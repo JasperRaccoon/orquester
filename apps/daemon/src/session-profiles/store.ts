@@ -439,6 +439,7 @@ export class SessionProfileStore {
       name: file.manifest.name,
       dir: layout.dir,
       settings: file.manifest.settings,
+      ...(isManaged(file.manifest) ? { managed: file.manifest.managed } : {}),
       instructions: (await readTextIfExists(layout.instructions)) ?? "",
       items: file.items,
       secrets: secrets.items,
@@ -811,8 +812,13 @@ export class SessionProfileStore {
           else if (record.kind === "plugin") await copy(from.pluginCacheDir(record.id), target.pluginCacheDir(record.id));
         }
         await normalizeProfileModes(tmp);
+        // An export never brings Orquester's own marks: the result is the user's profile, with
+        // no daemon-internal setting (`managed`, `claudeBuiltinTools`).
+        const { managed: _managed, ...fields } = source.manifest;
+        const { claudeBuiltinTools: _builtinTools, ...settings } = fields.settings;
         const manifest: SessionProfileManifestRecord = {
-          ...source.manifest,
+          ...fields,
+          settings,
           version: SESSION_PROFILE_MANIFEST_VERSION,
           id,
           name,

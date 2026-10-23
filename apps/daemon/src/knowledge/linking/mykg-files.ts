@@ -10,8 +10,9 @@
  * (`total_batches`, `completed`, `failed`) is advisory and only exists in Pass 2.
  */
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { copyFile, readFile, rename, rm, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 export const MYKG_SESSIONS_DIR = "mykg_sessions";
 
@@ -40,6 +41,60 @@ export function mykgSessionPaths(mykgDir: string, session: string): MykgSessionP
 /** myKG session names are UTC timestamps (`2026-10-23T10-00-00`); anything path-like is refused. */
 export function isMykgSessionName(name: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name) && !name.includes("..");
+}
+
+/** myKG's corpus record (`step_ingest.py`): relative `.md` path → `{content, sha256, token_count}`. */
+export const MYKG_MANIFEST_FILE = "file_manifest.json";
+/** The daemon's copy of the manifest as of the last run that succeeded (in the session root, beside myKG's dirs). */
+export const COMMITTED_MANIFEST_FILE = "orquester-committed-manifest.json";
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function copyAtomic(from: string, to: string): Promise<void> {
+  const tmp = `${to}.${randomUUID()}.tmp`;
+  await copyFile(from, tmp);
+  await rename(tmp, to);
+}
+
+/**
+ * Before an `--update` / `--append-with-grow-schema` run: myKG's append ingest rewrites
+ * `file_manifest.json` (new hashes in, deleted entries out) BEFORE Pass 2 evicts and re-extracts the
+ * changed entries, so a run that dies or fails after its ingest leaves a manifest that already
+ * "has" its edits — the next `--update` sees nothing to do, the evicted entries drop out of the
+ * graph for good, and with no change no graph is written at all (verified on the installed
+ * 0.4.10). So the manifest of the last good run is kept beside the session and put back before
+ * every update until a run succeeds ({@link commitMykgManifest}); myKG then re-detects every change
+ * since that run, and the tasks the failed attempt answered are reused from its outbox cache.
+ */
+export async function guardMykgManifest(paths: MykgSessionPaths): Promise<void> {
+  const manifest = join(paths.intermediate, MYKG_MANIFEST_FILE);
+  const committed = join(paths.root, COMMITTED_MANIFEST_FILE);
+  if (await exists(committed)) await copyAtomic(committed, manifest);
+  else if (await exists(manifest)) await copyAtomic(manifest, committed);
+}
+
+/** A run succeeded: its manifest is the good one now. */
+export async function commitMykgManifest(paths: MykgSessionPaths): Promise<void> {
+  await rm(join(paths.root, COMMITTED_MANIFEST_FILE), { force: true });
+}
+
+/** Entry ids in myKG's manifest (`<id>.md` keys), or null when it does not read. */
+export async function readManifestEntryIds(intermediateDir: string): Promise<Set<string> | null> {
+  const value = await readJson(join(intermediateDir, MYKG_MANIFEST_FILE));
+  if (!isRecord(value)) return null;
+  const ids = new Set<string>();
+  for (const key of Object.keys(value)) {
+    const base = basename(key);
+    if (base.endsWith(".md")) ids.add(base.slice(0, -3));
+  }
+  return ids;
 }
 
 export interface MykgProgress {

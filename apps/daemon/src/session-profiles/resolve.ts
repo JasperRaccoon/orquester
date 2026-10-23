@@ -44,6 +44,8 @@ export interface SessionProfileSource {
   /** The profile's source directory (see `layout.ts`). */
   dir: string;
   settings: SessionProfileSettingsRecord;
+  /** Set when Orquester owns the profile (`manifest.managed`): only then do daemon-internal settings apply. */
+  managed?: string;
   /** `""` when the profile has none. */
   instructions: string;
   items: SessionProfileItemEntry[];
@@ -222,7 +224,8 @@ export function resolveForAgent(source: SessionProfileSource, agent: SessionProf
     settings: {
       hideBuiltinSkills: settings.hideBuiltinSkills[agent],
       claudeWorkflowTool: settings.claudeWorkflowTool,
-      ...(source.settings?.claudeBuiltinTools === false ? { claudeBuiltinTools: false } : {})
+      // Daemon-internal, honoured on a managed profile only (a user profile never loses its tools).
+      ...(source.managed && source.settings?.claudeBuiltinTools === false ? { claudeBuiltinTools: false } : {})
     },
     instructions: source.instructions,
     skills: [],

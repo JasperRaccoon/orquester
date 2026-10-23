@@ -10,7 +10,7 @@ import { after, describe, it } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
 import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
-import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
+import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type { KnowledgeEntryChange, KnowledgeGraphPort, KnowledgeRuntime, KnowledgeRuntimePort, KnowledgeSettingsPort, KnowledgeStorePort } from "../ports.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { SpawnMykg } from "./runner.ts";
@@ -307,6 +307,44 @@ describe("KnowledgeLinkingService — the coalesced queue", () => {
   });
 });
 
+describe("KnowledgeLinkingService — one child per run", () => {
+  it("two environment changes in a row resume an interrupted run once, and a stopped service starts none", async () => {
+    const children: FakeChild[] = [];
+    const spawn: SpawnMykg = (_file, args) => {
+      const child = new FakeChild(args);
+      children.push(child);
+      return child as unknown as ChildProcess;
+    };
+    const first = await harness({ spawn, workerMode: "manual" });
+    await first.service.start();
+    first.service.entriesChanged(await first.store.put(ID(1), "one"));
+    await first.clock.advance(20_000);
+    await first.until(() => children.length === 1);
+    await first.service.stop();
+    assert.ok((await readState(first)).currentRun, "the interrupted run stays recorded");
+
+    const second = await harness({ appdir: first.appdir, store: first.store, spawn, workerMode: "manual" });
+    second.settings.on = false;
+    await second.service.start();
+    assert.equal(children.length, 1);
+    // The plugin comes on and, at once, another setting moves: both ask to resume the run.
+    second.settings.set(true);
+    second.settings.set(true);
+    await second.until(() => second.service.status().state === "running");
+    await flushAsync(20);
+    assert.equal(children.length, 2, "one myKG child for the resumed run, never two on its session");
+
+    // Stopping while a start is under way never leaves a child behind.
+    await second.service.stop();
+    const third = await harness({ appdir: first.appdir, store: first.store, spawn, workerMode: "manual" });
+    const starting = third.service.start();
+    await third.service.stop();
+    await starting;
+    await flushAsync(20);
+    assert.equal(children.length, 2, "no child after stop()");
+  });
+});
+
 describe("KnowledgeLinkingService — link states", () => {
   it("an entry edited while its run is in flight stays pending and goes in the next run", async () => {
     const children: FakeChild[] = [];
@@ -445,7 +483,71 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 1));
     assert.equal(h.store.linkStates.get(ID(1)), "linked");
+    // The retry resumed the failed run's session (no new ingest): entry 2 goes in the next update.
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
+    await h.service.stop();
+  });
+
+  it("an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land", async () => {
+    const h = await harness();
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    h.service.entriesChanged(await h.store.put(ID(3), "three"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    const session = (await readState(h)).session!;
+    const paths = mykgSessionPaths(h.mykgDir, session);
+
+    // myKG rewrites its manifest and evicts the edited and deleted entries' shards, then dies.
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ failAfterEvict: "worker gone" }));
+    h.service.entriesChanged(await h.store.put(ID(2), "two, edited"));
+    h.service.entriesChanged(await h.store.remove(ID(3)));
+    await h.clock.advance(20_000);
+    await h.until(() => lastRun(h)?.outcome === "failed");
+    assert.equal(h.store.linkStates.get(ID(2)), "failed");
+
+    // The retry (30 min later) must still see the edit and the delete.
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    await h.clock.advance(30 * 60_000);
+    await h.until(() => h.service.snapshot().recentRuns.filter((run) => run.outcome !== "running").length === 3);
+    assert.equal(lastRun(h)!.outcome, "ok", lastRun(h)!.error ?? "");
+    const nodes = (await readFile(paths.nodes, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { source_files: string[] });
+    assert.deepEqual(nodes.map((node) => node.source_files[0]).sort(), [`${ID(1)}.md`, `${ID(2)}.md`], "the edited entry is extracted again and the deleted one is gone");
+    const shard = JSON.parse(await readFile(join(paths.intermediate, "raw_extractions_shards", `${ID(2)}.md.json`), "utf8")) as { sha: string };
+    assert.equal(shard.sha, createHash("sha256").update("two, edited").digest("hex"));
+    assert.equal(h.store.linkStates.get(ID(2)), "linked");
+    await h.service.stop();
+  });
+
+  it("an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed", async () => {
+    const h = await harness();
+    await h.service.start();
+    await mkdir(h.mykgDir, { recursive: true });
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    await h.clock.advance(20_000);
+    await h.until(() => lastRun(h)?.outcome === "failed");
+    await h.service.idle();
+    assert.ok((await readState(h)).resumeSession, "the session the failed full run made is resumed next");
+
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    h.service.entriesChanged(await h.store.put(ID(3), "three"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    assert.equal(lastRun(h)!.mode, "full");
+    // myKG resumed the session without a new ingest: entry 3 is not in it yet.
+    assert.notEqual(h.store.linkStates.get(ID(3)), "linked", "never marked linked while it is not in the graph");
+    assert.deepEqual((await readState(h)).pendingEntryIds, [ID(3)]);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.mode, "update");
+    assert.equal(h.store.linkStates.get(ID(3)), "linked");
+    const nodes = (await readFile(h.graph.loads.at(-1)! + "/nodes.jsonl", "utf8")).trim().split("\n");
+    assert.equal(nodes.length, 3);
     await h.service.stop();
   });
 
@@ -484,6 +586,32 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     assert.equal(h.graph.loads.at(-1), mykgSessionPaths(h.mykgDir, after).output);
     await assert.rejects(stat(mykgSessionPaths(h.mykgDir, before).root), "the old session is removed");
     assert.deepEqual((await readdir(join(h.mykgDir, "mykg_sessions"))).sort(), [after]);
+    await h.service.stop();
+  });
+
+  it("a failed rebuild waits for the error retry like any failed run (no tight loop)", async () => {
+    const h = await harness();
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
+    await h.service.rebuild();
+    await h.until(() => lastRun(h)?.mode === "rebuild" && lastRun(h)?.outcome === "failed");
+    await h.service.idle();
+    const spawned = (await h.log()).length;
+    const status = h.service.status();
+    assert.equal(status.state, "paused");
+    assert.equal(status.state === "paused" && status.reason, "error");
+    await h.clock.advance(1_000);
+    await h.service.idle();
+    assert.equal((await h.log()).length, spawned, "not started again at once");
+    assert.equal(h.service.status().state, "paused");
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    await h.clock.advance(30 * 60_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.mode, "rebuild", "the rebuild is still owed, and runs at the retry");
+    assert.equal((await h.log()).length, spawned + 1);
     await h.service.stop();
   });
 

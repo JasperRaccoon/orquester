@@ -14,13 +14,23 @@
  *   released (`release`) and the task goes to the next asker;
  * - checks every answer: it must parse as JSON (an object or an array) once trimmed and stripped
  *   of an optional ```json fence — else `{accepted: false, error}` with the parse error and the
- *   chat keeps the task to redo it; an accepted answer is written as `<id>.answer.json` (temp +
+ *   chat keeps the task to redo it; after {@link MAX_REFUSALS} refusals of one task the chat is
+ *   retired and the task goes to another chat (a chat that cannot answer it must not loop); an accepted answer is written as `<id>.answer.json` (temp +
  *   rename) and only THEN `<id>.done` (temp + rename), so myKG never reads half an answer;
  * - sends a task's instructions (myKG's system prompt) only the first time a chat sees that exact
  *   text; afterwards `instructions: null, sameInstructionsAs: <the task it came with>`;
  * - retires a chat at its budget (tasks served, or an estimate of the tokens its context took on):
  *   `{kind: "done", reason: "session-budget"}`, and the pool starts a fresh one while tasks remain;
- * - answers `done` with `run-finished` / `run-cancelled` once the run ends.
+ * - answers `done` with `run-finished` / `run-cancelled` once the run ends;
+ * - answers a name-normalization task ({@link REUSABLE_STEPS}) from an answer a chat already gave
+ *   to the very same prompt (system + user) in this session, without asking a chat again. myKG's
+ *   own cache keys a task by its prompt AND its label, and normalization labels its calls
+ *   `normalize_names batch i/n`: when a type is added or the types reorder, every batch's label
+ *   moves and myKG would ask again for name lists that did not change. The answer reused is the
+ *   one a Claude Code chat gave to exactly that prompt — what myKG's cache would return had the
+ *   label stayed put. Accepted normalization answers are indexed in
+ *   `intermediate/orquester-answer-reuse.ndjson` (prompt hash → task id), so the index outlives
+ *   the run.
  *
  * `next` long-polls: with no task waiting it holds the call until one appears, the run ends, or
  * `nextWaitMs` passes (then the chat is retired; the pool restarts one when work appears). Every
@@ -30,7 +40,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { watch as fsWatch } from "node:fs";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { KnowledgeWorkerNextResponse, KnowledgeWorkerSubmitResponse, KnowledgeWorkerTask } from "@orquester/api";
 import type { Clock } from "../../workflows/contracts.ts";
@@ -38,6 +48,9 @@ import type { Clock } from "../../workflows/contracts.ts";
 export const INBOX_DIR = "agent_inbox";
 export const OUTBOX_DIR = "agent_outbox";
 const TASK_SUFFIX = ".task.json";
+/** Steps whose answers are reused for an identical prompt under another label (see the module header). */
+export const REUSABLE_STEPS: ReadonlySet<string> = new Set(["normalize_names"]);
+export const REUSE_INDEX_FILE = "orquester-answer-reuse.ndjson";
 
 /**
  * Defaults for one worker chat's life (spec: "Each session is retired before its context grows
@@ -51,6 +64,8 @@ const TASK_SUFFIX = ".task.json";
 export const DEFAULT_SESSION_BUDGET = { tasks: 12, tokens: 60_000 };
 /** A task view above this estimate is logged: it may not fit the worker's tool-result limit (60k, see the Claude launch). */
 export const MAX_TASK_TOKENS = 45_000;
+/** Answers of one task a chat may have refused before it is retired and the task handed on. */
+export const MAX_REFUSALS = 3;
 /** How long `next` holds a call with nothing to hand out before it retires the chat. */
 export const DEFAULT_NEXT_WAIT_MS = 10 * 60_000;
 
@@ -71,6 +86,7 @@ export interface InboxFiles {
   readdir(dir: string): Promise<string[]>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, text: string): Promise<void>;
+  appendFile(path: string, text: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   mkdir(dir: string): Promise<void>;
@@ -80,6 +96,7 @@ export const nodeInboxFiles: InboxFiles = {
   readdir: (dir) => readdir(dir),
   readFile: (path) => readFile(path, "utf8"),
   writeFile: (path, text) => writeFile(path, text, { mode: 0o600 }),
+  appendFile: (path, text) => appendFile(path, text, { mode: 0o600 }),
   rename: (from, to) => rename(from, to),
   exists: async (path) => {
     try {
@@ -151,7 +168,11 @@ interface SessionEntry {
   /** instructions hash → the task they were first sent with. */
   seen: Map<string, string>;
   lease: string | null;
+  /** Refused answers to the task it holds now. */
+  refusals: number;
   retired: boolean;
+  /** It ended (or was retired) while holding a task it did not answer. */
+  gaveUp: boolean;
 }
 
 export interface InboxCounts {
@@ -161,6 +182,8 @@ export interface InboxCounts {
   leased: number;
   /** Answers accepted by this broker. */
   answered: number;
+  /** Tasks answered from an identical earlier prompt (no chat asked). */
+  reused: number;
   /** Chats blocked in `next` right now. */
   waiting: number;
 }
@@ -182,7 +205,12 @@ export class InboxBroker {
   private readonly logger: InboxBrokerOptions["logger"];
   private inbox: string | null = null;
   private outbox: string | null = null;
+  private reuseIndex: string | null = null;
+  /** Prompt hash → a done task with that prompt (reusable steps only). */
+  private readonly reusable = new Map<string, string>();
+  private reused = 0;
   private watcher: { close(): void } | null = null;
+  private disposed = false;
   private readonly tasks = new Map<string, TaskEntry>();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly wakers = new Set<() => void>();
@@ -205,8 +233,12 @@ export class InboxBroker {
   async attach(intermediateDir: string): Promise<void> {
     this.inbox = join(intermediateDir, INBOX_DIR);
     this.outbox = join(intermediateDir, OUTBOX_DIR);
+    this.reuseIndex = join(intermediateDir, REUSE_INDEX_FILE);
     await this.files.mkdir(this.inbox);
     await this.files.mkdir(this.outbox);
+    await this.loadReuseIndex();
+    // The run may have ended while the dirs were made: no watcher outlives it.
+    if (this.disposed) return;
     this.watcher?.close();
     this.watcher = this.watchFn ? this.watchFn(this.inbox, () => void this.rescan()) : null;
     await this.rescan();
@@ -224,7 +256,7 @@ export class InboxBroker {
   /** A worker chat of this run (also implicit on its first call). */
   register(sessionId: string): void {
     if (!this.sessions.has(sessionId)) {
-      this.sessions.set(sessionId, { id: sessionId, tasks: 0, tokens: 0, seen: new Map(), lease: null, retired: false });
+      this.sessions.set(sessionId, { id: sessionId, tasks: 0, tokens: 0, seen: new Map(), lease: null, refusals: 0, retired: false, gaveUp: false });
     }
   }
 
@@ -233,8 +265,14 @@ export class InboxBroker {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.retired = true;
+    if (session.lease !== null) session.gaveUp = true;
     this.dropLease(session);
     this.changed();
+  }
+
+  /** The chat ended, or was retired, holding a task it never answered (the pool counts it as a failure). */
+  gaveUp(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.gaveUp === true;
   }
 
   /** The chat holds a task or is waiting in `next` (so it needs no new chat beside it). */
@@ -256,6 +294,7 @@ export class InboxBroker {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.watcher?.close();
     this.watcher = null;
     if (!this.finished) this.finish("run-cancelled");
@@ -269,7 +308,7 @@ export class InboxBroker {
       if (task.leasedTo !== null) leased += 1;
       else pending += 1;
     }
-    return { known: this.tasks.size, pending, leased, answered: this.answered, waiting: this.waiting.size };
+    return { known: this.tasks.size, pending, leased, answered: this.answered, reused: this.reused, waiting: this.waiting.size };
   }
 
   /** Pending tasks no waiting chat will pick up: what new chats are needed for. */
@@ -321,6 +360,7 @@ export class InboxBroker {
       if (task) {
         task.leasedTo = session.id;
         session.lease = task.id;
+        session.refusals = 0;
         return { kind: "task", task: this.view(session, task) };
       }
       const left = deadline - this.clock.now().getTime();
@@ -355,6 +395,15 @@ export class InboxBroker {
       // The chat keeps the task and redoes it.
       if (task.leasedTo === null) task.leasedTo = session.id;
       if (task.leasedTo === session.id) session.lease = task.id;
+      session.refusals += 1;
+      if (session.refusals >= MAX_REFUSALS && session.lease === task.id) {
+        // This chat cannot answer it: the task goes to a fresh chat, this one ends.
+        session.retired = true;
+        session.gaveUp = true;
+        this.dropLease(session);
+        this.changed();
+        return { accepted: false, error: `${parsed.error} This task goes to another worker: end your turn now.` };
+      }
       return { accepted: false, error: `${parsed.error} Answer with only the JSON the task's instructions ask for, then submit it again.` };
     }
     task.writing = true;
@@ -374,6 +423,7 @@ export class InboxBroker {
     session.tasks += 1;
     session.tokens += estimateTokens(task.envelope!.user) + estimateTokens(parsed.text);
     this.answered += 1;
+    await this.indexForReuse(task);
     this.events.emit("answered", { sessionId, taskId: task.id, step: task.envelope!.step });
     this.changed();
     return { accepted: true, next: await this.next(sessionId, signal) };
@@ -457,14 +507,16 @@ export class InboxBroker {
         this.logger?.warn("knowledge inbox: a task file did not read", { taskId: id });
         continue;
       }
-      this.tasks.set(id, {
+      const entry: TaskEntry = {
         id,
         envelope,
         instructionsHash: createHash("sha256").update(envelope.system).digest("hex"),
         leasedTo: null,
         done: false,
         writing: false
-      });
+      };
+      this.tasks.set(id, entry);
+      if (await this.answerFromReuse(entry)) continue;
       added = true;
     }
     if (added) this.changed();
@@ -480,6 +532,63 @@ export class InboxBroker {
     const doneTmp = `${donePath}.${randomUUID()}.tmp`;
     await this.files.writeFile(doneTmp, "");
     await this.files.rename(doneTmp, donePath);
+  }
+
+  private async loadReuseIndex(): Promise<void> {
+    if (!this.reuseIndex) return;
+    let text: string;
+    try {
+      text = await this.files.readFile(this.reuseIndex);
+    } catch {
+      return;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const value = JSON.parse(line) as { prompt?: unknown; taskId?: unknown };
+        if (typeof value.prompt === "string" && typeof value.taskId === "string" && /^[0-9a-f]{64}$/.test(value.taskId)) this.reusable.set(value.prompt, value.taskId);
+      } catch {
+        // A torn last line (a crash mid-append): the rest still counts.
+      }
+    }
+  }
+
+  /** Records an accepted answer of a reusable step (best effort: a lost line only costs a later re-ask). */
+  private async indexForReuse(task: TaskEntry): Promise<void> {
+    const envelope = task.envelope;
+    if (!envelope || !REUSABLE_STEPS.has(envelope.step) || !this.reuseIndex) return;
+    const prompt = promptHash(envelope);
+    if (this.reusable.has(prompt)) return;
+    this.reusable.set(prompt, task.id);
+    await this.files.appendFile(this.reuseIndex, `${JSON.stringify({ prompt, taskId: task.id })}\n`).catch(() => undefined);
+  }
+
+  /** A new task of a reusable step whose exact prompt was answered before: answered with that answer. */
+  private async answerFromReuse(task: TaskEntry): Promise<boolean> {
+    const envelope = task.envelope;
+    if (!envelope || !REUSABLE_STEPS.has(envelope.step) || !this.outbox) return false;
+    const source = this.reusable.get(promptHash(envelope));
+    if (source === undefined || source === task.id) return false;
+    let answer: string;
+    try {
+      if (!(await this.files.exists(join(this.outbox, `${source}.done`)))) return false;
+      const value = JSON.parse(await this.files.readFile(join(this.outbox, `${source}.answer.json`))) as { answer?: unknown };
+      if (typeof value.answer !== "string") return false;
+      answer = value.answer;
+    } catch {
+      return false;
+    }
+    task.writing = true;
+    try {
+      await this.writeAnswer(task.id, answer);
+    } catch {
+      task.writing = false;
+      return false;
+    }
+    task.writing = false;
+    task.done = true;
+    this.reused += 1;
+    return true;
   }
 
   private changed(): void {
@@ -533,6 +642,11 @@ function readEnvelope(value: unknown, id: string): InboxTaskEnvelope | null {
     timeout_seconds: typeof v.timeout_seconds === "number" ? v.timeout_seconds : 0,
     created_at: typeof v.created_at === "string" ? v.created_at : ""
   };
+}
+
+/** What the model is shown (myKG's task id adds the label to it). */
+function promptHash(envelope: InboxTaskEnvelope): string {
+  return createHash("sha256").update(`${envelope.system}\n--user--\n${envelope.user}`).digest("hex");
 }
 
 /** A rough token count (4 characters a token) for the session budget. */

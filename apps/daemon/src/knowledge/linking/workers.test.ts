@@ -175,6 +175,19 @@ describe("WorkerPool", () => {
     assert.equal(h.broker.counts().answered, 2);
   });
 
+  it("a run that ends while the pool is paused leaves no timer behind", async () => {
+    const h = await harness({ concurrency: 1, accounts: ["a1"], behaviour: { a1: { limitAfter: 1, resetsAt: "2026-10-23T11:00:00.000Z" } } });
+    await h.addTasks(2);
+    await h.untilEvent((e) => e.kind === "paused");
+    await flushAsync(10);
+    h.broker.finish("run-finished");
+    await h.pool.settle(60_000);
+    const after = h.events.length;
+    await h.clock.advance(2 * 60 * 60_000);
+    await flushAsync(10);
+    assert.deepEqual(h.events.slice(after), [], "no resume (or anything else) after the run ended");
+  });
+
   it("says no-account when there is no Claude account at all", async () => {
     const h = await harness({ concurrency: 1, accounts: [] });
     await h.addTasks(1);
@@ -194,6 +207,41 @@ describe("WorkerPool", () => {
     assert.equal(h.port.sessions.length, 2, "a replacement chat starts for the released task");
     const again = await h.broker.next(h.port.sessions[1]!.id);
     assert.equal(again.kind === "task" && again.task.taskId, id);
+  });
+
+  it("chats that end their turn while holding a task count as failures: no endless restarts on a task nobody answers", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    const [id] = await h.addTasks(1);
+    for (let round = 0; round < 6; round += 1) {
+      await flushAsync(20);
+      const chat = h.port.sessions[round];
+      if (!chat) break;
+      const taken = await h.broker.next(chat.id);
+      assert.equal(taken.kind === "task" && taken.task.taskId, id);
+      // The chat gives up on it (it ends its turn without submitting).
+      chat.end({ kind: "done" });
+    }
+    await flushAsync(20);
+    assert.equal(h.port.sessions.length, 3, "three chats tried it, no fourth is started");
+    assert.deepEqual(
+      h.events.filter((e) => e.kind === "error").map((e) => e.kind === "error" && e.message),
+      ["Worker chats keep ending without answering their task."]
+    );
+  });
+
+  it("a chat that keeps submitting answers that do not parse is retired and its task handed on", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    const [id] = await h.addTasks(1);
+    await flushAsync();
+    const chat = h.port.sessions[0]!;
+    await h.broker.next(chat.id);
+    for (let i = 0; i < 2; i += 1) assert.equal((await h.broker.submit(chat.id, id!, "no JSON here")).accepted, false);
+    const third = await h.broker.submit(chat.id, id!, "still no JSON");
+    assert.equal(third.accepted, false);
+    assert.match(!third.accepted ? third.error : "", /end your turn/);
+    assert.equal((await h.broker.submit(chat.id, id!, "and again")).accepted, false);
+    assert.deepEqual(await h.broker.next(chat.id), { kind: "done", reason: "session-budget" });
+    assert.equal(h.broker.counts().pending, 1, "the task waits for another chat (a retired chat never takes it back)");
   });
 
   it("gives up with an error after repeated start failures", async () => {
