@@ -5,6 +5,7 @@ import { type TestContext, test } from "node:test";
 import {
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
+  KNOWLEDGE_GRAPH_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   type PluginInfo,
   type PluginsResponse,
@@ -166,7 +167,7 @@ async function plugin(h: Harness, id: PluginInfo["id"] = ID): Promise<PluginInfo
   const response = await h.service.list();
   assert.deepEqual(
     response.plugins.map((p) => p.id),
-    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID, EPHEMERAL_VMS_PLUGIN_ID]
+    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID, EPHEMERAL_VMS_PLUGIN_ID, KNOWLEDGE_GRAPH_PLUGIN_ID]
   );
   return response.plugins.find((p) => p.id === id) as PluginInfo;
 }
