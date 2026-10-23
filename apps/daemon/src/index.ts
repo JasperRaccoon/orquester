@@ -4294,7 +4294,8 @@ export function createServer(
   if (agentChatDeps) {
     registerAgentChatRoutes(app, {
       ...agentChatDeps,
-      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body)
+      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body),
+      beforeStopCommand: (id, command, body) => services.delegateStops?.commandRequested(id, command, body) ?? (() => undefined)
     });
     // Thread lineage (spec 2026-10-14 §6): fork, merge back, the lineage read.
     registerLineageRoutes(app, {

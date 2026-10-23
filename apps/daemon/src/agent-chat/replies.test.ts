@@ -86,6 +86,8 @@ function fakeHost() {
   let ids = 0;
   /** Called on every accepted `/turn` before it lands (assert what is on disk then). */
   let beforePost: ((post: Post) => void) | null = null;
+  /** Called on every head read, before it is answered (a stop landing mid-hand-off). */
+  let beforeHeadRead: ((id: string) => void) | null = null;
   /** The next post's refusal, once. */
   let refuseNext: DaemonResponse | null = null;
   /** An older host: `ifIdle` ignored (a busy target is steered). */
@@ -171,6 +173,7 @@ function fakeHost() {
         const id = decodeURIComponent(head[1]!);
         if (!sessions.has(id)) return { status: 404, body: null };
         headReads.set(id, (headReads.get(id) ?? 0) + 1);
+        beforeHeadRead?.(id);
         return headFromThreadRead({ status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } }, opts?.query);
       }
       const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
@@ -300,6 +303,9 @@ function fakeHost() {
     listing: { get: (id: string) => sessions.get(id), list: () => [...sessions.values()] },
     onBeforePost(fn: ((post: Post) => void) | null) {
       beforePost = fn;
+    },
+    onBeforeHeadRead(fn: ((id: string) => void) | null) {
+      beforeHeadRead = fn;
     },
     refuseNextWith(response: DaemonResponse) {
       refuseNext = response;
@@ -2105,7 +2111,7 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
     await w.stop();
     const answer = await waiting;
     assert.equal(answer.outcome, "replied");
-    assert.match((answer as { error?: string }).error ?? "", /was stopped together with the chat that asked, so no reply will come/);
+    assert.match((answer as { error?: string }).error ?? "", /You were stopped while waiting for "Codex review"/);
     assert.equal(postsTo(w.host, "req").length, 0);
     // A later wait on it says the same, truthfully.
     const later = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 1 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
@@ -2191,6 +2197,93 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
     assert.equal(w.host.interrupts.filter((i) => i.sessionId === "g").length, 1);
     assert.equal(postsTo(w.host, "tgt").length, 1, "the child got no notice turn");
     assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a reply being handed over when the Stop lands is held, never posted (the hand-off race)", async () => {
+    const w = await stoppable();
+    // The stop lands while the hand-off reads whether the parent is idle — the moment before it posts.
+    let stopped = false;
+    w.host.onBeforeHeadRead((id) => {
+      if (id !== "req" || stopped) return;
+      stopped = true;
+      w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-mid" });
+    });
+    w.host.settle("tgt", { reply: "The fix is in." });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.ok(stopped, "the stop landed mid-hand-off");
+    assert.equal(postsTo(w.host, "req").length, 0, "the stopped parent is not woken");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1);
+    assert.deepEqual([pending[0]!.state, pending[0]!.held], ["failed", true]);
+    const delivery = w.router.deliveries()[0] as { state: string; held?: true };
+    assert.deepEqual([delivery.state, delivery.held], ["queued", true]);
+    await w.cleanup();
+  });
+
+  it("an attention notice being handed over when the Stop lands is dropped, never posted", async () => {
+    const w = await stoppable();
+    let stopped = false;
+    w.host.onBeforeHeadRead((id) => {
+      if (id !== "req" || stopped) return;
+      stopped = true;
+      w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-mid" });
+    });
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.ok(stopped);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal(w.queue.pendingFor("req").length, 0, "taken off the queue");
+    await w.cleanup();
+  });
+
+  it("a delegate that finished just before the Stop keeps its reply: held for the user, never lost", async () => {
+    const w = await stoppable();
+    // It completed; the router has not claimed the reply yet when the stop lands.
+    w.host.settle("tgt", { reply: "All 42 tests pass." });
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-after" });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(w.host.interrupts.length, 0, "a finished delegate is not interrupted");
+    assert.equal(postsTo(w.host, "req").length, 0, "the stopped parent is not woken");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.held, true);
+    assert.match(pending[0]!.preview, /All 42 tests pass\./);
+    assert.notEqual((sub(w, w.res.subscriptionId) as { ended?: string }).ended, "stopped", "it replied: never said stopped");
+    await w.queue.actOnMerge("req", pending[0]!.mergeId, { action: "deliver" });
+    await idle(w);
+    assert.match(postsTo(w.host, "req")[0]!.body.input as string, /All 42 tests pass\./);
+    await w.cleanup();
+  });
+
+  it("while a stop is on its way to the host, replies to that chat wait; a refused stop lets them go", async () => {
+    const w = await stoppable();
+    const done = w.cascade.commandRequested("req", "interrupt", { commandId: "stop-pending" });
+    w.host.settle("tgt", { reply: "Finished." });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "not posted while the stop is in flight");
+    assert.equal(w.queue.pendingFor("req").length, 1);
+    // The host refused the stop: nothing was marked, so the reply goes out.
+    done();
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("a stop the host takes in that window marks the reply before it can be posted", async () => {
+    const w = await stoppable();
+    const done = w.cascade.commandRequested("req", "interrupt", { commandId: "stop-1" });
+    w.host.settle("tgt", { reply: "Finished." });
+    await idle(w);
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-1" });
+    done();
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal(w.queue.pendingFor("req")[0]?.held, true);
     await w.cleanup();
   });
 
