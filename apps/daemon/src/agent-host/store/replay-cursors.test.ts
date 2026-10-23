@@ -12,7 +12,7 @@ import test from "node:test";
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
 import { createThreadStore } from "./index.ts";
-import { REPLAY_CURSOR_CAPACITY, ReplayCursorRing } from "./replay-cursors.ts";
+import { REPLAY_CURSOR_CAPACITY, REPLAY_CURSOR_IDLE_MS, ReplayCursorRing } from "./replay-cursors.ts";
 
 const eventsPathOf = (root: string, id: string): string => path.join(root, "threads", id, "events.ndjson");
 
@@ -92,17 +92,62 @@ async function seeded(count: number): Promise<{ rootDir: string; store: Awaited<
   return { rootDir, store, reads };
 }
 
-test("the ring remembers the newest positions only, and forgets on clear", () => {
-  const ring = new ReplayCursorRing(4);
-  ring.note([1, 2, 3, 4, 5, 6].map((seq) => ({ seq, byteOffset: seq * 100, byteLength: 100 })));
+test("the cursors grow with appends, keep the newest positions only, and forget on clear", () => {
+  const pos = (seq: number) => ({ seq, byteOffset: seq * 100, byteLength: 100 });
+  const ring = new ReplayCursorRing(0, 4);
+  assert.equal(ring.size, 0, "nothing allocated up front");
+  ring.note([1, 2].map(pos), 0);
+  assert.equal(ring.size, 2, "one number per appended line");
+  ring.note([3, 4, 5, 6].map(pos), 0);
   assert.equal(ring.offsetOf(6), 600);
   assert.equal(ring.offsetOf(3), 300);
-  assert.equal(ring.offsetOf(2), undefined, "overwritten by seq 6");
+  assert.equal(ring.offsetOf(2), undefined, "older than the newest 4");
   assert.equal(ring.offsetOf(0), undefined);
   assert.equal(ring.offsetOf(7), undefined);
-  ring.clear();
+  // A gap in the sequences (the log re-read under them) starts over.
+  ring.note([9].map(pos), 0);
   assert.equal(ring.offsetOf(6), undefined);
+  assert.equal(ring.offsetOf(9), 900);
+  ring.clear();
+  assert.equal(ring.offsetOf(9), undefined);
   assert.equal(REPLAY_CURSOR_CAPACITY, 1_000, "the replay's own row cap");
+
+  // At full capacity it holds at most the cap plus one trim batch, never the thread's whole length.
+  const big = new ReplayCursorRing(0);
+  for (let seq = 1; seq <= 10_000; seq += 1) big.note([pos(seq)], 0);
+  assert.ok(big.size <= REPLAY_CURSOR_CAPACITY + 256, String(big.size));
+  assert.equal(big.offsetOf(10_000 - REPLAY_CURSOR_CAPACITY), undefined);
+  assert.equal(big.offsetOf(10_000 - REPLAY_CURSOR_CAPACITY + 1), (10_000 - REPLAY_CURSOR_CAPACITY + 1) * 100);
+});
+
+test("a thread idle for the drop interval loses its cursors; reconnects then read the whole log, and its next append starts over", async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-replay-idle-"));
+  let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const reads: string[] = [];
+  const store = createThreadStore({
+    rootDir,
+    clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
+    idGen: countingIds(),
+    onLogRead: ({ kind }) => reads.push(kind)
+  });
+  t.after(() => store.close());
+  await store.append({ threadId: "t1", events: [created(), say("m1"), say("m2")] });
+
+  nowMs += REPLAY_CURSOR_IDLE_MS - 1;
+  assert.equal(store.dropIdleReplayCursors(), 0, "not idle long enough");
+  await store.readTail("t1", 2);
+  assert.deepEqual(reads, ["from-cursor"]);
+
+  nowMs += 1;
+  assert.equal(store.dropIdleReplayCursors(), 1);
+  reads.length = 0;
+  assert.deepEqual(ids((await store.readTail("t1", 2)).events), ["m2"]);
+  assert.deepEqual(reads, ["whole"], "dropped: the whole log, same answer");
+
+  await store.append({ threadId: "t1", events: [say("m3")] });
+  reads.length = 0;
+  assert.deepEqual(ids((await store.readTail("t1", 3)).events), ["m3"]);
+  assert.deepEqual(reads, ["from-cursor"], "the next append starts new cursors");
 });
 
 test("a small gap is read from its line's offset, not the whole log, with the whole log's answer", async (t) => {
