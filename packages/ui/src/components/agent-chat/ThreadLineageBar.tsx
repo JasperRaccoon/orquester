@@ -200,7 +200,9 @@ export function ThreadLineageBar({
           {pendingMerges.map((merge) => {
             const outgoing = merge.childSessionId === session.id;
             const other = titleOf(outgoing ? merge.parentSessionId : merge.childSessionId);
-            const failed = merge.state === "failed";
+            // Held after a stop: waiting for the user, not refused — said quietly.
+            const held = merge.state === "failed" && merge.held === true;
+            const failed = merge.state === "failed" && !held;
             return (
               <li
                 key={merge.mergeId}
@@ -209,8 +211,16 @@ export function ThreadLineageBar({
               >
                 <GitMerge size={12} strokeWidth={1.8} className="shrink-0" aria-hidden />
                 <span className="min-w-0 flex-1 truncate" title={merge.error ?? merge.preview}>
-                  {outgoing ? `Merge to “${other}”` : `Merge from “${other}”`}{" "}
-                  {failed
+                  {held
+                    ? outgoing
+                      ? `Reply to “${other}” is held: that chat was stopped`
+                      : `Reply from “${other}” is held: this chat was stopped`
+                    : outgoing
+                      ? `Merge to “${other}”`
+                      : `Merge from “${other}”`}{" "}
+                  {held
+                    ? null
+                    : failed
                     ? `failed${merge.error ? `: ${merge.error}` : ""}`
                     : outgoing
                       ? "is queued until it is idle"
