@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { isAuthTokenShape } from "@orquester/api";
 
-import { AuthSessionStore, AuthSessionsUnavailableError, DEVICE_SESSION_IDLE_MS, LAST_USED_PERSIST_MS, deviceLabelFromUserAgent } from "./sessions.ts";
+import { AuthSessionStore, AuthSessionsUnavailableError, StalePasswordError, DEVICE_SESSION_IDLE_MS, LAST_USED_PERSIST_MS, deviceLabelFromUserAgent } from "./sessions.ts";
 
 const quiet = { warn: () => undefined, error: () => undefined };
 
@@ -202,4 +202,14 @@ test("device labels come from the user agent", () => {
   assert.equal(deviceLabelFromUserAgent("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"), "Firefox on Linux");
   assert.equal(deviceLabelFromUserAgent(undefined), "Unknown device");
   assert.equal(deviceLabelFromUserAgent("curl/8.5.0"), "curl/8.5.0");
+});
+
+test("a login bound to a hash the sessions are no longer bound to mints nothing", async () => {
+  const store = new AuthSessionStore();
+  assert.ok(await store.create("device", "unbound store", "$2a$12$any"), "nothing recorded yet: nothing to compare");
+  await store.syncPassword("$2a$12$old");
+  assert.ok(await store.create("device", "same hash", "$2a$12$old"));
+  await store.syncPassword("$2a$12$new");
+  await assert.rejects(store.create("device", "checked the old hash", "$2a$12$old"), StalePasswordError);
+  assert.deepEqual(store.list(null), [], "the old-hash sessions were revoked and nothing new was minted");
 });
