@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import type { KnowledgeColor } from "@orquester/api";
 
-import { node } from "../../lib/knowledge/fixtures.test-helpers.ts";
+import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
   MAX_LABELS,
   NODE_MAX_SIZE,
@@ -15,6 +15,7 @@ import {
   labelledNodes,
   nodeColors,
   nodeSize,
+  searchSummary,
   truncationNote
 } from "./graph.logic.ts";
 
@@ -91,5 +92,18 @@ describe("concept colours, sizes and labels", () => {
   it("builds the canvas nodes", () => {
     const [built] = canvasNodes({ nodes: [node({ id: "a", name: "Alternatives pages", degree: 2, collections: ["kc_seo", "kc_ads"] })] }, colorOf, []);
     assert.deepEqual(built, { id: "a", label: "Alternatives pages", labelled: true, size: NODE_MAX_SIZE, colors: ["chart-1", "chart-2"] });
+  });
+});
+
+describe("the search summary", () => {
+  const entryHit = (id: string) => ({ kind: "entry" as const, score: 1, entry: summary({ id }) });
+  const conceptHit = (id: string) => ({ kind: "concept" as const, score: 1, concept: { id, name: id, type: "Tactic", description: null }, entryIds: [] });
+
+  it("names entry hits, which have no node to mark, and concept hits not on the canvas", () => {
+    assert.equal(searchSummary([], new Set()), null);
+    assert.equal(searchSummary([entryHit("ke_1")], new Set()), "Matches: 1 entry.");
+    assert.equal(searchSummary([entryHit("ke_1"), entryHit("ke_2"), conceptHit("a")], new Set(["a"])), "Matches: 2 entries, 1 concept (marked).");
+    assert.equal(searchSummary([conceptHit("a"), conceptHit("b")], new Set(["a"])), "Matches: 2 concepts (1 marked).");
+    assert.equal(searchSummary([conceptHit("b")], new Set(["a"])), "Matches: 1 concept (not on the canvas).");
   });
 });

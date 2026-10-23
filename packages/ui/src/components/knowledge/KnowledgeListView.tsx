@@ -24,13 +24,18 @@ const PAGE = 50;
 
 type Page = { status: "loading" } | { status: "error"; message: string } | { status: "ready"; entries: KnowledgeEntrySummary[]; nextCursor: string | null };
 
-/** The entries of one collection, read again from the first page whenever entries change. */
+/**
+ * The entries of one collection. Whenever entries change they are read again
+ * as deep as the user had paged ("Load more"), so loaded cards never drop away.
+ */
 function useEntries(api: KnowledgeListApi | null, collection: ListCollection) {
   const [page, setPage] = useState<Page>({ status: "loading" });
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const [tick, setTick] = useState(0);
   const seq = useRef(0);
   const shown = useRef(collection);
+  /** Pages shown (the first one plus each "Load more"); a refetch reads as many. */
+  const depth = useRef(1);
 
   useEffect(
     () =>
@@ -47,17 +52,36 @@ function useEntries(api: KnowledgeListApi | null, collection: ListCollection) {
     // A refetch keeps the cards up; a different collection starts from a spinner.
     if (shown.current !== collection) {
       shown.current = collection;
+      depth.current = 1;
       setPage({ status: "loading" });
     } else setPage((p) => (p.status === "ready" ? p : { status: "loading" }));
     setMore({ busy: false, error: null });
-    api
-      .listKnowledgeEntries({ collection: collection === "all" ? undefined : collection, limit: PAGE }, controller.signal)
-      .then((answer) => {
-        if (mine === seq.current) setPage({ status: "ready", entries: answer.entries, nextCursor: answer.nextCursor });
-      })
-      .catch((error: unknown) => {
-        if (mine === seq.current && !controller.signal.aborted) setPage({ status: "error", message: knowledgeErrorText(error) });
-      });
+    const wanted = depth.current;
+    const query = collection === "all" ? undefined : collection;
+    void (async () => {
+      const entries: KnowledgeEntrySummary[] = [];
+      const seen = new Set<string>();
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const answer: KnowledgeEntriesResponse = await api.listKnowledgeEntries(
+          { collection: query, limit: PAGE, ...(cursor ? { cursor } : {}) },
+          controller.signal
+        );
+        for (const entry of answer.entries) {
+          if (seen.has(entry.id)) continue;
+          seen.add(entry.id);
+          entries.push(entry);
+        }
+        cursor = answer.nextCursor;
+        pages += 1;
+      } while (cursor && pages < wanted && mine === seq.current && !controller.signal.aborted);
+      if (mine !== seq.current || controller.signal.aborted) return;
+      depth.current = Math.max(1, pages);
+      setPage({ status: "ready", entries, nextCursor: cursor });
+    })().catch((error: unknown) => {
+      if (mine === seq.current && !controller.signal.aborted) setPage({ status: "error", message: knowledgeErrorText(error) });
+    });
     return () => controller.abort();
   }, [api, collection, tick]);
 
@@ -72,6 +96,7 @@ function useEntries(api: KnowledgeListApi | null, collection: ListCollection) {
         limit: PAGE
       });
       if (mine !== seq.current) return;
+      depth.current += 1;
       setPage((p) => {
         if (p.status !== "ready") return p;
         const seen = new Set(p.entries.map((e) => e.id));
@@ -111,10 +136,11 @@ const CollectionRow: React.FC<{
         <span className="block truncate text-[13px]">{name}</span>
         {profiles && <span className="block truncate text-[10.5px] text-neutral-500" title={profiles}>{profiles}</span>}
       </span>
-      <span className={cn("mt-px shrink-0 text-[11px] tabular-nums text-neutral-500", onEdit ? "group-hover:invisible" : null)}>{count}</span>
+      <span className={cn("mt-px shrink-0 text-[11px] tabular-nums text-neutral-500", onEdit ? "group-focus-within:invisible group-hover:invisible" : null)}>{count}</span>
     </button>
+    {/* Faded, not `invisible`: a hidden button could never take keyboard focus. */}
     {onEdit && (
-      <IconButton label={`Edit ${name}`} onClick={onEdit} className="invisible absolute right-0.5 top-0.5 h-6 w-6 group-hover:visible focus-visible:visible">
+      <IconButton label={`Edit ${name}`} onClick={onEdit} className="absolute right-0.5 top-0.5 h-6 w-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100">
         <Pencil size={12} />
       </IconButton>
     )}

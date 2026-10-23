@@ -11,7 +11,7 @@ import { IconButton } from "../ui";
 import { cn } from "../../lib/cn";
 import type { CanvasNode } from "./graph.logic";
 import { knowledgeColorProperty } from "./knowledge.logic";
-import { computeLayout, type LayoutRequest, type LayoutResponse } from "./graph-layout";
+import { DeferredFit, FIT_PADDING, Layouts, type LayoutWorkerLike } from "./graph-layout";
 import LayoutWorker from "./graph-layout.worker.ts?worker";
 
 export interface KnowledgeGraphCanvasProps {
@@ -127,58 +127,8 @@ function elementsOf(nodes: readonly CanvasNode[], edges: readonly KnowledgeEdge[
 const topologyKey = (nodes: readonly CanvasNode[], edges: readonly KnowledgeEdge[]) =>
   `${nodes.map((n) => n.id).join("\u0000")}\u0001${edges.map((e) => e.id).join("\u0000")}`;
 
-type Positions = Record<string, { x: number; y: number }>;
-
-/**
- * Arranges graphs off the main thread, one at a time: a newer request makes an
- * older answer stale. Without workers (none of the app's targets) it runs inline.
- */
-class Layouts {
-  private worker: Worker | null = null;
-  private seq = 0;
-  private waiting: ((answer: LayoutResponse) => void) | null = null;
-
-  run(request: Omit<LayoutRequest, "id">, done: (positions: Positions) => void, failed: (message: string) => void): void {
-    const id = ++this.seq;
-    const settle = (answer: LayoutResponse) => {
-      if (answer.id !== this.seq) return;
-      if ("positions" in answer) done(answer.positions);
-      else failed(answer.error);
-    };
-    if (typeof Worker === "undefined") {
-      setTimeout(() => {
-        if (id !== this.seq) return;
-        try {
-          settle({ id, positions: computeLayout(request) });
-        } catch (error) {
-          settle({ id, error: error instanceof Error ? error.message : String(error) });
-        }
-      }, 16);
-      return;
-    }
-    if (!this.worker) {
-      this.worker = new LayoutWorker();
-      this.worker.onmessage = (event: MessageEvent<LayoutResponse>) => this.waiting?.(event.data);
-      this.worker.onerror = (event) => {
-        event.preventDefault();
-        this.waiting?.({ id: this.seq, error: event.message || "The layout worker failed." });
-      };
-    }
-    this.waiting = settle;
-    this.worker.postMessage({ id, ...request } satisfies LayoutRequest);
-  }
-
-  /** Drop any answer still on its way. */
-  cancel(): void {
-    this.seq += 1;
-  }
-
-  dispose(): void {
-    this.cancel();
-    this.worker?.terminate();
-    this.worker = null;
-  }
-}
+/** The layout worker, where the runtime has workers (every app target does). */
+const createLayoutWorker = typeof Worker === "undefined" ? null : (): LayoutWorkerLike => new LayoutWorker() as unknown as LayoutWorkerLike;
 
 const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edges, selectedId, highlightIds, onSelect, active }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -188,6 +138,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const layoutsRef = useRef<Layouts | null>(null);
+  const fitRef = useRef(new DeferredFit());
   const [arranging, setArranging] = useState(false);
   const [layoutError, setLayoutError] = useState<string | null>(null);
 
@@ -209,7 +160,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       motionBlur: false
     });
     cyRef.current = cy;
-    const layouts = new Layouts();
+    const layouts = new Layouts(createLayoutWorker);
     layoutsRef.current = layouts;
     cy.on("tap", "node", (event) => onSelectRef.current(event.target.id() as string));
     cy.on("tap", (event) => {
@@ -233,7 +184,13 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
     });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-mode", "data-scheme", "style", "class"] });
 
-    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => cy.resize());
+    const resize =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            cy.resize();
+            fitRef.current.whenSized(cy);
+          });
     resize?.observe(container);
     return () => {
       observer.disconnect();
@@ -294,13 +251,14 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
             if (at) n.position(at);
           });
         });
-        cy.fit(undefined, 30);
+        fitRef.current.fit(cy);
         setArranging(false);
       },
       (message) => {
         if (cyRef.current !== cy) return;
         // Something is better than nothing: a grid.
-        cy.layout({ name: "grid", fit: true, padding: 30 }).run();
+        cy.layout({ name: "grid", fit: false }).run();
+        fitRef.current.fit(cy);
         setLayoutError(message);
         setArranging(false);
       }
@@ -334,7 +292,10 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
 
   // A tab shown again: the container has its size back.
   useEffect(() => {
-    if (active) cyRef.current?.resize();
+    const cy = cyRef.current;
+    if (!active || !cy) return;
+    cy.resize();
+    fitRef.current.whenSized(cy);
   }, [active]);
 
   const zoomBy = (factor: number) => {
@@ -363,7 +324,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
         <IconButton label="Zoom out" onClick={() => zoomBy(0.8)}>
           <Minus size={14} />
         </IconButton>
-        <IconButton label="Fit the graph" onClick={() => cyRef.current?.fit(undefined, 30)}>
+        <IconButton label="Fit the graph" onClick={() => cyRef.current?.fit(undefined, FIT_PADDING)}>
           <Maximize2 size={13} />
         </IconButton>
       </div>

@@ -4,7 +4,7 @@
  * (`KnowledgeGraphCanvas.tsx`) turns this into Cytoscape elements.
  */
 
-import type { KnowledgeColor, KnowledgeGraphNode, KnowledgeGraphQuery, KnowledgeGraphResponse } from "@orquester/api";
+import type { KnowledgeColor, KnowledgeGraphNode, KnowledgeGraphQuery, KnowledgeGraphResponse, KnowledgeSearchHit } from "@orquester/api";
 
 /** The graph a view asks for: everything (within the filter), or the neighbourhood of `focus`. */
 export interface GraphScope {
@@ -123,4 +123,24 @@ export function canvasNodes(
     size: nodeSize(node.degree, maxDegree),
     colors: nodeColors(node, colorOf, filter)
   }));
+}
+
+/**
+ * What the canvas says about a search while its results list is closed, so no
+ * hit is invisible: entry hits have no node, and a concept hit may be outside
+ * the graph shown. Null without hits.
+ */
+export function searchSummary(hits: readonly KnowledgeSearchHit[], onCanvas: ReadonlySet<string>): string | null {
+  if (hits.length === 0) return null;
+  const entries = hits.filter((h) => h.kind === "entry").length;
+  const concepts = hits.length - entries;
+  const hidden = hits.filter((h) => h.kind === "concept" && !onCanvas.has(h.concept.id)).length;
+  const parts: string[] = [];
+  if (entries > 0) parts.push(`${entries} ${entries === 1 ? "entry" : "entries"}`);
+  if (concepts > 0) {
+    const marked = concepts - hidden;
+    const where = hidden === 0 ? "marked" : marked === 0 ? "not on the canvas" : `${marked} marked`;
+    parts.push(`${concepts} ${concepts === 1 ? "concept" : "concepts"} (${where})`);
+  }
+  return `Matches: ${parts.join(", ")}.`;
 }
