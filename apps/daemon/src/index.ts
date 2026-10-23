@@ -157,7 +157,9 @@ import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
 import { KnowledgeService } from "./knowledge/service.ts";
-import { ownerKindOf } from "./knowledge/visibility.ts";
+import { KnowledgeLinkingService } from "./knowledge/linking/service.ts";
+import { createDaemonWorkerSessions } from "./knowledge/linking/daemon-workers.ts";
+import { ensureKnowledgeIndexerProfile } from "./knowledge/linking/indexer-profile.ts";
 // boxes: Ephemeral AI VMs — the box service (projects in boxes, the plugin's routes).
 import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
@@ -282,6 +284,7 @@ import {
   remotesConfigPath,
   repoIconsDir,
   secretFilesDir,
+  knowledgeWorkersDir,
   repoIdentitiesPath,
   resolveDaemonPaths,
   savedPromptsPath,
@@ -1457,7 +1460,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   // Knowledge Graph plugin (spec 2026-10-23): one server-wide knowledge base for agent chats. Built
   // here (it follows the plugin record, the chats' tabs and the Agent Profiles), started below once
-  // the transports serve; while the plugin is off nothing of it is read, indexed or loaded.
+  // the daemon's in-process API exists; while the plugin is off nothing of it is read, indexed or loaded.
   const knowledge = new KnowledgeService({
     appdir: paths.baseDir,
     plugins,
@@ -1466,7 +1469,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // (Global) once its next start fell back; its owner says whether it is an indexing session.
     session: (sessionId) => {
       const tab = agentChat.chat.get(sessionId);
-      return tab ? { profileId: tab.profileId ?? null, ownerKind: ownerKindOf(tab.owner) } : null;
+      return tab ? { profileId: tab.profileId ?? null, ...(tab.owner ? { owner: tab.owner } : {}) } : null;
     },
     profiles: sessionProfileStore,
     onProfileChange: (listener) => {
@@ -1479,7 +1482,25 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       };
     },
     publisher: broadcaster,
-    api: () => services.internalApi,
+    // Linking (built when the knowledge base first opens, after `knowledge.start()` below): the myKG
+    // run queue, answered by unattended Claude Code chats it starts through the daemon's own API with
+    // the workflow Agent block's account selection, failover and shared cooldowns.
+    linking: ({ store, graph, runtime, settings }) => {
+      const api = services.internalApi;
+      if (!api) throw new Error("the daemon's in-process API does not exist yet");
+      const workers = createDaemonWorkerSessions({
+        api,
+        accounts: { list: () => agentAccounts.list() },
+        usage: { snapshot: () => workflowUsage },
+        cooldowns: createCooldownStore(workflowState, realClock),
+        clock: realClock,
+        settings: () => settings.get(),
+        workDir: knowledgeWorkersDir(paths.baseDir),
+        ensureProfile: () => ensureKnowledgeIndexerProfile(sessionProfiles),
+        logger: console
+      });
+      return new KnowledgeLinkingService({ appdir: paths.baseDir, runtime, settings, store, graph, workers, clock: realClock, logger: console });
+    },
     // `services` is read per call: the refresher is built below.
     toolsChanged: () => {
       void services.sessionToolsRefresher
@@ -1674,6 +1695,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   lineage.attachApi(services.internalApi);
+  // Knowledge Graph: follows the plugin (after `plugins.start()`), and with it on opens the knowledge
+  // base — linking loads its graph and resumes an interrupted run, its worker chats going through
+  // the in-process API just made. Before the boot manifest refresh below, so chats see its collections.
+  await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
   limitRecovery.attachApi(services.internalApi);
   delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
@@ -1745,9 +1770,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
-  // Knowledge Graph: follows the plugin (after `plugins.start()` above); while on, its knowledge base
-  // opens in the background (a request or manifest that needs it first opens it itself).
-  await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
 
   const stop = async () => {
     usage.stop();
@@ -4710,11 +4732,11 @@ export function createServer(
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
   // already (installing agent CLIs, running shells), and nothing here is secret.
   registerPluginRoutes(app, { plugins: services.plugins });
-  // Knowledge Graph (its spec, "Agent tools", "Settings → Plugins entry"): settings, status, the data
-  // routes and rebuild on both transports (the bearer hook gates HTTP; in-chat tools reach them
-  // through the unix app's in-process client with the agent's principal). The two worker routes are
-  // SOCKET-ONLY: only the indexing sessions' tools, through that client, call them.
-  services.knowledge?.registerRoutes(app, { socket: options.mode === "local" });
+  // Knowledge Graph (its spec, "Agent tools", "Settings → Plugins entry"): settings, the data routes,
+  // status, rebuild and the worker routes on both transports (the bearer hook gates HTTP). In-chat
+  // tools reach them through the unix app's in-process client with the agent's stamped principal —
+  // the only identity the worker routes accept.
+  services.knowledge?.registerRoutes(app);
   // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
   services.boxes?.registerRoutes(app);
 
