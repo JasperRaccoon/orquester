@@ -239,6 +239,27 @@ describe("the Ephemeral AI VMs settings section", () => {
     assert.ok(document.querySelector('[aria-label="Copy the policy snippet"]'));
   });
 
+  it("marks every secret field new-password so Chrome does not fill a saved login into the page", async () => {
+    // Chrome ignores autocomplete="off" on a password field and fills the saved
+    // username into the nearest text field before it: the plugin search box.
+    const radio = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent === label);
+    const secretAutocomplete = () =>
+      [...document.querySelectorAll<HTMLInputElement>('input[type="password"]')].map((i) => [i.id, i.getAttribute("autocomplete")]);
+
+    await click(buttonNamed("Add API key"));
+    await click(radio("Tailscale"));
+    assert.deepEqual(secretAutocomplete(), [
+      ["box-provider-vultr-key", "new-password"],
+      ["box-ts-token", "new-password"]
+    ]);
+    await click(radio("OAuth client"));
+    assert.deepEqual(secretAutocomplete(), [
+      ["box-provider-vultr-key", "new-password"],
+      ["box-ts-client-secret", "new-password"]
+    ]);
+  });
+
   it("lists the boxes and destroys a temporary one after confirming", async () => {
     assert.ok(text().includes("jaspersito / JasperEngine"));
     assert.ok(text().includes("Agent chat: build on macOS"));

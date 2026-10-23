@@ -156,7 +156,9 @@ export const ConnectionCard: React.FC = () => {
               <Input
                 id="box-ts-token"
                 type="password"
-                autoComplete="off"
+                // Chrome ignores "off" on a password field and would fill a saved
+                // login's username into the plugin search above.
+                autoComplete="new-password"
                 data-1p-ignore
                 placeholder={settings.tailscale.configured ? "Enter a new token" : "tskey-api-…"}
                 value={draft.apiToken}
@@ -189,7 +191,7 @@ export const ConnectionCard: React.FC = () => {
                 <Input
                   id="box-ts-client-secret"
                   type="password"
-                  autoComplete="off"
+                  autoComplete="new-password"
                   data-1p-ignore
                   value={draft.oauthClientSecret}
                   disabled={busy !== null}
