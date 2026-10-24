@@ -70,6 +70,11 @@ test("runnerOf takes the package's own node --test preamble", () => {
   });
   assert.deepEqual(runnerOf("node --test $(find test -name '*.test.mjs')"), { test: "node --test", check: "node" });
   assert.equal(runnerOf("vitest run"), null);
+  // A setup step in front (the daemon's native-module check) stays in front of both runs.
+  assert.deepEqual(runnerOf(`node ../../scripts/ensure-node-native.mjs && ${DAEMON_TEST}`), {
+    test: `node ../../scripts/ensure-node-native.mjs && ${runnerOf(DAEMON_TEST).test}`,
+    check: `node ../../scripts/ensure-node-native.mjs && ${runnerOf(DAEMON_TEST).check}`
+  });
   assert.equal(runnerOf(undefined), null);
 });
 
