@@ -836,48 +836,48 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             re-rendering on every change to it. */}
         <TimelineRowContext.Provider value={context}>
           <TimelineRosterContext.Provider value={roster ?? NO_ROSTER}>
-          <div
-            ref={contentRef}
-            // `h-full` (not `min-h-full`) when the panel shows: a min-height
-            // lets the column grow with the list and the whole timeline scrolls
-            // the title away; a fixed height is what makes ONLY the list scroll.
-            className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
-          >
-            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-            {showLoadOlder ? (
-              <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
-            ) : null}
-            {/* ONE keyed list, the empty notice spliced in at its place: a row
-                that crosses it never remounts, and with no notice the rows are
-                mapped directly under the same keys (`timelineChildren`). */}
-            {timelineChildren(
-              rows,
-              notice,
-              (row, key) => (
-                <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
-              ),
-              (shown, key) => (
-                <div
-                  key={key}
-                  className={cn(
-                    "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
-                    shown.at === 0 ? "py-12" : "py-4"
-                  )}
-                >
-                  {shown.text}
-                </div>
-              )
-            )}
-            {showEmptyPanel
-              ? // An empty thread shows the provider's resumable conversations
-                // (`EmptyThreadPanel`, built by the view). The wrapper fits the
-                // visible area so only the panel's own list scrolls.
-                emptyThreadPanel
-              : null}
-            {/* The footer spacer reserves exactly what the composer overlay hides. */}
-            {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
-            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-          </div>
+            <div
+              ref={contentRef}
+              // `h-full` (not `min-h-full`) when the panel shows: a min-height
+              // lets the column grow with the list and the whole timeline scrolls
+              // the title away; a fixed height is what makes ONLY the list scroll.
+              className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
+            >
+              <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+              {showLoadOlder ? (
+                <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
+              ) : null}
+              {/* ONE keyed list, the empty notice spliced in at its place: a row
+                  that crosses it never remounts, and with no notice the rows are
+                  mapped directly under the same keys (`timelineChildren`). */}
+              {timelineChildren(
+                rows,
+                notice,
+                (row, key) => (
+                  <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
+                ),
+                (shown, key) => (
+                  <div
+                    key={key}
+                    className={cn(
+                      "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
+                      shown.at === 0 ? "py-12" : "py-4"
+                    )}
+                  >
+                    {shown.text}
+                  </div>
+                )
+              )}
+              {showEmptyPanel
+                ? // An empty thread shows the provider's resumable conversations
+                  // (`EmptyThreadPanel`, built by the view). The wrapper fits the
+                  // visible area so only the panel's own list scrolls.
+                  emptyThreadPanel
+                : null}
+              {/* The footer spacer reserves exactly what the composer overlay hides. */}
+              {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
+              <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+            </div>
           </TimelineRosterContext.Provider>
         </TimelineRowContext.Provider>
       </div>
