@@ -225,7 +225,10 @@ test("a linking module that cannot be built, or cannot start, leaves linking pau
   assert.equal(built.state === "paused" && built.reason, "error");
   assert.match(built.state === "paused" ? built.message : "", /no python/);
   assert.equal((await broken.inject("GET", knowledgeRoutes.collections)).status, 200);
-  assert.equal((await broken.inject("POST", knowledgeRoutes.rebuild)).status, 500);
+  const rebuild = await broken.inject("POST", knowledgeRoutes.rebuild);
+  assert.equal(rebuild.status, 500);
+  assert.equal(rebuild.body!.code, "KNOWLEDGE_ERROR");
+  assert.match(String(rebuild.body!.message), /no python/);
 
   const failing = recordingLinking({ failStart: true });
   const h = await harness(t, { enabled: true, over: { linking: failing.factory } });

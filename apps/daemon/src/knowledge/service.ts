@@ -150,7 +150,8 @@ class NoLinking implements KnowledgeLinking {
   }
 
   async rebuild(): Promise<{ queued: boolean; running: boolean }> {
-    throw new KnowledgeError("KNOWLEDGE_NOT_INSTALLED", this.message);
+    // The runtime is there (the route checked): linking itself failed, an unexpected error.
+    throw new KnowledgeError("KNOWLEDGE_ERROR", this.message);
   }
 
   async rebuildEstimate(): Promise<{ entries: number; tasks: number }> {

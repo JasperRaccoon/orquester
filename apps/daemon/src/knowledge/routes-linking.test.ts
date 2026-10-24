@@ -11,6 +11,7 @@ import {
   type KnowledgeLinkingRouteService,
   type KnowledgeStatusCounts
 } from "./routes-linking.ts";
+import { KnowledgeError } from "./store/errors.ts";
 
 const SNAPSHOT: KnowledgeLinkingSnapshot = {
   linking: { state: "idle" },
@@ -21,12 +22,13 @@ const SNAPSHOT: KnowledgeLinkingSnapshot = {
   lastError: null
 };
 
-function setup(options: { counts?: Partial<KnowledgeStatusCounts>; owners?: Record<string, SessionOwner> } = {}) {
+function setup(options: { counts?: Partial<KnowledgeStatusCounts>; owners?: Record<string, SessionOwner>; rebuildError?: Error } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const linking: KnowledgeLinkingRouteService = {
     snapshot: () => SNAPSHOT,
     rebuild: async () => {
       calls.push({ method: "rebuild", args: [] });
+      if (options.rebuildError) throw options.rebuildError;
       return { queued: false, running: true };
     },
     rebuildEstimate: async () => ({ entries: 2, tasks: 7 }),
@@ -75,6 +77,17 @@ describe("knowledge linking routes", () => {
     assert.equal(res.json().entries, 5);
     assert.deepEqual(on.calls, [{ method: "rebuild", args: [] }]);
     assert.deepEqual((await on.app.inject({ method: "GET", url: knowledgeRoutes.rebuildEstimate })).json(), { entries: 2, tasks: 7 });
+  });
+
+  it("a refusal from the linking module keeps its code and message; an unexpected failure is 500 KNOWLEDGE_ERROR", async () => {
+    const disabled = setup({ rebuildError: new KnowledgeError("KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off.") });
+    const off = await disabled.app.inject({ method: "POST", url: knowledgeRoutes.rebuild });
+    assert.equal(off.statusCode, 409);
+    assert.deepEqual(off.json(), { code: "KNOWLEDGE_DISABLED", message: "The Knowledge Graph plugin is off." });
+    const broken = setup({ rebuildError: new Error("The knowledge linking service is not started.") });
+    const failed = await broken.app.inject({ method: "POST", url: knowledgeRoutes.rebuild });
+    assert.equal(failed.statusCode, 500);
+    assert.equal(failed.json().code, "KNOWLEDGE_ERROR");
   });
 
   it("worker routes refuse any session that is not a worker chat of the run in flight", async () => {
