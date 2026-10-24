@@ -39,7 +39,8 @@ mkdirSync(join(PROJECT, "sub"), { recursive: true });
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 const THREADS: Record<string, SessionToolThread> = {
   "thread-a": { projectPath: PROJECT, cwd: join(PROJECT, "sub"), agentId: "codex" },
-  "thread-gone": { projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed"), agentId: "codex" }
+  "thread-gone": { projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed"), agentId: "codex" },
+  "thread-worker": { projectPath: join(ROOT, "workers"), cwd: join(ROOT, "workers"), agentId: "claude", ownerKind: "knowledge-indexer" }
 };
 /** The daemon's view of thread-a: its tab and its snapshot (the route builds the caller from them). */
 function fakeApiFor(): FakeDaemonApi {
@@ -48,11 +49,13 @@ function fakeApiFor(): FakeDaemonApi {
       status: 200,
       body: [
         chatSummary({ id: "thread-a", projectPath: PROJECT, cwd: join(PROJECT, "sub") }),
-        chatSummary({ id: "thread-gone", projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed") })
+        chatSummary({ id: "thread-gone", projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed") }),
+        chatSummary({ id: "thread-worker", projectPath: join(ROOT, "workers"), cwd: join(ROOT, "workers") })
       ]
     })
     .on("GET", agentChatRoutes.thread("thread-a"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-a", runtimeMode: "auto" }) }) } })
-    .on("GET", agentChatRoutes.thread("thread-gone"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-gone" }) }) } });
+    .on("GET", agentChatRoutes.thread("thread-gone"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-gone" }) }) } })
+    .on("GET", agentChatRoutes.thread("thread-worker"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-worker" }) }) } });
   api.fsRoot = ROOT;
   api.workspacesDir = WS;
   return api;
@@ -162,6 +165,23 @@ test("results: image content, a coded handler error, an unknown tool", async (t)
   const unknown = await forward({ threadId: "thread-a", callId: "c", name: "nope", arguments: {} }, signal);
   assert.equal(unknown.isError, true);
   assert.match(textOf(unknown), /^TOOL_NOT_FOUND/);
+});
+
+test("a Knowledge Graph worker chat may call its two worker tools and no other tool", async (t) => {
+  const worker = testChatTool({ name: "knowledge_worker_next_task", title: "Next", description: "A worker tool.", input: {}, run: async () => jsonResult({ ok: true }) });
+  const { socketPath } = await daemon(t, [...TEST_CHAT_TOOLS, worker]);
+  const forward = forwarderFor(socketPath);
+  const signal = new AbortController().signal;
+  // Whatever the manifest advertised (a fallback, a degraded read), the daemon runs no other tool for it.
+  const refused = await forward({ threadId: "thread-worker", callId: "c", name: "echo", arguments: { text: "x" } }, signal);
+  assert.equal(refused.isError, true);
+  assert.match(textOf(refused), /^TOOL_NOT_FOUND/);
+  const allowed = await forward({ threadId: "thread-worker", callId: "c", name: "knowledge_worker_next_task", arguments: {} }, signal);
+  assert.equal(allowed.isError, undefined, textOf(allowed));
+  assert.deepEqual(allowed.structuredContent, { ok: true });
+  // An ordinary chat still reaches every tool.
+  const ordinary = await forward({ threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } }, signal);
+  assert.equal(ordinary.isError, undefined);
 });
 
 test("only the host's bearer is honoured, and only for a thread the daemon knows", async (t) => {
