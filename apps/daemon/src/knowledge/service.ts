@@ -544,7 +544,8 @@ export class KnowledgeService {
    * linking's status, rebuild and worker routes. In-chat tools reach them through the unix app's
    * in-process client with the agent's principal, which is all the worker routes accept.
    */
-  registerRoutes(app: FastifyInstance): void {
+  /** `mode`: the app's transport; the worker routes are the unix-socket app's only. */
+  registerRoutes(app: FastifyInstance, mode: "local" | "remote" = "local"): void {
     const logger = this.logger;
     const service = this;
     registerKnowledgeSettingsRoutes(app, { settings: this.settings, logger });
@@ -587,6 +588,7 @@ export class KnowledgeService {
       },
       counts: () => this.counts(),
       sessionOwner: (sessionId) => this.options.session(sessionId)?.owner,
+      workerRoutes: mode === "local",
       logger
     });
   }

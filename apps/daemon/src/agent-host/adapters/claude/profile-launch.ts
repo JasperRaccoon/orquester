@@ -183,7 +183,11 @@ export async function loadClaudeProfileLaunch(
     ...(isPlainObject(projectEntry) ? stringList(projectEntry.disabledMcpjsonServers) : [])
   ]);
   const mcpServers: Record<string, Doc> = {};
-  for (const [name, def] of Object.entries(await claudeProjectMcpServers(input.cwd, projectFs))) {
+  // A managed profile without built-in tools (the Knowledge indexer) gets its own servers only:
+  // the `.mcp.json` walk goes up to `/`, so a chat in the appdir would otherwise lift whatever
+  // `~/.mcp.json` (or a repo root's, for a `.stage` appdir) declares into an unattended chat.
+  const projectServers = section.disableBuiltinTools === true ? {} : await claudeProjectMcpServers(input.cwd, projectFs);
+  for (const [name, def] of Object.entries(projectServers)) {
     if (!disabledMcp.has(name)) mcpServers[name] = def;
   }
   Object.assign(mcpServers, profileServers);

@@ -558,6 +558,11 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     assert.equal(on.options.env?.ENABLE_TOOL_SEARCH, undefined);
   });
 
+  it("a profile without built-in tools loads no filesystem settings (no CLAUDE.md walked up from its cwd)", () => {
+    assert.deepEqual(buildWith(profileLaunch({ disableBuiltinTools: true })).options.settingSources, []);
+    assert.deepEqual(buildWith(profileLaunch()).options.settingSources, ["project", "local"]);
+  });
+
   it("the Workflow tool off adds disableWorkflows; no MCP server means no --mcp-config", () => {
     const built = buildWith(profileLaunch({ disableWorkflows: true, mcpServers: {}, disabledPluginIds: [] }));
     assert.equal(built.profileFiles?.settings.disableWorkflows, true);

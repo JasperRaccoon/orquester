@@ -262,4 +262,18 @@ describe("stopStaleMykg", () => {
     await stopping;
     assert.equal(result, "stopped");
   });
+
+  it("signals only this knowledge base's myKG extract, never another appdir's on a recycled pid", async () => {
+    const clock = new FakeClock();
+    for (const other of ["/venv/bin/python /venv/bin/mykg extract-graph /other/in --session s --update", "/venv/bin/mykg extract-graph /in/sub", "grep mykg extract-graph"]) {
+      const proc = fakeProcess({ cmdline: other });
+      proc.use(clock);
+      assert.equal(await stopStaleMykg({ pid: 1234, startTime: null, inputDir: "/in" }, { clock, probe: proc.probe }), "none", other);
+      assert.deepEqual(proc.signals, [], other);
+    }
+    const ours = fakeProcess({ cmdline: "/venv/bin/python /venv/bin/mykg extract-graph /in --session s --update", exitsOn: ["SIGTERM"] });
+    ours.use(clock);
+    assert.equal(await clock.drive(stopStaleMykg({ pid: 1234, startTime: null, inputDir: "/in" }, { clock, probe: ours.probe })), "stopped");
+    assert.equal(await stopStaleMykg({ pid: 1.5, startTime: null, inputDir: "/in" }, { clock, probe: ours.probe }), "none", "not an integer pid");
+  });
 });

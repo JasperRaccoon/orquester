@@ -301,12 +301,14 @@ const STALE_KILL_WAIT_MS = 5_000;
  */
 export async function stopStaleMykg(child: StaleMykgChild, options: StopStaleMykgOptions): Promise<"none" | "stopped" | "alive"> {
   const { pid } = child;
-  if (pid === null || pid <= 1) return "none";
+  if (pid === null || !Number.isSafeInteger(pid) || pid <= 1) return "none";
   const probe = options.probe ?? procMykgProbe;
   const isChild = async (): Promise<boolean> => {
     const cmdline = await probe.cmdline(pid);
     if (cmdline === null || !/mykg/.test(cmdline) || !/extract-graph/.test(cmdline)) return false;
-    if (child.inputDir !== undefined && !cmdline.includes(child.inputDir)) return false;
+    // `extract-graph <this knowledge base's input dir>` exactly: another appdir's myKG (a dev
+    // `.stage` daemon, another checkout) on a recycled pid is never signalled.
+    if (child.inputDir !== undefined && !` ${cmdline} `.includes(` extract-graph ${child.inputDir} `)) return false;
     if (child.startTime !== null && (await probe.startTime(pid)) !== child.startTime) return false;
     return true;
   };

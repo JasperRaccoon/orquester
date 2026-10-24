@@ -31,6 +31,8 @@ import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { exchangeOfTurn } from "../mcp/gate/turn-policy.ts";
 import { listSessions, readThreadHead } from "../mcp/reads.ts";
 import { toSafeToolError } from "../mcp/result.ts";
+import { KNOWLEDGE_WORKER_OWNER_KIND } from "../knowledge/visibility.ts";
+import { KNOWLEDGE_WORKER_TOOLS } from "./manifest.ts";
 import type { SessionSecretRequests } from "./contract.ts";
 import { chatToolByName } from "./legacy-aliases.ts";
 
@@ -42,6 +44,8 @@ export interface SessionToolThread {
   projectPath: string;
   cwd: string;
   agentId: AgentAdapterId;
+  /** The tab's `owner.kind`, when it has one (`"workflow"`, `"knowledge-indexer"`, …). */
+  ownerKind?: string;
 }
 
 export interface SessionToolRouteDeps {
@@ -122,6 +126,11 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
     const thread = deps.resolveThread(call.threadId);
     if (thread === null) {
       return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "No chat thread with that id." });
+    }
+    // A Knowledge Graph worker chat reads untrusted entry text: whatever its manifest advertised
+    // (a fallback, a degraded read), it may call its two worker tools and nothing else.
+    if (thread.ownerKind === KNOWLEDGE_WORKER_OWNER_KIND && !KNOWLEDGE_WORKER_TOOLS.includes(call.name)) {
+      return reply.code(200).send(toSafeToolError(new ToolError("TOOL_NOT_FOUND", `Session tool ${call.name.slice(0, 100)} not found.`)));
     }
     const api = deps.api();
     if (api === null) {

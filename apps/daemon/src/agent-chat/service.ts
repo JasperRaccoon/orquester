@@ -931,12 +931,12 @@ export class AgentChatService {
    * thread's own chat tab (never from the call): its project, its cwd and the
    * adapter it runs on. Null for a thread with no chat tab.
    */
-  sessionToolThread(threadId: string): { projectPath: string; cwd: string; agentId: AgentAdapterId } | null {
+  sessionToolThread(threadId: string): { projectPath: string; cwd: string; agentId: AgentAdapterId; ownerKind?: string } | null {
     const summary = this.chat.get(threadId);
     if (!summary) return null;
     const agentId = this.opts.registryEntry(summary.refId)?.chat?.adapter;
     if (agentId === undefined || !isAgentAdapterId(agentId)) return null;
-    return { projectPath: summary.projectPath, cwd: summary.cwd, agentId };
+    return { projectPath: summary.projectPath, cwd: summary.cwd, agentId, ...(summary.owner ? { ownerKind: summary.owner.kind } : {}) };
   }
 
   routeDeps(): AgentChatRouteDeps {

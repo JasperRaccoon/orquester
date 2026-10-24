@@ -25,7 +25,7 @@ import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory, 
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
 
 
-async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions> } = {}) {
+async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions>; mode?: "local" | "remote" } = {}) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-service-"));
   const plugins = new FakeKnowledgePlugins(options.enabled ?? false);
   const runtime = new FakeRuntime();
@@ -63,7 +63,7 @@ async function harness(t: TestContext, options: { enabled?: boolean; over?: Part
     const agent = request.headers["x-test-agent"];
     if (typeof agent === "string") (request as unknown as { principal: unknown }).principal = { kind: "agent", threadId: agent, projectPath: "" };
   });
-  knowledge.registerRoutes(app);
+  knowledge.registerRoutes(app, options.mode);
   t.after(async () => {
     await app.close();
     await knowledge.stop();
@@ -252,6 +252,19 @@ test("worker routes: the worker is the stamped principal only, and must be a wor
   }
   // Visibility agrees: a worker sees no collection.
   assert.equal((await h.knowledge.knowledgeForSession("w1")).worker, true);
+});
+
+test("the worker routes are the unix-socket app's only: the remote app serves the rest without them", async (t) => {
+  const linking = recordingLinking();
+  const session = (id: string) => (id === "w1" ? { owner: { kind: "knowledge-indexer", runId: "kr_1" } as SessionOwner } : { profileId: null });
+  const h = await harness(t, { enabled: true, mode: "remote", over: { linking: linking.factory, session } });
+  await h.knowledge.start();
+  assert.equal((await h.inject("GET", knowledgeRoutes.status)).status, 200);
+  assert.equal((await h.inject("GET", knowledgeRoutes.collections)).status, 200);
+  for (const url of [knowledgeRoutes.workerNext, knowledgeRoutes.workerSubmit]) {
+    assert.equal((await h.inject("POST", url, { taskId: "t", answer: "{}" }, "w1")).status, 404, url);
+  }
+  assert.equal(linking.log.includes("next w1"), false);
 });
 
 test("the profiles behind the collection views are listed once and reused until a profile event", async (t) => {
