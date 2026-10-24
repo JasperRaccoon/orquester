@@ -11,12 +11,13 @@
  * them, and the contract keeps them): they are not shown, and only leave the
  * list when it would otherwise exceed its cap.
  *
- * Saving sends only what changed (`UpdateSessionProfileRequest`); a cleared
- * icon is `icon: null`. The daemon's refusal — a taken name, a stale
+ * Saving sends only what changed (`UpdateSessionProfileRequest`) from the
+ * profile as the dialog opened on it — not as it reads now, so a change made
+ * elsewhere meanwhile is not undone; a cleared icon is `icon: null`. The daemon's refusal — a taken name, a stale
  * revision — is shown in the dialog, which stays open.
  */
 
-import React, { useId, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 
 import {
   KNOWLEDGE_GRAPH_PLUGIN_ID,
@@ -34,7 +35,8 @@ import {
 } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
-import { useKnowledgeCollections } from "../../../lib/knowledge/store";
+import { loadKnowledgeCollections, useKnowledgeCollections, useKnowledgeState } from "../../../lib/knowledge/store";
+import { knowledgeErrorText } from "../../knowledge/knowledge.logic";
 import { isGlobalPluginEnabled } from "../../../lib/plugins-state";
 import { agentLabel } from "../../../lib/session-profiles/logic";
 import { Button } from "../../ui/button";
@@ -148,8 +150,11 @@ export const ProfileSettingsDialog: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  /** Resolves to the refusal's words, or `null` once saved (the dialog then closes). */
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  /**
+   * Resolves to the refusal's words, or `null` once saved (the dialog then closes). `base` is the
+   * profile the form was filled from (null when creating): diff against it, not the profile now.
+   */
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ open, ...props }) => (
   <Modal open={open} onClose={props.onCancel} className="max-w-md">
     {open ? <SettingsBody {...props} /> : null}
@@ -162,9 +167,11 @@ const SettingsBody: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ mode, profile, focusName = false, sheet, onCancel, onSubmit }) => {
   const ids = useId();
+  // What the form was filled from: the profile may move on while the dialog is open.
+  const [base] = useState(profile);
   const [form, setForm] = useState<ProfileSettingsForm>(() => profileSettingsForm(profile));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -183,7 +190,7 @@ const SettingsBody: React.FC<{
       return;
     }
     setBusy(true);
-    const refusal = await onSubmit(form);
+    const refusal = await onSubmit(form, base);
     setBusy(false);
     if (refusal !== null) setError(refusal);
   };
@@ -322,11 +329,24 @@ const SettingsBody: React.FC<{
 /**
  * The Knowledge Graph plugin's collections, ticked for this profile; nothing
  * while the plugin is off. The collections are the knowledge store's (loaded
- * while the plugin is on).
+ * while the plugin is on); read here when that load has not answered, with a
+ * retry when it failed.
  */
 const KnowledgeSection: React.FC<{ ids: readonly string[]; onChange: (ids: string[]) => void }> = ({ ids, onChange }) => {
   const on = useAppStore((s) => isGlobalPluginEnabled(s.plugins, KNOWLEDGE_GRAPH_PLUGIN_ID));
+  const api = useAppStore((s) => s.api);
   const collections = useKnowledgeCollections();
+  const collectionsError = useKnowledgeState((s) => s.collectionsError);
+  const missing = on && collections === null;
+  const read = () => {
+    if (api) void loadKnowledgeCollections(api).catch(() => undefined);
+  };
+  // Once per open (single-flight in the store): a failed or missed load would
+  // otherwise leave the section "Loading" until the next connect.
+  useEffect(() => {
+    if (missing) read();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missing, api]);
   if (!on) return null;
   const list = collections?.collections ?? null;
   const known = list?.map((c) => c.id) ?? [];
@@ -337,7 +357,14 @@ const KnowledgeSection: React.FC<{ ids: readonly string[]; onChange: (ids: strin
       <p className="pb-1 text-[11px] leading-4 text-neutral-500">
         Chats with this profile can only search the ticked collections. Chats without a profile see everything.
       </p>
-      {list === null ? (
+      {list === null && collectionsError ? (
+        <div className="flex items-center gap-2 text-[12px] text-danger">
+          <span className="min-w-0 flex-1">Could not read the collections: {knowledgeErrorText(collectionsError)}</span>
+          <Button type="button" size="sm" variant="outline" onClick={read}>
+            Retry
+          </Button>
+        </div>
+      ) : list === null ? (
         <p className="text-[12px] text-neutral-500">Loading collections…</p>
       ) : list.length === 0 ? (
         <p className="text-[12px] text-neutral-500">No collections yet. Create them in the Knowledge tab.</p>

@@ -9,6 +9,8 @@
 import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { defaultUrlTransform } from "react-markdown";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
@@ -91,6 +93,48 @@ describe("the chat's URL filter", () => {
     assert.equal(t("orquester-knowledge:entry/../../etc"), "");
     assert.equal(t("orquester-knowledge:concept/tactic-x"), "");
     assert.equal(t(`orquester-knowledge:entry/${LIVE}`, "src"), "", "never an image source");
+  });
+
+  it("refuses every near-citation: case, whitespace, controls, encodings, smuggling, length", () => {
+    const t = (url: string, key = "href") => markdown.chatUrlTransform(url, key, {} as never);
+    const refused = [
+      `ORQUESTER-KNOWLEDGE:entry/${LIVE}`,
+      `Orquester-Knowledge:entry/${LIVE}`,
+      `orquester-knowledge:Entry/${LIVE}`,
+      "orquester-knowledge:entry/KE_AAAAAAAAAAAA",
+      ` orquester-knowledge:entry/${LIVE}`,
+      `orquester-knowledge:entry/${LIVE} `,
+      `orquester-knowledge:entry/${LIVE}\n`,
+      `orquester-knowledge:entry/${LIVE}%0A`,
+      `orquester-knowledge:entry/${LIVE}\u0000`,
+      `\torquester-knowledge:entry/${LIVE}`,
+      "orquester-knowledge:entry/ke_%61aaaaaaaaaaa",
+      `orquester-knowledge:entry/${LIVE}?x=javascript:alert(1)`,
+      `orquester-knowledge:entry/${LIVE}#x`,
+      `orquester-knowledge:entry/${LIVE}/../x`,
+      `javascript:orquester-knowledge:entry/${LIVE}`,
+      `javascript:alert(1)//orquester-knowledge:entry/${LIVE}`,
+      `orquester-knowledge:entry/${LIVE}${"a".repeat(10_000)}`,
+      "orquester-knowledge:entry/ke_aaaaaaaaaaa",
+      "orquester-knowledge://entry/ke_aaaaaaaaaaaa"
+    ];
+    for (const url of refused) assert.equal(t(url), "", JSON.stringify(url.slice(0, 80)));
+    // Every other scheme keeps react-markdown's own filter.
+    for (const url of ["https://a.example/x", "mailto:a@b.c", "#frag", "./rel", "data:text/html,x", "vbscript:x", "file:///etc/passwd"]) {
+      assert.equal(t(url), defaultUrlTransform(url), url);
+      assert.equal(t(url, "src"), defaultUrlTransform(url), url);
+    }
+  });
+
+  it("renders link text as text and never as HTML, and a citation-shaped image as no image", () => {
+    const html = renderToStaticMarkup(
+      createElement(markdown.ChatMarkdown, {
+        text: `[<img src=x onerror=alert(1)>](orquester-knowledge:entry/${LIVE}) ![pic](orquester-knowledge:entry/${LIVE})`
+      })
+    );
+    assert.doesNotMatch(html, /<img[^>]*onerror/);
+    assert.doesNotMatch(html, /src="orquester-knowledge:/);
+    assert.doesNotMatch(html, /href="orquester-knowledge:/);
   });
 });
 
@@ -185,6 +229,33 @@ describe("knowledge citations in a message", () => {
     assert.equal(tab?.focus?.kind, "entry");
     assert.equal(tab?.focus?.id, LIVE);
     assert.equal(useAppStore.getState().activeTabByProject[PROJECT.path], tab?.id);
+  });
+
+  it("middle-, ctrl-, meta- and keyboard activation never open a window or navigate", async () => {
+    await show(true);
+    const opened: unknown[] = [];
+    const original = dom.window.open;
+    dom.window.open = ((...args: unknown[]) => (opened.push(args), null)) as typeof dom.window.open;
+    try {
+      const chip = chips(LIVE)[0]!;
+      assert.equal(chip.getAttribute("href"), null);
+      assert.notEqual(chip.getAttribute("draggable"), "true");
+      for (const init of [{ button: 1 }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }]) {
+        await act(async () => {
+          chip.dispatchEvent(new dom.window.MouseEvent("auxclick", { bubbles: true, cancelable: true, ...init }));
+          chip.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+        });
+      }
+      await act(async () => {
+        chip.focus();
+        chip.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      });
+      await settle();
+      assert.deepEqual(opened, []);
+      assert.equal(dom.window.location.href, "http://localhost/");
+    } finally {
+      dom.window.open = original;
+    }
   });
 
   it("asks whether an entry exists on hover, once per entry, and strikes a deleted one through", async () => {

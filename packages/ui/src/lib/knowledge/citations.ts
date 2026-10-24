@@ -16,7 +16,7 @@
 import { useSyncExternalStore } from "react";
 
 import { knowledgeErrorCode } from "../../components/knowledge/knowledge.logic";
-import { knowledgeStore } from "./store";
+import { knowledgeStore, onKnowledgeReset } from "./store";
 
 export type KnowledgeCitationState = "unknown" | "exists" | "deleted";
 
@@ -28,6 +28,9 @@ export interface KnowledgeCitationsApi {
 
 const known = new Map<string, "exists" | "deleted">();
 const inFlight = new Map<string, Promise<void>>();
+/** The newest read of each entry: an older one that settles after it is dropped. */
+const latest = new Map<string, number>();
+let reads = 0;
 const listeners = new Set<() => void>();
 /** Bumped by a reset: an answer from before it is dropped. */
 let generation = 0;
@@ -44,6 +47,7 @@ export function resetKnowledgeCitations(): void {
   connectionId = null;
   client = null;
   inFlight.clear();
+  latest.clear();
   if (known.size > 0) {
     known.clear();
     emit();
@@ -56,12 +60,15 @@ export function knowledgeCitationState(id: string): KnowledgeCitationState {
 
 function ask(api: KnowledgeCitationsApi, id: string): Promise<void> {
   const gen = generation;
+  const mine = ++reads;
+  latest.set(id, mine);
+  const current = () => gen === generation && latest.get(id) === mine;
   const run = api.getKnowledgeItem(id).then(
     () => {
-      if (gen === generation) known.set(id, "exists");
+      if (current()) known.set(id, "exists");
     },
     (error: unknown) => {
-      if (gen === generation && knowledgeErrorCode(error) === "KNOWLEDGE_NOT_FOUND") known.set(id, "deleted");
+      if (current() && knowledgeErrorCode(error) === "KNOWLEDGE_NOT_FOUND") known.set(id, "deleted");
     }
   );
   const settled = run.finally(() => {
@@ -83,11 +90,12 @@ export function checkKnowledgeCitation(api: KnowledgeCitationsApi, id: string): 
   return inFlight.get(id) ?? ask(api, id);
 }
 
-/** Entry changes: ask again about the named entries already known; `null` (any entry) forgets every answer. */
+/** Entry changes: ask again about the named entries known or being asked about; `null` (any entry) forgets every answer. */
 function entriesChanged(ids: readonly string[] | null): void {
   if (ids === null) {
     generation += 1;
     inFlight.clear();
+    latest.clear();
     if (known.size > 0) {
       known.clear();
       emit();
@@ -96,12 +104,16 @@ function entriesChanged(ids: readonly string[] | null): void {
   }
   const api = client;
   for (const id of ids) {
-    if (!known.has(id)) continue;
+    // A read in flight may answer from before the change: ask again.
+    if (!known.has(id) && !inFlight.has(id)) continue;
     known.delete(id);
     if (api) void ask(api, id);
   }
   emit();
 }
+
+// A reset (connection switch, plugin off) forgets every answer and the client.
+onKnowledgeReset(resetKnowledgeCitations);
 
 knowledgeStore.subscribe((state, previous) => {
   if (state.entriesRevision === previous.entriesRevision) return;

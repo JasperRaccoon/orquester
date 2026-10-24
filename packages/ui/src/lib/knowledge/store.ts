@@ -104,6 +104,21 @@ const seq = { status: 0, collections: 0 };
 let collectionsInFlight: Promise<void> | null = null;
 let collectionsAgain = false;
 
+const resetListeners = new Set<() => void>();
+
+/**
+ * Run `listener` on every {@link resetKnowledge} (connection switch, plugin
+ * off) — for caches kept beside this store, such as the citation answers. The
+ * state alone cannot say so: a reset before any entry changed leaves the
+ * revision counters where they were.
+ */
+export function onKnowledgeReset(listener: () => void): () => void {
+  resetListeners.add(listener);
+  return () => {
+    resetListeners.delete(listener);
+  };
+}
+
 /** Forget everything (connection switch, plugin off). */
 export function resetKnowledge(): void {
   generation += 1;
@@ -114,6 +129,7 @@ export function resetKnowledge(): void {
   collectionsInFlight = null;
   collectionsAgain = false;
   knowledgeStore.setState(INITIAL, true);
+  for (const listener of [...resetListeners]) listener();
 }
 
 /** Adopt `api`; a client of another connection resets the store first. */

@@ -187,6 +187,48 @@ describe("the profile settings dialog's Knowledge section", () => {
     assert.equal(box("kc_gone"), null, "a deleted collection is not shown");
   });
 
+  it("reads the collections when they never loaded, and offers a retry when the read fails", async () => {
+    let fail = true;
+    const reads: string[] = [];
+    const api = {
+      connection: { id: "c1" },
+      listKnowledgeCollections: async () => {
+        reads.push("collections");
+        if (fail) throw Object.assign(new Error("offline"), { body: { code: "KNOWLEDGE_ERROR", message: "The server is unreachable." } });
+        return collections([collection({ id: "kc_seo", name: "SEO" })]);
+      }
+    };
+    useAppStore.setState({ plugins: [knowledgePlugin(true)], api: api as never });
+    for (let i = 0; i < 5; i += 1) await act(async () => await Promise.resolve());
+    // The load when the plugin turned on failed: no collections, only the error.
+    assert.equal(knowledgeStore.getState().collections, null);
+    reads.length = 0;
+    await act(async () =>
+      root.render(
+        createElement(dialog.ProfileSettingsDialog, {
+          open: true,
+          mode: "edit",
+          profile: profile(["kc_seo"]),
+          sheet: false,
+          onCancel: () => undefined,
+          onSubmit: async () => null
+        })
+      )
+    );
+    for (let i = 0; i < 5; i += 1) await act(async () => await Promise.resolve());
+    assert.deepEqual(reads, ["collections"], "read on open");
+    const section = () => doc().querySelector('fieldset[aria-label="Knowledge"]')!;
+    assert.match(section().textContent!, /The server is unreachable\./);
+    assert.doesNotMatch(section().textContent!, /Loading collections/);
+
+    fail = false;
+    const retry = [...section().querySelectorAll("button")].find((b) => b.textContent?.trim() === "Retry");
+    assert.ok(retry, "a retry");
+    await click(retry);
+    for (let i = 0; i < 5; i += 1) await act(async () => await Promise.resolve());
+    assert.equal(box("kc_seo")?.checked, true);
+  });
+
   it("round-trips: ticking and unticking reach the patch, a deleted collection's id stays", async () => {
     const stored = profile(["kc_seo", "kc_gone"]);
     await show(true, stored);

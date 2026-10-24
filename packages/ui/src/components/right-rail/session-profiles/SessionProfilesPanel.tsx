@@ -11,7 +11,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-import { SESSION_PROFILE_WORKFLOW_USES_CHANGED, type SessionProfileItem, type SessionProfileItemKind } from "@orquester/api";
+import { SESSION_PROFILE_WORKFLOW_USES_CHANGED, type SessionProfileDetail, type SessionProfileItem, type SessionProfileItemKind } from "@orquester/api";
 
 import { useApi } from "../../../context/orquester-context";
 import { useSessionProfileDetail, useSessionProfileList, useSessionProfilesState } from "../../../lib/session-profiles/hooks";
@@ -129,7 +129,7 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
   );
 
   const submitSettings = useCallback(
-    async (form: ProfileSettingsForm): Promise<string | null> => {
+    async (form: ProfileSettingsForm, base: SessionProfileDetail | null): Promise<string | null> => {
       if (settings?.mode === "create") {
         const result = await createSessionProfile(api, createRequestFromForm(form));
         if (!result.ok) return result.error;
@@ -139,7 +139,8 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
         return null;
       }
       if (profile === null) return "The profile is not loaded.";
-      const patch = updatePatchFromForm(profile, form);
+      // Against what the form was filled from: a field changed elsewhere meanwhile is left alone.
+      const patch = updatePatchFromForm(base ?? profile, form);
       if (Object.keys(patch).length === 0) {
         setSettings(null);
         return null;

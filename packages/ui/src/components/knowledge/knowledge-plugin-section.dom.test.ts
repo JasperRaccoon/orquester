@@ -1,6 +1,6 @@
 /**
- * Settings → Plugins → Knowledge Graph in a DOM: nothing while the plugin is
- * off; Activity from the knowledge store (live on a `knowledge.status` event),
+ * Settings → Plugins → Knowledge Graph in a DOM: only the indexing settings
+ * while the plugin is off; Activity from the knowledge store (live on a `knowledge.status` event),
  * worker sessions linking to their chat when this client has its tab, the
  * rebuild confirmation with its estimate, "Open Knowledge tab"; and the
  * indexing settings saved with a PUT of what changed, showing the daemon's
@@ -163,10 +163,14 @@ describe("the Knowledge Graph plugin section", () => {
     });
   };
 
-  it("shows nothing while the plugin is off", async () => {
+  it("while the plugin is off shows no activity, but the indexing settings to prepare it", async () => {
     await show(false);
-    assert.equal(text(), "");
-    assert.deepEqual(calls, []);
+    assert.doesNotMatch(text(), /Activity|Rebuild graph/);
+    assert.ok(!calls.includes("status"), "no status read");
+    assert.ok(calls.includes("settings"), "the settings are read (the daemon answers them while off)");
+    await choose(field<HTMLSelectElement>("Indexing account"), "c2");
+    await click(buttonNamed("Save"));
+    assert.deepEqual(puts, [{ accountId: "c2" }]);
   });
 
   it("shows the activity and follows knowledge.status events", async () => {
@@ -242,6 +246,27 @@ describe("the Knowledge Graph plugin section", () => {
     assert.ok(!calls.includes("rebuild"), "nothing before the confirmation");
     await click(buttonNamed("Rebuild"));
     assert.ok(calls.includes("rebuild"));
+  });
+
+  it("shows the estimate of the latest confirmation, not one an earlier open asked for", async () => {
+    await show();
+    const original = api.getKnowledgeRebuildEstimate;
+    const answers: Array<(value: { entries: number; tasks: number }) => void> = [];
+    api.getKnowledgeRebuildEstimate = () => new Promise((resolve) => answers.push(resolve));
+    try {
+      await click(buttonNamed("Rebuild graph"));
+      await click(buttonNamed("Cancel"));
+      await click(buttonNamed("Rebuild graph"));
+      assert.equal(answers.length, 2);
+      await act(async () => answers[1]!({ entries: 12, tasks: 340 }));
+      await settle();
+      await act(async () => answers[0]!({ entries: 1, tasks: 5 }));
+      await settle();
+      assert.match(text(), /about 340 tasks \(model calls\) for 12 entries/);
+      assert.doesNotMatch(text(), /about 5 tasks/);
+    } finally {
+      api.getKnowledgeRebuildEstimate = original;
+    }
   });
 
   it("shows a refused rebuild's message", async () => {

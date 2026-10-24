@@ -146,7 +146,9 @@ import {
   parseKnowledgeEntriesResponse,
   parseKnowledgeGraphResponse,
   parseKnowledgeItemResponse,
+  parseKnowledgeRebuildEstimate,
   parseKnowledgeSearchResponse,
+  parseKnowledgeSettings,
   parseKnowledgeStatus
 } from "./knowledge/validate";
 import type {
@@ -988,12 +990,12 @@ export class ApiClient {
     return readKnowledge(parseKnowledgeStatus(await this.send<unknown>("GET", knowledgeRoutes.status, { signal })), "status");
   }
 
-  getKnowledgeSettings(signal?: AbortSignal): Promise<KnowledgeSettings> {
-    return this.send("GET", knowledgeRoutes.settings, { signal });
+  async getKnowledgeSettings(signal?: AbortSignal): Promise<KnowledgeSettings> {
+    return readKnowledge(parseKnowledgeSettings(await this.send<unknown>("GET", knowledgeRoutes.settings, { signal })), "settings");
   }
 
-  updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettings> {
-    return this.send("PUT", knowledgeRoutes.settings, { body: req });
+  async updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettings> {
+    return readKnowledge(parseKnowledgeSettings(await this.send<unknown>("PUT", knowledgeRoutes.settings, { body: req })), "settings");
   }
 
   async listKnowledgeCollections(signal?: AbortSignal): Promise<KnowledgeCollectionsResponse> {
@@ -1061,8 +1063,9 @@ export class ApiClient {
     return this.send("POST", knowledgeRoutes.rebuild, { body: {} });
   }
 
-  getKnowledgeRebuildEstimate(signal?: AbortSignal): Promise<KnowledgeRebuildEstimate> {
-    return this.send("GET", knowledgeRoutes.rebuildEstimate, { signal });
+  async getKnowledgeRebuildEstimate(signal?: AbortSignal): Promise<KnowledgeRebuildEstimate> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.rebuildEstimate, { signal });
+    return readKnowledge(parseKnowledgeRebuildEstimate(data), "rebuild estimate");
   }
 
   // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---

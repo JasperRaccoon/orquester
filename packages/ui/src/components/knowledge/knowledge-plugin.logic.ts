@@ -16,6 +16,7 @@ import {
 } from "@orquester/api";
 
 import { shortAccountLabel } from "../../lib/account-label";
+import { parseKnowledgeSettings } from "../../lib/knowledge/validate";
 import { formatDuration } from "../../lib/workflows/format";
 import { compactCount } from "../topbar/usage-format";
 
@@ -36,22 +37,11 @@ export interface KnowledgeSettingsForm {
 }
 
 /**
- * The settings as the daemon sent them, read field by field (an older or newer
- * daemon's answer may lack one or carry another type): a bad field reads as
- * its default, as the daemon itself reads its stored record.
+ * The settings as the daemon sent them, read field by field (see
+ * `parseKnowledgeSettings`); an answer that is not an object reads as the defaults.
  */
 export function readKnowledgeSettings(value: unknown): KnowledgeSettings {
-  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const accountId = typeof record.accountId === "string" && record.accountId.trim() !== "" ? record.accountId : null;
-  const model = typeof record.model === "string" && record.model.trim() !== "" ? record.model : null;
-  const concurrency =
-    typeof record.concurrency === "number" &&
-    Number.isInteger(record.concurrency) &&
-    record.concurrency >= KNOWLEDGE_CONCURRENCY_MIN &&
-    record.concurrency <= KNOWLEDGE_CONCURRENCY_MAX
-      ? record.concurrency
-      : KNOWLEDGE_DEFAULT_SETTINGS.concurrency;
-  return { accountId, model, concurrency };
+  return parseKnowledgeSettings(value) ?? { ...KNOWLEDGE_DEFAULT_SETTINGS };
 }
 
 export function knowledgeSettingsForm(settings: KnowledgeSettings): KnowledgeSettingsForm {
