@@ -172,13 +172,18 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
 });
 
 describe("stopStaleMykg", () => {
-  it("only signals a pid whose command line is a myKG extract", async () => {
-    assert.equal(await stopStaleMykg(null), false);
-    assert.equal(await stopStaleMykg(1234, async () => "/usr/bin/python3 -m http.server"), false);
-    assert.equal(await stopStaleMykg(1234, async () => null), false);
+  it("only signals a pid whose command line is this knowledge base's myKG extract", async () => {
+    assert.equal(await stopStaleMykg(null, "/in"), false);
+    assert.equal(await stopStaleMykg(1234, "/in", async () => "/usr/bin/python3 -m http.server"), false);
+    assert.equal(await stopStaleMykg(1234, "/in", async () => null), false);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     const exited = new Promise((resolve) => child.on("exit", resolve));
-    assert.equal(await stopStaleMykg(child.pid!, async () => "/venv/bin/python /venv/bin/mykg extract-graph /in --session s --update"), true);
+    // A recycled pid running ANOTHER appdir's myKG (a `.stage` daemon, another checkout) is left alone.
+    for (const other of ["/venv/bin/python /venv/bin/mykg extract-graph /other/in --session s --update", "/venv/bin/mykg extract-graph /in/sub", "grep mykg extract-graph"]) {
+      assert.equal(await stopStaleMykg(child.pid!, "/in", async () => other), false, other);
+    }
+    assert.equal(child.exitCode, null, "the process is still running");
+    assert.equal(await stopStaleMykg(child.pid!, "/in", async () => "/venv/bin/python /venv/bin/mykg extract-graph /in --session s --update"), true);
     assert.equal(await exited, null);
   });
 });

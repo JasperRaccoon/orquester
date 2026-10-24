@@ -212,7 +212,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     }
     const current = this.state.currentRun;
     if (current) {
-      await stopStaleMykg(current.pid, this.opts.readCmdline);
+      await stopStaleMykg(current.pid, this.opts.store.mykgInputDir, this.opts.readCmdline);
       if (this.canRun()) await this.launch(current, { resume: true });
     } else {
       this.schedule();

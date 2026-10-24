@@ -227,12 +227,18 @@ export function startMykgRun(spec: MykgRunSpec, deps: MykgRunDeps): MykgRun {
 /**
  * A child a previous daemon process left running (its pid recorded with the run): stopped before
  * the run is started again, so two myKG processes never share a session. Linux only checks that
- * the pid is still a myKG process (`/proc/<pid>/cmdline`); elsewhere nothing is killed.
+ * the pid is still THIS knowledge base's myKG extract (`/proc/<pid>/cmdline` names `mykg` and
+ * `extract-graph <inputDir>`): a recycled pid now running another appdir's myKG (a dev `.stage`
+ * daemon, another checkout) or anything else is never signalled. Elsewhere nothing is killed.
  */
-export async function stopStaleMykg(pid: number | null, readCmdline: (pid: number) => Promise<string | null> = procCmdline): Promise<boolean> {
-  if (pid === null || pid <= 1) return false;
+export async function stopStaleMykg(
+  pid: number | null,
+  inputDir: string,
+  readCmdline: (pid: number) => Promise<string | null> = procCmdline
+): Promise<boolean> {
+  if (pid === null || !Number.isSafeInteger(pid) || pid <= 1) return false;
   const cmdline = await readCmdline(pid);
-  if (cmdline === null || !/mykg/.test(cmdline) || !/extract-graph/.test(cmdline)) return false;
+  if (cmdline === null || !/mykg/.test(cmdline) || !` ${cmdline} `.includes(` extract-graph ${inputDir} `)) return false;
   try {
     process.kill(pid, "SIGTERM");
     return true;
