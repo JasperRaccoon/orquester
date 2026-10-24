@@ -271,6 +271,7 @@ func New(cfg Config, logger *log.Logger) (*Agent, error) {
 		}
 	}
 	cleanupOldExecutable()
+	a.procs.recoverFrom(filepath.Join(cfg.DataDir, procStateFile), logger)
 	a.sys = detectSysInfo(a)
 	return a, nil
 }
@@ -375,6 +376,13 @@ func (a *Agent) shutdown(reason string) {
 	a.log.Printf("shutting down: %s", reason)
 	a.procs.killAll()
 	a.stopWith(0, false)
+}
+
+// persistProcs records the running detached processes for the next orq-agent (procstate.go).
+func (a *Agent) persistProcs() {
+	if err := a.procs.persist(); err != nil {
+		a.log.Printf("recording the detached processes: %v", err)
+	}
 }
 
 func (a *Agent) currentLink() *Link {

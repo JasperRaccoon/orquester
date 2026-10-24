@@ -529,15 +529,55 @@ export function boxTerminalTitle(box: Pick<BoxSummary, "kind" | "purposeNote">):
   return purpose ? `VM · ${purpose}` : `VM · ${BOX_KIND_LABELS[box.kind]}`;
 }
 
-/** A chat's temporary boxes, live ones first, newest first within each. */
+/**
+ * A box whose create call the provider refused: no machine ever existed and nothing was billed (the
+ * daemon counts no cost for a box without an instance; a refused create that still left an instance
+ * the destroy found does cost, and stays listed).
+ */
+export function boxNeverExisted(box: Pick<BoxSummary, "state" | "setup" | "estimatedCostUsd">): boolean {
+  return (
+    box.state === "destroyed" &&
+    box.estimatedCostUsd === 0 &&
+    box.setup.some((step) => step.id === "create" && step.state === "failed")
+  );
+}
+
+/** A chat's temporary boxes, live ones first, newest first within each; failed rentals are left out. */
 export function chatTemporaryBoxes(boxes: readonly BoxSummary[], threadId: string): BoxSummary[] {
   return boxes
-    .filter((box) => box.purpose === "temporary" && box.threadId === threadId)
+    .filter((box) => box.purpose === "temporary" && box.threadId === threadId && !boxNeverExisted(box))
     .sort((a, b) => {
       const liveA = a.state === "destroyed" ? 1 : 0;
       const liveB = b.state === "destroyed" ? 1 : 0;
       return liveA - liveB || b.createdAt.localeCompare(a.createdAt);
     });
+}
+
+/** The folded box panel's line: "1 VM running · 2 destroyed · 1 config change to review". */
+export function boxPanelSummary(temporary: readonly Pick<BoxSummary, "state">[], pendingChanges: number): string {
+  const live = temporary.filter((box) => box.state !== "destroyed").length;
+  const ended = temporary.length - live;
+  const parts: string[] = [];
+  if (live > 0) parts.push(`${live} ${live === 1 ? "VM" : "VMs"} running`);
+  if (ended > 0) parts.push(`${ended} destroyed`);
+  if (pendingChanges > 0) parts.push(`${pendingChanges} config ${pendingChanges === 1 ? "change" : "changes"} to review`);
+  return parts.length > 0 ? parts.join(" · ") : "VM details";
+}
+
+/** The smallest height the box panel's list is dragged to: about one card. */
+export const BOX_PANEL_MIN_HEIGHT_PX = 48;
+
+/** A dragged or stored list height, kept between one card and 70% of the view. */
+export function clampBoxPanelHeight(px: number, viewportHeight: number): number {
+  const max = Math.max(BOX_PANEL_MIN_HEIGHT_PX, Math.round(viewportHeight * 0.7));
+  return Math.min(max, Math.max(BOX_PANEL_MIN_HEIGHT_PX, Math.round(px)));
+}
+
+/** A stored list height (localStorage text), or null when there is none worth trusting. */
+export function parseBoxPanelHeight(raw: string | null): number | null {
+  if (raw === null || !/^\d{1,5}$/.test(raw)) return null;
+  const px = Number(raw);
+  return px >= BOX_PANEL_MIN_HEIGHT_PX ? px : null;
 }
 
 // ---------------------------------------------------------------------------

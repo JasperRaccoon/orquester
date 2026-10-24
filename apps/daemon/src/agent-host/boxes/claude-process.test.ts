@@ -9,6 +9,7 @@ import { query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claud
 
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { boxClaudeSpawner } from "./claude-process.ts";
+import { reattachableBoxConnection } from "./testing.ts";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "../../../test/fixtures/claude/01-init-plain-text.ndjson");
 
@@ -33,6 +34,22 @@ test("the SDK's SpawnedProcess: exit fields set before 'exit', stderr to the ses
   // Once ended, a late SIGKILL from the SDK's close() is a harmless false.
   assert.equal(child.kill("SIGKILL"), false);
   assert.match(stderr.join(""), /warn line/);
+});
+
+test("why the box lost the process reaches the session's capture before 'exit'", async () => {
+  const connection = reattachableBoxConnection();
+  const stderr: string[] = [];
+  const spawn = boxClaudeSpawner({ connection, procId, stderr: (data) => stderr.push(data) });
+  const child = spawn(spawnOptions(process.execPath, ["-e", 'process.stdout.write("up\\n"); process.stdin.resume()']));
+  await new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
+  const atExit = new Promise<{ signal: string | null; stderr: string }>((resolve) => {
+    child.on("exit", (_code, signal) => resolve({ signal, stderr: stderr.join("") }));
+  });
+  connection.dropLink();
+  await connection.restartAgent("lose", "orq-agent restarted in the box; it was stopped");
+  connection.restoreLink();
+  assert.deepEqual(await atExit, { signal: "SIGTERM", stderr: "[orquester] orq-agent restarted in the box; it was stopped\n" });
+  await connection.killAll();
 });
 
 test("kill() sends one signal now and marks the process killed; a signal death reads as such", async () => {

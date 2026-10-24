@@ -389,30 +389,32 @@ test("sessions.json keeps box terminals (boxId) and a restarted daemon reattache
   }
 });
 
-test("after an orq-agent restart a tmux terminal re-joins its tmux session; without one it ends", async () => {
-  const r = rig({ tmux: true, tmuxAlive: true });
-  try {
-    const summary = await r.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT });
-    r.connection.dropLink();
-    r.connection.restartAgent();
-    const rejoin = r.connection.nextExec((spec) => spec.detach !== undefined);
-    r.connection.restoreLink();
-    const rejoined = await rejoin;
-    assert.deepEqual(rejoined.args?.slice(7, 11), ["new-session", "-A", "-s", `orq-${summary.id}`]);
-    assert.equal(r.sessions.get(summary.id)?.status, "running");
-  } finally {
-    r.box.dispose();
-  }
+for (const mode of ["forget", "lose"] as const) {
+  test(`after an orq-agent restart (${mode}) a tmux terminal re-joins its tmux session; without one it ends`, async () => {
+    const r = rig({ tmux: true, tmuxAlive: true });
+    try {
+      const summary = await r.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT });
+      r.connection.dropLink();
+      r.connection.restartAgent(mode);
+      const rejoin = r.connection.nextExec((spec) => spec.detach !== undefined);
+      r.connection.restoreLink();
+      const rejoined = await rejoin;
+      assert.deepEqual(rejoined.args?.slice(7, 11), ["new-session", "-A", "-s", `orq-${summary.id}`]);
+      assert.equal(r.sessions.get(summary.id)?.status, "running");
+    } finally {
+      r.box.dispose();
+    }
 
-  const plain = rig({ tmux: false });
-  try {
-    const summary = await plain.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT });
-    plain.connection.dropLink();
-    plain.connection.restartAgent();
-    const exited = once<SessionSummary>(plain.sessions.lifecycle, "exited");
-    plain.connection.restoreLink();
-    assert.equal((await exited).id, summary.id);
-  } finally {
-    plain.box.dispose();
-  }
-});
+    const plain = rig({ tmux: false });
+    try {
+      const summary = await plain.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT });
+      plain.connection.dropLink();
+      plain.connection.restartAgent(mode);
+      const exited = once<SessionSummary>(plain.sessions.lifecycle, "exited");
+      plain.connection.restoreLink();
+      assert.equal((await exited).id, summary.id);
+    } finally {
+      plain.box.dispose();
+    }
+  });
+}

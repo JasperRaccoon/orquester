@@ -113,3 +113,6 @@ func RunService(run func() int) (bool, error) {
 	}
 	return true, svc.Run(windowsServiceName, &serviceHandler{run: run})
 }
+
+// ProtectService is only meaningful on Linux.
+func ProtectService() error { return nil }

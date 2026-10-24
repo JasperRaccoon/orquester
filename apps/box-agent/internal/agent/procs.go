@@ -118,6 +118,11 @@ type detachedProc struct {
 	signal    *string
 	delivered bool // some viewer streamed it to the end (exit reported)
 	stdin     io.WriteCloser
+	// startID names the process beyond its pid (procstate.go); "" where the OS cannot tell.
+	startID string
+	// lost: a previous orq-agent started it, and its output could not be
+	// followed after the restart (procstate.go). It has no process handle.
+	lost string
 }
 
 func (d *detachedProc) info() wire.DetachedProcInfo {
@@ -131,6 +136,10 @@ func (d *detachedProc) info() wire.DetachedProcInfo {
 		Signal:      d.signal,
 		OutputBytes: total,
 		BufferStart: start,
+	}
+	if d.lost != "" {
+		lost := d.lost
+		info.Lost = &lost
 	}
 	if d.running {
 		pid := d.pid
@@ -165,6 +174,11 @@ func (d *detachedProc) closeStdin() {
 type procRegistry struct {
 	mu    sync.Mutex
 	procs map[string]*detachedProc
+
+	// statePath records the running processes for the next orq-agent (procstate.go); "" records nothing.
+	statePath string
+	self      procIdentity
+	writeMu   sync.Mutex
 }
 
 func newProcRegistry() *procRegistry {
@@ -252,7 +266,7 @@ func (r *procRegistry) killAll() {
 		d.mu.Lock()
 		running := d.running
 		d.mu.Unlock()
-		if running {
+		if running && d.proc != nil {
 			d.proc.kill()
 		}
 	}

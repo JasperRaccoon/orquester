@@ -81,8 +81,17 @@ function epoch(iso: string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** Uptime × hourly price, in USD. A box with no price costs 0 in the estimate. */
+/**
+ * A destroyed box with no `providerRef` never had an instance: its create call failed (an unconfirmed
+ * create the destroy found an instance for records that instance's ref), so nothing was billed.
+ */
+function neverCreated(record: StoredBox): boolean {
+  return record.state === "destroyed" && !record.providerRef;
+}
+
+/** Uptime × hourly price, in USD. A box with no price, or no instance, costs 0 in the estimate. */
 export function estimatedCostUsd(record: StoredBox, now: number): number {
+  if (neverCreated(record)) return 0;
   const hourly = record.hourlyUsd ?? null;
   const start = epoch(record.createdAt);
   if (hourly === null || start === null) return 0;
@@ -98,6 +107,7 @@ export function utcMonthStart(now: number): number {
 
 /** The part of the box's uptime inside this UTC month × its hourly price. */
 export function monthCostUsd(record: StoredBox, now: number): number {
+  if (neverCreated(record)) return 0;
   const hourly = record.hourlyUsd ?? null;
   const created = epoch(record.createdAt);
   if (hourly === null || created === null) return 0;

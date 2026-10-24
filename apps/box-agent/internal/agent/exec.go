@@ -497,6 +497,7 @@ func (a *Agent) openDetached(ch *Channel, spec *wire.ExecSpec, start *startSpec)
 		running: true,
 		pid:     proc.pid(),
 		stdin:   proc.stdin(),
+		startID: processStartID(proc.pid()),
 	}
 	if !a.procs.add(d) {
 		proc.kill()
@@ -504,6 +505,7 @@ func (a *Agent) openDetached(ch *Channel, spec *wire.ExecSpec, start *startSpec)
 		return
 	}
 	a.log.Printf("detached process %s started", d.id)
+	a.persistProcs()
 	go func() {
 		pumps := newOutputPumps()
 		pumps.start(
@@ -518,6 +520,8 @@ func (a *Agent) openDetached(ch *Channel, spec *wire.ExecSpec, start *startSpec)
 		d.exitCode = code
 		d.signal = signal
 		d.mu.Unlock()
+		// Off the record before any viewer reports the exit.
+		a.persistProcs()
 		d.ring.finish()
 		a.log.Printf("detached process %s ended", d.id)
 	}()
@@ -538,6 +542,11 @@ func (a *Agent) openAttach(ch *Channel, spec *wire.AttachSpec) {
 	d := a.procs.get(spec.ProcID)
 	if d == nil {
 		ch.OpenFailed(rpcErr("NOT_FOUND", "no detached process "+spec.ProcID))
+		return
+	}
+	if d.lost != "" {
+		// Its output ended with the previous orq-agent: there is nothing to replay or follow.
+		ch.OpenFailed(rpcErr("LOST", d.lost))
 		return
 	}
 	from := spec.FromOffset

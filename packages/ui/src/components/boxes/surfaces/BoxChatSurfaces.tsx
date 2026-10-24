@@ -12,11 +12,13 @@
  *    deny.
  *
  * The panel scrolls on its own past a third of the view, so the transcript
- * below always keeps most of the height.
+ * below always keeps most of the height. Its bottom edge drags to another
+ * height and its header folds it to one line; both are kept per device, like
+ * the agent roster's fold.
  */
 
 import React from "react";
-import { Eye, Lock, Server, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Eye, Lock, Server, Trash2 } from "lucide-react";
 import type { BoxConfigChangeSet, BoxSummary } from "@orquester/api";
 
 import { useApi } from "../../../context/orquester-context";
@@ -24,14 +26,17 @@ import { useUsageNow } from "../../../hooks/use-usage-display";
 import { ApiError } from "../../../lib/api-client";
 import { cn } from "../../../lib/cn";
 import { launchWithNotice } from "../../../lib/launch-notice";
-import { ConfirmDialog } from "../../ui";
+import { ConfirmDialog, ResizeHandle } from "../../ui";
 import { TONE_BAND, TONE_BAND_TEXT, type ChatTone } from "../../agent-chat/primitives/tone";
 import { destroyBox, useBoxConfigChanges, useBoxes, watchBox, type ProjectBoxView } from "./box-data";
 import { BOX_PILL_TONE, BOX_TEXT_TONE } from "./BoxBadge";
 import {
   boxChatChip,
   boxChatGate,
+  boxPanelSummary,
   chatTemporaryBoxes,
+  clampBoxPanelHeight,
+  parseBoxPanelHeight,
   temporaryBoxCard,
   type BoxTone
 } from "./box-surfaces.logic";
@@ -92,11 +97,11 @@ const TemporaryBoxCard: React.FC<{ box: BoxSummary; now: number }> = ({ box, now
           {model.subtitle}
         </span>
       </span>
-      <span className="flex shrink-0 flex-col items-end text-[11px] tabular-nums">
-        <span className={BOX_TEXT_TONE[model.tone]} title={box.stateReason ?? undefined}>
+      <span className="flex min-w-0 max-w-full flex-col items-end text-[11px] tabular-nums">
+        <span className={cn("max-w-full truncate", BOX_TEXT_TONE[model.tone])} title={box.stateReason ?? undefined}>
           {model.stateText}
         </span>
-        <span className="text-neutral-400">{model.cost}</span>
+        <span className="max-w-full truncate text-neutral-400">{model.cost}</span>
       </span>
       {model.countdown ? (
         <span
@@ -155,6 +160,50 @@ const TemporaryBoxCard: React.FC<{ box: BoxSummary; now: number }> = ({ box, now
   );
 };
 
+const PANEL_COLLAPSED_KEY = "orquester.chat.box-panel-collapsed";
+const PANEL_HEIGHT_KEY = "orquester.chat.box-panel-height";
+
+function readStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function viewportHeight(): number {
+  return typeof window === "undefined" ? 800 : window.innerHeight;
+}
+
+/** The panel's fold and dragged list height, per device: how this person likes the space split. */
+function useBoxPanelLayout(): {
+  collapsed: boolean;
+  setCollapsed: (collapsed: boolean) => void;
+  height: number | null;
+  setHeight: (px: number | null, persist?: boolean) => void;
+} {
+  const [collapsed, setCollapsedState] = React.useState(() => readStored(PANEL_COLLAPSED_KEY) === "1");
+  const [height, setHeightState] = React.useState(() => parseBoxPanelHeight(readStored(PANEL_HEIGHT_KEY)));
+  const setCollapsed = React.useCallback((next: boolean) => {
+    setCollapsedState(next);
+    writeStored(PANEL_COLLAPSED_KEY, next ? "1" : "0");
+  }, []);
+  const setHeight = React.useCallback((px: number | null, persist = true) => {
+    setHeightState(px);
+    if (persist) writeStored(PANEL_HEIGHT_KEY, px === null ? null : String(px));
+  }, []);
+  return { collapsed, setCollapsed, height, setHeight };
+}
+
 /** The top-of-chat box panel; renders nothing for a host chat with no boxes or changes. */
 export const BoxChatPanel: React.FC<{ sessionId: string; view: ProjectBoxView | null }> = ({ sessionId, view }) => {
   const now = useUsageNow();
@@ -164,48 +213,99 @@ export const BoxChatPanel: React.FC<{ sessionId: string; view: ProjectBoxView | 
   const isMine = React.useCallback((change: BoxConfigChangeSet) => change.threadId === sessionId, [sessionId]);
   const { shown, dismiss } = useShownConfigChanges(changes, isMine);
   const gate = boxChatGate(view?.info, view?.setupStep ?? null);
+  const { collapsed, setCollapsed, height, setHeight } = useBoxPanelLayout();
+  const listRef = React.useRef<HTMLDivElement>(null);
 
   if (!view && temporary.length === 0 && shown.length === 0) return null;
   const chip = view ? boxChatChip(view.info, now) : null;
+  // The chip stays on the header; the rest is what folds.
+  const foldable = gate.notice !== null || temporary.length > 0 || shown.length > 0;
+  const pending = shown.filter((change) => change.state === "pending").length;
+  const open = foldable && !collapsed;
 
   return (
     <div className="shrink-0 border-b border-neutral-800/70 bg-neutral-950" data-box-chat-panel="">
-      <div className="mx-auto max-h-[33vh] w-full min-w-0 max-w-3xl space-y-1.5 overflow-y-auto px-3 py-1.5 sm:px-5">
-        {chip ? (
-          <div className="flex min-w-0 items-center gap-1.5 text-xs">
-            <Server size={12} aria-hidden className="shrink-0 text-neutral-500" />
-            <span
-              title={chip.title}
-              data-box-chip={chip.tone}
-              className={cn(
-                "inline-flex h-5 min-w-0 items-center truncate rounded-full px-2 text-[11px] font-medium tabular-nums",
-                BOX_PILL_TONE[chip.tone]
-              )}
-            >
-              <span className="truncate">{chip.text}</span>
-            </span>
-          </div>
-        ) : null}
-        {gate.notice ? (
-          <div
-            role={gate.notice.tone === "danger" ? "alert" : "status"}
-            data-box-notice={view?.info.state}
+      <div
+        className={cn(
+          "mx-auto flex w-full min-w-0 max-w-3xl items-center gap-1.5 px-3 pt-1.5 text-xs sm:px-5",
+          !open && "pb-1.5"
+        )}
+      >
+        {foldable ? (
+          <button
+            type="button"
+            onClick={() => setCollapsed(!collapsed)}
+            aria-expanded={!collapsed}
+            title={collapsed ? "Show the VMs" : "Hide the VMs"}
             className={cn(
-              "rounded-lg border px-2.5 py-1.5 text-xs leading-snug",
-              TONE_BAND[CHAT_TONE[gate.notice.tone]]
+              "-ml-1 inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5 text-[11px] text-neutral-500",
+              "hover:bg-neutral-800/40 hover:text-neutral-300 focus:outline-none",
+              "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
             )}
           >
-            <p className={cn("font-medium", TONE_BAND_TEXT[CHAT_TONE[gate.notice.tone]])}>{gate.notice.title}</p>
-            <p className="text-neutral-300">{gate.notice.text}</p>
-          </div>
+            {collapsed ? <ChevronRight size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
+            {collapsed || !chip ? (
+              <span className={cn("truncate", pending > 0 && "text-warn-300")}>{boxPanelSummary(temporary, pending)}</span>
+            ) : null}
+          </button>
+        ) : (
+          <Server size={12} aria-hidden className="shrink-0 text-neutral-500" />
+        )}
+        {chip ? (
+          <span
+            title={chip.title}
+            data-box-chip={chip.tone}
+            className={cn(
+              "inline-flex h-5 min-w-0 items-center truncate rounded-full px-2 text-[11px] font-medium tabular-nums",
+              BOX_PILL_TONE[chip.tone]
+            )}
+          >
+            <span className="truncate">{chip.text}</span>
+          </span>
         ) : null}
-        {temporary.map((box) => (
-          <TemporaryBoxCard key={box.id} box={box} now={now} />
-        ))}
-        {shown.map((change) => (
-          <ConfigChangeCard key={change.id} change={change} onDismiss={() => dismiss(change.id)} />
-        ))}
       </div>
+      {open ? (
+        <>
+          <div
+            ref={listRef}
+            data-box-panel-list=""
+            style={height !== null ? { maxHeight: height } : undefined}
+            className={cn(
+              "mx-auto w-full min-w-0 max-w-3xl space-y-1.5 overflow-y-auto overflow-x-hidden px-3 py-1.5 sm:px-5",
+              height === null && "max-h-[33vh]"
+            )}
+          >
+            {gate.notice ? (
+              <div
+                role={gate.notice.tone === "danger" ? "alert" : "status"}
+                data-box-notice={view?.info.state}
+                className={cn(
+                  "rounded-lg border px-2.5 py-1.5 text-xs leading-snug",
+                  TONE_BAND[CHAT_TONE[gate.notice.tone]]
+                )}
+              >
+                <p className={cn("font-medium", TONE_BAND_TEXT[CHAT_TONE[gate.notice.tone]])}>{gate.notice.title}</p>
+                <p className="text-neutral-300">{gate.notice.text}</p>
+              </div>
+            ) : null}
+            {temporary.map((box) => (
+              <TemporaryBoxCard key={box.id} box={box} now={now} />
+            ))}
+            {shown.map((change) => (
+              <ConfigChangeCard key={change.id} change={change} onDismiss={() => dismiss(change.id)} />
+            ))}
+          </div>
+          <ResizeHandle
+              orientation="horizontal"
+              aria-label="Resize the VM list"
+              getCurrent={() => listRef.current?.offsetHeight ?? height ?? 0}
+              clamp={(px) => clampBoxPanelHeight(px, viewportHeight())}
+              onResize={(px) => setHeight(px, false)}
+              onCommit={(px) => setHeight(px)}
+            onReset={() => setHeight(null)}
+          />
+        </>
+      ) : null}
     </div>
   );
 };

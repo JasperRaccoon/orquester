@@ -13,6 +13,42 @@ import (
 
 const systemdUnitPath = "/etc/systemd/system/orq-agent.service"
 
+// needrestartDir is needrestart's config dir. Ubuntu and Debian run needrestart after every apt
+// run, unattended-upgrades included, and it restarts a unit when a process in the unit's cgroup
+// still maps an upgraded library. KillMode=process keeps the agent CLIs and terminals orq-agent
+// started in its cgroup, so after one upgrade every later apt run restarts orq-agent again, and
+// each restart loses its record of those processes: no reattach can reach them.
+const needrestartDir = "/etc/needrestart"
+
+// needrestartOverride tells needrestart never to restart orq-agent.service by itself.
+const needrestartOverride = "# Written by orq-agent: restarting orq-agent.service loses the agent CLIs and terminals it runs.\n" +
+	"$nrconf{override_rc}->{qr(^orq-agent\\.service$)} = 0;\n"
+
+// ProtectService keeps package upgrades from restarting orq-agent (see needrestartDir). It runs
+// at every start, so boxes installed before it existed get it with their next update.
+func ProtectService() error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	return writeNeedrestartOverride(needrestartDir)
+}
+
+// writeNeedrestartOverride writes the override under `dir` when needrestart is installed there.
+func writeNeedrestartOverride(dir string) error {
+	if !pathExists(dir) {
+		return nil
+	}
+	confDir := filepath.Join(dir, "conf.d")
+	path := filepath.Join(confDir, "orq-agent.conf")
+	if current, err := os.ReadFile(path); err == nil && string(current) == needrestartOverride {
+		return nil
+	}
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomic(path, []byte(needrestartOverride), 0o644)
+}
+
 // InstallService installs and starts orq-agent as a systemd unit when systemd
 // runs; otherwise (containers, Fly machines) it starts `orq-agent run` as a
 // detached background process.
@@ -48,6 +84,9 @@ func InstallService(cfg Config) error {
 	}, "\n")
 	if err := writeFileAtomic(systemdUnitPath, []byte(unit), 0o644); err != nil {
 		return err
+	}
+	if err := ProtectService(); err != nil {
+		return fmt.Errorf("writing the needrestart override: %w", err)
 	}
 	for _, args := range [][]string{{"daemon-reload"}, {"enable", "orq-agent.service"}, {"restart", "orq-agent.service"}} {
 		out, err := exec.Command("systemctl", args...).CombinedOutput()

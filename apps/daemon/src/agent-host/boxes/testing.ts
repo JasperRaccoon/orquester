@@ -38,6 +38,8 @@ interface DetachedRecord {
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
   /** The proxy currently attached, if any. */
   proxy: ProxyProcess | null;
+  /** Set by {@link ReattachableBoxConnection.restartAgent} (`"lose"`): the box's `lost` reason. */
+  lost?: string;
 }
 
 class ProxyProcess extends EventEmitter implements BoxProcess {
@@ -86,6 +88,12 @@ export interface ReattachableBoxConnection extends LocalBoxConnection {
   outputSeen(procId: string, predicate: (text: string) => boolean): Promise<void>;
   /** SIGKILL every process this double started (a test's cleanup). */
   killAll(): Promise<void>;
+  /**
+   * `orq-agent` restarts in the box while the link is down; its detached processes end. `"lose"`:
+   * as an `orq-agent` that records them (`procstate.go`) — listed as ended and `lost` with
+   * `reason`, an attach refused with `LOST`. `"forget"`: as one that does not — no trace of them.
+   */
+  restartAgent(mode: "lose" | "forget", reason?: string): Promise<void>;
 }
 
 export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {}): ReattachableBoxConnection {
@@ -155,7 +163,12 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
       const record = detached.get(procId);
       const proxy = new ProxyProcess(record ?? { real: null as never, chunks: [], exit: null, proxy: null }, procId);
       if (record === undefined) {
-        queueMicrotask(() => proxy.emit("error", new Error(`no detached process ${procId}`)));
+        queueMicrotask(() => proxy.emit("error", Object.assign(new Error(`no detached process ${procId}`), { code: "NOT_FOUND" })));
+        return proxy;
+      }
+      if (record.lost !== undefined) {
+        const lost = record.lost;
+        queueMicrotask(() => proxy.emit("error", Object.assign(new Error(lost), { code: "LOST" })));
         return proxy;
       }
       record.proxy = proxy;
@@ -174,7 +187,8 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
           exitCode: record.exit?.code ?? null,
           signal: record.exit?.signal ?? null,
           outputBytes: record.chunks.reduce((sum, chunk) => sum + chunk.data.length, 0),
-          bufferStart: 0
+          bufferStart: 0,
+          ...(record.lost !== undefined ? { lost: record.lost } : {})
         }));
       }
       if (method === "proc.signal") {
@@ -206,6 +220,21 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
     },
     restoreLink(): void {
       base.setConnected(true);
+    },
+    async restartAgent(mode: "lose" | "forget", reason = "orq-agent restarted in the box; it was stopped"): Promise<void> {
+      for (const [procId, record] of [...detached]) {
+        if (record.exit === null) {
+          const exited = new Promise<void>((resolve) => record.real.once("exit", () => resolve()));
+          record.real.kill("SIGTERM");
+          await exited;
+        }
+        if (mode === "forget") {
+          detached.delete(procId);
+        } else {
+          // Its output went with the old orq-agent: nothing to replay.
+          detached.set(procId, { real: record.real, chunks: [], exit: { code: null, signal: "SIGTERM" }, proxy: null, lost: reason });
+        }
+      }
     },
     outputSeen(procId: string, predicate: (text: string) => boolean): Promise<void> {
       const record = detached.get(procId);

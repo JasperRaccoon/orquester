@@ -21,6 +21,11 @@
  *   that does not come back within the reattach deadline ends the child as
  *   `SIGHUP`, as a dropped local terminal would. A channel lost before it
  *   opened (`BOX_DISCONNECTED`: the link went away again) is a detach too.
+ * - **A refused reattach** settles from the box's process list. One that
+ *   `orq-agent` restarted under is listed `lost` (it was stopped, or had
+ *   ended): it ends with the signal that stopped it. One the box has no
+ *   record of ends as `SIGHUP`. Either way one `[orquester]` line on stderr
+ *   says why, so the session's error names the cause.
  * - **Output is never skipped.** The box's buffer may have moved past the
  *   offset (an attach reports `droppedBytes`, or a viewer overran it,
  *   `OUTPUT_OVERRUN`): the agent CLI's protocol stream now has a hole, so the
@@ -214,15 +219,31 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     })();
   };
 
+  /** One line on the child's stderr, where the session's error excerpt reads it. */
+  const explain = (text: string): void => {
+    if (!stderr.writableEnded) stderr.write(`[orquester] ${text}\n`);
+  };
+
   /** Settle a detached process the box no longer streams: from its last known state. */
   const settleFromBox = async (why: string): Promise<void> => {
     const listed = (await connection.request("proc.list", {}).catch(() => null)) as BoxDetachedProcInfo[] | null;
     const entry = listed?.find((proc) => proc.procId === procId);
+    if (entry?.lost !== undefined) {
+      notice(`box process ${procId}: ${entry.lost}`);
+      explain(entry.lost);
+      finish({ kind: "signal", code: null, signal: (entry.signal as NodeJS.Signals | null) ?? "SIGHUP" });
+      return;
+    }
     if (entry !== undefined && !entry.running) {
       finish(exitOf(entry.exitCode, entry.signal));
       return;
     }
     notice(`box process ${procId}: ${why}`);
+    explain(
+      listed !== null && entry === undefined
+        ? "the box no longer knows this process (orq-agent restarted there), so its output could not be followed"
+        : `the box process could not be reattached (${why})`
+    );
     finish({ kind: "signal", code: null, signal: "SIGHUP" });
   };
 

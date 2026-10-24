@@ -147,6 +147,8 @@ interface FakeProc {
   handles: Set<FakeHandle>;
   control: FakeProcControl | null;
   behavior: ReturnType<FakeProcBehavior> | undefined;
+  /** Set by `restartAgent("lose")`: the box's `lost` reason. */
+  lost?: string;
 }
 
 class FakeHandle extends EventEmitter implements BoxProcess {
@@ -211,8 +213,12 @@ export interface FakeAgentConnection extends LocalBoxConnection {
   /** Drop the link: detached handles emit "detached", others end with SIGHUP. */
   dropLink(): void;
   restoreLink(): void;
-  /** Forget every process (an orq-agent restart). */
-  restartAgent(): void;
+  /**
+   * An orq-agent restart. `"forget"` (default): every process is gone without a trace. `"lose"`:
+   * as an orq-agent that records them (`procstate.go`) — each running one is listed ended and
+   * `lost`, and an attach to it fails with `LOST`.
+   */
+  restartAgent(mode?: "forget" | "lose"): void;
   /** Resolves with the params of the next request of `method`. */
   nextCall(method: string): Promise<unknown>;
   /** Resolves with the next exec matching `predicate`. */
@@ -336,6 +342,13 @@ export function fakeAgentConnection(
       const proc = procs.get(procId);
       if (!proc) throw Object.assign(new Error(`UNKNOWN_PROC ${procId}`), { code: "UNKNOWN_PROC" });
       const handle = newHandle(proc);
+      if (proc.lost !== undefined) {
+        // As orq-agent: the open fails; there is no output to replay.
+        proc.handles.delete(handle);
+        const lost = proc.lost;
+        queueMicrotask(() => handle.emit("error", Object.assign(new Error(lost), { code: "LOST" })));
+        return handle;
+      }
       // Replay what is kept from `fromOffset`, each byte on the stream it was emitted on.
       let at = proc.bufferStart;
       for (const segment of proc.buffer) {
@@ -360,7 +373,8 @@ export function fakeAgentConnection(
         exitCode: proc.exitCode,
         signal: proc.signal,
         outputBytes: proc.outputBytes,
-        bufferStart: proc.bufferStart
+        bufferStart: proc.bufferStart,
+        ...(proc.lost !== undefined ? { lost: proc.lost } : {})
       }));
     },
     async request(method: string, params: unknown): Promise<unknown> {
@@ -400,8 +414,18 @@ export function fakeAgentConnection(
     restoreLink(): void {
       base.setConnected(true);
     },
-    restartAgent(): void {
-      procs.clear();
+    restartAgent(mode = "forget"): void {
+      if (mode === "forget") {
+        procs.clear();
+        return;
+      }
+      for (const proc of procs.values()) {
+        if (!proc.running) continue;
+        proc.running = false;
+        proc.signal = "SIGTERM";
+        proc.buffer = [];
+        proc.lost = "orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped";
+      }
     },
     nextCall(method: string): Promise<unknown> {
       return new Promise((resolve) => waiters.once(`call:${method}`, resolve));

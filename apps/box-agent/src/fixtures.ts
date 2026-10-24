@@ -102,7 +102,17 @@ export const controlFixture: ByT = {
       procs: [
         { procId: "p1", pid: 4242, running: true, exitCode: null, signal: null, outputBytes: 9000, bufferStart: 0 },
         { procId: "p2", pid: null, running: false, exitCode: 0, signal: null, outputBytes: 5, bufferStart: 1 },
-        { procId: "p3", pid: null, running: false, exitCode: null, signal: "SIGKILL", outputBytes: 0, bufferStart: 0 }
+        { procId: "p3", pid: null, running: false, exitCode: null, signal: "SIGKILL", outputBytes: 0, bufferStart: 0 },
+        {
+          procId: "p4",
+          pid: null,
+          running: false,
+          exitCode: null,
+          signal: "SIGTERM",
+          outputBytes: 0,
+          bufferStart: 0,
+          lost: "orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped"
+        }
       ]
     },
     {

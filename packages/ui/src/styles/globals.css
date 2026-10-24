@@ -507,6 +507,12 @@ body {
     background-color: rgb(var(--n-700));
     border-radius: 9999px;
   }
+
+  /* Where both bars meet: unstyled, it paints as a white square. */
+  .overflow-y-auto::-webkit-scrollbar-corner,
+  .overflow-x-auto::-webkit-scrollbar-corner {
+    background-color: transparent;
+  }
 }
 
 /* Upload progress bar: a soft highlight sweeping the fill while bytes move. */
