@@ -26,9 +26,18 @@ const at = (iso: string) => Date.parse(iso);
 
 test("estimated cost is uptime × the hourly price, frozen once destroyed", () => {
   assert.equal(estimatedCostUsd(box({}), at("2026-10-20T13:00:00.000Z")), 1.5);
-  const destroyed = box({ state: "destroyed", destroyedAt: "2026-10-20T11:30:00.000Z" });
+  const destroyed = box({ state: "destroyed", destroyedAt: "2026-10-20T11:30:00.000Z", providerRef: { id: 1 } });
   assert.equal(estimatedCostUsd(destroyed, at("2026-10-25T00:00:00.000Z")), 0.75);
   assert.equal(estimatedCostUsd(box({ hourlyUsd: null }), at("2026-10-21T00:00:00.000Z")), 0);
+});
+
+test("a box whose create call failed never had an instance and costs nothing", () => {
+  const failed = box({ state: "destroyed", destroyedReason: "provisioning-failed", destroyedAt: "2026-10-20T10:00:30.000Z" });
+  const now = at("2026-10-20T11:00:00.000Z");
+  assert.equal(estimatedCostUsd(failed, now), 0);
+  assert.equal(monthCostUsd(failed, now), 0);
+  // Still being created: the instance may exist, so its time counts.
+  assert.equal(estimatedCostUsd(box({ state: "provisioning" }), now), 0.5);
 });
 
 test("the month estimate counts only this UTC month's part of each box's uptime", () => {
@@ -41,7 +50,7 @@ test("the month estimate counts only this UTC month's part of each box's uptime"
   const totals = boxesTotals(
     [
       box({ id: "a", createdAt: "2026-11-01T00:00:00.000Z", hourlyUsd: 1 }),
-      box({ id: "b", createdAt: "2026-11-01T00:00:00.000Z", hourlyUsd: 0.25, state: "destroyed", destroyedAt: "2026-11-01T01:00:00.000Z" }),
+      box({ id: "b", createdAt: "2026-11-01T00:00:00.000Z", hourlyUsd: 0.25, state: "destroyed", destroyedAt: "2026-11-01T01:00:00.000Z", providerRef: { id: 2 } }),
       box({ id: "c", createdAt: "2026-11-01T01:00:00.000Z", hourlyUsd: null, state: "provisioning" })
     ],
     now

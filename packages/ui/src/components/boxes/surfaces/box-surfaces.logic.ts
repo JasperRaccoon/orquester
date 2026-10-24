@@ -529,10 +529,23 @@ export function boxTerminalTitle(box: Pick<BoxSummary, "kind" | "purposeNote">):
   return purpose ? `VM · ${purpose}` : `VM · ${BOX_KIND_LABELS[box.kind]}`;
 }
 
-/** A chat's temporary boxes, live ones first, newest first within each. */
+/**
+ * A box whose create call the provider refused: no machine ever existed and nothing was billed (the
+ * daemon counts no cost for a box without an instance; a refused create that still left an instance
+ * the destroy found does cost, and stays listed).
+ */
+export function boxNeverExisted(box: Pick<BoxSummary, "state" | "setup" | "estimatedCostUsd">): boolean {
+  return (
+    box.state === "destroyed" &&
+    box.estimatedCostUsd === 0 &&
+    box.setup.some((step) => step.id === "create" && step.state === "failed")
+  );
+}
+
+/** A chat's temporary boxes, live ones first, newest first within each; failed rentals are left out. */
 export function chatTemporaryBoxes(boxes: readonly BoxSummary[], threadId: string): BoxSummary[] {
   return boxes
-    .filter((box) => box.purpose === "temporary" && box.threadId === threadId)
+    .filter((box) => box.purpose === "temporary" && box.threadId === threadId && !boxNeverExisted(box))
     .sort((a, b) => {
       const liveA = a.state === "destroyed" ? 1 : 0;
       const liveB = b.state === "destroyed" ? 1 : 0;

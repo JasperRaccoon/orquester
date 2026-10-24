@@ -392,6 +392,24 @@ describe("temporary boxes", () => {
     );
     assert.deepEqual(list.map((b) => b.id), ["new", "old", "gone"]);
   });
+
+  it("leaves out rentals the provider refused, which never existed or cost anything", () => {
+    const createFailed = [{ id: "create" as const, label: "Create the machine", state: "failed" as const, startedAt: null, finishedAt: null, message: "shared core limit exceeded" }];
+    const createDone = [{ ...createFailed[0]!, state: "done" as const, message: null }];
+    const destroyed = { state: "destroyed" as const, destroyedReason: "provisioning-failed" as const };
+    const list = chatTemporaryBoxes(
+      [
+        box({ id: "refused", ...destroyed, estimatedCostUsd: 0, setup: createFailed }),
+        // The create call failed, but an instance turned up and was billed: it existed.
+        box({ id: "found", ...destroyed, estimatedCostUsd: 0.0002, setup: createFailed }),
+        // Created, then setup failed: it existed.
+        box({ id: "setup-failed", ...destroyed, estimatedCostUsd: 0, setup: createDone }),
+        box({ id: "live" })
+      ],
+      "thread-1"
+    );
+    assert.deepEqual(list.map((b) => b.id), ["live", "found", "setup-failed"]);
+  });
 });
 
 describe("config change cards", () => {
