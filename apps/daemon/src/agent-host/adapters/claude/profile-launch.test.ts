@@ -163,6 +163,23 @@ describe("loadClaudeProfileLaunch", () => {
     );
   });
 
+  it("a profile without built-in tools lifts no project or ancestor .mcp.json server, only its own", async () => {
+    const { root, preparedDir, cwd, where, profile } = await setup();
+    // An ancestor's `.mcp.json` (the daemon user's `~/.mcp.json` above a `~/.orquester` appdir).
+    await write(join(root, ".mcp.json"), { mcpServers: { ancestor: { command: "a" } } });
+    const plain = await loadClaudeProfileLaunch({ profile, cwd }, where);
+    assert.ok(plain !== null);
+    assert.equal("ancestor" in plain.mcpServers, true, "a user profile keeps the project walk");
+    const manifest = JSON.parse(await readFile(join(preparedDir, "manifest.json"), "utf8"));
+    manifest.agentSection.disableBuiltinTools = true;
+    await writeFile(join(preparedDir, "manifest.json"), JSON.stringify(manifest));
+    const launch = await loadClaudeProfileLaunch({ profile, cwd }, where);
+    assert.ok(launch !== null);
+    assert.equal(launch.disableBuiltinTools, true);
+    assert.deepEqual(Object.keys(launch.mcpServers).sort(), ["docs", "plugin:toolbox:db", "search"]);
+    assert.equal((launch.mcpServers.search as { env: Record<string, string> }).env.API_KEY, FIXTURE_SECRETS.env, "the profile's own server");
+  });
+
   it("refuses a section path that leaves the prepared dir", async () => {
     const { preparedDir, cwd, where, profile } = await setup();
     const manifest = JSON.parse(await readFile(join(preparedDir, "manifest.json"), "utf8"));

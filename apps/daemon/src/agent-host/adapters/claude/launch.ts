@@ -218,7 +218,11 @@ export function buildClaudeQueryOptions(
     },
     // A profile chat drops the user source: no user CLAUDE.md, rules, skills, commands, agents,
     // MCP servers, hooks or settings (its runtime settings come back through `settings`, §6.0).
-    settingSources: profile !== undefined ? ["project", "local"] : ["user", "project", "local"],
+    // A managed profile without built-in tools (the Knowledge indexer) loads NO filesystem settings
+    // (SDK isolation mode, `[]`): no CLAUDE.md walked up from its cwd (a `~/CLAUDE.md` above a
+    // `~/.orquester` appdir), no project hooks or settings. Its own settings ride `settings`.
+    settingSources:
+      profile === undefined ? ["user", "project", "local"] : profile.launch.disableBuiltinTools === true ? [] : ["project", "local"],
     ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
     ...(wantsThinkingSummaries
       ? { thinking: { type: "adaptive" as const, display: "summarized" as const } }
