@@ -258,6 +258,28 @@ const ID = (n: number) => `ke_${String(n).padStart(12, "0")}`;
 // ---------------------------------------------------------------------------
 
 describe("KnowledgeLinkingService — the coalesced queue", () => {
+  it("a save made while start() still loads the state reports queued, and is linked once loading finishes", async () => {
+    const children: FakeChild[] = [];
+    const h = await harness({
+      spawn: (_file, args) => {
+        const child = new FakeChild(args);
+        children.push(child);
+        return child as unknown as ChildProcess;
+      }
+    });
+    const change = await h.store.put(ID(1), "one");
+    const starting = h.service.start();
+    // state.json is still being read: the change is buffered, and the status says it is waiting.
+    h.service.entriesChanged(change);
+    h.service.entriesChanged({ kind: "edited", entryIds: [ID(1)] });
+    assert.deepEqual(h.service.status(), { state: "queued", pendingEntries: 1, startsAt: "2026-10-23T10:00:00.000Z" });
+    await starting;
+    assert.deepEqual(h.service.status(), { state: "queued", pendingEntries: 1, startsAt: "2026-10-23T10:00:20.000Z" });
+    await h.clock.advance(20_000);
+    await h.until(() => children.length === 1);
+    assert.deepEqual((await readState(h)).currentRun?.entryIds, [ID(1)], "the run links it");
+  });
+
   it("starts 20 s after the last change, never later than 2 min after the first; relabels never queue", async () => {
     const children: FakeChild[] = [];
     const h = await harness({

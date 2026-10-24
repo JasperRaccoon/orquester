@@ -10,7 +10,8 @@ export interface SessionOwner {
 /**
  * The session a reported pid/port belongs to, or null when this client must not
  * name it: an unknown id (another client's session, or one that just exited), a
- * session with no project, or one behind the archived-data curtain. Kept pure
+ * session with no project (a Knowledge Graph worker chat's "project" is the plugin's workers
+ * folder, which is none), or one behind the archived-data curtain. Kept pure
  * and separate from {@link SessionChip} so the curtain rule is directly testable
  * — a leak here would turn the System panel into a hole in it.
  */
@@ -21,7 +22,7 @@ export function resolveSessionOwner(
   projects: readonly ProjectSummary[]
 ): SessionOwner | null {
   const session = sessions.find((item) => item.id === sessionId);
-  if (!session || session.projectPath === "") {
+  if (!session || session.projectPath === "" || session.owner?.kind === "knowledge-indexer") {
     return null;
   }
   const project = resolveProjectRef(session.projectPath, workspaces, projects);

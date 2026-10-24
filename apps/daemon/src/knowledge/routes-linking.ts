@@ -46,6 +46,8 @@ export interface KnowledgeStatusCounts {
   concepts: number;
   edges: number;
   collections: number;
+  /** Entries with `linkState: "failed"`. */
+  failedEntries: number;
 }
 
 export type KnowledgeLinkingRouteService = Pick<
@@ -71,6 +73,7 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
     concepts: counts.concepts,
     edges: counts.edges,
     collections: counts.collections,
+    failedEntries: counts.failedEntries,
     linking: snapshot.linking,
     lastRun: snapshot.lastRun,
     recentRuns: snapshot.recentRuns,

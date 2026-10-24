@@ -216,6 +216,16 @@ describe("the Knowledge tab", () => {
     assert.doesNotMatch(text(), /No entries yet/);
   });
 
+  it("says how many entries could not be linked instead of calling an idle linking complete", async () => {
+    await show();
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, failedEntries: 2 }) }));
+    const bar = doc().querySelector('[role="status"][aria-label="Knowledge status"]');
+    assert.ok(bar, "the status bar");
+    assert.match(bar.textContent ?? "", /2 entries could not be linked/);
+    assert.match(bar.textContent ?? "", /Settings → Plugins → Knowledge Graph/);
+    assert.doesNotMatch(bar.innerHTML, /Every entry is linked/);
+  });
+
   it("opens on the graph; a concept opens its panel, and an entry in it opens the entry, with Back", async () => {
     await show();
     assert.ok(doc().querySelector('[data-testid="canvas"]'), "the graph view is first");
@@ -291,6 +301,52 @@ describe("the Knowledge tab", () => {
     const confirm = [...doc().querySelectorAll("button")].filter((b) => b.textContent?.trim() === "Delete").pop()!;
     await click(confirm);
     assert.ok(calls.includes("delete-collection:kc_seo"));
+  });
+
+  it("deleting the collection the list is filtered to falls back to All before anything refetches", async () => {
+    let deleted = false;
+    // The collections read after the delete is slow, as over a network: whatever the view
+    // refetches before it lands must not name the deleted collection.
+    let release: (() => void) | null = null;
+    const unknown = () =>
+      Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_UNKNOWN_COLLECTION", message: "No collection kc_seo." } });
+    await show({
+      api: {
+        listKnowledgeCollections: async () => {
+          calls.push("collections");
+          if (!deleted) return collections([collection(), collection({ id: "kc_ads", name: "Ads", color: "chart-2", entryCount: 0 })]);
+          await new Promise<void>((resolve) => (release = resolve));
+          return collections([collection({ id: "kc_ads", name: "Ads", color: "chart-2", entryCount: 0 })]);
+        },
+        listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => {
+          calls.push(`entries:${query.collection ?? "all"}`);
+          if (deleted && query.collection === "kc_seo") throw unknown();
+          return { entries: [summary()], nextCursor: null };
+        },
+        deleteKnowledgeCollection: async (id: string) => {
+          calls.push(`delete-collection:${id}`);
+          deleted = true;
+          return {};
+        }
+      }
+    });
+    await click([...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === "List")!);
+    const nav = () => doc().querySelector('nav[aria-label="Collections"]')!;
+    await click([...nav().querySelectorAll("button")].find((b) => b.textContent?.startsWith("SEO"))!);
+    assert.ok(calls.includes("entries:kc_seo"));
+
+    await click(buttonNamed("Edit SEO"));
+    await click(buttonNamed("Delete"));
+    await click([...doc().querySelectorAll("button")].filter((b) => b.textContent?.trim() === "Delete").pop()!);
+    assert.ok(release, "the collections are being read again");
+    assert.doesNotMatch(text(), /no longer exists|No collection kc_seo/, "no error while the collections reload");
+    await act(async () => release!());
+    await settle();
+    const after = calls.slice(calls.indexOf("delete-collection:kc_seo") + 1);
+    assert.ok(!after.includes("entries:kc_seo"), `no read of the deleted collection (${after.join(", ")})`);
+    assert.ok(after.includes("entries:all"), "All is read instead");
+    assert.match(text(), /All entries/);
+    assert.doesNotMatch(text(), /no longer exists|No collection kc_seo/);
   });
 
   it("a focus request selects its entry; editing it sends only what changed", async () => {

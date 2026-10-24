@@ -1,9 +1,9 @@
 // The Knowledge tab's bottom bar: entry, concept and collection counts, and
 // the linking state (idle, queued, "Linking N entries…" with progress, paused
-// with the reason).
+// with the reason, or idle with "N entries could not be linked").
 
 import React, { useEffect, useState } from "react";
-import { CircleCheck, Clock, Loader2, PauseCircle } from "lucide-react";
+import { AlertTriangle, CircleCheck, Clock, Loader2, PauseCircle } from "lucide-react";
 import type { KnowledgeStatus } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
@@ -24,7 +24,7 @@ function useSecondTick(on: boolean): number {
 export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ status }) => {
   const now = useSecondTick(status.linking.state === "queued");
   const runs = status.lastRun ? [status.lastRun, ...status.recentRuns] : status.recentRuns;
-  const view = linkingView(status.linking, runs, now);
+  const view = linkingView(status.linking, runs, now, status.failedEntries);
   const icon =
     view.tone === "running" ? (
       <Loader2 size={12} className="motion-safe:animate-spin" />
@@ -32,6 +32,8 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
       <Clock size={12} />
     ) : view.tone === "paused" ? (
       <PauseCircle size={12} />
+    ) : view.tone === "failed" ? (
+      <AlertTriangle size={12} />
     ) : (
       <CircleCheck size={12} />
     );
@@ -45,11 +47,16 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
       <span className="flex-1" />
       <span
         title={view.detail ?? undefined}
-        className={cn("inline-flex min-w-0 items-center gap-1.5", view.tone === "paused" ? "text-warn" : view.tone === "running" ? "text-neutral-300" : null)}
+        className={cn(
+          "inline-flex min-w-0 items-center gap-1.5",
+          view.tone === "paused" || view.tone === "failed" ? "text-warn" : view.tone === "running" ? "text-neutral-300" : null
+        )}
       >
         {icon}
         <span className="truncate">{view.label}</span>
-        {view.tone === "paused" && view.detail && <span className="hidden truncate text-neutral-500 md:inline">— {view.detail}</span>}
+        {(view.tone === "paused" || view.tone === "failed") && view.detail && (
+          <span className="hidden truncate text-neutral-500 md:inline">— {view.detail}</span>
+        )}
       </span>
       {view.progress !== null && (
         <span

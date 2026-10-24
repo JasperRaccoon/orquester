@@ -248,12 +248,21 @@ export function applyKnowledgeEvent(event: EventMessage): void {
 // Mutations (no optimistic writes: each refetches what it changed)
 // ---------------------------------------------------------------------------
 
-/** Run `call`, then refetch; rejects with the call's error (an ApiError carrying `{ code, message }`). */
-async function mutate(api: KnowledgeApi, call: () => Promise<unknown>, after: { entries?: readonly string[] | null; graph?: boolean }): Promise<void> {
+/**
+ * Run `call`, then refetch; rejects with the call's error (an ApiError carrying `{ code, message }`).
+ * `after.done` runs once the call succeeded and before anything refetches, so a view can let go of
+ * what the call removed first.
+ */
+async function mutate(
+  api: KnowledgeApi,
+  call: () => Promise<unknown>,
+  after: { entries?: readonly string[] | null; graph?: boolean; done?: () => void }
+): Promise<void> {
   adopt(api);
   const gen = generation;
   await call();
   if (gen !== generation) return;
+  after.done?.();
   if (after.entries !== undefined) bumpEntries(after.entries);
   if (after.graph) bumpGraph();
   await loadKnowledgeCollections(api).catch(() => undefined);
@@ -267,9 +276,13 @@ export function updateKnowledgeCollection(api: KnowledgeApi, id: string, req: Up
   return mutate(api, () => api.updateKnowledgeCollection(id, req), {});
 }
 
-/** Its entries lose the label (those with no other collection become Unfiled), so entry lists and the graph's colours move too. */
-export function deleteKnowledgeCollection(api: KnowledgeApi, id: string): Promise<void> {
-  return mutate(api, () => api.deleteKnowledgeCollection(id), { entries: null, graph: true });
+/**
+ * Its entries lose the label (those with no other collection become Unfiled), so entry lists and the
+ * graph's colours move too. `onDeleted` runs once it is gone and before those refetch: a view
+ * filtered to it falls back first, so no read names a collection that no longer exists.
+ */
+export function deleteKnowledgeCollection(api: KnowledgeApi, id: string, onDeleted?: (id: string) => void): Promise<void> {
+  return mutate(api, () => api.deleteKnowledgeCollection(id), { entries: null, graph: true, ...(onDeleted ? { done: () => onDeleted(id) } : {}) });
 }
 
 export function updateKnowledgeEntry(api: KnowledgeApi, id: string, req: UpdateKnowledgeEntryRequest): Promise<void> {

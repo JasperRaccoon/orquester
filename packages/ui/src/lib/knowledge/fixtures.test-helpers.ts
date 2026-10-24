@@ -18,6 +18,7 @@ export function status(overrides: Partial<KnowledgeStatus> = {}): KnowledgeStatu
     concepts: 3,
     edges: 2,
     collections: 2,
+    failedEntries: 0,
     linking: { state: "idle" },
     lastRun: null,
     recentRuns: [],

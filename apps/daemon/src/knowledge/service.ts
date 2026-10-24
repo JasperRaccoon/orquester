@@ -340,9 +340,15 @@ export class KnowledgeService {
         this.publishStatus();
       })
     );
-    // A run's verdict on its entries: the entry lists and panels show the link state and count.
-    // (A whole rebuild's worth is sent as `[]`, which clients read as "refetch every entry".)
-    opening.unsubscribe.push(store.onLinkStateChange((entryIds) => this.publishChanged({ entryIds: entryIds.length > 500 ? [] : [...entryIds] })));
+    // A run's verdict on its entries: the entry lists and panels show the link state and count,
+    // and the status its failed count. (A whole rebuild's worth is sent as `[]`, which clients
+    // read as "refetch every entry".)
+    opening.unsubscribe.push(
+      store.onLinkStateChange((entryIds) => {
+        this.publishChanged({ entryIds: entryIds.length > 500 ? [] : [...entryIds] });
+        this.publishStatus();
+      })
+    );
     const onLinkingStatus = (): void => this.linkingMoved();
     linking.events.on("status", onLinkingStatus);
     opening.unsubscribe.push(() => linking.events.off("status", onLinkingStatus));
@@ -415,10 +421,12 @@ export class KnowledgeService {
   private counts(): KnowledgeStatusCounts {
     const opening = this.opening;
     const graph = opening?.graph.counts() ?? { nodes: 0, edges: 0 };
+    const metas = opening?.store.listMeta() ?? [];
     return {
       enabled: this.settings.enabled(),
       installed: this.runtime.current() !== null,
-      entries: opening?.store.listMeta().length ?? 0,
+      entries: metas.length,
+      failedEntries: metas.filter((meta) => meta.linkState === "failed").length,
       concepts: graph.nodes,
       edges: graph.edges,
       collections: opening?.store.listCollections().length ?? 0

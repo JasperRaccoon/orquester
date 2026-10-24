@@ -414,6 +414,7 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
     concepts: count(value.concepts),
     edges: count(value.edges),
     collections: count(value.collections),
+    failedEntries: count(value.failedEntries),
     linking: parseKnowledgeLinkingState(value.linking),
     lastRun: parseRunSummary(value.lastRun),
     recentRuns: list(value.recentRuns, parseRunSummary) ?? [],

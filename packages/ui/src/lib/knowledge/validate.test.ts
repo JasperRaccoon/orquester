@@ -170,6 +170,8 @@ describe("knowledge wire validation", () => {
     assert.equal(status.recentRuns.length, 1);
     assert.deepEqual(status.tokens, { week: { in: 10, out: 5 }, total: { in: 0, out: 0 } });
     assert.equal(status.lastError, null);
+    assert.equal(status.failedEntries, 0, "a daemon that predates the failed count reports none");
+    assert.equal(parseKnowledgeStatus({ enabled: true, installed: true, failedEntries: 4 })?.failedEntries, 4);
   });
 
   it("reads an unknown linking state as idle and an unknown pause reason as an error", () => {
