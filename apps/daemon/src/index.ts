@@ -4733,10 +4733,10 @@ export function createServer(
   // already (installing agent CLIs, running shells), and nothing here is secret.
   registerPluginRoutes(app, { plugins: services.plugins });
   // Knowledge Graph (its spec, "Agent tools", "Settings → Plugins entry"): settings, the data routes,
-  // status, rebuild and the worker routes on both transports (the bearer hook gates HTTP). In-chat
-  // tools reach them through the unix app's in-process client with the agent's stamped principal —
-  // the only identity the worker routes accept.
-  services.knowledge?.registerRoutes(app);
+  // status and rebuild on both transports (the bearer hook gates HTTP). In-chat tools reach them
+  // through the unix app's in-process client with the agent's stamped principal — the only
+  // identity the worker routes accept, which are therefore the unix app's alone.
+  services.knowledge?.registerRoutes(app, options.mode);
   // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
   services.boxes?.registerRoutes(app);
 

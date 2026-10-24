@@ -8,8 +8,9 @@
  * - `POST rebuild` — asks for a full re-extraction (now, or after the run in flight); answers the
  *   status. 409 `KNOWLEDGE_DISABLED` / `KNOWLEDGE_NOT_INSTALLED`.
  * - `GET rebuildEstimate` — `KnowledgeRebuildEstimate` (information only).
- * - `POST workerNext` / `POST workerSubmit` `KnowledgeWorkerSubmitRequest` — the worker protocol.
- *   The calling session is ONLY the request's agent principal (the identity the daemon stamps on
+ * - `POST workerNext` / `POST workerSubmit` `KnowledgeWorkerSubmitRequest` — the worker protocol,
+ *   on the unix-socket app only (`workerRoutes`): in-chat tools reach it through the in-process
+ *   client, and nothing on the remote transport could ever be a worker. The calling session is ONLY the request's agent principal (the identity the daemon stamps on
  *   an in-chat tool call); a body `sessionId` is never trusted. It must be a session whose `owner`
  *   is `{kind: "knowledge-indexer"}` for the run in flight, else 403 `KNOWLEDGE_NOT_A_WORKER`. `workerNext` long-polls (see `linking/inbox.ts`);
  *   a client that goes away ends the wait.
@@ -56,6 +57,8 @@ export interface KnowledgeLinkingRoutesDeps {
   counts: () => KnowledgeStatusCounts;
   /** The session's `owner` (`SessionSummary.owner`), or undefined for no such session. */
   sessionOwner: (sessionId: string) => SessionOwner | undefined;
+  /** Register the worker routes (the unix-socket app; default). The remote app passes false. */
+  workerRoutes?: boolean;
   logger?: { error(message: string): void };
 }
 
@@ -149,6 +152,8 @@ export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: Knowl
       return fail(reply, error);
     }
   });
+
+  if (deps.workerRoutes === false) return;
 
   app.post(knowledgeRoutes.workerNext, async (request, reply): Promise<KnowledgeWorkerNextResponse | void> => {
     try {
