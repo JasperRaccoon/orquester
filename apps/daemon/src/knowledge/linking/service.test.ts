@@ -377,6 +377,38 @@ describe("KnowledgeLinkingService — link states", () => {
   });
 });
 
+describe("KnowledgeLinkingService — link states (metadata edits)", () => {
+  it("an entry whose title or author is edited mid-run (its body hash unchanged) stays pending too", async () => {
+    const children: FakeChild[] = [];
+    const h = await harness({
+      spawn: (_file, args) => {
+        const child = new FakeChild(args);
+        children.push(child);
+        return child as unknown as ChildProcess;
+      }
+    });
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    await h.clock.advance(20_000);
+    await h.until(() => children.length === 1);
+    // The store's `edited` for a title change: the mirror moved, the body's contentHash did not.
+    h.service.entriesChanged({ kind: "edited", entryIds: [ID(1)] });
+    const session = "2026-10-23T10-00-20";
+    children[0]!.stdout.write(`Session: ${session}\n`);
+    const paths = mykgSessionPaths(h.mykgDir, session);
+    await mkdir(paths.output, { recursive: true });
+    await writeFile(paths.nodes, "");
+    await h.until(() => h.service.snapshot().lastRun?.outcome === "running");
+    children[0]!.exit(0);
+    await h.until(ranOk(h, 1));
+    assert.equal(h.store.linkStates.get(ID(2)), "linked");
+    assert.equal(h.store.linkStates.has(ID(1)), false, "its new header line is not in the graph yet");
+    assert.deepEqual((await readState(h)).pendingEntryIds, [ID(1)]);
+    await h.service.stop();
+  });
+});
+
 describe("KnowledgeLinkingService — runs against a fake myKG and fake worker chats", { timeout: 60_000 }, () => {
   it("links new entries through worker chats, then re-links only an edited one with --update", async () => {
     const h = await harness();

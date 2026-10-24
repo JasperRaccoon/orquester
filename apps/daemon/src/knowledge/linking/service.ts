@@ -720,10 +720,13 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     active.broker.dispose();
 
     // Only entries still as the run saw them get a verdict; one edited mid-run (it is pending
-    // again already) is linked by the next run.
+    // again already — the pending set was emptied when the run started) is linked by the next run.
+    // The pending set also catches an edit of the header line (title, author…), which leaves the
+    // body's contentHash as it was.
+    const changedMeanwhile = new Set(state.pendingEntryIds);
     const existing = record.entryIds.filter((id) => {
       const meta = this.opts.store.getMeta(id);
-      return meta !== null && (record.entryHashes[id] === undefined || meta.contentHash === record.entryHashes[id]);
+      return meta !== null && !changedMeanwhile.has(id) && (record.entryHashes[id] === undefined || meta.contentHash === record.entryHashes[id]);
     });
     const editedMeanwhile = record.entryIds.filter((id) => {
       const meta = this.opts.store.getMeta(id);
