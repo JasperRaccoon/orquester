@@ -24,10 +24,13 @@ import {
   boxDestroyedMessage,
   boxProjectMenu,
   boxShellChoices,
+  BOX_PANEL_MIN_HEIGHT_PX,
+  boxPanelSummary,
   boxShellRefId,
   boxTerminalTitle,
   chatPendingConfigChanges,
   chatTemporaryBoxes,
+  clampBoxPanelHeight,
   configChangeCard,
   configChangeDecisionFailure,
   configChangeFileRow,
@@ -39,6 +42,7 @@ import {
   formatUsd,
   launchAccountFor,
   newTabMenuGates,
+  parseBoxPanelHeight,
   nextShownChangeIds,
   projectBoxBadge,
   projectPendingConfigChanges,
@@ -409,6 +413,27 @@ describe("temporary boxes", () => {
       "thread-1"
     );
     assert.deepEqual(list.map((b) => b.id), ["live", "found", "setup-failed"]);
+  });
+});
+
+describe("box panel fold and height", () => {
+  it("sums up the folded panel", () => {
+    assert.equal(boxPanelSummary([box(), box({ state: "destroyed" }), box({ state: "destroyed" })], 0), "1 VM running · 2 destroyed");
+    assert.equal(boxPanelSummary([box(), box()], 1), "2 VMs running · 1 config change to review");
+    assert.equal(boxPanelSummary([], 2), "2 config changes to review");
+    assert.equal(boxPanelSummary([], 0), "VM details");
+  });
+
+  it("keeps the list between one card and 70% of the view", () => {
+    assert.equal(clampBoxPanelHeight(10, 1000), BOX_PANEL_MIN_HEIGHT_PX);
+    assert.equal(clampBoxPanelHeight(300.4, 1000), 300);
+    assert.equal(clampBoxPanelHeight(900, 1000), 700);
+    assert.equal(clampBoxPanelHeight(900, 20), BOX_PANEL_MIN_HEIGHT_PX);
+  });
+
+  it("trusts only a stored whole number of pixels", () => {
+    assert.equal(parseBoxPanelHeight("240"), 240);
+    for (const raw of [null, "", "abc", "-5", "1e3", "12.5", "10"]) assert.equal(parseBoxPanelHeight(raw), null, String(raw));
   });
 });
 
