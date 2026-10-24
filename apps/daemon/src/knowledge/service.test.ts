@@ -289,3 +289,35 @@ test("the profiles behind the collection views are listed once and reused until 
   await h.inject("GET", knowledgeRoutes.collections);
   assert.equal(h.profileReads.list, baseline + 1);
 });
+
+test("a profile ticking or unticking a collection (or renamed while it ticks one) refreshes the collection views; an unrelated edit does not", async (t) => {
+  const listeners: ((profileId: string) => void)[] = [];
+  const profiles = [{ manifest: { id: "p1", name: "SEO expert", settings: { knowledgeCollections: [] as string[] } } }];
+  const h = await harness(t, {
+    enabled: true,
+    over: {
+      onProfileChange: (listener) => (listeners.push(listener), () => undefined),
+      profiles: { list: async () => ({ profiles: structuredClone(profiles) as never, errors: [] }), read: async () => structuredClone(profiles[0]) as never }
+    }
+  });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  const collectionEvents = () => h.events.filter((e) => e.type === "knowledge.changed" && (e.payload as { collections?: boolean }).collections === true).length;
+  const pushesBefore = h.pushes();
+
+  profiles[0]!.manifest.settings.knowledgeCollections = ["kc_aaaaaaaaaa"];
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 1, "ticking a collection moves its profile chips");
+  assert.equal(h.pushes(), pushesBefore + 1, "and the chats' manifests");
+
+  profiles[0]!.manifest.name = "SEO lead";
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 2, "a rename shows under the collections it ticks");
+  assert.equal(h.pushes(), pushesBefore + 1, "a rename changes no manifest");
+
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 2, "an edit that moves nothing the views show");
+});

@@ -520,7 +520,10 @@ export class KnowledgeService {
     return promise;
   }
 
-  /** A profile changed or was deleted: re-read the profiles and push manifests when its collections changed. */
+  /**
+   * A profile changed or was deleted: re-read the profiles, push manifests when its collections
+   * changed, and tell the collection views (their profile chips) when what they show of it moved.
+   */
   private profileChanged(profileId: string): void {
     const run = this.profileChain.then(async () => {
       const before = this.profiles?.map ?? null;
@@ -533,6 +536,7 @@ export class KnowledgeService {
         return null;
       });
       if (before === null || after === null || ticked(before, profileId) !== ticked(after, profileId)) this.toolsChanged();
+      if (after !== null && (before === null || shown(before, profileId) !== shown(after, profileId))) this.publishChanged({ collections: true });
     });
     this.profileChain = run.catch(() => undefined);
   }
@@ -598,6 +602,16 @@ export class KnowledgeService {
 /** The collections as the manifests name them: ids and names, in order. */
 function collectionsKeyOf(store: KnowledgeStore): string {
   return JSON.stringify(store.listCollections().map((collection) => [collection.id, collection.name]));
+}
+
+/** What the collection views show of one profile (its name under each collection it ticks), as a comparable key. */
+function shown(map: ProfilesByCollection, profileId: string): string {
+  const parts: string[] = [];
+  for (const [collectionId, profiles] of map) {
+    const profile = profiles.find((p) => p.id === profileId);
+    if (profile) parts.push(`${collectionId}=${profile.name}`);
+  }
+  return JSON.stringify(parts.sort());
 }
 
 /** The collection ids one profile ticks in a profiles-by-collection map, as a comparable key. */
