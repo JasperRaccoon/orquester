@@ -1,7 +1,7 @@
 /**
  * Settings → Plugins → Knowledge Graph in a DOM: only the indexing settings
  * while the plugin is off; Activity from the knowledge store (live on a `knowledge.status` event),
- * worker sessions linking to their chat when this client has its tab, the
+ * a worker chat's transcript opened read-only in place (never its folder as a project), the
  * rebuild confirmation with its estimate, "Open Knowledge tab"; and the
  * indexing settings saved with a PUT of what changed, showing the daemon's
  * refusal.
@@ -29,24 +29,28 @@ let knowledgeStore: typeof import("../../lib/knowledge/store").knowledgeStore;
 let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
 let applyKnowledgeEvent: typeof import("../../lib/knowledge/store").applyKnowledgeEvent;
 let KnowledgePluginSection: typeof import("./KnowledgePluginSection").KnowledgePluginSection;
+let OrquesterProvider: typeof import("../../context/orquester-context").OrquesterProvider;
 let ApiError: typeof import("../../lib/api-client").ApiError;
 
 let dom: JSDOM;
-const globals = ["window", "document", "HTMLElement", "HTMLInputElement", "HTMLSelectElement", "Node", "navigator", "KeyboardEvent", "MouseEvent", "FocusEvent", "Event"] as const;
+const globals = ["window", "document", "HTMLElement", "HTMLInputElement", "HTMLSelectElement", "Node", "navigator", "KeyboardEvent", "MouseEvent", "FocusEvent", "Event", "requestAnimationFrame", "cancelAnimationFrame", "localStorage"] as const;
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
 before(async () => {
-  dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/" });
+  dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/", pretendToBeVisual: true });
   for (const name of globals) {
     saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, { value: (dom.window as unknown as Record<string, unknown>)[name], configurable: true, writable: true });
   }
+  // The transcript's timeline scrolls its list; jsdom lays nothing out.
+  dom.window.HTMLElement.prototype.scrollTo = () => {};
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ useAppStore } = await import("../../store/app"));
   ({ knowledgeStore, resetKnowledge, applyKnowledgeEvent } = await import("../../lib/knowledge/store"));
   ({ KnowledgePluginSection } = await import("./KnowledgePluginSection"));
+  ({ OrquesterProvider } = await import("../../context/orquester-context"));
   ({ ApiError } = await import("../../lib/api-client"));
 });
 
@@ -77,9 +81,32 @@ describe("the Knowledge Graph plugin section", () => {
   let settings: KnowledgeSettings;
   let refuse: unknown;
   let initial: ReturnType<typeof useAppStore.getState>;
+  let copied: string[];
+  let streamed: string[];
+
+  const pending = () => new Promise<never>(() => {});
+  const agentChat = {
+    stream: (sessionId: string) => {
+      streamed.push(sessionId);
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} };
+    },
+    command: pending,
+    switchAccount: pending,
+    switchProfile: pending,
+    read: pending,
+    readItem: pending,
+    readHistory: pending,
+    search: pending,
+    turnDiff: pending,
+    providers: async () => ({ providers: [], hostInstanceId: "h1" }),
+    refreshProvider: pending,
+    upload: pending,
+    fetchAttachment: pending
+  };
 
   const api = {
     connection: { id: "c1" },
+    agentChat,
     getKnowledgeStatus: async () => (calls.push("status"), knowledgeStore.getState().status ?? status()),
     listKnowledgeCollections: async () => ({ collections: [], unfiledCount: 0, totalEntries: 0 }),
     getKnowledgeSettings: async () => (calls.push("settings"), settings),
@@ -100,6 +127,12 @@ describe("the Knowledge Graph plugin section", () => {
     root = createRoot(mount);
     calls = [];
     puts = [];
+    copied = [];
+    streamed = [];
+    Object.defineProperty(dom.window.navigator, "clipboard", {
+      value: { writeText: async (value: string) => void copied.push(value) },
+      configurable: true
+    });
     refuse = null;
     settings = { accountId: null, model: null, concurrency: 4 };
     resetKnowledge();
@@ -127,7 +160,16 @@ describe("the Knowledge Graph plugin section", () => {
       settingsOpen: true
     });
     knowledgeStore.setState({ status: status() });
-    await act(async () => root.render(createElement(KnowledgePluginSection, { enabled })));
+    await act(async () =>
+      root.render(
+        createElement(OrquesterProvider, {
+          runtime: "web",
+          api: api as never,
+          useTitlebar: false,
+          children: createElement(KnowledgePluginSection, { enabled })
+        })
+      )
+    );
     await settle();
   };
 
@@ -213,9 +255,18 @@ describe("the Knowledge Graph plugin section", () => {
     assert.match(text(), /myKG exited with 1/);
   });
 
-  it("links a worker to its chat when this client has the tab, else shows its id", async () => {
+  it("opens a live worker's transcript read-only in place, never its folder as a project; a closed one offers its id", async () => {
     await show();
-    useAppStore.setState({ sessions: [{ id: "s-open", projectPath: PROJECT.path, title: "Indexer", kind: "agent-chat" }] as never });
+    // A worker chat's "project" is the plugin's workers folder (no workspace, no project).
+    const workerChat = {
+      id: "s-open",
+      projectPath: "/appdir/daemon/plugins/knowledge-graph/workers",
+      title: "Knowledge indexer",
+      kind: "agent-chat",
+      refId: "claude",
+      owner: { kind: "knowledge-indexer", runId: "r1" }
+    };
+    useAppStore.setState({ sessions: [workerChat] as never });
     await act(async () => {
       knowledgeStore.setState({
         status: status({
@@ -230,11 +281,31 @@ describe("the Knowledge Graph plugin section", () => {
     assert.equal(rows.length, 2);
     assert.match(rows[0]!.textContent!, /Running · 2 tasks.*\bme\b/);
     assert.match(rows[1]!.textContent!, /Done · 5 tasks.*Work/);
-    assert.equal(rows[1]!.querySelector("code")?.textContent, "s-hidden");
-    assert.equal(rows[1]!.querySelector("button"), null);
 
-    await click(buttonNamed("Open the chat of worker s-open"));
-    assert.equal(useAppStore.getState().settingsOpen, false, "Settings closes over the chat it opens");
+    // A closed worker: its id, and a way to copy it.
+    assert.equal(rows[1]!.querySelector("code")?.textContent, "s-hidden");
+    await click(buttonNamed("Copy the session id of worker s-hidden"));
+    assert.deepEqual(copied, ["s-hidden"]);
+
+    const opened: string[] = [];
+    const openProject = useAppStore.getState().openProject;
+    useAppStore.setState({ openProject: ((project: { path: string }) => opened.push(project.path)) as never });
+    try {
+      await click(buttonNamed("Open the transcript of worker s-open"));
+    } finally {
+      useAppStore.setState({ openProject });
+    }
+    assert.deepEqual(opened, [], "no project is opened for a worker chat");
+    assert.equal(useAppStore.getState().currentProject?.path, PROJECT.path);
+    assert.equal(useAppStore.getState().settingsOpen, true, "Settings stays open under the transcript");
+    const dialog = [...doc().querySelectorAll("[role=dialog]")].find((d) => /Worker transcript/.test(d.textContent ?? ""));
+    assert.ok(dialog, "a transcript dialog");
+    assert.match(dialog.textContent ?? "", /s-open/);
+    assert.equal(dialog.querySelector("textarea"), null, "read-only: no composer");
+    assert.deepEqual(streamed, ["s-open"], "the transcript is the worker thread's own stream");
+
+    await click(buttonNamed("Close"));
+    assert.equal([...doc().querySelectorAll("[role=dialog]")].some((d) => /Worker transcript/.test(d.textContent ?? "")), false);
   });
 
   it("confirms a rebuild with the estimate, then posts it", async () => {

@@ -27,7 +27,9 @@ const sessions = [
   session("live", "/w/ws/proj", "claude"),
   session("archived-project", "/w/ws/shelved", "SECRET"),
   session("archived-workspace", "/w/old/thing", "SECRET"),
-  session("no-project", "")
+  session("no-project", ""),
+  // A Knowledge Graph worker chat: its "project" is the plugin's workers folder, no project at all.
+  { ...session("kg-worker", "/appdir/daemon/plugins/knowledge-graph/workers", "Knowledge indexer"), owner: { kind: "knowledge-indexer", runId: "kr_1" } } as SessionSummary
 ];
 
 // The happy path names the tab and its project.
@@ -39,7 +41,7 @@ assert.deepEqual(resolveSessionOwner("live", sessions, workspaces, projects), {
 
 // Everything the curtain (or ignorance) must hide resolves to null, never to a
 // chip with a leaked title.
-for (const id of ["archived-project", "archived-workspace", "no-project", "unknown-id"]) {
+for (const id of ["archived-project", "archived-workspace", "no-project", "kg-worker", "unknown-id"]) {
   assert.equal(resolveSessionOwner(id, sessions, workspaces, projects), null, `${id} must not resolve`);
 }
 

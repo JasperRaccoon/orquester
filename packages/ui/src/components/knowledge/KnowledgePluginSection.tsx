@@ -11,7 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { AlertTriangle, ExternalLink, Hammer, Loader2, RefreshCw, Waypoints } from "lucide-react";
+import { AlertTriangle, Copy, Hammer, Loader2, RefreshCw, ScrollText, Waypoints } from "lucide-react";
 import {
   KNOWLEDGE_CONCURRENCY_MAX,
   KNOWLEDGE_CONCURRENCY_MIN,
@@ -22,13 +22,12 @@ import {
 } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
+import { copyText } from "../../lib/clipboard";
 import { shortAccountLabel } from "../../lib/account-label";
 import { providerForRefId, providersStore, loadProviders } from "../../lib/agent-chat/providers";
 import { loadKnowledgeStatus, useKnowledgeState } from "../../lib/knowledge/store";
 import { relativeTime } from "../../lib/relative-time";
-import { jumpToProject } from "../../lib/session-nav";
 import { useAppStore } from "../../store/app";
-import { resolveSessionOwner } from "../system/session-owner";
 import { Button, ConfirmDialog, Input } from "../ui";
 import { InfoRow, Notice, SettingRow, SettingsSection } from "../settings/primitives";
 import { knowledgeCountsText, knowledgeErrorText, linkingView } from "./knowledge.logic";
@@ -46,6 +45,7 @@ import {
   readKnowledgeSettings,
   type KnowledgeSettingsForm
 } from "./knowledge-plugin.logic";
+import { WorkerTranscriptDialog } from "./WorkerTranscriptDialog";
 
 const SELECT_CLASS =
   "h-8 min-w-0 max-w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 text-base text-neutral-100 disabled:opacity-50 sm:text-sm";
@@ -126,6 +126,7 @@ const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) 
   const linking = linkingView(status.linking, runs);
   const last = status.lastRun ? knowledgeRunLine(status.lastRun, relativeTime) : null;
   const workers = knowledgeWorkersShown(status.workers);
+  const [transcript, setTranscript] = useState<string | null>(null);
   return (
     <>
       {!status.installed && (
@@ -170,11 +171,12 @@ const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) 
           <p className="text-sm text-neutral-400">Worker sessions</p>
           <ul aria-label="Worker sessions" className="mt-1.5 space-y-1">
             {workers.map((worker) => (
-              <WorkerRow key={worker.sessionId} worker={worker} />
+              <WorkerRow key={worker.sessionId} worker={worker} onOpenTranscript={setTranscript} />
             ))}
           </ul>
         </div>
       )}
+      <WorkerTranscriptDialog sessionId={transcript} onClose={() => setTranscript(null)} />
     </>
   );
 };
@@ -190,17 +192,18 @@ const DetailRow: React.FC<{ label: string; value: React.ReactNode; detail: strin
   </div>
 );
 
-/** One worker: its state and tasks, its account, and a way to its chat (or its id when this client cannot open it). */
-const WorkerRow: React.FC<{ worker: KnowledgeWorkerView }> = ({ worker }) => {
-  const sessions = useAppStore((s) => s.sessions);
-  const workspaces = useAppStore((s) => s.workspaces);
-  const projects = useAppStore((s) => s.projects);
-  const owner = useMemo(() => resolveSessionOwner(worker.sessionId, sessions, workspaces, projects), [worker.sessionId, sessions, workspaces, projects]);
+/**
+ * One worker: its state and tasks, its account, and its transcript. A worker chat is no project's
+ * tab (its "project" is the plugin's workers folder), so it is never navigated to: while its chat
+ * is open its transcript opens read-only over Settings; once the daemon has closed it, only its id
+ * is left, with a way to copy it (the chat's usage stays under Usage).
+ */
+const WorkerRow: React.FC<{ worker: KnowledgeWorkerView; onOpenTranscript: (sessionId: string) => void }> = ({ worker, onOpenTranscript }) => {
+  const live = useAppStore((s) => s.sessions.some((session) => session.id === worker.sessionId));
   const account = useAppStore((s) => s.agentAccounts?.accounts.find((a) => a.id === worker.accountId)?.label);
-  const open = () => {
-    if (!owner) return;
-    useAppStore.getState().setSettingsOpen(false);
-    jumpToProject({ project: owner.project, sessionId: worker.sessionId });
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void copyText(worker.sessionId).then(setCopied);
   };
   return (
     <li data-knowledge-worker={worker.sessionId} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-neutral-400">
@@ -211,19 +214,30 @@ const WorkerRow: React.FC<{ worker: KnowledgeWorkerView }> = ({ worker }) => {
       <span>{shortAccountLabel(account) || worker.accountId}</span>
       {relativeTime(worker.startedAt) && <span className="text-neutral-500">· {relativeTime(worker.startedAt)}</span>}
       <span className="flex-1" />
-      {owner ? (
+      {live ? (
         <button
           type="button"
-          onClick={open}
-          aria-label={`Open the chat of worker ${worker.sessionId}`}
+          onClick={() => onOpenTranscript(worker.sessionId)}
+          aria-label={`Open the transcript of worker ${worker.sessionId}`}
           className="inline-flex items-center gap-1 text-info-300 underline-offset-2 hover:underline"
         >
-          Open chat <ExternalLink size={11} />
+          <ScrollText size={11} /> Transcript
         </button>
       ) : (
-        <code title="This client has no tab for this session" className="select-all font-mono text-[11px] text-neutral-500">
-          {worker.sessionId}
-        </code>
+        <span className="inline-flex items-center gap-1.5">
+          <code title="This worker chat has closed" className="select-all font-mono text-[11px] text-neutral-500">
+            {worker.sessionId}
+          </code>
+          <button
+            type="button"
+            onClick={copy}
+            aria-label={`Copy the session id of worker ${worker.sessionId}`}
+            title={copied ? "Copied" : "Copy session id"}
+            className="inline-flex items-center text-neutral-500 hover:text-neutral-200"
+          >
+            <Copy size={11} />
+          </button>
+        </span>
       )}
     </li>
   );
