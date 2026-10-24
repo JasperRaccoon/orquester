@@ -826,3 +826,53 @@ describe("attachments", () => {
     );
   });
 });
+
+describe("on-demand agent rows", () => {
+  it("opts the stream in on every connection, a resume included, and passes the agent-rows frame through without moving the cursor", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const frames: AgentChatStreamFrame[] = [];
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", { agentRows: "on-demand" }, { onFrame: (frame) => frames.push(frame) });
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?agentRows=on-demand");
+    transporter.latest.handlers.onData(
+      line({ kind: "event", seq: 7, event: ev("thread.reverted", { turnCount: 1 }, { seq: 7 }) }) +
+        line({ kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" }) +
+        line({ kind: "agent-rows", seq: 7, agentIds: ["a"], items: [], after: [] })
+    );
+    assert.deepEqual(frames.map((frame) => frame.kind), ["event", "synchronized", "agent-rows"]);
+    assert.equal(handle.lastSeq, 7);
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(1_000);
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&agentRows=on-demand");
+    handle.close();
+  });
+
+  it("reads the thread with the opt-in, and posts a request for an agent's rows", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({ status: 200, ok: true, data: { kind: "snapshot", thread: snapshot({ seq: 3 }) } });
+    await transport.read("s1", { agentRows: "on-demand" });
+    assert.deepEqual(transporter.requests.at(-1)?.query, { agentRows: "on-demand" });
+    transporter.responses.push({ status: 200, ok: true, data: { kind: "snapshot", thread: snapshot({ seq: 3 }) } });
+    await transport.read("s1");
+    assert.equal(transporter.requests.at(-1)?.query, undefined, "a read without it asks for the whole snapshot");
+    transporter.responses.push({ status: 200, ok: true, data: { ok: true } });
+    assert.deepEqual(await transport.requestAgentRows!("s1", { streamId: "s-1", agentIds: ["a"] }), { ok: true });
+    const posted = transporter.requests.at(-1)!;
+    assert.equal(posted.method, "POST");
+    assert.equal(posted.path, "/api/sessions/s1/agent-rows");
+    assert.deepEqual(posted.body, { streamId: "s-1", agentIds: ["a"] });
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open." } }
+    });
+    await assert.rejects(transport.requestAgentRows!("s1", { streamId: "s-1", agentIds: ["a"] }), (error: unknown) => {
+      assert.ok(error instanceof AgentChatCommandError);
+      assert.equal(error.status, 404);
+      assert.equal(error.code, "STREAM_NOT_FOUND");
+      return true;
+    });
+  });
+});

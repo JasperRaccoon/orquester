@@ -54,7 +54,7 @@
  */
 
 import React from "react";
-import { ArrowLeft, Terminal } from "lucide-react";
+import { ArrowLeft, LoaderCircle, Terminal } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
@@ -316,38 +316,56 @@ export function AgentDrillIn({
         </div>
       )}
 
-      <ChatTimeline
-        sessionId={sessionId}
-        // `agentId` is what makes the timeline a child view: W12 forces
-        // read-only from it, and we say so explicitly as well. It also owns
-        // the empty state, so there is no second "nothing here yet" surface.
-        agentId={agentId}
-        readOnly
-        retentionDropped={live.retentionDropped}
-        // The row and the kind as this view knows them — the roster may no
-        // longer have the row — for the empty copy and the shell pane.
-        drilledAgent={agent}
-        drilledAgentRemembered={live.agentRemembered}
-        backgroundShell={background}
-        roster={roster}
-        projectPath={projectPath}
-        skills={skills}
-        rows={rows}
-        follow={follow}
-        onFollowChange={setFollow}
-        // Where the reader left this agent, restored on mount; published back
-        // into the host's memory, never the thread's LRU.
-        scroll={opening.position}
-        onScrollPositionChange={onScrollPositionChange}
-        disclosures={timelineDisclosures}
-        onDisclosureChange={onDisclosureChange}
-        bottomInset={bottomInset}
-        {...callbacks}
-        // The thread's banner: the overlay's commands fail through it, and it
-        // is on screen whichever timeline the main area shows.
-        errorBanner={errorBanner}
-        onDismissErrorBanner={onDismissErrorBanner ?? noop}
-      />
+      {live.rowsLoading ? (
+        // The snapshot left this settled agent's own rows out (on-demand agent
+        // rows); they are on their way down the thread's stream. The timeline
+        // mounts once they land, so it restores the reading position over the
+        // rows themselves — never over a launch and an ending with nothing
+        // between.
+        <div
+          className="flex min-h-0 flex-1 items-start justify-center px-3 py-6 text-sm text-neutral-500"
+          data-drill-in-loading=""
+          role="status"
+        >
+          <span className="inline-flex items-center gap-2">
+            <LoaderCircle size={14} strokeWidth={1.8} aria-hidden className="animate-spin motion-reduce:animate-none" />
+            Loading this agent&apos;s activity…
+          </span>
+        </div>
+      ) : (
+        <ChatTimeline
+          sessionId={sessionId}
+          // `agentId` is what makes the timeline a child view: W12 forces
+          // read-only from it, and we say so explicitly as well. It also owns
+          // the empty state, so there is no second "nothing here yet" surface.
+          agentId={agentId}
+          readOnly
+          retentionDropped={live.retentionDropped}
+          // The row and the kind as this view knows them — the roster may no
+          // longer have the row — for the empty copy and the shell pane.
+          drilledAgent={agent}
+          drilledAgentRemembered={live.agentRemembered}
+          backgroundShell={background}
+          roster={roster}
+          projectPath={projectPath}
+          skills={skills}
+          rows={rows}
+          follow={follow}
+          onFollowChange={setFollow}
+          // Where the reader left this agent, restored on mount; published back
+          // into the host's memory, never the thread's LRU.
+          scroll={opening.position}
+          onScrollPositionChange={onScrollPositionChange}
+          disclosures={timelineDisclosures}
+          onDisclosureChange={onDisclosureChange}
+          bottomInset={bottomInset}
+          {...callbacks}
+          // The thread's banner: the overlay's commands fail through it, and it
+          // is on screen whichever timeline the main area shows.
+          errorBanner={errorBanner}
+          onDismissErrorBanner={onDismissErrorBanner ?? noop}
+        />
+      )}
     </div>
   );
 }

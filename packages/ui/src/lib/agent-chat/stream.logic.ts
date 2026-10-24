@@ -127,6 +127,37 @@ export function parseStreamLine(line: string): StreamLine {
       if (typeof decoded.hostInstanceId !== "string") {
         return { kind: "malformed", line };
       }
+      // The stream's on-demand id (`streamId`) is additive: one that is not a
+      // non-empty string is no id, and the marker still stands.
+      if (decoded.streamId !== undefined && !(typeof decoded.streamId === "string" && decoded.streamId.length > 0)) {
+        const marker: Record<string, unknown> = { ...decoded };
+        delete marker.streamId;
+        return { kind: "frame", frame: marker as unknown as AgentChatStreamFrame };
+      }
+      return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
+    }
+    case "agent-rows": {
+      // What the reducer indexes on: the position, the agents, and one
+      // placement (a row id or null) per row, each row an item with an id.
+      const { seq, agentIds, items, after } = decoded;
+      if (
+        typeof seq !== "number" ||
+        !Array.isArray(agentIds) ||
+        !agentIds.every((id) => typeof id === "string" && id.length > 0) ||
+        !Array.isArray(items) ||
+        !items.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.id === "string" &&
+            (item.kind === "message" || item.kind === "activity") &&
+            typeof item.createdAt === "string"
+        ) ||
+        !Array.isArray(after) ||
+        after.length !== items.length ||
+        !after.every((id) => id === null || typeof id === "string")
+      ) {
+        return { kind: "malformed", line };
+      }
       return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
     }
     case "history-import": {

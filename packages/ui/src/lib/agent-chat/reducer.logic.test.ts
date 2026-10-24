@@ -119,3 +119,42 @@ describe("applyFrame — history replay progress", () => {
     assert.equal(resynced.slice.historyImport, null);
   });
 });
+
+describe("applyFrame — on-demand agent rows", () => {
+  it("a snapshot's omitted agents are read field-wise, and a later snapshot without them clears them", () => {
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: { ...snapshot({ seq: 3 }), omittedAgentIds: ["b", "a", "b", "", 7] as unknown as string[] }
+    });
+    assert.deepEqual(state.slice.omittedAgentIds, ["a", "b"]);
+    state = applyFrame(state, { kind: "snapshot", thread: snapshot({ seq: 4 }) });
+    assert.equal(state.slice.omittedAgentIds, undefined);
+    assert.equal("omittedAgentIds" in state.slice, false);
+  });
+
+  it("a frame loads its agents, and the last of them leaves nothing omitted", () => {
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: { ...snapshot({ seq: 3 }), omittedAgentIds: ["a", "b"] }
+    });
+    const row = activity("tool.started", { toolUseId: "c1" }, { id: "a-row", agentId: "a" });
+    state = applyFrame(state, { kind: "agent-rows", seq: 3, agentIds: ["a"], items: [row], after: [null] });
+    assert.deepEqual(state.slice.omittedAgentIds, ["b"]);
+    assert.deepEqual(state.slice.entries.map((item) => item.id), ["a-row"]);
+    assert.equal(state.slice.entries, state.fold.items);
+    state = applyFrame(state, { kind: "agent-rows", seq: 3, agentIds: ["b"], items: [], after: [] });
+    assert.equal(state.slice.omittedAgentIds, undefined);
+  });
+
+  it("the stream's id comes with every synchronized marker, the live one's included", () => {
+    let state = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: snapshot({ seq: 3 }) });
+    state = applyFrame(state, { kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" });
+    assert.equal(state.streamId, "s-1");
+    state = applyFrame(state, { kind: "synchronized", hostInstanceId: "h1", streamId: "s-2" });
+    assert.equal(state.streamId, "s-2", "a resumed connection names its own");
+    const same = applyFrame(state, { kind: "synchronized", hostInstanceId: "h1", streamId: "s-2" });
+    assert.equal(same, state);
+    state = applyFrame(state, { kind: "synchronized", hostInstanceId: "h1" });
+    assert.equal(state.streamId, null, "a host that names none");
+  });
+});

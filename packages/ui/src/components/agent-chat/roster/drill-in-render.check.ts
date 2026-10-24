@@ -192,6 +192,27 @@ const printing = await shellDrillIn([shellStart, shellChunk], liveShell);
 assert.ok(printing.includes("pnpm test --watch"), "opening the shell shows its command");
 assert.ok(printing.includes("PASS src/a.test.ts"), "the seeded thread renders shell output without another click");
 
+// ---------------------------------------------------------------------------
+// On-demand agent rows: an omitted agent's drill-in says it is loading, then shows its rows
+// ---------------------------------------------------------------------------
+
+const SETTLED = "agent-settled";
+const settled = rosterRow(SETTLED, { status: "completed", completedAt: "2026-09-21T10:05:00.000Z" });
+const settledLaunch = wireActivity("task.started", { taskId: SETTLED, agentKind: "agent", title: SETTLED }, { id: "settled-launch" });
+const settledCall = wireActivity(
+  "tool.completed",
+  { toolUseId: "settled-1", itemType: "command_execution", title: "cargo build --release", command: "cargo build --release", status: "completed" },
+  { agentId: SETTLED, id: "settled-call" }
+);
+const lazySession = await seededThread({ items: [settledLaunch], roster: [settled], omittedAgentIds: [SETTLED] });
+const loading = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(loading.includes("data-drill-in-loading"), "an omitted agent's drill-in is loading");
+assert.ok(!loading.includes("cargo build"), "and shows nothing of rows it does not have");
+frameHandlers.get(lazySession)!({ kind: "agent-rows", seq: 1, agentIds: [SETTLED], items: [settledCall], after: ["settled-launch"] });
+const loaded = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(!loaded.includes("data-drill-in-loading"), "its frame landed");
+assert.ok(loaded.includes("cargo build --release"), "the agent's own rows render");
+
 for (const sessionId of frameHandlers.keys()) releaseThreadStore(sessionId);
 console.error = consoleError;
 console.log("agent-chat seeded shell output check passed");
