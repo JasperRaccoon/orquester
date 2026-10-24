@@ -202,6 +202,20 @@ describe("the Knowledge tab", () => {
     assert.match(text(), /Paste a post into any chat and ask the agent to add it to the knowledge/);
   });
 
+  it("a knowledge base that cannot be opened (its counts read 0) shows the error, not \"No entries yet\"", async () => {
+    const refused = () => Object.assign(new Error("500"), { status: 500, body: { code: "KNOWLEDGE_ERROR", message: "The knowledge base could not be opened (EACCES). See the daemon log." } });
+    await show({
+      entries: 0,
+      api: {
+        getKnowledgeGraph: async () => {
+          throw refused();
+        }
+      }
+    });
+    assert.match(text(), /The knowledge base could not be opened \(EACCES\)/);
+    assert.doesNotMatch(text(), /No entries yet/);
+  });
+
   it("opens on the graph; a concept opens its panel, and an entry in it opens the entry, with Back", async () => {
     await show();
     assert.ok(doc().querySelector('[data-testid="canvas"]'), "the graph view is first");
