@@ -15,7 +15,9 @@ const options: BuildOptions = {
   target: "node24",
   format: "cjs",
   sourcemap: true,
-  external: ["electron", "node-pty", "better-sqlite3"],
+  // Native modules ship as dependencies (electron-builder unpacks their `.node` binaries);
+  // onnxruntime-node backs the Knowledge Graph plugin's local embeddings.
+  external: ["electron", "node-pty", "better-sqlite3", "onnxruntime-node"],
   logLevel: "info",
   plugins: [
     {
