@@ -45,6 +45,13 @@ function answerAll(broker: InboxBroker): Promise<number> {
 }
 
 describe("mykg argv and env", () => {
+  it("refuses a recorded session name that could become a flag or a path", () => {
+    for (const session of ["--help", "../x", "a/b"]) {
+      assert.throws(() => mykgArgs({ inputDir: "/in", mode: "update", session }), /Not a myKG session name/, session);
+      assert.throws(() => mykgArgs({ inputDir: "/in", mode: "rebuild", session }), /Not a myKG session name/, session);
+    }
+  });
+
   it("builds the four invocations", () => {
     assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "full", session: null }), ["extract-graph", "/in"]);
     assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "rebuild", session: "s2" }), ["extract-graph", "/in", "--session", "s2"]);

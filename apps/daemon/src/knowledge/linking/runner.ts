@@ -62,6 +62,8 @@ export type MykgRunResult =
 /** The argv after the binary. */
 export function mykgArgs(spec: Pick<MykgRunSpec, "inputDir" | "mode" | "session">): string[] {
   const args = ["extract-graph", spec.inputDir];
+  // The name comes from state.json: never let a hand-edited one become a flag or a path.
+  if (spec.session && !isMykgSessionName(spec.session)) throw new Error(`Not a myKG session name: ${JSON.stringify(spec.session)}`);
   if (spec.mode === "update" || spec.mode === "grow-schema") {
     if (!spec.session) throw new Error(`A ${spec.mode} run needs the recorded myKG session.`);
     args.push("--session", spec.session, "--update");
