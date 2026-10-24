@@ -114,6 +114,7 @@ import {
   resolveAgentChatTransport,
   type AgentChatTransport
 } from "./agent-chat/transport";
+import { bindThreadCacheScope } from "./agent-chat/persistent-cache";
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
@@ -376,7 +377,11 @@ export class ApiClient {
    * implementing `agentChat()`.
    */
   get agentChat(): AgentChatTransport {
-    this.agentChatTransport ??= resolveAgentChatTransport(this.transporter);
+    if (this.agentChatTransport === null) {
+      this.agentChatTransport = resolveAgentChatTransport(this.transporter);
+      // A thread store on this transport keeps its device cache under this daemon's scope.
+      bindThreadCacheScope(this.agentChatTransport, this.connection);
+    }
     return this.agentChatTransport;
   }
 

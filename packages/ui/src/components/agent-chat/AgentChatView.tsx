@@ -260,6 +260,8 @@ const selectFirstPrompt = (state: AgentChatThreadState): ThreadItem | undefined 
     (item) => item.kind === "message" && item.role === "user" && item.agentId === undefined
   );
 const selectRows = (state: AgentChatThreadState): AgentChatTimelineRow[] => state.rows;
+/** The thread on screen is the device cache's unconfirmed copy (`fromDeviceCache`). */
+const selectFromDeviceCache = (state: AgentChatThreadState): boolean => state.slice.fromDeviceCache === true;
 
 interface LiveChatTimelineProps extends Omit<ChatTimelineProps, "sessionId" | "rows"> {
   /** The thread the view names; the timeline may still paint the held one (§7.1). */
@@ -415,6 +417,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const loading = slice.connection !== "synchronized";
   const hasRows = useAgentChatThreadSelector(sessionId, selectHasRows);
   const { paintOnly } = threadSwitchDisplay({ sessionId, hasRows, loading, held: heldRef.current });
+  // The device cache's copy of the thread, not yet confirmed by the host
+  // (`fromDeviceCache`): shown, but nothing that rewrites, forks or stops the
+  // conversation acts on what may be hours old. The store refuses them too.
+  const deviceCopy = useAgentChatThreadSelector(sessionId, selectFromDeviceCache);
 
   // --- `request_secret` cards (design 2026-10-14 §5) ------------------------
   // Daemon-owned and memory-only; the value goes from the card to the answer
@@ -678,7 +684,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // rows projected into targets, so the two can never disagree about what is
   // rewindable. A rewind is conversation only — files are never touched — and
   // `rewindTo` hands the message back to the composer for editing.
-  const canRevert = !paintOnly && provider?.capabilities?.supportsConversationRollback !== false;
+  const canRevert =
+    !paintOnly && !deviceCopy && provider?.capabilities?.supportsConversationRollback !== false;
   const startedTurnCount = React.useMemo(() => startedTurns(slice.turns).length, [slice.turns]);
   // Read off the store's rows, and the same list by identity while a delta
   // leaves it as it was, so the composer's footer does not re-render with it.
@@ -850,10 +857,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const continueInRequest = useAppStore((s) => s.continueInRequest);
   const clearContinueInRequest = useAppStore((s) => s.clearContinueInRequest);
   React.useEffect(() => {
-    if (paintOnly || continueInRequest?.sessionId !== sessionId) return;
+    // A request for a device copy waits until the host has confirmed it.
+    if (paintOnly || deviceCopy || continueInRequest?.sessionId !== sessionId) return;
     clearContinueInRequest();
     setContinueFrom({ input: null });
-  }, [continueInRequest, sessionId, paintOnly, clearContinueInRequest]);
+  }, [continueInRequest, sessionId, paintOnly, deviceCopy, clearContinueInRequest]);
   const continueTarget = React.useMemo(
     () =>
       continueFrom?.input
@@ -1401,8 +1409,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               // "Rewind to here", confirmed in the row's own popover: the whole
               // §5.5 flow, ending with the message back in the composer.
               onRevert={paintOnly ? noop : rewindTo}
-              onFork={paintOnly ? undefined : forkFrom}
-              onContinueIn={paintOnly ? undefined : openContinueIn}
+              onFork={paintOnly || deviceCopy ? undefined : forkFrom}
+              onContinueIn={paintOnly || deviceCopy ? undefined : openContinueIn}
               revertBusy={revertBusy}
               startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
@@ -1519,7 +1527,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onDismiss={
                   paintOnly ? noop : (requestId) => dispatch(() => actions.dismissQuestion({ requestId }))
                 }
-                onStopBackgroundWork={paintOnly ? noop : () => dispatch(() => actions.interrupt())}
+                onStopBackgroundWork={
+                  paintOnly || deviceCopy ? noop : () => dispatch(() => actions.interrupt())
+                }
                 // Text displaced by an answer goes back into the draft rather
                 // than being silently discarded (§7.5).
                 onCarryTextToDraft={

@@ -20,6 +20,7 @@ import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/s
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
 import { applySecretFilesEvent, loadSecretVaults, resetSecretFiles } from "../lib/secret-files/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
+import { clearThreadCache, threadCacheScopeFor } from "../lib/agent-chat/persistent-cache";
 import {
   applyAgentToolsEvent,
   applyToolApprovalEvent,
@@ -597,6 +598,8 @@ function dropCredential(
 ): void {
   stopReconnect();
   clearStoredToken(api.connection.endpoint);
+  // The chats this device saved from that daemon go with the credential they were read under.
+  void clearThreadCache(threadCacheScopeFor(api.connection));
   set({
     api: get().api === api ? apiWithCredential(api, "") : get().api,
     connectionStatus: "error",
@@ -2166,6 +2169,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removeRemote: async (id) => {
+    // The chats this device saved from that daemon go with it.
+    const removed = get().connections.find((c) => c.id === id);
+    if (removed) void clearThreadCache(threadCacheScopeFor(removed));
     const connections = get().connections.filter((c) => c.id !== id);
     set({ connections });
     await persistRemotes(connections);
