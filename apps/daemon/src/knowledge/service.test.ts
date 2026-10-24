@@ -1,0 +1,270 @@
+/**
+ * `KnowledgeService` lifecycle and seams: nothing opens while the plugin is off; the first switch-on
+ * opens the knowledge base and builds and starts linking with its store and graph; switching off
+ * releases the embedder and gates the routes (linking pauses itself); a knowledge base that cannot
+ * open answers cleanly and is retried; a linking module that cannot be built or started leaves
+ * linking paused; the worker routes take the worker from the stamped principal only; the profile
+ * cache behind the collection views. Stop is idempotent and stops linking first.
+ */
+
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+
+import Fastify from "fastify";
+import { KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeLinkingState, type KnowledgeStatus, type SessionOwner } from "@orquester/api";
+import { knowledgeEntriesDir, knowledgeGraphPluginDir } from "@orquester/config";
+
+import { FAKE_RUNTIME } from "./linking/testing.ts";
+import type { KnowledgeEntryChange } from "./ports.ts";
+import { silentLogger } from "./search/test-fakes.ts";
+import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory, type KnowledgeServiceOptions } from "./service.ts";
+import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
+
+
+async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions> } = {}) {
+  const appdir = await mkdtemp(join(tmpdir(), "kg-service-"));
+  const plugins = new FakeKnowledgePlugins(options.enabled ?? false);
+  const runtime = new FakeRuntime();
+  runtime.set(FAKE_RUNTIME);
+  const embedders = fakeEmbedders();
+  const events: { channel: string; type: string; payload: unknown }[] = [];
+  const profileReads = { list: 0 };
+  let pushes = 0;
+  const knowledge = new KnowledgeService({
+    appdir,
+    plugins,
+    accounts: { getRecord: () => undefined },
+    session: () => null,
+    profiles: {
+      list: async () => {
+        profileReads.list += 1;
+        return { profiles: [], errors: [] };
+      },
+      read: async () => {
+        throw new Error("no profiles");
+      }
+    },
+    publisher: { publish: (channel: string, type: string, payload: unknown) => void events.push({ channel, type, payload }) },
+    toolsChanged: () => {
+      pushes += 1;
+    },
+    runtime,
+    embedders: embedders.factory,
+    logger: silentLogger(),
+    ...options.over
+  });
+  const app = Fastify();
+  // The principal hook's part: an in-chat call is stamped with its chat (here from a test header).
+  app.addHook("onRequest", async (request) => {
+    const agent = request.headers["x-test-agent"];
+    if (typeof agent === "string") (request as unknown as { principal: unknown }).principal = { kind: "agent", threadId: agent, projectPath: "" };
+  });
+  knowledge.registerRoutes(app);
+  t.after(async () => {
+    await app.close();
+    await knowledge.stop();
+    await rm(appdir, { recursive: true, force: true });
+  });
+  const inject = async (method: "GET" | "POST", url: string, payload?: object, agent?: string) => {
+    const res = await app.inject({ method, url, ...(payload ? { payload } : {}), ...(agent ? { headers: { "x-test-agent": agent } } : {}) });
+    return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : null };
+  };
+  const statuses = () => events.filter((e) => e.channel === KNOWLEDGE_CHANNEL && e.type === KNOWLEDGE_STATUS_EVENT).map((e) => e.payload as KnowledgeStatus);
+  return { appdir, plugins, runtime, embedders, knowledge, inject, events, statuses, profileReads, pushes: () => pushes };
+}
+
+/** A linking module that records what the service does with it. */
+function recordingLinking(options: { failStart?: boolean } = {}) {
+  const log: string[] = [];
+  const ports: Parameters<KnowledgeLinkingFactory>[0][] = [];
+  const changes: KnowledgeEntryChange[] = [];
+  const factory: KnowledgeLinkingFactory = (given) => {
+    const n = ports.push(given);
+    log.push(`build ${n}`);
+    const linking: KnowledgeLinking = {
+      events: new EventEmitter<{ status: [] }>(),
+      start: async () => {
+        log.push(`start ${n}`);
+        if (options.failStart) throw new Error("state.json is unreadable");
+      },
+      stop: async () => void log.push(`stop ${n}`),
+      status: (): KnowledgeLinkingState => ({ state: "idle" }),
+      entriesChanged: (change) => void changes.push(change),
+      snapshot: () => ({ linking: { state: "idle" }, lastRun: null, recentRuns: [], workers: [], tokens: { week: { in: 1, out: 2 }, total: { in: 3, out: 4 } }, lastError: null }),
+      rebuild: async () => ({ queued: true, running: false }),
+      rebuildEstimate: async () => ({ entries: 7, tasks: 12 }),
+      isActiveWorker: (owner: SessionOwner | undefined) => owner?.kind === "knowledge-indexer" && owner.runId === "kr_1",
+      workerNext: async (sessionId) => {
+        log.push(`next ${sessionId}`);
+        return { kind: "done", reason: "run-finished" };
+      },
+      workerSubmit: async () => ({ accepted: false, error: "x" })
+    };
+    return linking;
+  };
+  return { log, ports, changes, factory };
+}
+
+test("with the plugin off nothing opens: no store directory, no embedder, no linking; data routes 409, settings and status answer", async (t) => {
+  const linking = recordingLinking();
+  const h = await harness(t, { over: { linking: linking.factory } });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  await assert.rejects(stat(knowledgeGraphPluginDir(h.appdir)), { code: "ENOENT" });
+  assert.equal(h.embedders.made.length, 0);
+  assert.deepEqual(linking.log, []);
+  const search = await h.inject("POST", knowledgeRoutes.search, { query: "x" });
+  assert.equal(search.status, 409);
+  assert.equal(search.body!.code, "KNOWLEDGE_DISABLED");
+  assert.equal((await h.inject("GET", knowledgeRoutes.collections)).status, 409);
+  assert.equal((await h.inject("GET", knowledgeRoutes.settings)).status, 200);
+  const status = (await h.inject("GET", knowledgeRoutes.status)).body as unknown as KnowledgeStatus;
+  assert.equal(status.enabled, false);
+  assert.equal(status.installed, true);
+  assert.equal(status.linking.state === "paused" && status.linking.reason, "plugin-off");
+  assert.equal(status.entries, 0);
+});
+
+test("the first switch-on opens the knowledge base and builds and starts linking on its store and graph; switching off releases the embedder; on again serves without reopening", async (t) => {
+  const linking = recordingLinking();
+  const h = await harness(t, { over: { linking: linking.factory } });
+  await h.knowledge.start();
+  h.plugins.set(true);
+  await h.knowledge.settled();
+  assert.deepEqual(linking.log, ["build 1", "start 1"]);
+  assert.equal(h.pushes(), 1, "switching on pushes the manifests");
+  assert.equal(h.embedders.made.length, 1);
+  const ports = linking.ports[0]!;
+  assert.equal(ports.runtime, h.runtime);
+  assert.equal(ports.settings, h.knowledge.settings);
+  assert.equal(ports.store.mykgInputDir.startsWith(h.appdir), true);
+
+  // Store changes reach linking; the status follows, with linking's run history.
+  const saved = await h.inject("POST", knowledgeRoutes.save, { entries: [{ body: "Budget caps while a campaign learns.", collections: ["Ads"] }], newCollections: [{ name: "Ads", description: "Paid." }] });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual(linking.changes.map((c) => c.kind), ["added"]);
+  await h.knowledge.settled();
+  assert.equal(h.pushes(), 2, "the new collection pushed the manifests");
+  const status = h.statuses().at(-1)!;
+  assert.equal(status.entries, 1);
+  assert.equal(status.collections, 1);
+  assert.deepEqual(status.tokens, { week: { in: 1, out: 2 }, total: { in: 3, out: 4 } }, "the run history is linking's");
+  assert.deepEqual((await h.inject("GET", knowledgeRoutes.rebuildEstimate)).body, { entries: 7, tasks: 12 });
+
+  // A graph load announced by linking (counts moved) → knowledge.changed {graph: true}.
+  ports.graph.replace([{ id: "tactic-x", name: "X", type: "Tactic", source_files: [] }], []);
+  (h.knowledge.linking()!.events as EventEmitter).emit("status");
+  await h.knowledge.settled();
+  assert.ok(h.events.some((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true));
+
+  h.plugins.set(false);
+  await h.knowledge.settled();
+  assert.equal(h.embedders.released, 1, "the model is released at once");
+  assert.equal(h.pushes(), 3);
+  assert.deepEqual(linking.log, ["build 1", "start 1"], "linking follows the switch itself (it pauses); it is not rebuilt");
+  assert.equal((await h.inject("POST", knowledgeRoutes.search, { query: "budget" })).body!.code, "KNOWLEDGE_DISABLED");
+
+  h.plugins.set(true);
+  await h.knowledge.settled();
+  assert.equal(h.pushes(), 4);
+  assert.deepEqual(linking.log, ["build 1", "start 1"]);
+  assert.equal(h.embedders.made.length, 1, "the same knowledge base, not reopened");
+  const hits = await h.inject("POST", knowledgeRoutes.search, { query: "budget" });
+  assert.equal((hits.body!.hits as unknown[]).length, 1);
+
+  await h.knowledge.stop();
+  await h.knowledge.stop();
+  assert.deepEqual(linking.log, ["build 1", "start 1", "stop 1"], "stop stops linking once");
+  assert.equal(h.embedders.disposed, 1);
+});
+
+test("before start a request is told the plugin is starting; start opens it", async (t) => {
+  const h = await harness(t, { enabled: true });
+  const early = await h.inject("GET", knowledgeRoutes.collections);
+  assert.equal(early.status, 409);
+  assert.equal(early.body!.code, "KNOWLEDGE_BUSY");
+  await h.knowledge.start();
+  assert.equal((await h.inject("GET", knowledgeRoutes.collections)).status, 200);
+  await stat(knowledgeEntriesDir(h.appdir));
+});
+
+test("a knowledge base that cannot open: routes answer 500 KNOWLEDGE_ERROR, the status names it, and the next request retries", async (t) => {
+  const linking = recordingLinking();
+  const h = await harness(t, { enabled: true, over: { linking: linking.factory } });
+  // `entries` is a file: the store cannot make its directory.
+  await mkdir(knowledgeGraphPluginDir(h.appdir), { recursive: true });
+  await writeFile(knowledgeEntriesDir(h.appdir), "not a directory");
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  const res = await h.inject("POST", knowledgeRoutes.search, { query: "x" });
+  assert.equal(res.status, 500);
+  assert.equal(res.body!.code, "KNOWLEDGE_ERROR");
+  assert.match(String(res.body!.message), /could not be opened/);
+  const status = (await h.inject("GET", knowledgeRoutes.status)).body as unknown as KnowledgeStatus;
+  assert.equal(status.linking.state === "paused" && status.linking.reason, "error");
+  assert.ok(status.lastError);
+  assert.deepEqual(linking.log, [], "no linking without a store");
+  // The manifest read treats it as "no collections", never a throw.
+  assert.deepEqual((await h.knowledge.knowledgeForSession("unknown")).visibleCollectionNames, []);
+
+  await rm(knowledgeEntriesDir(h.appdir));
+  const retried = await h.inject("POST", knowledgeRoutes.search, { query: "x" });
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.deepEqual(linking.log, ["build 1", "start 1"]);
+  assert.equal(((await h.inject("GET", knowledgeRoutes.status)).body as unknown as KnowledgeStatus).lastError, null);
+});
+
+test("a linking module that cannot be built, or cannot start, leaves linking paused with the error; the data routes still serve", async (t) => {
+  const broken = await harness(t, { enabled: true, over: { linking: () => { throw new Error("no python"); } } });
+  await broken.knowledge.start();
+  const built = broken.knowledge.linkingStatus();
+  assert.equal(built.state === "paused" && built.reason, "error");
+  assert.match(built.state === "paused" ? built.message : "", /no python/);
+  assert.equal((await broken.inject("GET", knowledgeRoutes.collections)).status, 200);
+  assert.equal((await broken.inject("POST", knowledgeRoutes.rebuild)).status, 500);
+
+  const failing = recordingLinking({ failStart: true });
+  const h = await harness(t, { enabled: true, over: { linking: failing.factory } });
+  await h.knowledge.start();
+  const started = h.knowledge.linkingStatus();
+  assert.equal(started.state === "paused" && started.reason, "error");
+  assert.match(started.state === "paused" ? started.message : "", /state\.json is unreadable/);
+});
+
+test("worker routes: the worker is the stamped principal only, and must be a worker chat of the run in flight", async (t) => {
+  const linking = recordingLinking();
+  const owners = new Map<string, SessionOwner>([
+    ["w1", { kind: "knowledge-indexer", runId: "kr_1" }],
+    ["w-old", { kind: "knowledge-indexer", runId: "kr_0" }]
+  ]);
+  const h = await harness(t, { enabled: true, over: { linking: linking.factory, session: (id) => (owners.has(id) ? { owner: owners.get(id)! } : { profileId: null }) } });
+  await h.knowledge.start();
+  assert.deepEqual((await h.inject("POST", knowledgeRoutes.workerNext, {}, "w1")).body, { kind: "done", reason: "run-finished" });
+  assert.equal(linking.log.at(-1), "next w1");
+  for (const [payload, agent] of [[{ sessionId: "w1" }, undefined], [{}, "chat-1"], [{}, "w-old"]] as const) {
+    const refused = await h.inject("POST", knowledgeRoutes.workerNext, payload, agent);
+    assert.equal(refused.status, 403, JSON.stringify([payload, agent]));
+    assert.equal(refused.body!.code, "KNOWLEDGE_NOT_A_WORKER");
+  }
+  // Visibility agrees: a worker sees no collection.
+  assert.equal((await h.knowledge.knowledgeForSession("w1")).worker, true);
+});
+
+test("the profiles behind the collection views are listed once and reused until a profile event", async (t) => {
+  const listeners: ((profileId: string) => void)[] = [];
+  const h = await harness(t, { enabled: true, over: { onProfileChange: (listener) => (listeners.push(listener), () => undefined) } });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  const baseline = h.profileReads.list;
+  for (let i = 0; i < 5; i += 1) assert.equal((await h.inject("GET", knowledgeRoutes.collections)).status, 200);
+  assert.equal(h.profileReads.list, baseline, "no listing per request");
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(h.profileReads.list, baseline + 1, "an event re-lists once");
+  await h.inject("GET", knowledgeRoutes.collections);
+  assert.equal(h.profileReads.list, baseline + 1);
+});
