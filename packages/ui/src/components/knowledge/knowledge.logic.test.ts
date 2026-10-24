@@ -139,6 +139,17 @@ describe("the entry form", () => {
     assert.ok("error" in badDate);
   });
 
+  it("refuses before sending what the daemon refuses: an empty title, a date that is not ISO", () => {
+    const original = entry();
+    assert.deepEqual(entryFormPatch(original, { ...entryFormOf(original), title: "  " }), { error: "Give the entry a title." });
+    for (const postedAt of ["Oct 11 2026", "2026/10/11", "11-10-2026"]) {
+      assert.ok("error" in entryFormPatch(original, { ...entryFormOf(original), postedAt }), postedAt);
+    }
+    for (const postedAt of ["2026-10-12", "2026-10-12T09:30", "2026-10-12T09:30:00.000Z", "2026-10-12T09:30:00+02:00"]) {
+      assert.deepEqual(entryFormPatch(original, { ...entryFormOf(original), postedAt }), { patch: { postedAt } }, postedAt);
+    }
+  });
+
   it("knows a relabel alone does not re-link", () => {
     assert.equal(patchNeedsLinking({ collections: ["kc_ads"] }), false);
     assert.equal(patchNeedsLinking({ collections: ["kc_ads"], body: "x" }), true);

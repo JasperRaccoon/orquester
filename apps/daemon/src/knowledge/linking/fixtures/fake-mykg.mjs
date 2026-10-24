@@ -6,6 +6,16 @@
 // `<id>.answer.json` + `<id>.done` (an answered task is reused, never asked again), one Pass 2 task
 // per input file (`batch_per_file`), and `output/nodes.jsonl` / `output/edges.jsonl`.
 //
+// Ingest follows myKG's own bookkeeping (verified against the installed 0.4.10, `step_ingest.py`,
+// `orchestrator.py`, `step_pass2.py`): `intermediate/file_manifest.json` is the corpus. A full run
+// writes it once (a resumed full run skips ingest). An `--update` compares the mirror with it,
+// REWRITES it right away (new hashes in, deleted entries out), then deletes the graph outputs and,
+// in Pass 2, evicts the changed and deleted entries' shards before extracting the changed ones; a
+// file the manifest lists but `raw_extractions.json` does not is extracted too. An update that finds
+// nothing to do touches nothing and exits 0. So an update that dies after its ingest leaves a
+// manifest that already "has" its edits: the next `--update` sees no change, and the evicted
+// entries are lost (and with no change, no graph is written either).
+//
 // Behaviour is steered by `./fake-mykg.json` in the cwd (the myKG dir); every invocation is
 // appended to `./fake-mykg.log` (argv and env) so tests can check what the runner passed.
 //
@@ -102,8 +112,36 @@ async function complete(step, system, user, ctx) {
 async function main() {
   const shardDir = join(intermediate, "raw_extractions_shards");
   mkdirSync(shardDir, { recursive: true });
+  const manifestPath = join(intermediate, "file_manifest.json");
+  const extractedPath = join(intermediate, "raw_extractions.json");
+  const readJson = (path, fallback) => (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : fallback);
+  const hashes = Object.fromEntries(files.map((name) => [name, sha(readFileSync(join(mirror, name), "utf8"))]));
   mark("preprocess", "done");
-  mark("ingest", "done");
+
+  let todo;
+  let evict = [];
+  if (append) {
+    const manifest = readJson(manifestPath, {});
+    const extracted = new Set(readJson(extractedPath, []));
+    const changed = new Set(files.filter((name) => manifest[name] !== hashes[name]));
+    const deleted = Object.keys(manifest).filter((name) => !files.includes(name));
+    for (const name of Object.keys(manifest)) if (!extracted.has(name) && name in hashes) changed.add(name);
+    writeFileSync(manifestPath, JSON.stringify(hashes));
+    mark("ingest", "done");
+    if (changed.size === 0 && deleted.length === 0) {
+      for (const step of STEPS) if (state.steps[step].status !== "done") mark(step, "done");
+      return;
+    }
+    for (const out of ["nodes.jsonl", "edges.jsonl"]) rmSync(join(output, out), { force: true });
+    for (const step of STEPS.slice(STEPS.indexOf("pass2"))) state.steps[step] = { status: "pending" };
+    saveState();
+    todo = [...changed].sort();
+    evict = [...changed, ...deleted];
+  } else {
+    if (!existsSync(manifestPath)) writeFileSync(manifestPath, JSON.stringify(hashes));
+    mark("ingest", "done");
+    todo = Object.keys(readJson(manifestPath, {})).filter((name) => !existsSync(join(shardDir, `${name}.json`))).sort();
+  }
 
   if (!append && !existsSync(join(intermediate, "schema.json"))) {
     mark("pass1", "running");
@@ -117,11 +155,11 @@ async function main() {
   }
 
   mark("pass2", "running");
-  const todo = files.filter((name) => {
-    const shard = join(shardDir, `${name}.json`);
-    return !existsSync(shard) || JSON.parse(readFileSync(shard, "utf8")).sha !== sha(readFileSync(join(mirror, name), "utf8"));
-  });
-  for (const name of readdirSync(shardDir)) if (!files.includes(name.replace(/\.json$/, ""))) rmSync(join(shardDir, name));
+  for (const name of evict) rmSync(join(shardDir, `${name}.json`), { force: true });
+  if (control.failAfterEvict) {
+    process.stderr.write(`RuntimeError: ${control.failAfterEvict}\n`);
+    process.exit(1);
+  }
   const progress = { total_batches: todo.length, completed: 0, failed: 0, batches: {} };
   writeFileSync(join(intermediate, "pass2_progress.json"), JSON.stringify(progress));
   const failedChunks = [];
@@ -137,6 +175,7 @@ async function main() {
     })
   );
   writeFileSync(join(intermediate, "failed_chunks.json"), JSON.stringify(failedChunks));
+  writeFileSync(extractedPath, JSON.stringify(readdirSync(shardDir).map((name) => name.replace(/\.json$/, ""))));
   mark("pass2", "done");
 
   if (control.fail) {

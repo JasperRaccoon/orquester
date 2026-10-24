@@ -1,8 +1,9 @@
 // Test support for the Knowledge Graph runtime installer: a uv release tarball
 // built on the spot, a tiny embedding-model fixture, an in-memory network
 // (GitHub release, PyPI, Hugging Face) and a fake process runner that plays uv
-// (python install, venv, pip install) and `mykg --help` by writing the files
-// the real ones would. Nothing here touches the network or runs Python.
+// (python install, venv, pip install), `mykg --help` and the config check by
+// writing (or reading) the files the real ones would. Nothing here touches the
+// network or runs Python.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -10,8 +11,19 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { parse } from "yaml";
+import { MYKG_CONFIG_FILE } from "../linking/mykg-config.ts";
 import type { CommandOptions, CommandResult, KnowledgeInstallerDeps } from "./installer.ts";
-import { type EmbeddingModelSpec, MYKG_PINNED_VERSION, MYKG_PINNED_WHEEL_SHA256, PYPI, UV_VERSION, type UvBuild } from "./pins.ts";
+import {
+  type EmbeddingModelSpec,
+  MYKG_PINNED_VERSION,
+  MYKG_PINNED_WHEEL_SHA256,
+  PYPI,
+  type TiktokenEncodingSpec,
+  UV_VERSION,
+  type UvBuild,
+  tiktokenCacheKey
+} from "./pins.ts";
 
 const exec = promisify(execFile);
 
@@ -71,6 +83,13 @@ export function makeModel(): { spec: EmbeddingModelSpec; files: Map<string, Buff
   return { spec, files };
 }
 
+/** A one-encoding tiktoken fixture (its URL is served by the fake host). */
+export function makeEncodings(): { specs: TiktokenEncodingSpec[]; files: Map<string, Buffer> } {
+  const bytes = Buffer.from("IQ== 0\nIg== 1\n");
+  const url = "https://blob.invalid/encodings/cl100k_base.tiktoken";
+  return { specs: [{ name: "cl100k_base", url, sha256: sha256(bytes), size: bytes.length }], files: new Map([[url, bytes]]) };
+}
+
 export interface FakeRunCall {
   command: string;
   args: string[];
@@ -91,6 +110,13 @@ export interface FakeKnowledgeHost {
   omitPrompts: Set<string>;
   /** What `mykg --help` answers. */
   smoke: CommandResult;
+  /** The tiktoken encodings the host serves (pass them to the installer). */
+  encodings: TiktokenEncodingSpec[];
+  /**
+   * What the config check (`python -I -c …`) answers; null plays it: the generated config must be
+   * in cwd and select the profile named in argv, and every encoding must be in TIKTOKEN_CACHE_DIR.
+   */
+  configCheck: CommandResult | null;
   /** Make the next `uv <subcommand>` fail with this stderr. */
   failUv: Map<string, string>;
   /** Called at the start of every download (to block or fail one). */
@@ -126,12 +152,37 @@ export function fakeKnowledgeHost(options: {
     calls: { json: [], downloads: [], texts: [], run: [] },
     omitPrompts: new Set(),
     smoke: { exitCode: 0, stdout: "Usage: mykg [OPTIONS] COMMAND [ARGS]...\n\nCommands:\n  extract-graph\n  query\n", stderr: "", timedOut: false },
+    encodings: [],
+    configCheck: null,
     failUv: new Map(),
     onDownload: null,
     pypiDown: false,
     deps: undefined as never
   };
   for (const [path, bytes] of options.model.files) host.downloads.set(options.model.spec.fileUrl(path), bytes);
+  const encodings = makeEncodings();
+  host.encodings = encodings.specs;
+  for (const [url, bytes] of encodings.files) host.downloads.set(url, bytes);
+
+  /** The config check, played: what the real script would find wrong first. */
+  const checkConfig = async (args: readonly string[], opts: CommandOptions): Promise<CommandResult> => {
+    const fail = (stderr: string): CommandResult => ({ exitCode: 1, stdout: "", stderr: `Traceback (most recent call last):\n${stderr}\n`, timedOut: false });
+    if (args[0] !== "-I" || args[1] !== "-c") return fail("error: not the config check");
+    const profile = args[3] ?? "";
+    for (const encoding of host.encodings) {
+      const cached = await readFile(join(opts.env.TIKTOKEN_CACHE_DIR ?? "/nonexistent", tiktokenCacheKey(encoding.url))).catch(() => null);
+      if (!cached || sha256(cached) !== encoding.sha256) {
+        return fail(`RuntimeError: tiktoken tried to download ${encoding.url}: it is not in the runtime's cache`);
+      }
+    }
+    const text = await readFile(join(opts.cwd, MYKG_CONFIG_FILE), "utf8").catch(() => null);
+    if (text === null) return fail("FileNotFoundError: mykg_config.yaml not found.");
+    const doc = parse(text) as { profile?: string; profiles?: Record<string, { provider?: string }> };
+    if (doc.profile !== profile) return fail(`SystemExit: the config selects profile '${doc.profile}', not '${profile}'`);
+    if (!doc.profiles?.[profile]) return fail(`KeyError: "Profile '${profile}' not found in mykg_config.yaml."`);
+    const report = { config: join(opts.cwd, MYKG_CONFIG_FILE), profile, provider: doc.profiles[profile]?.provider, adapter: "AgentAdapter", encoding: "cl100k_base" };
+    return { exitCode: 0, stdout: `${JSON.stringify(report)}\n`, stderr: "", timedOut: false };
+  };
 
   const run = async (command: string, args: readonly string[], opts: CommandOptions): Promise<CommandResult> => {
     host.calls.run.push({ command, args: [...args], env: { ...opts.env }, cwd: opts.cwd });
@@ -172,6 +223,7 @@ export function fakeKnowledgeHost(options: {
       return { exitCode: 2, stdout: "", stderr: `error: unknown uv command ${sub}\n`, timedOut: false };
     }
     if (command.endsWith("/bin/mykg")) return { ...host.smoke };
+    if (command.endsWith("/bin/python")) return host.configCheck ? { ...host.configCheck } : checkConfig(args, opts);
     return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnError: "ENOENT" };
   };
 

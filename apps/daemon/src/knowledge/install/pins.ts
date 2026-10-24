@@ -2,8 +2,9 @@
  * What the Knowledge Graph runtime installs, pinned (spec "Install and
  * updates"). Moving a pin means re-checking it here: the uv release's
  * published sha256 files, the myKG prompts against `../mykg-prompts/<line>/`,
- * the lock under `./locks/`, and the model files' hashes.
+ * the lock under `./locks/`, the tiktoken encodings, and the model files' hashes.
  */
+import { createHash } from "node:crypto";
 import type { HostLibc } from "../../plugins/ts-rust/installer.ts";
 
 // ---- uv (astral-sh/uv) -----------------------------------------------------------------------
@@ -79,6 +80,40 @@ export const PYPI = "https://pypi.org/pypi";
 export const MYKG_LOCKS: Readonly<Record<string, string>> = {
   "0.4.10": "mykg-0.4.10.txt"
 };
+
+// ---- tiktoken's encodings --------------------------------------------------------------------
+
+/** A tiktoken BPE file the runtime holds, so myKG never downloads it on first use. */
+export interface TiktokenEncodingSpec {
+  /** e.g. "cl100k_base" (what `chunking.tiktoken_encoding` names). */
+  name: string;
+  /** The URL tiktoken loads it from; its cache file is named by the sha1 of this exact string. */
+  url: string;
+  /** sha256 hex of the file: the `expected_hash` tiktoken checks a cached copy against. */
+  sha256: string;
+  size: number;
+}
+
+/**
+ * The encodings myKG loads (tiktoken 0.13.0 `tiktoken_ext/openai_public.py`). myKG 0.4.10
+ * calls `tiktoken.get_encoding` only with `chunking.tiktoken_encoding` (`chunker.py`; the
+ * `context_calculator` utility, which linking never runs, defaults to the same), and the
+ * generated config sets `MYKG_TIKTOKEN_ENCODING` (cl100k_base). No other package in the lock
+ * loads an encoding.
+ */
+export const TIKTOKEN_ENCODINGS: readonly TiktokenEncodingSpec[] = [
+  {
+    name: "cl100k_base",
+    url: "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+    sha256: "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+    size: 1_681_126
+  }
+];
+
+/** tiktoken's cache file name for `url` (`tiktoken/load.py` `read_file_cached`: sha1 of the URL). */
+export function tiktokenCacheKey(url: string): string {
+  return createHash("sha1").update(url).digest("hex");
+}
 
 // ---- the embedding model ---------------------------------------------------------------------
 

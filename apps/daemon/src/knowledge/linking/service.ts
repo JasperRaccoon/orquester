@@ -20,7 +20,10 @@
  *   sooner); cancelled → back in the pending set.
  * - A daemon restart re-runs an interrupted run under the same id (a survivor child is stopped
  *   first): `--update` resumes from myKG's finished steps, cached shards and answered tasks; a
- *   full/rebuild run resumes its session. Worker chats still working are adopted.
+ *   full/rebuild run resumes its session. Worker chats still working are adopted. Every update
+ *   after one that did not succeed (interrupted, failed, cancelled) first puts back the last good
+ *   run's `file_manifest.json` (`mykg-files.ts` `guardMykgManifest`), else myKG would never see
+ *   that run's edits and deletes again.
  *
  * Schema growth policy (spec: thresholds are the builder's call). myKG's `detect-schema-drift`
  * only reports schema entries the graph no longer uses (a prune signal), not new topics, so growth
@@ -74,7 +77,15 @@ import type {
 } from "../ports.ts";
 import { InboxBroker, type InboxWatch } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
-import { isMykgSessionName, mykgSessionPaths, readFailedEntryIds, readMykgProgress } from "./mykg-files.ts";
+import {
+  commitMykgManifest,
+  guardMykgManifest,
+  isMykgSessionName,
+  mykgSessionPaths,
+  readFailedEntryIds,
+  readManifestEntryIds,
+  readMykgProgress
+} from "./mykg-files.ts";
 import { startMykgRun, stopStaleMykg, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
@@ -165,6 +176,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private startsAt: number | null = null;
   private lastChangeAt: number | null = null;
   private starting = false;
+  /** `launch` is between its first await and `this.active` (so no second child is spawned beside it). */
+  private launching = false;
   private stopped = false;
   /** Changes reported before `start` loaded the state. */
   private early: KnowledgeEntryChange[] = [];
@@ -401,12 +414,13 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if (!state || this.active || !this.canRun()) return;
     const now = this.opts.clock.now().getTime();
     let at: number;
-    if (state.rebuildRequested) {
-      at = now;
-    } else if (state.pause?.reason === "error") {
+    // A failed run (a failed rebuild included) waits for its retry; asking again clears the pause.
+    if (state.pause?.reason === "error") {
       const resumes = state.pause.resumesAt ? Date.parse(state.pause.resumesAt) : Number.NaN;
       if (!Number.isFinite(resumes)) return;
       at = resumes;
+    } else if (state.rebuildRequested) {
+      at = now;
     } else if (state.pendingEntryIds.length > 0 && state.pendingSince) {
       const first = Date.parse(state.pendingSince);
       const last = this.lastChangeAt ?? now;
@@ -423,7 +437,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
 
   private async maybeStart(): Promise<void> {
     const state = this.state;
-    if (!state || this.active || this.starting || !this.canRun()) return;
+    if (!state || this.active || this.starting || this.launching || !this.canRun()) return;
+    if (state.currentRun) {
+      // A recorded run that did not get going (a failed resume): it goes first, under its id.
+      await this.launch(state.currentRun, { resume: true });
+      return;
+    }
     if (state.pause?.reason === "error") state.pause = null;
     const mode = this.nextMode();
     if (mode === null) {
@@ -506,6 +525,16 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   // --- a run ---------------------------------------------------------------------------------------
 
   private async launch(record: KnowledgeCurrentRunRecord, options: { resume: boolean }): Promise<void> {
+    if (this.launching) return;
+    this.launching = true;
+    try {
+      await this.launchNow(record, options);
+    } finally {
+      this.launching = false;
+    }
+  }
+
+  private async launchNow(record: KnowledgeCurrentRunRecord, options: { resume: boolean }): Promise<void> {
     const state = this.requireState();
     const runtime = this.opts.runtime.current();
     if (!runtime || this.active) return;
@@ -516,6 +545,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     await mkdir(join(this.homeDir, "tmp"), { recursive: true, mode: 0o700 });
     await mkdir(this.workersDir, { recursive: true, mode: 0o700 });
     await writeMykgConfig(this.mykgDir, { concurrency: settings.concurrency, model: settings.model });
+    // An update after one that did not succeed starts from the last good run's manifest (`guardMykgManifest`).
+    if ((record.mode === "update" || record.mode === "grow-schema") && record.session && isMykgSessionName(record.session)) {
+      await guardMykgManifest(mykgSessionPaths(this.mykgDir, record.session));
+    }
+    // The daemon began stopping, or the plugin went off, meanwhile: the run stays recorded for later.
+    if (!this.canRun() || this.active) return;
 
     const broker = new InboxBroker({
       clock: this.opts.clock,
@@ -708,8 +743,18 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       }
       if (outcome === "ok") {
         const failed = new Set(await readFailedEntryIds(paths.intermediate));
-        const linked = existing.filter((id) => !failed.has(id));
-        const notLinked = existing.filter((id) => failed.has(id));
+        // An entry myKG's manifest does not list was never ingested (a resumed full run or rebuild
+        // skips ingest): it is not in the graph, so it waits for the next run instead.
+        const ingested = await readManifestEntryIds(paths.intermediate);
+        const missing = ingested ? existing.filter((id) => !ingested.has(id)) : [];
+        if (missing.length > 0) {
+          state.pendingEntryIds = [...new Set([...state.pendingEntryIds, ...missing])];
+          state.pendingSince ??= this.opts.clock.now().toISOString();
+        }
+        const inGraph = existing.filter((id) => !missing.includes(id));
+        const linked = inGraph.filter((id) => !failed.has(id));
+        const notLinked = inGraph.filter((id) => failed.has(id));
+        await commitMykgManifest(paths).catch(() => undefined);
         if (linked.length > 0) await this.opts.store.setLinkState(linked, "linked");
         if (notLinked.length > 0) await this.opts.store.setLinkState(notLinked, "failed");
         const previous = state.session;

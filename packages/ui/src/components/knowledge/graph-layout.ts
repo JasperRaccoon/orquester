@@ -91,3 +91,121 @@ export function spread(
   for (const [id, { x, y }] of Object.entries(positions)) out[id] = { x: cx + (x - cx) * scale, y: cy + (y - cy) * scale };
   return out;
 }
+
+export type Positions = Record<string, { x: number; y: number }>;
+
+/** The part of a dedicated `Worker` the layouts use (tests pass a fake). */
+export interface LayoutWorkerLike {
+  onmessage: ((event: MessageEvent<LayoutResponse>) => void) | null;
+  onerror: ((event: ErrorEvent) => void) | null;
+  postMessage(message: LayoutRequest): void;
+  terminate(): void;
+}
+
+/**
+ * Arranges graphs off the main thread, one at a time. New data cancels the
+ * layout in flight: a worker still arranging an older graph is terminated
+ * (its answer could only be dropped, and the new graph would wait behind it)
+ * and a fresh one takes the new request. Without a worker factory it runs inline.
+ */
+export class Layouts {
+  private worker: LayoutWorkerLike | null = null;
+  private seq = 0;
+  /** The request the worker is arranging; 0 when it is idle. */
+  private busy = 0;
+  private waiting: ((answer: LayoutResponse) => void) | null = null;
+
+  constructor(private readonly createWorker: (() => LayoutWorkerLike) | null) {}
+
+  run(request: Omit<LayoutRequest, "id">, done: (positions: Positions) => void, failed: (message: string) => void): void {
+    this.stopBusyWorker();
+    const id = ++this.seq;
+    const settle = (answer: LayoutResponse) => {
+      if (answer.id !== this.seq) return;
+      if ("positions" in answer) done(answer.positions);
+      else failed(answer.error);
+    };
+    if (!this.createWorker) {
+      setTimeout(() => {
+        if (id !== this.seq) return;
+        try {
+          settle({ id, positions: computeLayout(request) });
+        } catch (error) {
+          settle({ id, error: error instanceof Error ? error.message : String(error) });
+        }
+      }, 16);
+      return;
+    }
+    if (!this.worker) {
+      const worker = this.createWorker();
+      worker.onmessage = (event: MessageEvent<LayoutResponse>) => {
+        if (this.worker !== worker) return;
+        if (event.data.id === this.busy) this.busy = 0;
+        this.waiting?.(event.data);
+      };
+      worker.onerror = (event) => {
+        event.preventDefault();
+        if (this.worker !== worker) return;
+        const failedId = this.busy;
+        // A worker that threw is not trusted with the next graph.
+        this.busy = 0;
+        this.worker = null;
+        worker.terminate();
+        this.waiting?.({ id: failedId, error: event.message || "The layout worker failed." });
+      };
+      this.worker = worker;
+    }
+    this.waiting = settle;
+    this.busy = id;
+    this.worker.postMessage({ id, ...request });
+  }
+
+  /** Drop the layout in flight (its worker too, when one is busy with it). */
+  cancel(): void {
+    this.seq += 1;
+    this.stopBusyWorker();
+  }
+
+  dispose(): void {
+    this.cancel();
+    this.worker?.terminate();
+    this.worker = null;
+  }
+
+  private stopBusyWorker(): void {
+    if (this.busy === 0 || !this.worker) return;
+    this.worker.terminate();
+    this.worker = null;
+    this.busy = 0;
+  }
+}
+
+/** The viewport calls a deferred fit needs (`cytoscape.Core` satisfies it). */
+export interface FitTarget {
+  width(): number;
+  height(): number;
+  fit(eles?: undefined, padding?: number): unknown;
+}
+
+export const FIT_PADDING = 30;
+
+/**
+ * Fits the graph to its container, or — while the container has no size (the
+ * tab is hidden; a refetch laid the graph out meanwhile) — remembers to, and
+ * fits when `whenSized` sees a size again. Fitting a zero-size viewport would
+ * leave the graph at the minimum zoom when the tab comes back.
+ */
+export class DeferredFit {
+  private pending = false;
+
+  fit(cy: FitTarget): void {
+    if (cy.width() > 0 && cy.height() > 0) {
+      this.pending = false;
+      cy.fit(undefined, FIT_PADDING);
+    } else this.pending = true;
+  }
+
+  whenSized(cy: FitTarget): void {
+    if (this.pending) this.fit(cy);
+  }
+}

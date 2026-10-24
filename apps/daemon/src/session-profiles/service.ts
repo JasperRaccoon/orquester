@@ -150,6 +150,7 @@ export class SessionProfileService {
   }
 
   async readItem(profileId: string, itemId: string): Promise<SessionProfileItemDetail> {
+    await this.assertUserProfile(profileId);
     const stored = await this.store.readItem(profileId, itemId);
     const item = toWireItem(stored.record, stored.cached === true);
     if (item === null) throw sessionProfileErrors.invalidItem(`Item "${itemId}" applies to no agent this build knows.`);
@@ -193,7 +194,8 @@ export class SessionProfileService {
     return { profile: this.changed(await this.store.deleteItem(profileId, itemId, revision)) };
   }
 
-  readInstructions(profileId: string): Promise<SessionProfileInstructionsResponse> {
+  async readInstructions(profileId: string): Promise<SessionProfileInstructionsResponse> {
+    await this.assertUserProfile(profileId);
     return this.store.readInstructions(profileId);
   }
 
@@ -203,32 +205,42 @@ export class SessionProfileService {
 
   async prepareStatus(profileId: string): Promise<SessionProfilePrepareStatusResponse> {
     const { manifest } = await this.store.read(profileId);
+    if (isManaged(manifest)) throw sessionProfileErrors.notFound(profileId);
     const revision = String(manifest.revision);
     return { profileId, revision, agents: this.prepareStatusSource({ profileId, revision, updatedAt: manifest.updatedAt }) };
   }
 
   // --- Filling a profile (spec §4.5; `imports.ts`) -----------------------------------------------
 
-  globalSource(profileId: string, agent: SessionProfileAgentId): Promise<SessionProfileGlobalSourceResponse> {
-    return this.requireImports().globalSource(profileId, agent);
+  async globalSource(profileId: string, agent: SessionProfileAgentId): Promise<SessionProfileGlobalSourceResponse> {
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return imports.globalSource(profileId, agent);
   }
 
   async importFromGlobal(profileId: string, request: ImportSessionProfileFromGlobalRequest): Promise<SessionProfileImportResponse> {
-    return this.imported(await this.requireImports().importFromGlobal(profileId, request));
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return this.imported(await imports.importFromGlobal(profileId, request));
   }
 
-  scanGit(profileId: string, url: string): Promise<ProfileImportScanResponse> {
-    return this.requireImports().scanGit(profileId, url);
+  async scanGit(profileId: string, url: string): Promise<ProfileImportScanResponse> {
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return imports.scanGit(profileId, url);
   }
 
   /** `filePath` stays the caller's. */
-  scanUpload(profileId: string, name: string, filePath: string): Promise<ProfileImportScanResponse> {
-    return this.requireImports().scanUpload(profileId, name, filePath);
+  async scanUpload(profileId: string, name: string, filePath: string): Promise<ProfileImportScanResponse> {
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return imports.scanUpload(profileId, name, filePath);
   }
 
   /** The refusals an upload gets before its body is read (no imports, no such profile). */
   async assertCanScanUpload(profileId: string): Promise<void> {
     await this.requireImports().assertCanScan(profileId);
+    await this.assertUserProfile(profileId);
   }
 
   /** The refusals a profile import gets before its body is read. */
@@ -237,20 +249,29 @@ export class SessionProfileService {
   }
 
   async takeScan(profileId: string, importId: string, request: TakeSessionProfileImportRequest): Promise<SessionProfileImportResponse> {
-    return this.imported(await this.requireImports().takeScan(profileId, importId, request));
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return this.imported(await imports.takeScan(profileId, importId, request));
   }
 
   async copyFrom(profileId: string, request: CopySessionProfileItemsRequest): Promise<SessionProfileImportResponse> {
-    return this.imported(await this.requireImports().copyFrom(profileId, request));
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    await this.assertUserProfile(request.fromProfileId);
+    return this.imported(await imports.copyFrom(profileId, request));
   }
 
   async addPlugin(profileId: string, request: AddSessionProfilePluginRequest): Promise<SessionProfileImportResponse> {
-    return this.imported(await this.requireImports().addPlugin(profileId, request));
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return this.imported(await imports.addPlugin(profileId, request));
   }
 
   /** The profile's portable `.zip` — no secret values (`export.ts`). */
-  exportProfile(profileId: string): Promise<{ fileName: string; data: Buffer }> {
-    return this.requireImports().exportProfile(profileId);
+  async exportProfile(profileId: string): Promise<{ fileName: string; data: Buffer }> {
+    const imports = this.requireImports();
+    await this.assertUserProfile(profileId);
+    return imports.exportProfile(profileId);
   }
 
   /** A NEW profile from an export `.zip` at `filePath` (the caller's file). */
@@ -261,6 +282,12 @@ export class SessionProfileService {
 
   private imported(result: StoredImportResult): SessionProfileImportResponse {
     return { profile: this.changed(result.profile), itemIds: result.itemIds, notes: result.notes };
+  }
+
+  /** A user route on a managed profile (`manifest.managed`) answers 404, as for a missing one. */
+  private async assertUserProfile(profileId: string): Promise<void> {
+    const { manifest } = await this.store.read(profileId);
+    if (isManaged(manifest)) throw sessionProfileErrors.notFound(profileId);
   }
 
   private requireImports(): SessionProfileImports {

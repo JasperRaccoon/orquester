@@ -12,9 +12,9 @@
  * - schema growth: `--session <name> --update --append-with-grow-schema` (locked Pass 1 over the
  *   changed entries may add concepts/properties, then back-fills).
  *
- * The child's environment is minimal: `HOME` (and the XDG and tiktoken caches) inside the plugin
- * dir, `PATH` = the venv's bin then the system dirs, UTF-8 locale, unbuffered Python. No provider
- * key, no account variable, nothing else of the daemon's env: myKG never calls an LLM itself (its
+ * The child's environment is minimal: `HOME` (and the XDG dirs) inside the plugin dir, tiktoken's
+ * cache in the runtime (the installer prefetched its encodings), `PATH` = the venv's bin then the
+ * system dirs, UTF-8 locale, unbuffered Python. No provider key, no account variable, nothing else of the daemon's env: myKG never calls an LLM itself (its
  * agent provider only writes inbox files).
  *
  * Success is exit 0 AND `output/nodes.jsonl` present (a non-blocking `validate_graph` failure exits
@@ -73,7 +73,7 @@ export function mykgArgs(spec: Pick<MykgRunSpec, "inputDir" | "mode" | "session"
 }
 
 /** The child's whole environment (never a spread of the daemon's). */
-export function mykgEnv(runtime: Pick<KnowledgeRuntime, "mykgBin">, homeDir: string): Record<string, string> {
+export function mykgEnv(runtime: Pick<KnowledgeRuntime, "mykgBin" | "tiktokenCacheDir">, homeDir: string): Record<string, string> {
   const venvBin = dirname(runtime.mykgBin);
   return {
     HOME: homeDir,
@@ -87,8 +87,8 @@ export function mykgEnv(runtime: Pick<KnowledgeRuntime, "mykgBin">, homeDir: str
     XDG_CACHE_HOME: join(homeDir, ".cache"),
     XDG_CONFIG_HOME: join(homeDir, ".config"),
     XDG_DATA_HOME: join(homeDir, ".local", "share"),
-    // tiktoken's encoding cache (cl100k_base): kept, so it is fetched at most once.
-    TIKTOKEN_CACHE_DIR: join(homeDir, ".cache", "tiktoken"),
+    // The runtime's encoding cache, filled at install: tiktoken never goes to the network.
+    TIKTOKEN_CACHE_DIR: runtime.tiktokenCacheDir,
     TMPDIR: join(homeDir, "tmp"),
     NO_COLOR: "1",
     TERM: "dumb"

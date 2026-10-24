@@ -4,9 +4,11 @@ import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import { promisify } from "node:util";
+import { MYKG_CONFIG_FILE, MYKG_PROFILE, MYKG_TIKTOKEN_ENCODING, buildMykgConfig } from "../linking/mykg-config.ts";
 import {
   type MykgRelease,
   KnowledgeInstallError,
+  MYKG_CONFIG_CHECK,
   MYKG_LOCKS_DIR,
   installKnowledgeRuntime,
   knowledgeHomeDir,
@@ -21,13 +23,21 @@ import {
   resolveMykgRelease
 } from "./installer.ts";
 import { MYKG_PROMPTS_ROOT, overlayDigest, overlayFiles } from "./overlay.ts";
-import { MYKG_LOCKS, MYKG_PINNED_VERSION, MYKG_PINNED_WHEEL_SHA256, UV_BUILDS, uvBuildFor } from "./pins.ts";
+import {
+  MYKG_LOCKS,
+  MYKG_PINNED_VERSION,
+  MYKG_PINNED_WHEEL_SHA256,
+  TIKTOKEN_ENCODINGS,
+  UV_BUILDS,
+  tiktokenCacheKey,
+  uvBuildFor
+} from "./pins.ts";
 import { type FakeKnowledgeHost, fakeKnowledgeHost, makeModel, makeUvBuild, pypiWheel, sha256, tempRoot } from "./testing.ts";
 
 // The runtime installer over a temp runtime dir, an in-memory network (uv's
 // GitHub release, PyPI, the model files) and a fake uv/mykg runner
-// (./testing.ts): staging, verification, the prompt overlay, the smoke test,
-// the atomic rename, and that no child sees the daemon's env or HOME.
+// (./testing.ts): staging, verification, the prompt overlay, tiktoken's
+// encodings, the smoke test (with the generated config), the atomic rename, and that no child sees the daemon's env or HOME.
 
 const PINNED: MykgRelease = { version: MYKG_PINNED_VERSION, wheelSha256: MYKG_PINNED_WHEEL_SHA256 };
 const NEWER_SHA = "a".repeat(64);
@@ -62,7 +72,13 @@ async function harness(t: TestContext): Promise<Harness> {
     uv,
     model,
     install: (release = PINNED, signal = new AbortController().signal) =>
-      installKnowledgeRuntime(runtimeDir, release, host.deps, { uv: uv.build, env: DAEMON_ENV, signal, model: model.spec })
+      installKnowledgeRuntime(runtimeDir, release, host.deps, {
+        uv: uv.build,
+        env: DAEMON_ENV,
+        signal,
+        model: model.spec,
+        encodings: host.encodings
+      })
   };
 }
 
@@ -110,6 +126,12 @@ test("the pinned release installs from the hashed lock into versions/<v>/ with t
     assert.deepEqual(await readFile(join(prompts, file)), await readFile(join(MYKG_PROMPTS_ROOT, "0.4", file)), file);
   }
   assert.equal(await readFile(join(prompts, "feedback", "user_template.txt"), "utf8"), "UPSTREAM feedback/user_template.txt\n");
+  // tiktoken's encodings sit in the runtime's cache under tiktoken's own names.
+  assert.equal(runtime.tiktokenCacheDir, join(versionDir, "tiktoken"));
+  const [encoding] = h.host.encodings;
+  assert.ok(encoding);
+  assert.deepEqual(await list(runtime.tiktokenCacheDir), [tiktokenCacheKey(encoding.url)]);
+  assert.equal(sha256(await readFile(join(runtime.tiktokenCacheDir, tiktokenCacheKey(encoding.url)))), encoding.sha256);
 
   const manifest = await readKnowledgeManifest(versionDir);
   assert.equal(manifest?.mykgVersion, MYKG_PINNED_VERSION);
@@ -117,9 +139,11 @@ test("the pinned release installs from the hashed lock into versions/<v>/ with t
   assert.equal(manifest?.overlay.digest, await overlayDigest("0.4"));
   assert.deepEqual(manifest?.overlay.files, overlaid);
   assert.equal(manifest?.embeddingModel.revision, h.model.spec.revision);
+  assert.deepEqual(manifest?.tiktokenEncodings, ["cl100k_base"]);
   assert.equal(await knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION, { model: h.model.spec }), true);
 
-  // The steps, in order: python, venv, pip from the shipped lock with every hash, then the smoke test.
+  // The steps, in order: python, venv, pip from the shipped lock with every hash, then the smoke
+  // test: `mykg --help` and the config check.
   const runs = h.host.calls.run;
   assert.deepEqual(
     runs.map((call) => [call.command.split("/").at(-1), call.args[0]]),
@@ -127,9 +151,19 @@ test("the pinned release installs from the hashed lock into versions/<v>/ with t
       ["uv", "python"],
       ["uv", "venv"],
       ["uv", "pip"],
-      ["mykg", "--help"]
+      ["mykg", "--help"],
+      ["python", "-I"]
     ]
   );
+  // The config check: the venv's python, isolated, on linking's generated config in a dir of its
+  // own, the profile it must select, and the staged tiktoken cache (which became versions/<v>/tiktoken).
+  const check = runs[4];
+  assert.ok(check);
+  assert.deepEqual(check.args.slice(0, 4), ["-I", "-c", MYKG_CONFIG_CHECK, MYKG_PROFILE]);
+  assert.ok(check.cwd.startsWith(knowledgeStagingDir(h.runtimeDir)));
+  assert.equal(check.args[4], join(check.cwd, "intermediate"));
+  assert.match(String(check.env.TIKTOKEN_CACHE_DIR), /\/runtime\/tiktoken$/);
+  assert.equal(runs[3]?.env.TIKTOKEN_CACHE_DIR, check.env.TIKTOKEN_CACHE_DIR);
   assert.deepEqual(runs[0]?.args, ["python", "install", "3.12", "--no-bin"]);
   assert.ok(runs[1]?.args.includes("--relocatable"));
   const pip = runs[2]?.args ?? [];
@@ -210,7 +244,8 @@ test("tar unpacks uv with the runtime's env too, not the daemon's", async (t) =>
     uv: h.uv.build,
     env: { ...DAEMON_ENV, PATH: `${bin}:/usr/bin:/bin` },
     signal: new AbortController().signal,
-    model: h.model.spec
+    model: h.model.spec,
+    encodings: h.host.encodings
   });
   const env = await readFile(seen, "utf8").catch(() => "");
   assert.match(env, new RegExp(`^HOME=${knowledgeHomeDir(h.runtimeDir)}$`, "m"), "tar ran with the runtime's HOME");
@@ -252,6 +287,11 @@ test("each failing step is named and leaves versions/ as it was", async (t) => {
   h.host.smoke = { exitCode: 0, stdout: "Usage: mykg\n", stderr: "", timedOut: false };
   await failsAt(h.install(), "smoke-test", /no extract-graph/);
   h.host.smoke = { exitCode: 0, stdout: "extract-graph\n", stderr: "", timedOut: false };
+  const encodingUrl = h.host.encodings[0]?.url ?? "";
+  const encodingBytes = h.host.downloads.get(encodingUrl) ?? Buffer.alloc(0);
+  h.host.downloads.set(encodingUrl, Buffer.from("tampered"));
+  await failsAt(h.install(), "tiktoken", /cl100k_base encoding does not match its sha256/);
+  h.host.downloads.set(encodingUrl, encodingBytes);
   h.host.downloads.set(h.model.spec.fileUrl("onnx/model_quantized.onnx"), Buffer.from("other bytes"));
   await failsAt(h.install(), "model", /model_quantized\.onnx does not match its sha256/);
   h.host.downloads.delete(h.model.spec.fileUrl("config.json"));
@@ -259,6 +299,58 @@ test("each failing step is named and leaves versions/ as it was", async (t) => {
 
   assert.deepEqual(await readKnowledgeManifest(knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION)), before);
   assert.deepEqual(await list(knowledgeStagingDir(h.runtimeDir)), []);
+});
+
+test("a myKG that rejects the generated config fails the install at the smoke test, naming why", async (t) => {
+  const h = await harness(t);
+  h.host.configCheck = {
+    exitCode: 1,
+    stdout: "",
+    stderr: 'Traceback (most recent call last):\n  File "<string>", line 9, in <module>\nKeyError: \'per_file_token_target\'\n',
+    timedOut: false
+  };
+  await failsAt(
+    h.install({ version: "0.4.11", wheelSha256: NEWER_SHA }),
+    "smoke-test",
+    /^myKG 0\.4\.11 rejected the generated config \(profile agent-claude-code\): .*KeyError: 'per_file_token_target'$/
+  );
+  // Exit 0 without the report is no pass either.
+  h.host.configCheck = { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+  await failsAt(h.install(), "smoke-test", /rejected the generated config/);
+  h.host.configCheck = { exitCode: null, stdout: "", stderr: "", timedOut: true };
+  await failsAt(h.install(), "smoke-test", /the config check did not finish/);
+  assert.deepEqual(await list(join(h.runtimeDir, "versions")), []);
+  assert.ok(!h.host.calls.downloads.some((url) => url.startsWith("https://hf.invalid/")), "no model download after a failed smoke test");
+  assert.deepEqual(await list(knowledgeStagingDir(h.runtimeDir)), []);
+});
+
+test("the config check runs offline: an encoding the install did not fetch fails it", async (t) => {
+  const h = await harness(t);
+  // The installer is given no encodings; the (played) myKG still loads cl100k_base.
+  const install = installKnowledgeRuntime(h.runtimeDir, PINNED, h.host.deps, {
+    uv: h.uv.build,
+    env: DAEMON_ENV,
+    signal: new AbortController().signal,
+    model: h.model.spec,
+    encodings: []
+  });
+  await failsAt(install, "smoke-test", /rejected the generated config .*tiktoken tried to download/);
+});
+
+test("the pinned encodings are the one the generated config loads, under tiktoken's cache names", () => {
+  const profile = (buildMykgConfig({ concurrency: 4 }).profiles as Record<string, any>)[MYKG_PROFILE];
+  assert.equal(profile.pipeline.chunking.tiktoken_encoding, MYKG_TIKTOKEN_ENCODING);
+  assert.deepEqual(
+    TIKTOKEN_ENCODINGS.map((encoding) => encoding.name),
+    [MYKG_TIKTOKEN_ENCODING]
+  );
+  const [cl100k] = TIKTOKEN_ENCODINGS;
+  // tiktoken 0.13.0: the URL and expected_hash in tiktoken_ext/openai_public.py; the cache key is sha1(url).
+  assert.equal(cl100k?.url, "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken");
+  assert.equal(cl100k?.sha256, "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7");
+  assert.equal(tiktokenCacheKey(cl100k?.url ?? ""), "9b5ad71b2ce5302211f9c61530b329a4922fc6a4");
+  assert.equal(MYKG_CONFIG_FILE, "mykg_config.yaml");
+  assert.match(MYKG_CONFIG_CHECK, /tiktoken\.load\.read_file = offline/);
 });
 
 test("a leftover dir of the same version is replaced; a cancelled install leaves nothing", async (t) => {
@@ -288,9 +380,9 @@ test("an invalid release is refused before anything is downloaded", async (t) =>
   assert.deepEqual(h.host.calls.downloads, []);
 });
 
-test("readiness: the manifest, the entry points, every model file, and (when asked) the shipped overlay", async (t) => {
+test("readiness: the manifest, the entry points, every model file, and (when asked) the shipped overlay and encodings", async (t) => {
   const h = await harness(t);
-  const ready = (options: { overlayDigestNow?: string } = {}) =>
+  const ready = (options: { overlayDigestNow?: string; encodings?: typeof h.host.encodings } = {}) =>
     knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION, { ...options, model: h.model.spec });
   assert.equal(await ready(), false, "nothing installed");
   await h.install();
@@ -298,6 +390,10 @@ test("readiness: the manifest, the entry points, every model file, and (when ask
   assert.equal(await ready({ overlayDigestNow: "f".repeat(64) }), false, "installed with another overlay");
   assert.equal(await knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION), false, "another model pin");
   const runtime = knowledgeRuntimeOf(h.runtimeDir, MYKG_PINNED_VERSION, h.model.spec);
+  assert.equal(await ready({ encodings: h.host.encodings }), true);
+  await rm(join(runtime.tiktokenCacheDir, tiktokenCacheKey(h.host.encodings[0]?.url ?? "")));
+  assert.equal(await ready({ encodings: h.host.encodings }), false, "an encoding is gone");
+  assert.equal(await ready(), true, "it still runs without one (tiktoken would fetch it)");
   await rm(join(runtime.embeddingModelDir, "Fixture", "mini-model", "config.json"));
   assert.equal(await ready(), false, "a model file is gone");
 });

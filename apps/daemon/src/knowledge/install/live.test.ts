@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 import { detectHostLibc } from "../../plugins/ts-rust/installer.ts";
+import { MYKG_PROFILE, writeMykgConfig } from "../linking/mykg-config.ts";
 import {
+  MYKG_CONFIG_CHECK,
   defaultKnowledgeInstallerDeps,
   installKnowledgeRuntime,
   knowledgeHomeDir,
@@ -17,12 +19,12 @@ import {
   sha256Hex
 } from "./installer.ts";
 import { overlayApplied, overlayDigest } from "./overlay.ts";
-import { EMBEDDING_MODEL, MYKG_LINE, MYKG_PINNED_VERSION, uvBuildFor } from "./pins.ts";
+import { EMBEDDING_MODEL, MYKG_LINE, MYKG_PINNED_VERSION, TIKTOKEN_ENCODINGS, tiktokenCacheKey, uvBuildFor } from "./pins.ts";
 import { tempRoot } from "./testing.ts";
 
 // The real install, over the network, into a temp dir: uv from GitHub, CPython
-// 3.12, myKG from PyPI with the shipped lock, the overlay, the model from
-// Hugging Face. Off unless ORQUESTER_KG_LIVE_INSTALL=1 (a few minutes and a
+// 3.12, myKG from PyPI with the shipped lock, the overlay, tiktoken's
+// encodings, the config smoke test, the model from Hugging Face. Off unless ORQUESTER_KG_LIVE_INSTALL=1 (a few minutes and a
 // few hundred MB). Keep the dir for a look with ORQUESTER_KG_LIVE_KEEP=1.
 
 const live = process.env.ORQUESTER_KG_LIVE_INSTALL === "1";
@@ -70,6 +72,27 @@ test("live: the pinned runtime installs, relocates and runs", { skip: !live, tim
   const libDir = (await readdir(join(venv, "lib"))).find((name) => name.startsWith("python3."));
   assert.ok(libDir);
   assert.equal(await overlayApplied(MYKG_LINE, join(venv, "lib", libDir, "site-packages", "mykg", "prompts")), true);
+
+  // tiktoken's encodings, and the config check again from the final place: the generated config
+  // loads and the encoding comes from the runtime's cache with tiktoken's downloader disabled.
+  for (const encoding of TIKTOKEN_ENCODINGS) {
+    assert.equal(await sha256Hex(join(runtime.tiktokenCacheDir, tiktokenCacheKey(encoding.url))), encoding.sha256, encoding.name);
+  }
+  const mykgDir = join(root, "mykg");
+  await mkdir(mykgDir);
+  await writeMykgConfig(mykgDir, { concurrency: 4 });
+  const check = await runCommand(
+    runtime.pythonBin,
+    ["-I", "-c", MYKG_CONFIG_CHECK, MYKG_PROFILE, join(mykgDir, "intermediate")],
+    { cwd: mykgDir, env: { ...env, TIKTOKEN_CACHE_DIR: runtime.tiktokenCacheDir }, timeoutMs: 60_000, signal }
+  );
+  assert.equal(check.exitCode, 0, check.stderr);
+  const report = JSON.parse(check.stdout.trim().split("\n").at(-1) ?? "");
+  assert.deepEqual(
+    { profile: report.profile, provider: report.provider, adapter: report.adapter, encoding: report.encoding },
+    { profile: MYKG_PROFILE, provider: "agent", adapter: "AgentAdapter", encoding: "cl100k_base" }
+  );
+  t.diagnostic(`config check: ${check.stdout.trim()}`);
 
   for (const file of EMBEDDING_MODEL.files) {
     const path = join(runtime.embeddingModelDir, ...EMBEDDING_MODEL.id.split("/"), ...file.path.split("/"));

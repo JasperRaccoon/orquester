@@ -18,25 +18,18 @@ import Fastify from "fastify";
 import { KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeLinkingState, type KnowledgeStatus, type SessionOwner } from "@orquester/api";
 import { knowledgeEntriesDir, knowledgeGraphPluginDir } from "@orquester/config";
 
+import { FAKE_RUNTIME } from "./linking/testing.ts";
 import type { KnowledgeEntryChange } from "./ports.ts";
 import { silentLogger } from "./search/test-fakes.ts";
 import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory, type KnowledgeServiceOptions } from "./service.ts";
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
 
-const RUNTIME = {
-  mykgVersion: "0.4.10",
-  mykgBin: "/x/mykg",
-  pythonBin: "/x/python",
-  embeddingModelDir: "/x/models",
-  embeddingModelId: "Xenova/all-MiniLM-L6-v2",
-  embeddingDimensions: 384
-};
 
 async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions> } = {}) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-service-"));
   const plugins = new FakeKnowledgePlugins(options.enabled ?? false);
   const runtime = new FakeRuntime();
-  runtime.set(RUNTIME);
+  runtime.set(FAKE_RUNTIME);
   const embedders = fakeEmbedders();
   const events: { channel: string; type: string; payload: unknown }[] = [];
   const profileReads = { list: 0 };

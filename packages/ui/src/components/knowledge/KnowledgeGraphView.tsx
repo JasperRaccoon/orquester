@@ -20,8 +20,8 @@ import { Button } from "../ui";
 import { cn } from "../../lib/cn";
 import { knowledgeStore } from "../../lib/knowledge/store";
 import { CollectionChip, Centered, ErrorLine } from "./parts";
-import { canvasNodes, focusFor, graphQueryOf, graphScopeKey, truncationNote } from "./graph.logic";
-import { entryByline, knowledgeErrorText } from "./knowledge.logic";
+import { canvasNodes, focusFor, graphQueryOf, graphScopeKey, searchSummary, truncationNote } from "./graph.logic";
+import { entryByline, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
 import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 import type { KnowledgeSelection } from "./KnowledgePanel";
 
@@ -38,7 +38,9 @@ type GraphLoad =
   | { status: "ready"; graph: KnowledgeGraphResponse }
   | { status: "error"; message: string; graph: KnowledgeGraphResponse | null };
 
-function useGraph(api: KnowledgeGraphApi | null, collections: readonly string[], focus: string | null) {
+function useGraph(api: KnowledgeGraphApi | null, collections: readonly string[], focus: string | null, onFocusGone: () => void) {
+  const onFocusGoneRef = useRef(onFocusGone);
+  onFocusGoneRef.current = onFocusGone;
   const [load, setLoad] = useState<GraphLoad>({ status: "loading", graph: null });
   const [tick, setTick] = useState(0);
   const key = graphScopeKey({ collections, focus });
@@ -59,7 +61,13 @@ function useGraph(api: KnowledgeGraphApi | null, collections: readonly string[],
         if (!controller.signal.aborted) setLoad({ status: "ready", graph });
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted) setLoad((l) => ({ status: "error", message: knowledgeErrorText(error), graph: l.graph }));
+        if (controller.signal.aborted) return;
+        // The item the canvas centred on is gone (deleted, or dropped by a run): back to the overview.
+        if (focus !== null && knowledgeErrorCode(error) === "KNOWLEDGE_NOT_FOUND") {
+          onFocusGoneRef.current();
+          return;
+        }
+        setLoad((l) => ({ status: "error", message: knowledgeErrorText(error), graph: l.graph }));
       });
     return () => controller.abort();
     // `key` stands for `collections` and `focus`.
@@ -132,7 +140,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   toolbarEnd
 }) => {
   const [focus, setFocus] = useState<string | null>(null);
-  const { load, retry } = useGraph(api, filter, focus);
+  const { load, retry } = useGraph(api, filter, focus, () => setFocus(null));
   const graph = load.graph;
   const [query, setQuery] = useState("");
   const [resultsOpen, setResultsOpen] = useState(false);
@@ -143,11 +151,27 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   const graphRef = useRef(graph);
   graphRef.current = graph;
   const selectionKey = selection ? `${selection.kind}:${selection.id}` : "";
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  // A selection made before any graph was read (a citation opening the tab, the List view
+  // switched back to the graph) is placed once the first graph arrives.
+  const placeLater = useRef(false);
   useEffect(() => {
     if (!selection) return;
+    if (!graphRef.current) {
+      placeLater.current = true;
+      return;
+    }
+    placeLater.current = false;
     setFocus((current) => focusFor(selection, graphRef.current, current));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionKey]);
+  useEffect(() => {
+    if (!graph || !placeLater.current) return;
+    placeLater.current = false;
+    const pending = selectionRef.current;
+    if (pending) setFocus((current) => focusFor(pending, graph, current));
+  }, [graph]);
   // A filter change returns to the overview of those collections.
   const filterKey = filter.join(",");
   useEffect(() => setFocus(null), [filterKey]);
@@ -161,6 +185,12 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     return ids;
   }, [selection?.kind, entryConceptIds, search]);
   const selectedId = selection?.kind === "concept" ? selection.id : null;
+  const onCanvasIds = useMemo(() => new Set(graph?.nodes.map((n) => n.id) ?? []), [graph]);
+  // With the results closed, a line says what the search found (entry hits have no node to mark).
+  const searchNote =
+    !resultsOpen && query.trim() && search.status === "done"
+      ? (searchSummary(search.hits, onCanvasIds) ?? "Nothing matches.")
+      : null;
 
   // Clicking outside the search closes its results (the query stays, its concept hits stay marked).
   useEffect(() => {
@@ -221,6 +251,16 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
           )}
           {resultsOpen && query.trim() && <SearchResults state={search} collections={collections} onPick={pick} />}
         </div>
+        {searchNote && (
+          <span role="status" className="inline-flex min-w-0 items-center gap-1.5 text-[11.5px] text-neutral-400">
+            <span className="truncate">{searchNote}</span>
+            {search.status === "done" && search.hits.length > 0 && (
+              <button type="button" className="shrink-0 font-medium text-neutral-200 hover:underline" onClick={() => setResultsOpen(true)}>
+                Show results
+              </button>
+            )}
+          </span>
+        )}
         <div role="group" aria-label="Filter by collection" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
           <CollectionChip name="All" color={null} active={filter.length === 0} onClick={() => onFilter([])} dot={false} />
           {collections.map((c) => (

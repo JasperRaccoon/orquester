@@ -6,12 +6,13 @@
  */
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type {
   KnowledgeEntriesQuery,
+  KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeItemResponse,
   UpdateKnowledgeCollectionRequest,
@@ -115,11 +116,11 @@ describe("the Knowledge tab", () => {
   let patches: Array<[string, UpdateKnowledgeCollectionRequest | UpdateKnowledgeEntryRequest]>;
   let initial: ReturnType<typeof useAppStore.getState>;
 
-  const api = (entries: number) => ({
+  const api = (entries: number, overrides: Record<string, unknown> = {}) => ({
     connection: { id: "c1" },
     getKnowledgeStatus: async () => (calls.push("status"), status({ entries })),
     listKnowledgeCollections: async () => (calls.push("collections"), collections([collection({ profiles: [{ id: "p1", name: "SaaS expert" }] }), collection({ id: "kc_ads", name: "Ads", color: "chart-2", entryCount: 0 })])),
-    getKnowledgeGraph: async () => (calls.push("graph"), GRAPH),
+    getKnowledgeGraph: async (query: KnowledgeGraphQuery = {}) => (calls.push(`graph:${query.focus ?? ""}`), GRAPH),
     searchKnowledge: async () => ({ hits: [], searched: [] }),
     getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : CONCEPT),
     listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => (calls.push(`entries:${query.collection ?? "all"}`), { entries: [summary()], nextCursor: null }),
@@ -127,7 +128,8 @@ describe("the Knowledge tab", () => {
     updateKnowledgeCollection: async (id: string, req: UpdateKnowledgeCollectionRequest) => (patches.push([id, req]), {}),
     deleteKnowledgeCollection: async (id: string) => (calls.push(`delete-collection:${id}`), {}),
     updateKnowledgeEntry: async (id: string, req: UpdateKnowledgeEntryRequest) => (patches.push([id, req]), {}),
-    deleteKnowledgeEntry: async (id: string) => (calls.push(`delete-entry:${id}`), {})
+    deleteKnowledgeEntry: async (id: string) => (calls.push(`delete-entry:${id}`), {}),
+    ...overrides
   });
 
   beforeEach(() => {
@@ -152,8 +154,8 @@ describe("the Knowledge tab", () => {
     });
   };
 
-  const show = async (opts: { on?: boolean; entries?: number; focus?: KnowledgeFocus | null } = {}) => {
-    useAppStore.setState({ api: api(opts.entries ?? 2) as never, plugins: [knowledgePlugin(opts.on ?? true)] });
+  const show = async (opts: { on?: boolean; entries?: number; focus?: KnowledgeFocus | null; api?: Record<string, unknown> } = {}) => {
+    useAppStore.setState({ api: api(opts.entries ?? 2, opts.api) as never, plugins: [knowledgePlugin(opts.on ?? true)] });
     if (opts.on !== false) knowledgeStore.setState({ status: status({ entries: opts.entries ?? 2 }) });
     await act(async () => root.render(createElement(KnowledgeView, { focus: opts.focus ?? null, active: true, Canvas: StubCanvas })));
     await settle();
@@ -299,5 +301,86 @@ describe("the Knowledge tab", () => {
     await click(confirm);
     assert.ok(calls.includes("delete-entry:ke_aaaaaaaaaaaa"));
     assert.equal(doc().querySelector("aside"), null);
+  });
+
+  const showList = async () =>
+    click([...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === "List")!);
+
+  it("keeps the pages loaded with Load more when entries change", async () => {
+    const pages: Record<string, { entries: ReturnType<typeof summary>[]; nextCursor: string | null }> = {
+      "": { entries: [summary({ id: "ke_aaaaaaaaaaaa", title: "First page entry" })], nextCursor: "p2" },
+      p2: { entries: [summary({ id: "ke_bbbbbbbbbbbb", title: "Second page entry" })], nextCursor: "p3" },
+      p3: { entries: [summary({ id: "ke_cccccccccccc", title: "Third page entry" })], nextCursor: null }
+    };
+    await show({
+      api: {
+        listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => (calls.push(`entries:${query.cursor ?? ""}`), pages[query.cursor ?? ""]!)
+      }
+    });
+    await showList();
+    await click(buttonNamed("Load more"));
+    assert.match(text(), /First page entry.*Second page entry/);
+
+    calls.length = 0;
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1, changedEntryIds: null })));
+    await settle();
+    assert.deepEqual(calls.filter((c) => c.startsWith("entries:")), ["entries:", "entries:p2"], "read again to the same depth");
+    assert.match(text(), /First page entry.*Second page entry/);
+    assert.doesNotMatch(text(), /Third page entry/);
+    assert.ok(buttonNamed("Load more"), "and it can still page on");
+  });
+
+  it("keeps a search's entry hits in sight after its results close", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await show({
+        api: { searchKnowledge: async () => ({ hits: [{ kind: "entry", score: 0.9, entry: summary({ title: "Competitor pages" }) }], searched: [] }) }
+      });
+      const input = doc().querySelector('input[aria-label="Search the knowledge"]') as HTMLInputElement;
+      await type(input, "competitors");
+      await act(async () => mock.timers.tick(300));
+      await settle();
+      assert.ok(doc().querySelector('[role="listbox"][aria-label="Search results"]'));
+
+      await act(async () => {
+        doc().body.dispatchEvent(new dom.window.MouseEvent("mousedown", { bubbles: true }));
+      });
+      assert.equal(doc().querySelector('[role="listbox"]'), null, "the results closed");
+      assert.match(text(), /Matches: 1 entry\./, "the entry hit, which has no node on the canvas, is still named");
+      await click(buttonNamed("Show results"));
+      assert.match(doc().querySelector('[role="listbox"]')!.textContent!, /Competitor pages/);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("a concept asked for before the graph loaded gets its neighbourhood once it does", async () => {
+    await show({ focus: { kind: "concept", id: "tactic-far", nonce: 1 } });
+    assert.deepEqual(calls.filter((c) => c.startsWith("graph:")), ["graph:", "graph:tactic-far"], "the overview lacks it: its neighbourhood is read");
+  });
+
+  it("a collection's edit button can take keyboard focus (it is faded, never hidden)", async () => {
+    await show();
+    await showList();
+    const edit = buttonNamed("Edit SEO");
+    assert.ok(!edit.classList.contains("invisible"), "visibility: hidden would take it out of the tab order");
+    assert.ok(edit.classList.contains("focus-visible:opacity-100"), "it shows when focused");
+  });
+
+  it("when the item the canvas centred on is gone, it returns to the overview instead of an error", async () => {
+    const truncated = { ...GRAPH, truncated: true, totals: { nodes: 5000, edges: 9000 } };
+    await show({
+      focus: { kind: "entry", id: "ke_aaaaaaaaaaaa", nonce: 1 },
+      api: {
+        getKnowledgeGraph: async (query: KnowledgeGraphQuery = {}) => {
+          calls.push(`graph:${query.focus ?? ""}`);
+          if (query.focus) throw Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "Nothing visible has that id." } });
+          return truncated;
+        }
+      }
+    });
+    assert.deepEqual(calls.filter((c) => c.startsWith("graph:")), ["graph:", "graph:ke_aaaaaaaaaaaa", "graph:"]);
+    assert.doesNotMatch(text(), /Nothing visible has that id/);
+    assert.match(text(), /Showing the 2 most connected of 5,000 concepts/);
   });
 });
