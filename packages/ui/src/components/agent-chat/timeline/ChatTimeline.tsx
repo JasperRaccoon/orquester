@@ -11,7 +11,12 @@ import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
-import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
+import {
+  readPlanWithoutStore,
+  TimelineRosterContext,
+  TimelineRowContext,
+  type TimelineRowContextValue
+} from "./context";
 import { drillInEmptyNotice, timelineChildren, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { QuoteSelectionToolbar } from "./QuoteSelectionToolbar";
@@ -292,7 +297,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       revertBusy,
       startedTurnCount,
       disclosures,
-      roster: roster ?? [],
       skills: skills ?? [],
       // A tool row and an activity group both live in `expandedGroupIds`: their
       // ids come from disjoint id spaces (an activity item id and a group id),
@@ -347,7 +351,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       patchList,
       projectPath,
       revertBusy,
-      roster,
       sessionId,
       skills,
       startedTurnCount
@@ -832,6 +835,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             already memoised, and a provider per row would be N context nodes
             re-rendering on every change to it. */}
         <TimelineRowContext.Provider value={context}>
+          <TimelineRosterContext.Provider value={roster ?? NO_ROSTER}>
           <div
             ref={contentRef}
             // `h-full` (not `min-h-full`) when the panel shows: a min-height
@@ -874,6 +878,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />
           </div>
+          </TimelineRosterContext.Provider>
         </TimelineRowContext.Provider>
       </div>
 
@@ -893,6 +898,8 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 /** A read-only surface's rewind: the drill-in dispatches no commands (§7.6). */
 const NOOP_REVERT = (_input: { messageId: string; targetTurnCount: number }): void => {};
 const NOOP_STRING = (): void => {};
+/** No roster: one shared value, so a timeline given none never re-renders its spawn rows for it. */
+const NO_ROSTER: NonNullable<ChatTimelineProps["roster"]> = [];
 
 /**
  * The row context's plan reader for one thread: the store's

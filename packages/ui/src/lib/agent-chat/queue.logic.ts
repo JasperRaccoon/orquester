@@ -163,6 +163,23 @@ export function drainQueue(state: QueueState): {
 export function latestCompletedToolActivityId(
   activities: readonly Pick<ThreadActivityItem, "id" | "activityKind" | "createdAt">[]
 ): string | null {
+  // Asked on every store update (the queue's drive loop), of a list the
+  // projection hands back unchanged while only text streams: one walk per list.
+  const cached = latestCompletedToolIdByList.get(activities);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const id = scanLatestCompletedToolActivityId(activities);
+  latestCompletedToolIdByList.set(activities, id);
+  return id;
+}
+
+/** {@link latestCompletedToolActivityId} by list — the lists are never mutated once built. */
+const latestCompletedToolIdByList = new WeakMap<readonly object[], string | null>();
+
+function scanLatestCompletedToolActivityId(
+  activities: readonly Pick<ThreadActivityItem, "id" | "activityKind" | "createdAt">[]
+): string | null {
   let latest: { id: string; createdAt: string } | null = null;
   for (const activity of activities) {
     if (activity.activityKind !== "tool.completed") {

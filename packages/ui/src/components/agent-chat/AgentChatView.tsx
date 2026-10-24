@@ -620,6 +620,18 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     [sessionId]
   );
 
+  // The timeline's row context carries these, so a fresh function per render
+  // would hand every row a new context — and re-render the whole timeline —
+  // whenever this view re-renders (a roster tick, a status change).
+  const sendQueuedNow = React.useCallback(
+    (queuedId: string) => dispatch(() => actions.sendQueuedNow(queuedId)),
+    [actions]
+  );
+  const backgroundTool = React.useCallback(
+    (toolUseId: string) => dispatch(() => actions.backgroundTool({ toolUseId })),
+    [actions]
+  );
+
   // --- a queued message returned to the composer (§7.4) --------------------
   // Every other insert from outside the composer places the caret and leaves
   // focus where it is. "Cancel and return to the composer" is the user asking
@@ -1421,7 +1433,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 ) : undefined
               }
               onSendQueuedNow={
-                paintOnly || boxBlockedReason !== null ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))
+                paintOnly || boxBlockedReason !== null ? noop : sendQueuedNow
               }
               // The user's Ctrl+B (§4.5): offered on a running command only
               // where the provider can honour it.
@@ -1429,7 +1441,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 !paintOnly && provider?.capabilities?.supportsBackgroundTasks === true
               }
               onBackgroundTool={
-                paintOnly ? noop : (toolUseId) => dispatch(() => actions.backgroundTool({ toolUseId }))
+                paintOnly ? noop : backgroundTool
               }
               // The store's action already puts the message's text back in the
               // draft and its attachments back as chips (`appendToDraft`), so the

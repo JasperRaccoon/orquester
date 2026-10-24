@@ -26,25 +26,48 @@ import { backoffDelayMs } from "../connection/backoff";
  * (§6.3), and a chunk boundary can land anywhere — including inside a
  * multi-byte character, which is why the caller decodes with
  * `{ stream: true }` before pushing text in here.
+ *
+ * Linear in the bytes pushed: only the new chunk is searched for a newline,
+ * and an unfinished line's pieces are joined once, when it closes. A
+ * snapshot is one multi-megabyte line arriving in hundreds of chunks;
+ * appending each chunk to one string and searching it from the start made
+ * every chunk re-scan (and re-flatten) everything before it.
  */
 export class NdjsonLineBuffer {
-  private buffer = "";
+  /** The unfinished line's pieces, in order. */
+  private pending: string[] = [];
 
   /** Feed a decoded chunk; returns every complete line it closed. */
   push(chunk: string): string[] {
-    this.buffer += chunk;
+    let newline = chunk.indexOf("\n");
+    if (newline === -1) {
+      if (chunk.length > 0) {
+        this.pending.push(chunk);
+      }
+      return [];
+    }
     const lines: string[] = [];
-    let newline = this.buffer.indexOf("\n");
+    let start = 0;
+    if (this.pending.length > 0) {
+      this.pending.push(chunk.slice(0, newline));
+      lines.push(this.pending.join(""));
+      this.pending = [];
+      start = newline + 1;
+      newline = chunk.indexOf("\n", start);
+    }
     while (newline !== -1) {
-      lines.push(this.buffer.slice(0, newline));
-      this.buffer = this.buffer.slice(newline + 1);
-      newline = this.buffer.indexOf("\n");
+      lines.push(chunk.slice(start, newline));
+      start = newline + 1;
+      newline = chunk.indexOf("\n", start);
+    }
+    if (start < chunk.length) {
+      this.pending.push(chunk.slice(start));
     }
     return lines;
   }
 
   reset(): void {
-    this.buffer = "";
+    this.pending = [];
   }
 }
 
