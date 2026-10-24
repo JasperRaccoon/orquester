@@ -21,6 +21,7 @@ import {
   type IndexedTurn,
   type ThreadIndex
 } from "./index.ts";
+import { defaultSqliteDriver, defaultSqliteDriverError } from "./sqlite.ts";
 import {
   checkpoint,
   created,
@@ -53,6 +54,12 @@ afterEach(async () => {
 });
 
 function open(): ThreadIndex {
+  // Without the native binding the index runs disabled: a catch-up never reads, so the tests that
+  // gate a read would wait for it forever. Fail at once, saying why, instead of hanging the run.
+  assert.ok(
+    defaultSqliteDriver,
+    `better-sqlite3 does not load under this Node (${defaultSqliteDriverError}); run \`node scripts/ensure-node-native.mjs\` from the repo root`
+  );
   const index = createThreadIndex({
     filePath,
     logger

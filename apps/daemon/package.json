@@ -11,7 +11,7 @@
     "start": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs \"$f\" || exit 1; done"
+    "test": "node ../../scripts/ensure-node-native.mjs && TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.278",

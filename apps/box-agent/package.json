@@ -9,7 +9,7 @@
   "scripts": {
     "build": "node --import tsx scripts/build.ts",
     "typecheck": "tsc -p tsconfig.json && node scripts/go.mjs vet ./...",
-    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --test --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && node scripts/go.mjs test -race ./..."
+    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && node scripts/go.mjs test -race ./..."
   },
   "dependencies": {
     "@orquester/api": "workspace:*"

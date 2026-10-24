@@ -100,6 +100,7 @@
 - `pnpm check` typechecks every workspace and `pnpm test` runs every package's tests; they are the full gate, run rarely and before merging to `main`.
 - Package test scripts set `TSX_DISABLE_CACHE=1`, so test runs never grow the shared tsx transpile cache; do the same for ad hoc `tsx` runs.
 - Test scripts run one package at a time and at most 4 test files at once; set `ORQUESTER_TEST_CONCURRENCY` to change the per-package cap.
+- Test scripts fail any single test after 10 minutes; set `ORQUESTER_TEST_TIMEOUT_MS` to change it. The daemon's test script first runs `scripts/ensure-node-native.mjs`, which rebuilds native modules a desktop build left compiled for Electron; run it yourself before focused daemon test runs if a native module fails to load.
 - Keep one test run going per worktree, run long ones in the background, and wait for their completion instead of polling or sleeping.
 - Run `pnpm build` when a change affects emitted web, desktop, or public assets.
 - Run a targeted manual or browser check only when it can use an existing safe surface.
