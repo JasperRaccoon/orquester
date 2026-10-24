@@ -8,9 +8,13 @@ import {
   parseKnowledgeGraphResponse,
   parseKnowledgeItemResponse,
   parseKnowledgeLinkingState,
+  parseKnowledgeRebuildEstimate,
   parseKnowledgeSearchResponse,
+  parseKnowledgeSettings,
   parseKnowledgeStatus
 } from "./validate.ts";
+import { ApiClient } from "../api-client.ts";
+import type { Transporter } from "../transporter.ts";
 
 const entryMeta = (overrides: Record<string, unknown> = {}) => ({
   id: "ke_aaaaaaaaaaaa",
@@ -182,5 +186,47 @@ describe("knowledge wire validation", () => {
   it("reads a change event's fields and nothing else", () => {
     assert.deepEqual(parseKnowledgeChangedEvent({ entryIds: ["a", 1], graph: true, collections: "yes" }), { entryIds: ["a"], graph: true });
     assert.equal(parseKnowledgeChangedEvent("x"), null);
+  });
+
+  it("reads the indexing settings field by field, a bad field as its default", () => {
+    assert.deepEqual(parseKnowledgeSettings({ accountId: "c1", model: "opus", concurrency: 6, extra: 1 }), { accountId: "c1", model: "opus", concurrency: 6 });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: 7, model: "", concurrency: 99 }), { accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: " ", model: ["x"], concurrency: 2.5 }), { accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({}), { accountId: null, model: null, concurrency: 4 });
+    assert.equal(parseKnowledgeSettings(null), null);
+    assert.equal(parseKnowledgeSettings([]), null);
+    assert.equal(parseKnowledgeSettings("settings"), null);
+  });
+
+  it("reads a rebuild estimate as two counts, or nothing", () => {
+    assert.deepEqual(parseKnowledgeRebuildEstimate({ entries: 12, tasks: 340 }), { entries: 12, tasks: 340 });
+    assert.deepEqual(parseKnowledgeRebuildEstimate({ entries: -3, tasks: 7.6 }), { entries: 0, tasks: 7 });
+    assert.equal(parseKnowledgeRebuildEstimate({ entries: "12", tasks: 340 }), null);
+    assert.equal(parseKnowledgeRebuildEstimate({ tasks: 340 }), null);
+    assert.equal(parseKnowledgeRebuildEstimate({ entries: 1, tasks: Number.NaN }), null);
+    assert.equal(parseKnowledgeRebuildEstimate(null), null);
+  });
+
+  it("the client validates the settings, their update's answer and the estimate", async () => {
+    let answer: unknown = null;
+    const transporter = {
+      kind: "fake",
+      request: async () => ({ status: 200, ok: true, data: answer }),
+      openStream: () => ({ close: () => undefined })
+    } as unknown as Transporter;
+    const client = new ApiClient({ id: "c1" } as never, transporter);
+
+    answer = { accountId: 5, model: "opus", concurrency: "8" };
+    assert.deepEqual(await client.getKnowledgeSettings(), { accountId: null, model: "opus", concurrency: 4 });
+    answer = { accountId: "c2", model: null, concurrency: 3, secret: "x" };
+    assert.deepEqual(await client.updateKnowledgeSettings({ accountId: "c2" }), { accountId: "c2", model: null, concurrency: 3 });
+    answer = "<html>proxy error</html>";
+    await assert.rejects(client.getKnowledgeSettings(), /knowledge settings this app cannot read/);
+    await assert.rejects(client.updateKnowledgeSettings({}), /knowledge settings this app cannot read/);
+
+    answer = { entries: 2, tasks: 9 };
+    assert.deepEqual(await client.getKnowledgeRebuildEstimate(), { entries: 2, tasks: 9 });
+    answer = { entries: 2 };
+    await assert.rejects(client.getKnowledgeRebuildEstimate(), /knowledge rebuild estimate this app cannot read/);
   });
 });

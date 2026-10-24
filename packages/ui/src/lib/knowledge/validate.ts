@@ -12,6 +12,9 @@
 
 import {
   KNOWLEDGE_COLORS,
+  KNOWLEDGE_CONCURRENCY_MAX,
+  KNOWLEDGE_CONCURRENCY_MIN,
+  KNOWLEDGE_DEFAULT_SETTINGS,
   knowledgeCitation,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
@@ -33,10 +36,12 @@ import {
   type KnowledgeLinkState,
   type KnowledgeLinkingState,
   type KnowledgePauseReason,
+  type KnowledgeRebuildEstimate,
   type KnowledgeRunMode,
   type KnowledgeRunSummary,
   type KnowledgeSearchHit,
   type KnowledgeSearchResponse,
+  type KnowledgeSettings,
   type KnowledgeStatus,
   type KnowledgeWorkerView
 } from "@orquester/api";
@@ -426,4 +431,35 @@ export function parseKnowledgeChangedEvent(value: unknown): KnowledgeChangedEven
   if (value.collections === true) event.collections = true;
   if (value.graph === true) event.graph = true;
   return event;
+}
+
+// ---------------------------------------------------------------------------
+// Settings and the rebuild estimate (Settings → Plugins)
+// ---------------------------------------------------------------------------
+
+/**
+ * The indexing settings, field by field (an older or newer daemon's answer may
+ * lack one or carry another type): a bad field reads as its default, as the
+ * daemon reads its own stored record. Null when it is not an object.
+ */
+export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null {
+  if (!isRecord(value)) return null;
+  const accountId = typeof value.accountId === "string" && value.accountId.trim() !== "" ? value.accountId : null;
+  const model = typeof value.model === "string" && value.model.trim() !== "" ? value.model : null;
+  const concurrency =
+    typeof value.concurrency === "number" &&
+    Number.isInteger(value.concurrency) &&
+    value.concurrency >= KNOWLEDGE_CONCURRENCY_MIN &&
+    value.concurrency <= KNOWLEDGE_CONCURRENCY_MAX
+      ? value.concurrency
+      : KNOWLEDGE_DEFAULT_SETTINGS.concurrency;
+  return { accountId, model, concurrency };
+}
+
+/** A rebuild estimate: both counts must be numbers (an estimate missing one is no estimate). */
+export function parseKnowledgeRebuildEstimate(value: unknown): KnowledgeRebuildEstimate | null {
+  if (!isRecord(value)) return null;
+  const isCount = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  if (!isCount(value.entries) || !isCount(value.tasks)) return null;
+  return { entries: count(value.entries), tasks: count(value.tasks) };
 }
