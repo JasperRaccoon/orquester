@@ -213,6 +213,12 @@ export function agentRowsFrameOf(input: {
   readonly roster: readonly RuntimeSubagent[];
   readonly seq: number;
   readonly agentIds: readonly string[];
+  /**
+   * The frame's line stays under this many UTF-8 bytes
+   * (`AGENT_ROWS_FRAME_MAX_BYTES`): past it the oldest rows go and the frame
+   * says `truncated`. Absent: no cap.
+   */
+  readonly maxBytes?: number;
 }): AgentRowsFrame {
   const requested = new Set(input.agentIds);
   const omittable = new Set<string>();
@@ -232,7 +238,42 @@ export function agentRowsFrameOf(input: {
       anchor = item.id;
     }
   }
-  return { kind: "agent-rows", seq: input.seq, agentIds: [...requested].sort(), items, after };
+  const frame: AgentRowsFrame = { kind: "agent-rows", seq: input.seq, agentIds: [...requested].sort(), items, after };
+  return input.maxBytes === undefined ? frame : withinBytes(frame, input.maxBytes);
+}
+
+/** UTF-8 bytes of `text`, without an encoder: `@orquester/api` is shared with the browser. */
+function utf8Bytes(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/**
+ * `frame` under `maxBytes` as one JSON line: whole, or its newest rows that
+ * fit, `truncated`. The frame with no row at all always fits (its agents'
+ * rows are then on no client, and its drill-in says so).
+ */
+function withinBytes(frame: AgentRowsFrame, maxBytes: number): AgentRowsFrame {
+  const whole = utf8Bytes(JSON.stringify(frame));
+  if (whole <= maxBytes) return frame;
+  // What each row adds to the line: its JSON, its placement's, two commas.
+  const costs = frame.items.map((item, index) => utf8Bytes(JSON.stringify(item)) + utf8Bytes(JSON.stringify(frame.after[index] ?? null)) + 2);
+  let size = utf8Bytes(JSON.stringify({ ...frame, items: [], after: [], truncated: true }));
+  let start = frame.items.length;
+  while (start > 0 && size + costs[start - 1]! <= maxBytes) {
+    start -= 1;
+    size += costs[start]!;
+  }
+  return { ...frame, items: frame.items.slice(start), after: frame.after.slice(start), truncated: true };
 }
 
 /** Whether `item` is a launch or an anchor row of one of `agentIds` (a kept row, never on demand). */

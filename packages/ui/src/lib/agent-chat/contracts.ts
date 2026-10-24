@@ -225,6 +225,20 @@ export interface AgentChatThreadSlice {
    * frame lands. Absent reads as none — every row is here.
    */
   omittedAgentIds?: readonly string[];
+  /**
+   * Of {@link omittedAgentIds}, the agents whose rows this client still shows
+   * from before the last snapshot left them out (a reconnect's): their drill-in
+   * keeps showing those rows — the agent was settled, so they are what the
+   * host holds bar retention — until the frame replaces them, rather than
+   * flipping back to "loading". Absent reads as none.
+   */
+  revalidatingAgentIds?: readonly string[];
+  /**
+   * The agents whose last `agent-rows` frame carried only their newest rows
+   * (`AgentRowsFrame.truncated`): their drill-in says the older ones are not
+   * loaded. Absent reads as none.
+   */
+  truncatedAgentIds?: readonly string[];
   /** Live-follow is a render-visible flag, never a ref (§7.3). */
   follow: boolean;
   scroll: RememberedTimelinePosition | null;

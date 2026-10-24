@@ -1158,6 +1158,16 @@ export function agentRowsModeOf(value: unknown): AgentRowsMode | undefined {
 /** At most this many agents per `POST …/agent-rows`; a client batches beyond it. */
 export const AGENT_ROWS_MAX_AGENTS = 64;
 
+/**
+ * One {@link AgentRowsFrame}'s line stays under this (UTF-8 bytes): an agent
+ * whose rows pass it is sent its NEWEST rows only, marked `truncated`. The
+ * host writes one frame per agent, the next one only once the stream's
+ * undrained bytes are back under it as well — so a request, whatever it
+ * names, never trips the stream's 8 MiB budget
+ * ({@link AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES}) and the reconnect it forces.
+ */
+export const AGENT_ROWS_FRAME_MAX_BYTES = 2 * 1024 * 1024;
+
 /** `POST …/agent-rows` ({@link agentChatRoutes.agentRows}). No `commandId`: it changes no thread state, and a repeat only writes the same rows again. */
 export interface AgentRowsRequest {
   /** The stream to write the frame into: its `synchronized.streamId`. */
@@ -1192,6 +1202,12 @@ export interface AgentRowsFrame {
   agentIds: string[];
   items: ThreadItem[];
   after: Array<string | null>;
+  /**
+   * The rows passed {@link AGENT_ROWS_FRAME_MAX_BYTES}: `items` are the
+   * newest of them, and the agent's older rows are not on this client. Its
+   * drill-in says so. Absent: every row the host's window holds.
+   */
+  truncated?: true;
 }
 
 /**

@@ -22,11 +22,19 @@
  * asked for again on the new stream.
  *
  * Answers: 404 `STREAM_NOT_FOUND` — that stream is gone; asked again on the
- * next one. A lost answer or a 503 — asked again after a backoff. Anything
- * else — above all the route miss of a daemon or host from before the route —
- * and the store stops asking and reads the thread whole
- * ({@link AgentRowsLoaderDeps.onUnsupported}): a drill-in never waits for
- * good.
+ * next one. Any other 404, or a 405 — the route miss of a daemon or host from
+ * before the route, or a thread gone from it — and the store stops asking and
+ * reads the thread whole ({@link AgentRowsLoaderDeps.onUnsupported}, once). A
+ * lost answer, a 408, a 429 or a 5xx (a proxy's 502/504 too) — asked again
+ * after a backoff. A 401/403 — the app's sign-in handles it; asked again on
+ * the next stream. Any other refusal — not asked again on this stream.
+ *
+ * A request still in flight when its stream went away counts against its
+ * agents: an agent asked for on {@link MAX_LOST_REQUESTS} streams in a row
+ * that each went before its frame landed — a frame the stream could not carry
+ * — is not asked again; the store reads the thread whole instead, once. The
+ * host paces and caps its frames so it never comes to that; this is the guard
+ * against a reconnect loop if it ever does.
  *
  * No React import, no store: `store.ts` feeds it the slice and frames.
  */
@@ -74,6 +82,9 @@ export interface AgentRowsLoaderDeps {
 
 const RETRY_POLICY = { baseMs: 1_000, maxMs: 15_000 };
 
+/** Streams in a row an agent's request may be lost on before the whole thread is read instead. */
+export const MAX_LOST_REQUESTS = 3;
+
 export class AgentRowsLoader {
   private readonly wanted = new Map<string, number>();
   /** Live events of these omitted agents arrived; asked for until they load. */
@@ -82,6 +93,8 @@ export class AgentRowsLoader {
   private readonly requested = new Set<string>();
   /** Refused on {@link stream}: not asked again until the stream changes. */
   private readonly refused = new Set<string>();
+  /** Streams in a row each agent's request was lost on, its frame never landed. */
+  private readonly lost = new Map<string, number>();
   private stream: string | null = null;
   private view: AgentRowsView | null = null;
   private flushQueued = false;
@@ -132,6 +145,8 @@ export class AgentRowsLoader {
     if (this.closed) return;
     this.view = view;
     if (view.streamId !== this.stream) {
+      // What was still in flight on the stream that went never landed.
+      for (const agentId of this.requested) this.lost.set(agentId, (this.lost.get(agentId) ?? 0) + 1);
       this.stream = view.streamId;
       this.requested.clear();
       this.refused.clear();
@@ -143,7 +158,12 @@ export class AgentRowsLoader {
     for (const set of [this.touched, this.requested, this.refused]) {
       for (const agentId of set) if (!omitted.has(agentId)) set.delete(agentId);
     }
+    for (const agentId of this.lost.keys()) if (!omitted.has(agentId)) this.lost.delete(agentId);
     if (omitted.size === 0 || !view.live || this.unsupported) return;
+    if ([...this.lost.values()].some((count) => count >= MAX_LOST_REQUESTS)) {
+      this.disable();
+      return;
+    }
     if (view.streamId === null) {
       if (!this.noStreamReported) {
         this.noStreamReported = true;
@@ -201,8 +221,15 @@ export class AgentRowsLoader {
     }
   }
 
+  /** Stop asking, and have the thread read whole — once. */
+  private disable(): void {
+    if (this.unsupported) return;
+    this.unsupported = true;
+    this.deps.onUnsupported();
+  }
+
   private failed(streamId: string, agentIds: readonly string[], error: AgentRowsFailure | null): void {
-    if (this.closed || this.stream !== streamId) return;
+    if (this.closed || this.unsupported || this.stream !== streamId) return;
     for (const agentId of agentIds) this.requested.delete(agentId);
     const status = error?.status;
     const code = error?.code;
@@ -211,26 +238,35 @@ export class AgentRowsLoader {
       for (const agentId of agentIds) this.refused.add(agentId);
       return;
     }
-    if (error?.retryable === true || status === 503 || status === 0) {
-      const delay = backoffDelayMs(this.retryAttempt, RETRY_POLICY);
-      this.retryAttempt = Math.min(this.retryAttempt + 1, 16);
-      this.cancelRetry?.();
-      const schedule =
-        this.deps.schedule ??
-        ((run: () => void, ms: number) => {
-          const timer = setTimeout(run, ms);
-          return () => clearTimeout(timer);
-        });
-      this.cancelRetry = schedule(() => {
-        this.cancelRetry = null;
-        this.resync();
-      }, delay);
+    if (status === 404 || status === 405) {
+      // A daemon or host from before the route (its route miss), or a thread it no longer has.
+      this.disable();
       return;
     }
-    // A daemon or host from before the route (its route miss), or a refusal no
-    // retry changes: the rows can only come whole, and a drill-in must never
-    // wait on them for good.
-    this.unsupported = true;
-    this.deps.onUnsupported();
+    const retryable =
+      error?.retryable === true ||
+      status === undefined ||
+      status === 0 ||
+      status === 408 ||
+      status === 429 ||
+      status >= 500;
+    if (!retryable) {
+      // 401/403: the app's sign-in deals with it; any other refusal: not on this stream.
+      for (const agentId of agentIds) this.refused.add(agentId);
+      return;
+    }
+    const delay = backoffDelayMs(this.retryAttempt, RETRY_POLICY);
+    this.retryAttempt = Math.min(this.retryAttempt + 1, 16);
+    this.cancelRetry?.();
+    const schedule =
+      this.deps.schedule ??
+      ((run: () => void, ms: number) => {
+        const timer = setTimeout(run, ms);
+        return () => clearTimeout(timer);
+      });
+    this.cancelRetry = schedule(() => {
+      this.cancelRetry = null;
+      this.resync();
+    }, delay);
   }
 }

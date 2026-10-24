@@ -316,6 +316,14 @@ export function AgentDrillIn({
         </div>
       )}
 
+      {live.rowsTruncated && !live.rowsLoading ? (
+        // The agent's rows passed what one frame carries: its newest are here.
+        <div className="shrink-0 border-b border-neutral-800 px-3 py-1.5 sm:px-5" data-drill-in-truncated="">
+          <p className="mx-auto w-full max-w-3xl text-xs italic text-neutral-500">
+            Only this agent&apos;s most recent activity was loaded.
+          </p>
+        </div>
+      ) : null}
       {live.rowsLoading ? (
         // The snapshot left this settled agent's own rows out (on-demand agent
         // rows); they are on their way down the thread's stream. The timeline

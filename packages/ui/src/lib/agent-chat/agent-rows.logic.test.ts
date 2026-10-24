@@ -151,3 +151,85 @@ describe("on-demand agent rows — the loader", () => {
     assert.equal(h.posts.length, 2);
   });
 });
+
+describe("on-demand agent rows — the loader reads each refusal for what it is", () => {
+  const failing = (status: number, code = "UNKNOWN") => async () => {
+    throw Object.assign(new Error(`HTTP ${status}`), { status, code });
+  };
+
+  it("a proxy's 502/504, a 429 and a 500 are retried after a backoff, never taken for a missing route", async () => {
+    for (const status of [502, 504, 429, 500]) {
+      const h = harness(failing(status));
+      h.loader.want("a");
+      h.loader.sync(view());
+      await h.flush();
+      assert.equal(h.events.unsupported, 0, String(status));
+      assert.equal(h.loader.enabled, true, String(status));
+      assert.equal(h.timers.length, 1, `${status}: a retry is scheduled`);
+    }
+  });
+
+  it("a 401 waits for the next stream: not retried here, not unsupported", async () => {
+    const h = harness(failing(401));
+    h.loader.want("a");
+    h.loader.sync(view());
+    await h.flush();
+    h.loader.sync(view());
+    await h.flush();
+    assert.equal(h.posts.length, 1);
+    assert.equal(h.events.unsupported, 0);
+    assert.equal(h.timers.length, 0);
+    h.loader.sync(view({ streamId: "s-2" }));
+    await h.flush();
+    assert.equal(h.posts.length, 2, "asked on the next stream");
+  });
+
+  it("a route miss reads the thread whole once, however many batches fail", async () => {
+    const h = harness(failing(404, "THREAD_NOT_FOUND"));
+    const omitted = Array.from({ length: 130 }, (_, index) => `agent-${String(index).padStart(3, "0")}`);
+    h.loader.sync(view({ omitted, activeAgentIds: new Set(omitted) }));
+    await h.flush();
+    assert.equal(h.posts.length, 3, "three batches out");
+    assert.equal(h.events.unsupported, 1);
+    const once = harness(failing(405));
+    once.loader.want("a");
+    once.loader.sync(view());
+    await once.flush();
+    assert.equal(once.events.unsupported, 1);
+  });
+
+  it("an agent whose request is lost with its stream, stream after stream, is read whole instead — once", async () => {
+    const h = harness(async () => ({ ok: true }));
+    h.loader.want("a");
+    for (let stream = 1; stream <= 3; stream += 1) {
+      h.loader.sync(view({ streamId: `s-${stream}` }));
+      await h.flush();
+    }
+    // Three streams went, none carried its frame.
+    assert.equal(h.posts.length, 3);
+    assert.equal(h.events.unsupported, 0);
+    h.loader.sync(view({ streamId: "s-4" }));
+    await h.flush();
+    assert.equal(h.events.unsupported, 1, "not asked a fourth time: the thread is read whole");
+    assert.equal(h.posts.length, 3);
+    h.loader.sync(view({ streamId: "s-5" }));
+    await h.flush();
+    assert.equal(h.events.unsupported, 1);
+  });
+
+  it("a frame that lands clears what was lost", async () => {
+    const h = harness(async () => ({ ok: true }));
+    h.loader.want("a");
+    for (let stream = 1; stream <= 2; stream += 1) {
+      h.loader.sync(view({ streamId: `s-${stream}` }));
+      await h.flush();
+    }
+    // Its frame landed: no longer omitted.
+    h.loader.sync(view({ streamId: "s-2", omitted: ["b"] }));
+    h.loader.sync(view({ streamId: "s-3", omitted: ["a"] }));
+    await h.flush();
+    h.loader.sync(view({ streamId: "s-4", omitted: ["a"] }));
+    await h.flush();
+    assert.equal(h.events.unsupported, 0, "two lost since it last landed, not three");
+  });
+});

@@ -2403,6 +2403,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         return { ...state, reducer, slice: reducer.slice };
       });
+      // The connection that delivered these frames is live — set before the
+      // resync below may close it, whose fresh connection is not live until its
+      // own `synchronized` (`openStream` resets this): the loader never asks on
+      // a connection this step closed.
+      if (synchronizedHere) streamLive = true;
       // A snapshot replaces the rows wholesale, and a rewind or the cap can
       // drop pages and bridge rows: an unhandled reveal whose row went with
       // them is dropped, or it would fire whenever that row reappeared — long
@@ -2469,7 +2474,6 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         if (stoppingTaskIds !== state.stoppingTaskIds) set({ stoppingTaskIds });
       }
-      if (synchronizedHere) streamLive = true;
       agentRows?.touch(touchedAgents);
       agentRows?.dropped(droppedAgentRows);
       syncAgentRows();

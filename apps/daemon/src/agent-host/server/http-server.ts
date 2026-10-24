@@ -871,7 +871,11 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     if (rest === "/agent-rows" && method === "POST") {
       const { streamId, agentIds } = parseAgentRowsRequest(await readJsonBody(request));
       const open = agentRowStreams.get(streamId);
-      if (open === undefined || open.threadId !== threadId || !open.stream.requestAgentRows(agentIds)) {
+      const outcome = open === undefined || open.threadId !== threadId ? "closed" : open.stream.requestAgentRows(agentIds);
+      if (outcome === "gone") {
+        throw new AgentChatCommandError("THREAD_NOT_FOUND", `Thread '${threadId}' was not found.`);
+      }
+      if (outcome === "closed") {
         sendJson(response, 404, {
           error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open; ask on the next one." }
         });

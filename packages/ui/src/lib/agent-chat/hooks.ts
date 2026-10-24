@@ -469,6 +469,8 @@ export interface AgentChatDrillInView {
    * the rows it has — a launch and an ending with nothing between.
    */
   rowsLoading: boolean;
+  /** The agent's rows came as its newest only (`AgentRowsFrame.truncated`): the drill-in says so. */
+  rowsTruncated: boolean;
 }
 
 /**
@@ -498,8 +500,13 @@ export function useAgentChatDrillIn(
   const messageStreaming = useThreadState(store, (state) => messageStreamingContext(state.slice));
   const retentionDropped = useThreadState(store, (state) => state.retentionDropped);
   const omittedAgentIds = useThreadState(store, (state) => state.slice.omittedAgentIds);
+  const revalidatingAgentIds = useThreadState(store, (state) => state.slice.revalidatingAgentIds);
+  const truncatedAgentIds = useThreadState(store, (state) => state.slice.truncatedAgentIds);
   const wantAgentRows = useThreadState(store, (state) => state.actions.wantAgentRows);
-  const rowsLoading = agentId !== null && omittedAgentIds?.includes(agentId) === true;
+  // Rows kept from before a reconnect's snapshot show until their frame lands.
+  const rowsLoading =
+    agentId !== null && omittedAgentIds?.includes(agentId) === true && revalidatingAgentIds?.includes(agentId) !== true;
+  const rowsTruncated = agentId !== null && truncatedAgentIds?.includes(agentId) === true;
 
   // An open drill-in wants its agent's rows: asked for while omitted, again on
   // every stream whose snapshot leaves them out, until it closes.
@@ -522,7 +529,8 @@ export function useAgentChatDrillIn(
         items: entries,
         openTurnIds: NO_TURNS,
         retentionDropped,
-        rowsLoading: false
+        rowsLoading: false,
+        rowsTruncated: false
       };
     }
     const { row: agent, remembered: agentRemembered } = drillInAgentRow({
@@ -534,7 +542,7 @@ export function useAgentChatDrillIn(
     // window, only while no row is known.
     const backgroundShell = agent !== null ? isBackgroundShellRow(agent) : isBackgroundShellItems(entries, agentId);
     if (backgroundShell) {
-      return { rows: null, agent, agentRemembered, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped, rowsLoading };
+      return { rows: null, agent, agentRemembered, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped, rowsLoading, rowsTruncated };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -553,9 +561,10 @@ export function useAgentChatDrillIn(
       items: entries,
       openTurnIds: projection.current.openTurnIds,
       retentionDropped,
-      rowsLoading
+      rowsLoading,
+      rowsTruncated
     };
-  }, [agentId, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped, rowsLoading]);
+  }, [agentId, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped, rowsLoading, rowsTruncated]);
 }
 
 // ---------------------------------------------------------------------------

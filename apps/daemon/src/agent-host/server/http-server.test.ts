@@ -1617,8 +1617,8 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
 
 describe("agent host server — on-demand agent rows", () => {
   /** A settled agent `a` (a call and its words) and a running one `b`, ingested as an adapter's rows. */
-  async function fleetThread(h: Harness): Promise<string> {
-    const threadId = await h.host.createThread();
+  async function fleetThread(h: Harness, id = "thread-1"): Promise<string> {
+    const threadId = await h.host.createThread({ threadId: id });
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-fleet", input: "go" });
     await h.host.settle();
     const at = "1970-01-01T00:00:01.000Z";
@@ -1743,6 +1743,16 @@ describe("agent host server — on-demand agent rows", () => {
     const elsewhere = await h.call("POST", agentHostRoutes.agentRows(other), { streamId, agentIds: ["a"] });
     assert.equal(elsewhere.status, 404);
     assert.equal(code(elsewhere), "STREAM_NOT_FOUND");
+    // A request whose frames cannot be built — the thread is gone — answers so, never a hang.
+    const deletedThread = await fleetThread(h, "thread-doomed");
+    const doomed = await h.stream(`${agentHostRoutes.events(deletedThread)}?agentRows=on-demand`);
+    await doomed.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    const doomedId = (doomed.frames.find((frame) => frame.kind === "synchronized") as { streamId: string }).streamId;
+    assert.equal((await h.call("DELETE", `/threads/${deletedThread}`)).status, 200);
+    const gone = await h.call("POST", agentHostRoutes.agentRows(deletedThread), { streamId: doomedId, agentIds: ["a"] });
+    assert.equal(gone.status, 404);
+    assert.equal(code(gone), "THREAD_NOT_FOUND");
+    doomed.close();
     for (const body of [{}, { streamId }, { streamId, agentIds: [] }, { streamId, agentIds: [7] }]) {
       const refused = await h.call("POST", agentHostRoutes.agentRows(threadId), body);
       assert.equal(refused.status, 400, JSON.stringify(body));

@@ -212,6 +212,19 @@ frameHandlers.get(lazySession)!({ kind: "agent-rows", seq: 1, agentIds: [SETTLED
 const loaded = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
 assert.ok(!loaded.includes("data-drill-in-loading"), "its frame landed");
 assert.ok(loaded.includes("cargo build --release"), "the agent's own rows render");
+assert.ok(!loaded.includes("data-drill-in-truncated"), "whole: no notice");
+// A reconnect's snapshot leaves it out again: its rows stay on screen until its frame lands.
+frameHandlers.get(lazySession)!({
+  kind: "snapshot",
+  thread: snapshot({ head: head({ id: lazySession }), seq: 2, items: [settledLaunch], roster: [settled], omittedAgentIds: [SETTLED] })
+});
+const revalidating = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(!revalidating.includes("data-drill-in-loading"), "not back to loading");
+assert.ok(revalidating.includes("cargo build --release"), "the rows it had stay meanwhile");
+// Its frame came truncated: the newest rows, and the drill-in says so.
+frameHandlers.get(lazySession)!({ kind: "agent-rows", seq: 2, agentIds: [SETTLED], items: [settledCall], after: ["settled-launch"], truncated: true });
+const truncated = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(truncated.includes("data-drill-in-truncated"), "a truncated frame is said");
 
 for (const sessionId of frameHandlers.keys()) releaseThreadStore(sessionId);
 console.error = consoleError;

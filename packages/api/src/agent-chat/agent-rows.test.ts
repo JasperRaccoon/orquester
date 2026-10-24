@@ -327,3 +327,29 @@ test("with the parent's rows left to load older, each of a relaunched agent's ru
     "launch-2", "a2-start", "a2-out", "a2-done", "end-2"
   ]);
 });
+
+test("a frame past its byte cap keeps the newest rows that fit, counted in UTF-8, and says it is truncated", () => {
+  reset();
+  const events = [
+    created(),
+    ev("thread.session-set", { session: session("running", "t1") }),
+    row(activity("task.started", agentTask("a"), { id: "a-launch", turnId: "t1" })),
+    ...[0, 1, 2, 3].map((n) => row(activity("tool.output", { toolUseId: `c${n}`, delta: "€".repeat(1_000) }, { id: `a-${n}`, agentId: "a", turnId: "t1" })))
+  ];
+  const { fold, snapshot } = fullSnapshot(events);
+  const frameOf = (maxBytes?: number) =>
+    agentRowsFrameOf({ items: snapshot.items, roster: fold.roster, seq: fold.seq, agentIds: ["a"], ...(maxBytes !== undefined ? { maxBytes } : {}) });
+  const whole = frameOf();
+  const bytes = new TextEncoder().encode(JSON.stringify(whole)).length;
+  assert.equal(whole.truncated, undefined);
+  assert.deepEqual(frameOf(bytes), whole, "exactly at the cap: the same frame");
+  assert.equal(frameOf(bytes).truncated, undefined, "exactly at the cap: whole");
+  // "€" is three bytes: 7 000 bytes hold two of the four rows, not seven.
+  const cut = frameOf(7_000);
+  assert.equal(cut.truncated, true);
+  assert.deepEqual(ids(cut.items), ["a-2", "a-3"]);
+  assert.equal(cut.after.length, cut.items.length);
+  assert.ok(new TextEncoder().encode(JSON.stringify(cut)).length <= 7_000);
+  assert.deepEqual(frameOf(10).items, [], "nothing fits: no row, still truncated");
+  assert.equal(frameOf(10).truncated, true);
+});

@@ -400,3 +400,26 @@ describe("on-demand agent rows — the store", () => {
     store.destroy?.();
   });
 });
+
+describe("on-demand agent rows — the store after a host restart", () => {
+  it("never asks on the connection a changed host instance made it close", async () => {
+    const host = fakeHost();
+    const { store, state } = open(host);
+    await settle();
+    host.open();
+    await settle();
+    host.answer("hold");
+    // The host restarts under the stream: its marker names a new instance (and a stream id).
+    const first = host.streams[0]!;
+    const release = state().actions.wantAgentRows!("a1");
+    first.handlers.onFrames?.([
+      { kind: "synchronized", hostInstanceId: "host-2", streamId: "stream-dead" } as AgentChatStreamFrame
+    ]);
+    await settle();
+    assert.equal(first.closed, true, "re-read on a fresh connection");
+    assert.equal(host.streams.length, 2);
+    assert.ok(!host.posts.some((post) => post.streamId === "stream-dead"), "nothing asked on the closed one");
+    release();
+    store.destroy?.();
+  });
+});

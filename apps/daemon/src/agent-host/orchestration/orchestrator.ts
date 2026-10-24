@@ -105,6 +105,7 @@ import {
   type Turn,
   AGENT_CHAT_REPLAY_MAX_EVENTS,
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES,
+  AGENT_ROWS_FRAME_MAX_BYTES,
   AGENT_ROWS_ON_DEMAND,
   agentRowsFrameOf,
   omitOnDemandAgentRows,
@@ -6129,7 +6130,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       items: slimItemsForRead(runtime.state.items ?? []),
       roster: runtime.state.roster ?? [],
       seq: runtime.state.seq,
-      agentIds
+      agentIds,
+      // One stream line each, under the cap the stream paces frames by (`stream.ts`).
+      maxBytes: AGENT_ROWS_FRAME_MAX_BYTES
     });
   };
 

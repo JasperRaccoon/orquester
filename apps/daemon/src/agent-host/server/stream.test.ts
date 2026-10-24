@@ -26,6 +26,8 @@ interface FakeResponse {
   lines: string[];
   /** Make the next `write` report backpressure instead of flushing. */
   stall(): void;
+  /** Every `write` reports backpressure until the next `drain()`. */
+  hold(): void;
   drain(): void;
   ended: boolean;
   closeFromClient(): void;
@@ -34,6 +36,7 @@ interface FakeResponse {
 function fakeResponse(): FakeResponse {
   const lines: string[] = [];
   let stalled = false;
+  let holding = false;
   let drainListener: (() => void) | null = null;
   const closeListeners: Array<() => void> = [];
   const state = {
@@ -51,6 +54,7 @@ function fakeResponse(): FakeResponse {
     },
     write(chunk: string): boolean {
       lines.push(chunk.replace(/\n$/, ""));
+      if (holding) return false;
       if (stalled) {
         stalled = false;
         return false;
@@ -68,7 +72,11 @@ function fakeResponse(): FakeResponse {
     stall(): void {
       stalled = true;
     },
+    hold(): void {
+      holding = true;
+    },
     drain(): void {
+      holding = false;
       drainListener?.();
       drainListener = null;
     },
@@ -546,7 +554,7 @@ describe("thread stream — on-demand agent rows", () => {
     await without.start();
     assert.deepEqual(parse(plain.lines).at(-1), { kind: "synchronized", hostInstanceId: "host-1" });
     assert.equal(without.streamId, undefined);
-    assert.equal(without.requestAgentRows(["a"]), false);
+    assert.equal(without.requestAgentRows(["a"]), "closed");
     without.close();
 
     const fake = fakeResponse();
@@ -561,7 +569,7 @@ describe("thread stream — on-demand agent rows", () => {
     assert.deepEqual(parse(fake.lines).at(-1), { kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" });
     assert.equal(stream.streamId, "s-1");
     stream.close();
-    assert.equal(stream.requestAgentRows(["a"]), false, "a closed stream takes none");
+    assert.equal(stream.requestAgentRows(["a"]), "closed", "a closed stream takes none");
   });
 
   it("an agent message streaming while the request lands ends up whole, with no delta twice", async (t) => {
@@ -596,7 +604,7 @@ describe("thread stream — on-demand agent rows", () => {
     host.commit([host.words("aw2", "Hel", "a", true)]);
     host.commit([host.row("tool.updated", { toolUseId: "a2", title: "Bash" }, "a2-update", "a")]);
     // …and the client's request lands mid-message.
-    assert.equal(stream.requestAgentRows(["a"]), true);
+    assert.equal(stream.requestAgentRows(["a"]), "ok");
     host.commit([host.words("aw2", "lo", "a", true)]);
     host.commit([host.words("aw2", " world", "a", true)]);
     // The close: empty text keeps what streamed.
@@ -656,7 +664,7 @@ describe("thread stream — on-demand agent rows", () => {
     await new Promise((resolve) => setImmediate(resolve));
     // A row lands while the read is out, and a request is already in.
     host.commit([host.row("tool.output", { toolUseId: "a1", delta: "late" }, "a1-out", "a")]);
-    assert.equal(stream.requestAgentRows(["a"]), true);
+    assert.equal(stream.requestAgentRows(["a"]), "ok");
     releaseRead();
     await started;
     const client = clientOf(fake.lines);
@@ -666,5 +674,80 @@ describe("thread stream — on-demand agent rows", () => {
     );
     assert.deepEqual(ownRows(client.fold.items, "a"), ownRows(host.state.items, "a"));
     stream.close();
+  });
+});
+
+describe("thread stream — on-demand agent rows are paced under the budget", () => {
+  /** A host whose agents each own one row of `bytes` characters, settled. */
+  function bigAgents(count: number, bytes: number) {
+    const host = foldHost();
+    host.commit([host.created(), host.running()]);
+    for (let n = 0; n < count; n += 1) {
+      host.commit([
+        host.row("task.started", { taskId: `a${n}`, agentKind: "agent" }, `a${n}-launch`),
+        host.row("tool.completed", { toolUseId: `c${n}`, output: "x".repeat(bytes) }, `a${n}-row`, `a${n}`),
+        host.row("task.completed", { taskId: `a${n}`, agentKind: "agent", status: "completed" }, `a${n}-end`)
+      ]);
+    }
+    return host;
+  }
+
+  it("writes one frame per agent, the next only once the socket drained under the cap, and never trips the budget", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const host = bigAgents(6, 1_500_000);
+    const fake = fakeResponse();
+    const closed: string[] = [];
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (listener) => {
+        host.listen(listener);
+        return () => undefined;
+      },
+      read: async () => [{ kind: "snapshot", thread: omitOnDemandAgentRows(host.snapshot()) }],
+      agentRows: { streamId: "s-1", frame: (agentIds) => host.frame(agentIds) },
+      onClose: (reason) => closed.push(reason)
+    });
+    await stream.start();
+    const frames = () => parse(fake.lines).filter((frame) => frame.kind === "agent-rows") as AgentRowsFrame[];
+    // A slow phone: nothing drains until it says so. Six agents of 1.5 MB are 9 MB in all.
+    fake.hold();
+    assert.equal(stream.requestAgentRows(["a0", "a1", "a2", "a3", "a4", "a5", "a0"]), "ok");
+    assert.deepEqual(frames().map((frame) => frame.agentIds), [["a0"], ["a1"]], "two frames' worth undrained, then it waits");
+    for (let round = 0; round < 3; round += 1) fake.drain();
+    assert.deepEqual(frames().map((frame) => frame.agentIds), [["a0"], ["a1"], ["a2"], ["a3"], ["a4"], ["a5"]]);
+    assert.deepEqual(closed, [], "never cut for its budget");
+    stream.close();
+  });
+
+  it("an agent whose rows pass the frame cap gets its newest rows, marked truncated", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const host = foldHost();
+    host.commit([host.created(), host.running(), host.row("task.started", { taskId: "a", agentKind: "agent" }, "a-launch")]);
+    for (let n = 0; n < 3; n += 1) {
+      host.commit([host.row("tool.completed", { toolUseId: `c${n}`, output: "x".repeat(900_000) }, `a-row-${n}`, "a")]);
+    }
+    host.commit([host.row("task.completed", { taskId: "a", agentKind: "agent", status: "completed" }, "a-end")]);
+    const frame = agentRowsFrameOf({ items: host.state.items, roster: host.state.roster, seq: host.state.seq, agentIds: ["a"], maxBytes: 2 * 1024 * 1024 });
+    assert.equal(frame.truncated, true);
+    assert.deepEqual(frame.items.map((item) => item.id), ["a-row-1", "a-row-2"], "the newest that fit");
+    assert.ok(Buffer.byteLength(JSON.stringify(frame)) <= 2 * 1024 * 1024);
+    const whole = agentRowsFrameOf({ items: host.state.items, roster: host.state.roster, seq: host.state.seq, agentIds: ["a"], maxBytes: 8 * 1024 * 1024 });
+    assert.equal(whole.truncated, undefined);
+  });
+
+  it("a thread the host can no longer read: the request says so and the stream closes", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fake = fakeResponse();
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async () => () => undefined,
+      read: async () => [{ kind: "snapshot", thread: snapshot(1) }],
+      agentRows: { streamId: "s-1", frame: () => null }
+    });
+    await stream.start();
+    assert.equal(stream.requestAgentRows(["a"]), "gone");
+    assert.equal(stream.closed, true);
   });
 });

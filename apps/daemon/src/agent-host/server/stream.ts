@@ -22,6 +22,7 @@ import {
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_ERROR_CODES,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
+  AGENT_ROWS_FRAME_MAX_BYTES,
   type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
   type AgentRowsFrame,
@@ -38,6 +39,9 @@ const STREAM_OVERFLOW_FRAME = {
   kind: "error" as const,
   message: "The live event buffer is full. Resume from the last received sequence."
 };
+
+/** The most agents one stream holds asked-for but unwritten (`requestAgentRows`); a roster lists 100. */
+const AGENT_ROWS_QUEUE_LIMIT = 1_024;
 
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
 const COALESCE_WINDOW_MS = 50;
@@ -163,12 +167,16 @@ export interface ThreadStream {
   /** {@link ThreadStreamOptions.agentRows}' id, or undefined for a stream without it. */
   readonly streamId: string | undefined;
   /**
-   * Write the agents' {@link AgentRowsFrame} into this stream, in order: now
-   * (after the tool updates still in their coalescing window, which were
-   * committed first) when the stream is live, else right after its
-   * `synchronized`. False when it cannot: closed, or opened without the opt-in.
+   * Write the agents' {@link AgentRowsFrame}s into this stream, ONE PER AGENT,
+   * in order: each after the tool updates still in their coalescing window
+   * (committed first), from right after `synchronized` when the stream is not
+   * live yet, and the next one only while the stream's undrained bytes are
+   * under {@link AGENT_ROWS_FRAME_MAX_BYTES} (else at the socket's next
+   * `drain`) — so no request ever trips the stream's budget. `"closed"`: the
+   * stream is closed or was opened without the opt-in. `"gone"`: the thread
+   * is no longer one the host can read (the stream closes too).
    */
-  requestAgentRows(agentIds: readonly string[]): boolean;
+  requestAgentRows(agentIds: readonly string[]): "ok" | "closed" | "gone";
 }
 
 /**
@@ -204,8 +212,12 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
    */
   let pendingDrainBytes = 0;
   let drainArmed = false;
-  /** Agent ids asked for before the stream went live, in order of asking; written after `synchronized`. */
-  const preLiveAgentRows: string[] = [];
+  /**
+   * Agents asked for whose frame is not written yet, in order of asking: before the stream is
+   * live, or while its undrained bytes are past the frame cap. Bounded: past it a request's
+   * agents are not taken, and the client asks again on its next stream.
+   */
+  const agentRowsQueue = new Set<string>();
 
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
@@ -259,6 +271,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       const released = pendingDrainBytes;
       pendingDrainBytes = 0;
       chargedBytes = Math.max(0, chargedBytes - released);
+      // Room again: the next agent's frame, if any waits.
+      pumpAgentRows();
     });
   };
 
@@ -332,24 +346,33 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
    * frame that already holds it, nor a frame's state be followed by an older
    * update of it. Built here, in the same synchronous step that writes it.
    */
-  const writeAgentRows = (agentIds: readonly string[]): void => {
+  const pumpAgentRows = (): "ok" | "gone" => {
     const agentRows = options.agentRows;
-    if (closed || agentRows === undefined || agentIds.length === 0) return;
-    flushPending();
-    const frame = agentRows.frame(agentIds);
-    if (frame !== null) writeFrame(frame);
+    if (closed || !live || agentRows === undefined) return "ok";
+    // Each frame is capped at the same size, so with this much undrained at most the stream
+    // holds two frames' worth beside its live tail — far under its budget.
+    while (!closed && agentRowsQueue.size > 0 && chargedBytes < AGENT_ROWS_FRAME_MAX_BYTES) {
+      const agentId = agentRowsQueue.values().next().value as string;
+      agentRowsQueue.delete(agentId);
+      flushPending();
+      const frame = agentRows.frame([agentId]);
+      if (frame === null) {
+        // The thread is gone from this host: the reconnect reads that and stops.
+        close("host");
+        return "gone";
+      }
+      writeFrame(frame);
+    }
+    return "ok";
   };
 
-  const requestAgentRows = (agentIds: readonly string[]): boolean => {
-    if (closed || options.agentRows === undefined) return false;
-    if (!live) {
-      for (const agentId of agentIds) {
-        if (!preLiveAgentRows.includes(agentId)) preLiveAgentRows.push(agentId);
-      }
-      return true;
+  const requestAgentRows = (agentIds: readonly string[]): "ok" | "closed" | "gone" => {
+    if (closed || options.agentRows === undefined) return "closed";
+    for (const agentId of agentIds) {
+      if (agentRowsQueue.size >= AGENT_ROWS_QUEUE_LIMIT) break;
+      agentRowsQueue.add(agentId);
     }
-    writeAgentRows(agentIds);
-    return true;
+    return pumpAgentRows();
   };
 
   const start = async (): Promise<void> => {
@@ -445,7 +468,7 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     }
     preReadImport = null;
     // Asked for before the marker: every event the fold holds is out by now.
-    writeAgentRows(preLiveAgentRows.splice(0, preLiveAgentRows.length));
+    pumpAgentRows();
   };
 
   return {
