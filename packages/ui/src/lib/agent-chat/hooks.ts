@@ -462,6 +462,15 @@ export interface AgentChatDrillInView {
   openTurnIds: readonly string[];
   /** The thread's retained window has dropped rows (`AgentChatThreadState.retentionDropped`). */
   retentionDropped: boolean;
+  /**
+   * The agent's own rows are not here yet: the snapshot left them out
+   * (on-demand agent rows, `slice.omittedAgentIds`) and the drill-in has asked
+   * for them. Until they land the drill-in shows that it is loading, never
+   * the rows it has — a launch and an ending with nothing between.
+   */
+  rowsLoading: boolean;
+  /** The agent's rows came as its newest only (`AgentRowsFrame.truncated`): the drill-in says so. */
+  rowsTruncated: boolean;
 }
 
 /**
@@ -490,6 +499,21 @@ export function useAgentChatDrillIn(
   // Memoised by the roster and the session, so this selector is stable.
   const messageStreaming = useThreadState(store, (state) => messageStreamingContext(state.slice));
   const retentionDropped = useThreadState(store, (state) => state.retentionDropped);
+  const omittedAgentIds = useThreadState(store, (state) => state.slice.omittedAgentIds);
+  const revalidatingAgentIds = useThreadState(store, (state) => state.slice.revalidatingAgentIds);
+  const truncatedAgentIds = useThreadState(store, (state) => state.slice.truncatedAgentIds);
+  const wantAgentRows = useThreadState(store, (state) => state.actions.wantAgentRows);
+  // Rows kept from before a reconnect's snapshot show until their frame lands.
+  const rowsLoading =
+    agentId !== null && omittedAgentIds?.includes(agentId) === true && revalidatingAgentIds?.includes(agentId) !== true;
+  const rowsTruncated = agentId !== null && truncatedAgentIds?.includes(agentId) === true;
+
+  // An open drill-in wants its agent's rows: asked for while omitted, again on
+  // every stream whose snapshot leaves them out, until it closes.
+  useEffect(() => {
+    if (agentId === null || wantAgentRows === undefined) return undefined;
+    return wantAgentRows(agentId);
+  }, [agentId, wantAgentRows]);
 
   // One projection per drill-in, held across renders so a streamed token in
   // the child's timeline changes one row object, exactly as in the parent.
@@ -504,7 +528,9 @@ export function useAgentChatDrillIn(
         backgroundShell: false,
         items: entries,
         openTurnIds: NO_TURNS,
-        retentionDropped
+        retentionDropped,
+        rowsLoading: false,
+        rowsTruncated: false
       };
     }
     const { row: agent, remembered: agentRemembered } = drillInAgentRow({
@@ -516,7 +542,7 @@ export function useAgentChatDrillIn(
     // window, only while no row is known.
     const backgroundShell = agent !== null ? isBackgroundShellRow(agent) : isBackgroundShellItems(entries, agentId);
     if (backgroundShell) {
-      return { rows: null, agent, agentRemembered, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped };
+      return { rows: null, agent, agentRemembered, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped, rowsLoading, rowsTruncated };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -534,9 +560,11 @@ export function useAgentChatDrillIn(
       backgroundShell,
       items: entries,
       openTurnIds: projection.current.openTurnIds,
-      retentionDropped
+      retentionDropped,
+      rowsLoading,
+      rowsTruncated
     };
-  }, [agentId, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped]);
+  }, [agentId, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped, rowsLoading, rowsTruncated]);
 }
 
 // ---------------------------------------------------------------------------

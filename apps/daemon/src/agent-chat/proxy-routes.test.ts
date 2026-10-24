@@ -653,7 +653,8 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     INDEX_UNAVAILABLE: 503,
     ITEM_NOT_FOUND: 404,
     PROMPT_NOT_FOUND: 404,
-    TURN_NOT_IDLE: 409
+    TURN_NOT_IDLE: 409,
+    STREAM_NOT_FOUND: 404
   };
   for (const code of Object.keys(expected) as AgentChatErrorCode[]) {
     const response = await h.app.inject({
@@ -1334,5 +1335,72 @@ test("a profile chat with no profile catalog to offer — or one that fails — 
   const failed = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
   assert.equal(failed.statusCode, 200);
   assert.deepEqual(failed.json(), empty);
+  await h.close();
+});
+
+// --- on-demand agent rows ------------------------------------------------------
+
+test("the on-demand opt-in passes through on both reads, and only its one value", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (req, res) => {
+    if ((req.url ?? "").includes("/events")) {
+      res.writeHead(200, { "content-type": "application/x-ndjson" });
+      res.end(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" })}\n`);
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ kind: "snapshot", thread: { seq: 2 } }));
+  };
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?after=3&agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?agentRows=everything` });
+  const stream = await h.app.inject({ method: "GET", url: `${agentChatRoutes.events("t1")}?after=4&agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: agentChatRoutes.events("t1") });
+  assert.deepEqual(
+    h.host.requests.map((request) => request.url),
+    [
+      "/threads/t1/thread?agentRows=on-demand",
+      "/threads/t1/thread?after=3&agentRows=on-demand",
+      "/threads/t1/thread",
+      "/threads/t1/events?after=4&agentRows=on-demand",
+      "/threads/t1/events"
+    ]
+  );
+  assert.equal(JSON.parse(stream.body.trim()).streamId, "s-1", "the stream's id reaches the client");
+  await h.close();
+});
+
+test("POST agent-rows is forwarded to the host as it is, and its answers come back verbatim", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res, body) => {
+    const parsed = JSON.parse(body) as { streamId: string };
+    if (parsed.streamId === "gone") {
+      res
+        .writeHead(404, { "content-type": "application/json" })
+        .end(JSON.stringify({ error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open." } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+  };
+  const ok = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.agentRows("t1"),
+    payload: { streamId: "s-1", agentIds: ["a", "b"] }
+  });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.json(), { ok: true });
+  assert.equal(h.host.requests[0]!.method, "POST");
+  assert.equal(h.host.requests[0]!.url, "/threads/t1/agent-rows");
+  assert.deepEqual(JSON.parse(h.host.requests[0]!.body), { streamId: "s-1", agentIds: ["a", "b"] });
+  assert.equal(h.host.requests[0]!.auth, "Bearer tok", "the daemon's own credential, never the client's");
+  const gone = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t1"), payload: { streamId: "gone", agentIds: ["a"] } });
+  assert.equal(gone.statusCode, 404);
+  assert.equal(gone.json().error.code, "STREAM_NOT_FOUND");
+  // No tab: never reaches the host. A host that is down: 503.
+  const none = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t9"), payload: { streamId: "s-1", agentIds: ["a"] } });
+  assert.equal(none.statusCode, 404);
+  h.healthy = false;
+  const down = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t1"), payload: { streamId: "s-1", agentIds: ["a"] } });
+  assert.equal(down.statusCode, 503);
+  assert.equal(h.host.requests.length, 2);
   await h.close();
 });

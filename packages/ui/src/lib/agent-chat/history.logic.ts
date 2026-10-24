@@ -446,6 +446,34 @@ function windowCutAfter(
   return count;
 }
 
+/**
+ * The history once an `agent-rows` frame replaced some agents' on-demand rows
+ * in the window (`applyAgentRows`, on-demand agent rows): nothing moves but
+ * the window cut, which counts window rows — recounted as how many of the new
+ * list's rows lie up to the last surviving row the cut held. A frame's row
+ * placed after that row is the window's, as a row appended live would be.
+ */
+export function historyAfterAgentRows(
+  history: AgentChatHistoryState,
+  before: readonly ThreadItem[],
+  after: readonly ThreadItem[]
+): AgentChatHistoryState {
+  if (history.windowCut === 0 || before === after) {
+    return history;
+  }
+  const positions = new Map<string, number>();
+  after.forEach((item, index) => positions.set(rowKey(item), index));
+  let windowCut = 0;
+  for (let index = Math.min(history.windowCut, before.length) - 1; index >= 0; index -= 1) {
+    const at = positions.get(rowKey(before[index]!));
+    if (at !== undefined) {
+      windowCut = at + 1;
+      break;
+    }
+  }
+  return windowCut === history.windowCut ? history : { ...history, windowCut };
+}
+
 /** How many rows the pages and the bridge hold together. */
 function historyRowCount(history: AgentChatHistoryState): number {
   let total = history.bridge.length;

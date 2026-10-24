@@ -17,6 +17,7 @@ import {
   isThreadGoneStreamError,
   agentChatCommandPath,
   agentChatRoutes,
+  AGENT_ROWS_QUERY_PARAM,
   isThreadItemOutputWindow,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
@@ -28,6 +29,9 @@ import {
   type AgentChatErrorCode,
   type AgentChatStreamFrame,
   type AgentProvidersResponse,
+  type AgentRowsMode,
+  type AgentRowsRequest,
+  type AgentRowsResponse,
   type AttachmentRef,
   type CommandReceiptResponse,
   type RefreshProviderResponse,
@@ -94,6 +98,14 @@ export interface AgentChatStreamOptions {
    * with a different one, the client re-reads instead of resuming (§6.3, §8).
    */
   hostInstanceId?: string | null;
+  /**
+   * `?agentRows=on-demand` on every connection: a snapshot then leaves out the
+   * settled agents' on-demand rows (`ThreadSnapshotPayload.omittedAgentIds`),
+   * and the `synchronized` frame names the connection (`streamId`) for
+   * {@link AgentChatTransport.requestAgentRows}. A host that predates it
+   * ignores it.
+   */
+  agentRows?: AgentRowsMode;
 }
 
 /** A stream that reconnects itself; `close()` retires it for good. */
@@ -160,8 +172,19 @@ export interface AgentChatTransport {
   ): Promise<CommandReceiptResponse>;
   read(
     sessionId: string,
-    options?: { after?: number; window?: ThreadReadWindow; signal?: AbortSignal }
+    options?: { after?: number; window?: ThreadReadWindow; agentRows?: AgentRowsMode; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
+  /**
+   * `POST …/agent-rows`: have the host write the agents' on-demand rows into
+   * the stream `body.streamId` names, as one `agent-rows` frame in order with
+   * its events. Answers only that it did; rejects with the §6.2 error — 404
+   * `STREAM_NOT_FOUND` for a stream that is gone (ask on the next one), the
+   * generic 404 `THREAD_NOT_FOUND` route miss of a host that predates it.
+   *
+   * Optional: a transport a runtime supplies itself (`Transporter.agentChat()`)
+   * may predate it, and the store then never asks for on-demand rows.
+   */
+  requestAgentRows?(sessionId: string, body: AgentRowsRequest, signal?: AbortSignal): Promise<AgentRowsResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
   /**
    * `GET …/items/:itemId/output`, whole — the streamed output of the tool
@@ -354,15 +377,21 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
     },
 
     read(sessionId, options) {
+      const query = definedQuery({
+        after: options?.after,
+        window: options?.window,
+        [AGENT_ROWS_QUERY_PARAM]: options?.agentRows
+      });
       return send<ThreadReadResponse>("GET", agentChatRoutes.thread(sessionId), {
-        query:
-          options?.after === undefined && options?.window === undefined
-            ? undefined
-            : {
-                ...(options?.after === undefined ? {} : { after: options.after }),
-                ...(options?.window === undefined ? {} : { window: options.window })
-              },
+        query: Object.keys(query).length === 0 ? undefined : query,
         ...(options?.signal === undefined ? {} : { signal: options.signal })
+      });
+    },
+
+    requestAgentRows(sessionId, body, signal) {
+      return send<AgentRowsResponse>("POST", agentChatRoutes.agentRows(sessionId), {
+        body,
+        ...(signal === undefined ? {} : { signal })
       });
     },
 
@@ -699,8 +728,13 @@ function openAgentChatStream(
     });
     knownHostInstanceId = hostInstanceId;
     // This client handles a bounded snapshot (`ThreadReadWindow`): its history bounds name the
-    // turns it leaves out, which "load older" pages back in.
-    const query = `?${after === undefined ? "" : `after=${after}&`}window=${THREAD_READ_WINDOW_RECENT}`;
+    // turns it leaves out, which "load older" pages back in. And, when the caller asks, on-demand
+    // agent rows beside it.
+    const params = new URLSearchParams();
+    if (after !== undefined) params.set("after", String(after));
+    params.set("window", THREAD_READ_WINDOW_RECENT);
+    if (options.agentRows !== undefined) params.set(AGENT_ROWS_QUERY_PARAM, options.agentRows);
+    const query = `?${params.toString()}`;
     let opened = false;
     liveness = { fastHeartbeat: false, synchronized: false };
     lastHeartbeatAt = null;

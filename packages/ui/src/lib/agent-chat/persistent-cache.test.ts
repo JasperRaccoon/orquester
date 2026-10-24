@@ -30,6 +30,7 @@ import {
   THREAD_CACHE_MAX_ENTRY_CHARS,
   THREAD_CACHE_MAX_TOTAL_CHARS,
   THREAD_CACHE_SAVE_INTERVAL_MS,
+  THREAD_CACHE_PARTIAL_VERSION,
   THREAD_CACHE_VERSION,
   type PersistableThreadState,
   type ThreadCacheBackend,
@@ -245,7 +246,7 @@ describe("records", () => {
 
   it("ignores and deletes a record of another format or fold version", async () => {
     const key = threadCacheKey(SCOPE_A, "s1");
-    for (const change of [{ v: THREAD_CACHE_VERSION + 1 }, { fold: FOLD_SNAPSHOT_VERSION - 1 }]) {
+    for (const change of [{ v: THREAD_CACHE_PARTIAL_VERSION + 1 }, { fold: FOLD_SNAPSHOT_VERSION - 1 }]) {
       await save(transportFor("https://a.example"), synchronizedState(5));
       backend.metas.set(key, { ...(backend.metas.get(key) as object), ...change });
       assert.equal(await loadPersistedThread(SCOPE_A, "s1"), null, JSON.stringify(change));
@@ -811,5 +812,81 @@ describe("the IndexedDB adapter", () => {
     const warn = mock.method(console, "warn", () => {});
     assert.equal(await loadPersistedThread(SCOPE_A, "s1"), null);
     warn.mock.restore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// On-demand agent rows
+// ---------------------------------------------------------------------------
+
+describe("on-demand agent rows", () => {
+  /** A synchronized thread whose snapshot left agent `a`'s rows out. */
+  function partialState(seq: number): PersistableThreadState {
+    let reducer = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: {
+        ...threadSnapshot(seq),
+        omittedAgentIds: ["a", "b"],
+        // A bounded snapshot's too: the device keeps its cut beside what it lacks.
+        history: { indexed: true, hasOlder: true, beforeCursor: "c1", oldestRetainedOrdinal: 4, totalTurns: 9, windowCut: "c1" }
+      }
+    });
+    reducer = applyFrame(reducer, { kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" });
+    return { reducer, slice: reducer.slice };
+  }
+
+  it("a partial copy is saved as its own version with whose rows it lacks, and restored with them", async () => {
+    const state = partialState(5);
+    await save(transportFor("https://a.example"), state);
+    const key = threadCacheKey(SCOPE_A, "s1");
+    assert.equal((backend.metas.get(key) as ThreadCacheMeta).v, THREAD_CACHE_PARTIAL_VERSION);
+    const record = await loadPersistedThread(SCOPE_A, "s1");
+    assert.ok(record);
+    assert.deepEqual(record.snapshot.omittedAgentIds, ["a", "b"]);
+    assert.equal(record.snapshot.history?.windowCut, "c1", "and the bounded snapshot's cut with them");
+    assert.deepEqual(record.snapshot, persistableSnapshotOf(state));
+    const refolded = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: record.snapshot });
+    assert.deepEqual(refolded.slice.omittedAgentIds, ["a", "b"], "a restored copy knows what it lacks");
+    assert.equal(refolded.slice.history.bounds?.windowCut, "c1");
+    // A whole copy is still the format every bundle reads.
+    await save(transportFor("https://a.example"), synchronizedState(6));
+    assert.equal((backend.metas.get(key) as ThreadCacheMeta).v, THREAD_CACHE_VERSION);
+    assert.equal((await loadPersistedThread(SCOPE_A, "s1"))?.snapshot.omittedAgentIds, undefined);
+  });
+
+  it("a record whose version and omitted list disagree is not read", async () => {
+    const key = threadCacheKey(SCOPE_A, "s1");
+    // Written partial, claimed whole: a bundle from before would paint it as whole.
+    await save(transportFor("https://a.example"), partialState(5));
+    for (const half of [backend.metas, backend.bodies]) {
+      half.set(key, { ...(half.get(key) as object), v: THREAD_CACHE_VERSION });
+    }
+    assert.equal(await loadPersistedThread(SCOPE_A, "s1"), null);
+    await settled();
+    // Written whole, claimed partial.
+    await save(transportFor("https://a.example"), synchronizedState(5));
+    for (const half of [backend.metas, backend.bodies]) {
+      half.set(key, { ...(half.get(key) as object), v: THREAD_CACHE_PARTIAL_VERSION });
+    }
+    assert.equal(await loadPersistedThread(SCOPE_A, "s1"), null);
+  });
+
+  it("rewrites the copy when an agent's rows load, though its cursor did not move", async () => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+    const link = linkThreadCache(transportFor("https://a.example"), "s1", { load: false })!;
+    const store = fakeStore(EMPTY);
+    link.watch(store);
+    store.set(partialState(5));
+    mock.timers.tick(THREAD_CACHE_FIRST_SAVE_DELAY_MS);
+    await settled();
+    const writes = backend.bodyWrites;
+    assert.ok(writes >= 1);
+    store.apply({ kind: "agent-rows", seq: 5, agentIds: ["a"], items: [], after: [] });
+    mock.timers.tick(THREAD_CACHE_SAVE_INTERVAL_MS);
+    await settled();
+    link.close();
+    await settled();
+    assert.ok(backend.bodyWrites > writes, "written again");
+    assert.deepEqual((await loadPersistedThread(SCOPE_A, "s1"))?.snapshot.omittedAgentIds, ["b"]);
   });
 });

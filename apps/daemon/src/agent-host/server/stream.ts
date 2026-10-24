@@ -22,8 +22,10 @@ import {
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_ERROR_CODES,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
+  AGENT_ROWS_FRAME_MAX_BYTES,
   type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
+  type AgentRowsFrame,
   type DomainEvent,
   type HistoryImportProgress
 } from "@orquester/api/agent-chat";
@@ -37,6 +39,9 @@ const STREAM_OVERFLOW_FRAME = {
   kind: "error" as const,
   message: "The live event buffer is full. Resume from the last received sequence."
 };
+
+/** The most agents one stream holds asked-for but unwritten (`requestAgentRows`); a roster lists 100. */
+const AGENT_ROWS_QUEUE_LIMIT = 1_024;
 
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
 const COALESCE_WINDOW_MS = 50;
@@ -140,6 +145,17 @@ export interface ThreadStreamOptions {
    */
   read(): Promise<AgentChatStreamFrame[]>;
   onClose?: (reason: "client" | "budget" | "host") => void;
+  /**
+   * On-demand agent rows (`?agentRows=on-demand`): this stream's id, announced
+   * on its `synchronized` frame, and the frame a `POST …/agent-rows` naming it
+   * writes — built SYNCHRONOUSLY from the fold as it stands when it is written,
+   * so every event at or below its `seq` has already been offered here.
+   * Absent: the stream announces no id and takes no request.
+   */
+  agentRows?: {
+    streamId: string;
+    frame(agentIds: readonly string[]): AgentRowsFrame | null;
+  };
 }
 
 export interface ThreadStream {
@@ -148,6 +164,19 @@ export interface ThreadStream {
   /** Close from the host side (shutdown). */
   close(reason?: "client" | "budget" | "host"): void;
   readonly closed: boolean;
+  /** {@link ThreadStreamOptions.agentRows}' id, or undefined for a stream without it. */
+  readonly streamId: string | undefined;
+  /**
+   * Write the agents' {@link AgentRowsFrame}s into this stream, ONE PER AGENT,
+   * in order: each after the tool updates still in their coalescing window
+   * (committed first), from right after `synchronized` when the stream is not
+   * live yet, and the next one only while the stream's undrained bytes are
+   * under {@link AGENT_ROWS_FRAME_MAX_BYTES} (else at the socket's next
+   * `drain`) — so no request ever trips the stream's budget. `"closed"`: the
+   * stream is closed or was opened without the opt-in. `"gone"`: the thread
+   * is no longer one the host can read (the stream closes too).
+   */
+  requestAgentRows(agentIds: readonly string[]): "ok" | "closed" | "gone";
 }
 
 /**
@@ -183,6 +212,12 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
    */
   let pendingDrainBytes = 0;
   let drainArmed = false;
+  /**
+   * Agents asked for whose frame is not written yet, in order of asking: before the stream is
+   * live, or while its undrained bytes are past the frame cap. Bounded: past it a request's
+   * agents are not taken, and the client asks again on its next stream.
+   */
+  const agentRowsQueue = new Set<string>();
 
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
@@ -236,6 +271,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       const released = pendingDrainBytes;
       pendingDrainBytes = 0;
       chargedBytes = Math.max(0, chargedBytes - released);
+      // Room again: the next agent's frame, if any waits.
+      pumpAgentRows();
     });
   };
 
@@ -300,6 +337,42 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     // After any tool updates still in their window: they were committed first.
     flushPending();
     writeFrame({ kind: "history-import", progress });
+  };
+
+  /**
+   * The frame goes through the same ordered path as the live tail: the tool
+   * updates waiting on their window were committed before the fold this frame
+   * reads, so they go first — a row they update must never land after the
+   * frame that already holds it, nor a frame's state be followed by an older
+   * update of it. Built here, in the same synchronous step that writes it.
+   */
+  const pumpAgentRows = (): "ok" | "gone" => {
+    const agentRows = options.agentRows;
+    if (closed || !live || agentRows === undefined) return "ok";
+    // Each frame is capped at the same size, so with this much undrained at most the stream
+    // holds two frames' worth beside its live tail — far under its budget.
+    while (!closed && agentRowsQueue.size > 0 && chargedBytes < AGENT_ROWS_FRAME_MAX_BYTES) {
+      const agentId = agentRowsQueue.values().next().value as string;
+      agentRowsQueue.delete(agentId);
+      flushPending();
+      const frame = agentRows.frame([agentId]);
+      if (frame === null) {
+        // The thread is gone from this host: the reconnect reads that and stops.
+        close("host");
+        return "gone";
+      }
+      writeFrame(frame);
+    }
+    return "ok";
+  };
+
+  const requestAgentRows = (agentIds: readonly string[]): "ok" | "closed" | "gone" => {
+    if (closed || options.agentRows === undefined) return "closed";
+    for (const agentId of agentIds) {
+      if (agentRowsQueue.size >= AGENT_ROWS_QUEUE_LIMIT) break;
+      agentRowsQueue.add(agentId);
+    }
+    return pumpAgentRows();
   };
 
   const start = async (): Promise<void> => {
@@ -382,7 +455,11 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     // Events at or below what the read already carried are dropped here as
     // well as on the client, so the overlapping windows of §6.6 are safe.
     emitEvents(coalesceToolUpdates(buffered.filter((event) => event.seq > highest)));
-    writeFrame({ kind: "synchronized", hostInstanceId });
+    writeFrame({
+      kind: "synchronized",
+      hostInstanceId,
+      ...(options.agentRows !== undefined ? { streamId: options.agentRows.streamId } : {})
+    });
     live = true;
     // A replay still running is announced after the marker, which clears
     // the client's view of it; one that ended meanwhile needs nothing.
@@ -390,13 +467,19 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       writeFrame({ kind: "history-import", progress: preReadImport });
     }
     preReadImport = null;
+    // Asked for before the marker: every event the fold holds is out by now.
+    pumpAgentRows();
   };
 
   return {
     start,
     close,
+    requestAgentRows,
     get closed() {
       return closed;
+    },
+    get streamId() {
+      return options.agentRows?.streamId;
     }
   };
 }

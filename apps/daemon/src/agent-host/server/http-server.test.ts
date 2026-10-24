@@ -700,7 +700,7 @@ describe("agent host server — the event stream (§6.3)", () => {
     assert.deepEqual(reads, [
       undefined,
       { window: "recent" },
-      { window: "recent" },
+      { window: "recent", agentRows: "on-demand" },
       undefined,
       { window: "recent" },
       undefined
@@ -1611,6 +1611,154 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
     const error = (gone.body as { error: { code: string; message: string } }).error;
     assert.equal(error.code, "THREAD_NOT_FOUND");
     assert.ok(!error.message.startsWith("No route for"), error.message);
+    await h.stop();
+  });
+});
+
+describe("agent host server — on-demand agent rows", () => {
+  /** A settled agent `a` (a call and its words) and a running one `b`, ingested as an adapter's rows. */
+  async function fleetThread(h: Harness, id = "thread-1"): Promise<string> {
+    const threadId = await h.host.createThread({ threadId: id });
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-fleet", input: "go" });
+    await h.host.settle();
+    const at = "1970-01-01T00:00:01.000Z";
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>, agentId?: string) => ({
+      eventId: `ingest-${id}`,
+      threadId,
+      type: "thread.activity-appended" as const,
+      payload: {
+        activity: {
+          kind: "activity" as const,
+          id,
+          tone: "tool" as const,
+          activityKind,
+          summary: activityKind,
+          payload,
+          turnId: null,
+          createdAt: at,
+          updatedAt: at,
+          ...(agentId !== undefined ? { agentId } : {})
+        }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    const words = (messageId: string, text: string, agentId: string) => ({
+      eventId: `ingest-${messageId}`,
+      threadId,
+      type: "thread.message-sent" as const,
+      payload: { messageId, role: "assistant" as const, text, streaming: false, turnId: null, agentId },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    await h.host.orchestrator.ingestionSink(threadId, [
+      row("a-launch", "task.started", { taskId: "a", agentKind: "agent", title: "A" }),
+      row("b-launch", "task.started", { taskId: "b", agentKind: "agent", title: "B" }),
+      row("a1-start", "tool.started", { toolUseId: "a1", title: "Bash" }, "a"),
+      row("a1-done", "tool.completed", { toolUseId: "a1", title: "Bash" }, "a"),
+      words("aw", "found it", "a"),
+      row("b1-start", "tool.started", { toolUseId: "b1", title: "Read" }, "b"),
+      row("a-end", "task.completed", { taskId: "a", agentKind: "agent", status: "completed" })
+    ]);
+    await h.host.settle();
+    return threadId;
+  }
+
+  const idsOf = (items: ReadonlyArray<{ id: string }>): string[] => items.map((item) => item.id);
+
+  it("a read without the opt-in is byte for byte the full snapshot; with it, the settled agent's rows are left out and named", async () => {
+    const h = await harness();
+    const threadId = await fleetThread(h);
+    const full = await h.call("GET", agentHostRoutes.read(threadId));
+    const unknown = await h.call("GET", `${agentHostRoutes.read(threadId)}?agentRows=everything`);
+    assert.deepEqual(unknown.body, full.body, "only the one value opts in");
+    const snap = (full.body as { thread: ThreadSnapshotPayload }).thread;
+    assert.equal("omittedAgentIds" in snap, false);
+    const lazy = await h.call("GET", `${agentHostRoutes.read(threadId)}?agentRows=on-demand`);
+    const omitted = (lazy.body as { thread: ThreadSnapshotPayload }).thread;
+    const status = Object.fromEntries(snap.roster.map((entry) => [entry.id, entry.status]));
+    assert.equal(status.a, "completed");
+    assert.deepEqual(omitted.omittedAgentIds, status.b === "completed" ? ["a", "b"] : ["a"]);
+    const left = idsOf(snap.items).filter((id) => !idsOf(omitted.items).includes(id));
+    assert.deepEqual(left.filter((id) => id.startsWith("a")), ["a1-start", "a1-done", "aw"]);
+    for (const id of ["a-launch", "a-end", "b-launch"]) assert.ok(idsOf(omitted.items).includes(id), id);
+    // Nothing but the items and the list moved.
+    const { items: _fullItems, ...fullRest } = snap;
+    const { items: _lazyItems, omittedAgentIds: _list, ...lazyRest } = omitted;
+    assert.deepEqual(lazyRest, fullRest);
+    await h.stop();
+  });
+
+  it("a POST naming the stream writes the agent's rows into that stream, after `synchronized`", async () => {
+    const h = await harness();
+    const threadId = await fleetThread(h);
+    const full = ((await h.call("GET", agentHostRoutes.read(threadId))).body as { thread: ThreadSnapshotPayload }).thread;
+    const plain = await h.stream(agentHostRoutes.events(threadId));
+    const live = await h.stream(`${agentHostRoutes.events(threadId)}?agentRows=on-demand`);
+    await plain.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    await live.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    const marker = live.frames.find((frame) => frame.kind === "synchronized") as { streamId?: string };
+    const plainMarker = plain.frames.find((frame) => frame.kind === "synchronized") as { streamId?: string };
+    assert.equal(plainMarker.streamId, undefined, "a stream without the opt-in has no id");
+    assert.equal(typeof marker.streamId, "string");
+    const first = live.frames[0] as { kind: string; thread: ThreadSnapshotPayload };
+    assert.ok(first.thread.omittedAgentIds?.includes("a"));
+
+    const answer = await h.call("POST", agentHostRoutes.agentRows(threadId), { streamId: marker.streamId, agentIds: ["a"] });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(answer.body, { ok: true });
+    await live.waitFor((frames) => frames.some((frame) => frame.kind === "agent-rows"));
+    const frame = live.frames.find((candidate) => candidate.kind === "agent-rows") as {
+      seq: number;
+      agentIds: string[];
+      items: ThreadSnapshotPayload["items"];
+      after: Array<string | null>;
+    };
+    assert.deepEqual(frame.agentIds, ["a"]);
+    assert.equal(frame.seq, full.seq);
+    assert.deepEqual(frame.items, full.items.filter((item) => item.agentId === "a" && item.id !== "a-end"));
+    assert.equal(frame.after.length, frame.items.length);
+    assert.ok(!plain.frames.some((candidate) => candidate.kind === "agent-rows"), "only the named stream");
+    plain.close();
+    live.close();
+    await h.stop();
+  });
+
+  it("answers 404 STREAM_NOT_FOUND for a stream it does not hold or another thread's, and 400 for a malformed body", async () => {
+    const h = await harness();
+    const threadId = await fleetThread(h);
+    const other = await h.host.createThread({ threadId: "thread-other" });
+    const live = await h.stream(`${agentHostRoutes.events(threadId)}?agentRows=on-demand`);
+    await live.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    const streamId = (live.frames.find((frame) => frame.kind === "synchronized") as { streamId: string }).streamId;
+    const code = (result: { body: unknown }): string => (result.body as { error: { code: string } }).error.code;
+
+    const unknown = await h.call("POST", agentHostRoutes.agentRows(threadId), { streamId: "nope", agentIds: ["a"] });
+    assert.equal(unknown.status, 404);
+    assert.equal(code(unknown), "STREAM_NOT_FOUND");
+    const elsewhere = await h.call("POST", agentHostRoutes.agentRows(other), { streamId, agentIds: ["a"] });
+    assert.equal(elsewhere.status, 404);
+    assert.equal(code(elsewhere), "STREAM_NOT_FOUND");
+    // A request whose frames cannot be built — the thread is gone — answers so, never a hang.
+    const deletedThread = await fleetThread(h, "thread-doomed");
+    const doomed = await h.stream(`${agentHostRoutes.events(deletedThread)}?agentRows=on-demand`);
+    await doomed.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    const doomedId = (doomed.frames.find((frame) => frame.kind === "synchronized") as { streamId: string }).streamId;
+    assert.equal((await h.call("DELETE", `/threads/${deletedThread}`)).status, 200);
+    const gone = await h.call("POST", agentHostRoutes.agentRows(deletedThread), { streamId: doomedId, agentIds: ["a"] });
+    assert.equal(gone.status, 404);
+    assert.equal(code(gone), "THREAD_NOT_FOUND");
+    doomed.close();
+    for (const body of [{}, { streamId }, { streamId, agentIds: [] }, { streamId, agentIds: [7] }]) {
+      const refused = await h.call("POST", agentHostRoutes.agentRows(threadId), body);
+      assert.equal(refused.status, 400, JSON.stringify(body));
+      assert.equal(code(refused), "INVALID_COMMAND");
+    }
+    live.close();
     await h.stop();
   });
 });

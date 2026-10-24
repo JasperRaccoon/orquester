@@ -29,6 +29,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 import {
   ACTIVE_SUBAGENT_STATUSES,
+  AGENT_ROWS_ON_DEMAND,
   DEFAULT_INTERACTION_MODE,
   messageStreamingContext,
   repairsReEmittedAssistantCopies,
@@ -36,6 +37,7 @@ import {
   type AgentChatCommandBodies,
   type AgentChatCommandName,
   type ApprovalDecision,
+  type DomainEvent,
   type AttachmentRef,
   type ComposerContextRecord,
   type InteractionMode,
@@ -106,7 +108,9 @@ import {
   findLatestProposedPlan,
   hasActionableProposedPlan
 } from "./plan.logic";
+import { AgentRowsLoader } from "./agent-rows.logic";
 import {
+  agentRowsFrameApplies,
   applyFrame,
   createReducerState,
   latestTurnSettled,
@@ -427,12 +431,14 @@ function cachedThreadState(retained: RetainedThreadState): RetainedThreadState {
   const history = slice.history.loading
     ? withoutOrphanBridge({ ...slice.history, loading: false })
     : slice.history;
-  const reducer = patchSlice(retained.reducer, {
+  const patched = patchSlice(retained.reducer, {
     connection,
     errorBanner: null,
     history,
     ...(slice.respondingRequestIds.length > 0 ? { respondingRequestIds: [] } : {})
   });
+  // The connection that named this stream id is gone: the resumed one names its own.
+  const reducer = (patched.streamId ?? null) === null ? patched : { ...patched, streamId: null };
   return reducer === retained.reducer ? retained : { ...retained, reducer };
 }
 
@@ -498,6 +504,21 @@ type RewindProgress =
   | { kind: "pending" }
   | { kind: "rewound" }
   | { kind: "failed"; reason: string };
+
+/**
+ * The agent a live event writes a row of — an activity or a message stamped
+ * with its `agentId` — or null: what makes an omitted agent live again
+ * (on-demand agent rows, `agent-rows.logic.ts`).
+ */
+function eventAgentId(event: DomainEvent): string | null {
+  const owner =
+    event.type === "thread.activity-appended"
+      ? event.payload.activity.agentId
+      : event.type === "thread.message-sent"
+        ? event.payload.agentId
+        : undefined;
+  return typeof owner === "string" && owner.length > 0 ? owner : null;
+}
 
 function isRevertFailure(item: ThreadItem): item is ThreadActivityItem {
   return item.kind === "activity" && item.activityKind === REVERT_FAILED_ACTIVITY_KIND;
@@ -1006,6 +1027,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   /** Opens the stream with this generation's handlers (set once the store exists). */
   let openStream: ((options: AgentChatStreamOptions) => AgentChatStreamHandle) | null = null;
   /**
+   * On-demand agent rows (`agent-rows.logic.ts`): what this generation asks
+   * the host for, and whether its streams and reads opt in at all.
+   */
+  let agentRows: AgentRowsLoader | null = null;
+  /** The current connection reached `synchronized`: its frames are in order from here. */
+  let streamLive = false;
+  /** The opt-in a stream or a read of this generation carries now. */
+  const agentRowsOptIn = (): { agentRows?: typeof AGENT_ROWS_ON_DEMAND } =>
+    agentRows?.enabled === true && transport.requestAgentRows !== undefined ? { agentRows: AGENT_ROWS_ON_DEMAND } : {};
+  /**
    * The §7.4 queue's drive loop re-checks when a queued send of this thread
    * settles — this generation's or one a torn-down generation still had out
    * (`beginQueuedSend`, which is also its in-flight latch).
@@ -1043,6 +1074,38 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       update((state) => {
         const reducer = patchSlice(state.reducer, patch);
         return reducer === state.reducer ? state : { ...state, reducer, slice: reducer.slice };
+      });
+    };
+
+    /**
+     * Read the thread whole: the stream reopened without a cursor, so the host
+     * answers with a snapshot and then everything after it, in one ordered
+     * stream — the store's resync path. What on-demand agent rows fall back to
+     * when they cannot be loaded one agent at a time (`agent-rows.logic.ts`):
+     * a daemon or host from before the route — then without the opt-in, so the
+     * snapshot holds every row — or a resumed copy whose host names no stream.
+     */
+    const rereadWhole = (): void => {
+      if (closed || stream === null || openStream === null) return;
+      stream.close();
+      stream = openStream({});
+    };
+    agentRows = new AgentRowsLoader({
+      request: (body) =>
+        transport.requestAgentRows !== undefined
+          ? transport.requestAgentRows(sessionId, body)
+          : Promise.reject(new AgentChatCommandError(404, "THREAD_NOT_FOUND", "This connection cannot load agent rows.")),
+      onUnsupported: rereadWhole,
+      onNoStream: rereadWhole
+    });
+    /** What the loader reads off the thread now. */
+    const syncAgentRows = (): void => {
+      const { slice, reducer } = get();
+      agentRows?.sync({
+        omitted: slice.omittedAgentIds,
+        streamId: reducer.streamId ?? null,
+        live: streamLive,
+        activeAgentIds: messageStreamingContext(slice).activeAgentIds
       });
     };
 
@@ -2147,7 +2210,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async refresh() {
-        const response = await transport.read(sessionId, { window: "recent" });
+        const response = await transport.read(sessionId, { window: "recent", ...agentRowsOptIn() });
         if (response.kind === "snapshot") {
           applyStreamFrame({ kind: "snapshot", thread: response.thread });
           return;
@@ -2223,6 +2286,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
       acknowledgeReveal(nonce) {
         update((state) => (state.reveal?.nonce === nonce ? { ...state, reveal: null } : state));
+      },
+
+      wantAgentRows(agentId) {
+        const release = agentRows?.want(agentId);
+        syncAgentRows();
+        return release ?? (() => undefined);
       }
     };
 
@@ -2267,6 +2336,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
       }
       const historyBefore = get().slice.history;
+      // On-demand agent rows: the omitted agents a live event names (it is live
+      // again, so it gets its whole rows), and the frames that came too late to
+      // apply (a snapshot read beside the stream moved the fold past them).
+      const touchedAgents: string[] = [];
+      const droppedAgentRows: string[] = [];
+      let synchronizedHere = false;
       update((state) => {
         let reducer = state.reducer;
         for (const frame of frames) {
@@ -2274,6 +2349,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           // Decided inside the updater, performed after `set` returns: a zustand
           // updater must be pure, or a replay double-fires the read (Q2-9).
           resyncWanted ||= needsResync(reducer.hostInstanceId, frame);
+          if (frame.kind === "event" && (reducer.slice.omittedAgentIds?.length ?? 0) > 0) {
+            const owner = eventAgentId(frame.event);
+            if (owner !== null && reducer.slice.omittedAgentIds!.includes(owner)) touchedAgents.push(owner);
+          } else if (frame.kind === "agent-rows" && !agentRowsFrameApplies(reducer.fold, frame)) {
+            droppedAgentRows.push(...frame.agentIds);
+          } else if (frame.kind === "synchronized" && options.fromDevice !== true) {
+            synchronizedHere = true;
+          }
           reducer = applyFrame(reducer, frame);
         }
         if (reducer === state.reducer) {
@@ -2320,6 +2403,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         return { ...state, reducer, slice: reducer.slice };
       });
+      // The connection that delivered these frames is live — set before the
+      // resync below may close it, whose fresh connection is not live until its
+      // own `synchronized` (`openStream` resets this): the loader never asks on
+      // a connection this step closed.
+      if (synchronizedHere) streamLive = true;
       // A snapshot replaces the rows wholesale, and a rewind or the cap can
       // drop pages and bridge rows: an unhandled reveal whose row went with
       // them is dropped, or it would fire whenever that row reappeared — long
@@ -2386,6 +2474,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         if (stoppingTaskIds !== state.stoppingTaskIds) set({ stoppingTaskIds });
       }
+      agentRows?.touch(touchedAgents);
+      agentRows?.dropped(droppedAgentRows);
+      syncAgentRows();
       if (options.fromDevice !== true) driveQueue();
     };
 
@@ -2430,7 +2521,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * connection state.
      */
     const resyncHistory = async (): Promise<void> => {
-      const response = await transport.read(sessionId, { window: "recent" });
+      const response = await transport.read(sessionId, { window: "recent", ...agentRowsOptIn() });
       if (closed || response.kind !== "snapshot" || response.thread.seq < get().reducer.fold.seq) {
         return;
       }
@@ -2593,23 +2684,32 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       } catch (error) {
         console.warn(`agent chat: could not resume what a reload left for session ${sessionId}`, error);
       }
-      openStream = (options) => transport.stream(
-        sessionId,
-        options,
-        {
-          onFrame: applyStreamFrame,
-          onFrames: applyStreamFrames,
-          onOpen: () => {
-            if (get().slice.connection === "idle") {
-              setSlice({ connection: "connecting" });
-            }
-          },
-          onReconnect: () => setSlice({ connection: "reconnecting" }),
-          onError: () => setSlice({ connection: "error" }),
-          // The host holds no such thread: no reconnect loop, a terminal state the tab shows.
-          onGone: () => setSlice({ connection: "gone" })
-        }
-      );
+      openStream = (options) => {
+        streamLive = false;
+        return transport.stream(
+          sessionId,
+          // On-demand agent rows on every connection while the loader may ask for them.
+          { ...options, ...agentRowsOptIn() },
+          {
+            onFrame: applyStreamFrame,
+            onFrames: applyStreamFrames,
+            onOpen: () => {
+              // A new connection: nothing may be asked on it before its `synchronized`.
+              streamLive = false;
+              if (get().slice.connection === "idle") {
+                setSlice({ connection: "connecting" });
+              }
+            },
+            onReconnect: () => {
+              streamLive = false;
+              setSlice({ connection: "reconnecting" });
+            },
+            onError: () => setSlice({ connection: "error" }),
+            // The host holds no such thread: no reconnect loop, a terminal state the tab shows.
+            onGone: () => setSlice({ connection: "gone" })
+          }
+        );
+      };
       const deviceCopy = deviceCache?.restored ?? null;
       if (deviceCopy === null) {
         stream = openStream(resumeOptions);
@@ -2715,6 +2815,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     closed = true;
     stream?.close();
     stream = null;
+    agentRows?.close();
     unsubscribeProviders?.();
     unsubscribeProviders = null;
     unsubscribeQueuedSends?.();

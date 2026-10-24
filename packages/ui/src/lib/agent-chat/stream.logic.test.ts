@@ -120,6 +120,34 @@ describe("parseStreamLine", () => {
     assert.equal(parseStreamLine(JSON.stringify({ kind: "error" })).kind, "malformed");
   });
 
+  it("accepts an agent-rows frame by its structure, and rejects one it could not apply", () => {
+    const row = { kind: "activity", id: "r1", createdAt: "2026-01-01T00:00:00.000Z", activityKind: "tool.started" };
+    const frame = (overrides: Record<string, unknown>) =>
+      JSON.stringify({ kind: "agent-rows", seq: 4, agentIds: ["a"], items: [row], after: [null], ...overrides });
+    assert.equal(parseStreamLine(frame({})).kind, "frame");
+    assert.equal(parseStreamLine(frame({ items: [], after: [] })).kind, "frame", "an agent with nothing on demand");
+    assert.equal(parseStreamLine(frame({ after: ["p1"] })).kind, "frame");
+    for (const broken of [
+      { seq: "4" },
+      { agentIds: "a" },
+      { agentIds: [""] },
+      { items: [{ id: "r1" }] },
+      { items: [{ ...row, id: 7 }] },
+      { after: [] },
+      { after: [7] },
+      { after: undefined }
+    ]) {
+      assert.equal(parseStreamLine(frame(broken)).kind, "malformed", JSON.stringify(broken));
+    }
+  });
+
+  it("keeps a synchronized marker whose stream id it cannot read, without the id", () => {
+    const parsed = parseStreamLine(JSON.stringify({ kind: "synchronized", hostInstanceId: "h1", streamId: 7 }));
+    assert.deepEqual(parsed, { kind: "frame", frame: { kind: "synchronized", hostInstanceId: "h1" } });
+    const named = parseStreamLine(JSON.stringify({ kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" }));
+    assert.deepEqual(named, { kind: "frame", frame: { kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" } });
+  });
+
   it("accepts an event whose payload carries fields this bundle does not know", () => {
     const line = JSON.stringify({
       kind: "event",

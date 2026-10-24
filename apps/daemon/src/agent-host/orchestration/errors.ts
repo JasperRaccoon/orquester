@@ -33,7 +33,10 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   PROMPT_NOT_FOUND: 404,
   // `turn` with `ifIdle: true` while a turn is active (unified MCP §8.3): a refusal of the moment,
   // never recorded — the same command id may land at the next idle point.
-  TURN_NOT_IDLE: 409
+  TURN_NOT_IDLE: 409,
+  // `POST …/agent-rows` alone: no open stream with that id on the thread; the client asks again on
+  // its next stream. Its own code, so a route miss on an older host can be told apart. A read.
+  STREAM_NOT_FOUND: 404
 };
 
 /**

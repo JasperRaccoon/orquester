@@ -67,7 +67,7 @@ import {
 
 import type { AgentChatHistoryState, AgentChatThreadSlice } from "./contracts";
 import { historyBoundsFromSnapshot } from "./history.logic";
-import type { AgentChatReducerState } from "./reducer.logic";
+import { omittedAgentIdsOf, type AgentChatReducerState } from "./reducer.logic";
 
 // ---------------------------------------------------------------------------
 // Bounds and cadence
@@ -75,6 +75,20 @@ import type { AgentChatReducerState } from "./reducer.logic";
 
 /** This record format. Bump it whenever what is written changes shape or meaning. */
 export const THREAD_CACHE_VERSION = 1;
+/**
+ * The same format for a snapshot that holds only part of the rows: on-demand
+ * agent rows (`agent-rows.ts`) left some agents' own rows out, and its
+ * `omittedAgentIds` say whose. Its own version so a bundle from before it —
+ * which would paint the copy as whole and never load those rows — drops the
+ * record instead of trusting it; a whole snapshot is still written as
+ * {@link THREAD_CACHE_VERSION}, which every bundle reads.
+ */
+export const THREAD_CACHE_PARTIAL_VERSION = 2;
+
+/** Whether `v` is a record format this bundle reads. */
+function isReadableVersion(v: unknown): boolean {
+  return v === THREAD_CACHE_VERSION || v === THREAD_CACHE_PARTIAL_VERSION;
+}
 /** How many threads are kept on the device; the least recently used go first. */
 export const THREAD_CACHE_MAX_ENTRIES = 20;
 /** One thread's serialized snapshot above this is not kept (UTF-16 code units). */
@@ -339,7 +353,7 @@ function parseMeta(value: unknown): ThreadCacheMeta | null {
   if (!isRecord(value)) return null;
   const { key, v, fold, scope, sessionId, seq, hostInstanceId, cleared, savedAt, usedAt, chars } = value;
   if (
-    v !== THREAD_CACHE_VERSION ||
+    !isReadableVersion(v) ||
     fold !== FOLD_SNAPSHOT_VERSION ||
     typeof scope !== "string" ||
     typeof sessionId !== "string" ||
@@ -361,7 +375,7 @@ function parseMeta(value: unknown): ThreadCacheMeta | null {
   ) {
     return null;
   }
-  return { key, v, fold, scope, sessionId, seq, hostInstanceId, cleared, savedAt, usedAt, chars };
+  return { key, v: v as number, fold, scope, sessionId, seq, hostInstanceId, cleared, savedAt, usedAt, chars };
 }
 
 /**
@@ -397,7 +411,14 @@ export function parsePersistedSnapshot(
   }
   const snapshot = toThreadSnapshot(fold);
   const history = historyBoundsFromSnapshot(value as unknown as ThreadSnapshotPayload);
-  return history === null ? snapshot : { ...snapshot, history };
+  // Whose rows the saved copy does not hold (on-demand agent rows): restored
+  // with it, so its drill-ins load them rather than show what is left.
+  const omittedAgentIds = omittedAgentIdsOf(value.omittedAgentIds);
+  return {
+    ...snapshot,
+    ...(history !== null ? { history } : {}),
+    ...(omittedAgentIds !== undefined ? { omittedAgentIds: [...omittedAgentIds] } : {})
+  };
 }
 
 /** Both halves of a record, validated against each other and the key asked for. */
@@ -412,7 +433,7 @@ export function parsePersistedThread(
   if (
     !isRecord(bodyValue) ||
     bodyValue.key !== meta.key ||
-    bodyValue.v !== THREAD_CACHE_VERSION ||
+    bodyValue.v !== meta.v ||
     bodyValue.seq !== meta.seq ||
     typeof bodyValue.json !== "string" ||
     bodyValue.json.length !== meta.chars
@@ -427,6 +448,8 @@ export function parsePersistedThread(
   }
   const snapshot = parsePersistedSnapshot(decoded, sessionId, meta.seq);
   if (snapshot === null) return null;
+  // A whole record that names omitted rows is not one this format writes.
+  if ((meta.v === THREAD_CACHE_PARTIAL_VERSION) !== (snapshot.omittedAgentIds !== undefined)) return null;
   return {
     scope,
     sessionId,
@@ -475,7 +498,13 @@ export function persistableSnapshotOf(state: PersistableThreadState): ThreadSnap
   // was folded further than its floor is saved at the floor it resumes from.
   const head = snapshot.head.seq === fold.seq ? snapshot.head : { ...snapshot.head, seq: fold.seq };
   const history = boundsOfWindow(state.slice.history, fold.evicted !== undefined);
-  return { ...snapshot, head, ...(history !== null ? { history } : {}) };
+  const omittedAgentIds = state.slice.omittedAgentIds;
+  return {
+    ...snapshot,
+    head,
+    ...(history !== null ? { history } : {}),
+    ...(omittedAgentIds !== undefined && omittedAgentIds.length > 0 ? { omittedAgentIds: [...omittedAgentIds] } : {})
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +670,7 @@ export async function loadPersistedThread(
  * write runs, so a clear in another tab counts too.
  */
 function saveSerializedThread(
-  input: { scope: string; sessionId: string; seq: number; hostInstanceId: string; json: string },
+  input: { scope: string; sessionId: string; seq: number; hostInstanceId: string; json: string; partial: boolean },
   generation: string
 ): Promise<void> {
   const backend = activeBackend();
@@ -651,9 +680,10 @@ function saveSerializedThread(
   waitingWrites.set(key, async () => {
     if (clearGenerationOf(input.scope) !== generation) return;
     const stamp = now();
+    const v = input.partial ? THREAD_CACHE_PARTIAL_VERSION : THREAD_CACHE_VERSION;
     const meta: ThreadCacheMeta = {
       key,
-      v: THREAD_CACHE_VERSION,
+      v,
       fold: FOLD_SNAPSHOT_VERSION,
       scope: input.scope,
       sessionId: input.sessionId,
@@ -664,7 +694,7 @@ function saveSerializedThread(
       usedAt: stamp,
       chars: input.json.length
     };
-    const body: ThreadCacheBody = { key, v: THREAD_CACHE_VERSION, seq: input.seq, json: input.json };
+    const body: ThreadCacheBody = { key, v, seq: input.seq, json: input.json };
     const remove = evictionsFor(await backend.readMetas(), meta);
     if (clearGenerationOf(input.scope) !== generation) return;
     await backend.write({ put: [{ meta, body }], remove });
@@ -825,6 +855,11 @@ function savable(state: PersistableThreadState): boolean {
   );
 }
 
+/** One comparable key for an omitted set (sorted already). */
+function omittedKey(ids: readonly string[] | undefined): string {
+  return ids === undefined ? "" : ids.join("\u0000");
+}
+
 /** A turn is under way: the session is running, or the latest turn has not settled. */
 function turnRunning(slice: AgentChatThreadSlice): boolean {
   return (
@@ -859,8 +894,12 @@ export function linkThreadCache(
   let closed = false;
   /** The scope was cleared (a sign-out): this generation never writes again. */
   let revoked = false;
-  /** What the device holds for this thread, as far as this generation knows. */
-  let saved: { seq: number; hostInstanceId: string } | null = null;
+  /**
+   * What the device holds for this thread, as far as this generation knows —
+   * and whose rows it lacks: an `agent-rows` frame changes the copy without
+   * moving its cursor.
+   */
+  let saved: { seq: number; hostInstanceId: string; omitted: string } | null = null;
   /** A change not yet written. */
   let dirty = false;
   let lastWriteAt: number | null = null;
@@ -904,7 +943,11 @@ export function linkThreadCache(
           storageUnresponsive = false;
           clearTimeout(bound);
           if (record !== null && saved === null && !revoked) {
-            saved = { seq: record.seq, hostInstanceId: record.hostInstanceId };
+            saved = {
+              seq: record.seq,
+              hostInstanceId: record.hostInstanceId,
+              omitted: omittedKey(record.snapshot.omittedAgentIds)
+            };
           }
           resolve(revoked ? null : record);
         });
@@ -929,8 +972,9 @@ export function linkThreadCache(
     if (resyncPending || !savable(state) || (!final && turnRunning(state.slice))) return;
     const seq = state.reducer.fold.seq;
     const hostInstanceId = state.reducer.hostInstanceId!;
+    const omitted = omittedKey(state.slice.omittedAgentIds);
     dirty = false;
-    if (saved !== null && saved.seq === seq && saved.hostInstanceId === hostInstanceId) {
+    if (saved !== null && saved.seq === seq && saved.hostInstanceId === hostInstanceId && saved.omitted === omitted) {
       // The device already holds this cursor under this host (the copy it was painted from).
       return;
     }
@@ -942,8 +986,11 @@ export function linkThreadCache(
       void dropPersistedThread(scope, sessionId);
       return;
     }
-    saved = { seq, hostInstanceId };
-    void saveSerializedThread({ scope, sessionId, seq, hostInstanceId, json }, generation);
+    saved = { seq, hostInstanceId, omitted };
+    void saveSerializedThread(
+      { scope, sessionId, seq, hostInstanceId, json, partial: snapshot.omittedAgentIds !== undefined },
+      generation
+    );
   };
 
   const schedule = (): void => {
@@ -998,7 +1045,9 @@ export function linkThreadCache(
     if (
       reducer.fold !== previous.reducer.fold ||
       reducer.hostInstanceId !== previous.reducer.hostInstanceId ||
-      slice.history.bounds !== previous.slice.history.bounds
+      slice.history.bounds !== previous.slice.history.bounds ||
+      // An agent's rows loaded: what the copy lacks moved, its cursor did not.
+      slice.omittedAgentIds !== previous.slice.omittedAgentIds
     ) {
       dirty = true;
     }
