@@ -153,5 +153,9 @@ describe("the entry form", () => {
   it("knows a relabel alone does not re-link", () => {
     assert.equal(patchNeedsLinking({ collections: ["kc_ads"] }), false);
     assert.equal(patchNeedsLinking({ collections: ["kc_ads"], body: "x" }), true);
+    // The URL is metadata myKG never reads (the daemon files it as a relabel): no re-link.
+    assert.equal(patchNeedsLinking({ url: "https://x.com/a/status/1" }), false);
+    assert.equal(patchNeedsLinking({ url: null, collections: [] }), false);
+    assert.equal(patchNeedsLinking({ url: null, title: "New title" }), true);
   });
 });
