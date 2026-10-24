@@ -23,10 +23,12 @@
 /**
  * The same token shape the composer and the timeline chips recognise, so a
  * rendered chip and a dispatched skill are always the same set. `\p{Sc}` is
- * the currency-symbol class: `$name`, but never `$5k` or `$1e6`.
+ * the currency-symbol class: `$name`, but never `$5k` or `$1e6`. A `.` is part
+ * of a name because Claude Code accepts it in a plugin's (`$my.plugin:skill`);
+ * only a known name dispatches, so `$1.50` or a sentence's final `.` never do.
  */
-const SKILL_MENTION_PATTERN =
-  /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
+export const SKILL_MENTION_PATTERN =
+  /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:._-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:._-]*)(?=\s|$)/gu;
 
 interface ClaudeSkillDispatch {
   /** Text before the dispatched mention, or `undefined` when it opens the prompt. */

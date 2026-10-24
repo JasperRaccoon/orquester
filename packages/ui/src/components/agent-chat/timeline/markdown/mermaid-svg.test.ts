@@ -1,153 +1,166 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { JSDOM } from "jsdom";
-import { createMermaidSvgSanitizer, standaloneSvg, uniquifySvgIds } from "./mermaid-svg.ts";
+import { createDiagramSanitizers, standaloneSvg } from "./mermaid-svg.ts";
 
 const dom = new JSDOM("<!doctype html><body></body>");
 const win = dom.window as unknown as Window & typeof globalThis;
-const sanitize = createMermaidSvgSanitizer(win);
+const sanitizers = createDiagramSanitizers(win);
+
+/** The sanitised fragment as markup. */
+function markup(node: Node): string {
+  const host = win.document.createElement("div");
+  host.append(node);
+  return host.innerHTML;
+}
+const plain = (svg: string): string => markup(sanitizers.plain(svg));
+const math = (svg: string): string => markup(sanitizers.math(svg));
 
 const wrap = (inner: string): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 50">${inner}</svg>`;
+  `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="pele" viewBox="0 0 100 50" style="--_fg:var(--pele-fg,#1f1f1f);color:var(--_fg)">${inner}</svg>`;
 
-describe("mermaid SVG sanitiser", () => {
-  it("keeps an ordinary diagram intact, label text included", () => {
-    const out = sanitize(
+// The styled rect comes first: an HTML-only tag such as `<img>` ends the SVG
+// for the HTML parser, and what follows it is no longer SVG.
+const HOSTILE =
+  '<rect style="fill:url(//evil.example/b.png);stroke:url(#grad)" width="1" height="1"/>' +
+  '<script>alert(1)</script><rect onload="alert(2)" width="1" height="1"/>' +
+  '<a href="https://evil.example/"><text>link</text></a>' +
+  '<a xlink:href="javascript:alert(3)"><text>js</text></a>' +
+  "<style>.a{background:url(https://evil.example/a.png)}</style>" +
+  '<use href="https://evil.example/sprite.svg#n"/><rect href="#n"/>' +
+  '<image href="https://evil.example/x.png"/><img src="https://evil.example/y.png"/>';
+
+function assertHostileGone(out: string): void {
+  assert.ok(!/<script/i.test(out), out);
+  assert.ok(!/onload/i.test(out), out);
+  assert.ok(!/<a[\s>]/i.test(out), out);
+  assert.ok(!/<image/i.test(out), out);
+  assert.ok(!/<img/i.test(out), out);
+  assert.ok(!/<style/i.test(out), out);
+  assert.ok(!/href=/.test(out), out);
+  assert.ok(!out.includes("evil.example"), out);
+  assert.ok(!out.includes("javascript:"), out);
+}
+
+describe("diagram SVG sanitiser (no math)", () => {
+  it("keeps a pele diagram intact: shapes, label text, CSS variables", () => {
+    const out = plain(
       wrap(
-        '<style>#m .node rect{fill:#222;stroke:#999}</style><g class="node"><rect width="10" height="10"/><text x="1" y="2">Start &amp; stop</text></g>' +
-          '<defs><marker id="arrow"><path d="M0 0L5 5"/></marker></defs><path marker-end="url(#arrow)" d="M0 0L9 9"/>'
+        '<g class="pele-node" data-id="A" transform="translate(32,76)"><rect width="48" height="48" fill="var(--_s)" style="rx:var(--_r)"/>' +
+          '<text class="pele-label" text-anchor="middle"><tspan x="0" y="5.6">Start &amp; stop</tspan></text></g>' +
+          '<path class="pele-marker" d="M104,32L96,35Z" fill="var(--_l)"/>'
       )
     );
     assert.ok(out.includes("Start &amp; stop"), out);
-    assert.ok(out.includes('marker-end="url(#arrow)"'), out);
-    assert.ok(out.includes("<rect"), out);
-    assert.ok(out.includes("fill:#222"), out);
+    assert.ok(out.includes('fill="var(--_s)"'), out);
+    assert.ok(out.includes("--_fg:var(--pele-fg,#1f1f1f)"), out);
+    assert.ok(out.includes("<tspan"), out);
   });
 
-  it("drops script, event handlers, links and images", () => {
-    const out = sanitize(
-      wrap(
-        '<script>alert(1)</script><rect onload="alert(2)" width="1" height="1"/>' +
-          '<a href="https://evil.example/"><text>link</text></a>' +
-          '<a xlink:href="javascript:alert(3)"><text>js</text></a>' +
-          '<image href="https://evil.example/x.png"/><img src="https://evil.example/y.png"/>'
-      )
-    );
-    assert.ok(!/<script/i.test(out), out);
-    assert.ok(!/onload/i.test(out), out);
-    assert.ok(!/<a[\s>]/i.test(out), out);
-    assert.ok(!/<image/i.test(out), out);
-    assert.ok(!/<img/i.test(out), out);
-    assert.ok(!out.includes("evil.example"), out);
-    assert.ok(!out.includes("javascript:"), out);
+  it("drops script, handlers, links, images, styles and every reference attribute", () => {
+    const out = plain(wrap(HOSTILE));
+    assertHostileGone(out);
+    assert.ok(out.includes("url(#grad)"), "a local reference stays");
   });
 
-  it("strips src and srcset anywhere", () => {
-    const out = sanitize(wrap('<foreignObject><div><video src="https://evil.example/v.mp4"></video></div></foreignObject>'));
+  it("drops foreignObject entirely, HTML or MathML inside it", () => {
+    const out = plain(wrap('<foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><math><mi>x</mi></math><video src="https://evil.example/v.mp4"></video></div></foreignObject>'));
+    assert.ok(!/foreignObject|<math|<video/i.test(out), out);
     assert.ok(!out.includes("evil.example"), out);
-    assert.ok(!/\ssrc=/.test(out), out);
-  });
-
-  it("removes href and xlink:href on any element", () => {
-    const out = sanitize(
-      wrap('<defs><g id="n"/></defs><use href="#n"/><use xlink:href="https://evil.example/sprite.svg#n"/><rect href="#n"/>')
-    );
-    assert.ok(!/href=/.test(out), out);
-    assert.ok(!out.includes("evil.example"), out);
-  });
-
-  it("neutralises remote url() in style elements and attributes, keeping local references", () => {
-    const out = sanitize(
-      wrap(
-        "<style>.a{background:url(https://evil.example/a.png)} .b{fill:url(#grad)} @import url('https://evil.example/c.css');</style>" +
-          '<rect style="fill:url(//evil.example/b.png);stroke:url(#grad)" width="1" height="1"/>'
-      )
-    );
-    assert.ok(!out.includes("evil.example"), out);
-    assert.ok(out.includes("url(#grad)"), out);
   });
 });
 
-const env = { DOMParser: win.DOMParser, XMLSerializer: win.XMLSerializer };
+describe("diagram SVG sanitiser (math labels)", () => {
+  const label = (inner: string): string =>
+    wrap(
+      `<foreignObject class="pele-math" x="-10" y="-5" width="20" height="10"><div xmlns="http://www.w3.org/1999/xhtml" style="display:flex">${inner}</div></foreignObject>`
+    );
+
+  it("keeps KaTeX's MathML and its presentation attributes", () => {
+    const out = math(
+      label(
+        '<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msup><mi>x</mi><mn>2</mn></msup><mo stretchy="false" lspace="0em">+</mo><mfrac linethickness="0px"><mn>1</mn><mn>2</mn></mfrac></mrow></semantics></math>'
+      )
+    );
+    assert.ok(out.includes("<foreignObject"), out);
+    assert.ok(out.includes("<math"), out);
+    assert.ok(out.includes("<msup>"), out);
+    assert.ok(out.includes('stretchy="false"'), out);
+    assert.ok(out.includes('lspace="0em"'), out);
+    assert.ok(out.includes('linethickness="0px"'), out);
+  });
+
+  it("drops what KaTeX never emits: annotations, glyph images, links and unknown attributes", () => {
+    const out = math(
+      label(
+        '<math><semantics><mrow><mi onclick="alert(1)" href="https://evil.example/">x</mi><mglyph src="https://evil.example/g.png"/></mrow><annotation encoding="application/x-tex">x</annotation></semantics></math>'
+      )
+    );
+    assert.ok(out.includes("<mi>x</mi>"), out);
+    assert.ok(!/annotation|mglyph|onclick/i.test(out), out);
+    assert.ok(!out.includes("evil.example"), out);
+  });
+
+  it("drops the same hostile markup as the plain profile, HTML inside the label included", () => {
+    assertHostileGone(math(wrap(HOSTILE)));
+    const out = math(label('<img src="https://evil.example/x.png"><a href="https://evil.example/">x</a><script>alert(1)</script><iframe src="https://evil.example/"></iframe>'));
+    assert.ok(!/<img|<a[\s>]|<script|<iframe/i.test(out), out);
+    assert.ok(!out.includes("evil.example"), out);
+  });
+});
 
 /** The expanded image is a standalone XML document: it must parse as one. */
-function parsesAsXml(markup: string): { ok: boolean; doc: Document } {
-  const doc = new win.DOMParser().parseFromString(markup, "image/svg+xml");
+function parsesAsXml(text: string): { ok: boolean; doc: Document } {
+  const doc = new win.DOMParser().parseFromString(text, "image/svg+xml");
   return { ok: doc.getElementsByTagName("parsererror").length === 0, doc };
 }
 
+function mounted(inner: string, style = ""): SVGSVGElement {
+  const host = win.document.createElement("div");
+  host.setAttribute("style", style);
+  win.document.body.replaceChildren(host);
+  host.append(sanitizers.math(wrap(inner)));
+  return host.querySelector("svg") as unknown as SVGSVGElement;
+}
+
+const env = { getComputedStyle: (element: Element) => win.getComputedStyle(element), XMLSerializer: win.XMLSerializer };
+
 describe("standalone SVG for the expanded viewer", () => {
-  it("fixes the size from the viewBox and sets an opaque background", () => {
-    const markup = standaloneSvg(
-      '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 320 180" style="max-width: 320px;"><rect/></svg>',
-      env,
-      "rgb(10, 10, 10)"
+  it("fixes the size from the viewBox, sets an opaque background and leaves the mounted SVG alone", () => {
+    const svg = mounted('<rect width="1" height="1"/>');
+    const text = standaloneSvg(svg, env, "rgb(10, 10, 10)");
+    assert.ok(text.includes('width="100"'), text);
+    assert.ok(text.includes('height="50"'), text);
+    assert.ok(text.includes("background-color: rgb(10, 10, 10)"), text);
+    assert.ok(text.includes("max-width: none"), text);
+    assert.ok(text.includes('xmlns="http://www.w3.org/2000/svg"'), text);
+    assert.equal(parsesAsXml(text).ok, true, text);
+    assert.equal(svg.getAttribute("width"), null, "the mounted copy is untouched");
+  });
+
+  it("writes the page's resolved --pele-* colours onto the copy, which an image cannot inherit", () => {
+    const svg = mounted('<rect width="1" height="1"/>');
+    // jsdom does not inherit custom properties; a browser resolves them from `.ac-mermaid`.
+    const resolved: Record<string, string> = {
+      "--pele-fg": "rgb(1, 2, 3)",
+      "--pele-series-3": "rgb(4, 5, 6)",
+      "--pele-font": "inherit",
+      "font-family": "Inter"
+    };
+    const computed = { getPropertyValue: (name: string) => resolved[name] ?? "" } as CSSStyleDeclaration;
+    const text = standaloneSvg(svg, { ...env, getComputedStyle: () => computed }, "#000");
+    assert.ok(text.includes("--pele-fg: rgb(1, 2, 3)"), text);
+    assert.ok(text.includes("--pele-series-3: rgb(4, 5, 6)"), text);
+    assert.ok(text.includes("--pele-font: Inter"), text);
+    assert.ok(!text.includes("--pele-font: inherit"), text);
+  });
+
+  it("keeps labels with entities and MathML well-formed", () => {
+    const svg = mounted(
+      '<text>a b x &lt; y &amp; z</text><foreignObject width="5" height="5"><div xmlns="http://www.w3.org/1999/xhtml"><math><mi>x</mi></math></div></foreignObject>'
     );
-    assert.ok(markup.includes('width="320"'), markup);
-    assert.ok(markup.includes('height="180"'), markup);
-    assert.ok(markup.includes("background-color:rgb(10, 10, 10)"), markup);
-    assert.ok(markup.includes("max-width:none"), markup);
-    assert.ok(markup.includes('xmlns="http://www.w3.org/2000/svg"'), markup);
-    assert.equal(parsesAsXml(markup).ok, true, markup);
-  });
-
-  it("survives a non-breaking space in a label (HTML output, XML document)", () => {
-    // DOMPurify serialises U+00A0 as `&nbsp;`, which an XML parser rejects.
-    const sanitized = sanitize(wrap('<text x="1" y="2">a\u00a0b</text>'));
-    assert.ok(sanitized.includes("&nbsp;"), "precondition: the sanitiser emits an HTML entity");
-    const markup = standaloneSvg(sanitized, env, "rgb(0, 0, 0)");
-    const { ok, doc } = parsesAsXml(markup);
-    assert.equal(ok, true, markup);
-    assert.equal(doc.getElementsByTagName("text")[0]?.textContent, "a\u00a0b");
-  });
-
-  it("keeps labels with other HTML-only output well-formed", () => {
-    const sanitized = sanitize(wrap('<style>.n{fill:#fff}</style><text>x &lt; y &amp; z</text><rect width="1" height="1"/>'));
-    const { ok, doc } = parsesAsXml(standaloneSvg(sanitized, env, "#000"));
+    const { ok, doc } = parsesAsXml(standaloneSvg(svg, env, "#000"));
     assert.equal(ok, true);
-    assert.equal(doc.getElementsByTagName("text")[0]?.textContent, "x < y & z");
-  });
-
-  it("throws, so the viewer can show an error, when there is no SVG", () => {
-    assert.throws(() => standaloneSvg("<p>not a diagram</p>", env, "#000"), /could not be prepared/);
-    assert.throws(() => standaloneSvg("", env, "#000"), /could not be prepared/);
-  });
-});
-
-describe("one mount's copy of a cached diagram", () => {
-  const diagram = sanitize(
-    `<svg id="mermaid-diagram-1" aria-labelledby="chart-title-mermaid-diagram-1" xmlns="http://www.w3.org/2000/svg">` +
-      `<style>#mermaid-diagram-1 .edge{stroke:#333;fill:#fff}#mermaid-diagram-1 .label{color:#abc}</style>` +
-      `<title id="chart-title-mermaid-diagram-1">Flow</title>` +
-      `<defs><marker id="mermaid-diagram-1_flowchart-v2-pointEnd"><path d="M0,0"/></marker>` +
-      `<marker id="arrowhead"><path d="M0,0"/></marker></defs>` +
-      `<path class="edge" marker-end="url(#mermaid-diagram-1_flowchart-v2-pointEnd)"/>` +
-      `<path style="marker-start:url(#arrowhead)"/><text>Issue #12 and C#</text></svg>`
-  );
-
-  it("renames every id and every reference to it together", () => {
-    const out = uniquifySvgIds(diagram, "m7");
-    assert.match(out, /id="mermaid-diagram-1-m7"/);
-    assert.match(out, /#mermaid-diagram-1-m7 \.edge/);
-    assert.match(out, /url\(#mermaid-diagram-1_flowchart-v2-pointEnd-m7\)/);
-    assert.match(out, /id="mermaid-diagram-1_flowchart-v2-pointEnd-m7"/);
-    assert.match(out, /url\(#arrowhead-m7\)/);
-    assert.match(out, /id="arrowhead-m7"/);
-    assert.match(out, /aria-labelledby="chart-title-mermaid-diagram-1-m7"/);
-    // Every id is renamed, so no reference is left pointing at the shared copy.
-    for (const [, id] of out.matchAll(/\sid="([^"]+)"/g)) assert.ok(id!.endsWith("-m7"), id);
-  });
-
-  it("leaves colours, label text and other markup alone", () => {
-    const out = uniquifySvgIds(diagram, "m7");
-    assert.match(out, /stroke:#333;fill:#fff/);
-    assert.match(out, /color:#abc/);
-    assert.match(out, /Issue #12 and C#/);
-  });
-
-  it("gives two mounts ids that never collide", () => {
-    const ids = (svg: string) => [...svg.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
-    const first = new Set(ids(uniquifySvgIds(diagram, "m1")));
-    for (const id of ids(uniquifySvgIds(diagram, "m2"))) assert.ok(!first.has(id), id);
+    assert.equal(doc.getElementsByTagName("text")[0]?.textContent, "a b x < y & z");
   });
 });

@@ -8,6 +8,7 @@ import { MobileKeyBar } from "../terminal";
 import { ToastStack } from "../status";
 import { CommandPalette } from "../command-palette";
 import { GlobalShortcutListener } from "../attention";
+import { SessionDeepLinkHost } from "../attention/SessionDeepLinkHost";
 import { MobileSectionNav, RightRailEditorHost, RightRailFrame, useMobileSection } from "../right-rail";
 import { WorkflowsHost } from "../workflows/WorkflowsHost";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
@@ -50,5 +51,6 @@ export const AppShell: React.FC = () => (
     <GlobalShortcutListener />
     <RightRailEditorHost />
     <WorkflowsHost />
+    <SessionDeepLinkHost />
   </div>
 );

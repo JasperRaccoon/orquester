@@ -19,11 +19,13 @@ const stored = await load({
   activeConnectionId: "local",
   useTitlebar: "yes", // wrong type → dropped
   runInBackground: true,
+  desktopNotifications: false,
   usage: { enabled: true, claude: false, chip: "busiest" } // legacy → migrated
 });
 assert.equal(stored.useTitlebar, undefined);
 assert.equal(stored.runInBackground, true);
 assert.equal(stored.confirmCloseSession, undefined);
+assert.equal(stored.desktopNotifications, false);
 assert.equal(stored.activeConnectionId, "local");
 assert.deepEqual(stored.usage?.agents, { claude: false });
 
@@ -32,8 +34,9 @@ assert.deepEqual(await load(null), {});
 assert.deepEqual(await load("junk"), {});
 assert.deepEqual(await load([1, 2]), {});
 // A corrupt usage sub-object is dropped while the rest survives.
-const badUsage = await load({ confirmCloseSession: false, usage: { chip: "nope" } });
+const badUsage = await load({ confirmCloseSession: false, desktopNotifications: "off", usage: { chip: "nope" } });
 assert.equal(badUsage.confirmCloseSession, false);
+assert.equal(badUsage.desktopNotifications, undefined);
 assert.equal(badUsage.usage, undefined);
 
 console.log("app-config.check OK");

@@ -67,7 +67,7 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import type { HtmlRenderReference, Skill, SlashCommand, ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
+import type { HtmlRenderReference, IdleCompactionCandidate, Skill, SlashCommand, ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import { publishHtmlRender, type LocalImageReader, type PublishHtmlRenderInput } from "./html-render-publish.ts";
 import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
@@ -509,13 +509,20 @@ export class AgentChatService {
       // what just finished (`SupervisorAdapters` / pending wakes).
       onBackgroundWorkEnded: (threadId) => this.supervisor.handleBackgroundWorkEnded(threadId),
       onUsageLimits: (reading) => this.usageLimitsListener(reading),
-      onUsageLimitNotice: (threadId, notice) => this.usageLimitNoticeListener(threadId, notice)
+      onUsageLimitNotice: (threadId, notice) => this.usageLimitNoticeListener(threadId, notice),
+      onIdleCompactionCandidate: (threadId, candidate) => this.idleCompactionListener(threadId, candidate)
     });
   }
 
   private usageLimitsListener: (reading: ThreadUsageReading) => void = () => undefined;
 
   private usageLimitNoticeListener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void = () => undefined;
+  private idleCompactionListener: (threadId: string, candidate: IdleCompactionCandidate | null) => void = () => undefined;
+
+  /** The idle compaction (`idle-compaction.ts`): each open chat's candidate on every summary read. */
+  setIdleCompactionListener(listener: (threadId: string, candidate: IdleCompactionCandidate | null) => void): void {
+    this.idleCompactionListener = listener;
+  }
 
   /** Where each thread's current usage limit goes (`index.ts`: the usage-limit recovery). */
   setUsageLimitNoticeListener(listener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void): void {

@@ -15,6 +15,7 @@ import {
   nextDesktopQuality
 } from "../../lib/desktop-quality";
 import { openDesktopVncChannel, type DesktopVncChannel } from "../../lib/desktop-vnc-socket";
+import { backoffDelayMs, scheduleRetry as retryLater, type PendingRetry } from "../../lib/connection/backoff";
 import { DesktopToolbar } from "./DesktopToolbar";
 import { DesktopAppsDialog, DesktopInfoDialog } from "./DesktopDialogs";
 import { DesktopKeyStrip, useDesktopHiddenInput } from "./DesktopKeyboard";
@@ -34,8 +35,7 @@ export interface DesktopViewProps {
 type RfbCtor = typeof RFB;
 type ConnState = "idle" | "connecting" | "connected" | "reconnecting";
 
-const RECONNECT_BASE_MS = 500;
-const RECONNECT_MAX_MS = 10_000;
+const RECONNECT_BACKOFF = { baseMs: 500, maxMs: 10_000 };
 /** RTT samples (one per 2 s) to spend getting a fixed size applied before giving up. */
 const FIXED_SIZE_ATTEMPTS = 5;
 const DISPLAY_BACKGROUND = "rgb(10, 10, 10)";
@@ -245,16 +245,20 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if (!shouldConnect || !api || !target) return;
     let disposed = false;
     let attempt = 0;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryTimer: PendingRetry | null = null;
     let rfb: RFB | null = null;
     let channel: DesktopVncChannel | null = null;
 
     const scheduleRetry = () => {
       if (disposed) return;
-      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
+      // Shared jittered backoff; a wake (back online, tab visible) redials at once.
+      const delay = backoffDelayMs(attempt, RECONNECT_BACKOFF);
       attempt += 1;
       setConn("reconnecting");
-      retryTimer = setTimeout(() => void start(), delay);
+      retryTimer = retryLater(delay, (woken) => {
+        if (woken) attempt = 0;
+        void start();
+      });
     };
 
     const start = async () => {
@@ -345,7 +349,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     void start();
     return () => {
       disposed = true;
-      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer?.cancel();
       if (rfbRef.current === rfb) rfbRef.current = null;
       if (rfb) {
         try {

@@ -7,6 +7,8 @@
  * import from this file; nothing here imports a component.
  */
 
+import type { ThreadMessageOrigin } from "@orquester/api/agent-chat";
+
 import { agentPromptOf } from "../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
 import { formatContextTokens } from "../status/context-meter";
@@ -151,6 +153,34 @@ const USER_MESSAGE_CLAMP_LINES = 8;
 
 export function shouldClampUserMessage(text: string): boolean {
   return text.length > USER_MESSAGE_CLAMP_CHARS || text.split("\n").length > USER_MESSAGE_CLAMP_LINES;
+}
+
+// Adapted from T3 Code (MIT): apps/web/src/components/chat/TimelineUserMessageRow.tsx
+// (`folded = userMessage.attribution === "agent"`, `foldSummary`).
+
+/**
+ * The ways another chat's message arrives that fold to one line, so the user's own messages
+ * stay easy to find. "Needs input in" (`attention`) stays open: it asks the user to act. A
+ * merged-back result is not a thread message at all and stays open too.
+ */
+const FOLDED_THREAD_ORIGINS: ReadonlySet<ThreadMessageOrigin> = new Set<ThreadMessageOrigin>([
+  "sent",
+  "reply",
+  "opened",
+  "delegated"
+]);
+
+export function foldsThreadMessage(origin: ThreadMessageOrigin): boolean {
+  return FOLDED_THREAD_ORIGINS.has(origin);
+}
+
+/** A folded message's one line: its first line with text, whitespace collapsed; "" for none. */
+export function foldedMessageSummary(body: string): string {
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) return trimmed.replace(/\s+/g, " ");
+  }
+  return "";
 }
 
 

@@ -21,6 +21,12 @@ describe("classifyToolItemType", () => {
     assert.equal(classifyToolItemType("Edit"), "file_change");
     assert.equal(classifyToolItemType("Agent"), "collab_agent_tool_call");
     assert.equal(classifyToolItemType("TaskCreate"), "dynamic_tool_call");
+    // The task tools CLAUDE_CODE_ENABLE_TODO_TOOLS turns on are to-do bookkeeping, never edits.
+    for (const tool of ["TaskUpdate", "TaskList", "TaskGet", "TodoWrite"]) {
+      assert.equal(classifyToolItemType(tool), "dynamic_tool_call", tool);
+      assert.equal(classifyRequestType(tool), "dynamic_tool_call", tool);
+    }
+    assert.equal(classifyToolItemType("mcp__todo__todowrite"), "mcp_tool_call");
     assert.equal(classifyToolItemType("WebSearch"), "web_search");
   });
 });

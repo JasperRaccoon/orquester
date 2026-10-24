@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "./index.js";
+import { testAuthSessions } from "./auth/testing.ts";
 
 // Route-level coverage for the two DevTools proxies (Tasks 2 & 3). The pure
 // helpers (devtools.test.ts) don't exercise the wiring these tests pin down:
@@ -13,10 +14,10 @@ import { createServer } from "./index.js";
 // `ws` upstream stands in for Chromium so no real browser launches.
 
 const USERNAME = "admin";
-// authorizeCredential only sha256-compares the stored hash string against the
-// hash half of the credential — any non-empty string works as a fixture.
+// Only a session token authenticates (auth/sessions.ts); the hash just turns
+// remote auth on — any non-empty string works as a fixture.
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const CREDENTIAL = Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64");
+const { authSessions: AUTH_SESSIONS, token: CREDENTIAL } = await testAuthSessions();
 const BROWSER_ID = "tab-abc";
 const TARGET_ID = "TARGET-1";
 
@@ -55,6 +56,7 @@ async function makeHarness(mode: "local" | "remote"): Promise<Harness> {
   } as unknown as CreateServerArgs[1];
 
   const services = {
+    authSessions: AUTH_SESSIONS,
     browsers: {
       devtoolsPort: async () => {
         harness.devtoolsPortCalls = (harness.devtoolsPortCalls ?? 0) + 1;

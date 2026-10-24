@@ -13,6 +13,12 @@
  * interrupt that carries a cause starts no cascade of its own — the root's walk already covers
  * the whole tree below it.
  *
+ * A Stop sticks: before any interrupt is posted, the reply router hears every delegate link of the
+ * stopped tree ({@link DelegateStopListener}) and ends what those links still wait on, so the
+ * stopped children's "interrupted before it replied" notices — and replies already queued for a
+ * stopped chat — never start a turn on the chat the user just stopped. This runs on every stop,
+ * even with no unfinished child left to interrupt.
+ *
  * Idempotent twice over: a child's command id is derived from the root command's id (a repeat of
  * the same stop posts the same ids, and the host's receipts answer them), and a child already
  * interrupted for its current turn is not interrupted again while its summary trails the host.
@@ -35,6 +41,14 @@ import type { LineageSessions } from "./lineage.ts";
 
 /** The stop commands whose acceptance starts a cascade (the agent-chat command route's names). */
 export type DelegateStopCommand = "interrupt" | "session/stop";
+
+/** Hears a stop before its interrupts go out (the reply router, `replies.ts`). */
+export interface DelegateStopListener {
+  delegatesStopped(links: readonly { parentId: string; childId: string }[]): Promise<void>;
+  /** A stop of `sessionId` is on its way to the host: hold replies to it until {@link stopResolved}. */
+  stopRequested?(sessionId: string): void;
+  stopResolved?(sessionId: string): void;
+}
 
 export interface DelegateStopCascadeOptions {
   sessions: LineageSessions;
@@ -100,6 +114,7 @@ export const REPEAT_INTERRUPT_WINDOW_MS = 10_000;
 
 export class DelegateStopCascade {
   private api: DaemonApi | null = null;
+  private listener: DelegateStopListener | null = null;
   private stopped = false;
   private readonly inFlight = new Set<Promise<unknown>>();
   /** Per child, the turn (or "" for none) a cascade interrupted lately, and when. */
@@ -110,6 +125,11 @@ export class DelegateStopCascade {
   /** Bind the daemon's own API; until then nothing cascades (the daemon is still starting). */
   attachApi(api: DaemonApi): void {
     this.api = api;
+  }
+
+  /** Bind the reply router: it hears each stop's delegate links before the interrupts go out. */
+  setListener(listener: DelegateStopListener): void {
+    this.listener = listener;
   }
 
   stop(): void {
@@ -128,6 +148,26 @@ export class DelegateStopCascade {
     this.start(sessionId, command === "interrupt" ? "interrupted" : "stopped", `${sessionId}\u0000${command}\u0000${commandId}`);
   }
 
+  /**
+   * The command route is about to forward `command` for `sessionId`: the router holds replies to
+   * it until the returned callback (run once the host answered and {@link commandAccepted} ran),
+   * so the turn the stop settles is not woken before the stop's own marks land. The cascade's own
+   * interrupts and housekeeping ones (`cascade: false`) hold nothing.
+   */
+  commandRequested(sessionId: string, command: DelegateStopCommand, body: unknown): () => void {
+    const record = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+    const listener = this.listener;
+    if (this.stopped || listener?.stopRequested === undefined) return () => undefined;
+    if (command === "interrupt" && (parseInterruptCause(record.cause) !== undefined || record.cascade === false)) return () => undefined;
+    listener.stopRequested(sessionId);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      listener.stopResolved?.(sessionId);
+    };
+  }
+
   /** `sessionId`'s tab is closing — called while its record is still readable. */
   closing(sessionId: string): void {
     this.start(sessionId, "closed", `${sessionId}\u0000close`);
@@ -142,11 +182,21 @@ export class DelegateStopCascade {
     if (this.stopped || this.api === null) return;
     // Read now, synchronously: a closing root's record and its title are gone once it closes.
     const sessions = this.opts.sessions.list();
-    const targets = delegateDescendants(sessions, rootId).filter(delegateUnfinished);
-    if (targets.length === 0) return;
+    const descendants = delegateDescendants(sessions, rootId);
+    if (descendants.length === 0) return;
+    const links = descendants.map((child) => ({ parentId: child.lineage!.parentThreadId, childId: child.id }));
+    const targets = descendants.filter(delegateUnfinished);
     const root = this.opts.sessions.get(rootId) ?? sessions.find((session) => session.id === rootId);
     const cause: InterruptCause = { kind: "parent-stopped", parentSessionId: rootId, parentTitle: root?.title ?? "", action };
-    const step = this.cascade(this.api, targets, cause, rootKey).catch((error: unknown) => {
+    const api = this.api;
+    const step = (async () => {
+      // The router first, so nothing the interrupts settle is delivered; a failure there never
+      // keeps the children running.
+      await this.listener?.delegatesStopped(links).catch((error: unknown) => {
+        this.opts.logger?.warn?.("[delegates] the reply router could not record the stop", error);
+      });
+      if (targets.length > 0) await this.cascade(api, targets, cause, rootKey);
+    })().catch((error: unknown) => {
       this.opts.logger?.warn?.("[delegates] the stop cascade failed", error);
     });
     this.inFlight.add(step);

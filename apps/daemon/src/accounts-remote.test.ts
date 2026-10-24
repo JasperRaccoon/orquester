@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, test } from "node:test";
 
-import { type AccountsExec, AccountsService } from "./accounts";
+import { type AccountsExec, AccountsService, isSshKeyRefusal } from "./accounts";
 import { AccountError } from "./account-error";
 import { GitRemoteError } from "./providers/types";
 
@@ -304,6 +304,91 @@ test("cloneRepo: a missing branch name is a clone failure, a bad ref never runs,
     service(slow.exec).cloneRepo("gh", "git@github.com:o/r.git", "wf-h", workspace, { timeoutMs: 3_000 }),
     (error: unknown) => error instanceof GitRemoteError && error.kind === "timeout" && error.status === 504
   );
+});
+
+// --- clone: SSH key refused → HTTPS -------------------------------------------
+
+const REFUSED = "Cloning into 'r'...\ngit@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n";
+
+test("isSshKeyRefusal tells an SSH-layer refusal from a repository's answer", () => {
+  assert.equal(isSshKeyRefusal(REFUSED), true);
+  assert.equal(isSshKeyRefusal("git@ssh.bitbucket.org: Permission denied (publickey,keyboard-interactive)."), true);
+  assert.equal(isSshKeyRefusal("Host key verification failed.\nfatal: Could not read from remote repository."), true);
+  assert.equal(isSshKeyRefusal("Received disconnect from 1.2.3.4 port 22:2: Too many authentication failures"), true);
+  assert.equal(isSshKeyRefusal("ERROR: Repository not found.\nfatal: Could not read from remote repository."), false);
+  assert.equal(isSshKeyRefusal("conq: repository access denied. access via a deployment key is read-only."), false);
+  assert.equal(isSshKeyRefusal("fatal: unable to access 'https://x/': Could not resolve host: x"), false);
+  assert.equal(isSshKeyRefusal(""), false);
+});
+
+test("a clone whose SSH key is refused is retried once over HTTPS through the credential store", async () => {
+  const dest = join(workspace, "fb-r");
+  const leftBehindAtRetry: boolean[] = [];
+  const { exec, calls } = fakeExec((args) => {
+    const url = command(args)[2] ?? "";
+    if (url.startsWith("https://")) {
+      leftBehindAtRetry.push(existsSync(dest));
+      return "";
+    }
+    return gitFailure(REFUSED);
+  });
+  const result = await service(async (file, args, options) => {
+    // What a real failed clone can leave behind.
+    if ((command(args)[2] ?? "").startsWith("git@")) await mkdir(dest, { recursive: true });
+    return exec(file, args, options);
+  }).cloneFromInput("gh", "o/r", "fb-r", workspace);
+  assert.deepEqual(result, {
+    name: "fb-r",
+    transport: "https",
+    notice: "The SSH key was refused, so the repository was cloned over HTTPS instead."
+  });
+  assert.deepEqual(calls.map((c) => command(c.args)), [
+    ["clone", "--", "git@github.com:o/r.git", "fb-r"],
+    ["clone", "--", "https://github.com/o/r.git", "fb-r"]
+  ]);
+  assert.deepEqual(leftBehindAtRetry, [false], "the failed clone's directory is gone before the retry");
+  const retry = calls[1];
+  assert.ok(configOf(retry.args).some((c) => /^credential\.helper=store --file=.*gh\.git-credentials$/.test(c)));
+  assert.equal(retry.env?.GIT_TERMINAL_PROMPT, "0", "the retry never waits on a prompt");
+  assert.ok(!retry.args.join(" ").includes("ghp_secret"), "the token stays out of argv");
+  assert.ok(!JSON.stringify(result).includes("ghp_secret"));
+});
+
+test("a clone that went through over SSH says so", async () => {
+  const { exec, calls } = fakeExec();
+  assert.deepEqual(await service(exec).cloneFromInput("gh", "o/r", "fb-ok", workspace), { name: "fb-ok", transport: "ssh" });
+  assert.equal(calls.length, 1);
+});
+
+test("no HTTPS retry for a failure that is not a key refusal, nor for an account with no token", async () => {
+  const notFound = fakeExec(() => gitFailure("ERROR: Repository not found.\nfatal: Could not read from remote repository."));
+  await assert.rejects(
+    service(notFound.exec).cloneFromInput("gh", "o/r", "fb-nf", workspace),
+    (error: unknown) => error instanceof AccountError && error.status === 502 && /Repository not found/.test(error.message)
+  );
+  assert.equal(notFound.calls.length, 1);
+
+  const tokenless = fakeExec(() => gitFailure(REFUSED));
+  await assert.rejects(
+    service(tokenless.exec).cloneFromInput("gh-ssh-only", "o/r", "fb-nt", workspace),
+    (error: unknown) =>
+      error instanceof GitRemoteError && error.kind === "auth" && error.status === 400 && /key was refused/.test(error.message)
+  );
+  assert.equal(tokenless.calls.length, 1, "no credential for HTTPS: nothing to retry with");
+});
+
+test("when the HTTPS retry fails too, both failures are reported", async () => {
+  const { exec, calls } = fakeExec((args) =>
+    (command(args)[2] ?? "").startsWith("git@")
+      ? gitFailure(REFUSED)
+      : gitFailure("remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/o/r.git/'")
+  );
+  await assert.rejects(service(exec).cloneFromInput("gh", "o/r", "fb-both", workspace), (error: unknown) => {
+    assert.ok(error instanceof AccountError);
+    assert.match(error.message, /key was refused.*Cloning over HTTPS instead also failed: .*Authentication failed/s);
+    return true;
+  });
+  assert.equal(calls.length, 2);
 });
 
 // --- PR / release listings: provider + repo resolution ------------------------

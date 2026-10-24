@@ -17,6 +17,7 @@ import {
   NON_LINUX_BROWSER,
   NON_LINUX_DESKTOP,
   boxDesktopInstallHint,
+  boxDesktopInstallsOnOpen,
   browserFontChoices,
   canInstall,
   chromeArch,
@@ -186,7 +187,8 @@ class GuiInstaller implements BoxGuiInstaller {
 
   private withHint(connection: BoxConnection, facts: BoxGuiFacts): DesktopHostStatus {
     const { status, missingPackages } = evaluateBoxDesktop(facts);
-    return { ...status, installHint: boxDesktopInstallHint(facts, missingPackages, connection.sys.user) };
+    const installHint = boxDesktopInstallHint(facts, missingPackages, connection.sys.user);
+    return { ...status, installHint, ...(boxDesktopInstallsOnOpen(facts, missingPackages) ? { installsOnOpen: true } : {}) };
   }
 
   // -------------------------------------------------------------------------

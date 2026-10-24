@@ -61,6 +61,7 @@ function sanitizeStoredAppConfig(raw: unknown): Partial<AppConfig> {
   if (typeof rec.useTitlebar === "boolean") out.useTitlebar = rec.useTitlebar;
   if (typeof rec.runInBackground === "boolean") out.runInBackground = rec.runInBackground;
   if (typeof rec.confirmCloseSession === "boolean") out.confirmCloseSession = rec.confirmCloseSession;
+  if (typeof rec.desktopNotifications === "boolean") out.desktopNotifications = rec.desktopNotifications;
   if (rec.usage !== undefined) {
     const usage = usagePrefsSchema.safeParse(rec.usage);
     if (usage.success) out.usage = usage.data;

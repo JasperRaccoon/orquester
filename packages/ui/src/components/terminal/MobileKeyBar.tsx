@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { ClipboardPaste, Loader2, Paperclip } from "lucide-react";
+import { ClipboardPaste, Loader2, Lock, Paperclip } from "lucide-react";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
@@ -8,20 +8,55 @@ import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
 import { pasteTextForSession } from "../../lib/paste";
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
+import {
+  activeModifiers,
+  consumeModifiers,
+  encodeKey,
+  resetModifierLatches,
+  tapModifier,
+  useModifierLatches,
+  type LatchState,
+  type ModifierName,
+  type TerminalKey
+} from "../../lib/terminal-keys";
 
-// Control keys Android/iOS soft keyboards usually lack. Values are the bytes a
-// PTY expects.
-const KEYS: { label: string; data: string; wide?: boolean }[] = [
-  { label: "Esc", data: "\x1b" },
-  { label: "Tab", data: "\t" },
-  { label: "⌃C", data: "\x03" },
-  { label: "⌃D", data: "\x04" },
-  { label: "←", data: "\x1b[D" },
-  { label: "↑", data: "\x1b[A" },
-  { label: "↓", data: "\x1b[B" },
-  { label: "→", data: "\x1b[C" },
-  { label: "↵", data: "\r", wide: true }
+// Keys Android/iOS soft keyboards usually lack, encoded through the latched
+// Ctrl/Alt modifiers (`encodeKey`); `ctrl` keys always carry Ctrl. Unmodified,
+// each sends the bytes a PTY expects for that key.
+// Adapted from T3 Code (MIT): apps/mobile/src/features/terminal/ThreadTerminalRouteScreen.tsx
+const KEYS: { label: string; key: TerminalKey; ctrl?: true; wide?: true }[] = [
+  { label: "Tab", key: { kind: "special", key: "tab" } },
+  { label: "⌃C", key: { kind: "char", char: "c" }, ctrl: true },
+  { label: "⌃D", key: { kind: "char", char: "d" }, ctrl: true },
+  { label: "←", key: { kind: "special", key: "left" } },
+  { label: "↑", key: { kind: "special", key: "up" } },
+  { label: "↓", key: { kind: "special", key: "down" } },
+  { label: "→", key: { kind: "special", key: "right" } },
+  { label: "~", key: { kind: "char", char: "~" } },
+  { label: "|", key: { kind: "char", char: "|" } },
+  { label: "/", key: { kind: "char", char: "/" } },
+  { label: "-", key: { kind: "char", char: "-" } },
+  { label: "↵", key: { kind: "special", key: "enter" }, wide: true }
 ];
+
+const ESC_KEY: TerminalKey = { kind: "special", key: "escape" };
+
+const MODIFIERS: { name: ModifierName; label: string }[] = [
+  { name: "ctrl", label: "Ctrl" },
+  { name: "alt", label: "Alt" }
+];
+
+const LATCH_CLASS: Record<LatchState, string> = {
+  off: "bg-neutral-800 text-neutral-200 active:bg-neutral-700",
+  armed: "bg-info-soft/40 text-info ring-1 ring-inset ring-info/60",
+  locked: "bg-info text-neutral-950"
+};
+
+const LATCH_LABEL: Record<LatchState, string> = {
+  off: "off",
+  armed: "on for the next key",
+  locked: "locked on"
+};
 
 // Per-kind auto-dismiss for the upload status line (ms). A hard failure warrants
 // a longer read than a benign over-the-cap skip; `uploading` isn't timed — it's
@@ -79,6 +114,10 @@ async function readClipboard(): Promise<{ text: string; images: File[] }> {
  * up just above the on-screen keyboard. Sends bytes straight to the daemon
  * session without stealing focus (the keyboard stays open).
  *
+ * Its Ctrl and Alt are latches (`lib/terminal-keys.ts`): a tap applies the
+ * modifier to the next key, from this bar or the on-screen keyboard; a quick
+ * double tap locks it until it is tapped again.
+ *
  * For agent sessions it also shows a file-attach button: a phone has no drag
  * source, so this is the mobile equivalent of the desktop drag/drop — it opens
  * the native file picker and runs the same upload + path-injection flow
@@ -110,7 +149,16 @@ export const MobileKeyBar: React.FC = () => {
     return () => window.clearTimeout(timer);
   }, [status]);
 
+  const latches = useModifierLatches();
+
   const active = tabs.find((t) => t.id === activeId);
+  const activeSessionId = !isDesktop && active?.type === "session" ? active.session.id : null;
+  // The latches belong to the session the bar is driving: switching tabs, or
+  // the bar going away, releases them so a stale Ctrl never lands elsewhere.
+  useEffect(() => {
+    resetModifierLatches(activeSessionId);
+    return () => resetModifierLatches();
+  }, [activeSessionId]);
   // `type === "session"` and nothing else: the bar writes raw control bytes into
   // a PTY, so a chat tab (the sixth `ProjectTab` arm) must never mount it — its
   // composer supplies its own send/attach/paste affordances (chat spec §7.1).
@@ -135,7 +183,20 @@ export const MobileKeyBar: React.FC = () => {
     }
   };
 
+  // A key-bar key goes out through the latched modifiers and spends the
+  // one-shots, the same as a key from the on-screen keyboard (TerminalView).
+  const sendKey = (key: TerminalKey, ctrl = false) => {
+    const mods = activeModifiers(sessionId);
+    consumeModifiers(sessionId);
+    void api.sendSessionInput(sessionId, encodeKey(key, { ctrl: ctrl || mods.ctrl, alt: mods.alt }));
+  };
+
+  const latchOf = (name: ModifierName): LatchState =>
+    latches.sessionId === sessionId ? latches[name].state : "off";
+
   const handlePaste = async () => {
+    // A paste is not a key: it disarms a one-shot modifier rather than carry it.
+    consumeModifiers(sessionId);
     let content: { text: string; images: File[] };
     try {
       content = await readClipboard();
@@ -244,21 +305,54 @@ export const MobileKeyBar: React.FC = () => {
             A+
           </button>
         </div>
+        <KeyButton label="Esc" onPress={() => sendKey(ESC_KEY)} />
+        {MODIFIERS.map(({ name, label }) => {
+          const state = latchOf(name);
+          return (
+            <button
+              key={name}
+              type="button"
+              aria-label={`${label} modifier, ${LATCH_LABEL[state]}`}
+              aria-pressed={state !== "off"}
+              // Tap arms for the next key; a quick second tap locks; tap again releases.
+              onPointerDown={(e) => {
+                e.preventDefault();
+                tapModifier(sessionId, name, e.timeStamp);
+              }}
+              className={`flex h-9 shrink-0 touch-manipulation items-center justify-center gap-1 rounded-md px-3 font-mono text-sm ${LATCH_CLASS[state]}`}
+            >
+              {label}
+              {state === "locked" && <Lock size={11} aria-hidden />}
+            </button>
+          );
+        })}
         {KEYS.map((key) => (
-          <button
+          <KeyButton
             key={key.label}
-            type="button"
-            // Don't take focus → the keyboard stays up.
-            onPointerDown={(e) => {
-              e.preventDefault();
-              void api.sendSessionInput(sessionId, key.data);
-            }}
-            className={`flex h-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 px-3 font-mono text-sm text-neutral-200 active:bg-neutral-700 ${key.wide ? "flex-1" : ""}`}
-          >
-            {key.label}
-          </button>
+            label={key.label}
+            wide={key.wide}
+            onPress={() => sendKey(key.key, key.ctrl)}
+          />
         ))}
       </div>
     </div>
   );
 };
+
+const KeyButton: React.FC<{ label: string; wide?: boolean; onPress: () => void }> = ({
+  label,
+  wide,
+  onPress
+}) => (
+  <button
+    type="button"
+    // Don't take focus → the keyboard stays up.
+    onPointerDown={(e) => {
+      e.preventDefault();
+      onPress();
+    }}
+    className={`flex h-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 px-3 font-mono text-sm text-neutral-200 active:bg-neutral-700 ${wide ? "flex-1" : ""}`}
+  >
+    {label}
+  </button>
+);

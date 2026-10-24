@@ -388,6 +388,15 @@ export interface AdapterCapabilities {
    */
   supportsTaskStop?: boolean;
   /**
+   * A subagent's approval takes the user's own words as its denial — Claude's
+   * deny `message`, OpenCode's reject `message` — so a message sent over it
+   * (a redirect, `TurnCommandBody.declineApprovals`) goes to the subagent that
+   * asked rather than being steered into the main agent, which never sees the
+   * subagent's question (T3 `b7e802bd`). Absent means no (Codex, Grok: their
+   * approval replies carry no text).
+   */
+  approvalFeedbackToSubagents?: boolean;
+  /**
    * When a background task the parent launched — a subagent, a background shell, a monitor —
    * ends while no turn runs, the provider starts a turn BY ITSELF to hand the agent its result
    * (Claude's woken parent, Grok's `subagent-completed-…`/`task-completed-…` prompts, OpenCode's
@@ -424,6 +433,12 @@ export interface ProviderModel {
   isDefault?: boolean;
   isLegacy?: boolean;
   capabilities: ModelCapabilities | null;
+  /**
+   * The model's context window in tokens, when the provider's catalogue states one (OpenCode's
+   * `limit.context`, Grok's `totalContextTokens`). Absent means unknown; a handoff into the model
+   * then assumes `HANDOFF_FALLBACK_CONTEXT_WINDOW` (`handoff.ts`).
+   */
+  contextWindow?: number;
 }
 
 /** `input.hint` is the only argument metadata that exists (§4.6.1). */

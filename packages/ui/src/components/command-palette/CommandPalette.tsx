@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Box, Search } from "lucide-react";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import { LimitedMarker } from "../ui/limited-marker";
@@ -28,6 +29,7 @@ import {
   type ConversationSearchRow
 } from "./ConversationSearchResults";
 import { revealConversationTurn } from "./reveal-turn";
+import { createRecencySnapshot, matchRanges, paletteResults, sessionRecency } from "./command-palette.logic";
 
 /** One selectable row: an open session tab, or a project to jump into. */
 interface SessionRow {
@@ -94,45 +96,33 @@ export function toggleCommandPalette(): boolean {
   return false;
 }
 
-/**
- * Split `text` around the first case-insensitive occurrence of `query` so the
- * matched run can be emphasised. Empty query = no match.
- */
-function splitMatch(text: string, query: string): [string, string, string] | null {
-  if (!query) {
-    return null;
-  }
-  const at = text.toLowerCase().indexOf(query);
-  if (at < 0) {
-    return null;
-  }
-  return [text.slice(0, at), text.slice(at, at + query.length), text.slice(at + query.length)];
-}
-
-/** `text` with the matched substring highlighted (plain text when it doesn't match). */
+/** `text` with each query word emphasised where it matched (`matchRanges`). */
 const Highlighted: React.FC<{ text: string; query: string }> = ({ text, query }) => {
-  const parts = splitMatch(text, query);
-  if (!parts) {
+  const ranges = query ? matchRanges(text, query) : [];
+  if (ranges.length === 0) {
     return <>{text}</>;
   }
-  return (
-    <>
-      {parts[0]}
-      <span className="font-medium text-warn-300">{parts[1]}</span>
-      {parts[2]}
-    </>
-  );
+  const parts: React.ReactNode[] = [];
+  let at = 0;
+  for (const [start, end] of ranges) {
+    if (start > at) parts.push(text.slice(at, start));
+    parts.push(
+      <span key={start} className="font-medium text-warn-300">
+        {text.slice(start, end)}
+      </span>
+    );
+    at = end;
+  }
+  if (at < text.length) parts.push(text.slice(at));
+  return <>{parts}</>;
 };
-
-function matches(text: string, query: string): boolean {
-  return text.toLowerCase().includes(query);
-}
 
 /**
  * Global "go to" palette (`Ctrl/Cmd+K`, or the topbar button on mobile): open
  * session tabs first, then projects. Empty query lists every open session plus
- * the projects that have one (the "active" set); typing searches session
- * titles, project names and workspace names across every workspace.
+ * the projects that have one (the "active" set), most recent first; typing
+ * searches session titles, project names and workspace names across every
+ * workspace, best match first (`command-palette.logic.ts`).
  *
  * Every row — session rows included — comes out of the shared project index, so
  * nothing is ever listed before the daemon has confirmed its project is an
@@ -152,6 +142,8 @@ function matches(text: string, query: string): boolean {
 export const CommandPalette: React.FC = () => {
   const api = useApi();
   const sessions = useAppStore((s) => s.sessions);
+  const threadVisits = useAppStore((s) => s.threadVisits);
+  const recentProjects = useAppStore((s) => s.recentProjects);
 
   const [open, setOpen] = useState(false);
   // An open layer like any other (`useOpenLayer`); `isCommandPaletteOpen`
@@ -175,6 +167,9 @@ export const CommandPalette: React.FC = () => {
   // Scrolling the highlighted row into view is a keyboard affordance; doing it
   // for a hover would fight the pointer that caused it.
   const navSourceRef = useRef<"keyboard" | "pointer">("keyboard");
+  // Recency as of this opening: live turn activity must not reorder the rows
+  // under the highlight. Replaced on every open.
+  const recencyRef = useRef(createRecencySnapshot());
 
   const close = useCallback((restoreFocus: boolean) => {
     openRef.current = false;
@@ -202,6 +197,7 @@ export const CommandPalette: React.FC = () => {
       return false;
     }
     restoreFocusRef.current = document.activeElement as HTMLElement | null;
+    recencyRef.current = createRecencySnapshot();
     openRef.current = true;
     setOpen(true);
     return true;
@@ -226,6 +222,10 @@ export const CommandPalette: React.FC = () => {
       controllers.delete(controller);
     };
   }, [requestOpen, close]);
+
+  // The phone's Back closes it too, without handing focus back: on a phone
+  // that would raise the keyboard over a composer the user just left.
+  useBackClose(open, () => close(false));
 
   // Escape closes. Capture phase + stopPropagation: modals underneath listen
   // for Escape on `document` too, and one press must close only the top layer.
@@ -299,7 +299,7 @@ export const CommandPalette: React.FC = () => {
       }
       rows.push({ key: `session:${session.id}`, kind: "session", session, project });
     }
-    // Same order the tab strip uses, grouped by project.
+    // Same order the tab strip uses, grouped by project: the order ties fall back to.
     return rows.sort(
       (a, b) =>
         a.project.path.localeCompare(b.project.path) ||
@@ -308,46 +308,38 @@ export const CommandPalette: React.FC = () => {
     );
   }, [sessions, projectsByPath]);
 
+  const sessionRowById = useMemo(() => new Map(sessionRows.map((row) => [row.session.id, row])), [sessionRows]);
+
   const results = useMemo(() => {
-    const trimmed = query.trim().toLowerCase();
     const projects = [...projectsByPath.values()].sort(
       (a, b) => a.workspace.localeCompare(b.workspace) || a.name.localeCompare(b.name)
     );
-
-    if (!trimmed) {
-      // Same "Active" set the sidebar shows (projects with an open tab); with
-      // nothing open there is nothing to be active, so list everything instead.
-      const active = new Set(sessionRows.map((row) => row.project.path));
-      const activeProjects = projects.filter((project) => active.has(project.path));
-      const shown = activeProjects.length > 0 ? activeProjects : projects;
-      return {
-        sessions: sessionRows,
-        projects: shown.map<ProjectRow>((project) => ({
-          key: `project:${project.path}`,
-          kind: "project",
-          project
-        })),
-        projectsLabel: activeProjects.length > 0 ? "Active" : "Projects"
-      };
-    }
-
+    const interactedAt = new Map(recentProjects.map((recent) => [recent.path, Date.parse(recent.lastInteractedAt) || 0]));
+    const recency = recencyRef.current;
+    const ranked = paletteResults({
+      query,
+      sessions: sessionRows,
+      projects,
+      sessionRecency: (session) =>
+        recency.get(`session:${session.id}`, () => sessionRecency(session, threadVisits[session.id])),
+      projectRecency: (project) => recency.get(`project:${project.path}`, () => interactedAt.get(project.path) ?? 0)
+    });
     return {
-      sessions: sessionRows.filter(
-        (row) =>
-          matches(row.session.title, trimmed) ||
-          matches(row.project.name, trimmed) ||
-          matches(row.project.workspace, trimmed)
-      ),
-      projects: projects
-        .filter((project) => matches(project.name, trimmed) || matches(project.workspace, trimmed))
-        .map<ProjectRow>((project) => ({ key: `project:${project.path}`, kind: "project", project })),
-      projectsLabel: "Projects"
+      sessions: ranked.sessions.map((row) => sessionRowById.get(row.session.id)!),
+      projects: ranked.projects.map<ProjectRow>((project) => ({ key: `project:${project.path}`, kind: "project", project })),
+      projectsLabel: ranked.projectsLabel,
+      projectsFirst: ranked.projectsFirst
     };
-  }, [query, projectsByPath, sessionRows]);
+    // `open` is a dependency because a reopening brings a fresh recency snapshot.
+  }, [open, query, projectsByPath, sessionRows, sessionRowById, threadVisits, recentProjects]);
 
-  const flat = useMemo(
-    () => [...results.sessions, ...results.projects],
-    [results.sessions, results.projects]
+  // Keyboard order is display order: the group with the best match leads.
+  const flat = useMemo<PaletteItem[]>(
+    () =>
+      results.projectsFirst
+        ? [...results.projects, ...results.sessions]
+        : [...results.sessions, ...results.projects],
+    [results]
   );
 
   // --- "Search conversations" ------------------------------------------------
@@ -528,7 +520,7 @@ export const CommandPalette: React.FC = () => {
     return null;
   }
 
-  const trimmedQuery = query.trim().toLowerCase();
+  const trimmedQuery = query.trim();
   const searchOptionId = (row: ConversationSearchRow) => `command-palette-${row.key}`;
   const activeId =
     mode === "search"
@@ -652,18 +644,29 @@ export const CommandPalette: React.FC = () => {
                   {index === null ? "Loading…" : "Nothing found."}
                 </p>
               )}
-              {results.sessions.length > 0 && (
-                <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
-                  Sessions
-                </p>
-              )}
-              {results.sessions.map((item, index) => renderRow(item, index))}
-              {results.projects.length > 0 && (
-                <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
-                  {results.projectsLabel}
-                </p>
-              )}
-              {results.projects.map((item, index) => renderRow(item, results.sessions.length + index))}
+              {(() => {
+                const sessionsBlock = results.sessions.length > 0 && (
+                  <React.Fragment key="sessions">
+                    <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
+                      Sessions
+                    </p>
+                    {results.sessions.map((item, at) =>
+                      renderRow(item, results.projectsFirst ? results.projects.length + at : at)
+                    )}
+                  </React.Fragment>
+                );
+                const projectsBlock = results.projects.length > 0 && (
+                  <React.Fragment key="projects">
+                    <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
+                      {results.projectsLabel}
+                    </p>
+                    {results.projects.map((item, at) =>
+                      renderRow(item, results.projectsFirst ? at : results.sessions.length + at)
+                    )}
+                  </React.Fragment>
+                );
+                return results.projectsFirst ? [projectsBlock, sessionsBlock] : [sessionsBlock, projectsBlock];
+              })()}
               {/* One dead workspace shouldn't blank the palette, but silently
                   dropping its projects would look like they don't exist. */}
               {index?.incomplete && (

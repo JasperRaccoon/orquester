@@ -1,4 +1,7 @@
+import type { TerminalStreamClientFrame } from "@orquester/api";
 import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporter";
+import { backoffDelayMs } from "../connection/backoff";
+import { noteWsClosed, noteWsOpened } from "../connection/connection-log";
 
 /**
  * Multiplexes every terminal's output/input/resize for one daemon over a single
@@ -8,9 +11,9 @@ import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporte
  * asks each terminal to reset before the daemon replays its buffer, so nothing
  * is duplicated.
  *
- * Wire protocol (JSON text frames):
- *   client → { t:"sub"|"unsub", id } | { t:"input", id, data } | { t:"resize", id, cols, rows } | { t:"ping" }
- *   server → { t:"out", id, data } | { t:"end", id } | { t:"pong" }
+ * Wire protocol: JSON text frames, `TerminalStreamClientFrame` and
+ * `TerminalStreamServerFrame` in packages/api. A server `reset` clears the
+ * terminal before the daemon resyncs it; an `out` with `replay` is a snapshot.
  */
 export class WsSessionChannel implements SessionChannel {
   private ws: WebSocket | null = null;
@@ -116,6 +119,7 @@ export class WsSessionChannel implements SessionChannel {
 
     ws.onopen = () => {
       this.attempts = 0;
+      noteWsOpened(this.wsUrl);
       // Re-subscribe everything. Each is a reconnect for a terminal that already
       // has content, so reset it before the daemon replays its buffer.
       for (const [id, handlers] of this.subs) {
@@ -128,7 +132,7 @@ export class WsSessionChannel implements SessionChannel {
       if (typeof event.data !== "string") {
         return;
       }
-      let msg: { t?: string; id?: string; data?: string };
+      let msg: { t?: string; id?: string; data?: string; replay?: boolean };
       try {
         msg = JSON.parse(event.data);
       } catch {
@@ -146,19 +150,28 @@ export class WsSessionChannel implements SessionChannel {
         return;
       }
       if (msg.t === "out" && typeof msg.data === "string") {
-        handlers.onData(msg.data);
+        if (msg.replay === true && handlers.onReplay) {
+          handlers.onReplay(msg.data);
+        } else {
+          handlers.onData(msg.data);
+        }
+      } else if (msg.t === "reset") {
+        handlers.onReset?.();
       } else if (msg.t === "end") {
         handlers.onEnd();
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       // Superseded by an explicit reconnect (wake/credential change): this close
       // is expected — scheduling another dial here would double-connect.
       if (this.ws !== ws) {
         return;
       }
       this.ws = null;
+      // For the connection diagnosis: closes that keep coming while HTTP works
+      // mean something between here and the daemon blocks WebSockets.
+      noteWsClosed(this.wsUrl, typeof event?.code === "number" ? event.code : null);
       // A wake-probe deadline racing this close would tear down the redial.
       this.clearPongDeadline();
       this.scheduleReconnect();
@@ -193,15 +206,17 @@ export class WsSessionChannel implements SessionChannel {
     if (this.reconnectTimer) {
       return;
     }
+    // Shared jittered backoff: after a daemon restart, terminals and screencasts
+    // of every client must not redial in the same instant.
+    const delay = backoffDelayMs(this.attempts);
     this.attempts += 1;
-    const delay = Math.min(this.attempts * 500, 5000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
   }
 
-  private raw(msg: Record<string, unknown>): void {
+  private raw(msg: TerminalStreamClientFrame): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     }
@@ -221,8 +236,13 @@ export function wakeSessionChannels(): void {
   }
 }
 
+/** The terminal WebSocket URL for a daemon's HTTP base URL. */
+export function sessionChannelUrl(httpBaseUrl: string): string {
+  return `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
+}
+
 export function getSessionChannel(httpBaseUrl: string, credential?: string): WsSessionChannel {
-  const wsUrl = `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
+  const wsUrl = sessionChannelUrl(httpBaseUrl);
   const existing = channels.get(wsUrl);
   if (existing) {
     existing.setCredential(credential);

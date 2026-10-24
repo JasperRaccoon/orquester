@@ -93,6 +93,7 @@ import {
   type ChildExitReason,
   type ProviderChild
 } from "../../support/spawn.ts";
+import { ProviderLeftovers } from "../../support/provider-leftovers.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { childItemId, notificationThreadId } from "./child-routing.ts";
@@ -440,6 +441,8 @@ export class CodexSession {
   private readonly childRequests = new Map<string, RequestBookkeeping>();
 
   private child: ProviderChild | null = null;
+  /** This launch's leftover sweep (local launches only). */
+  private leftovers: ProviderLeftovers | null = null;
   private peer: CodexPeer | null = null;
   private providerThreadId: string | null = null;
   private announcedThreadId: string | null = null;
@@ -580,6 +583,12 @@ export class CodexSession {
             cwd: this.options.cwd
           });
     this.child = child;
+    // What the app-server leaves in its own group is stopped whenever it ends — its own exit
+    // included, not only a stop's group kill (`support/provider-leftovers.ts`). Not in a box.
+    if (box === undefined) {
+      this.leftovers = new ProviderLeftovers({ env: this.options.env, label: "codex", logger: this.options.context.logger });
+      void this.leftovers.watchGroup(child.pid);
+    }
     this.watchStderr(child);
     // `exited` never rejects, but `handleExit` runs the whole settle path
     // (emits, `stderr.excerpt()`, `usage.completeTurn`, `onClosed`); a throw in
@@ -2215,6 +2224,10 @@ export class CodexSession {
           itemId: params.itemId,
           providerRequestId: String(request.id),
           detail: params.command ?? undefined,
+          // Codex's own "why" (a request for network access, say): the card's reason line.
+          ...(typeof params.reason === "string" && params.reason.trim().length > 0
+            ? { reason: params.reason.trim() }
+            : {}),
           options:
             approvalOptionsFromAvailableDecisions(params.availableDecisions) ??
             [...DEFAULT_APPROVAL_OPTIONS],
@@ -2450,6 +2463,7 @@ export class CodexSession {
     itemId?: string;
     providerRequestId: string;
     detail?: string;
+    reason?: string;
     appName?: string;
     options: ApprovalOption[];
     args?: unknown;
@@ -2514,6 +2528,7 @@ export class CodexSession {
           // waiting on a reply and it must be answered or cancelled (§4.2).
           dismissible: false,
           ...(input.detail !== undefined ? { detail: input.detail } : {}),
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
           ...(input.appName !== undefined ? { appName: input.appName } : {}),
           options: input.options,
           ...(input.args !== undefined ? { args: input.args } : {})
@@ -2662,6 +2677,7 @@ export class CodexSession {
       return;
     }
     this.exitHandled = true;
+    void this.leftovers?.sweep();
     this.disarmLivenessWatchdog();
     // The child that held the credential is gone (design 2026-10-14 §1.2).
     this.options.sessionTools?.revoke();

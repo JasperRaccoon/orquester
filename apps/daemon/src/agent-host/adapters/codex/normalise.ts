@@ -144,6 +144,14 @@ export class CodexNormaliser {
   /** The last error notification of the active turn, for its `errorMessage`. */
   private lastTurnError: string | null = null;
   /**
+   * The `codexErrorInfo` of the active turn's last error notification, retry
+   * or terminal: a failed completion that names no status of its own is
+   * classed by it (a 429 retry run can end in a bare completion).
+   */
+  private lastTurnErrorInfo: CodexProtocol.v2.CodexErrorInfo | null = null;
+  /** The active turn already raised its usage-limit `runtime.error`. */
+  private turnLimitRaised = false;
+  /**
    * The account's rate-limit windows as `account/rateLimits/updated` last
    * reported them, keyed `<limitId>:<primary|secondary>`, so a terminal
    * usage-limit error can say when the exhausted window resets (workflows
@@ -296,6 +304,50 @@ export class CodexNormaliser {
   }
 
   /**
+   * The usage-limit `runtime.error` a failed `turn/completed` still owes, or
+   * nothing. The terminal `error` notification usually raised it already; this
+   * covers a completion that is the only evidence — a retry run on 429 that
+   * ends in a bare completion, or a completion whose own exhaustion status is
+   * 429 when the notification's was not. An explicit status on the completion
+   * decides; a missing one, or no `codexErrorInfo` at all, defers to the
+   * turn's last error notification.
+   */
+  private completionLimit(
+    turn: CodexProtocol.v2.Turn,
+    errorMessage: string | undefined,
+    raw: () => RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    if (this.turnLimitRaised) {
+      return [];
+    }
+    const info = turn.error?.codexErrorInfo ?? null;
+    const previous = this.lastTurnErrorInfo;
+    const decidedByCompletion =
+      info !== null &&
+      (exhaustionHttpStatus(info) !== null || errorInfoCode(info) !== errorInfoCode(previous));
+    const evidence = decidedByCompletion ? info : previous;
+    if (evidence === null || failureReasonOf(evidence) !== "usage_limit") {
+      return [];
+    }
+    this.turnLimitRaised = true;
+    const resetsAt = this.exhaustedWindowResetsAt();
+    return [
+      {
+        type: "runtime.error",
+        payload: {
+          message: presentableError(errorMessage ?? "Codex usage limit reached."),
+          class: errorClassOf(evidence),
+          detail: { codexErrorInfo: evidence },
+          reason: "usage_limit",
+          ...(resetsAt !== undefined ? { resetsAt } : {})
+        },
+        turnId: turn.id,
+        raw: raw()
+      }
+    ];
+  }
+
+  /**
    * Record a settled turn, evicting the oldest past the cap. A re-add moves
    * the id to the back, which is why the delete comes first.
    */
@@ -319,7 +371,7 @@ export class CodexNormaliser {
     this.activeTurnId = turnId;
     this.turnModel = model ?? null;
     this.turnEffort = effort ?? null;
-    this.lastTurnError = null;
+    this.forgetTurnError();
     this.usage.beginTurn(turnId);
   }
 
@@ -339,7 +391,13 @@ export class CodexNormaliser {
   /** Called when the session settles a turn outside the protocol (child death). */
   noteTurnSettled(): void {
     this.activeTurnId = null;
+    this.forgetTurnError();
+  }
+
+  private forgetTurnError(): void {
     this.lastTurnError = null;
+    this.lastTurnErrorInfo = null;
+    this.turnLimitRaised = false;
   }
 
   /**
@@ -688,10 +746,11 @@ export class CodexNormaliser {
         // settling, and the next turn must start from an empty set.
         this.forgetTurnAgents();
         const errorMessage = p.turn.error?.message ?? this.lastTurnError ?? undefined;
+        const limit = state === "failed" ? this.completionLimit(p.turn, errorMessage, raw) : [];
         if (this.activeTurnId === p.turn.id) {
           this.activeTurnId = null;
         }
-        this.lastTurnError = null;
+        this.forgetTurnError();
         this.rememberSettledTurn(p.turn.id);
         // A turn the provider abandoned leaves its in-progress items with no
         // `item/completed` of their own (R3 finding 1). Close them BEFORE the
@@ -699,6 +758,7 @@ export class CodexNormaliser {
         // finished turn.
         return [
           ...this.closeOpenItems(interrupted ? "failed" : "completed", p.turn.id, raw()),
+          ...limit,
           {
             type: "turn.completed",
             payload: {
@@ -867,6 +927,7 @@ export class CodexNormaliser {
         const p = params as CodexProtocol.v2.ErrorNotification;
         const message = presentableError(p.error.message);
         this.lastTurnError = p.error.message;
+        this.lastTurnErrorInfo = p.error.codexErrorInfo;
         // `willRetry` maps DIRECTLY onto §10's "retryable provider errors are
         // runtime.warning, terminal ones runtime.error" — no heuristic needed
         // (fixtures README observation 13).
@@ -884,6 +945,9 @@ export class CodexNormaliser {
         // a retry that may still succeed is not acted on.
         const reason = failureReasonOf(p.error.codexErrorInfo);
         const resetsAt = reason === "usage_limit" ? this.exhaustedWindowResetsAt() : undefined;
+        if (reason === "usage_limit") {
+          this.turnLimitRaised = true;
+        }
         return [
           {
             type: "runtime.error",
@@ -2072,10 +2136,34 @@ function truncate(value: string): string {
   return value.length <= MAX_ERROR_CHARS ? value : `${value.slice(0, MAX_ERROR_CHARS - 1)}…`;
 }
 
+/** The `codexErrorInfo` variant's name: the string itself, or the object's one key. */
+function errorInfoCode(info: CodexProtocol.v2.CodexErrorInfo | null): string | null {
+  if (info === null) {
+    return null;
+  }
+  return typeof info === "string" ? info : (Object.keys(info)[0] ?? null);
+}
+
+// Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
+/**
+ * Retry exhaustion says why it failed only through the last attempt's HTTP
+ * status: `responseTooManyFailedAttempts {httpStatusCode}`. Null when the
+ * info is another variant or the status is unknown.
+ */
+function exhaustionHttpStatus(info: CodexProtocol.v2.CodexErrorInfo | null): number | null {
+  if (info === null || typeof info === "string" || !("responseTooManyFailedAttempts" in info)) {
+    return null;
+  }
+  const status = info.responseTooManyFailedAttempts?.httpStatusCode;
+  return typeof status === "number" ? status : null;
+}
+
 /**
  * The account failure a TERMINAL error names (workflows §5.4), read off
  * `codexErrorInfo` alone — never the message. A connection failure the
- * server stamped 401 is a refused login too.
+ * server stamped 401 is a refused login too. Retries exhausted on 429 are a
+ * usage or rate limit; exhaustion on any other status stays a transport
+ * failure with no reason.
  */
 function failureReasonOf(
   info: CodexProtocol.v2.CodexErrorInfo | null
@@ -2084,6 +2172,9 @@ function failureReasonOf(
     return undefined;
   }
   if (typeof info !== "string") {
+    if (exhaustionHttpStatus(info) === 429) {
+      return "usage_limit";
+    }
     const inner = Object.values(info)[0] as { httpStatusCode?: unknown } | undefined;
     return inner?.httpStatusCode === 401 ? "auth" : undefined;
   }
@@ -2106,6 +2197,10 @@ function errorClassOf(info: CodexProtocol.v2.CodexErrorInfo | null): RuntimeErro
   if (typeof info !== "string") {
     if ("httpConnectionFailed" in info || "responseStreamConnectionFailed" in info) {
       return "transport_error";
+    }
+    if (exhaustionHttpStatus(info) === 429) {
+      // A limit, like `usageLimitExceeded` — the transport worked.
+      return "provider_error";
     }
     if ("responseStreamDisconnected" in info || "responseTooManyFailedAttempts" in info) {
       return "transport_error";

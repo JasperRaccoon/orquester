@@ -84,6 +84,14 @@ export function daemonConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
+/**
+ * The remote transport's login sessions and API tokens (digests only, never a token). 0600, read
+ * tolerantly ({@link parseAuthSessionsFile}).
+ */
+export function authSessionsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "auth-sessions.json");
+}
+
 export function accountsConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "accounts.json");
 }
@@ -635,8 +643,22 @@ export function localDateStamp(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-export function dailyLogFile(logsDir: string, date = new Date()): string {
-  return joinPath(logsDir, `${localDateStamp(date)}.log`);
+/** Days of daemon logs kept besides today's: older daily files are deleted. */
+export const DAILY_LOG_RETENTION_DAYS = 14;
+
+/**
+ * The daemon log for a local day: `<yyyy-mm-dd>.log`, then `<yyyy-mm-dd>.<part>.log` (part ≥ 1)
+ * for each later file of the same day once one reaches its size cap.
+ */
+export function dailyLogFile(logsDir: string, date = new Date(), part = 0): string {
+  return joinPath(logsDir, `${localDateStamp(date)}${part > 0 ? `.${part}` : ""}.log`);
+}
+
+/** The local day and part a daily log file name stands for, or null for any other file. */
+export function parseDailyLogFileName(name: string): { day: string; part: number } | null {
+  const match = /^(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d{0,5}))?\.log$/.exec(name);
+  if (!match) return null;
+  return { day: match[1]!, part: match[2] === undefined ? 0 : Number(match[2]) };
 }
 
 // daemon.json
@@ -646,9 +668,9 @@ export const httpTransportSchema = z.object({
   host: z.string().min(1).default(DEFAULT_HTTP_HOST),
   port: z.coerce.number().int().min(1).max(65535).default(DEFAULT_HTTP_PORT),
   /**
-   * The username half of the credential. The wire bearer is
-   * base64("<username>:<passwordHash>"); the server compares this (normalized:
-   * trim + lowercase) in constant time. Defaults to "mapacho".
+   * The username a login checks with the password (normalized: trim +
+   * lowercase, compared in constant time). Defaults to "mapacho". A login mints
+   * a session token (`auth-sessions.json`); neither this nor the hash is a bearer.
    */
   username: z
     .string()
@@ -803,6 +825,17 @@ export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
   return prefs.enabled && (prefs.agents[id] ?? true);
 }
 
+// Adapted from T3 Code (MIT): packages/contracts/src/settings.ts
+/** When an idle Claude chat is compacted, with T3 Code's names, labels and order. */
+export const IDLE_COMPACTION_MODES = [
+  { value: "onReturn", label: "When you return" },
+  { value: "beforeCacheExpires", label: "Before the cache expires (beta)" },
+  { value: "off", label: "Never" }
+] as const;
+export const idleCompactionModeSchema = z.enum(["onReturn", "beforeCacheExpires", "off"]);
+export type IdleCompactionMode = z.infer<typeof idleCompactionModeSchema>;
+export const DEFAULT_IDLE_COMPACTION_MODE: IdleCompactionMode = "onReturn";
+
 /**
  * Agent-harness runtime preferences. Daemon-side and per-VPS: the daemon reads
  * them at session launch, so every client that launches a session gets the same
@@ -850,9 +883,49 @@ export const agentPrefsSchema = z.object({
    * default — it spends another account's quota without asking. Never for an agent without
    * managed accounts (OpenCode).
    */
-  switchAccountOnUsageLimit: z.boolean().default(false)
+  switchAccountOnUsageLimit: z.boolean().default(false),
+  /**
+   * When an idle Claude chat over 200,000 tokens is compacted (T3 Code's "Compact idle threads"):
+   * `onReturn` offers it when the user comes back after the prompt cache expired, the default;
+   * `beforeCacheExpires` (beta) has the daemon send `/compact` two minutes before the cache
+   * expires (`apps/daemon/src/agent-chat/idle-compaction.ts`); `off` never compacts on its own
+   * and answers Claude's resume prompt with "keep full history". A value from another version
+   * reads as the default rather than failing the whole file.
+   */
+  claudeIdleCompaction: idleCompactionModeSchema.catch(DEFAULT_IDLE_COMPACTION_MODE).default(DEFAULT_IDLE_COMPACTION_MODE),
+  /**
+   * Per-account override of the mode above, keyed by managed account id (`"system"` for the
+   * system login): T3 Code's per-instance override, since an account is a separate Claude home
+   * with its own cache lifetime (an API key's 5 minutes, a subscription's hour). An absent entry
+   * means "use the default"; an unreadable one is dropped.
+   */
+  claudeIdleCompactionByAccount: z
+    .record(z.string(), z.unknown())
+    .catch({})
+    .default({})
+    .transform((entries) => {
+      const out: Record<string, IdleCompactionMode> = {};
+      for (const [account, mode] of Object.entries(entries)) {
+        const parsed = idleCompactionModeSchema.safeParse(mode);
+        if (parsed.success) out[account] = parsed.data;
+      }
+      return out;
+    })
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
+
+/**
+ * The idle-compaction mode a Claude chat on `accountKey` runs under: its account's override, else
+ * the host-wide default. The single resolution point, so the daemon's scheduler, the host's resume
+ * prompt and the Settings panel cannot disagree. *T3: `resolveIdleCompaction`.*
+ */
+export function resolveIdleCompaction(
+  prefs: Pick<AgentPrefs, "claudeIdleCompaction" | "claudeIdleCompactionByAccount">,
+  accountKey: string
+): IdleCompactionMode {
+  const byAccount = prefs.claudeIdleCompactionByAccount;
+  return Object.hasOwn(byAccount, accountKey) ? byAccount[accountKey]! : prefs.claudeIdleCompaction;
+}
 
 /**
  * Whether an interrupted turn in this project is continued after a host
@@ -940,6 +1013,8 @@ export const appConfigSchema = z.object({
   runInBackground: z.boolean().default(false),
   /** Confirm before closing a live terminal/agent session tab (it ends the session). */
   confirmCloseSession: z.boolean().default(true),
+  /** Desktop: native notifications for the daemon's pushes, and the dock/taskbar attention badge. */
+  desktopNotifications: z.boolean().default(true),
   /** Top-bar agent-usage widget preferences. */
   usage: usagePrefsSchema.default({}),
   /** Agent-harness runtime preferences (see agentPrefsSchema). */
@@ -954,6 +1029,45 @@ export function createDefaultAppConfig(): AppConfig {
 
 export function parseAppConfig(value: unknown): AppConfig {
   return appConfigSchema.parse(value);
+}
+
+/** The `app.json` groups a client writes as a whole object, which an update merges field-wise. */
+const APP_CONFIG_GROUPS: ReadonlySet<string> = new Set(["usage", "agents"]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Apply a client's `PUT /api/config/app` body to what `app.json` holds now, without losing what the
+ * client does not know.
+ *
+ * A client sends a whole group (`{agents: {...}}`) as its own schema parsed it, so an older client
+ * — one that predates a field such as `agents.claudeIdleCompaction` — drops that field from what it
+ * writes back. Replacing the group with it reset the field on every unrelated toggle. Instead each
+ * group is merged field-wise over the stored one (a field the body names wins; a record-valued
+ * field such as `continueThreadsByProject` is still replaced whole, so removing a key works), and
+ * every field this build does not know — a newer daemon's or a newer client's — is kept in the file
+ * (AGENTS.md: preserve unknown persisted fields). Throws when the merged config is invalid.
+ *
+ * `config` is the validated result; `stored` is what to write: the validated values over the raw
+ * merge, so known fields are normalized and unknown ones survive.
+ */
+export function applyAppConfigUpdate(storedRaw: unknown, update: unknown): { config: AppConfig; stored: Record<string, unknown> } {
+  const base = isPlainRecord(storedRaw) ? storedRaw : {};
+  const patch = isPlainRecord(update) ? update : {};
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const current = base[key];
+    merged[key] = APP_CONFIG_GROUPS.has(key) && isPlainRecord(value) && isPlainRecord(current) ? { ...current, ...value } : value;
+  }
+  const config = parseAppConfig(merged);
+  const stored: Record<string, unknown> = { ...merged };
+  for (const [key, value] of Object.entries(config)) {
+    const raw = merged[key];
+    stored[key] = isPlainRecord(value) && isPlainRecord(raw) ? { ...raw, ...value } : value;
+  }
+  return { config, stored };
 }
 
 // remotes.json (user-added remote servers; local is implicit)
@@ -1704,6 +1818,11 @@ export const mergeOutboxEntrySchema = z
     attempts: z.number().int().nonnegative().catch(0).default(0),
     /** The last refusal, in the parent's words. */
     error: z.string().max(2_000).optional().catch(undefined),
+    /**
+     * A reply held because the chat it is for was stopped (the reply router, `replies.ts`): kept
+     * `failed` so no build posts it on its own, and said as held rather than refused.
+     */
+    held: z.literal(true).optional().catch(undefined),
     /** The parent's turn mode (`MergeBackRequest.interactionMode`); absent: default. */
     interactionMode: z.enum(["default", "plan"]).optional().catch(undefined),
     /**
@@ -1793,9 +1912,11 @@ export type ReplySubscriptionState = (typeof REPLY_SUBSCRIPTION_STATES)[number];
 /**
  * How a `done` subscription ended (`ended`): its reply `delivered` as a message, handed to its
  * `waiter`, the target `closed`, `dropped` (the requester closed), `refused` (nothing was posted or
- * queued), or its message `discarded` from the target's queue. A newer build's value is kept as is.
+ * queued), its message `discarded` from the target's queue, or `stopped` (the requester, or a chat
+ * above it, was stopped and the delegate with it: nothing is delivered). A newer build's value is
+ * kept as is.
  */
-export const REPLY_SUBSCRIPTION_ENDINGS = ["delivered", "waiter", "closed", "dropped", "refused", "discarded"] as const;
+export const REPLY_SUBSCRIPTION_ENDINGS = ["delivered", "waiter", "closed", "dropped", "refused", "discarded", "stopped"] as const;
 export type ReplySubscriptionEnding = (typeof REPLY_SUBSCRIPTION_ENDINGS)[number];
 
 const replyExchangeSchema = z.object({
@@ -2705,6 +2826,7 @@ export function isValidName(name: string | undefined): name is string {
 
 export * from "./workflows.ts";
 export * from "./agent-tools.ts";
+export * from "./auth-sessions.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";

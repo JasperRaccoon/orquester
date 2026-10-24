@@ -51,6 +51,7 @@ import {
   type AdapterFactory,
   type AdapterMcpApps,
   type AgentAdapter,
+  type ApprovalResponseOptions,
   type RollbackTarget,
   type SendTurnInput,
   type SendTurnResult,
@@ -512,7 +513,10 @@ class GrokAdapter implements AgentAdapter {
   async respondToApproval(
     threadId: string,
     requestId: string,
-    decision: ApprovalDecision
+    decision: ApprovalDecision,
+    // A redirect declines as any decline does (`reject_once`): ACP's permission reply takes no
+    // reason, and the host's steer that follows carries the user's message.
+    _options?: ApprovalResponseOptions
   ): Promise<void> {
     this.requireSession(threadId).respondToApproval(requestId, decision);
     await Promise.resolve();

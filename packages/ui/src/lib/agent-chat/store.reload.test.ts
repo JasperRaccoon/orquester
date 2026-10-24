@@ -295,6 +295,36 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(stored(), null, "settled: nothing left for another reload");
   });
 
+  it("a compact-first send is in the outbox while its /compact runs: a reload then re-posts the message", async () => {
+    const before = fakeHost();
+    const page = previousPage("A", before);
+    await flush();
+    void page.getState().actions.sendTurn({ text: "pick it up again", compactFirst: true }).catch(() => {});
+    await settle();
+    // Only the compaction is out; the message waits behind it, and is already kept.
+    assert.deepEqual(before.attempts.map((attempt) => attempt.name), ["compact"]);
+    const commandId = JSON.parse(stored()!).entries[0].commandId as string;
+
+    await reload();
+    const host = fakeHost();
+    open("A", host);
+    await flush();
+    assert.deepEqual(host.posted(), [["pick it up again", commandId]], "the message, under its own id");
+
+    // Without a reload: compact, then the turn, then nothing kept.
+    const live = fakeHost();
+    const thread = open("B", live);
+    await flush();
+    const sent = thread.getState().actions.sendTurn({ text: "next", compactFirst: true });
+    await settle();
+    assert.deepEqual(live.attempts.map((attempt) => attempt.name), ["compact"]);
+    live.attempts[0]!.answer();
+    await settle();
+    assert.deepEqual(live.attempts.map((attempt) => attempt.name), ["compact", "turn"]);
+    live.attempts[1]!.answer();
+    await sent;
+  });
+
   it("does not re-post a send older than the replay bound: it comes back to the thread's draft", async () => {
     left([
       sendLeft({

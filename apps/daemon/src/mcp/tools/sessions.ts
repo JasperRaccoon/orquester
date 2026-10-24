@@ -381,7 +381,7 @@ function fitFiles(files: readonly { path: string; additions: number; deletions: 
 }
 
 /** A turn's diff within `budget` bytes of result (the pre-catalog get_turn_diff's answer at the full cap). */
-async function turnDiff(api: DaemonApi, sessionId: string, turn: number | undefined, budget: number): Promise<Record<string, unknown>> {
+async function turnDiff(api: DaemonApi, sessionId: string, turn: number | undefined, ignoreWhitespace: boolean, budget: number): Promise<Record<string, unknown>> {
   await requireChatSession(api, sessionId);
   const snap = await readThread(api, sessionId);
   // Checkpoints are keyed by turn ORDINAL and sparse (a non-git project captures nothing);
@@ -389,7 +389,7 @@ async function turnDiff(api: DaemonApi, sessionId: string, turn: number | undefi
   const latestCheckpointed = snap.checkpoints.reduce((max, c) => Math.max(max, c.checkpointTurnCount), 0);
   const turnCount = turn ?? latestCheckpointed;
   if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
-  const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(sessionId, turnCount), { query: { ignoreWhitespace: "1" } }));
+  const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(sessionId, turnCount), { query: { ignoreWhitespace: ignoreWhitespace ? "1" : "0" } }));
   const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
   // The list gets its floor, or all the diff leaves unused of the result beside the frame — the frame counted with the
   // markers a cut list would carry.
@@ -406,7 +406,11 @@ const getTurnDiff = defineTool({
   name: "get_turn_diff",
   title: "Get a turn's diff",
   description: "Unified diff of the files a turn changed. Too large: cut at the end (truncated:true); a long file list too (filesTruncated, omittedFiles).",
-  input: { sessionId: sessionIdField, turn: z.number().int().min(1).optional().describe("1-based; default: the latest checkpointed turn.") },
+  input: {
+    sessionId: sessionIdField,
+    turn: z.number().int().min(1).optional().describe("1-based; default: the latest checkpointed turn."),
+    ignoreWhitespace: z.boolean().optional().describe("Hide whitespace-only changes. Default false: every change, indentation included.")
+  },
   audiences: ["external", "chat"],
   toolset: "chat-extras",
   tier: "read",
@@ -415,10 +419,11 @@ const getTurnDiff = defineTool({
   annotations: READ_ONLY,
   resultKind: "json",
   async run(args, { api, caller }) {
-    if (caller.kind !== "thread") return turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES);
+    const ignoreWhitespace = args.ignoreWhitespace === true;
+    if (caller.kind !== "thread") return turnDiff(api, args.sessionId, args.turn, ignoreWhitespace, MAX_RESULT_BYTES);
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
     const frame = chatFrame(caller, sessions, summary);
-    const diff = await turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES - frame.bytes);
+    const diff = await turnDiff(api, args.sessionId, args.turn, ignoreWhitespace, MAX_RESULT_BYTES - frame.bytes);
     return { ...frame.before, ...diff, ...frame.after };
   }
 });

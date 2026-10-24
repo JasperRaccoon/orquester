@@ -14,6 +14,7 @@ import { ChatInlineMarkdown, ChatMarkdown } from "../timeline/markdown/ChatMarkd
 import {
   allowsAnswerAttachments,
   allowsCustomAnswer,
+  applyComposerAnswer,
   buildPendingUserInputAnswers,
   carryDisplacedCustomAnswerIntoPrompt,
   customAnswerSubmitsOnEnter,
@@ -29,6 +30,7 @@ import {
   type PendingAnswerDraft
 } from "./pending-answer";
 import { QuestionOptionPreview } from "./QuestionOptionPreview";
+import { registerQuestionComposerAnswer, type QuestionComposerAnswer } from "./question-composer-bridge";
 import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
 /** A file staged against one question, with the upload's own state. */
@@ -63,6 +65,12 @@ export interface QuestionCardProps {
    * tab, as the timeline's messages do. Without it such a link navigates.
    */
   onOpenFile?: ((path: string) => void) | undefined;
+  /**
+   * The chat whose composer answers this card: a message sent there while the
+   * card is up is the active question's typed answer (`applyComposerAnswer`,
+   * through `question-composer-bridge.ts`). Absent: the composer cannot.
+   */
+  composerSessionId?: string | undefined;
 }
 
 /** 200 ms: long enough to see the tick land, short enough not to feel slow. */
@@ -136,7 +144,8 @@ export function QuestionCard({
   onCarryTextToDraft,
   compact = false,
   active,
-  onOpenFile
+  onOpenFile,
+  composerSessionId
 }: QuestionCardProps): React.ReactElement | null {
   const [draftAnswers, setDraftAnswers] = React.useState<Record<string, PendingAnswerDraft>>({});
   const [questionIndex, setQuestionIndex] = React.useState(0);
@@ -320,6 +329,50 @@ export function QuestionCard({
     const borders = element.offsetHeight - element.clientHeight;
     element.style.height = `${Math.min(CUSTOM_ANSWER_MAX_PX, element.scrollHeight + borders)}px`;
   }, [customAnswerText, activeQuestionId, customFieldOpen, isCollapsed]);
+
+  // The composer's send while this card is up: its text answers the question
+  // on screen, as a typed answer here would (T3's composer is this field). Read
+  // through a ref, so the one registration always sees this render's drafts.
+  const answerFromComposerRef = React.useRef<(text: string) => QuestionComposerAnswer>(() => ({
+    ok: false,
+    reason: ""
+  }));
+  answerFromComposerRef.current = (text) => {
+    const step = applyComposerAnswer({
+      questions: request.questions,
+      drafts: effectiveDraftAnswers,
+      questionIndex,
+      text,
+      isResponding
+    });
+    if (step.kind === "refuse") return { ok: false, reason: step.reason };
+    if (advanceTimerRef.current !== null) {
+      clearTimeout(advanceTimerRef.current);
+      advanceTimerRef.current = null;
+    }
+    setOptimisticSelection(null);
+    setDraftAnswers(step.drafts);
+    if (step.kind === "advance") {
+      advance();
+      return { ok: true };
+    }
+    const attachmentsByQuestionId: Record<string, AttachmentRef[]> = {};
+    for (const question of request.questions) {
+      const refs = attachmentsFor(question)
+        .map((entry) => entry.ref)
+        .filter((ref): ref is AttachmentRef => ref !== undefined);
+      if (refs.length > 0) attachmentsByQuestionId[question.id] = refs;
+    }
+    onSubmit({ answers: step.answers, attachmentsByQuestionId });
+    return { ok: true };
+  };
+  React.useEffect(
+    () =>
+      composerSessionId === undefined
+        ? undefined
+        : registerQuestionComposerAnswer(composerSessionId, (text) => answerFromComposerRef.current(text)),
+    [composerSessionId]
+  );
 
   if (!activeQuestion) return null;
 

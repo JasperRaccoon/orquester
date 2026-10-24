@@ -66,6 +66,7 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  ApprovalResponseOptions,
   ForkConversationInput,
   RollbackTarget,
   SendTurnInput,
@@ -995,10 +996,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   async respondToApproval(
     threadId: string,
     requestId: string,
-    decision: ApprovalDecision
+    decision: ApprovalDecision,
+    options?: ApprovalResponseOptions
   ): Promise<void> {
     const session = this.require(threadId);
-    await session.respondToApproval(requestId, decision);
+    await session.respondToApproval(requestId, decision, options);
   }
 
   async respondToUserInput(

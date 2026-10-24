@@ -12,10 +12,21 @@
  * | `acceptAlways` | **deny** — Claude has no permanent grant through `canUseTool` |
  * | `decline` | `{behavior:"deny", message:"User declined tool execution."}` |
  * | `cancel` | `{behavior:"deny", message:"User cancelled tool execution."}` |
+ *
+ * A decline that redirects — the user sent a message over the card — denies
+ * with {@link APPROVAL_REDIRECT_MESSAGE}, so Claude reads the message that
+ * follows as the new instruction rather than retrying the tool. A subagent's
+ * request is denied with the user's own words instead (`feedback`): the
+ * message is not steered into the main agent, so the denial is the only way
+ * it reaches the agent that asked (T3 `b7e802bd`).
  */
 
-import type { PermissionResult, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
-import type { ApprovalDecision } from "@orquester/api/agent-chat";
+import { stripVTControlCharacters } from "node:util";
+
+import type { CanUseTool, PermissionResult, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
+import type { ApprovalDecision, ApprovalOption } from "@orquester/api/agent-chat";
+
+import { APPROVAL_REDIRECT_MESSAGE, approvalFeedbackText } from "../../adapter.ts";
 
 const DECLINE_MESSAGE = "User declined tool execution.";
 const CANCEL_MESSAGE = "User cancelled tool execution.";
@@ -64,8 +75,18 @@ export function permissionResultForDecision(input: {
   toolName: string;
   toolInput: Record<string, unknown>;
   suggestions?: readonly PermissionUpdate[];
+  /** The decline redirects: the user's message follows it as a steer. */
+  redirect?: boolean;
+  /** The user's own words for the agent that asked (a subagent's request): the denial itself. */
+  feedback?: string;
 }): PermissionResult {
   const { decision, toolName, toolInput, suggestions } = input;
+  if (decision === "decline") {
+    // Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+    const feedback = approvalFeedbackText(input.feedback);
+    if (feedback !== undefined) return { behavior: "deny", message: feedback };
+    if (input.redirect === true) return { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE };
+  }
   if (decision === "accept") {
     return { behavior: "allow", updatedInput: toolInput };
   }
@@ -84,5 +105,33 @@ export function permissionResultForDecision(input: {
   return {
     behavior: "deny",
     message: decision === "cancel" ? CANCEL_MESSAGE : DECLINE_MESSAGE
+  };
+}
+
+/** "Always allow" would grant more than this ask's own action, so only Approve and Decline. */
+const NO_STANDING_GRANT_OPTIONS: ApprovalOption[] = [
+  { decision: "decline", label: "Decline" },
+  { decision: "accept", label: "Approve" }
+];
+
+/**
+ * What the card says beside the request itself: why Claude asked
+ * (`decisionReason` — an ask rule, a path outside the workspace, a safety
+ * check), and the options when the CLI forbids a standing grant
+ * (`suppressAlwaysAllowRule`). The reason is dropped when it only repeats
+ * the card's detail, and is absent when Claude gives none.
+ */
+// Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+export function claudeApprovalPresentation(input: {
+  detail: string;
+  callbackOptions: Pick<Parameters<CanUseTool>[2], "decisionReason" | "suppressAlwaysAllowRule">;
+}): { reason?: string; options?: ApprovalOption[] } {
+  // The reason can carry terminal escapes from the CLI's own prompt renderer.
+  const reason = stripVTControlCharacters(input.callbackOptions.decisionReason ?? "").trim();
+  return {
+    ...(reason === "" || reason === input.detail.trim() ? {} : { reason }),
+    ...(input.callbackOptions.suppressAlwaysAllowRule === true
+      ? { options: NO_STANDING_GRANT_OPTIONS.map((option) => ({ ...option })) }
+      : {})
   };
 }

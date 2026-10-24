@@ -59,6 +59,15 @@ export class AgentCatalog {
     }
   }
 
+  /** The model's context window in tokens, when its catalogue states one (a handoff into it is sized by it). */
+  async contextWindow(agent: string, model: string): Promise<number | undefined> {
+    try {
+      return (await this.list()).find((a) => a.id === agent)?.models.find((m) => m.slug === model)?.contextWindow;
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * The catalogue's verdict on a candidate: the agent is installed and enabled, the model and its
    * options are ones the provider lists (normalised as the composer would), and the account is one

@@ -6,6 +6,7 @@ import type {
   HttpClientStreamHandle,
   HttpClientStreamHandlers
 } from "@orquester/ui";
+import { endBridgeStream } from "./stream-status";
 import { binaryBodyToArrayBuffer, type DesktopBridge } from "./unix-socket-transporter";
 
 /**
@@ -86,12 +87,14 @@ export class NodeHttpClient implements HttpClient {
         handlers.onData(chunk);
       }
     });
-    const offEnd = this.bridge.onHttpStreamEnd(({ streamId: id }) => {
+    const offEnd = this.bridge.onHttpStreamEnd(({ streamId: id, status }) => {
       if (id === streamId && !closed) {
         closed = true;
         offData();
         offEnd();
-        handlers.onEnd();
+        // A refusal (a 401 for a revoked token, say) is no stream: report it so the caller can
+        // stop retrying rather than reconnect forever.
+        endBridgeStream(status, handlers);
       }
     });
 

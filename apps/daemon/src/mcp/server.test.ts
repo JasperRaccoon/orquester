@@ -7,6 +7,7 @@ import { createServer } from "../index.ts";
 import { chatSummary } from "./fixtures.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { registerMcp,type McpDeps } from "./server.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
@@ -316,7 +317,7 @@ type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 // authorizeCredential sha256-compares the stored hash string with the credential's hash half, so any string works.
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
 function daemonApp(mode: "local" | "remote", services: Record<string, unknown>): FastifyInstance {
   const config = createDefaultDaemonConfig({ env: {} });
@@ -324,7 +325,7 @@ function daemonApp(mode: "local" | "remote", services: Record<string, unknown>):
   config.transports.http.passwordHash = PASSWORD_HASH;
   const root = "/nonexistent-orquester-mcp-test";
   const resolved = { daemonDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root } as unknown as CreateServerArgs[1];
-  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), services as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
+  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
   app.addHook("preHandler", markConsumed);
   return app;
 }

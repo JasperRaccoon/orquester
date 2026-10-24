@@ -1,4 +1,16 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, protocol, shell, Tray, type IpcMainEvent } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification,
+  protocol,
+  screen,
+  shell,
+  Tray,
+  type IpcMainEvent
+} from "electron";
 import { startDaemon as startOrquesterDaemon, type RunningDaemon } from "@orquester/daemon";
 import fs from "node:fs";
 import http from "node:http";
@@ -12,6 +24,29 @@ import {
   VISUAL_SCHEME,
   type NavigationAction
 } from "./navigation";
+import { pipeHttpStream } from "./http-stream";
+import { applicationMenuTemplate, contextMenuTemplate } from "./menus";
+import {
+  badgeDescription,
+  badgeOverlayBitmap,
+  NotificationRegistry,
+  parseBadgeCount,
+  parseNotificationRequest,
+  type NotificationTarget
+} from "./native-notifications";
+import {
+  DEFAULT_WINDOW_STATE,
+  MIN_WINDOW_SIZE,
+  NO_NATIVE_CONTROLS_ARGUMENT,
+  frameKey,
+  hasNativeWindowControls,
+  parseWindowState,
+  resolveInitialWindowBounds,
+  sameWindowState,
+  windowFrameOptions,
+  type WindowState
+} from "./window-state";
+import { canDeliverToRenderer, planShowWindow, RendererOutbox, replacementShows } from "./window-lifecycle";
 
 /**
  * A bridged request body: JSON as a string, or an upload's raw bytes as the
@@ -111,6 +146,21 @@ let tray: Tray | undefined;
 let daemonSocketPath: string | undefined;
 let isDaemonOwner = false;
 let quitting = false;
+/** Startup reached window creation: from here a second launch may open a window. */
+let windowsReady = false;
+
+// One Orquester per user: a second launch focuses the running window instead
+// of starting another shell that would race this one for the daemon. A dev
+// appdir (ORQUESTER_APPDIR) takes no lock, so a staging instance can run
+// beside the installed app or another checkout.
+const hasInstanceLock = process.env.ORQUESTER_APPDIR ? true : app.requestSingleInstanceLock();
+if (!hasInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (windowsReady) showWindow();
+  });
+}
 
 function checkExistingDaemon(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -184,6 +234,8 @@ function readAppConfig(): Record<string, unknown> {
   }
 }
 const runInBackground = () => readAppConfig().runInBackground === true;
+// "Custom titlebar" (Settings → General); the schema's default is on.
+const useTitlebar = () => readAppConfig().useTitlebar !== false;
 
 // --- Window background (follows the renderer's colour scheme) ---
 //
@@ -275,6 +327,76 @@ function applyWindowBackground(payload: unknown): void {
       win.setBackgroundColor(next.background);
     }
   }
+}
+
+// --- Window geometry (window-state.json) ---
+//
+// Device-local like window-theme.json and owned by this process; the pure
+// rules (validation, display fit) are `window-state.ts`'s.
+
+const windowStatePath = () => path.join(appDir(), "window-state.json");
+
+function readWindowState(): WindowState {
+  try {
+    return parseWindowState(JSON.parse(fs.readFileSync(windowStatePath(), "utf8")));
+  } catch {
+    return DEFAULT_WINDOW_STATE;
+  }
+}
+
+/** The connected displays' work areas, primary first; empty when the screen module cannot say. */
+function displayAreas(): Electron.Rectangle[] {
+  try {
+    const primary = screen.getPrimaryDisplay();
+    return [primary, ...screen.getAllDisplays().filter((display) => display.id !== primary.id)].map(
+      (display) => display.workArea
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Save a window's normal bounds and maximized flag (a maximized window keeps its restore size). */
+function saveWindowState(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+  const useNormal = win.isMaximized() || win.isMinimized() || win.isFullScreen();
+  const raw = useNormal ? win.getNormalBounds() : win.getBounds();
+  const next = parseWindowState({
+    bounds: {
+      x: Math.round(raw.x),
+      y: Math.round(raw.y),
+      width: Math.round(raw.width),
+      height: Math.round(raw.height)
+    },
+    maximized: win.isMaximized()
+  });
+  if (sameWindowState(next, readWindowState())) return;
+  try {
+    fs.mkdirSync(appDir(), { recursive: true });
+    fs.writeFileSync(windowStatePath(), `${JSON.stringify(next, null, 2)}\n`);
+  } catch (error) {
+    console.error("Failed to persist window state", error);
+  }
+}
+
+const WINDOW_STATE_SAVE_DELAY_MS = 500;
+
+/** Save the window's geometry as it moves and resizes (debounced), and once more as it closes. */
+function trackWindowState(win: BrowserWindow): void {
+  let timer: NodeJS.Timeout | undefined;
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => saveWindowState(win), WINDOW_STATE_SAVE_DELAY_MS);
+  };
+  win.on("resize", schedule);
+  win.on("move", schedule);
+  win.on("maximize", schedule);
+  win.on("unmaximize", schedule);
+  win.on("close", () => {
+    clearTimeout(timer);
+    saveWindowState(win);
+  });
+  win.on("closed", () => clearTimeout(timer));
 }
 
 function ensureAppFiles(): void {
@@ -441,7 +563,18 @@ function requestBytesOverSocket({ method, path: requestPath, headers, body, requ
   });
 }
 
-const streams = new Map<string, http.ClientRequest>();
+// Open streams, with the webContents that opened them: a window that is
+// rebuilt (the titlebar setting) or closed takes its streams with it.
+const streams = new Map<string, { req: http.ClientRequest; senderId: number }>();
+
+function closeStreamsOf(senderId: number): void {
+  for (const [streamId, stream] of streams) {
+    if (stream.senderId === senderId) {
+      stream.req.destroy();
+      streams.delete(streamId);
+    }
+  }
+}
 
 function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath }: { streamId: string; path: string }): void {
   if (!daemonSocketPath) {
@@ -451,28 +584,23 @@ function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath 
     return;
   }
 
-  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" }, (res) => {
-    res.setEncoding("utf8");
-    res.on("data", (chunk: string) => {
+  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" });
+  // The embedded daemon restarting cuts the stream mid-body: reported at once, like the remote path.
+  pipeHttpStream(req, {
+    data: (chunk) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:stream:data", { streamId, chunk });
       }
-    });
-    res.on("end", () => {
+    },
+    end: (status) => {
       streams.delete(streamId);
       if (!event.sender.isDestroyed()) {
-        event.sender.send("orquester:stream:end", { streamId });
+        event.sender.send("orquester:stream:end", status === undefined ? { streamId } : { streamId, status });
       }
-    });
-  });
-  req.on("error", () => {
-    streams.delete(streamId);
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("orquester:stream:end", { streamId });
     }
   });
   req.end();
-  streams.set(streamId, req);
+  streams.set(streamId, { req, senderId: event.sender.id });
 }
 
 // --- Remote HTTP transport (desktop → VPS over TCP, in the main process) ---
@@ -566,36 +694,127 @@ function openHttpStream(
     return;
   }
 
-  const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} }, (res) => {
-    res.setEncoding("utf8");
-    res.on("data", (chunk: string) => {
+  const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} });
+  pipeHttpStream(req, {
+    data: (chunk) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:http-stream:data", { streamId, chunk });
       }
-    });
-    res.on("end", () => {
+    },
+    end: (status) => {
       streams.delete(streamId);
       if (!event.sender.isDestroyed()) {
-        event.sender.send("orquester:http-stream:end", { streamId });
+        event.sender.send("orquester:http-stream:end", status === undefined ? { streamId } : { streamId, status });
       }
-    });
-  });
-  req.on("error", () => {
-    streams.delete(streamId);
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("orquester:http-stream:end", { streamId });
     }
   });
   req.end();
-  streams.set(streamId, req);
+  streams.set(streamId, { req, senderId: event.sender.id });
 }
 
 function closeStream(streamId: string): void {
-  const req = streams.get(streamId);
-  if (req) {
-    req.destroy();
+  const stream = streams.get(streamId);
+  if (stream) {
+    stream.req.destroy();
     streams.delete(streamId);
   }
+}
+
+// --- Notifications, badge and menu actions (the renderer's desktop host) ---
+
+/** Only the main window's own page may drive notifications, the badge and the frame. */
+function fromMainWindow(event: IpcMainEvent): boolean {
+  return mainWindow !== undefined && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
+}
+
+// Messages for the main window's page (a clicked notification's target, a
+// menu action). They wait while the page loads — a click may have just created
+// the window — and through a titlebar rebuild, whose old page is about to go.
+const rendererOutbox = new RendererOutbox<{ channel: string; payload: unknown }>();
+
+/** Send to the main window's page now if it can take it, else when it can (`flushRendererOutbox`). */
+function sendToRenderer(channel: string, payload: unknown): void {
+  rendererOutbox.push({ channel, payload });
+  flushRendererOutbox();
+}
+
+/** Deliver waiting messages to the main window's page: on its load, and when a rebuild ends. */
+function flushRendererOutbox(): void {
+  const contents = mainWindow?.webContents;
+  const mainLoaded = contents !== undefined && !contents.isDestroyed() && !contents.isLoading();
+  if (!contents || !canDeliverToRenderer({ mainLoaded, rebuilding: replacementWindow !== undefined })) return;
+  for (const message of rendererOutbox.drain()) contents.send(message.channel, message.payload);
+}
+
+// Shown notifications by tag, held for their click handlers (`NotificationRegistry`).
+const notifications = new NotificationRegistry<Notification>();
+
+function showNotification(payload: unknown): void {
+  const request = parseNotificationRequest(payload);
+  if (!request || !Notification.isSupported()) return;
+  const notification = new Notification({ title: request.title, body: request.body });
+  notifications.hold(request.tag, notification)?.close();
+  const release = () => notifications.release(request.tag, notification);
+  notification.on("click", () => {
+    release();
+    showWindow();
+    if (request.target) sendToRenderer("orquester:notification-open", request.target satisfies NotificationTarget);
+  });
+  notification.on("close", release);
+  notification.on("failed", release);
+  notification.show();
+}
+
+let badgeCount = 0;
+let badgeOverlay: Electron.NativeImage | undefined;
+
+/** Dock badge on macOS, launcher badge on Linux (Unity-style launchers only), taskbar overlay dot on Windows. */
+function applyBadge(count: number): void {
+  badgeCount = count;
+  if (process.platform === "win32") {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    badgeOverlay ??= nativeImage.createFromBitmap(badgeOverlayBitmap(16), { width: 16, height: 16 });
+    mainWindow.setOverlayIcon(count > 0 ? badgeOverlay : null, badgeDescription(count));
+  } else {
+    app.setBadgeCount(count);
+  }
+}
+
+function setBadge(payload: unknown): void {
+  const count = parseBadgeCount(payload);
+  if (count !== null && count !== badgeCount) applyBadge(count);
+}
+
+function installApplicationMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(
+      applicationMenuTemplate(process.platform, app.getName(), {
+        openSettings: () => {
+          showWindow();
+          sendToRenderer("orquester:menu-action", "open-settings");
+        },
+        openLogs: () => void shell.openPath(path.join(appDir(), "logs"))
+      })
+    )
+  );
+}
+
+/** Right-click menu for editable fields and selections, with spelling suggestions. */
+function installContextMenu(win: BrowserWindow): void {
+  const contents = win.webContents;
+  contents.on("context-menu", (_event, params) => {
+    const template = contextMenuTemplate(params, {
+      replaceMisspelling: (word) => {
+        if (!contents.isDestroyed()) contents.replaceMisspelling(word);
+      },
+      addToDictionary: (word) => {
+        if (!contents.isDestroyed()) contents.session.addWordToSpellCheckerDictionary(word);
+      }
+    });
+    if (template.length > 0 && !win.isDestroyed()) {
+      Menu.buildFromTemplate(template).popup({ window: win });
+    }
+  });
 }
 
 function registerIpc(): void {
@@ -615,21 +834,34 @@ function registerIpc(): void {
   );
   ipcMain.on("orquester:http-stream:close", (_event, streamId: string) => closeStream(streamId));
   ipcMain.on("orquester:window-background", (_event, payload: unknown) => applyWindowBackground(payload));
-  ipcMain.on("orquester:window", (_event, action: string) => {
-    if (!mainWindow) {
+  ipcMain.on("orquester:window", (event, action: string) => {
+    // The sender's own window: while a rebuilt window loads, the old one is still on screen.
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) {
       return;
     }
-    if (action === "minimize") mainWindow.minimize();
-    else if (action === "toggleMaximize") mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
-    else if (action === "close") mainWindow.close();
+    if (action === "minimize") win.minimize();
+    else if (action === "toggleMaximize") win.isMaximized() ? win.unmaximize() : win.maximize();
+    else if (action === "close") win.close();
+  });
+  ipcMain.on("orquester:titlebar-changed", (event) => {
+    if (fromMainWindow(event)) rebuildWindowIfFrameChanged();
+  });
+  ipcMain.on("orquester:notify", (event, payload: unknown) => {
+    if (fromMainWindow(event)) showNotification(payload);
+  });
+  ipcMain.on("orquester:badge", (event, payload: unknown) => {
+    if (fromMainWindow(event)) setBadge(payload);
   });
 }
 
 function showWindow(): void {
-  if (mainWindow) {
+  const plan = planShowWindow({ hasMain: mainWindow !== undefined, rebuilding: replacementWindow !== undefined });
+  if (plan === "show-main" && mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-  } else {
+  } else if (plan === "create") {
     createWindow();
   }
 }
@@ -702,17 +934,30 @@ function createTray(): void {
   void rebuildTrayMenu();
 }
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 860,
-    minWidth: 1040,
-    minHeight: 680,
+/** The main window's frame identity (`frameKey`); a titlebar change that alters it rebuilds the window. */
+let mainWindowFrame: string | undefined;
+/** A rebuilt window still loading behind the one on screen. */
+let replacementWindow: BrowserWindow | undefined;
+
+/**
+ * Create the main window, or — with `replacing` — its replacement: the new
+ * window loads hidden and takes over (geometry, badge, focus) once it can
+ * paint, then the old one is destroyed, so there is never a moment with no
+ * window and no `window-all-closed`.
+ */
+function createWindow(replacing?: BrowserWindow): void {
+  const titlebar = useTitlebar();
+  const frame = windowFrameOptions(process.platform, titlebar);
+  const state = readWindowState();
+  const win = new BrowserWindow({
+    ...resolveInitialWindowBounds(state.bounds, displayAreas()),
+    minWidth: MIN_WINDOW_SIZE.width,
+    minHeight: MIN_WINDOW_SIZE.height,
     title: "Orquester",
     icon: nativeImage.createFromPath(logoPath("logo-512.png")),
-    frame: false,
-    titleBarStyle: "hidden",
-    trafficLightPosition: { x: 12, y: 12 },
+    ...frame,
+    // A framed window on Windows/Linux keeps its menu bar behind Alt.
+    autoHideMenuBar: true,
     show: false,
     // Read synchronously here (not from the renderer) so the window's first
     // paint is already in the user's colour scheme instead of flashing dark.
@@ -720,9 +965,18 @@ function createWindow(): void {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(desktopRoot, "dist-electron", "preload.cjs")
+      preload: path.join(desktopRoot, "dist-electron", "preload.cjs"),
+      // Tells the preload the window has no OS caption buttons, so the UI
+      // shows its own whatever the setting says.
+      additionalArguments: hasNativeWindowControls(process.platform, titlebar) ? [] : [NO_NATIVE_CONTROLS_ARGUMENT]
     }
   });
+  if (replacing) {
+    replacementWindow = win;
+  } else {
+    mainWindow = win;
+    mainWindowFrame = frameKey(frame);
+  }
 
   // No window of this app opens another one, and no frame may navigate it
   // away from itself: a link (a chat link's target=_blank, an agent page's
@@ -731,7 +985,7 @@ function createWindow(): void {
   // download is downloaded here, and a URL carrying the connection's
   // password never reaches the system browser. Anything else is refused
   // (spec 2026-10-14 §2.2; the decisions are `navigation.ts`'s).
-  const contents = mainWindow.webContents;
+  const contents = win.webContents;
   const perform = (action: NavigationAction): void => {
     if (action.kind === "download") contents.downloadURL(action.url);
     else if (action.kind === "external") void shell.openExternal(action.url);
@@ -746,33 +1000,93 @@ function createWindow(): void {
     event.preventDefault();
     perform(action);
   });
+  installContextMenu(win);
+  const contentsId = contents.id;
+  contents.once("destroyed", () => closeStreamsOf(contentsId));
+  contents.on("did-finish-load", flushRendererOutbox);
 
-  mainWindow.once("ready-to-show", () => {
-    mainWindow?.show();
-    mainWindow?.focus();
+  win.once("ready-to-show", () => {
+    if (state.maximized) win.maximize();
+    if (!replacing) {
+      win.show();
+      win.focus();
+      return;
+    }
+    // Hidden to the tray (run in background) stays hidden.
+    const show = replacementShows({
+      destroyed: replacing.isDestroyed(),
+      visible: !replacing.isDestroyed() && replacing.isVisible()
+    });
+    replacementWindow = undefined;
+    mainWindow = win;
+    mainWindowFrame = frameKey(frame);
+    if (!replacing.isDestroyed()) replacing.destroy();
+    applyBadge(badgeCount);
+    if (show) {
+      win.show();
+      win.focus();
+    }
+    flushRendererOutbox();
+    // The setting may have changed again while this window loaded.
+    rebuildWindowIfFrameChanged();
   });
+  trackWindowState(win);
 
   // Run-in-background: closing hides the window (daemon + tray keep running).
-  mainWindow.on("close", (event) => {
+  win.on("close", (event) => {
     if (!quitting && runInBackground() && isDaemonOwner) {
       event.preventDefault();
-      mainWindow?.hide();
+      win.hide();
     }
   });
-  mainWindow.on("closed", () => {
-    mainWindow = undefined;
+  win.on("closed", () => {
+    if (mainWindow === win) {
+      mainWindow = undefined;
+      mainWindowFrame = undefined;
+      // No page is left to keep the count current.
+      applyBadge(0);
+      // Closed mid-rebuild: the replacement must not appear in its place.
+      const pending = replacementWindow;
+      if (pending && !pending.isDestroyed()) pending.destroy();
+    }
+    if (replacementWindow === win) {
+      replacementWindow = undefined;
+      flushRendererOutbox();
+    }
   });
 
   const devUrl = process.env.ORQUESTER_DESKTOP_DEV_URL;
   if (devUrl) {
-    void mainWindow.loadURL(devUrl);
+    void win.loadURL(devUrl);
   } else {
-    void mainWindow.loadFile(path.join(desktopRoot, "dist", "index.html"));
+    void win.loadFile(path.join(desktopRoot, "dist", "index.html"));
   }
 }
 
+/**
+ * The renderer saved the "Custom titlebar" setting: rebuild the main window
+ * when the frame it needs differs from the one it has (never on macOS, whose
+ * frame does not change). The setting is read back from app.json rather than
+ * taken from the message, so a save that failed changes nothing.
+ */
+function rebuildWindowIfFrameChanged(): void {
+  const current = mainWindow;
+  if (!current || current.isDestroyed() || replacementWindow) return;
+  if (frameKey(windowFrameOptions(process.platform, useTitlebar())) === mainWindowFrame) return;
+  saveWindowState(current);
+  createWindow(current);
+}
+
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) {
+    return;
+  }
   ensureAppFiles();
+  // Windows shows a notification only for an app with an AppUserModelID
+  // (the installer's appId; set here so a dev run notifies too).
+  if (process.platform === "win32") {
+    app.setAppUserModelId("com.orquester.desktop");
+  }
   const socketPath = socketPathFor();
 
   if (await checkExistingDaemon(socketPath)) {
@@ -793,6 +1107,8 @@ app.whenReady().then(async () => {
   if (isDaemonOwner) {
     createTray();
   }
+  installApplicationMenu();
+  windowsReady = true;
   createWindow();
 
   app.on("activate", () => {

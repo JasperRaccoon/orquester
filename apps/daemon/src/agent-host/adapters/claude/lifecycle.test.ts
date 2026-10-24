@@ -28,7 +28,7 @@ import type {
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, AgentAdapter, SendTurnResult } from "../../adapter.ts";
+import { APPROVAL_REDIRECT_MESSAGE, type AdapterContext, type AgentAdapter, type SendTurnResult } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { ChildExitReason, ProviderChild } from "../../support/spawn.ts";
 import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
@@ -350,6 +350,8 @@ interface Harness {
 
 interface HarnessOptions {
   binaryPath?: string | null;
+  /** `AdapterContext.idleCompactionMode`: the setting the resume question reads. */
+  idleCompactionMode?: AdapterContext["idleCompactionMode"];
   version?: string;
   queryThrows?: boolean;
   initResolves?: boolean;
@@ -417,7 +419,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sessionPath: () => "/usr/bin",
     tmpDir: () => options.tmpDir ?? "/tmp",
     signal: options.signal ?? new AbortController().signal,
-    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
+    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {}),
+    ...(options.idleCompactionMode !== undefined ? { idleCompactionMode: options.idleCompactionMode } : {})
   };
 
   const deps: ClaudeAdapterDeps = {
@@ -723,6 +726,37 @@ describe("claude adapter — Agent Profile threads (spec 2026-10-18 §6.1)", () 
     await peer.nextTurn();
     const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
     assert.equal(content.at(-1)?.text, "please $review");
+  });
+
+  it("lists and dispatches its own plugins' skills as plugin:skill, never the account's installed plugins", async () => {
+    const { root, profile } = await prepared();
+    const accountHome = nodePath.join(root, "account-home");
+    const installed = nodePath.join(root, "account-cache", "gplug");
+    await mkdir(nodePath.join(installed, "skills", "gskill"), { recursive: true });
+    await writeFile(nodePath.join(installed, "skills", "gskill", "SKILL.md"), "---\ndescription: Global\n---\nx\n");
+    await mkdir(nodePath.join(accountHome, "plugins"), { recursive: true });
+    await writeFile(
+      nodePath.join(accountHome, "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: { "gplug@m": [{ scope: "user", installPath: installed }] } })
+    );
+    await writeFile(nodePath.join(accountHome, "settings.json"), JSON.stringify({ enabledPlugins: { "gplug@m": true } }));
+    const harness = await makeHarness({ tmpDir: nodePath.join(root, "appdir-tmp"), initCommands: [] });
+    await harness.adapter.startSession({ ...START, home: { ...START.home, path: accountHome }, profile });
+
+    const catalog = await harness.adapter.sessionCatalog!(START.threadId);
+    assert.deepEqual(
+      catalog?.skills.map((skill) => [skill.name, skill.scope]),
+      [
+        ["dev-kit:review", "plugin"],
+        ["toolbox:lint", "plugin"]
+      ]
+    );
+
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({ threadId: START.threadId, input: "$toolbox:lint src", attachments: [], interactionMode: "default" });
+    await peer.nextTurn();
+    const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+    assert.equal(content.at(-1)?.text, "/toolbox:lint src");
   });
 });
 
@@ -1146,6 +1180,114 @@ describe("claude adapter — approvals", () => {
     assert.equal(opened?.payload.dismissible, false);
     harness.adapter.respondToApproval(START.threadId, requestId, "accept");
     assert.deepEqual(await decision, { behavior: "allow", updatedInput: { command: "rm -f x" } });
+  });
+
+  it("says why Claude asked, and offers no standing grant where the CLI forbids one", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "remove the file",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const decision = peer.canUseTool!("Bash", { command: "rm -rf build" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_reason",
+      requestId: "req-reason",
+      description: "Remove the build directory",
+      decisionReason: "\u001b[1mPermission rule Bash(rm:*) requires approval\u001b[22m ",
+      suppressAlwaysAllowRule: true
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    assert.equal(opened.payload.reason, "Permission rule Bash(rm:*) requires approval");
+    assert.deepEqual(opened.payload.options, [
+      { decision: "decline", label: "Decline" },
+      { decision: "accept", label: "Approve" }
+    ]);
+    await harness.adapter.respondToApproval(START.threadId, opened.requestId!, "accept");
+    assert.equal(((await decision) as { behavior: string }).behavior, "allow");
+  });
+
+  it("omits a reason Claude did not give, or one that only repeats the detail", async () => {
+    for (const decisionReason of [undefined, "  ", "Remove x"]) {
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "remove the file",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      void peer.canUseTool!("Bash", { command: "rm -f x" }, {
+        signal: new AbortController().signal,
+        toolUseID: "toolu_1",
+        requestId: "req-1",
+        description: "Remove x",
+        ...(decisionReason !== undefined ? { decisionReason } : {})
+      } as unknown as Parameters<CanUseTool>[2]);
+      const opened = await harness.waitFor("request.opened");
+      assert.equal("reason" in opened.payload, false, `reason ${JSON.stringify(decisionReason)}`);
+      assert.equal(opened.payload.options, undefined);
+      await harness.adapter.stopSession(START.threadId);
+    }
+  });
+
+  it("a subagent's request says whose it is, and its decline carries the user's own words", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "review the repo",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const decision = peer.canUseTool!("Bash", { command: "rm -rf fixtures" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_sub",
+      requestId: "req-sub",
+      agentID: "agent-explore-1"
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    assert.equal(opened.payload.requestingAgentId, "agent-explore-1");
+    assert.equal(opened.agentId, undefined, "the card stays the parent's");
+    await harness.adapter.respondToApproval(START.threadId, opened.requestId!, "decline", {
+      redirect: true,
+      feedback: "  keep the fixtures, delete only build/  "
+    });
+    assert.deepEqual(await decision, { behavior: "deny", message: "keep the fixtures, delete only build/" });
+  });
+
+  it("a main-agent request names no requesting agent", async () => {
+    const { harness, decision, requestId } = await openApproval();
+    const opened = findEvent(harness.events, "request.opened");
+    assert.equal("requestingAgentId" in (opened?.payload ?? {}), false);
+    await harness.adapter.respondToApproval(START.threadId, requestId, "accept");
+    await decision;
+  });
+
+  it("a redirecting decline denies with the redirect message, a plain one with the decline", async () => {
+    const redirected = await openApproval();
+    await redirected.harness.adapter.respondToApproval(
+      START.threadId,
+      redirected.requestId,
+      "decline",
+      { redirect: true }
+    );
+    assert.deepEqual(await redirected.decision, { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE });
+    const resolved = findEvent(redirected.harness.events, "request.resolved");
+    assert.equal(resolved?.payload.decision, "decline");
+    assert.equal(resolved?.payload.withdrawn, undefined, "the user answered it");
+
+    const plain = await openApproval();
+    await plain.harness.adapter.respondToApproval(START.threadId, plain.requestId, "decline");
+    assert.deepEqual(await plain.decision, { behavior: "deny", message: "User declined tool execution." });
   });
 
   it("a redelivered request does not open a second card", async () => {
@@ -2374,6 +2516,37 @@ describe("claude adapter — fix-wave regressions", () => {
     );
     // `{behavior:"cancelled"}` is a real settlement the SDK forbids here.
     assert.equal(answer, null);
+  });
+
+  it("idle compaction set to Never keeps the full history without asking; other modes ask", async () => {
+    const homes: unknown[] = [];
+    const never = await makeHarness({
+      idleCompactionMode: async (home) => {
+        homes.push(home);
+        return "off";
+      }
+    });
+    await never.adapter.startSession(START);
+    const answer = await never.queryOptions.at(-1)!.onUserDialog!(
+      { dialogKind: "resume_return", payload: { sessionAgeMinutes: 90, estimatedTokens: 250_000 } },
+      { signal: new AbortController().signal, requestId: "req-r" }
+    );
+    assert.deepEqual(answer, { behavior: "completed", result: "continue" });
+    // Resolved for the thread's own account home.
+    assert.deepEqual(homes, [START.home]);
+    await never.drain();
+    assert.equal(never.events.some((event) => event.type === "user-input.requested"), false);
+
+    const asks = await makeHarness({ idleCompactionMode: async () => "onReturn" });
+    await asks.adapter.startSession(START);
+    const abort = new AbortController();
+    const pending = asks.queryOptions.at(-1)!.onUserDialog!(
+      { dialogKind: "resume_return", payload: { sessionAgeMinutes: 90, estimatedTokens: 250_000 } },
+      { signal: abort.signal, requestId: "req-s" }
+    );
+    await asks.waitFor("user-input.requested");
+    abort.abort();
+    assert.deepEqual(await pending, { behavior: "cancelled" });
   });
 
   it("R2-1: the per-cwd overlay carries the machine command list", async () => {

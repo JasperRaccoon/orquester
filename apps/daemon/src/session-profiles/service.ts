@@ -48,6 +48,7 @@ import {
 import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
 import { readSessionProfilePluginSource, type SessionProfileItemRecord, type SessionProfilePluginSourceRecord } from "@orquester/config";
 import { parseMarkdownDocument } from "../agent-profile/infra/frontmatter.ts";
+import { discoverClaudePluginSkills } from "../agent-host/adapters/claude/skills.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import type { SessionProfileImports, StoredImportResult } from "./imports.ts";
@@ -306,8 +307,9 @@ export class SessionProfileService {
   /**
    * The composer's catalog for a profile chat of `agent` whose live session has not reported its
    * own (`GET …/catalog`, source `profile`): the profile's enabled, in-scope skills and commands
-   * as the agent loads them — Codex runs a command as a skill — plus the host's `/compact`.
-   * Never a Global item. Throws as {@link resolveForAgent} does (`PROFILE_NOT_FOUND`, …).
+   * as the agent loads them — Codex runs a command as a skill; a Claude plugin's skills are
+   * `plugin:skill` — plus the host's `/compact`. Never a Global item. Throws as
+   * {@link resolveForAgent} does (`PROFILE_NOT_FOUND`, …).
    */
   async composerCatalog(profileId: string, agent: SessionProfileAgentId): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] }> {
     const resolved = await this.resolveForAgent(profileId, agent);
@@ -328,6 +330,14 @@ export class SessionProfileService {
       }
       const hint = await commandArgumentHint(command.file);
       slashCommands.push({ name: command.name, ...described(command.description), ...(hint !== undefined ? { input: { hint } } : {}) });
+    }
+    if (agent === "claude" && resolved.plugins.length > 0) {
+      // The profile's Claude plugins' skills, `plugin:skill` as the session loads them: the cache
+      // dir is `plugins/<itemId>` like the prepared copy, so a plugin without a manifest name is
+      // named by the same directory in both.
+      const taken = new Set(skills.map((skill) => skill.name));
+      const pluginSkills = await discoverClaudePluginSkills(resolved.plugins.map((plugin) => plugin.cacheDir)).catch(() => []);
+      skills.push(...pluginSkills.filter((skill) => !taken.has(skill.name)));
     }
     return { slashCommands, skills };
   }

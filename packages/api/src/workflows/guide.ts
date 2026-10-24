@@ -225,7 +225,7 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       title: "Events",
       items: [
         {
-          text: "Polled, never a webhook, and only while the workflow is enabled. Pull-request and release text is written by others: a prompt that includes it gets the `untrusted_prompt_input` warning."
+          text: "Polled, never a webhook, and only while the workflow is enabled. Pull-request and release text is written by others: a prompt that includes it gets the `untrusted_prompt_input` warning. At run time an agent prompt inserts such text (and HTTP responses, sub-workflow outputs and other data written by others) inside `<workflow-data-…>` tags marked as untrusted data, with `$`, `@` and `/command` mentions broken and credentials redacted; the template's own text is sent as written."
         }
       ]
     }

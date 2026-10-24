@@ -26,6 +26,7 @@ import {
   resolvePrincipalToken,
   setPrincipalClockForTests
 } from "./principal.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 const AGENT: CallerPrincipal = { kind: "agent", threadId: "t1", projectPath: "/w/acme/api", agent: "claude", title: "T" };
 
@@ -149,7 +150,7 @@ test("the remote transport strips causedBy from turn and merge-back bodies and a
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
 function daemonApp(mode: "local" | "remote", services: Record<string, unknown>): { app: FastifyInstance; principals: { url: string; principal: CallerPrincipal }[] } {
   const config = createDefaultDaemonConfig({ env: {} });
@@ -157,7 +158,7 @@ function daemonApp(mode: "local" | "remote", services: Record<string, unknown>):
   config.transports.http.passwordHash = PASSWORD_HASH;
   const root = "/nonexistent-orquester-principal-test";
   const resolved = { daemonDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root } as unknown as CreateServerArgs[1];
-  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), services as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
+  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
   const principals: { url: string; principal: CallerPrincipal }[] = [];
   app.addHook("preHandler", async (request) => {
     principals.push({ url: request.url, principal: request.principal });

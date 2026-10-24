@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveThreadSwitchTimeline } from "./thread-switch.ts";
+import { resolveThreadSwitchTimeline, threadSwitchDisplay } from "./thread-switch.ts";
 
 const held = { sessionId: "a", rows: ["a1", "a2"] };
 
@@ -30,4 +30,18 @@ test("switching to a thread with no snapshot holds the previous one, inert", () 
 test("a settled empty thread renders empty rather than someone else's rows", () => {
   const out = resolveThreadSwitchTimeline({ sessionId: "b", rows: [], loading: false, held });
   assert.deepEqual(out, { rows: [], paintOnly: false, displaySessionId: "b" });
+});
+
+test("the view's rows-free flags agree with the full hold in every case", () => {
+  for (const sessionId of ["a", "b"]) {
+    for (const rows of [[], ["x1"]]) {
+      for (const loading of [true, false]) {
+        for (const heldNow of [null, held, { sessionId: "a", rows: [] }]) {
+          const full = resolveThreadSwitchTimeline({ sessionId, rows, loading, held: heldNow });
+          const flags = threadSwitchDisplay({ sessionId, hasRows: rows.length > 0, loading, held: heldNow });
+          assert.deepEqual(flags, { paintOnly: full.paintOnly, displaySessionId: full.displaySessionId });
+        }
+      }
+    }
+  }
 });

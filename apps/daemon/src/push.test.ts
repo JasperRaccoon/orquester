@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
 import webpush from "web-push";
-import type { SessionSummary } from "@orquester/api";
+import type { PushNotificationEvent, SessionSummary } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { Broadcaster } from "./broadcaster.ts";
 import { InjectDaemonApi, withPrincipal } from "./mcp/daemon-api.ts";
@@ -18,7 +18,7 @@ import { registerPrincipalHook } from "./mcp/principal.ts";
 import { AGENT_PUSH_CREDENTIAL_INTERVAL_MS, AGENT_PUSH_THREAD_INTERVAL_MS, PushService, pushRateKey, registerPushNotifyRoute } from "./push.ts";
 
 /** A PushService over a temp push.json with one subscription, a fake clock, and every payload it sends. */
-async function rig(t: TestContext) {
+async function rig(t: TestContext, onNotification?: (event: PushNotificationEvent) => void) {
   const dir = await mkdtemp(join(tmpdir(), "orq-push-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const sent: Record<string, unknown>[] = [];
@@ -28,7 +28,7 @@ async function rig(t: TestContext) {
   });
   const clock = { now: Date.parse("2026-10-15T12:00:00.000Z") };
   const errors: unknown[] = [];
-  const push = new PushService(join(dir, "push.json"), { error: (...args: unknown[]) => errors.push(args) }, { now: () => clock.now });
+  const push = new PushService(join(dir, "push.json"), { error: (...args: unknown[]) => errors.push(args) }, { now: () => clock.now, onNotification });
   await push.subscribe({ endpoint: "https://push.example.com/device-1", keys: { p256dh: "p", auth: "a" } });
   return { push, sent, clock, errors };
 }
@@ -122,4 +122,47 @@ test("POST /api/push/notify: validated body, the agent's push always deep-links 
   const external = withPrincipal(api, { kind: "external", credentialId: "cred_x" });
   assert.equal((await external.request("POST", "/api/push/notify", { body: { title: "1" } })).status, 200);
   assert.equal((await external.request("POST", "/api/push/notify", { body: { title: "2" } })).status, 429);
+});
+
+test("every push past its debounce or limit reaches the observer with its kind and deep link, subscribers or not; a test push does not", async (t) => {
+  const seen: PushNotificationEvent[] = [];
+  const { push, sent } = await rig(t, (event) => seen.push(event));
+  const session = chatSummary({ id: "c7", title: "Implement auth", projectPath: "/w/acme/api" }) as SessionSummary;
+  await push.notifyStructural(session, "finished");
+  await push.notifyStructural(session, "finished");
+  await push.notifyStructural(session, "plan-ready");
+  await push.notifyAttention(session);
+  await push.notifyApprovalNeeded(session, "Run the migration");
+  await push.notifyAgent({ title: "Deployed", body: "v2 is live", sessionId: "c7" }, thread("c7"));
+  await push.notifyAgent({ title: "Refused" }, thread("c7"));
+  await push.notifyAgent({ title: "From a script" }, null);
+  await push.notifyWorkflowRun({ title: "Workflow failed: Nightly", body: "A block failed.", tag: "workflow-w1", workflowId: "w1", runId: "r1" });
+  await push.sendTest();
+  assert.deepEqual(seen, [
+    { kind: "finished", title: "Implement auth in api finished", body: "", tag: "session-c7", sessionId: "c7" },
+    { kind: "plan-ready", title: "Implement auth in api has a plan ready", body: "", tag: "session-c7", sessionId: "c7" },
+    { kind: "attention", title: "Implement auth in api needs your attention", body: "", tag: "session-c7", sessionId: "c7" },
+    { kind: "approval", title: "Approval needed: Run the migration", body: "Implement auth in api", tag: "session-c7", sessionId: "c7" },
+    { kind: "agent", title: "Deployed", body: "v2 is live", tag: "session-c7", sessionId: "c7" },
+    { kind: "agent", title: "From a script", body: "", tag: "orquester-agent" },
+    { kind: "workflow", title: "Workflow failed: Nightly", body: "A block failed.", tag: "workflow-w1", workflowId: "w1", runId: "r1" }
+  ]);
+  // The Web Push payloads are unchanged: no kind, and `sessionId` always present.
+  assert.deepEqual(sent.at(-2), { title: "Workflow failed: Nightly", body: "A block failed.", tag: "workflow-w1", workflowId: "w1", runId: "r1", sessionId: "" });
+  assert.deepEqual(sent[5], { title: "From a script", body: "", tag: "orquester-agent", sessionId: "" });
+  assert.ok(sent.every((payload) => !("kind" in payload)));
+
+  // Nobody subscribed: the observer still hears it.
+  await push.unsubscribe("https://push.example.com/device-1");
+  await push.notifyStructural(chatSummary({ id: "c8", title: "Docs", projectPath: "" }) as SessionSummary, "needs-input");
+  assert.deepEqual(seen.at(-1), { kind: "needs-input", title: "Docs needs your input", body: "", tag: "session-c8", sessionId: "c8" });
+});
+
+test("an observer that throws is logged and never stops the push", async (t) => {
+  const { push, sent, errors } = await rig(t, () => {
+    throw new Error("bus down");
+  });
+  await push.notifyStructural(chatSummary({ id: "c9" }) as SessionSummary, "finished");
+  assert.equal(sent.length, 1);
+  assert.equal(errors.length, 1);
 });

@@ -11,6 +11,7 @@ import {
   Workflow as WorkflowIcon
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { LONG_PRESS_SURFACE, useLongPress } from "../../hooks/use-long-press";
 import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../ui";
 import { NewItemInput } from "./NewItemInput";
 import { ArchivedFooter } from "./ArchivedFooter";
@@ -61,16 +62,15 @@ export const ProjectRow: React.FC<{
   // boxes: a box project's badge, struck-through name once destroyed, and its config changes.
   const boxView = useProjectBox(project.path, project.box);
   const boxDestroyed = boxView?.info.state === "destroyed";
+  // Right-click, or a long press on a touch screen (iOS fires no `contextmenu`).
+  const press = useLongPress((point) => onMenu?.(point));
   return (
     <>
     <div
-      onContextMenu={(event) => {
-        if (!onMenu) return;
-        event.preventDefault();
-        onMenu({ x: event.clientX, y: event.clientY });
-      }}
+      {...(onMenu ? press : {})}
       className={cn(
         "group relative flex items-center rounded-lg transition-colors",
+        LONG_PRESS_SURFACE,
         active
           ? "bg-neutral-800 text-neutral-50"
           : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
@@ -147,6 +147,13 @@ export const WorkspaceProjects: React.FC<{
   );
   const [renamingTodo, setRenamingTodo] = useState<TodoListRecord | null>(null);
   const [pendingTodoDelete, setPendingTodoDelete] = useState<TodoListRecord | null>(null);
+  // A to-do row's menu: right-click, or a long press on a touch screen. One
+  // handler for every row; the pressed row names its list.
+  const todoPress = useLongPress((point, target) => {
+    const id = target instanceof Element ? target.closest("[data-todo-row]")?.getAttribute("data-todo-row") : null;
+    const todo = id ? todos.find((t) => t.id === id) : undefined;
+    if (todo) setTodoMenu({ ...point, todo });
+  });
 
   // Archived projects live only behind the archived entry at the bottom.
   const visibleProjects = projects.filter((p) => !p.isArchived);
@@ -321,11 +328,12 @@ export const WorkspaceProjects: React.FC<{
             ) : (
               <div
                 key={todo.id}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setTodoMenu({ x: event.clientX, y: event.clientY, todo });
-                }}
-                className="group flex items-center rounded-lg text-neutral-300 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100"
+                data-todo-row={todo.id}
+                {...todoPress}
+                className={cn(
+                  "group flex items-center rounded-lg text-neutral-300 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100",
+                  LONG_PRESS_SURFACE
+                )}
               >
                 <button
                   type="button"

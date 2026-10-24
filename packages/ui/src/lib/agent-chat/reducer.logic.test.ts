@@ -63,6 +63,34 @@ describe("applyFrame — snapshots", () => {
   });
 });
 
+describe("applyFrame — requests answered elsewhere", () => {
+  it("a snapshot's answers mark their requests answered until the resolution lands", () => {
+    const opened = activity("user-input.requested", {
+      requestId: "q1",
+      dismissible: false,
+      questions: [{ id: "q", header: "Q", question: "Which?", options: [{ label: "a", description: "" }] }]
+    }, { createdAt: stamp(1) });
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({
+        items: [opened],
+        pending: { approvals: [], userInputs: [{ requestId: "q1", createdAt: stamp(1), dismissible: false, questions: [] }] },
+        answeredQuestions: [["q1", stamp(2)], ["junk"] as never],
+        seq: 2
+      })
+    });
+    assert.deepEqual(state.slice.answeredRequestIds, ["q1"]);
+    // Another tab answers nothing new: the same list, by identity.
+    const before = state.slice.answeredRequestIds;
+    state = applyFrame(state, eventFrame(ev("thread.meta-updated", { title: "Renamed" }, { seq: 3 })));
+    assert.equal(state.slice.answeredRequestIds, before);
+    state = applyFrame(state, eventFrame(ev("thread.activity-appended", {
+      activity: activity("user-input.resolved", { requestId: "q1", answers: { q: "a" } }, { createdAt: stamp(4) })
+    }, { seq: 4 })));
+    assert.deepEqual(state.slice.answeredRequestIds, []);
+  });
+});
+
 describe("applyFrame — history replay progress", () => {
   it("shows a replay until it is done, and drops a stale one on (re)synchronizing", () => {
     let state = applyFrame(createReducerState("s1"), {

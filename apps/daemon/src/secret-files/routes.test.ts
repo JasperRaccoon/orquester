@@ -12,6 +12,7 @@ import { createServer } from "../index.ts";
 import { mintPrincipalToken } from "../mcp/principal.ts";
 import { registerSecretFilesRoutes } from "./routes.ts";
 import { REPO, WS, makeHarness, root, type Harness } from "./test-fakes.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 // Route-level coverage for /api/secret-files: statuses, the `{ code, message }` envelope, the
 // plugin gate, the principal, the bearer on the remote transport, and no secret in any body.
@@ -197,7 +198,7 @@ test("the daemon serves the routes on both transports with one service; the remo
   const dir = await mkdtemp(join(tmpdir(), "orquester-secret-files-server-"));
   type Args = Parameters<typeof createServer>;
   const passwordHash = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const bearer = `Bearer ${Buffer.from(`admin:${passwordHash}`).toString("base64")}`;
+  const { authSessions, bearer } = await testAuthSessions();
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = "admin";
   config.transports.http.passwordHash = passwordHash;
@@ -207,7 +208,7 @@ test("the daemon serves the routes on both transports with one service; the remo
       { daemonDir: dir, workspacesDir: dir, fsRoot: dir } as unknown as Args[1],
       createDefaultClientConfig(join(dir, "daemon.sock")),
       createWriteStream("/dev/null"),
-      { secretFiles: h.service } as unknown as Args[4],
+      { secretFiles: h.service, authSessions } as unknown as Args[4],
       options
     );
   const local = build({ authRequired: false, mode: "local" });

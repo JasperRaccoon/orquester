@@ -7,6 +7,12 @@ interface KernelProcess {
   starttime: number;
   sid: number;
   ppid?: number;
+  /** The process group; defaults to the pid (each fake process leads its own). */
+  pgid?: number;
+  /** The executable's name, `/proc/<pid>/stat` field 2. */
+  comm?: string;
+  /** `/proc/<pid>/cmdline` (NUL-separated); absent reads as unreadable. */
+  cmdline?: string;
   diesOn?: NodeJS.Signals;
   zombie?: boolean;
 }
@@ -52,10 +58,13 @@ export function mockProc(t: TestContext, initial: Record<number, KernelProcess>)
       const fields = Array<string>(20).fill("0");
       fields[0] = row.zombie ? "Z" : "S";
       fields[1] = String(row.ppid ?? 1);
-      fields[2] = String(pid);
+      fields[2] = String(row.pgid ?? pid);
       fields[3] = String(row.sid);
       fields[19] = String(row.starttime);
-      return `${pid} (provider (child)) ${fields.join(" ")}\n`;
+      return `${pid} (${row.comm ?? "provider (child)"}) ${fields.join(" ")}\n`;
+    }
+    if (path.endsWith("/cmdline")) {
+      return row.cmdline ?? missing();
     }
     if (path.endsWith("/children")) {
       return [...table].filter(([, child]) => child.ppid === pid).map(([child]) => child).join(" ");

@@ -4,6 +4,16 @@ import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
+import { backoffDelayMs, scheduleRetry, wakeReconnects } from "../lib/connection/backoff";
+import { checkHealth, classifyConnectionError, deviceOnline } from "../lib/connection/failure";
+import {
+  noteConnected,
+  noteDaemonStopping,
+  noteServerHealth,
+  noteServerInfo,
+  recordConnectionFailure,
+  resetConnectionLog
+} from "../lib/connection/connection-log";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
@@ -22,6 +32,7 @@ import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/
 import { applySessionProfileEvent, resetSessionProfiles, sessionProfilesStore } from "../lib/session-profiles/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
+import { observePushEvent } from "../lib/desktop-host";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
 import {
   applyDesktopWindows,
@@ -41,16 +52,7 @@ import {
   whiteboardsDirOf
 } from "../lib/whiteboard";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
-import {
-  buildCredential,
-  clearStoredHash,
-  clearStoredUsername,
-  deriveAuthHash,
-  loadStoredHash,
-  loadStoredUsername,
-  storeHash,
-  storeUsername
-} from "../lib/auth";
+import { asSessionToken, clearStoredToken, loadStoredToken, storeToken, storeUsername } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
 import {
@@ -173,6 +175,7 @@ import {
   DESKTOP_CHANNEL,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
+  PUSH_CHANNEL,
   REPO_IDENTITIES_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
   SECRET_FILES_CHANNEL,
@@ -184,6 +187,7 @@ import type { PluginInfo } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on;
 // with it off, only the boxes still running).
 import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT, type DaemonStoppingPayload } from "@orquester/api";
 import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn } from "../lib/boxes/store";
 // The Knowledge Graph plugin's module store (status + collections; loaded while the plugin is on).
 import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
@@ -192,36 +196,13 @@ import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Pending reconnect-backoff waits that a wake (tab visible/online) short-circuits. */
-let wakeWaiters: Array<() => void> = [];
-
 /**
- * Like {@link delay}, but resolves early when {@link wakeReconnectWaiters} fires.
+ * Like {@link delay}, but resolves early on a wake ({@link wakeReconnects}).
  * Used for reconnect backoff only: a hidden tab's setTimeout is throttled/frozen,
  * so on tab return the wake path must be able to retry NOW instead of waiting
- * out a thawed backoff timer.
+ * out a thawed backoff timer. Resolves `true` when a wake cut it short.
  */
-const wakeableDelay = (ms: number) =>
-  new Promise<void>((resolve) => {
-    const wake = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      wakeWaiters = wakeWaiters.filter((w) => w !== wake);
-      resolve();
-    }, ms);
-    wakeWaiters.push(wake);
-  });
-
-/** Short-circuit every pending {@link wakeableDelay}. */
-function wakeReconnectWaiters(): void {
-  const waiters = wakeWaiters;
-  wakeWaiters = [];
-  for (const wake of waiters) {
-    wake();
-  }
-}
+const wakeableDelay = (ms: number) => new Promise<boolean>((resolve) => scheduleRetry(ms, resolve));
 
 /**
  * When the last /events line (any event or the daemon's 15s heartbeat) arrived.
@@ -257,7 +238,10 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = {
   continueThreadsByProject: {},
   // Usage-limit recovery: resuming at the reset is on, moving to another account is opt-in.
   autoResumeLimitedChats: true,
-  switchAccountOnUsageLimit: false
+  switchAccountOnUsageLimit: false,
+  // Idle Claude compaction: offered when you return, T3 Code's default.
+  claudeIdleCompaction: "onReturn",
+  claudeIdleCompactionByAccount: {}
 };
 
 /**
@@ -415,10 +399,22 @@ const LOCKED_FALLBACK_BASE_MS = 8000;
 /** Cap (ms) for the locked-cycle exponential fallback. */
 const LOCKED_FALLBACK_CAP_MS = 120000;
 
-/** Capped exponential backoff (ms) for reconnect attempt N (1-based). */
-function backoffMs(attempt: number): number {
-  return Math.min(attempt * 1000, 8000);
+/** Log why an attempt to reach the daemon failed (the connection diagnosis reads it). */
+function recordFailure(error: unknown): void {
+  recordConnectionFailure(classifyConnectionError(error, { online: deviceOnline() }));
 }
+
+/**
+ * Failed reconnect probes since the connection was last stable. Unlike the
+ * loop's own attempt count it survives a daemon that accepts the connection and
+ * drops it again at once, so such a flap keeps backing off instead of redialing
+ * at the shortest delay forever.
+ */
+let reconnectFailures = 0;
+/** When the current connection was established; 0 while not connected. */
+let connectedAt = 0;
+/** A connection that stayed up this long resets {@link reconnectFailures}. */
+const STABLE_CONNECTION_MS = 30_000;
 
 /**
  * Capped exponential fallback (ms) for the Nth consecutive locked cycle
@@ -492,7 +488,7 @@ function scheduleLockedReconnect(
   // cleared because nothing is scheduled to fire.
   if (cycle >= MAX_LOCKED_CYCLES) {
     const api = get().api;
-    const authInPlay = get().authSalt != null && api != null;
+    const authInPlay = get().authRequired && api != null;
     set({
       connectionStatus: "error",
       reconnectAttempt: 0,
@@ -560,6 +556,7 @@ export interface UiAppConfig {
   useTitlebar: boolean;
   runInBackground: boolean;
   confirmCloseSession: boolean;
+  desktopNotifications: boolean;
   usage: UsagePrefs;
   agents: AgentPrefs;
 }
@@ -569,6 +566,43 @@ async function persistRemotes(connections: UiConnection[]): Promise<void> {
   await homeApi
     ?.saveRemotes(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
     .catch(() => undefined);
+}
+
+/**
+ * Forget the active connection's bearer (stored and in memory) and show the
+ * sign-in prompt: a 401 means the token was revoked or lapsed, so retrying it
+ * can only fail again. Stops reconnecting; the prompt's sign-in reconnects.
+ */
+function dropCredential(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+  api: ApiClient,
+  message: string | null = "Your session ended. Sign in again."
+): void {
+  stopReconnect();
+  clearStoredToken(api.connection.endpoint);
+  set({
+    api: get().api === api ? apiWithCredential(api, "") : get().api,
+    connectionStatus: "error",
+    reconnectAttempt: 0,
+    connectionError: message,
+    authError: message,
+    lockedUntil: null,
+    authPrompt: { connectionId: api.connection.id }
+  });
+}
+
+/** The sign-in prompt's message for a failed login. */
+function signInError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return "Incorrect username or password.";
+    if (error.status === 429) {
+      const seconds = error.retryAfterSeconds;
+      return seconds ? `Too many failed attempts. Try again in ${seconds}s.` : "Too many failed attempts. Try again later.";
+    }
+    if (error.serverMessage) return error.serverMessage;
+  }
+  return "Could not reach the server. Try again.";
 }
 
 /** Rebuild an ApiClient for the same connection but with a bearer credential. */
@@ -592,6 +626,9 @@ function buildTransporter(connection: UiConnection): Transporter {
 export interface FileReveal {
   path: string;
   nonce: number;
+  /** 1-based line (and column) to jump to in the opened file. */
+  line?: number;
+  column?: number;
 }
 
 /** A client-local, non-PTY tab (e.g. the file browser). */
@@ -877,9 +914,12 @@ export interface AppState {
 
   // auth (web → password-protected HTTP daemon)
   authPrompt: { connectionId: string } | null;
-  authSalt: string | null;
+  /** Whether the active connection requires a sign-in (its `/api/auth/info`). */
+  authRequired: boolean;
   /** Whether the active connection's auth needs a username (UI hint). */
   authRequiresUsername: boolean;
+  /** Why the last sign-in failed or the session ended (shown in the sign-in prompt). */
+  authError: string | null;
 
   // navigation
   currentWorkspace: string | null;
@@ -1118,7 +1158,10 @@ export interface AppState {
   updateAgentPrefs: (next: AgentPrefs) => Promise<void>;
 
   // auth
+  /** Sign in with the password: the daemon returns a session token, the only thing stored. */
   submitCredentials: (username: string, password: string) => Promise<void>;
+  /** Revoke this client's session on the daemon, forget its token and show the sign-in prompt. */
+  signOut: () => Promise<void>;
 
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string, gitAccountId?: string) => Promise<void>;
@@ -1222,9 +1265,9 @@ export interface AppState {
   openFileBrowser: () => void;
   /**
    * Open absolute `path` in the current project's file browser: its first Files
-   * tab when there is one, otherwise a new one.
+   * tab when there is one, otherwise a new one. `position` jumps to a line.
    */
-  revealInFileBrowser: (path: string) => void;
+  revealInFileBrowser: (path: string, position?: { line?: number; column?: number }) => void;
   openGit: () => void;
   /** Open (or focus) the whiteboard tab of `.excalidraw` file `path` in the current project. */
   openWhiteboard: (path: string) => void;
@@ -1363,6 +1406,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     useTitlebar: false,
     runInBackground: false,
     confirmCloseSession: true,
+    desktopNotifications: true,
     usage: DEFAULT_USAGE_PREFS,
     agents: DEFAULT_AGENT_PREFS
   },
@@ -1370,8 +1414,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingCloseTabId: null,
   sidebarDrawerOpen: false,
   authPrompt: null,
-  authSalt: null,
+  authRequired: false,
   authRequiresUsername: false,
+  authError: null,
   currentWorkspace: null,
   currentProject: null,
   registry: EMPTY_REGISTRY,
@@ -1438,6 +1483,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // starts from a clean exponential fallback.
     stopReconnect();
     lockedCycles = 0;
+    reconnectFailures = 0;
     set({ connectionStatus: "connecting", reconnectAttempt: 0, connectionError: null, lockedUntil: null });
 
     // The embedded daemon is spawned asynchronously: poll /health first.
@@ -1446,9 +1492,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       try {
-        await initial.health();
+        noteServerHealth(checkHealth(await initial.health()));
         break;
-      } catch {
+      } catch (error) {
+        recordFailure(error);
         await delay(500);
         if (attempt === 59) {
           set({ connectionStatus: "error" });
@@ -1460,10 +1507,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       await get().establish(initial);
-    } catch {
+    } catch (error) {
       // A network error during establish (after /health came back) is a
       // transient disconnect: hand off to the exponential-backoff reconnect.
       // 401/429 are handled inside establish() and never reach here.
+      recordFailure(error);
       get().handleDisconnect();
     }
   },
@@ -1476,24 +1524,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     // untracked delay() — without it, the resumed loop would run a SECOND
     // establish (duplicate fan-out + double events subscription).
     const reconnectGenAtStart = reconnectGen;
-    // Auth gate: derive/restore the bearer credential (web) or prompt.
+    // Auth gate: restore the session token (web) or prompt.
     let active = api;
     const info = await active.authInfo().catch(() => null);
     if (reconnectGenAtStart !== reconnectGen) {
       return;
     }
-    set({ authSalt: info?.salt ?? null, authRequiresUsername: info?.requiresUsername ?? false });
+    set({ authRequired: info?.authRequired ?? false, authRequiresUsername: info?.requiresUsername ?? false });
     if (info?.authRequired) {
-      // The bearer is base64("<username>:<hash>"). Prefer one already on the
-      // connection; else rebuild it from the per-endpoint stored username+hash.
+      // The bearer is a session token from the daemon's login: the endpoint's
+      // stored one (validated) first, else one already on the connection (a
+      // sign-in just now, or a token configured for this remote). Anything
+      // that cannot be a token — an older build's base64("<user>:<hash>") —
+      // is never sent.
       const endpoint = active.connection.endpoint;
-      const storedHash = loadStoredHash(endpoint);
-      const storedUser = loadStoredUsername(endpoint);
-      const credential =
-        active.connection.password ??
-        (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
+      const credential = loadStoredToken(endpoint) ?? asSessionToken(active.connection.password);
       if (!credential) {
         stopReconnect();
+        recordConnectionFailure({ kind: "unauthorized", detail: "This server needs a sign-in.", at: Date.now() });
         set({
           connectionStatus: "error",
           reconnectAttempt: 0,
@@ -1514,7 +1562,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 401 (not five), and a locked-out client a single 429 — and we never enter
     // the reconnect loop on either. Only network errors fall through to retry.
     try {
-      await active.info();
+      noteServerInfo(await active.info());
     } catch (error) {
       // A newer flow preempted us while the pre-check was in flight: don't act on
       // this stale response (no creds-clear, no reschedule, no rethrow-to-retry).
@@ -1522,23 +1570,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       if (error instanceof ApiError && error.status === 401) {
-        // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
-        // fan out and do NOT reconnect.
-        stopReconnect();
-        clearStoredHash(active.connection.endpoint);
-        clearStoredUsername(active.connection.endpoint);
-        set({
-          connectionStatus: "error",
-          reconnectAttempt: 0,
-          connectionError: "Incorrect username or password.",
-          lockedUntil: null,
-          authPrompt: { connectionId: active.connection.id }
-        });
+        // The token was revoked or lapsed (or is an old build's credential):
+        // drop it and re-prompt. Do NOT fan out and do NOT reconnect.
+        recordFailure(error);
+        dropCredential(get, set, active);
         return;
       }
       if (error instanceof ApiError && error.status === 429) {
         // Rate-limited (too many failed attempts): back off until Retry-After
         // (or a capped exponential fallback) — never tight-loop.
+        recordFailure(error);
         scheduleLockedReconnect(get, set, error.retryAfterSeconds);
         return;
       }
@@ -1556,6 +1597,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
+    connectedAt = Date.now();
+    noteConnected(connectedAt);
+    // After an outage the terminal and browser WebSockets may be deep in their
+    // own backoff: the daemon answers again, so redial (or ping) them now.
+    wakeSessionChannels();
+    wakeBrowserChannels();
     // agentConversationsByProject: a (re)connect may be a restarted or upgraded
     // daemon, and the cache is the only place a failed scan settles as "none" —
     // dropping it here is what makes that recoverable.
@@ -1688,10 +1735,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       if (Date.now() - lastEventAt > EVENTS_STALE_MS) {
+        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: Date.now() });
         get().handleDisconnect();
         return;
       }
-      void current.health().catch(() => get().handleDisconnect());
+      void current.health().catch((error: unknown) => {
+        recordFailure(error);
+        get().handleDisconnect();
+      });
     }, 4000);
   },
 
@@ -1704,6 +1755,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     reconnecting = true;
+    // Only a connection that stayed up resets the backoff (see reconnectFailures).
+    if (connectedAt !== 0 && Date.now() - connectedAt >= STABLE_CONNECTION_MS) {
+      reconnectFailures = 0;
+    }
+    connectedAt = 0;
 
     const loop = async () => {
       // Own this reconnect generation (mirrors eventsGen). Any newer flow
@@ -1728,7 +1784,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
-          await current.health();
+          noteServerHealth(checkHealth(await current.health()));
           if (gen !== reconnectGen) {
             return;
           }
@@ -1744,6 +1800,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           if (gen !== reconnectGen) {
             return;
           }
+          recordFailure(error);
           // Even /health can 429 if the limiter is broadened: honor Retry-After.
           if (error instanceof ApiError && error.status === 429) {
             reconnecting = false;
@@ -1751,8 +1808,10 @@ export const useAppStore = create<AppState>((set, get) => ({
             return;
           }
           // Wakeable: a tab-return/online event short-circuits the backoff so
-          // the next probe runs immediately instead of when the timer thaws.
-          await wakeableDelay(backoffMs(attempt));
+          // the next probe runs immediately instead of when the timer thaws —
+          // and starts the backoff over, since what made it wait has changed.
+          const woken = await wakeableDelay(backoffDelayMs(reconnectFailures));
+          reconnectFailures = woken ? 0 : reconnectFailures + 1;
           if (gen !== reconnectGen) {
             return;
           }
@@ -1777,14 +1836,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     wakeSessionChannels();
     // Browser screencast WS: same redial/ping-probe on visibility regain.
     wakeBrowserChannels();
+    // Every other pending retry (this store's backoff loop, chat streams, git
+    // watches, desktop streams) runs now instead of when its timer thaws.
+    wakeReconnects();
 
     const api = get().api;
     if (!api) {
       return;
     }
     if (reconnecting) {
-      // A backoff loop is mid-wait: retry NOW instead of when its timer thaws.
-      wakeReconnectWaiters();
+      // A backoff loop is mid-wait: wakeReconnects() above retried it NOW.
       return;
     }
     const status = get().connectionStatus;
@@ -1793,9 +1854,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // onEnd having been delivered yet. Probe immediately rather than waiting
       // for the 4s interval (throttled to ≥60s while hidden) to notice.
       if (now - lastEventAt > EVENTS_STALE_MS) {
+        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: now });
         get().handleDisconnect();
       } else {
-        void api.health().catch(() => get().handleDisconnect());
+        void api.health().catch((error: unknown) => {
+          recordFailure(error);
+          get().handleDisconnect();
+        });
       }
       return;
     }
@@ -1822,6 +1887,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         useTitlebar: nextSetup.defaultUseTitlebar,
         runInBackground: false,
         confirmCloseSession: true,
+        desktopNotifications: true,
         usage: DEFAULT_USAGE_PREFS,
         agents: DEFAULT_AGENT_PREFS
       },
@@ -1849,6 +1915,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
             runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
             confirmCloseSession: config.confirmCloseSession ?? state.appConfig.confirmCloseSession,
+            desktopNotifications: config.desktopNotifications ?? state.appConfig.desktopNotifications,
             usage: normalizeUsagePrefs(config.usage, state.appConfig.usage),
             // `agents` is deliberately NOT taken from `config`: it is daemon-side
             // (the daemon reads app.json at session launch), so it is owned by
@@ -1942,20 +2009,47 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   submitCredentials: async (username, password) => {
     const api = get().api;
-    const salt = get().authSalt;
-    if (!api || !salt) {
+    if (!api) {
       return;
     }
-    // Derive the same bcrypt hash the daemon stores; persist the hash + the
-    // plain username (never the plaintext password). The wire bearer is
-    // base64("<username>:<hash>").
+    // The password goes to the daemon once; what comes back is a revocable
+    // session token, the only thing kept (with the username, to pre-fill the
+    // next sign-in). The login route is public, so `api`'s own (dead) bearer is
+    // irrelevant here.
     const normalizedUser = username.trim().toLowerCase();
-    const hash = deriveAuthHash(password, salt);
-    const credential = buildCredential(normalizedUser, hash);
-    storeHash(api.connection.endpoint, hash);
+    let token: string;
+    try {
+      token = (await api.login({ username: normalizedUser, password })).token;
+    } catch (error) {
+      set({ authError: signInError(error) });
+      return;
+    }
+    if (get().api !== api || !asSessionToken(token)) {
+      if (get().api === api) set({ authError: "The server sent an invalid session token." });
+      return;
+    }
+    storeToken(api.connection.endpoint, token);
     storeUsername(api.connection.endpoint, normalizedUser);
-    set({ api: apiWithCredential(api, credential), authPrompt: null });
+    set({ api: apiWithCredential(api, token), authPrompt: null, authError: null });
     await get().connect();
+  },
+
+  signOut: async () => {
+    const api = get().api;
+    if (!api || api.connection.kind === "local") {
+      return;
+    }
+    // Close the event stream first: the daemon ends it when the session is
+    // revoked, and that end must not read as a disconnect to recover from.
+    // Then revoke (best effort: an unreachable daemon still loses this
+    // client's copy, and the session lapses on its own).
+    stopReconnect();
+    closeEvents();
+    await api.logout().catch(() => undefined);
+    if (get().api !== api) {
+      return;
+    }
+    dropCredential(get, set, api, null);
   },
 
   selectConnection: async (id) => {
@@ -1965,6 +2059,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     stopReconnect();
     closeEvents();
+    // What was learned about the old daemon's connection says nothing about the new one.
+    resetConnectionLog();
     // The verified project index is daemon-scoped too, and it lives outside the
     // store (module cache) — reset it by hand with the rest. So are the saved
     // prompts (`lib/saved-prompts/store.ts`).
@@ -2023,11 +2119,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addRemote: async (input) => {
-    // No credential is captured at add-time: `connection.password` is the wire
-    // bearer base64("<username>:<hash>"), and the raw password must never leave
-    // the client (nor be persisted to remotes.json). The AuthModal derives the
-    // hash and builds the credential on first connect, exactly like the
-    // seeded-VPS remote (apps/desktop/src/main.ts).
+    // No credential is captured at add-time: the AuthModal signs in on first
+    // connect and the session token is stored per endpoint, exactly like the
+    // seeded-VPS remote (apps/desktop/src/main.ts). The password is never
+    // stored, nor persisted to remotes.json.
     const connection: UiConnection = {
       id: crypto.randomUUID(),
       name: input.name.trim() || input.baseUrl,
@@ -2140,15 +2235,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // establish() pre-check catches this first; this is the defensive fallback
       // for a credential revoked mid-fan-out.)
       if (error instanceof ApiError && error.status === 401) {
-        stopReconnect();
-        clearStoredHash(api.connection.endpoint);
-        clearStoredUsername(api.connection.endpoint);
-        set({
-          connectionStatus: "error",
-          connectionError: "Incorrect username or password.",
-          lockedUntil: null,
-          authPrompt: { connectionId: api.connection.id }
-        });
+        recordFailure(error);
+        dropCredential(get, set, api);
       } else {
         console.error("[orquester] failed to load workspaces", error);
       }
@@ -2232,7 +2320,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api || !workspace) {
       return;
     }
-    await api.createProject(workspace, req);
+    const project = await api.createProject(workspace, req);
+    // A clone that fell back to HTTPS (the SSH key was refused) works, but the user should know.
+    if (project?.clone?.transport === "https" && typeof project.clone.notice === "string" && project.clone.notice) {
+      get().setNotice({ title: "Cloned over HTTPS", message: project.clone.notice });
+    }
     await get().loadProjects();
   },
 
@@ -2968,7 +3060,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
-  revealInFileBrowser: (path) =>
+  revealInFileBrowser: (path, position) =>
     set((state) => {
       const project = state.currentProject;
       if (!project) {
@@ -2976,7 +3068,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const tabs = state.fileTabsByProject[project.path] ?? [];
       const existing = tabs[0];
-      const reveal: FileReveal = { path, nonce: (existing?.reveal?.nonce ?? 0) + 1 };
+      const reveal: FileReveal = {
+        path,
+        nonce: (existing?.reveal?.nonce ?? 0) + 1,
+        ...(position?.line ? { line: position.line } : {}),
+        ...(position?.column ? { column: position.column } : {})
+      };
       const tab: FileTab = existing
         ? { ...existing, reveal }
         : { id: crypto.randomUUID(), projectPath: project.path, title: "Files", reveal };
@@ -3635,6 +3732,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyEvent: (event) => {
+    if (event.channel === DAEMON_EVENTS_CHANNEL && event.type === DAEMON_STOPPING_EVENT) {
+      // The disconnect that follows is a restart, not a network failure. An HTTP
+      // listener restart drops only clients that came in over HTTP.
+      const reason = (event.payload as Partial<DaemonStoppingPayload> | undefined)?.reason;
+      if (reason !== "http-restart" || get().api?.transportKind === "http") {
+        noteDaemonStopping();
+      }
+      return;
+    }
     if (event.channel === "usage") {
       set({ usage: event.payload as UsageResponse });
       return;
@@ -3790,6 +3896,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           return { preferredProfileByAgent };
         });
       }
+      return;
+    }
+    if (event.channel === PUSH_CHANNEL) {
+      // The daemon's pushes, for the desktop shell's system notifications
+      // (`lib/desktop-host.ts`); parsed there, and nothing here keeps them.
+      observePushEvent(event);
       return;
     }
     if (event.channel === AGENT_TOOLS_CHANNEL) {

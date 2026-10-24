@@ -11,6 +11,12 @@ export {
   type OrquesterContextValue,
   type WindowControls
 } from "./context/orquester-context";
+export type {
+  DesktopHost,
+  DesktopMenuAction,
+  DesktopNotificationRequest,
+  DesktopNotificationTarget
+} from "./lib/desktop-host";
 
 // Connection layer
 export { ApiClient, ApiError, WorkflowApiError, type ApiRequestOptions } from "./lib/api-client";
@@ -134,6 +140,15 @@ export {
   WORKFLOW_RUN_MESSAGE,
   type WorkflowDeepLink
 } from "./lib/workflows/deep-link";
+// A session's notification (the web host hands its link / message here)
+export {
+  parseSessionDeepLink,
+  parseSessionOpenMessage,
+  requestSessionDeepLink,
+  stripSessionDeepLink,
+  SESSION_OPEN_MESSAGE,
+  type SessionDeepLink
+} from "./lib/session-deep-link";
 export { pickRunId, pickBlockId, type PhoneRunPane } from "./lib/workflows/runs-mode";
 export { canvasFitOptions, type CanvasFitOptions } from "./lib/workflows/canvas-fit";
 export * from "./hooks";

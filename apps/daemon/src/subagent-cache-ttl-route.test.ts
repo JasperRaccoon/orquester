@@ -13,11 +13,12 @@ import { test } from "node:test";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "./index.ts";
 import { SubagentCacheTtlController, type SubagentRequest } from "./subagent-cache-ttl.ts";
+import { testAuthSessions } from "./auth/testing.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 const NOW = Date.parse("2026-10-11T00:00:00Z");
 
 /** 300 subagents that each re-write a 100k prefix after a 10 minute wait: 1h is 16% cheaper. */
@@ -43,7 +44,7 @@ test("the status route answers for the stored mode, to authenticated clients onl
     resolved,
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
-    { subagentCacheTtl } as unknown as CreateServerArgs[4],
+    { subagentCacheTtl, authSessions: AUTH_SESSIONS } as unknown as CreateServerArgs[4],
     { authRequired: true, mode: "remote" }
   );
   const get = (headers?: Record<string, string>) =>

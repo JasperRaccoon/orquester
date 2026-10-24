@@ -11,7 +11,7 @@
     "build:electron": "node ../../scripts/ensure-node-native.mjs --detach && electron-builder && node ../../scripts/ensure-node-native.mjs",
     "build": "pnpm build:main && pnpm build:ui && pnpm build:electron",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --import tsx --import ../../scripts/test/assert-ok.mjs --test $(find src -name '*.test.ts')"
+    "test": "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --test $(find src -name '*.test.ts')"
   },
   "dependencies": {
     "@orquester/daemon": "workspace:*",

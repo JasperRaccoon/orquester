@@ -17,8 +17,11 @@ import type { DesktopAudioStateMessage } from "@orquester/api";
 import { desktopAudioState, type DesktopAudioHub, type DesktopAudioSink, type DesktopAudioSpawn } from "./audio.ts";
 
 export interface DesktopWsDeps {
-  /** True when `token` (the `?token=` query value) is a valid credential. */
-  authorize(token: string | undefined): boolean;
+  /**
+   * True when `token` (the `?token=` query value) is a valid credential. `socket` is the accepted
+   * connection, so the caller can close it when that credential is revoked.
+   */
+  authorize(token: string | undefined, socket: WebSocket): boolean;
   /** Path of a RUNNING desktop's RFB unix socket; null when unknown or not running. */
   vncSocketPath(desktopId: string): string | null;
   /** boxes: how to open a RUNNING VM desktop's RFB stream (through its box link); null when it is not one. */
@@ -67,7 +70,7 @@ function tokenOf(query: unknown): string | undefined {
 export async function registerDesktopWsRoutes(app: FastifyInstance, deps: DesktopWsDeps): Promise<void> {
   void app.register(async (instance) => {
     instance.get<{ Params: { id: string } }>("/ws-desktop/:id", { websocket: true }, (socket, request) => {
-      if (!deps.authorize(tokenOf(request.query))) {
+      if (!deps.authorize(tokenOf(request.query), socket)) {
         socket.close(1008, "unauthorized");
         return;
       }
@@ -185,7 +188,7 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
     });
 
     instance.get<{ Params: { id: string } }>("/ws-desktop-audio/:id", { websocket: true }, (socket, request) => {
-      if (!deps.authorize(tokenOf(request.query))) {
+      if (!deps.authorize(tokenOf(request.query), socket)) {
         socket.close(1008, "unauthorized");
         return;
       }

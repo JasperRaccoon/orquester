@@ -39,6 +39,11 @@ export interface HttpClientStreamHandlers {
   onData(chunk: string): void;
   /** The stream ended (server closed it, or it failed). */
   onEnd(): void;
+  /**
+   * The server answered with an error status instead of a stream: called with an error carrying
+   * `status`, before {@link onEnd}. The error body is never handed to {@link onData}.
+   */
+  onError?(error: unknown): void;
 }
 
 /** Handle to a chunked stream opened via {@link HttpClient.stream}. */

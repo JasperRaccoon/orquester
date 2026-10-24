@@ -1,6 +1,7 @@
 import type { OwnerSummary, RepoSummary } from "@orquester/api";
 
 import { AccountError } from "../account-error";
+import { rateGateFor } from "./rate-gate";
 import type {
   CloneUrls,
   ConditionalListOptions,
@@ -100,6 +101,15 @@ async function githubError(response: Response, method: string, path: string): Pr
   );
 }
 
+/**
+ * The account's GitHub rate gate (`rate-gate.ts`), pause only: GitHub's quota
+ * is generous and no request retries itself, so concurrency is left alone, but
+ * once GitHub says the quota is spent no further request is sent until its reset.
+ */
+function githubGate(token: string | null) {
+  return rateGateFor("github.com", "GitHub", token ? { token } : null, { slots: Infinity });
+}
+
 /** Authenticated GitHub REST call; throws AccountError on a non-2xx. */
 async function github(
   token: string,
@@ -107,11 +117,13 @@ async function github(
   path: string,
   body?: unknown
 ): Promise<Response> {
-  const response = await githubFetch(token, method, path, body);
-  if (!response.ok) {
-    throw await githubError(response, method, path);
-  }
-  return response;
+  return githubGate(token).run("interactive", async () => {
+    const response = await githubFetch(token, method, path, body);
+    if (!response.ok) {
+      throw await githubError(response, method, path);
+    }
+    return response;
+  });
 }
 
 /**
@@ -124,12 +136,15 @@ async function githubConditionalList(
   path: string,
   etag: string | undefined
 ): Promise<{ notModified: true } | { notModified?: false; etag?: string; values: Record<string, unknown>[] }> {
-  const response = await githubFetch(token, "GET", path, undefined, etag ? { "If-None-Match": etag } : undefined);
+  const response = await githubGate(token).run("background", async () => {
+    const answer = await githubFetch(token, "GET", path, undefined, etag ? { "If-None-Match": etag } : undefined);
+    if (answer.status !== 304 && !answer.ok) {
+      throw await githubError(answer, "GET", path);
+    }
+    return answer;
+  });
   if (response.status === 304) {
     return { notModified: true };
-  }
-  if (!response.ok) {
-    throw await githubError(response, "GET", path);
   }
   const page = (await response.json().catch(() => [])) as unknown;
   const values = Array.isArray(page)

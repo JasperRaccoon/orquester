@@ -425,6 +425,8 @@ export interface CheckpointService {
    * without touching git; a turn above the thread's highest checkpoint is a
    * 404 rather than an empty result. Cached in memory by
    * `(threadId, from, to, ignoreWhitespace)` — derived state, dropped freely.
+   * `ignoreWhitespace` (default false) hides whitespace-only changes. A binary
+   * file is git's one-line "Binary files … differ", never a binary patch.
    */
   readTurnDiff(input: {
     threadId: string;

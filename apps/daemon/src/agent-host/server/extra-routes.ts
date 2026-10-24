@@ -11,6 +11,7 @@
 import type {
   AccountHomeKind,
   AgentChatSessionSummaryFields,
+  IdleCompactionCandidate,
   McpAppOperation,
   ProviderUsageWindow,
   ThreadUsageLimitNotice
@@ -84,6 +85,14 @@ export interface AgentHostThreadSummary extends AgentChatSessionSummaryFields {
    * every poll. Absent from a host older than the field (the daemon then does nothing).
    */
   usageLimit?: ThreadUsageLimitNotice | null;
+  /**
+   * The prompt cache the thread's latest completed turn left (`idleCompactionCandidateOf` over
+   * its newest rows, so a host restart reads the same from the log): which turn, how much context,
+   * and when the cache expires. `null` when there is none to compact before. The daemon's idle
+   * compaction reads it on every poll. Absent from a host older than the field (nothing is
+   * scheduled then).
+   */
+  idleCompaction?: IdleCompactionCandidate | null;
 }
 
 /** One thread's latest live account usage (see {@link AgentHostThreadSummary.usageLimits}). */

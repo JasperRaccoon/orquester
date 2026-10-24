@@ -45,6 +45,24 @@ describe("Claude preparer", () => {
     assert.equal(claudePreparer.inputs, undefined);
   });
 
+  it("names a copied plugin as the CLI loads it: its manifest name, else its directory (the item id)", async () => {
+    for (const [manifest, name, allowed] of [
+      [{ version: "1" }, "pl1", ["pl1:fmt", "pl1:lint"]],
+      [{ name: "tool.box" }, "tool.box", ["tool.box:fmt", "tool.box:lint"]],
+      [{ name: "bad name" }, "pl1", []]
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), "orq-claude-preparer-"));
+      roots.push(root);
+      const fixture = await makeClaudeProfileFixture(root);
+      await writeFile(join(root, "profile", "plugins", "pl1", ".claude-plugin", "plugin.json"), JSON.stringify(manifest));
+      const stagingDir = join(root, "staging");
+      await mkdir(stagingDir, { mode: 0o700 });
+      const section = await claudePreparer.prepare(fixture.context({ stagingDir, preparedDir: "/appdir/prepared/v-1" }));
+      assert.deepEqual(section.plugins, [{ itemId: "pl1", name, path: "plugins/pl1" }]);
+      assert.deepEqual(section.skills?.filter((id) => !id.startsWith("dev-kit:") && id !== "workflow-authoring").sort(), [...allowed]);
+    }
+  });
+
   it("writes the plugin, the plugin copy, the MCP file and the instructions (golden)", async () => {
     const { stagingDir, preparedDir, section, fixture } = await prepare();
     assert.deepEqual(section, {

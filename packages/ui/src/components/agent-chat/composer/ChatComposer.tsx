@@ -2,17 +2,18 @@
 // apps/web/src/components/ChatView.tsx (the composer overlay and its inset)
 import React from "react";
 import { flushSync } from "react-dom";
-import { Paperclip, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import type {
   AttachmentRef,
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
-  SelectProviderOptionDescriptor
+  ThreadItem
 } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { noteRender } from "../../../lib/render-probe";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { useAppStore } from "../../../store/app";
@@ -20,8 +21,10 @@ import { attachmentPathOf, type ComposerDraft } from "../../../lib/agent-chat/co
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
-import { AccountChip, ComposerLinkChips, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
-import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
+import { ComposerLinkChips } from "./ComposerChips";
+import { ComposerFooterControls } from "./ComposerFooterControls";
+import { compactsBeforeSend } from "../../../lib/agent-chat/resume-compaction.logic";
+import type { ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
   imageOrdinal,
@@ -33,7 +36,6 @@ import {
 import {
   REWIND_ESCAPE_HINT,
   REWIND_ESCAPE_HINT_MS,
-  RewindControl,
   rewindPickerEnabled
 } from "./RewindControl";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
@@ -77,7 +79,6 @@ import {
 import {
   applyEffortArgument,
   findReasoningDescriptor,
-  optionDescriptors,
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
@@ -95,6 +96,7 @@ import {
 import {
   attachmentCountBlockSend,
   attachmentRejectionReason,
+  attachmentSizeRejection,
   composerStatusText,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
@@ -128,6 +130,16 @@ import {
   type ComposerTrigger
 } from "./composer-trigger";
 import { useComposerPathSearch } from "./use-composer-path-search";
+import { downscalableImageMimeType, prepareImageForUpload } from "./composer-image-fit";
+import { planPendingRequestSend, pendingRequestWording } from "./composer-pending-send";
+import {
+  buildPromptRecallEntries,
+  promptRecallDirection,
+  stepPromptRecall,
+  textareaCaretOnEdge,
+  type PromptRecallPosition
+} from "./composer-recall";
+import { answerQuestionFromComposer } from "../banners/question-composer-bridge";
 
 /**
  * The **live** draft: what is on screen, including uploads still in flight.
@@ -191,6 +203,12 @@ export interface ChatComposerExtraProps {
    * not wired it cannot hide a command that would have worked.
    */
   threadHasContent?: boolean;
+  /**
+   * Idle compaction's "When you return" (`resume-compaction.logic.ts`): the context of a Claude
+   * chat whose prompt cache expired, when compacting before the next message is offered; null or
+   * absent otherwise. While offered, a send compacts first unless the chip says Full.
+   */
+  resumeCompactionTokens?: number | null;
   /** Overrides the root the `@` search walks; defaults to the session's cwd. */
   searchRoot?: string;
   /**
@@ -212,6 +230,12 @@ export interface ChatComposerExtraProps {
    * whose agent no profile serves). Picking one calls `actions.setProfile`.
    */
   profileChip?: Omit<ProfileChipProps, "onChange" | "returnFocusTo"> | undefined;
+  /**
+   * The thread's items, read when an arrow key may recall a sent prompt
+   * (`composer-recall.ts`) — a reader rather than the list, so the composer
+   * does not re-render on every streamed token. Absent: no recall.
+   */
+  readRecallItems?: (() => readonly ThreadItem[]) | undefined;
 }
 
 /**
@@ -236,7 +260,7 @@ export interface ChatComposerExtraProps {
  * *T3: `ChatView.tsx:9987-9998` (the overlay), `:5900-5917` (the republished
  * height), `ChatComposer.tsx:5880-5901` (`openControl`).*
  */
-export function ChatComposer({
+function ChatComposerView({
   sessionId,
   provider,
   modelSelection,
@@ -251,6 +275,7 @@ export function ChatComposer({
   accountNote,
   isTurnActive,
   hasPendingRequest,
+  pendingRequests,
   queue,
   activePlan,
   actionableProposedPlan,
@@ -261,16 +286,29 @@ export function ChatComposer({
   onHeightChange,
   onDraftAttachmentCountChange,
   threadHasContent = true,
+  resumeCompactionTokens = null,
   searchRoot,
   active,
   onLeaveDrillIn,
-  profileChip
+  profileChip,
+  readRecallItems
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
+  noteRender("ChatComposer");
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
   );
   const root = searchRoot ?? sessionCwd;
+  // The thread whose resume offer the user switched to Full; it lasts while the offer stands.
+  const [fullHistoryThread, setFullHistoryThread] = React.useState<string | null>(null);
+  const keepFullHistory = fullHistoryThread === sessionId;
+  const toggleFullHistory = React.useCallback(
+    () => setFullHistoryThread(keepFullHistory ? null : sessionId),
+    [keepFullHistory, sessionId]
+  );
+  React.useEffect(() => {
+    if (resumeCompactionTokens === null) setFullHistoryThread(null);
+  }, [resumeCompactionTokens]);
   const sessionProjectPath = useAppStore(
     (state) => state.sessions.find((session) => session.id === sessionId)?.projectPath ?? null
   );
@@ -293,7 +331,8 @@ export function ChatComposer({
 
   const shellRef = React.useRef<HTMLDivElement>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  /** Where a footer chip's popover hands focus back: one function for the composer's life. */
+  const returnFocusToField = React.useCallback(() => textareaRef.current, []);
   const draftRef = React.useRef<DraftState>(EMPTY_DRAFT);
   const caretRef = React.useRef(0);
   /** A caret `applyCaret` still owes the textarea; whichever lands last, its microtask or the commit, clears it. */
@@ -327,6 +366,8 @@ export function ChatComposer({
   const [focused, setFocused] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
   const [menuDismissed, setMenuDismissed] = React.useState(false);
+  /** The sent prompt ArrowUp/ArrowDown recalled into the draft, while it stays unedited. */
+  const [recallPosition, setRecallPosition] = React.useState<PromptRecallPosition | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
   /**
    * A send from THIS thread is in flight — from this composer, or from one a
@@ -393,6 +434,8 @@ export function ChatComposer({
     // has a send in flight is the registry's to say, not this instance's.
     setNotice(null);
     setMenuDismissed(false);
+    // A recall belongs to the thread it walked.
+    setRecallPosition(null);
     // A half-finished double Escape belongs to the thread it was pressed in.
     escapeSequenceRef.current?.reset();
   }, [sessionId]);
@@ -910,9 +953,6 @@ export function ChatComposer({
   // a provider that parses its own lists it in the catalog above.
   const hostGoalCommand = provider?.capabilities?.goals?.command === "host";
   const selectedModel = resolveSelectedModel(models, modelSelection);
-  const selectDescriptors = optionDescriptors(selectedModel).filter(
-    (descriptor): descriptor is SelectProviderOptionDescriptor => descriptor.type === "select"
-  );
   const reasoningDescriptor = findReasoningDescriptor(selectedModel);
 
   const applyModelSelectionChange = React.useCallback(
@@ -1012,7 +1052,10 @@ export function ChatComposer({
   React.useEffect(() => setMenuDismissed(false), [triggerKind, triggerStart]);
 
   const menuOpen = trigger !== null && (menuItems.length > 0 || pathSearch.loading);
-  const showMenu = menuOpen && !menuDismissed;
+  // An unedited recall is a sent prompt, not something being typed: its `/`
+  // or `@` opens no menu, so the next arrow keeps walking the history (T3).
+  const showingRecall = recallPosition !== null && recallPosition.recalled === draft.text;
+  const showMenu = menuOpen && !menuDismissed && !showingRecall;
 
   const pickMenuItem = React.useCallback(
     (item: ComposerMenuItem) => {
@@ -1068,8 +1111,16 @@ export function ChatComposer({
   // Attachments
   // ---------------------------------------------------------------------
   const uploadOne = React.useCallback(
-    async (key: string, file: File) => {
+    async (key: string, staged: File) => {
       try {
+        // A large photo goes up at the provider's size, still as a binary
+        // stream; a retry reuses the smaller file. Its byte limit is checked
+        // here, after the shrink (`attachmentRejectionReason`'s `downscales`).
+        const file = await prepareImageForUpload(staged);
+        if (file !== staged && retryFilesRef.current.has(key)) retryFilesRef.current.set(key, file);
+        const tooLarge = attachmentSizeRejection(file.name, file.size, file.type);
+        if (tooLarge) throw new Error(tooLarge);
+        if (!draftRef.current.attachments.some((entry) => entry.key === key)) return;
         const ref: AttachmentRef = await actions.uploadAttachment(file, {
           name: file.name,
           type: file.type
@@ -1079,7 +1130,9 @@ export function ChatComposer({
         if (!draftRef.current.attachments.some((entry) => entry.key === key)) return;
         const ready = (entries: StagedAttachment[]): StagedAttachment[] =>
           entries.map((entry) =>
-            entry.key === key ? { ...entry, status: "ready" as const, progress: 1, ref } : entry
+            entry.key === key
+              ? { ...entry, status: "ready" as const, progress: 1, ref, name: file.name, sizeBytes: file.size }
+              : entry
           );
         draftRef.current = { ...draftRef.current, attachments: ready(draftRef.current.attachments) };
         // A file's path is known only now, so this is where it reaches the
@@ -1152,7 +1205,8 @@ export function ChatComposer({
           sizeBytes: file.size,
           mimeType: file.type,
           stagedCount: staged,
-          preparingCount: preparing
+          preparingCount: preparing,
+          downscales: downscalableImageMimeType(file.type) !== null
         });
         if (reason) {
           rejection ??= reason;
@@ -1249,13 +1303,20 @@ export function ChatComposer({
   // A draft files came back into may hold more than the eight: every one stays,
   // and it is neither sent nor queued until the user removes enough (§7.4).
   const countBlock = attachmentCountBlockSend(draft.attachments);
-  // An open card holds a send back — but not a `/goal …` the host applies
-  // itself (final fix wave, the same rule as the chip's actions).
-  const cardBlocksSend = pendingRequestBlocksSend({
-    hasPendingRequest,
-    text: draft.text,
-    hostParsesGoal: hostGoalCommand
-  });
+  // Told what the dock holds, a card never disables Send: a message over an
+  // approval redirects the agent and one over a question answers it, and what
+  // refuses either is said on submit (`planPendingRequestSend`). Not told, an
+  // open card holds a send back — but not a `/goal …` the host applies itself
+  // (final fix wave, the same rule as the chip's actions).
+  const cardBlocksSend =
+    pendingRequests === undefined &&
+    pendingRequestBlocksSend({
+      hasPendingRequest,
+      text: draft.text,
+      hostParsesGoal: hostGoalCommand
+    });
+  // What a send does to the card in front of the user, said before they send.
+  const pendingWording = pendingRequests === undefined ? null : pendingRequestWording(pendingRequests);
   const sendDisabledReason = reverting
     ? REVERT_RUNNING_REASON
     : cardBlocksSend
@@ -1286,6 +1347,13 @@ export function ChatComposer({
          * never the blockquotes glued into the textarea.
          */
         quoted?: { text: string; quotes: readonly ComposerQuote[] };
+        /**
+         * Idle compaction's "When you return": compact the chat first. The host queues the
+         * message behind the compaction; a compaction it refuses does not hold the message.
+         */
+        compactFirst?: boolean;
+        /** A redirect: the approvals the host declines before it steers this in. */
+        declineApprovals?: string[];
       } = {}
     ) => {
       // The thread this message leaves FROM. A failure goes back into its
@@ -1309,7 +1377,10 @@ export function ChatComposer({
               ...(refs.length > 0 ? { attachments: refs } : {}),
               interactionMode: mode,
               ...(modelSelection ? { modelSelection } : {}),
-              ...(generatedPrompt ? { generatedPrompt: true } : {})
+              ...(generatedPrompt ? { generatedPrompt: true } : {}),
+              ...(options.declineApprovals ? { declineApprovals: options.declineApprovals } : {}),
+              // In the outbox before the compaction goes out (`sendTurn`).
+              ...(options.compactFirst ? { compactFirst: true } : {})
             })
         });
         if (outcome.kind === "sent") {
@@ -1387,6 +1458,7 @@ export function ChatComposer({
       // way — from any composer, a reload's re-post included — refuses this one.
       sending: isComposerSending(sessionId),
       hasPendingRequest,
+      pendingRequests,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand
     });
@@ -1394,7 +1466,10 @@ export function ChatComposer({
     // does — a stale "Answer the request above first." must not outlive it.
     setNotice(plan.notice);
     if (plan.text === null) return false;
-    void runSend(plan.text, interactionMode, [], { returnToDraftOnFailure: false });
+    void runSend(plan.text, interactionMode, [], {
+      returnToDraftOnFailure: false,
+      ...(plan.declineApprovals ? { declineApprovals: plan.declineApprovals } : {})
+    });
     return true;
   };
   const sendExternalTextRef = React.useRef(sendExternalText);
@@ -1419,6 +1494,7 @@ export function ChatComposer({
       // way — from any composer, a reload's re-post included — refuses this one.
       sending: isComposerSending(sessionId),
       hasPendingRequest,
+      pendingRequests,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand,
       showPlanModeToggle,
@@ -1450,7 +1526,12 @@ export function ChatComposer({
         return { ok: true, disposition: "queued" };
       case "send":
         setNotice(null);
-        void runSend(plan.text, interactionMode, []);
+        void runSend(
+          plan.text,
+          interactionMode,
+          [],
+          plan.declineApprovals ? { declineApprovals: plan.declineApprovals } : {}
+        );
         return { ok: true, disposition: "sent" };
     }
   };
@@ -1546,6 +1627,36 @@ export function ChatComposer({
       }
 
       const sentAttachments = draft.attachments;
+      // The card in front of the user decides what this send is: a redirect
+      // over an approval, the open question's answer, or an ordinary send.
+      const pendingPlan =
+        pendingRequests === undefined
+          ? ({ kind: "send" } as const)
+          : planPendingRequestSend({
+              pending: pendingRequests,
+              text: outgoing,
+              attachmentCount: sentAttachments.length,
+              hostParsesGoal: hostGoalCommand
+            });
+      if (pendingPlan.kind === "refuse") {
+        setNotice(pendingPlan.reason);
+        return;
+      }
+      if (pendingPlan.kind === "answer-question") {
+        const answered = answerQuestionFromComposer(sessionId, outgoing);
+        if (answered === null || !answered.ok) {
+          setNotice(answered?.reason ?? PENDING_REQUEST_REASON);
+          return;
+        }
+        // The card took it: the text is an answer now, not a draft.
+        setDraft(EMPTY_DRAFT);
+        carriedContextRef.current = [];
+        persistRef.current?.write(EMPTY_PERSISTED_DRAFT);
+        applyCaret(0);
+        setNotice(null);
+        return;
+      }
+      const declineApprovals = pendingPlan.kind === "redirect" ? pendingPlan.declineApprovals : undefined;
       const disposition = resolveFollowUpDisposition({
         followUpBehavior: chatPrefs.followUpBehavior,
         intent,
@@ -1553,7 +1664,9 @@ export function ChatComposer({
         isRunning: isTurnActive && plan === null,
         // Nor is a `/goal …` the host applies itself (goals §5.1): it starts
         // no turn, so holding it behind the running one only delays it.
-        hostCommand: isHostGoalCommandText(outgoing, hostGoalCommand)
+        hostCommand: isHostGoalCommandText(outgoing, hostGoalCommand),
+        // Nor a redirect: it answers the card the running turn waits on.
+        redirect: declineApprovals !== undefined
       });
 
       revokeImagePreviews(draft.attachments);
@@ -1589,9 +1702,14 @@ export function ChatComposer({
       }
       void runSend(outgoing, outgoingMode, sentAttachments, {
         resolveText: implementationText,
+        // Never ahead of a typed `/compact`: that message is the compaction (`compactsBeforeSend`).
+        ...(compactsBeforeSend({ offered: resumeCompactionTokens !== null, keepFullHistory, text: outgoing })
+          ? { compactFirst: true }
+          : {}),
         // A failure puts the quotes back as quotes and the user's words as
         // they typed them (`runSend`), not the composed blockquotes.
-        ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {})
+        ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {}),
+        ...(declineApprovals !== undefined ? { declineApprovals } : {})
       });
     },
     [
@@ -1605,7 +1723,10 @@ export function ChatComposer({
       hostGoalCommand,
       interactionMode,
       isTurnActive,
+      keepFullHistory,
+      resumeCompactionTokens,
       chatPrefs.followUpBehavior,
+      pendingRequests,
       persistNow,
       reverting,
       runSend,
@@ -1825,6 +1946,39 @@ export function ChatComposer({
       }
     }
 
+    // ArrowUp / ArrowDown walk this chat's sent prompts from an empty
+    // composer, and only from the edge line — otherwise they move the caret.
+    const recallDirection =
+      readRecallItems === undefined
+        ? null
+        : promptRecallDirection({
+            key: event.key,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+            ctrlKey: event.ctrlKey,
+            isComposing: event.nativeEvent.isComposing,
+            menuOpen: showMenu,
+            questionPending: pendingRequests?.hasQuestion === true,
+            draftHasExtras: draft.attachments.length > 0 || draft.quotes.length > 0,
+            caretOnEdge: (edge) => textareaCaretOnEdge(event.currentTarget, edge)
+          });
+    if (recallDirection !== null && readRecallItems !== undefined) {
+      const step = stepPromptRecall({
+        direction: recallDirection,
+        entries: buildPromptRecallEntries(readRecallItems()),
+        position: recallPosition,
+        currentPrompt: draft.text
+      });
+      if (step !== null) {
+        event.preventDefault();
+        setRecallPosition(step.position);
+        setDraft((state) => ({ ...state, text: step.prompt }));
+        applyCaret(step.prompt.length);
+        return;
+      }
+    }
+
     if (event.key === "Escape") {
       // Which of these it is — a held key's repeat, the menu's, an open
       // layer's, the drill-in's, the turn's or half of Esc Esc — is
@@ -1930,7 +2084,8 @@ export function ChatComposer({
       followUpBehavior: chatPrefs.followUpBehavior,
       intent: "foreground",
       isRunning: isTurnActive,
-      hostCommand: isHostGoalCommandText(draft.text, hostGoalCommand)
+      hostCommand: isHostGoalCommandText(draft.text, hostGoalCommand),
+      redirect: (pendingRequests?.approvalIds.length ?? 0) > 0
     }) === "queue";
 
   return (
@@ -2006,7 +2161,8 @@ export function ChatComposer({
             aria-activedescendant={showMenu ? `${menuId}-option-${highlightedIndex}` : undefined}
             aria-autocomplete="list"
             placeholder={
-              isTurnActive
+              pendingWording?.placeholder ??
+              (isTurnActive
                 ? willQueue
                   ? "Queue a follow-up…"
                   : "Steer the agent…"
@@ -2016,9 +2172,13 @@ export function ChatComposer({
                     : "Say what to do with the quotes…"
                   : planTitle
                   ? `Refine “${planTitle}” — or press Implement`
-                  : "Ask, or describe the change…"
+                  : "Ask, or describe the change…")
             }
             onChange={(event) => {
+              // An edited recall is a fresh draft: the arrows are the caret's again.
+              if (recallPosition !== null && recallPosition.recalled !== event.target.value) {
+                setRecallPosition(null);
+              }
               setDraft((state) => ({ ...state, text: event.target.value }));
               setCursor(event.target.selectionStart ?? event.target.value.length);
               if (notice) setNotice(null);
@@ -2044,131 +2204,49 @@ export function ChatComposer({
             <p className="pt-1 text-[11px] leading-snug text-warn-300" role="status">
               {statusText}
             </p>
+          ) : pendingWording ? (
+            <p
+              data-composer-pending-hint="true"
+              className="pt-1 text-[11px] leading-snug text-neutral-500"
+              role="status"
+            >
+              {pendingWording.hint}
+            </p>
           ) : null}
 
           <ComposerLinkChips text={draft.text} projectPath={sessionProjectPath} />
 
           <div className="flex items-end justify-between gap-2 pt-2">
-            <div
-              data-chat-composer-resting-controls="true"
-              className="flex min-w-0 flex-wrap items-center gap-0.5"
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => {
-                  const files = Array.from(event.target.files ?? []);
-                  event.target.value = "";
-                  stageFiles(files);
-                }}
-              />
-              <button
-                type="button"
-                data-composer-shortcut="attach"
-                aria-label="Attach files"
-                title="Attach files"
-                disabled={reverting || draft.attachments.length >= MAX_TURN_ATTACHMENTS}
-                onClick={() => fileInputRef.current?.click()}
-                className={cn(
-                  "ac-press inline-flex h-7 w-7 items-center justify-center rounded-md",
-                  "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-100",
-                  "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-                  "disabled:pointer-events-none disabled:opacity-40"
-                )}
-              >
-                <Paperclip size={14} aria-hidden />
-              </button>
-              {/* The rewind picker — the double Escape's destination (§5.5).
-                  Renders nothing while there is no message to go back to. */}
-              <RewindControl
-                targets={rewindTargets}
-                isTurnActive={isTurnActive}
-                reverting={reverting}
-                hasPendingRequest={hasPendingRequest}
-                isSending={sending}
-                onRewind={onRewind}
-                returnFocusTo={() => textareaRef.current}
-              />
-
-              <ModelChip
-                models={models}
-                selection={modelSelection}
-                selectedModel={selectedModel}
-                disabled={reverting}
-                onChange={applyModelSelectionChange}
-                returnFocusTo={() => textareaRef.current}
-              />
-              {selectDescriptors.map((descriptor) => (
-                <OptionChip
-                  key={descriptor.id}
-                  descriptor={descriptor}
-                  selection={modelSelection}
-                  fallbackModelSlug={selectedModel?.slug ?? ""}
-                  disabled={reverting}
-                  onChange={applyModelSelectionChange}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ))}
-              <RuntimeModeChip
-                mode={runtimeMode}
-                disabled={reverting}
-                onChange={(mode) => {
-                  void actions.setMode({ runtimeMode: mode }).catch((error: unknown) => {
-                    setNotice(
-                      error instanceof Error
-                        ? error.message
-                        : "Could not change the permission mode."
-                    );
-                  });
-                }}
-                returnFocusTo={() => textareaRef.current}
-              />
-              {showPlanModeToggle ? (
-                <PlanChip
-                  interactionMode={interactionMode}
-                  disabled={reverting}
-                  onChange={setPlanMode}
-                />
-              ) : null}
-              {profileChip ? (
-                <ProfileChip
-                  {...profileChip}
-                  canSwitch={profileChip.canSwitch && !reverting}
-                  onChange={(next) => {
-                    void actions.setProfile({ profileId: next }).catch((error: unknown) => {
-                      setNotice(error instanceof Error ? error.message : "Could not switch the profile.");
-                    });
-                  }}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ) : null}
-              {accountLabel ? (
-                <AccountChip
-                  label={accountLabel}
-                  {...(accountOptions ? { options: accountOptions } : {})}
-                  {...(accountId !== undefined ? { selectedId: accountId } : {})}
-                  canSwitch={accountSwitchEnabled === true && !reverting}
-                  disabledReason={accountSwitchRefusal}
-                  {...(accountNote ? { note: accountNote } : {})}
-                  {...(accountOptions
-                    ? {
-                        onChange: (next: string) => {
-                          void actions.setAccount({ accountId: next }).catch((error: unknown) => {
-                            setNotice(
-                              error instanceof Error
-                                ? error.message
-                                : "Could not switch the account."
-                            );
-                          });
-                        }
-                      }
-                    : {})}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ) : null}
-            </div>
+            <ComposerFooterControls
+              reverting={reverting}
+              attachmentsFull={draft.attachments.length >= MAX_TURN_ATTACHMENTS}
+              onPickFiles={stageFiles}
+              rewindTargets={rewindTargets}
+              isTurnActive={isTurnActive}
+              hasPendingRequest={hasPendingRequest}
+              isSending={sending}
+              onRewind={onRewind}
+              returnFocusTo={returnFocusToField}
+              provider={provider}
+              modelSelection={modelSelection}
+              onModelSelectionChange={applyModelSelectionChange}
+              runtimeMode={runtimeMode}
+              showPlanModeToggle={showPlanModeToggle}
+              interactionMode={interactionMode}
+              onPlanModeChange={setPlanMode}
+              profileChip={profileChip}
+              accountLabel={accountLabel}
+              accountOptions={accountOptions}
+              accountId={accountId}
+              accountSwitchEnabled={accountSwitchEnabled}
+              accountSwitchRefusal={accountSwitchRefusal}
+              accountNote={accountNote}
+              resumeCompactionTokens={resumeCompactionTokens}
+              keepFullHistory={keepFullHistory}
+              onToggleFullHistory={toggleFullHistory}
+              actions={actions}
+              onNotice={setNotice}
+            />
 
             <ComposerPrimaryActions
               isRunning={isTurnActive}
@@ -2179,6 +2257,7 @@ export function ChatComposer({
               isSendBusy={sending}
               sendDisabledReason={sendDisabledReason}
               willQueue={willQueue}
+              pendingSendLabel={pendingWording?.sendLabel ?? null}
               onInterrupt={interrupt}
             />
           </div>
@@ -2195,5 +2274,13 @@ export function ChatComposer({
     </div>
   );
 }
+
+/**
+ * Memoised: the chat view re-renders for the thread's own changes (a turn
+ * starting, a usage update), and every prop it hands the composer is held
+ * stable across those, so the composer — its draft, menu and footer — renders
+ * only for what it shows.
+ */
+export const ChatComposer = React.memo(ChatComposerView);
 
 export default ChatComposer;

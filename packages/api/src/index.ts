@@ -65,9 +65,12 @@ import {
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
 export * from "./agent-chat/index.ts";
+export * from "./auth.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
 export * from "./forge-links.ts";
+export * from "./terminal-stream.ts";
+export * from "./changed-file-kind.ts";
 export * from "./secret-files.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";
@@ -81,6 +84,7 @@ export * from "./box-protocol.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
 export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
+export * from "./connection.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -90,12 +94,24 @@ export type {
 
 export interface HealthResponse {
   ok: true;
+  /** `ORQUESTER_SERVICE`; absent on daemons that predate it. */
+  service?: string;
+  /** The daemon's `ORQUESTER_PROTOCOL_VERSION`; absent on daemons that predate it. */
+  protocol?: number;
 }
 
 export interface ServerInfoResponse {
   name: string;
+  /** The running daemon's version (the repository's package.json); null when unreadable. Absent from older daemons. */
+  version?: string | null;
+  /** The git commit the daemon runs (full sha), read once at boot; null when unknown. Absent from older daemons. */
+  commit?: string | null;
   dataDir: string;
   workspacesDir: string;
+  /** The daemon's `ORQUESTER_PROTOCOL_VERSION`; absent on daemons that predate it. */
+  protocol?: number;
+  /** `commit` shortened to 12 characters for display (connection diagnostics); null when unknown. Absent on older daemons. */
+  build?: string | null;
   capabilities: {
     terminals: boolean;
     sessions: boolean;
@@ -179,6 +195,12 @@ export interface ProjectSummary {
    * fresh clone of the same repo. Set with `repoKey`.
    */
   cloneUrl?: string;
+  /**
+   * Only on the answer to a create-project request that cloned (`source: "clone"` /
+   * `"create"`): the transport the clone went over, and a notice when it is not the one it
+   * started on (the SSH key was refused, so it was cloned over HTTPS).
+   */
+  clone?: { transport: "ssh" | "https"; notice?: string };
   /**
    * Set when the project runs in a box (Ephemeral AI VMs plugin, spec
    * 2026-10-19 §8). Absent = this host. For a box project the repo fields above
@@ -1021,6 +1043,38 @@ export interface PushNotifyResponse {
   sent: number;
 }
 
+/**
+ * Every push the daemon sends to Web Push subscribers is also published on the event bus (channel
+ * {@link PUSH_CHANNEL}, type {@link PUSH_NOTIFICATION_EVENT_TYPE}), after the same debounce and rate
+ * limits, so a client that notifies on its own (the desktop app) shows exactly what a phone would.
+ */
+export const PUSH_CHANNEL = "push";
+export const PUSH_NOTIFICATION_EVENT_TYPE = "push.notification";
+
+/** Which push it is: a terminal bell, a structural agent state, an approval card, `notify_user`, or a workflow run. */
+export type PushNotificationKind =
+  | "attention"
+  | "needs-input"
+  | "finished"
+  | "plan-ready"
+  | "approval"
+  | "agent"
+  | "workflow";
+
+/** Payload of `push.notification`: the Web Push payload's text and deep link, plus its kind. */
+export interface PushNotificationEvent {
+  kind: PushNotificationKind;
+  title: string;
+  body: string;
+  /** Replaces an earlier notification with the same tag (`session-<id>`, `workflow-<id>`, `orquester-agent`). */
+  tag: string;
+  /** The session to open on click. */
+  sessionId?: string;
+  /** The workflow run to open on click (`kind: "workflow"`). */
+  workflowId?: string;
+  runId?: string;
+}
+
 // Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent
 // CLI's config that reach THIS daemon's full-trust `/mcp` — denied inside every Orquester chat.
 
@@ -1072,11 +1126,9 @@ export interface DaemonMcpServersResponse {
   servers: DaemonPointingServer[];
 }
 
-/** Public auth metadata for the HTTP transport (no secrets). */
+/** Public auth metadata for the HTTP transport (no secrets). Sign in at `authRoutes.login`. */
 export interface AuthInfoResponse {
   authRequired: boolean;
-  /** bcrypt salt prefix the client uses to derive the bearer hash, or null. */
-  salt: string | null;
   /**
    * Whether the credential also needs a username (UI hint; shows the username
    * field). True when auth is required. The username itself is never returned.
@@ -2057,6 +2109,7 @@ export interface OrquesterApi {
 
 export interface HttpApiClientOptions {
   baseUrl: string;
+  /** The bearer: a session or API token (`authRoutes`), never the password. */
   password?: string;
   fetch?: typeof fetch;
 }

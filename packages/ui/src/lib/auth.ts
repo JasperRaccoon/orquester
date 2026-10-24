@@ -1,94 +1,49 @@
-import bcrypt from "bcryptjs";
+import { isAuthTokenShape } from "@orquester/api";
 
 /**
- * Web auth for the HTTP transport: the daemon stores a bcrypt hash of the
- * password and publishes its salt. The client derives the SAME hash from the
- * typed password + salt and uses it as the bearer — so the plaintext password
- * is never sent nor stored; only the derived hash lives in localStorage.
+ * Remote sign-in, client side. The password goes to the daemon's login route once (over TLS) and
+ * comes back as a session token; only that token is stored, per endpoint. It is revocable on the
+ * daemon (Settings → Server), lapses after 30 idle days, and is useless anywhere else. The client
+ * never keeps the password or anything derived from it.
  */
-export function deriveAuthHash(password: string, salt: string): string {
-  return bcrypt.hashSync(password, salt);
+
+/** A stored or configured bearer, if it can be a token at all (an old build's credential cannot). */
+export function asSessionToken(value: unknown): string | undefined {
+  return isAuthTokenShape(value) ? value : undefined;
 }
 
+const tokenKeyFor = (endpoint: string) => `orquester.session:${endpoint}`;
+/** Older builds kept a bcrypt hash of the password here: a password-equivalent, so it is purged. */
+const legacyHashKeyFor = (endpoint: string) => `orquester.auth:${endpoint}`;
+
 /**
- * Client-side check for the "Protect archived data" curtain: does the typed
- * password match the per-endpoint stored credential hash? A bcrypt hash embeds
- * its own salt, so this is a pure offline compare — nothing crosses the wire
- * and the plaintext never leaves this call.
+ * The endpoint's stored session token, validated: anything that is not token-shaped is dropped
+ * from storage and reads as none. Also purges the endpoint's legacy password-hash entry.
  */
-export function verifyLocalPassword(password: string, storedHash: string): boolean {
+export function loadStoredToken(endpoint: string): string | undefined {
   try {
-    return bcrypt.compareSync(password, storedHash);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The wire credential for the HTTP transport: base64("<username>:<hash>")
- * (HTTP `Authorization: Bearer …` and WS `?token=…`), mirroring HTTP Basic with
- * the derived bcrypt hash standing in for the raw password. The raw password
- * never leaves the client.
- */
-export function buildCredential(username: string, hash: string): string {
-  return btoa(`${username}:${hash}`);
-}
-
-/**
- * Narrow an untrusted string to something `bcrypt.compare` can actually use.
- * Persisted client-side values (localStorage) must never reach typed code
- * unvalidated (repo rule): a stale/garbage cache entry would otherwise shadow a
- * perfectly good live credential and make the archived-data gate permanently
- * unopenable, because bcrypt throws on a non-hash and the caller reads that as
- * "wrong password".
- */
-export function asBcryptHash(value: string | undefined): string | undefined {
-  // bcrypt hashes start with $2a/$2b/$2y — anything else isn't comparable.
-  return typeof value === "string" && value.startsWith("$2") ? value : undefined;
-}
-
-/**
- * Pull the bcrypt hash back out of a wire credential (base64("<user>:<hash>")).
- * The in-memory credential is the authoritative copy — localStorage is only a
- * cache of it (writes are swallowed when storage is unavailable, and a seeded
- * remote carries its credential in remotes.json instead). Used as the fallback
- * source for the offline `verifyLocalPassword` compare so the archived-data
- * curtain still works — and still fails closed when there is no credential.
- */
-export function hashFromCredential(credential: string | undefined): string | undefined {
-  if (!credential) {
-    return undefined;
-  }
-  try {
-    const decoded = atob(credential);
-    const separator = decoded.indexOf(":");
-    return asBcryptHash(separator >= 0 ? decoded.slice(separator + 1) : "");
+    localStorage.removeItem(legacyHashKeyFor(endpoint));
+    const raw = localStorage.getItem(tokenKeyFor(endpoint));
+    const token = asSessionToken(raw);
+    if (raw !== null && token === undefined) localStorage.removeItem(tokenKeyFor(endpoint));
+    return token;
   } catch {
     return undefined;
   }
 }
 
-const keyFor = (endpoint: string) => `orquester.auth:${endpoint}`;
-
-export function loadStoredHash(endpoint: string): string | undefined {
+export function storeToken(endpoint: string, token: string): void {
   try {
-    return localStorage.getItem(keyFor(endpoint)) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-export function storeHash(endpoint: string, hash: string): void {
-  try {
-    localStorage.setItem(keyFor(endpoint), hash);
+    localStorage.setItem(tokenKeyFor(endpoint), token);
   } catch {
     /* storage unavailable */
   }
 }
 
-export function clearStoredHash(endpoint: string): void {
+export function clearStoredToken(endpoint: string): void {
   try {
-    localStorage.removeItem(keyFor(endpoint));
+    localStorage.removeItem(tokenKeyFor(endpoint));
+    localStorage.removeItem(legacyHashKeyFor(endpoint));
   } catch {
     /* storage unavailable */
   }
@@ -96,9 +51,11 @@ export function clearStoredHash(endpoint: string): void {
 
 const usernameKeyFor = (endpoint: string) => `orquester.user:${endpoint}`;
 
+/** The username last signed in with (pre-fills the sign-in form; not a secret). */
 export function loadStoredUsername(endpoint: string): string | undefined {
   try {
-    return localStorage.getItem(usernameKeyFor(endpoint)) ?? undefined;
+    const value = localStorage.getItem(usernameKeyFor(endpoint));
+    return value && value.length <= 200 ? value : undefined;
   } catch {
     return undefined;
   }
@@ -107,14 +64,6 @@ export function loadStoredUsername(endpoint: string): string | undefined {
 export function storeUsername(endpoint: string, username: string): void {
   try {
     localStorage.setItem(usernameKeyFor(endpoint), username);
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-export function clearStoredUsername(endpoint: string): void {
-  try {
-    localStorage.removeItem(usernameKeyFor(endpoint));
   } catch {
     /* storage unavailable */
   }

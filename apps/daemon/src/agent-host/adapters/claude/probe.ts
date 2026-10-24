@@ -62,6 +62,9 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   // `query.stopTask(taskId)`, the `stop_task` control: one task — a workflow
   // run, a subagent, a shell — stopped while the rest keep running.
   supportsTaskStop: true,
+  // A subagent's approval is denied with the user's own words (`canUseTool`'s
+  // deny `message`), so a message over it reaches the Task tool's agent.
+  approvalFeedbackToSubagents: true,
   // A background agent or shell that ends while no turn runs wakes the parent:
   // the CLI streams its reply and the adapter opens a synthetic turn for it.
   wakesOnBackgroundCompletion: true,
@@ -449,11 +452,17 @@ export function pendingClaudeSnapshot(checkedAt: string): ProviderSnapshot {
 export async function buildClaudeWorkspaceSnapshot(input: {
   cwd: string;
   configDir: string;
+  /** The `CLAUDE_CODE_PLUGIN_CACHE_DIR` the CLI sees, when set. */
+  pluginCacheDir?: string;
   checkedAt: string;
   /** The machine-level command list this overlay carries forward. */
   slashCommands?: readonly SlashCommand[];
 }): Promise<WorkspaceSnapshot> {
-  const skills = await discoverClaudeSkills({ configDir: input.configDir, cwd: input.cwd });
+  const skills = await discoverClaudeSkills({
+    configDir: input.configDir,
+    cwd: input.cwd,
+    ...(input.pluginCacheDir !== undefined ? { pluginCacheDir: input.pluginCacheDir } : {})
+  });
   return {
     cwd: input.cwd,
     checkedAt: input.checkedAt,

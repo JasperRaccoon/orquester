@@ -44,9 +44,12 @@ import {
   parseDaemonConfig,
   parseSessionsConfig,
   resolveDaemonPaths,
-  sessionsIndexPath
+  resolveIdleCompaction,
+  sessionsIndexPath,
+  type IdleCompactionMode
 } from "@orquester/config";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
+import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
@@ -427,6 +430,7 @@ export async function startAgentHost(
       }
     },
     leftoverWorkPath: (threadId) => agentChatThreadLeftoverWorkPath(appdir, threadId),
+    idleCompactionMode: (home) => idleCompactionModeFor(appdir, home),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, secretRedactor.redactFrame(threadId, frame)),
     buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry
@@ -454,8 +458,9 @@ export async function startAgentHost(
         // One marker per launch — every call builds one child's env — and
         // never the injectable `uuid()`, whose deterministic test ids two
         // hosts could share. Every adapter's provider and what it starts carry
-        // it, so Settings → System can reach what outlives the provider; only
-        // the Grok adapter sweeps by it (it stamps its own value over this one).
+        // it, so Settings → System can reach what outlives the provider; the
+        // adapters sweep by it at a session's end (Grok stamps its own value over
+        // this one; the others: `support/provider-leftovers.ts`).
         launchId: randomUUID(),
         // Checked per spawn: the plugin can be turned on while the host runs.
         nodePreloadPath: providerNodePreload(appdir)
@@ -1049,6 +1054,22 @@ async function continuationEnabledFor(
     return continueThreadsForProject(config.agents, projectPath);
   } catch {
     return continueThreadsForProject(createDefaultAppConfig().agents, projectPath);
+  }
+}
+
+/**
+ * The idle-compaction mode of a chat on `home` (`resolveIdleCompaction`: its account's override,
+ * else the default), read from `app.json` per call like {@link continuationEnabledFor}: the Claude
+ * resume question is rare, and a change in Settings applies to the next one. An unreadable file
+ * reads as the defaults.
+ */
+async function idleCompactionModeFor(appdir: string, home: AccountHome): Promise<IdleCompactionMode> {
+  const accountKey = home.kind === "account" && home.accountId ? home.accountId : SYSTEM_ACCOUNT_ID;
+  try {
+    const raw = await readFile(appConfigPath(appdir), "utf8");
+    return resolveIdleCompaction(parseAppConfig(JSON.parse(raw) as unknown).agents, accountKey);
+  } catch {
+    return resolveIdleCompaction(createDefaultAppConfig().agents, accountKey);
   }
 }
 

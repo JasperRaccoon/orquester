@@ -95,6 +95,13 @@ import {
   SECRET_REQUEST_EVENT_TYPE,
   SYSTEM_ACCOUNT_ID
 } from "@orquester/api";
+import {
+  DAEMON_EVENTS_CHANNEL,
+  DAEMON_STOPPING_EVENT,
+  ORQUESTER_PROTOCOL_VERSION,
+  ORQUESTER_SERVICE,
+  type DaemonStoppingPayload
+} from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
@@ -102,11 +109,17 @@ import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
 import { registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
+import { registerAuthRoutes } from "./auth/routes.ts";
+import { AuthSessionStore } from "./auth/sessions.ts";
+import { LoginThrottle, clientIp } from "./auth/throttle.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
+import { DailyLogStream } from "./daily-log.ts";
+import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
+import { createSessionStream } from "./session-stream";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
@@ -117,6 +130,7 @@ import { LineageService } from "./agent-chat/lineage.ts";
 import { DelegateStopCascade } from "./agent-chat/delegates.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
+import { ChatIdleCompaction } from "./agent-chat/idle-compaction.ts";
 import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
 import { createCooldownStore } from "./workflows/agent/cooldowns.ts";
 import { realClock } from "./workflows/factory.ts";
@@ -136,7 +150,8 @@ import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRef
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
-import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, authRoutes, type AgentProfileAgentId } from "@orquester/api";
+import { PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE } from "@orquester/api";
 import { SECRET_FILES_CHANGED, SECRET_FILES_CHANNEL, SECRET_FILES_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
@@ -263,6 +278,7 @@ import {
   agentProfileImportsDir,
   agentAccountsFile,
   appConfigPath,
+  authSessionsPath,
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
@@ -272,10 +288,10 @@ import {
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
   createDefaultWorkspacesConfig,
-  dailyLogFile,
   expandVars,
   keysDir,
   parseAppConfig,
+  applyAppConfigUpdate,
   parseDaemonConfig,
   parseRemotesConfig,
   parseWorkspacesConfig,
@@ -309,12 +325,12 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
@@ -520,7 +536,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   await prepareDirs(resolved);
 
-  const logStream = createWriteStream(dailyLogFile(resolved.logsDir), { flags: "a" });
+  const buildInfo = daemonBuildInfo();
+  // Rolled over at local midnight and at its size cap; old days pruned (daily-log.ts).
+  const logStream = new DailyLogStream({ logsDir: () => resolved.logsDir });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
 
   // Shared, transport-agnostic services. Sessions live here so they survive
@@ -595,8 +613,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // than below with the rest) because the agent-chat service needs both, and it
   // in turn has to exist before the session manager, which persists its tab
   // records (chat spec §5.2).
-  const push = new PushService(resolved.pushConfigFile, console);
   const broadcaster = new Broadcaster();
+  // Every push also goes on the event bus: the desktop app shows it as a native notification.
+  const push = new PushService(resolved.pushConfigFile, console, {
+    onNotification: (event) => broadcaster.publish(PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE, event)
+  });
 
   // Chromium resolves through the registry's probed browser entries; no
   // bundled download. Only CDP-speaking (Chromium-family) browsers can drive
@@ -1378,6 +1399,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
   limitRecovery.start();
+  // Idle Claude compaction (`agent-chat/idle-compaction.ts`): each open chat's prompt-cache
+  // candidate (the summary poll) → a `/compact` two minutes before the cache expires, when the
+  // setting says so. Nothing persisted: the first poll after a restart re-arms from the logs.
+  const idleCompaction = new ChatIdleCompaction({
+    chat: agentChat.chat,
+    prefs: async () => (await readAppConfigFile(resolved.appConfigFile)).agents,
+    adapterOf: (refId) => registry.get(refId)?.chat?.adapter ?? null,
+    clock: realClock,
+    logger: console
+  });
+  agentChat.setIdleCompactionListener((threadId, candidate) => idleCompaction.onCandidate(threadId, candidate));
+  idleCompaction.start();
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
@@ -1509,7 +1542,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     },
     logger: console
   });
+  // The remote transport's sessions and API tokens. Bound to the password at boot: a hash changed
+  // while the daemon was down (a hand edit, `deploy.sh rotate-password`) signs every device out.
+  const authSessions = new AuthSessionStore({ file: authSessionsPath(paths.baseDir), logger: console });
+  await authSessions.load();
+  await authSessions.syncPassword(config.transports.http.passwordHash);
   const services: Services = {
+    buildInfo,
+    authSessions,
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
@@ -1522,6 +1562,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     limitRecovery,
+    idleCompaction,
     delegateStops,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready(),
@@ -1668,6 +1709,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   await replies.load();
   lineage.setDeliveryListener(replies);
+  delegateStops.setListener(replies);
   registerReplySubscriptionRoutes(unixServer, {
     replies: () => replies,
     isChatSession: (id) => agentChat.chat.has(id)
@@ -1700,6 +1742,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the in-process API just made. Before the boot manifest refresh below, so chats see its collections.
   await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
   limitRecovery.attachApi(services.internalApi);
+  idleCompaction.attachApi(services.internalApi);
   delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
   // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
@@ -1729,6 +1772,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the daemon, sessions (PTYs) and the unix transport keep running. Connected
   // clients are dropped and reconnect (re-authenticating on a password change).
   let httpServer: FastifyInstance | null = null;
+  const publishDaemonStopping = (reason: DaemonStoppingPayload["reason"]): void => {
+    broadcaster.publish(DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT, { reason } satisfies DaemonStoppingPayload);
+  };
   const startHttp = async () => {
     if (!config.transports.http.enabled) {
       return;
@@ -1757,6 +1803,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   };
   services.reloadHttp = async () => {
+    // Clients on the remote transport learn why their connection is about to drop.
+    publishDaemonStopping("http-restart");
     await stopHttp();
     try {
       await startHttp();
@@ -1772,6 +1820,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
 
   const stop = async () => {
+    // First, while the event streams still flow: clients show "restarting"
+    // instead of a bare network error for the gap that follows.
+    publishDaemonStopping("shutdown");
     usage.stop();
     clearTimeout(liveRecompute);
     await usageState.flush();
@@ -1811,6 +1862,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     delegateStops.stop();
     await lineage.stop();
     limitRecovery.stop();
+    idleCompaction.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
     // (PERMISSION_DENIED). Then pending cards end `cancelled`
@@ -1837,6 +1889,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
+    await logStream.close();
     await agentProfileStopped;
     // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit;
     // the same for the knowledge base's last writes.
@@ -1851,7 +1904,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     clearTimeout(secretFilesBound);
   };
 
-  console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+  const running = buildInfo.commit ? ` ${buildInfo.version ?? "?"} (${buildInfo.commit.slice(0, 12)})` : "";
+  console.log(`Orquester daemon${running} ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
 
   return {
     daemonId,
@@ -1892,6 +1946,8 @@ export function buildAgentLaunchEnv(
 const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
 interface Services {
+  /** The version and commit this daemon runs, read once at boot (build-info.ts). */
+  buildInfo: BuildInfo;
   registry: RegistryService;
   sessions: ISessionManager;
   /** The Grok and Codex accounts' device-code links (Settings → Accounts). */
@@ -1987,6 +2043,8 @@ interface Services {
   lineage?: LineageService;
   /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
   limitRecovery?: ChatLimitRecovery;
+  /** Idle Claude compaction. Optional: route-level tests build a partial `services`. */
+  idleCompaction?: ChatIdleCompaction;
   /**
    * The delegate stop cascade (`agent-chat/delegates.ts`): the command routes report every
    * accepted interrupt and stop to it. Optional: route-level tests build a partial `services`.
@@ -1994,6 +2052,11 @@ interface Services {
   delegateStops?: DelegateStopCascade;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
+  /**
+   * The remote transport's login sessions and API tokens (`auth/sessions.ts`). Optional: route
+   * tests build a partial `services` (each app then gets an empty in-memory store).
+   */
+  authSessions?: AuthSessionStore;
   // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
   // (route tests). Read per request.
   boxRegistry?: BoxRegistry;
@@ -2005,7 +2068,7 @@ export function createServer(
   config: DaemonConfig,
   resolved: ResolvedPaths,
   clientConfig: ClientConfig,
-  logStream: WriteStream,
+  logStream: { write(line: string): void },
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
@@ -2038,6 +2101,71 @@ export function createServer(
   });
 
   const throttle = new LoginThrottle();
+  // Password guesses (login, verify) have their own count: a valid bearer's success on the same
+  // IP must not reset it.
+  const passwordThrottle = new LoginThrottle();
+  const authSessions = services.authSessions ?? new AuthSessionStore();
+
+  // Open streams (event stream, WebSockets) by the session that authenticated them: a request
+  // re-checks its bearer every time, but a stream outlives that check, so revoking a session
+  // closes its streams too.
+  const liveStreams = new Map<string, Set<() => void>>();
+  const trackStream = (sessionId: string, close: () => void): (() => void) => {
+    const set = liveStreams.get(sessionId) ?? new Set<() => void>();
+    set.add(close);
+    liveStreams.set(sessionId, set);
+    return () => {
+      set.delete(close);
+      if (set.size === 0 && liveStreams.get(sessionId) === set) liveStreams.delete(sessionId);
+    };
+  };
+  const stopRevokeWatch = authSessions.onRevoked((ids) => {
+    for (const id of ids) {
+      const closers = liveStreams.get(id);
+      liveStreams.delete(id);
+      for (const close of closers ?? []) close();
+    }
+  });
+  app.addHook("onClose", async () => stopRevokeWatch());
+  /**
+   * The `?token=` check of a WebSocket route: true when auth is off or the token is a live session
+   * (the socket is then closed if that session is revoked).
+   */
+  const authorizeSocket = (token: string | undefined, socket: { close(code?: number, reason?: string): void; once(event: "close", listener: () => void): unknown }): boolean => {
+    if (!options.authRequired) return true;
+    const session = authSessions.verify(token);
+    if (!session) return false;
+    socket.once("close", trackStream(session.id, () => socket.close(1008, "unauthorized")));
+    return true;
+  };
+
+  /**
+   * Tie a gated request's response to its session: revoking the session destroys a response that
+   * is already streaming (a hijacked NDJSON stream — events, chat events, terminal output, MCP — or
+   * a streamed download). One still being computed is left to finish (a logout's own reply), but if
+   * it hijacks afterwards — a stream that opens after a wait — it is destroyed then. Every route
+   * behind the bearer hook gets this, so no streaming route has to remember to register itself.
+   */
+  const endOnRevoke = (sessionId: string, reply: FastifyReply): void => {
+    let revoked = false;
+    const streaming = (): boolean => reply.sent || reply.raw.headersSent;
+    const end = (): void => {
+      if (!reply.raw.writableEnded) reply.raw.destroy();
+    };
+    const untrack = trackStream(sessionId, () => {
+      if (streaming()) end();
+      else revoked = true;
+    });
+    reply.raw.once("close", untrack);
+    const hijack = reply.hijack.bind(reply);
+    reply.hijack = () => {
+      const result = hijack();
+      if (revoked) queueMicrotask(end);
+      return result;
+    };
+  };
+
+  app.decorateRequest("authSession", null);
 
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
@@ -2066,14 +2194,15 @@ export function createServer(
     }
 
     // Only the API + event stream are token-gated; the static web client, its
-    // assets and the public auth-info endpoint load freely (the web app then
-    // authenticates its API calls with the credential bearer).
+    // assets and the public auth info and login endpoints load freely (the web
+    // app then authenticates its API calls with its session token).
     const decodedPath = safeDecodePath(rawPath);
     const url = routePath ?? decodedPath ?? rawPath;
     const gated = (path: string | undefined): boolean =>
       path !== undefined &&
       (path.startsWith("/api") || path.startsWith("/events") || path.startsWith("/mcp")) &&
-      path !== "/api/auth/info";
+      path !== authRoutes.info &&
+      path !== authRoutes.login;
     // A path that does not even decode is refused unless authenticated.
     const needsAuth = decodedPath === undefined || gated(rawPath) || gated(decodedPath) || gated(routePath);
     if (!options.authRequired || !needsAuth) {
@@ -2091,17 +2220,14 @@ export function createServer(
     }
 
     // A browser download navigation (<a download>) can't set an Authorization
-    // header, so /api/fs/download also accepts the credential as ?token= — the
+    // header, so /api/fs/download also accepts the token as ?token= — the
     // same trick /ws uses. Scoped to this one route; the token is redacted from
-    // logs by the request serializer above.
+    // logs by the request serializer above. Only a live session or API token
+    // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
     const queryToken = url === "/api/fs/download" ? (request.query as { token?: string }).token : undefined;
-    const authorized = authorizeCredential(
-      headerToken ?? queryToken,
-      config.transports.http.username,
-      config.transports.http.passwordHash
-    );
-    if (!authorized) {
+    const session = authSessions.verify(headerToken ?? queryToken);
+    if (!session) {
       throttle.recordFailure(ip);
       return reply.code(401).send({
         code: "UNAUTHORIZED",
@@ -2109,6 +2235,8 @@ export function createServer(
       });
     }
     throttle.recordSuccess(ip);
+    request.authSession = session;
+    endOnRevoke(session.id, reply);
   });
 
   // umcp:t2 begin — principals (unified MCP design 2026-10-15; `@orquester/api` principal.ts).
@@ -2120,28 +2248,34 @@ export function createServer(
   if (options.mode === "remote") registerRemoteFieldStripping(app);
   // umcp:t2 end
 
-  // Public: tells the web client whether auth is needed and the bcrypt salt to
-  // derive the bearer (the same hash the daemon stores). Never exposes the hash
-  // OR the username — only whether a username is required.
-  app.get("/api/auth/info", async () => {
-    const authRequired = options.mode === "remote" && Boolean(config.transports.http.passwordHash);
-    return {
-      authRequired,
-      salt: config.transports.http.passwordHash
-        ? config.transports.http.passwordHash.slice(0, 29)
-        : null,
-      requiresUsername: authRequired
-    };
+  // Public `info` (whether auth is needed — never the hash, a salt or the username) and `login`;
+  // the session and token management routes behind the bearer hook (auth/routes.ts).
+  registerAuthRoutes(app, {
+    mode: options.mode,
+    store: authSessions,
+    passwordThrottle,
+    credentials: () => ({ username: config.transports.http.username, passwordHash: config.transports.http.passwordHash })
   });
 
   // Public liveness only. Daemon id / version / mode / transports are not
   // disclosed to unauthenticated callers (moved behind /api/info, which is gated).
-  app.get("/health", async (): Promise<HealthResponse> => ({ ok: true }));
+  // The service marker and the wire protocol generation are: the web client is
+  // served from here anyway, and a client must tell "not an Orquester daemon"
+  // and "incompatible protocol" from "unreachable" before it signs in.
+  app.get("/health", async (): Promise<HealthResponse> => ({
+    ok: true,
+    service: ORQUESTER_SERVICE,
+    protocol: ORQUESTER_PROTOCOL_VERSION
+  }));
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
+    version: services.buildInfo.version,
+    commit: services.buildInfo.commit,
     dataDir: resolved.daemonDir,
     workspacesDir: resolved.workspacesDir,
+    protocol: ORQUESTER_PROTOCOL_VERSION,
+    build: services.buildInfo.commit?.slice(0, 12) ?? null,
     capabilities: {
       terminals: true,
       sessions: true,
@@ -2238,6 +2372,8 @@ export function createServer(
       return reply.code(400).send({ code: outcome.code, message: outcome.message });
     }
     const merged = outcome.merged;
+    // A new password signs every device out; API tokens stay (auth/sessions.ts).
+    await authSessions.syncPassword(merged.transports.http.passwordHash);
     resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
     resolved.fsRoot = merged.transports.http.fsRoot
       ? expandVars(merged.transports.http.fsRoot, resolved.vars)
@@ -2639,7 +2775,7 @@ export function createServer(
             return reply.code(400).send({ code: "INVALID_REF", message: refProblem });
           }
           await mkdir(workspaceDir, { recursive: true });
-          const { name } = await accounts.cloneFromInput(
+          const { name, transport, notice } = await accounts.cloneFromInput(
             accountId,
             body.url,
             preferredName,
@@ -2656,7 +2792,13 @@ export function createServer(
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
           // A clone of a repo with a secret-files vault gets its files before this answers (never throws).
           await services.secretFiles?.notifyProjectCreated(join(workspaceDir, name));
-          return { name, workspace, path: join(workspaceDir, name), isArchived: false };
+          return {
+            name,
+            workspace,
+            path: join(workspaceDir, name),
+            isArchived: false,
+            clone: { transport, ...(notice ? { notice } : {}) }
+          };
         }
 
         if (body.source === "create") {
@@ -2678,10 +2820,10 @@ export function createServer(
             ...(body.description ? { description: body.description } : {})
           });
           await mkdir(workspaceDir, { recursive: true });
-          await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
+          const clone = await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
           await services.secretFiles?.notifyProjectCreated(path);
-          return { name, workspace, path, isArchived: false };
+          return { name, workspace, path, isArchived: false, clone };
         }
 
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "Unknown project source." });
@@ -2818,9 +2960,18 @@ export function createServer(
 
   app.put("/api/config/app", async (request, reply): Promise<AppConfig | void> => {
     const current = await readAppConfigFile(resolved.appConfigFile);
+    // The file as written, unknown fields included; a missing or unreadable one is the defaults.
+    let raw: unknown = current;
     try {
-      const merged = parseAppConfig({ ...current, ...((request.body as object) ?? {}) });
-      await writeJsonFile(resolved.appConfigFile, merged);
+      raw = JSON.parse(await readFile(resolved.appConfigFile, "utf8")) as unknown;
+    } catch {
+      raw = current;
+    }
+    try {
+      // Field-wise per group, keeping what this build or the client does not know
+      // (`applyAppConfigUpdate`): an older client's `{agents}` lacks newer fields.
+      const { config: merged, stored } = applyAppConfigUpdate(raw, request.body);
+      await writeJsonFile(resolved.appConfigFile, stored);
       // A usage-limit setting moved: armed chats follow at once (off disarms, on re-arms).
       if (
         merged.agents.autoResumeLimitedChats !== current.agents.autoResumeLimitedChats ||
@@ -2830,6 +2981,14 @@ export function createServer(
           autoResume: merged.agents.autoResumeLimitedChats,
           switchAccount: merged.agents.switchAccountOnUsageLimit
         });
+      }
+      // The idle-compaction setting moved: armed chats follow at once (off cancels, on arms).
+      if (
+        merged.agents.claudeIdleCompaction !== current.agents.claudeIdleCompaction ||
+        JSON.stringify(merged.agents.claudeIdleCompactionByAccount) !==
+          JSON.stringify(current.agents.claudeIdleCompactionByAccount)
+      ) {
+        services.idleCompaction?.prefsChanged();
       }
       return merged;
     } catch {
@@ -4205,7 +4364,8 @@ export function createServer(
   if (agentChatDeps) {
     registerAgentChatRoutes(app, {
       ...agentChatDeps,
-      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body)
+      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body),
+      beforeStopCommand: (id, command, body) => services.delegateStops?.commandRequested(id, command, body) ?? (() => undefined)
     });
     // Thread lineage (spec 2026-10-14 §6): fork, merge back, the lineage read.
     registerLineageRoutes(app, {
@@ -4786,7 +4946,8 @@ export function createServer(
     mode: options.mode,
     detector: new DaemonMcpDetector(
       {
-        verifyBearer: (token) => authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+        // A peek: finding a token in a config file is not a use of it.
+        verifyBearer: (token) => authSessions.verify(token, false) !== null,
         httpPort: () => config.transports.http.port,
         // No public origin is configured anywhere: a proxied URL is caught by its bearer.
         publicOrigins: () => [],
@@ -4905,6 +5066,8 @@ export function createServer(
       sink.send(JSON.stringify(event));
     }, 15_000);
 
+    // Revoking the session that opened this stream destroys it (the bearer hook's endOnRevoke);
+    // the close below cleans up then too.
     request.raw.on("close", () => {
       clearInterval(timer);
       services.broadcaster.remove(sink);
@@ -4935,121 +5098,15 @@ export function createServer(
   services.boxWiring?.registerRoutes(app, options.mode);
   void app.register(async (instance) => {
     instance.get("/ws", { websocket: true }, (socket, request) => {
-      if (options.authRequired) {
-        const token = (request.query as { token?: string }).token;
-        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-          socket.close(1008, "unauthorized");
-          return;
-        }
+      if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+        socket.close(1008, "unauthorized");
+        return;
       }
 
-      const subs = new Map<string, () => void>();
-      // Ids whose sub-time scrollback was captured before the client reported its
-      // real terminal size; re-sent once on the first resize after the sub so an
-      // alt-screen grid that was captured at the wrong width arrives un-wrapped.
-      const resyncPending = new Set<string>();
-      const send = (msg: unknown) => {
-        try {
-          socket.send(JSON.stringify(msg));
-        } catch {
-          /* socket closing */
-        }
-      };
-
-      socket.on("message", async (raw) => {
-        let msg: { t?: string; id?: string; data?: string; cols?: number; rows?: number };
-        try {
-          msg = JSON.parse(raw.toString());
-        } catch {
-          return;
-        }
-        // Liveness probe: mobile browsers kill a backgrounded tab's socket
-        // without a close frame, so the client pings on wake and treats a
-        // missing pong as a dead socket (see WsSessionChannel.wake).
-        if (msg.t === "ping") {
-          send({ t: "pong" });
-          return;
-        }
-        const id = msg.id;
-        if (!id) {
-          return;
-        }
-        if (msg.t === "sub") {
-          const summary = sessions.get(id);
-          if (!summary) {
-            send({ t: "end", id });
-            return;
-          }
-          // Cancel any prior subscription and reserve this id's slot SYNCHRONOUSLY
-          // with a unique placeholder before the await below. `ws` drains queued
-          // frames into this async handler at each await point, so a back-to-back
-          // `unsub` (fast tab close, or a strict-mode dev double-mount — see
-          // WsSessionChannel.openOutput/close) runs DURING this await. Reserving the
-          // slot lets that unsub remove it, and the identity check after the await
-          // lets the unsub — or a newer sub — win instead of installing an emitter
-          // listener the client already cancelled (which would leak and keep
-          // streaming output for a closed stream).
-          subs.get(id)?.();
-          const pending = () => {};
-          subs.set(id, pending);
-          send({ t: "out", id, data: await sessions.scrollback(id) });
-          // A racing unsub (or a newer sub) replaced our placeholder while we
-          // awaited — honor it and do not install the subscription.
-          if (subs.get(id) !== pending) {
-            return;
-          }
-          // Re-read the LIVE status after the await — the pre-await `summary` is a
-          // clone and can't reflect a transition during scrollback(). If the
-          // command exited (or the session was closed) while capture-pane was in
-          // flight, the attach PTY's onExit already emitted "exit" with no
-          // subscriber, so subscribing now would never deliver an end and the
-          // client's terminal pane would hang open. Send end + drop the slot.
-          const current = sessions.get(id);
-          if (!current || current.status === "exited") {
-            subs.delete(id);
-            send({ t: "end", id });
-            return;
-          }
-          subs.set(
-            id,
-            sessions.subscribe(
-              id,
-              (data) => send({ t: "out", id, data }),
-              () => send({ t: "end", id })
-            )
-          );
-          resyncPending.add(id);
-        } else if (msg.t === "unsub") {
-          subs.get(id)?.();
-          subs.delete(id);
-          resyncPending.delete(id);
-        } else if (msg.t === "input" && typeof msg.data === "string") {
-          sessions.input(id, msg.data);
-        } else if (msg.t === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
-          sessions.resize(id, msg.cols, msg.rows);
-          // The first resize after a sub is the client's REAL terminal size. The
-          // sub-time scrollback was captured before the client fit (often at the
-          // 80-col default), so an alt-screen TUI grid landed wrapped/garbled. Now
-          // the pane matches the client: re-capture at the correct width and re-send,
-          // once. The brief wait lets tmux apply the resize (SIGWINCH → window
-          // resize) before we snapshot. Reliable regardless of whether the agent
-          // emits more output — an idle agent would otherwise stay garbled.
-          if (resyncPending.delete(id)) {
-            await new Promise((resolve) => setTimeout(resolve, 80));
-            if (subs.has(id)) {
-              send({ t: "out", id, data: await sessions.scrollback(id) });
-            }
-          }
-        }
-      });
-
-      socket.on("close", () => {
-        for (const unsub of subs.values()) {
-          unsub();
-        }
-        subs.clear();
-        resyncPending.clear();
-      });
+      // Subscriptions, backpressure and resyncs live in session-stream.ts.
+      const stream = createSessionStream(socket, sessions);
+      socket.on("message", (raw) => void stream.onMessage(raw.toString()));
+      socket.on("close", () => stream.onClose());
     });
   });
 
@@ -5057,12 +5114,9 @@ export function createServer(
   // /ws so the terminal channel's text-only fast path is untouched.
   void app.register(async (instance) => {
     instance.get("/ws-browser", { websocket: true }, (socket, request) => {
-      if (options.authRequired) {
-        const token = (request.query as { token?: string }).token;
-        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-          socket.close(1008, "unauthorized");
-          return;
-        }
+      if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+        socket.close(1008, "unauthorized");
+        return;
       }
 
       const subs = new Map<string, () => void>();
@@ -5157,9 +5211,7 @@ export function createServer(
   // context like /ws-browser; `?token=` is checked after the upgrade (1008).
   void app.register(async (instance) => {
     await registerDesktopWsRoutes(instance, {
-      authorize: (token) =>
-        !options.authRequired ||
-        authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+      authorize: (token, socket) => authorizeSocket(token, socket),
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
       // boxes: a VM desktop's RFB socket is reached through its box link.
       vncStream: (id) => services.desktops.vncStream(id),
@@ -5181,12 +5233,9 @@ export function createServer(
         "/ws-devtools/:browserId",
         { websocket: true },
         (socket, request) => {
-          if (options.authRequired) {
-            const token = (request.query as { token?: string }).token;
-            if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-              socket.close(1008, "unauthorized");
-              return;
-            }
+          if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+            socket.close(1008, "unauthorized");
+            return;
           }
 
           // CDP is stateful → never drop frames; PAUSE/RESUME on a high-water
@@ -5850,59 +5899,6 @@ function safeDecodePath(path: string): string | undefined {
 }
 
 /**
- * Decode a credential bearer/token of the form base64("<username>:<hash>").
- * Splits on the FIRST ":" (a bcrypt hash contains no ":", but be defensive).
- * Returns empty strings when the input is missing or not valid base64 — the
- * caller still runs the full constant-time check so a malformed credential is
- * indistinguishable from a wrong one.
- */
-function decodeCredential(token: string | undefined): { user: string; hash: string } {
-  if (!token) {
-    return { user: "", hash: "" };
-  }
-  let decoded: string;
-  try {
-    decoded = Buffer.from(token, "base64").toString("utf8");
-  } catch {
-    return { user: "", hash: "" };
-  }
-  const sep = decoded.indexOf(":");
-  if (sep === -1) {
-    return { user: "", hash: "" };
-  }
-  return { user: decoded.slice(0, sep), hash: decoded.slice(sep + 1) };
-}
-
-/** Normalize a username for comparison (matches the config-side transform). */
-function normalizeUsername(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-/** Fixed-length sha256 digest so timingSafeEqual gets equal-length buffers. */
-function sha256(value: string): Buffer {
-  return createHash("sha256").update(value).digest();
-}
-
-/**
- * Constant-time credential check with NO early return: both the username and
- * the password-hash comparisons are always computed, so wrong-username,
- * wrong-length and wrong-password are indistinguishable (no enumeration).
- */
-function authorizeCredential(
-  token: string | undefined,
-  expectedUsername: string,
-  expectedHash: string | undefined
-): boolean {
-  if (!expectedHash) {
-    return false;
-  }
-  const { user, hash } = decodeCredential(token);
-  const userOk = timingSafeEqual(sha256(normalizeUsername(user)), sha256(expectedUsername));
-  const passOk = timingSafeEqual(sha256(hash), sha256(expectedHash));
-  return userOk && passOk;
-}
-
-/**
  * Migrate a legacy/env plaintext `password` into a bcrypt `passwordHash` and
  * drop the plaintext. Returns true when the config changed (needs persisting).
  */
@@ -5970,9 +5966,9 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
-  // Never expose credential material over the wire. The hash is a
-  // bearer-equivalent (the client derives its own via the public salt at
-  // /api/auth/info), and the username is deliberately withheld too — same
+  // Never expose credential material over the wire. The hash is no bearer
+  // (only session tokens are, auth/sessions.ts) but it is an offline-crackable
+  // copy of the password, and the username is deliberately withheld too — same
   // invariant as /api/auth/info, which only reports `requiresUsername`, never
   // the username itself. Both are masked with the same sentinel the schema
   // accepts as a string; the fsRoot (sandbox root path) is server-internal.
@@ -5994,118 +5990,4 @@ function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-/**
- * Per-IP failed-login throttle with escalating lockout. Single-user, so real
- * failures are rare: 5 fails within the window → locked out, with the lockout
- * doubling on each subsequent breach (15 min, 30, 60 … capped). Keyed on the
- * proxy-supplied client IP (X-Forwarded-For); this is defense-in-depth on top
- * of fail2ban (OS-layer ban on the daemon's 401 log lines, Phase 0).
- */
-class LoginThrottle {
-  private readonly state = new Map<
-    string,
-    { fails: number; lockedUntil: number; strikes: number; burstStartAt: number }
-  >();
-  private static readonly MAX_FAILS = 5;
-  private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
-  private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
-  // One login attempt fans out into several authenticated requests (workspaces,
-  // sessions, registry, events, …), so a single wrong password yields a burst of
-  // near-simultaneous 401s. Collapse failures within this window into ONE counted
-  // attempt so a lone typo can't trip the lockout instantly.
-  private static readonly BURST_WINDOW_MS = 2000;
-  // Bound the per-IP map: only sweep once it grows past this, then drop entries
-  // that are neither locked nor part of a recent burst.
-  private static readonly PRUNE_THRESHOLD = 1024;
-  private static readonly STALE_AFTER_MS = 10 * 60 * 1000;
-
-  /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
-  retryAfterMs(ip: string): number {
-    const entry = this.state.get(ip);
-    if (!entry || entry.lockedUntil <= Date.now()) {
-      return 0;
-    }
-    return entry.lockedUntil - Date.now();
-  }
-
-  /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
-  recordFailure(ip: string): void {
-    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, burstStartAt: 0 };
-    const now = Date.now();
-    this.prune(now);
-    // Burst collapse: failures arriving within BURST_WINDOW_MS of the FIRST failure
-    // of the current burst belong to one login attempt's fan-out (or a rapid
-    // auto-reconnect), so they don't count. The window is anchored to that first
-    // failure and is NEVER refreshed — otherwise a sustained stream of guesses
-    // (even 1/sec) would keep the window alive forever and pin `fails` at 1, so the
-    // IP would never lock. Anchoring lets a real fan-out collapse to one strike
-    // while a continuous attack advances ~one strike per BURST_WINDOW_MS.
-    if (entry.fails > 0 && now - entry.burstStartAt < LoginThrottle.BURST_WINDOW_MS) {
-      this.state.set(ip, entry);
-      return;
-    }
-    entry.burstStartAt = now;
-    entry.fails += 1;
-    if (entry.fails >= LoginThrottle.MAX_FAILS) {
-      const lockout = Math.min(
-        LoginThrottle.BASE_LOCKOUT_MS * 2 ** entry.strikes,
-        LoginThrottle.MAX_LOCKOUT_MS
-      );
-      entry.lockedUntil = Date.now() + lockout;
-      entry.strikes += 1;
-      entry.fails = 0;
-    }
-    this.state.set(ip, entry);
-  }
-
-  // Opportunistic eviction so a distinct-IP spray can't grow `state` without
-  // bound: entries that are neither locked nor mid-burst carry no useful state.
-  // Cheap by default; sweeps the whole map only once it gets large.
-  private prune(now: number): void {
-    if (this.state.size <= LoginThrottle.PRUNE_THRESHOLD) {
-      return;
-    }
-    for (const [ip, entry] of this.state) {
-      if (entry.lockedUntil <= now && now - entry.burstStartAt > LoginThrottle.STALE_AFTER_MS) {
-        this.state.delete(ip);
-      }
-    }
-  }
-
-  /** Clear an IP's failure count after a successful auth. */
-  recordSuccess(ip: string): void {
-    this.state.delete(ip);
-  }
-}
-
-/**
- * Client IP used to key the login throttle.
- *
- * TRUSTED-HOP ASSUMPTION: exactly ONE trusted proxy (Caddy) fronts the daemon on
- * loopback. Caddy's default `reverse_proxy` APPENDS the real client IP to whatever
- * the client sent, so `X-Forwarded-For` is `<client-supplied…>, <real-client-ip>`
- * — the entry we trust is the RIGHTMOST one (the hop Caddy added), never the
- * leftmost (which is fully attacker-controlled and would let an attacker rotate it
- * per request to evade the per-IP throttle).
- *
- * With `trustProxy: "127.0.0.1"` set on the remote Fastify instance, proxy-addr
- * already computes exactly this (request.ip = closest untrusted address = the
- * rightmost XFF hop), so request.ip is authoritative; the manual rightmost parse
- * below is a belt-and-suspenders fallback that still refuses the client-controlled
- * leftmost value. If the deployment ever inserts more than one proxy hop, both
- * trustProxy and this helper must be updated together.
- */
-function clientIp(request: { headers: Record<string, unknown>; ip: string }): string {
-  if (request.ip) {
-    return request.ip;
-  }
-  const xff = request.headers["x-forwarded-for"];
-  const raw = Array.isArray(xff) ? xff[xff.length - 1] : xff;
-  if (typeof raw === "string" && raw.length > 0) {
-    const parts = raw.split(",");
-    return parts[parts.length - 1]!.trim();
-  }
-  return request.ip;
 }

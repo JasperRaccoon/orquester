@@ -32,6 +32,7 @@ import type {
   CheckpointFile,
   CheckpointStatus,
   ThreadActivityItem,
+  ThreadMessageSentBy,
   ThreadMessageRole,
   ThreadSessionState,
   TurnState
@@ -166,6 +167,8 @@ export interface ThreadMessageSentPayload {
   messageKind?: "answer" | "commentary";
   /** `ThreadMessageItem.interactionMode`: a user message's own interaction mode, when the host records it. */
   interactionMode?: InteractionMode;
+  /** `ThreadMessageItem.sentBy`: who sent a user message nobody typed. */
+  sentBy?: ThreadMessageSentBy;
 }
 
 export interface ThreadTurnStartRequestedPayload {

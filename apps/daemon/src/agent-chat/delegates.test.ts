@@ -117,6 +117,56 @@ function tree(): SessionSummary[] {
 }
 
 describe("the delegate stop cascade", () => {
+  it("tells the reply router every delegate link of the stopped tree before any interrupt — even with nothing left to interrupt", async () => {
+    const w = world(tree());
+    const heard: Array<{ links: string[]; interruptsBefore: number }> = [];
+    w.cascade.setListener({
+      async delegatesStopped(links) {
+        heard.push({ links: links.map((link) => `${link.parentId}>${link.childId}`).sort(), interruptsBefore: w.interrupts.length });
+      }
+    });
+    w.cascade.commandAccepted("root", "interrupt", { commandId: "c1" });
+    await w.cascade.whenIdle();
+    assert.deepEqual(heard, [{ links: ["a>a1", "b>b1", "root>a", "root>b"], interruptsBefore: 0 }], "forks and opened chats are not followed");
+    assert.deepEqual(w.interrupted(), ["a", "a1", "b1"]);
+    // Every delegate finished: no interrupt, but the router still hears the stop (replies may be waiting).
+    const idleTree = world([tab("root", null, RUNNING), tab("d", { parentThreadId: "root" }, DONE)]);
+    const idleHeard: string[] = [];
+    idleTree.cascade.setListener({ async delegatesStopped(links) { idleHeard.push(...links.map((link) => link.childId)); } });
+    idleTree.cascade.commandAccepted("root", "session/stop", { commandId: "c2" });
+    await idleTree.cascade.whenIdle();
+    assert.deepEqual(idleHeard, ["d"]);
+    assert.deepEqual(idleTree.interrupted(), []);
+    // The cascade's own interrupts and housekeeping ones start nothing.
+    idleTree.cascade.commandAccepted("root", "interrupt", { commandId: "c3", cascade: false });
+    await idleTree.cascade.whenIdle();
+    assert.deepEqual(idleHeard, ["d"]);
+  });
+
+  it("holds replies to a chat while its stop is on the way, never for the cascade's own interrupts", () => {
+    const w = world(tree());
+    const log: string[] = [];
+    w.cascade.setListener({
+      delegatesStopped: async () => undefined,
+      stopRequested: (id) => log.push(`hold ${id}`),
+      stopResolved: (id) => log.push(`release ${id}`)
+    });
+    const done = w.cascade.commandRequested("root", "interrupt", { commandId: "c1" });
+    done();
+    done();
+    w.cascade.commandRequested("a", "interrupt", { commandId: "c2", cause: { kind: "parent-stopped", parentSessionId: "root", parentTitle: "", action: "interrupted" } })();
+    w.cascade.commandRequested("a", "interrupt", { commandId: "c3", cascade: false })();
+    assert.deepEqual(log, ["hold root", "release root"], "released once; cascaded and housekeeping interrupts hold nothing");
+  });
+
+  it("a router that fails to record the stop never keeps the children running", async () => {
+    const w = world(tree());
+    w.cascade.setListener({ delegatesStopped: async () => { throw new Error("disk full"); } });
+    w.cascade.commandAccepted("root", "interrupt", { commandId: "c1" });
+    await w.cascade.whenIdle();
+    assert.deepEqual(w.interrupted(), ["a", "a1", "b1"]);
+  });
+
   it("walks delegate links only, every depth, each chat once", () => {
     assert.deepEqual(
       delegateDescendants(tree(), "root").map((s) => s.id),

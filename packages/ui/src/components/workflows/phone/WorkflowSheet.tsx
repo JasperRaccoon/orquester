@@ -19,7 +19,7 @@ import { useOpenLayer } from "../../../hooks/use-open-layer";
 import { cn } from "../../../lib/cn";
 import { openTrackedLayer } from "../../../lib/open-layers";
 import { KEYBOARD_SURFACE_PROPS } from "../../../lib/keyboard-surfaces";
-import { pushBackClose } from "./back-close";
+import { pushBackClose } from "../../../lib/back-close";
 import { PhoneLayoutContext } from "./phone-context";
 import { useVisualViewportBox } from "./use-visual-viewport";
 

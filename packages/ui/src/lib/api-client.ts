@@ -151,6 +151,15 @@ import {
   parseKnowledgeSettings,
   parseKnowledgeStatus
 } from "./knowledge/validate";
+import {
+  authRoutes,
+  authSessionPath,
+  type AuthIssuedTokenResponse,
+  type AuthLoginRequest,
+  type AuthSessionsResponse,
+  type RevokeAuthSessionsResponse,
+  type VerifyPasswordResponse
+} from "@orquester/api";
 import type {
   BlacksmithSetupResponse,
   BoxConfigChangeSet,
@@ -438,9 +447,42 @@ export class ApiClient {
     return this.send("GET", "/api/info", { signal });
   }
 
-  /** Public auth metadata (whether a token is required + bcrypt salt to derive it). */
+  /** Public auth metadata: whether a sign-in is required (and a username with it). */
   authInfo(signal?: AbortSignal): Promise<AuthInfoResponse> {
-    return this.send("GET", "/api/auth/info", { signal });
+    return this.send("GET", authRoutes.info, { signal });
+  }
+
+  /** Sign in with the password: a new device session's token (shown once; store only it). */
+  login(req: AuthLoginRequest): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.login, { body: req });
+  }
+
+  /** Revoke the session this client signed in with. */
+  logout(): Promise<void> {
+    return this.send("POST", authRoutes.logout);
+  }
+
+  /** Check a retyped password on the daemon (`ok: false` when wrong; 429 while locked out). */
+  verifyPassword(password: string): Promise<VerifyPasswordResponse> {
+    return this.send("POST", authRoutes.verifyPassword, { body: { password } });
+  }
+
+  listAuthSessions(signal?: AbortSignal): Promise<AuthSessionsResponse> {
+    return this.send("GET", authRoutes.sessions, { signal });
+  }
+
+  revokeAuthSession(id: string): Promise<void> {
+    return this.send("DELETE", authSessionPath(id));
+  }
+
+  /** Revoke every other device session and API token. */
+  revokeOtherAuthSessions(): Promise<RevokeAuthSessionsResponse> {
+    return this.send("POST", authRoutes.revokeOthers);
+  }
+
+  /** Mint a named API token for an external client (shown once). */
+  createApiToken(label: string): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.tokens, { body: { label } });
   }
 
   getDaemonConfig(signal?: AbortSignal): Promise<DaemonConfig> {
@@ -1881,7 +1923,8 @@ export class ApiClient {
 
   /**
    * A chat turn's unified diff (agent chat spec §6.3), for the changed-files
-   * card's "view diff". Whitespace-insensitive by default, as §5.4 specifies.
+   * card's "view diff". Shows every change by default; `ignoreWhitespace`
+   * hides whitespace-only ones.
    *
    * An ordinary request on both transports — nothing about a chat read needs
    * the multiplexed channel, which carries terminal bytes only.

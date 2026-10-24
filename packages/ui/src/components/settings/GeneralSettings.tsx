@@ -4,6 +4,7 @@ import { disablePush, enablePush, getSubscription, pushSupported } from "../../l
 import { Button, Switch } from "../ui";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
+import { serverVersionLabel } from "../../lib/server-version";
 import type { Runtime } from "../../types";
 import {
   Badge,
@@ -32,7 +33,7 @@ const runtimeLabel = (runtime: Runtime): string =>
   runtime === "desktop" ? "Desktop app" : isInstalledPwa() ? "Web app (installed)" : "Web browser";
 
 export const GeneralSettings: React.FC = () => {
-  const { runtime } = useOrquester();
+  const { runtime, desktopHost } = useOrquester();
   const appConfig = useAppStore((s) => s.appConfig);
   const updateAppConfig = useAppStore((s) => s.updateAppConfig);
   const connections = useAppStore((s) => s.connections);
@@ -83,17 +84,30 @@ export const GeneralSettings: React.FC = () => {
         )}
         {/* Only the desktop runtime has native window controls to replace. */}
         {runtime === "desktop" && (
-          <SettingRow label="Custom titlebar" description="Frameless window with in-app window controls.">
+          <SettingRow
+            label="Custom titlebar"
+            description={
+              // macOS keeps its hidden titlebar and traffic lights either way;
+              // elsewhere the window's frame changes, which needs a new window.
+              desktopHost?.platform === "darwin"
+                ? "In-app window controls in the top bar."
+                : "Frameless window with in-app window controls. The window reopens to apply a change."
+            }
+          >
             <Switch
               label="Custom titlebar"
               checked={appConfig.useTitlebar}
-              onChange={(checked) => void updateAppConfig({ useTitlebar: checked })}
+              // Saved first: the shell reads the setting back from app.json
+              // when it decides whether to rebuild the window.
+              onChange={(checked) =>
+                void updateAppConfig({ useTitlebar: checked }).then(() => desktopHost?.titlebarChanged?.())
+              }
             />
           </SettingRow>
         )}
       </SettingsSection>
 
-      {runtime === "web" && <NotificationsSection />}
+      {runtime === "web" ? <NotificationsSection /> : <DesktopNotificationsSection />}
 
       <SettingsSection title="About">
         <InfoRow label="Runtime" value={runtimeLabel(runtime)} />
@@ -112,6 +126,7 @@ export const GeneralSettings: React.FC = () => {
             )
           }
         />
+        {active && <ServerVersionRow key={active.id} />}
         {runtime === "web" && (
           <SettingRow
             label="Reload app"
@@ -124,6 +139,40 @@ export const GeneralSettings: React.FC = () => {
         )}
       </SettingsSection>
     </SettingsPage>
+  );
+};
+
+/**
+ * Desktop: the shell's system notifications for the daemon's pushes and the
+ * dock/taskbar badge (`components/attention/DesktopHostBridge.tsx`). A shell
+ * whose preload has no notification bridge says so instead of a dead switch.
+ */
+const DesktopNotificationsSection: React.FC = () => {
+  const { desktopHost } = useOrquester();
+  const enabled = useAppStore((s) => s.appConfig.desktopNotifications);
+  const updateAppConfig = useAppStore((s) => s.updateAppConfig);
+  const supported = typeof desktopHost?.notify === "function";
+  return (
+    <SettingsSection title="Notifications">
+      <SettingRow
+        label="Desktop notifications"
+        description={
+          supported
+            ? "Notify when an agent needs you, finishes, has a plan ready or messages you, and when a workflow run ends — not for the session you're looking at. The app icon's badge counts sessions waiting on you."
+            : "This version of the desktop app can't show notifications. Update the app to turn them on."
+        }
+      >
+        {supported ? (
+          <Switch
+            label="Desktop notifications"
+            checked={enabled}
+            onChange={(checked) => void updateAppConfig({ desktopNotifications: checked })}
+          />
+        ) : (
+          <Badge>Unavailable</Badge>
+        )}
+      </SettingRow>
+    </SettingsSection>
   );
 };
 
@@ -146,6 +195,23 @@ const NotificationsSection: React.FC = () => {
       )}
     </SettingsSection>
   );
+};
+
+/** The connected daemon's version and commit (`GET /api/info`); hidden when it reports neither. */
+const ServerVersionRow: React.FC = () => {
+  const api = useApi();
+  const [label, setLabel] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .info(controller.signal)
+      .then((info) => setLabel(serverVersionLabel(info)))
+      .catch(() => {
+        /* offline or an older daemon: no row */
+      });
+    return () => controller.abort();
+  }, [api]);
+  return label ? <InfoRow label="Server version" value={label} mono /> : null;
 };
 
 /**

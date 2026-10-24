@@ -19,6 +19,7 @@ import {
   FORK_HANDOFF_CLOSE_TAG as CLOSE_TAG,
   FORK_HANDOFF_OPEN_TAG as OPEN_TAG,
   formatHandoffBytes,
+  handoffBlocks,
   handoffMessagesOf,
   handoffSummaryOf,
   renderHandoffTranscript,
@@ -144,70 +145,64 @@ export function resolveForkCut(
 // Transcript handoff
 // ---------------------------------------------------------------------------
 
-/** The most a handoff transcript carries; the newest messages win. */
-export const FORK_TRANSCRIPT_MAX_CHARS = 120_000;
+/**
+ * The most message text a same-agent transcript carries, in UTF-8 bytes, however large the
+ * model's window; within it, what the window leaves ({@link handoffBudgetBytes}).
+ */
+export const FORK_TRANSCRIPT_MAX_BYTES = 120_000;
 /** The most one message contributes; a longer one keeps its head and tail. */
 export const FORK_TRANSCRIPT_MESSAGE_MAX_CHARS = 8_000;
 
 // The delimiters and their escaping are shared with the continuation's budgeted transcript
 // (`@orquester/api` `handoff.ts`), so {@link stripForkHandoff} strips either kind of handoff.
 
-function clip(text: string, max: number): string {
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
+
+/** `text` within `max` characters: its head and tail around a marker, never half a surrogate pair. */
+export function clipForkMessage(text: string, max: number): string {
   if (text.length <= max) return text;
   const half = Math.floor((max - 40) / 2);
-  return `${text.slice(0, half)}\n[… ${text.length - 2 * half} characters omitted …]\n${text.slice(-half)}`;
+  const head = isHighSurrogate(text.charCodeAt(half - 1)) ? half - 1 : half;
+  const tail = isLowSurrogate(text.charCodeAt(text.length - half)) ? text.length - half + 1 : text.length - half;
+  return `${text.slice(0, head)}\n[… ${tail - head} characters omitted …]\n${text.slice(tail)}`;
 }
 
 /**
  * The source's conversation through the kept turns, as plain text: every
  * user prompt and assistant reply of the main conversation (no reasoning, no
- * subagent's words, no tool rows — the provider re-reads files itself), the
- * newest first to survive {@link FORK_TRANSCRIPT_MAX_CHARS}. `null` when the
- * kept turns hold no message the fold still has.
+ * subagent's words, no tool rows — the provider re-reads files itself), each
+ * clipped to {@link FORK_TRANSCRIPT_MESSAGE_MAX_CHARS}, picked as a
+ * continuation's are (`selectHandoffMessages`: the original request and the
+ * newest prompt and reply first, then the newest history that fits) within
+ * `budgetBytes` — the model's window's share, {@link FORK_TRANSCRIPT_MAX_BYTES}
+ * by default — every omitted run marked where it was. `null` when the kept
+ * turns hold no message the fold still has.
  */
 export function buildForkTranscript(input: {
   items: readonly ThreadItem[];
   retained: readonly StartedTurn[];
   parentTitle: string;
+  budgetBytes?: number;
 }): string | null {
-  const turnIds = new Set(input.retained.map((turn) => turn.turnId));
-  const prompts = new Set(
-    input.retained.flatMap((turn) => (turn.userMessageId !== undefined ? [turn.userMessageId] : []))
-  );
-  const blocks: string[] = [];
-  /** Kept turns with at least one message still in the fold's window. */
-  const turnsWithText = new Set<string>();
-  for (const item of input.items) {
-    if (item.kind !== "message" || item.agentId !== undefined || item.role === "reasoning") continue;
-    const kept = prompts.has(item.id) || (item.turnId !== null && turnIds.has(item.turnId));
-    const text = item.text.trim();
-    if (!kept || text.length === 0) continue;
-    if (item.turnId !== null && turnIds.has(item.turnId)) turnsWithText.add(item.turnId);
-    for (const turn of input.retained) {
-      if (turn.userMessageId === item.id) turnsWithText.add(turn.turnId);
-    }
-    blocks.push(
-      `[${item.role === "user" ? "User" : "Assistant"}]\n${escapeHandoffTags(clip(text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS))}`
-    );
-  }
-  if (blocks.length === 0) return null;
+  const messages = handoffMessagesOf(input.items, input.retained).map((message) => ({
+    ...message,
+    text: clipForkMessage(message.text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS)
+  }));
+  if (messages.length === 0) return null;
   // Kept exchanges the fold's window no longer holds a word of (retention
   // evicted them): said, never passed off as the whole story. Only a turn that
   // had words to lose counts — a prompt or a recorded reply; a turn the
   // provider started itself with neither (a goal's continuation, a background
   // wake-up) lost nothing.
+  const turnsWithText = new Set(messages.map((message) => message.turn));
   const lostTurns = input.retained.filter(
-    (turn) =>
-      !turnsWithText.has(turn.turnId) &&
-      (turn.userMessageId !== undefined || turn.assistantMessageId !== null)
+    (turn, index) =>
+      !turnsWithText.has(index + 1) && (turn.userMessageId !== undefined || turn.assistantMessageId !== null)
   ).length;
-  let used = 0;
-  let first = blocks.length;
-  while (first > 0 && used + blocks[first - 1]!.length + 2 <= FORK_TRANSCRIPT_MAX_CHARS) {
-    first -= 1;
-    used += blocks[first]!.length + 2;
-  }
-  const omitted = first;
+  const selection = selectHandoffMessages(messages, input.budgetBytes ?? FORK_TRANSCRIPT_MAX_BYTES);
+  const { omitted } = selection;
+  const cut = selection.messages.filter((message) => message.cutBytes !== undefined).length;
   const title = escapeHandoffTags(input.parentTitle.replace(/\s+/g, " ").trim()) || "the original conversation";
   const preamble =
     `This conversation is a fork of "${title}". The user branched it off at the point below, so ` +
@@ -215,16 +210,24 @@ export function buildForkTranscript(input: {
     (lostTurns > 0
       ? ` ${lostTurns} earlier exchange${lostTurns === 1 ? " is" : "s are"} no longer available and ${lostTurns === 1 ? "is" : "are"} missing from it.`
       : "") +
-    (omitted > 0 ? ` The ${omitted} oldest message${omitted === 1 ? " was" : "s were"} left out for length.` : "");
-  return `${OPEN_TAG}\n${preamble}\n\n${blocks.slice(first).join("\n\n")}\n${CLOSE_TAG}`;
+    (omitted > 0
+      ? ` ${omitted} message${omitted === 1 ? " was" : "s were"} left out for length${selection.firstRequest ? " (the original request and the newest ones are kept)" : ""}, marked where ${omitted === 1 ? "it was" : "they were"}.`
+      : "") +
+    (cut > 0 ? ` ${cut === 1 ? "One message is" : `${cut} messages are`} cut in the middle to fit, marked where.` : "");
+  const blocks = handoffBlocks(
+    selection,
+    (message) => `[${message.role === "user" ? "User" : "Assistant"}]\n${escapeHandoffTags(message.text)}`
+  );
+  return `${OPEN_TAG}\n${preamble}\n\n${blocks.join("\n\n")}\n${CLOSE_TAG}`;
 }
 
 /**
  * "Continue in another agent" (a fork onto another adapter or account): the kept turns' user and
- * assistant messages, picked whole and newest first within the handoff budget, rendered with the
- * source's agent and model, what was left out and how the new agent reads it (`read_transcript`
- * on the parent). `null` when the kept turns hold no message the fold still has — the child then
- * starts fresh (`unavailable`), as a same-agent fork does.
+ * assistant messages within `budgetBytes` (`continuationBudgetBytes` of the target model's window)
+ * — the original request and the newest prompt and reply first, then the newest history that
+ * fits — rendered with the source's agent and model, what was left out and how the new agent
+ * reads it (`read_transcript` on the parent). `null` when the kept turns hold no message the fold
+ * still has — the child then starts fresh (`unavailable`), as a same-agent fork does.
  */
 export function buildContinuationTranscript(input: {
   items: readonly ThreadItem[];
@@ -277,13 +280,17 @@ export function continuationDetail(
   }
   const size = formatHandoffBytes(handoff.bytes);
   const when = `handed to ${targetLabel} with your first message`;
-  if (handoff.clipped) {
-    return `Only the end of the newest message fits the handoff (${size}); it is ${when}, and the full history stays readable in the original chat.`;
+  if (handoff.carried === 0) {
+    return `None of the ${handoff.total} message${handoff.total === 1 ? "" : "s"} fits ${targetLabel}'s context window, so only a pointer to the original chat's history is ${when}.`;
   }
+  const cut = handoff.clipped ? ", the longest cut in the middle to fit" : "";
   if (handoff.carried >= handoff.total) {
-    return `The whole conversation (${handoff.total} message${handoff.total === 1 ? "" : "s"}, ${size}) is ${when}.`;
+    return handoff.clipped
+      ? `All ${handoff.total} message${handoff.total === 1 ? "" : "s"} (${size})${cut}, are ${when}; the full text stays readable in the original chat.`
+      : `The whole conversation (${handoff.total} message${handoff.total === 1 ? "" : "s"}, ${size}) is ${when}.`;
   }
-  return `The last ${handoff.carried} of ${handoff.total} messages (${size}) are ${when}; earlier history stays readable in the original chat.`;
+  const which = handoff.firstRequest ? "the original request and the newest history" : "the newest history";
+  return `${handoff.carried} of ${handoff.total} messages (${size}) — ${which}${cut} — are ${when}; the rest stays readable in the original chat.`;
 }
 
 /**

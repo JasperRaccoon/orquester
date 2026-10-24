@@ -11,11 +11,14 @@ import { after, before, describe, it } from "node:test";
 
 import {
   dispatchableSkillNames,
+  discoverClaudePluginSkills,
   discoverClaudeSkills,
   parseFrontmatterBoolean,
+  readEnabledPluginsFromSettings,
   readSkillOverridesFromSettings
 } from "./skills.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
+import { claudePluginEntryIds } from "../../../agent-isolation/claude-names.ts";
 import {
   buildAskUserQuestionReply,
   CLAUDE_QUESTION_PREVIEW_FORMAT,
@@ -182,6 +185,279 @@ describe("claude skills — filesystem discovery", () => {
   });
 });
 
+// Adapted from T3 Code (MIT): apps/server/src/provider/Drivers/ClaudeSkills.test.ts
+describe("claude skills — installed plugins", () => {
+  /** A plugin install dir with an optional manifest and `skills/<name>/SKILL.md` entries. */
+  async function writePlugin(
+    dir: string,
+    manifest: string | undefined,
+    skills: Record<string, string>
+  ): Promise<string> {
+    await fs.mkdir(dir, { recursive: true });
+    if (manifest !== undefined) {
+      await fs.mkdir(nodePath.join(dir, ".claude-plugin"), { recursive: true });
+      await fs.writeFile(nodePath.join(dir, ".claude-plugin", "plugin.json"), manifest, "utf8");
+    }
+    for (const [name, frontmatter] of Object.entries(skills)) {
+      await writeSkill(nodePath.join(dir, "skills"), name, frontmatter);
+    }
+    return dir;
+  }
+
+  /** A fresh account config dir whose registry and user settings are these. */
+  async function account(
+    name: string,
+    plugins: Record<string, unknown>,
+    enabledPlugins: Record<string, unknown>
+  ): Promise<string> {
+    const dir = nodePath.join(root, name);
+    await fs.mkdir(nodePath.join(dir, "plugins"), { recursive: true });
+    await fs.writeFile(
+      nodePath.join(dir, "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins })
+    );
+    await fs.writeFile(nodePath.join(dir, "settings.json"), JSON.stringify({ enabledPlugins }));
+    return dir;
+  }
+
+  const user = (installPath: string): Record<string, unknown> => ({
+    scope: "user",
+    installPath,
+    version: "1.0.0"
+  });
+
+  it("lists an enabled plugin's skills as plugin:skill, and none of a disabled or uninstalled one", async () => {
+    const cache = nodePath.join(root, "plugin-cache-a");
+    const alpha = await writePlugin(nodePath.join(cache, "alpha"), '{"name":"alpha"}', {
+      review: "---\ndescription: Review the diff\n---",
+      "agent-side": "---\nuser-invocable: false\n---",
+      "with space": "---\ndescription: Sanitised\n---",
+      broken: "---\n  - a\n---"
+    });
+    const beta = await writePlugin(nodePath.join(cache, "beta"), '{"name":"beta"}', { lint: "---\n---" });
+    const config = await account(
+      "plugins-a",
+      { "alpha@market": [user(alpha)], "beta@market": [user(beta)] },
+      { "alpha@market": true, "beta@market": false, "ghost@market": true }
+    );
+
+    const skills = await discoverClaudeSkills({ configDir: config, cwd });
+    const plugin = skills.filter((skill) => skill.scope === "plugin");
+    assert.deepEqual(
+      plugin.map((skill) => skill.name),
+      ["alpha:agent-side", "alpha:review", "alpha:with-space"]
+    );
+    const review = plugin.find((skill) => skill.name === "alpha:review")!;
+    assert.equal(review.description, "Review the diff");
+    assert.equal(review.path, nodePath.join(alpha, "skills", "review", "SKILL.md"));
+    assert.equal(review.enabled, true);
+    assert.equal(plugin.find((skill) => skill.name === "alpha:agent-side")?.userInvocable, false);
+    assert.ok(dispatchableSkillNames(skills).has("alpha:review"), "a plugin skill dispatches as /plugin:skill");
+    // The project's own skills are still there beside them.
+    assert.ok(skills.some((skill) => skill.name === "project-thing"));
+  });
+
+  it("follows the settings precedence for enabledPlugins, an extended value replacing without enabling", async () => {
+    const cache = nodePath.join(root, "plugin-cache-b");
+    const alpha = await writePlugin(nodePath.join(cache, "alpha"), '{"name":"alpha"}', { one: "---\n---" });
+    const beta = await writePlugin(nodePath.join(cache, "beta"), '{"name":"beta"}', { two: "---\n---" });
+    const gamma = await writePlugin(nodePath.join(cache, "gamma"), '{"name":"gamma"}', { three: "---\n---" });
+    const config = await account(
+      "plugins-b",
+      { "alpha@m": [user(alpha)], "beta@m": [user(beta)], "gamma@m": [user(gamma)] },
+      { "alpha@m": true, "beta@m": true, "gamma@m": false }
+    );
+    const project = nodePath.join(root, "plugins-b-project");
+    await fs.mkdir(nodePath.join(project, ".claude"), { recursive: true });
+    await fs.writeFile(
+      nodePath.join(project, ".claude", "settings.json"),
+      '{ "enabledPlugins": { "alpha@m": false, "beta@m": { "source": "x" }, "gamma@m": true, }, }'
+    );
+    const names = (await discoverClaudeSkills({ configDir: config, cwd: project }))
+      .filter((skill) => skill.scope === "plugin")
+      .map((skill) => skill.name);
+    assert.deepEqual(names, ["gamma:three"]);
+  });
+
+  it("tolerates a malformed manifest or registry, and keeps a plugin's skills inside the plugin", async () => {
+    const cache = nodePath.join(root, "plugin-cache-c");
+    const outside = nodePath.join(cache, "outside");
+    await writeSkill(outside, "escaped", "---\n---");
+    const nameless = await writePlugin(nodePath.join(cache, "nameless"), "{ not json", { tidy: "---\n---" });
+    const declared = await writePlugin(
+      nodePath.join(cache, "declared"),
+      JSON.stringify({ name: "declared", skills: ["./extra", "../outside"] }),
+      { base: "---\n---" }
+    );
+    await writeSkill(nodePath.join(declared, "extra"), "added", "---\n---");
+    await fs.symlink(outside, nodePath.join(declared, "linked"));
+    await fs.writeFile(
+      nodePath.join(declared, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "declared", skills: ["./extra", "../outside", "./linked"] })
+    );
+    const single = nodePath.join(cache, "single");
+    await fs.mkdir(single, { recursive: true });
+    await fs.writeFile(nodePath.join(single, "SKILL.md"), "---\nname: single:solo\ndescription: One\n---\nBody\n");
+    const dotted = await writePlugin(nodePath.join(cache, "dotted"), '{"name":"my.plugin"}', { x: "---\n---" });
+    const config = await account(
+      "plugins-c",
+      {
+        "nameless@m": [user(nameless)],
+        "declared@m": [user(declared)],
+        "single@m": [user(single)],
+        "dotted@m": [user(dotted)],
+        "junk@m": [{ scope: "galaxy", installPath: nameless }, "nope"],
+        "notalist@m": { scope: "user" }
+      },
+      {
+        "nameless@m": true,
+        "declared@m": true,
+        "single@m": true,
+        "dotted@m": true,
+        "junk@m": true,
+        "notalist@m": true
+      }
+    );
+    const names = (await discoverClaudeSkills({ configDir: config }))
+      .filter((skill) => skill.scope === "plugin")
+      .map((skill) => skill.name);
+    // A manifest that does not read names the plugin after its id; `../outside` and a
+    // symlink out of the plugin are refused; a single-skill plugin keeps its declared name;
+    // a dotted plugin name loads as written, as Claude Code loads it (`my.plugin:x`).
+    assert.deepEqual(names, ["declared:added", "declared:base", "my.plugin:x", "nameless:tidy", "single:solo"]);
+
+    const broken = nodePath.join(root, "plugins-broken");
+    await fs.mkdir(nodePath.join(broken, "plugins"), { recursive: true });
+    await fs.writeFile(nodePath.join(broken, "plugins", "installed_plugins.json"), "{ truncated");
+    await fs.writeFile(nodePath.join(broken, "settings.json"), JSON.stringify({ enabledPlugins: { "x@m": true } }));
+    await writeSkill(nodePath.join(broken, "skills"), "still-here", "---\n---");
+    assert.deepEqual(
+      (await discoverClaudeSkills({ configDir: broken })).map((skill) => skill.name),
+      ["still-here"]
+    );
+  });
+
+  it("lists a plugin once, from its first install that exists, and a project install only in its project", async () => {
+    const cache = nodePath.join(root, "plugin-cache-d");
+    const installed = await writePlugin(nodePath.join(cache, "dup"), '{"name":"dup"}', { only: "---\n---" });
+    const scoped = await writePlugin(nodePath.join(cache, "scoped"), '{"name":"scoped"}', { here: "---\n---" });
+    const elsewhere = nodePath.join(root, "plugins-d-elsewhere");
+    await fs.mkdir(elsewhere, { recursive: true });
+    const config = await account(
+      "plugins-d",
+      {
+        "dup@m": [user(nodePath.join(cache, "gone")), user(installed), user(installed)],
+        "scoped@m": [{ scope: "project", installPath: scoped, projectPath: cwd }]
+      },
+      { "dup@m": true, "scoped@m": true }
+    );
+    const inProject = await discoverClaudeSkills({ configDir: config, cwd });
+    assert.deepEqual(
+      inProject.filter((skill) => skill.scope === "plugin").map((skill) => [skill.name, skill.path]),
+      [
+        ["dup:only", nodePath.join(installed, "skills", "only", "SKILL.md")],
+        ["scoped:here", nodePath.join(scoped, "skills", "here", "SKILL.md")]
+      ]
+    );
+    const outside = await discoverClaudeSkills({ configDir: config, cwd: elsewhere });
+    assert.deepEqual(
+      outside.filter((skill) => skill.scope === "plugin").map((skill) => skill.name),
+      ["dup:only"]
+    );
+  });
+
+  it("applies a project install to a linked worktree of the same repository", async () => {
+    const repo = nodePath.join(root, "plugins-e-repo");
+    const worktree = nodePath.join(root, "plugins-e-worktree");
+    const gitDir = nodePath.join(repo, ".git", "worktrees", "wt");
+    await fs.mkdir(gitDir, { recursive: true });
+    await fs.mkdir(worktree, { recursive: true });
+    await fs.writeFile(nodePath.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    await fs.writeFile(nodePath.join(gitDir, "commondir"), "../..\n");
+    await fs.writeFile(nodePath.join(gitDir, "gitdir"), `${nodePath.join(worktree, ".git")}\n`);
+    const plugin = await writePlugin(nodePath.join(root, "plugin-cache-e", "wt"), '{"name":"wt"}', { s: "---\n---" });
+    const config = await account(
+      "plugins-e",
+      { "wt@m": [{ scope: "local", installPath: plugin, projectPath: repo }] },
+      { "wt@m": true }
+    );
+    const names = (await discoverClaudeSkills({ configDir: config, cwd: worktree }))
+      .filter((skill) => skill.scope === "plugin")
+      .map((skill) => skill.name);
+    assert.deepEqual(names, ["wt:s"]);
+  });
+
+  it("reads each account's own config dir, and CLAUDE_CODE_PLUGIN_CACHE_DIR when the CLI is given one", async () => {
+    const plugin = await writePlugin(nodePath.join(root, "plugin-cache-f", "acct"), '{"name":"acct"}', { s: "---\n---" });
+    const first = await account("plugins-f1", { "acct@m": [user(plugin)] }, { "acct@m": true });
+    const second = await account("plugins-f2", {}, { "acct@m": true });
+    const pluginNames = async (input: Parameters<typeof discoverClaudeSkills>[0]): Promise<string[]> =>
+      (await discoverClaudeSkills(input)).filter((skill) => skill.scope === "plugin").map((skill) => skill.name);
+    assert.deepEqual(await pluginNames({ configDir: first }), ["acct:s"]);
+    assert.deepEqual(await pluginNames({ configDir: second }), [], "another account installed nothing");
+    assert.deepEqual(
+      await pluginNames({ configDir: second, pluginCacheDir: nodePath.join(first, "plugins") }),
+      ["acct:s"]
+    );
+  });
+
+  it("an Agent Profile's plugins replace the installed ones, named by manifest, else their directory", async () => {
+    const plugin = await writePlugin(nodePath.join(root, "plugin-cache-g", "installed"), '{"name":"installed"}', { s: "---\n---" });
+    const config = await account("plugins-g", { "installed@m": [user(plugin)] }, { "installed@m": true });
+    const generated = await writePlugin(nodePath.join(root, "prepared-g", "plugin"), '{"name":"developer"}', {
+      review: "---\ndescription: Profile review\n---"
+    });
+    const copied = await writePlugin(nodePath.join(root, "prepared-g", "plugins", "item-1"), undefined, { fmt: "---\n---" });
+
+    const skills = await discoverClaudeSkills({
+      configDir: config,
+      cwd,
+      pluginDirs: [generated, copied]
+    });
+    assert.deepEqual(
+      skills.filter((skill) => skill.scope === "plugin").map((skill) => skill.name),
+      ["developer:review", "item-1:fmt"]
+    );
+    assert.deepEqual((await discoverClaudePluginSkills([copied])).map((skill) => skill.name), ["item-1:fmt"]);
+  });
+
+  it("a plugin whose manifest names it invalidly loads nothing, as the CLI refuses it", async () => {
+    const bad = await writePlugin(nodePath.join(root, "plugin-cache-h", "bad"), '{"name":"bad name"}', { s: "---\n---" });
+    assert.deepEqual(await discoverClaudePluginSkills([bad]), []);
+  });
+
+  it("lists a profile plugin's skills under exactly the ids its skills allow-list carries", async () => {
+    // The live session filters its list by the prepared allow-list (`claudePluginEntryIds`):
+    // any naming drift between the two hides a skill the composer offers.
+    const dir = nodePath.join(root, "prepared-i", "plugins", "item-9");
+    await writePlugin(dir, '{"name":"dot.plug","skills":["./one"]}', {
+      "my.folder": "---\nname: front-name\n---",
+      "with space": "---\n---",
+      plain: "---\ndescription: d\n---"
+    });
+    await fs.mkdir(nodePath.join(dir, "one"), { recursive: true });
+    await fs.writeFile(nodePath.join(dir, "one", "SKILL.md"), "---\nname: dot.plug:So Lo\n---\nx\n");
+    const nameless = nodePath.join(root, "prepared-i", "plugins", "item-10");
+    await writePlugin(nameless, undefined, { fmt: "---\n---" });
+
+    for (const [path, pluginName] of [[dir, "dot.plug"], [nameless, "item-10"]] as const) {
+      const listed = (await discoverClaudePluginSkills([path])).map((skill) => skill.name).sort();
+      const allowed = (await claudePluginEntryIds(path, pluginName)).sort();
+      assert.deepEqual(listed, allowed, pluginName);
+    }
+    assert.deepEqual((await discoverClaudePluginSkills([dir])).map((skill) => skill.name), [
+      "dot.plug:my-folder",
+      "dot.plug:plain",
+      "dot.plug:So-Lo",
+      "dot.plug:with-space"
+    ]);
+    // ...and each dispatches as `/name`.
+    const names = dispatchableSkillNames(await discoverClaudePluginSkills([dir]));
+    assert.equal(planClaudeSkillDispatch("$dot.plug:my-folder now", names)?.commandText, "/dot.plug:my-folder now");
+    assert.equal(planClaudeSkillDispatch("costs $1.50.", names), undefined);
+  });
+});
+
 describe("claude skills — parsers", () => {
   it("accepts the YAML 1.1 booleans the CLI accepts", () => {
     for (const truthy of ["true", "yes", "on", "1", " Y "]) {
@@ -191,6 +467,13 @@ describe("claude skills — parsers", () => {
       assert.equal(parseFrontmatterBoolean(falsy), false, falsy);
     }
     assert.equal(parseFrontmatterBoolean("maybe"), undefined);
+  });
+
+  it("reads enabledPlugins leniently, an extended value as a replacement that enables nothing", () => {
+    const map = readEnabledPluginsFromSettings('{ "enabledPlugins": { "a@m": true, "b@m": false, "c@m": {}, }, // x\n }');
+    assert.deepEqual([...(map ?? [])], [["a@m", true], ["b@m", false], ["c@m", null]]);
+    assert.equal(readEnabledPluginsFromSettings('{ "enabledPlugins": [] }'), undefined);
+    assert.equal(readEnabledPluginsFromSettings("not json"), undefined);
   });
 
   it("drops every override in a file when one entry is invalid, as the CLI does", () => {

@@ -8,6 +8,9 @@ import { describe, it } from "node:test";
 
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
+import { APPROVAL_FEEDBACK_MAX_CHARS } from "@orquester/api/agent-chat";
+
+import { APPROVAL_REDIRECT_MESSAGE } from "../../adapter.ts";
 
 import {
   permissionResultForDecision,
@@ -279,6 +282,32 @@ describe("claude decisions — §4.3, every row of the Claude column", () => {
       toolInput
     });
     assert.equal(result.behavior, "deny");
+  });
+
+  it("a decline with the user's words denies with them, trimmed and capped", () => {
+    const feedback = permissionResultForDecision({
+      decision: "decline",
+      toolName: "Bash",
+      toolInput,
+      redirect: true,
+      feedback: "  do it in a branch  "
+    });
+    assert.deepEqual(feedback, { behavior: "deny", message: "do it in a branch" });
+    const long = permissionResultForDecision({
+      decision: "decline",
+      toolName: "Bash",
+      toolInput,
+      feedback: "x".repeat(APPROVAL_FEEDBACK_MAX_CHARS + 50)
+    });
+    assert.equal((long as { message: string }).message.length, APPROVAL_FEEDBACK_MAX_CHARS);
+    // Blank words fall back to the redirect's own message.
+    const blank = permissionResultForDecision({ decision: "decline", toolName: "Bash", toolInput, redirect: true, feedback: "   " });
+    assert.deepEqual(blank, { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE });
+    // Never on an approval.
+    assert.equal(
+      permissionResultForDecision({ decision: "accept", toolName: "Bash", toolInput, feedback: "words" }).behavior,
+      "allow"
+    );
   });
 
   it("decline and cancel are two answers, not two labels", () => {

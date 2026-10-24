@@ -63,6 +63,9 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   showPlanModeToggle: false,
   reportsContextWindow: true,
   compaction: { type: "native" },
+  // A child session's permission is rejected with the user's own words (the
+  // reply's `message`), which reach that child's model.
+  approvalFeedbackToSubagents: true,
   // A background `task` call's answer wakes the parent: the server writes its
   // reply, and the adapter opens the woken turn (`claimReply`).
   wakesOnBackgroundCompletion: true
@@ -293,11 +296,17 @@ function flattenOpenCodeModels(inventory: OpenCodeInventory): ProviderModel[] {
         continue;
       }
       const subProvider = provider.name?.trim();
+      const context = model.limit?.context;
       models.push({
         slug: `${provider.id}/${model.id}`,
         name,
         ...(subProvider !== undefined && subProvider.length > 0 ? { subProvider } : {}),
         ...(defaults[provider.id] === model.id ? { isDefault: true } : {}),
+        // The same `limit.context` the meter divides by ({@link modelContextLimits}): a handoff
+        // into the model is sized by it.
+        ...(typeof context === "number" && Number.isFinite(context) && context > 0
+          ? { contextWindow: Math.round(context) }
+          : {}),
         capabilities: openCodeCapabilitiesForModel({
           providerID: provider.id,
           model,

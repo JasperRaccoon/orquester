@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { useBackClose } from "../../hooks/use-back-close";
 import { cn } from "../../lib/cn";
 import { openTrackedLayer } from "../../lib/open-layers";
 
@@ -30,6 +31,9 @@ const escapeStack: object[] = [];
  * newest is read in the capture phase, before any handler runs — a menu that
  * closes on the same key has already let go of its layer by the time the
  * bubbling listener here runs.
+ *
+ * On a phone, Back closes it too (`useBackClose`): one modal at a time, the
+ * newest first.
  */
 export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className }) => {
   const layerRef = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
@@ -42,6 +46,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
       if (layerRef.current === layer) layerRef.current = null;
     };
   }, [open]);
+  useBackClose(open, onClose);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   // What had focus when the modal opened. Read while rendering, before the
   // dialog mounts: a field inside it autofocuses before any effect runs.

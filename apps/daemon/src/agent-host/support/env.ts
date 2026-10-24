@@ -63,6 +63,17 @@ const AMBIENT_CREDENTIAL_ENV_VARS: Record<AgentAdapterId, readonly string[]> = {
   grok: ["XAI_API_KEY", "GROK_API_KEY"]
 };
 
+/**
+ * Variables an adapter's CLI gets unless the launcher env (the registry entry's
+ * env, the per-launcher env file) set them itself — the user's value wins.
+ */
+export const PROVIDER_DEFAULT_ENV: Partial<Record<AgentAdapterId, Readonly<Record<string, string>>>> = {
+  // Claude Code offers its task tools (TodoWrite, TaskCreate/TaskUpdate/TaskList) only on some
+  // models unless this is set; the chat timeline folds them into the turn's task list. The
+  // registry entry sets it for terminal launches too (`packages/registry`).
+  claude: { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" }
+};
+
 interface BuildProviderEnvInput {
   adapter: AgentAdapterId;
   /**
@@ -94,9 +105,10 @@ interface BuildProviderEnvInput {
    * value per provider launch — never the injectable `uuid()` — which every
    * process the provider starts inherits. It is how Settings → System finds
    * what a provider CLI left running once no root reaches it (a Claude chat's
-   * background shells outlive its CLI, as a Grok chat's do), and how the Grok
-   * adapter finds what to sweep. Only Grok sweeps; for every other adapter it
-   * is a marker and nothing more.
+   * background shells outlive its CLI, as a Grok chat's do), and how an
+   * adapter finds what to sweep at a session's end: Grok its own way, Claude,
+   * Codex and OpenCode through `provider-leftovers.ts` (the CLI's helpers and
+   * its own group, never the user's later work nor a shared daemon).
    */
   launchId: string;
   /**
@@ -167,6 +179,10 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
       continue;
     }
     env[key] = value;
+  }
+
+  for (const [key, value] of Object.entries(PROVIDER_DEFAULT_ENV[adapter] ?? {})) {
+    env[key] ??= value;
   }
 
   // Appended, never replacing a NODE_OPTIONS the launcher env set.

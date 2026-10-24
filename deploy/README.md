@@ -21,7 +21,10 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
 - `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
   and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
-  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade. Run as
+  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade, and
+  `/etc/tmpfiles.d/orquester.conf` (from `orquester-tmpfiles.conf`): the daily
+  `systemd-tmpfiles-clean` run deletes tsx transpile-cache entries under `/var/lib/orquester/tmp/tsx-*`
+  that nothing has used for 2 days, since tsx lists that whole directory at every start. Run as
   root from the checkout; idempotent; it never restarts anything itself. Provisioning and every
   deploy run it before their own (re)start, so a changed unit — e.g. `OOMPolicy=continue`, which keeps
   one OOM-killed agent process from stopping the whole unit — applies at the deploy's restart.
@@ -37,6 +40,23 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 
 `./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
 file documents what those templates are for.
+
+### Deploy health check and automatic revert
+
+`remote-update.sh` restarts the daemon and then waits up to 10 minutes (`HEALTH_WAIT`, 600 s) for
+`/health` and an active unit. If the new release never gets there, it resets the tree to the last
+successful deploy (`.git/orq-last-deployed-head`), rebuilds it, restarts it and checks it the same
+way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary
+says `AUTO-REVERTED`), exit 4 means it did not come back either and the daemon needs attention now
+(`./deploy.sh logs <target>`). A build or native-module failure before the restart never restarts
+the daemon. `./deploy.sh rollback <target> <sha>` runs the same cycle with that sha.
+`deploy/lib/remote-update.test.mjs` (in `pnpm test`) drives the script against a throwaway checkout
+with stubbed `systemctl`, `curl` and `pnpm`.
+
+Each deploy writes `/opt/orquester/.orquester-version.json` (`commit`, `version`, `deployedAt`;
+gitignored) before the restart. The daemon reads its version and commit once at boot, from git or
+from this stamp when `.git` is missing, and reports them in the authenticated `GET /api/info`
+(Settings → General → About shows them); the deploy output prints `version=… commit=…`.
 
 Native modules: the daemon loads `better-sqlite3` and `node-pty` under the host's Node. After the
 install and SPA build, `remote-update.sh` and `remote-provision.sh` run

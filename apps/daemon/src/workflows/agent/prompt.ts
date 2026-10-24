@@ -2,11 +2,22 @@
 //
 // Rendering is two passes, in this order and never the other: `{{…}}` expressions against the run
 // context first, with every inserted value escaped for the saved-prompt `{variables}` pass
-// (`escapePromptVariables`) so text a trigger delivered can never inject a `{diff}`; then the
-// `{variables}` themselves, daemon-side (`PromptRenderer`), in the workflow's time zone. A failed
-// variable read fails the block naming it — a prompt is never sent missing its variables.
+// (`escapePromptVariables`) so text a trigger delivered can never inject a `{diff}`, and data
+// someone else wrote (a PR, a release, an HTTP response…) framed as untrusted
+// (`@orquester/api` prompt-safety.ts); then the `{variables}` themselves, daemon-side
+// (`PromptRenderer`), in the workflow's time zone. A failed variable read fails the block naming
+// it — a prompt is never sent missing its variables.
 
-import { escapePromptVariables, gitStatusSection, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
+import { randomBytes } from "node:crypto";
+import {
+  createPromptTrust,
+  gitStatusSection,
+  renderAgentPromptTemplate,
+  WORKFLOW_LIMITS,
+  type AgentBlockConfig,
+  type AgentFailureReason
+} from "@orquester/api";
+import { HANDOFF_PREAMBLE_BYTES, handoffBudgetBytes } from "@orquester/api/agent-chat";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
@@ -54,7 +65,8 @@ function clipUtf8Tail(text: string, maxBytes: number): { text: string; truncated
 
 /**
  * §5.4 step 4: the original rendered prompt, the handoff notice, the previous agent's last
- * assistant messages (≤ 32 KiB, newest kept) and `git status --short` (≤ 8 KiB).
+ * assistant messages (≤ 32 KiB, newest kept — less when the next model's window leaves less,
+ * {@link handoffMessagesBudget}) and `git status --short` (≤ 8 KiB).
  */
 export function buildHandoffPrompt(input: {
   originalPrompt: string;
@@ -64,9 +76,12 @@ export function buildHandoffPrompt(input: {
   previousMessages: string;
   gitStatus: string | null;
   autonomyNote: boolean;
+  /** The most bytes of the previous agent's messages carried; default the 32 KiB cap. */
+  messagesBudgetBytes?: number;
 }): string {
   const parts = [input.originalPrompt, handoffNotice(input.previousAgent, input.previousReason)];
-  const messages = clipUtf8Tail(input.previousMessages.trim(), WORKFLOW_LIMITS.handoffMessagesBytes);
+  const budget = Math.min(WORKFLOW_LIMITS.handoffMessagesBytes, Math.max(0, input.messagesBudgetBytes ?? WORKFLOW_LIMITS.handoffMessagesBytes));
+  const messages = clipUtf8Tail(input.previousMessages.trim(), budget);
   if (messages.text) {
     parts.push(`The previous agent's last messages${messages.truncated ? " (the oldest part cut)" : ""}:\n\n${messages.text}`);
   }
@@ -75,6 +90,22 @@ export function buildHandoffPrompt(input: {
     parts.push(gitStatusSection(input.gitStatus, WORKFLOW_LIMITS.handoffGitStatusBytes));
   }
   return withAutonomyNote(parts.join("\n\n"), input.autonomyNote);
+}
+
+/**
+ * How much of the previous agent's messages a handoff prompt may carry into a model with
+ * `contextWindow` tokens (unknown: the shared fallback): what the window leaves after its reserve,
+ * the original prompt, the handoff's own words and the git section — never over the 32 KiB cap.
+ */
+export function handoffMessagesBudget(input: { contextWindow: number | undefined; originalPrompt: string; gitStatus: string | null }): number {
+  return handoffBudgetBytes({
+    contextWindow: input.contextWindow,
+    reservedBytes:
+      Buffer.byteLength(input.originalPrompt, "utf8") +
+      HANDOFF_PREAMBLE_BYTES +
+      (input.gitStatus !== null ? WORKFLOW_LIMITS.handoffGitStatusBytes : 0),
+    capBytes: WORKFLOW_LIMITS.handoffMessagesBytes
+  });
 }
 
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
@@ -100,14 +131,30 @@ export function promptSource(config: AgentBlockConfig, prompts: Pick<PromptRende
   return { ok: true, template: `${saved.body}${append}` };
 }
 
+/** A fresh frame ID per render, so untrusted text cannot guess and close its own frame. */
+export function newPromptFrameId(): string {
+  return randomBytes(6).toString("hex");
+}
+
 /**
  * Pass 1: `{{…}}` against the run context, every inserted value escaped for the `{variables}`
- * pass. Rendered with the shared renderer rather than `ctx.render` because only the renderer takes
- * the escape hook.
+ * pass and every untrusted one framed. Rendered with the shared renderer rather than `ctx.render`
+ * because only the renderer takes the insertion hook.
  */
-export function renderExpressions(template: string, ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets">): { text: string; warnings: string[] } {
+export function renderExpressions(
+  template: string,
+  ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets" | "workflow" | "node" | "liveInputs">,
+  frameId: string = newPromptFrameId()
+): { text: string; warnings: string[] } {
   const context = ctx.expressionContext();
-  return renderTemplate(template, { ...context, secrets: ctx.secrets }, { escapeValue: escapePromptVariables });
+  const trust = createPromptTrust({
+    workflow: ctx.workflow,
+    nodeId: ctx.node.id,
+    trigger: context.trigger,
+    liveInputs: ctx.liveInputs?.() ?? []
+  });
+  const rendered = renderAgentPromptTemplate(template, { ...context, secrets: ctx.secrets }, { trust, frameId });
+  return { text: rendered.text, warnings: rendered.warnings };
 }
 
 /** Pass 2: the saved-prompt `{variables}`, daemon-side. */

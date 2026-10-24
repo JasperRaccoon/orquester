@@ -1,5 +1,27 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+/**
+ * A main → renderer channel whose messages wait for a listener: a clicked
+ * notification can relaunch the window, and its target arrives before the UI
+ * has mounted and subscribed. Returns the subscribe function.
+ */
+function bufferedChannel(channel) {
+  const queue = [];
+  const listeners = new Set();
+  ipcRenderer.on(channel, (_event, payload) => {
+    if (listeners.size === 0) {
+      if (queue.length < 10) queue.push(payload);
+      return;
+    }
+    for (const listener of listeners) listener(payload);
+  });
+  return (cb) => {
+    listeners.add(cb);
+    for (const payload of queue.splice(0)) cb(payload);
+    return () => listeners.delete(cb);
+  };
+}
+
 contextBridge.exposeInMainWorld("orquesterDesktop", {
   defaultConnection: {
     id: "local",
@@ -59,6 +81,19 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   // the renderer frames them without an http URL it may not reach. Absent on
   // an older build, where the renderer falls back to the daemon's http URL.
   visualScheme: "orq-visual",
+  // Native integration (`DesktopHost` in packages/ui/src/lib/desktop-host.ts).
+  // Payloads are validated in the main process, and what comes back in the UI.
+  host: {
+    platform: process.platform,
+    // Set by the main process for a window without OS caption buttons
+    // (NO_NATIVE_CONTROLS_ARGUMENT in window-state.ts).
+    nativeWindowControls: !process.argv.includes("--orquester-no-native-window-controls"),
+    titlebarChanged: () => ipcRenderer.send("orquester:titlebar-changed"),
+    notify: (request) => ipcRenderer.send("orquester:notify", request),
+    setBadgeCount: (count) => ipcRenderer.send("orquester:badge", count),
+    onNotificationOpen: bufferedChannel("orquester:notification-open"),
+    onMenuAction: bufferedChannel("orquester:menu-action")
+  },
   // Frameless window caption controls.
   windowControls: {
     minimize: () => ipcRenderer.send("orquester:window", "minimize"),

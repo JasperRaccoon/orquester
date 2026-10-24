@@ -12,6 +12,7 @@ import {
   Trash2
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { LONG_PRESS_SURFACE, useLongPress } from "../../hooks/use-long-press";
 import { ConfirmDialog, ContextMenu, IconButton, type ContextMenuItem } from "../ui";
 import { useAppStore } from "../../store/app";
 import { useApi } from "../../context/orquester-context";
@@ -94,6 +95,14 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
   const identities = useRepoIdentities();
 
   const [menu, setMenu] = useState<{ x: number; y: number; workspace: WorkspaceSummary } | null>(null);
+  // A workspace row's menu: right-click, or a long press on a touch screen
+  // (iOS fires no `contextmenu`). One handler for every row; the pressed row
+  // names its workspace.
+  const press = useLongPress((point, target) => {
+    const name = target instanceof Element ? target.closest("[data-workspace-row]")?.getAttribute("data-workspace-row") : null;
+    const workspace = name ? workspaces.find((w) => w.name === name) : undefined;
+    if (workspace) setMenu({ ...point, workspace });
+  });
   const [pendingDelete, setPendingDelete] = useState<WorkspaceSummary | null>(null);
 
   const searching = query.trim().length > 0;
@@ -220,12 +229,11 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
             )}
           >
             <div
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setMenu({ x: event.clientX, y: event.clientY, workspace });
-              }}
+              data-workspace-row={workspace.name}
+              {...press}
               className={cn(
                 "group flex items-center rounded-xl transition-colors",
+                LONG_PRESS_SURFACE,
                 expanded ? "text-neutral-100" : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
               )}
             >

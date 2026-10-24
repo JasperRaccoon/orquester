@@ -34,7 +34,7 @@ export interface LineageNotice {
 export function ThreadLineageBar({
   session,
   sessions,
-  defaultMergeText,
+  readDefaultMergeText,
   notice,
   onDismissNotice,
   onOpenSession,
@@ -44,8 +44,11 @@ export function ThreadLineageBar({
   session: SessionSummary;
   /** Every tab the store holds (the project's): parents and children are read from their records. */
   sessions: readonly SessionSummary[];
-  /** What "Merge back" offers to send: the thread's last finished answer. */
-  defaultMergeText: string;
+  /**
+   * What "Merge back" offers to send: the thread's last finished answer. Read
+   * when the merge composer opens, so a streamed reply re-renders nothing here.
+   */
+  readDefaultMergeText: () => string;
   notice: LineageNotice | null;
   onDismissNotice: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -82,7 +85,7 @@ export function ThreadLineageBar({
   if (!lineage && children.length === 0 && notice === null && pendingMerges.length === 0) return null;
 
   const openComposer = (): void => {
-    setDraft(defaultMergeText);
+    setDraft(readDefaultMergeText());
     setComposing(true);
   };
   const submit = (): void => {
@@ -197,7 +200,9 @@ export function ThreadLineageBar({
           {pendingMerges.map((merge) => {
             const outgoing = merge.childSessionId === session.id;
             const other = titleOf(outgoing ? merge.parentSessionId : merge.childSessionId);
-            const failed = merge.state === "failed";
+            // Held after a stop: waiting for the user, not refused — said quietly.
+            const held = merge.state === "failed" && merge.held === true;
+            const failed = merge.state === "failed" && !held;
             return (
               <li
                 key={merge.mergeId}
@@ -206,8 +211,16 @@ export function ThreadLineageBar({
               >
                 <GitMerge size={12} strokeWidth={1.8} className="shrink-0" aria-hidden />
                 <span className="min-w-0 flex-1 truncate" title={merge.error ?? merge.preview}>
-                  {outgoing ? `Merge to “${other}”` : `Merge from “${other}”`}{" "}
-                  {failed
+                  {held
+                    ? outgoing
+                      ? `Reply to “${other}” is held: that chat was stopped`
+                      : `Reply from “${other}” is held: this chat was stopped`
+                    : outgoing
+                      ? `Merge to “${other}”`
+                      : `Merge from “${other}”`}{" "}
+                  {held
+                    ? null
+                    : failed
                     ? `failed${merge.error ? `: ${merge.error}` : ""}`
                     : outgoing
                       ? "is queued until it is idle"

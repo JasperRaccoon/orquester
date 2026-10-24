@@ -20,9 +20,10 @@ usage() {
 usage: ./deploy.sh [--dry-run|-n] <command> [args]
 
 commands:
-  deploy [target|all]        update + restart + verify each target (default: all)
+  deploy [target|all]        update + restart + verify each target (default: all);
+                             a release that fails its health check is rolled back
   provision <target>         first-time setup of a fresh Ubuntu VPS
-  verify [target|all]        read-only: HEAD, health, service, bundle hash, orq-agent, Go
+  verify [target|all]        read-only: HEAD, version stamp, health, service, bundle hash, orq-agent, Go
   rollback <target> <sha>    reset the target to <sha>, rebuild, restart, verify
   logs <target> [-n N]       tail the daemon journal (default 50 lines)
   rotate-password <target>   generate + install a new HTTP password (shown once)
@@ -100,6 +101,26 @@ smoke_test() { # uses T_DOMAIN; a smoke failure fails the target's deploy
   SMOKE_CHROME="$chrome" node "$here/scripts/smoke-web.mjs" "https://$T_DOMAIN"
 }
 
+# remote_update <name> <payload> [KEY=VAL ...]: runs remote-update.sh; on failure names what
+# happened from its exit code (an automatic revert to the previous release, or a
+# revert that failed too) in STEP and in a loud warning.
+remote_update() {
+  local name="$1" rc=0
+  shift
+  STEP="remote-update"
+  run_payload "$@" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      STEP="remote-update: unhealthy, AUTO-REVERTED to the previous release"
+      warn "$name: the new release failed its health check and was ROLLED BACK — the previous release is running. The deploy FAILED." ;;
+    4)
+      STEP="remote-update: unhealthy, and the AUTO-REVERT FAILED — daemon not healthy"
+      warn "$name: the new release failed its health check and the previous release did not come back either — the daemon is NOT healthy. Act now: ./deploy.sh logs $name" ;;
+  esac
+  return 1
+}
+
 cmd_deploy_target() {
   local name="$1" s
   load_target "$CONF" "$name"
@@ -107,7 +128,7 @@ cmd_deploy_target() {
   s="$(sudo_word)"
   info "=== deploy $name ($T_USER@$T_HOST) ==="
   STEP="preflight";     preflight_pushed "$T_BRANCH" || return 1
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "DOMAIN=$T_DOMAIN" || return 1
+  remote_update "$name" "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name deployed"
 }
@@ -119,7 +140,7 @@ cmd_rollback() {
   build_ssh_args
   s="$(sudo_word)"
   info "=== rollback $name -> $sha ($T_USER@$T_HOST) ==="
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" "DOMAIN=$T_DOMAIN" || return 1
+  remote_update "$name" "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name rolled back to $sha"
 }
@@ -133,14 +154,15 @@ cmd_rotate_password() {
   # The daemon hashes ORQUESTER_HTTP_PASSWORD only when daemon.json has no
   # passwordHash yet (migrateHttpPassword, apps/daemon/src/index.ts) — a restart
   # alone leaves the OLD password valid. So: patch daemon.env, delete the stale
-  # hash, restart, then PROVE the rotation by comparing /api/auth/info's salt
-  # (the hash prefix) across the restart before printing anything.
+  # hash, restart, then PROVE the rotation by comparing daemon.json's stored
+  # hash across the restart before printing anything. The new hash signs every
+  # device out on boot (apps/daemon/src/auth/sessions.ts); API tokens stay.
   remote_run "set -e
 env_file=/etc/orquester/daemon.env
 cfg=/var/lib/orquester/daemon/daemon.json
-salt() { curl -fsS --retry 5 --retry-delay 1 http://127.0.0.1:47831/api/auth/info | sed -n 's/.*\"salt\":\"\([^\"]*\)\".*/\1/p'; }
+stored_hash() { ${s:+$s }node -e \"const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(String(((c.transports||{}).http||{}).passwordHash||''))\" \"\$cfg\" 2>/dev/null; }
 ${s:+$s }grep -q '^ORQUESTER_HTTP_PASSWORD=' \"\$env_file\" || { echo \"rotate-password: no ORQUESTER_HTTP_PASSWORD= line in \$env_file — nothing rotated\" >&2; exit 1; }
-before=\$(salt || true)
+before=\$(stored_hash || true)
 new=\$(openssl rand -base64 32)
 ${s:+$s }sed -i \"s|^ORQUESTER_HTTP_PASSWORD=.*|ORQUESTER_HTTP_PASSWORD=\$new|\" \"\$env_file\"
 # From here the new password exists only on this box. If anything below aborts
@@ -153,7 +175,7 @@ fi
 ${s:+$s }systemctl restart orquester
 curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
   || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
-after=\$(salt || true)
+after=\$(stored_hash || true)
 if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
   echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2
   echo \"rotate-password: read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
@@ -161,9 +183,9 @@ if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
 fi
 if [ -z \"\$after\" ]; then
   # The health check passed, so the daemon is up and has already re-hashed the
-  # NEW password — it is live even though the salt fetch came back empty. Never
+  # NEW password — it is live even though the hash read came back empty. Never
   # swallow it here or the operator is locked out of a password only the VPS knows.
-  echo 'rotate-password: WARNING — could not read /api/auth/info to confirm the rotation.' >&2
+  echo 'rotate-password: WARNING — could not read the stored hash in daemon.json to confirm the rotation.' >&2
   echo 'The new password below is most likely already ACTIVE. Verify by logging in.' >&2
   echo \"If it is not, read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
   echo '============================================================'
@@ -236,6 +258,7 @@ cmd_verify_target() {
   STEP="verify"
   remote_run "set -e
 echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
+echo \"stamp=\$(cat /opt/orquester/.orquester-version.json 2>/dev/null || echo 'none')\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"
 echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\"

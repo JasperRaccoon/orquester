@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PendingApproval, PendingUserInput } from "@orquester/api/agent-chat";
 
-import { ApprovalCard } from "./ApprovalCard";
+import { ApprovalCard, approvalCardDescription } from "./ApprovalCard";
 import { ChatBannerDock } from "./ChatBannerDock";
 import { QuestionCard } from "./QuestionCard";
 
@@ -52,6 +52,26 @@ try {
   }));
   assert.ok(warned.includes(`aria-description="${warning}"`));
   assert.match(warned, />Run</, "the provider's option label is visible");
+
+  // Why the provider asked is said under the detail, and only when it said.
+  const reasoned = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval: { ...approval, reason: "Permission rule Bash(make:*) requires approval" },
+    pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.match(reasoned, /data-approval-reason="true"[^>]*>Permission rule Bash\(make:\*\) requires approval</);
+  const unreasoned = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval, pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.doesNotMatch(unreasoned, /data-approval-reason/);
+
+  // A subagent's request says so, beside the MCP server that asks.
+  const fromSubagent = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval: { ...approval, requestingAgentId: "task-1" },
+    pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.match(fromSubagent, />Asked by a subagent</);
+  assert.equal(approvalCardDescription({ appName: "github", requestingAgentId: "t" }), "github · asked by a subagent");
+  assert.equal(approvalCardDescription({ appName: "github" }), "github");
 
   // The dock owns whether a native callback request can be dismissed.
   const dockProps = {

@@ -787,15 +787,49 @@
 }
 
 /*
- * Display math (`$$…$$`): a formula wider than the column scrolls on its own
- * instead of widening the message. The padding keeps tall glyphs (fractions,
- * large operators) from being clipped by the scroller.
+ * Display math (`MarkdownMath`): the wrapper owns the spacing and the
+ * scroller (a formula wider than the column scrolls on its own instead of
+ * widening the message), so KaTeX's own display margin goes. Its Copy TeX
+ * button shows on hovering the formula as well as the row.
  */
-.ac-stream .katex-display {
-  margin: 0.65rem 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 0.15rem 0;
+.ac-math-display .katex-display {
+  margin: 0;
+}
+
+.ac-math-display:hover .ac-reveal,
+.ac-math-display:focus-within .ac-reveal {
+  opacity: 1;
+}
+
+/*
+ * Mermaid diagrams (`MermaidBlock`): pele paints every diagram with these
+ * variables, so a diagram follows the colour scheme and mode like the rest of
+ * the chat, and a theme switch repaints it without drawing it again. The
+ * neutral steps are the code block's own: its surface is `neutral-900`, and
+ * every scheme (light ones invert the scale) re-points `--n-*`. Charts take
+ * their series from the semantic hues.
+ */
+.ac-mermaid {
+  --pele-bg: rgb(var(--n-900));
+  --pele-fg: rgb(var(--n-200));
+  --pele-muted: rgb(var(--n-400));
+  --pele-line: rgb(var(--n-400));
+  --pele-surface: rgb(var(--n-800));
+  --pele-surface-alt: rgb(var(--n-700));
+  --pele-border: rgb(var(--n-600));
+  --pele-accent: rgb(var(--sem-info-400));
+  --pele-critical: rgb(var(--sem-danger-400));
+  --pele-error: rgb(var(--sem-danger-400));
+  --pele-series-1: rgb(var(--sem-info-400));
+  --pele-series-2: rgb(var(--sem-ok-400));
+  --pele-series-3: rgb(var(--sem-warn-400));
+  --pele-series-4: rgb(var(--sem-danger-400));
+  --pele-series-5: var(--gh-merged);
+  --pele-series-6: var(--git-renamed);
+  --pele-series-7: var(--git-conflict);
+  --pele-series-8: rgb(var(--n-400));
+  --pele-font: inherit;
+  --pele-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 /*

@@ -340,10 +340,20 @@ export interface ThreadMessageItem {
    * mode stands.
    */
   interactionMode?: import("./adapter-types.ts").InteractionMode;
+  /**
+   * Only on a `user` message Orquester sent on its own: `idle-compaction` is the `/compact` the
+   * daemon sent before the chat's prompt cache expired (`idle-compaction.ts`), which the timeline
+   * labels as automatic. Absent on everything the user (or an agent) wrote, and on every message a
+   * host from before the field recorded. An unknown value from a newer host reads as absent.
+   */
+  sentBy?: ThreadMessageSentBy;
   streaming: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+/** {@link ThreadMessageItem.sentBy}. */
+export type ThreadMessageSentBy = "idle-compaction";
 
 export type ThreadActivityTone = "info" | "tool" | "approval" | "error";
 
@@ -559,6 +569,10 @@ export interface PendingApproval {
   requestKind: ProviderRequestKind;
   createdAt: string;
   detail?: string;
+  /** Why the provider asked ({@link RequestOpenedPayload.reason}); absent when it did not say. */
+  reason?: string;
+  /** The subagent that asked ({@link RequestOpenedPayload.requestingAgentId}); absent for the main agent. */
+  requestingAgentId?: string;
   appName?: string;
   /**
    * The tool call this request gates, when the adapter knows it.
@@ -787,6 +801,14 @@ export interface ThreadSnapshotPayload {
    * that as `null` and shows no goal until the drain-restart.
    */
   goal?: ThreadGoal | null;
+  /**
+   * Pending approvals and questions someone already answered, the provider's
+   * resolution still on its way (`ThreadFoldState.answeredApprovals` /
+   * `answeredQuestions`): `[requestId, answeredAt]`. Absent when there are
+   * none, and from a host that predates them.
+   */
+  answeredApprovals?: Array<[string, string]>;
+  answeredQuestions?: Array<[string, string]>;
 }
 
 /**

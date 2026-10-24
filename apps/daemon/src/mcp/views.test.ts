@@ -74,6 +74,15 @@ test("pending views: advertised decisions win over the default four; a message-m
   assert.equal(q.responseMode, "message"); assert.equal(q.dismissible, true); assert.equal(q.questions[0].multiSelect, true);
 });
 
+test("pending views: an approval's reason is shown when the provider gave one", () => {
+  const views = pendingApprovalViews(snapshot({ pending: { approvals: [
+    { requestId: "r4", requestKind: "command", createdAt: stamp(1), detail: "rm -rf build", reason: "Matched an ask rule" },
+    { requestId: "r5", requestKind: "command", createdAt: stamp(2) }
+  ], userInputs: [] } }));
+  assert.equal(views[0].reason, "Matched an ask rule");
+  assert.equal("reason" in views[1], false);
+});
+
 test("an unsettled turn has no last reply", () => {
   const running = snapshot({ turns: [turn({ turnId: "t1", state: "running", completedAt: null })], items: [message("assistant", "partial", { turnId: "t1" })] });
   assert.equal(sessionDetail(chatSummary(), running, ctx).lastReply, undefined);

@@ -16,6 +16,7 @@ import {
   createAgentChatTransport
 } from "./transport";
 import { ev, resetBuilders, snapshot } from "./test-helpers";
+import { wakeReconnects } from "../connection/backoff";
 
 interface OpenStream {
   path: string;
@@ -132,6 +133,27 @@ describe("the stream reader", () => {
     handle.close();
   });
 
+  it("a wake (back online, page visible) redials a waiting stream at once", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    // Several drops in a row grow the backoff well past a second.
+    for (let drop = 0; drop < 5; drop += 1) {
+      transporter.latest.handlers.onEnd();
+      mock.timers.tick(15_000);
+    }
+    const before = transporter.streams.length;
+    transporter.latest.handlers.onEnd();
+    wakeReconnects();
+    assert.equal(transporter.streams.length, before + 1, "redialed without waiting");
+    // The wake started the backoff over: the next drop waits at most the base.
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, before + 2);
+    handle.close();
+  });
+
   it("drops a replayed event so a reconnect duplicates nothing", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
@@ -214,6 +236,34 @@ describe("the stream reader", () => {
     transporter.latest.handlers.onData(line({ kind: "synchronized", hostInstanceId: "h1" }));
     assert.equal(handle.hostInstanceId, "h1");
     handle.close();
+  });
+
+  it("stops reconnecting on a 401: the token is revoked, and every retry would feed the login throttle", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const errors: unknown[] = [];
+    const reconnects: string[] = [];
+    const handle = transport.stream("s1", {}, {
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      onReconnect: (info) => reconnects.push(info.reason)
+    });
+    transporter.latest.handlers.onError?.(Object.assign(new Error("The stream failed with status 401."), { status: 401 }));
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(10 * 60_000);
+    assert.equal(errors.length, 1, "the error is still reported");
+    assert.equal(transporter.streams.length, 1, "no reconnect loop, stalled or ended");
+    assert.deepEqual(reconnects, []);
+    handle.close();
+
+    // Any other refusal (the host restarting) still reconnects.
+    const other = transport.stream("s2", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onError?.(Object.assign(new Error("The stream failed with status 503."), { status: 503 }));
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(1_000);
+    assert.equal(transporter.streams.length, 3);
+    other.close();
   });
 
   it("any other error line still ends in an ordinary reconnect", () => {
@@ -308,12 +358,19 @@ describe("commands", () => {
     );
   });
 
-  it("defaults the turn diff to ignoring whitespace", async () => {
+  it("defaults the turn diff to showing whitespace, and hides it only when asked", async () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
     transporter.responses.push({ status: 200, ok: true, data: {} });
+    transporter.responses.push({ status: 200, ok: true, data: {} });
+    transporter.responses.push({ status: 200, ok: true, data: {} });
     await transport.turnDiff("s1", 3);
-    assert.deepEqual(transporter.requests[0]?.query, { ignoreWhitespace: 1 });
+    await transport.turnDiff("s1", 3, { ignoreWhitespace: true });
+    await transport.turnDiff("s1", 3, { ignoreWhitespace: false });
+    assert.deepEqual(
+      transporter.requests.map((request) => request.query),
+      [{ ignoreWhitespace: 0 }, { ignoreWhitespace: 1 }, { ignoreWhitespace: 0 }]
+    );
   });
 });
 

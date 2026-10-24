@@ -23,6 +23,7 @@ import type { Clock, FireRequest, TriggerHost, WorkflowLogger } from "../contrac
 import type { WorkflowStateStore } from "../state-store.ts";
 import { isFullSha, parseRemoteUrl, redactUrlUserinfo, repoDisplayName, repoKeyOf, stripUrlCredentials, type LsRemoteResult } from "../git-remote/index.ts";
 import type { ConditionalListOptions, ConditionalPage, PullRequestInfo, ReleaseInfo } from "../../providers/types.ts";
+import { MAX_RETRY_AFTER_MS } from "../../providers/types.ts";
 import {
   type DetectedEvent,
   type Detection,
@@ -43,12 +44,16 @@ const REST_POLL_MS = 120_000;
 const BITBUCKET_CLOUD_REST_POLL_MS = 180_000;
 const POLL_JITTER = 0.1;
 const MAX_BACKOFF_MS = 15 * 60_000;
-/** A provider's Retry-After is honoured up to this. */
-const MAX_RETRY_AFTER_MS = 60 * 60_000;
 /** The default branch is re-read every Nth refs poll. */
 const DEFAULT_BRANCH_EVERY = 10;
 /** First polls after a (re)arm are spread over this window. */
 const INITIAL_SPREAD_MS = 10_000;
+/**
+ * …except a Bitbucket (Cloud or DC) repo's REST listings, spread wider: Bitbucket's REST quota is
+ * small (~1,000 req/h on Cloud, an admin-set bucket on DC), and a daemon start re-arms every
+ * trigger at once, so a 10 s sweep over many repos is the burst that drew the first 429s.
+ */
+const BITBUCKET_REST_INITIAL_SPREAD_MS = 60_000;
 /** Definitions are re-resolved this often too (a project's `origin` can change without an edit). */
 const RESOLVE_INTERVAL_MS = 5 * 60_000;
 
@@ -113,6 +118,8 @@ interface RepoPoller {
   accountId: string | null;
   repo: RepoInfo;
   restIntervalMs: number;
+  /** The window this repo's first REST polls after a (re)arm are spread over. */
+  restSpreadMs: number;
   triggers: Map<string, TriggerEntry>;
   channels: Record<ChannelName, ChannelState>;
   defaultBranch?: string;
@@ -325,6 +332,8 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
           accountId: group.accountId,
           repo: { url: group.url, name: repoDisplayName(group.url) },
           restIntervalMs: remoteHost === "bitbucket.org" ? BITBUCKET_CLOUD_REST_POLL_MS : REST_POLL_MS,
+          // GitHub's quota takes the plain sweep; every other forge here is Bitbucket (Cloud or DC).
+          restSpreadMs: remoteHost === "github.com" ? INITIAL_SPREAD_MS : BITBUCKET_REST_INITIAL_SPREAD_MS,
           triggers: new Map(),
           channels: {
             refs: { timer: null, running: false, again: false, failures: 0, polls: 0 },
@@ -348,7 +357,7 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
         if (ch.running) {
           if (needsBaseline && ch.failures === 0) ch.again = true;
         } else if (ch.timer === null || (needsBaseline && ch.failures === 0)) {
-          schedule(poller, channel, Math.round(random() * INITIAL_SPREAD_MS));
+          schedule(poller, channel, Math.round(random() * (channel === "refs" ? INITIAL_SPREAD_MS : poller.restSpreadMs)));
         }
       }
     }

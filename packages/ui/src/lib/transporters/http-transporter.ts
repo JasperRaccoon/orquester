@@ -11,11 +11,20 @@ import {
 import { FetchHttpClient, type HttpClient } from "../http-client";
 import { getSessionChannel } from "./ws-session-channel";
 import { getBrowserChannel, type WsBrowserChannel } from "./ws-browser-channel";
+import { UnexpectedResponseError } from "../connection/failure";
+
+/** A response header, whatever case the client reported its name in. */
+function headerValue(headers: Record<string, string> | undefined, name: string): string | null {
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (key.toLowerCase() === name) return value;
+  }
+  return null;
+}
 
 export interface HttpTransporterOptions {
   baseUrl: string;
-  /** Bearer sent as `Authorization: Bearer <credential>` when present. The
-   *  credential is base64("<username>:<hash>"). */
+  /** Bearer sent as `Authorization: Bearer <credential>` when present: a
+   *  session or API token from the daemon's login (`authRoutes`). */
   credential?: string;
   /** Defaults to a {@link FetchHttpClient}. */
   httpClient?: HttpClient;
@@ -68,7 +77,14 @@ export class HttpTransporter implements Transporter {
     });
 
     const raw = await response.text();
-    const data = raw ? (JSON.parse(raw) as T) : (undefined as T);
+    let data: T;
+    try {
+      data = raw ? (JSON.parse(raw) as T) : (undefined as T);
+    } catch {
+      // Not the daemon's API answering (an HTML error page, a captive portal,
+      // another web server): say so with the status, for the connection diagnosis.
+      throw new UnexpectedResponseError(response.status, headerValue(response.headers, "content-type"));
+    }
 
     return {
       status: response.status,
@@ -105,7 +121,7 @@ export class HttpTransporter implements Transporter {
     if (this.client.stream) {
       return this.client.stream(
         { url, method: "GET", headers },
-        { onData: handlers.onData, onEnd: handlers.onEnd }
+        { onData: handlers.onData, onEnd: handlers.onEnd, onError: handlers.onError }
       );
     }
 

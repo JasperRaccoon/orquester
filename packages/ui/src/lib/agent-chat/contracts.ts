@@ -188,6 +188,12 @@ export interface AgentChatThreadSlice {
   turns: Turn[];
   checkpoints: Checkpoint[];
   pending: { approvals: PendingApproval[]; userInputs: PendingUserInput[] };
+  /**
+   * Pending requests someone already answered — here, in another tab or over
+   * the MCP — whose resolution is still on its way (the fold's
+   * `answeredApprovals` / `answeredQuestions`). Absent reads as none.
+   */
+  answeredRequestIds?: readonly string[];
   roster: RuntimeSubagent[];
   /** The latest turn's state, for the composer's primary action and the status line. */
   turnStatus: TurnState | null;
@@ -722,6 +728,18 @@ export interface AgentChatActions {
      * what the user is typing.
      */
     generatedPrompt?: boolean;
+    /**
+     * The message redirects the agent: the pending approvals the user saw,
+     * which the host declines before it steers the message in
+     * (`TurnCommandBody.declineApprovals`).
+     */
+    declineApprovals?: string[];
+    /**
+     * Idle compaction's "When you return" (`resume-compaction.logic.ts`): compact the chat first.
+     * The message is in the outbox before the compaction is posted, so a reload while it runs
+     * re-posts the message rather than losing it (the draft was cleared at submit).
+     */
+    compactFirst?: boolean;
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
@@ -914,6 +932,8 @@ export interface AgentChatPendingView {
   userInputs: PendingUserInput[];
   /** `1/N` counters and the in-flight lock-out come from these. */
   respondingRequestIds: readonly string[];
+  /** Pending requests already answered, their resolution on its way ({@link AgentChatThreadSlice.answeredRequestIds}). */
+  answeredRequestIds: readonly string[];
   totalCount: number;
 }
 

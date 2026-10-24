@@ -268,7 +268,7 @@ test("readTurnDiff: equal turns short-circuit without touching git", async () =>
   assert.equal(diff, "");
 });
 
-test("readTurnDiff ignores whitespace by default and can be told not to", async (t) => {
+test("readTurnDiff shows whitespace changes by default and can be told to hide them", async (t) => {
   const repo = await createTempRepo();
   t.after(() => repo.cleanup());
   await repo.write("a.txt", "alpha\nbeta\n");
@@ -285,23 +285,55 @@ test("readTurnDiff ignores whitespace by default and can be told not to", async 
     assistantMessageId: null
   });
 
-  const ignored = await service.readTurnDiff({
+  const exact = await service.readTurnDiff({
     threadId: THREAD,
     cwd: repo.dir,
     fromTurnCount: 0,
     toTurnCount: 1
   });
-  assert.equal(ignored, "", "a whitespace-only change is no diff by default");
+  assert.match(exact, /^diff --git a\/a\.txt b\/a\.txt$/m);
+  assert.match(exact, /^\+alpha {3}$/m, "a whitespace-only change shows by default");
 
-  const exact = await service.readTurnDiff({
+  const ignored = await service.readTurnDiff({
     threadId: THREAD,
     cwd: repo.dir,
     fromTurnCount: 0,
     toTurnCount: 1,
-    ignoreWhitespace: false
+    ignoreWhitespace: true
   });
-  assert.match(exact, /^diff --git a\/a\.txt b\/a\.txt$/m);
-  assert.match(exact, /^\+alpha {3}$/m);
+  assert.equal(ignored, "", "hidden when asked");
+
+  // Each flag is its own cache entry: the default read is still whole.
+  const again = await service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 0, toTurnCount: 1 });
+  assert.equal(again, exact);
+});
+
+test("readTurnDiff carries a binary file as git's one-line marker beside the text files", async (t) => {
+  const repo = await createTempRepo();
+  t.after(() => repo.cleanup());
+  await repo.write("a.txt", "alpha\n");
+  await repo.git("add", "a.txt");
+  await repo.git("commit", "-qm", "initial");
+
+  const service = serviceFor(repo);
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+  // 64 KiB with NUL bytes: git's own binary test, and big enough that a binary
+  // patch would dwarf the marker.
+  await repo.write("logo.png", "\u0089PNG\u0000\u0001".repeat(10_000));
+  await repo.write("a.txt", "alpha\nbeta\n");
+  await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+
+  const diff = await service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 0, toTurnCount: 1 });
+  assert.match(diff, /^diff --git a\/logo\.png b\/logo\.png$/m);
+  assert.match(diff, /^Binary files \/dev\/null and b\/logo\.png differ$/m);
+  assert.doesNotMatch(diff, /GIT binary patch/);
+  assert.match(diff, /^\+beta$/m, "the text file beside it keeps its hunk");
+  assert.ok(diff.length < 1_000, `${diff.length} bytes`);
 });
 
 test("readTurnDiff refuses a turn above the thread's highest checkpoint", async (t) => {

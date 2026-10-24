@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   boxDesktopInstallHint,
+  boxDesktopInstallsOnOpen,
   browserFontChoices,
   chromeArch,
   desktopInstallPlan,
@@ -177,6 +178,15 @@ test("the install hint says Orquester installs, or why it cannot", () => {
   assert.equal(boxDesktopInstallHint(facts(INSTALLED), [], "root"), null);
   assert.equal(nonLinuxDesktopStatus().installHint, "Desktops run only in Linux VMs.");
   assert.equal(nonLinuxDesktopStatus().available, false);
+});
+
+test("a desktop installs what is missing by itself only with a package manager and root or sudo", () => {
+  const fresh = facts(FRESH);
+  const { missingPackages } = evaluateBoxDesktop(fresh);
+  assert.equal(boxDesktopInstallsOnOpen(fresh, missingPackages), true);
+  assert.equal(boxDesktopInstallsOnOpen({ ...fresh, sudo: false }, missingPackages), false);
+  assert.equal(boxDesktopInstallsOnOpen({ ...fresh, packageCommand: "pacman" }, missingPackages), false);
+  assert.equal(boxDesktopInstallsOnOpen(facts(INSTALLED), []), false);
 });
 
 test("package managers and Chrome architectures", () => {

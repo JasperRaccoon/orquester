@@ -45,9 +45,15 @@ import type {
 } from "@orquester/api/agent-chat";
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, RollbackTarget, SessionCatalog } from "../../adapter.ts";
+import type {
+  AdapterContext,
+  ApprovalResponseOptions,
+  RollbackTarget,
+  SessionCatalog
+} from "../../adapter.ts";
 import { parseInitializationCommands, withSynthesisedCommands } from "./probe.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
+import { ProviderLeftovers } from "../../support/provider-leftovers.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import {
   FileTail,
@@ -64,7 +70,7 @@ import {
   claudeTurnBoundariesFromCursor,
   type ClaudeResumeCursor
 } from "./cursor.ts";
-import { permissionResultForDecision } from "./decisions.ts";
+import { claudeApprovalPresentation, permissionResultForDecision } from "./decisions.ts";
 import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
 import { isPlainObject, readJsonObject, type ClaudeNamesFs } from "../../../agent-isolation/claude-names.ts";
@@ -104,6 +110,7 @@ import {
   remapClaudeForkTurnBoundaries,
   type ClaudeHistoryMessage
 } from "./rollback.ts";
+import { claudeLifelineSpawner } from "./local-process.ts";
 import { dispatchableSkillNames, discoverClaudeSkills } from "./skills.ts";
 import { readWorkflowHistoryRun, workflowLaunchesIn } from "./workflow-history.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
@@ -232,6 +239,14 @@ function claudeIngestsAttachment(
   return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);
 }
 
+/** What a decline's response hands `permissionResultForDecision`. */
+function responseFields(response: ApprovalResponseOptions | undefined): { redirect?: true; feedback?: string } {
+  return {
+    ...(response?.redirect === true ? { redirect: true as const } : {}),
+    ...(response?.feedback !== undefined ? { feedback: response.feedback } : {})
+  };
+}
+
 interface PendingApproval {
   requestId: string;
   requestType: CanonicalRequestType;
@@ -239,7 +254,11 @@ interface PendingApproval {
   toolInput: Record<string, unknown>;
   toolUseId?: string;
   suggestions?: readonly PermissionUpdate[];
-  settle: (decision: ApprovalDecision) => void;
+  /**
+   * `response`: a decline the user's message redirects, or — a subagent's
+   * request — the user's own words for it (`permissionResultForDecision`).
+   */
+  settle: (decision: ApprovalDecision, response?: ApprovalResponseOptions) => void;
 }
 
 interface PendingUserInput {
@@ -292,6 +311,8 @@ export class ClaudeSession {
   private readonly stderr: StderrCapture;
 
   private query: Query | undefined;
+  /** This launch's leftover sweep (local launches only). */
+  private leftovers: ProviderLeftovers | null = null;
   /** The handshake's `commands` (`catalog()`); unset until it answered. */
   private initCommands: SlashCommand[] | undefined;
   private record: ProviderSession;
@@ -495,6 +516,8 @@ export class ClaudeSession {
             box !== undefined ? new BoxProjectFs(box.launch.connection) : undefined
           )
         : undefined;
+    // A local CLI runs through the host-death lifeline (`local-process.ts`); a box's has its own spawner.
+    const localSpawner = box === undefined ? claudeLifelineSpawner((data) => this.onStderr(data)) : undefined;
     const built = buildClaudeQueryOptions({
       ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
       ...(settingsNodeOptions !== undefined ? { settingsNodeOptions } : {}),
@@ -510,7 +533,9 @@ export class ClaudeSession {
             spawnClaudeCodeProcess: box.launch.claudeSpawner((data) => this.onStderr(data), box.envUnset),
             bridgedMcpServers: box.mcpServers
           }
-        : {}),
+        : localSpawner !== undefined
+          ? { spawnClaudeCodeProcess: localSpawner }
+          : {}),
       runtimeMode: this.options.runtimeMode,
       modelSelection: this.options.modelSelection,
       models: this.options.models,
@@ -552,6 +577,11 @@ export class ClaudeSession {
 
     this.emit([this.normalizer.sessionStarted(this.options.resumeCursor)]);
 
+    // The CLI's MCP servers (and what they start) are stopped at every end of this launch;
+    // never the user's work, nor a shared daemon (`support/provider-leftovers.ts`). Not in a box.
+    if (box === undefined) {
+      this.leftovers = new ProviderLeftovers({ env: this.options.env, label: "claude", logger: this.options.context.logger });
+    }
     try {
       this.query = this.options.deps.query({
         prompt: this.promptQueue,
@@ -728,6 +758,11 @@ export class ClaudeSession {
         // so the turn's own events are out first, and against the turn that
         // ended — read before the frame settles it.
         const endsTurn = (message as { type?: unknown }).type === "result";
+        // The CLI's helpers: its children at its first `init` — its MCP servers, before any
+        // tool of the turn ran — then, at each turn's end, what those helpers started since.
+        if (endsTurn || isSystemInit(message)) {
+          void this.leftovers?.recordHelpers();
+        }
         const endingTurnId = endsTurn ? this.normalizer.turnState?.turnId : undefined;
         try {
           this.emit(this.normalizer.handleMessage(message));
@@ -1544,7 +1579,11 @@ export class ClaudeSession {
       // thread whose turn is already settled.
       step("background shells", () => this.stopAllBackgroundShells());
       step("workflow transcripts", () => this.stopAllWorkflowTails());
+      // A CLI that never saw a turn has only helpers: recorded now, if it still lives (after a
+      // turn, this only follows what the helpers recorded at its `init` started since).
+      step("the helpers", () => void this.leftovers?.recordHelpers());
       step("the query", () => this.closeQuery());
+      step("the leftovers", () => void this.leftovers?.sweep());
       step("the prompt queue", () => this.promptQueue.close());
 
       step("live tasks", () => this.emit(this.normalizer.closeLiveTasks()));
@@ -1697,14 +1736,15 @@ export class ClaudeSession {
       // waits on the same decision.
       return new Promise<PermissionResult>((resolve) => {
         const previous = existing.settle;
-        existing.settle = (decision) => {
-          previous(decision);
+        existing.settle = (decision, response) => {
+          previous(decision, response);
           resolve(
             permissionResultForDecision({
               decision,
               toolName,
               toolInput,
-              ...(existing.suggestions !== undefined ? { suggestions: existing.suggestions } : {})
+              ...(existing.suggestions !== undefined ? { suggestions: existing.suggestions } : {}),
+              ...responseFields(response)
             })
           );
         };
@@ -1716,7 +1756,18 @@ export class ClaudeSession {
     const detail =
       trimmedString(callbackOptions.description) ?? summarizeToolRequest(toolName, toolInput);
 
-    const decided = createDeferred<ApprovalDecision>();
+    // Why Claude asked, and whether it allows a standing grant for it.
+    const presentation = claudeApprovalPresentation({ detail, callbackOptions });
+
+    // A subagent's request (the Task tool's agent): a message sent over it is
+    // its answer, so it is said whose it is. The call's owner while it is in
+    // flight, else the SDK's own word for it.
+    const requestingAgentId =
+      (callbackOptions.toolUseID !== undefined
+        ? this.normalizer.toolUseOwner(callbackOptions.toolUseID)
+        : undefined) ?? trimmedString(callbackOptions.agentID);
+
+    const decided = createDeferred<{ decision: ApprovalDecision; response?: ApprovalResponseOptions }>();
     const pending: PendingApproval = {
       requestId,
       requestType,
@@ -1726,7 +1777,8 @@ export class ClaudeSession {
       ...(callbackOptions.suggestions !== undefined
         ? { suggestions: callbackOptions.suggestions }
         : {}),
-      settle: (decision) => decided.resolve(decision)
+      settle: (decision, response) =>
+        decided.resolve({ decision, ...(response !== undefined ? { response } : {}) })
     };
     this.pendingApprovals.set(requestId, pending);
 
@@ -1735,6 +1787,8 @@ export class ClaudeSession {
         requestId,
         requestType,
         detail,
+        ...presentation,
+        ...(requestingAgentId !== undefined ? { requestingAgentId } : {}),
         toolName,
         toolInput,
         ...(callbackOptions.toolUseID !== undefined
@@ -1775,13 +1829,14 @@ export class ClaudeSession {
       onAbort();
     }
 
-    const decision = await decided.promise;
+    const { decision, response } = await decided.promise;
     this.noteActivity();
     return permissionResultForDecision({
       decision,
       toolName,
       toolInput,
-      ...(pending.suggestions !== undefined ? { suggestions: pending.suggestions } : {})
+      ...(pending.suggestions !== undefined ? { suggestions: pending.suggestions } : {}),
+      ...responseFields(response)
     });
   };
 
@@ -1895,6 +1950,12 @@ export class ClaudeSession {
       // it.
       return null;
     }
+    // Idle compaction set to "Never": keep the full history without asking (T3 Code's `off`).
+    // An unreadable setting asks, as before.
+    const idleCompaction = await this.options.context.idleCompactionMode?.(this.options.home).catch(() => undefined);
+    if (idleCompaction === "off") {
+      return { behavior: "completed", result: "continue" };
+    }
     const ageMinutes = Number(request.payload.sessionAgeMinutes ?? 0);
     const estimatedTokens = Number(request.payload.estimatedTokens ?? 0);
     const question =
@@ -1956,13 +2017,17 @@ export class ClaudeSession {
   // Responding
   // -------------------------------------------------------------------------
 
-  respondToApproval(requestId: string, decision: ApprovalDecision): void {
+  respondToApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    options?: ApprovalResponseOptions
+  ): void {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) {
       throw new Error(`Unknown pending approval request: ${requestId}`);
     }
     this.pendingApprovals.delete(requestId);
-    pending.settle(decision);
+    pending.settle(decision, options);
     this.emit([
       this.normalizer.requestResolved({
         requestId,
@@ -2629,10 +2694,22 @@ export class ClaudeSession {
     // than `<home>/.claude/skills` and found none.
     const configDir = claudeConfigDir(this.options.env);
     try {
-      const skills = await discoverClaudeSkills({ configDir, cwd: this.options.cwd });
-      // An Agent Profile chat never loads the user's skills (`settingSources` drops that source):
-      // dispatching `/name` for one would only answer "Unknown command".
-      return this.options.profileLaunch !== undefined ? skills.filter((skill) => skill.scope !== "user") : skills;
+      const profile = this.options.profileLaunch;
+      const pluginCacheDir = this.options.env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
+      const skills = await discoverClaudeSkills({
+        configDir,
+        cwd: this.options.cwd,
+        ...(pluginCacheDir !== undefined ? { pluginCacheDir } : {}),
+        // A profile chat loads its own plugins by path; every installed one is switched off.
+        ...(profile !== undefined ? { pluginDirs: profile.plugins.map((plugin) => plugin.path) } : {})
+      });
+      if (profile === undefined) return skills;
+      // An Agent Profile chat never loads the user's skills (`settingSources` drops that source),
+      // nor one its `skills` allow-list leaves out: dispatching `/name` for one would only answer
+      // "Unknown command".
+      return skills.filter(
+        (skill) => skill.scope !== "user" && (profile.skills === undefined || profile.skills.includes(skill.name))
+      );
     } catch {
       // Discovery is best-effort: a broken skills dir must never fail a turn.
       return [];
@@ -2942,4 +3019,10 @@ function isInterruptLikeError(error: unknown): boolean {
 function claudeRequestKey(requestId: string | undefined, fallback: () => string): string {
   const trimmed = typeof requestId === "string" ? requestId.trim() : "";
   return trimmed.length > 0 ? trimmed : fallback();
+}
+
+/** The CLI's `system/init` frame: its MCP servers are started, no tool of the turn has run. */
+function isSystemInit(message: unknown): boolean {
+  const frame = message as { type?: unknown; subtype?: unknown } | null;
+  return frame !== null && frame.type === "system" && frame.subtype === "init";
 }

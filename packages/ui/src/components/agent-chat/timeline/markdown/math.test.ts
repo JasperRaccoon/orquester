@@ -1,116 +1,376 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { createElement } from "react";
+import { before, describe, it } from "node:test";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
-import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import { ChatInlineMarkdown, ChatMarkdown } from "./ChatMarkdown.tsx";
 import { createIncrementalMarkdownPlugin } from "./incremental.ts";
-import { isPlausibleSingleDollarMath, KATEX_OPTIONS, mightContainMath, remarkChatMath } from "./math.ts";
+import {
+  hasClosingLine,
+  isPlausibleSingleDollarMath,
+  KATEX_OPTIONS,
+  mathKind,
+  mathSource,
+  mightContainMath,
+  remarkChatMath
+} from "./math.ts";
+import { loadMathEngine } from "./math-typeset.ts";
 
-function render(source: string, extra: unknown[] = []): string {
-  return renderToStaticMarkup(
-    createElement(ReactMarkdown, {
-      remarkPlugins: [remarkGfm, remarkChatMath as unknown as typeof remarkGfm, ...(extra as Array<typeof remarkGfm>)],
-      rehypePlugins: [[rehypeKatex, KATEX_OPTIONS]] as never,
-      children: source
-    })
-  );
+type Formula = [kind: "inline" | "display", tex: string];
+
+function textOf(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(textOf).join("");
+  return "";
 }
 
-const codes = (text: string): number[] => Array.from(text, (char) => char.charCodeAt(0));
-const isMath = (html: string): boolean => html.includes('class="katex"') || html.includes('class="katex-error"');
+/** Parses `markdown` with the chat's math plugins; formulas are collected, not rendered. */
+function parse(markdown: string, extra: unknown[] = []): { formulas: Formula[]; html: string } {
+  const formulas: Formula[] = [];
+  const html = renderToStaticMarkup(
+    createElement(ReactMarkdown, {
+      remarkPlugins: [remarkGfm, remarkChatMath as unknown as typeof remarkGfm, ...(extra as Array<typeof remarkGfm>)],
+      components: {
+        code: ({ className, children }) => {
+          const kind = mathKind(className);
+          if (kind === null) return createElement("code", { className }, children);
+          formulas.push([kind, textOf(children)]);
+          return null;
+        }
+      },
+      children: markdown
+    })
+  );
+  return { formulas, html };
+}
 
-describe("currency text is not math", () => {
-  for (const text of [
-    "It costs $5 and then $10.",
-    "price $20,000 or $30,000",
-    "Between $5 and $10 per seat, plus $3.50 tax",
-    "We paid $ 5 and $ 10",
-    "$5",
-    "just a lone $ sign"
-  ]) {
-    it(JSON.stringify(text), () => {
-      const html = render(text);
-      assert.equal(isMath(html), false, html);
-      assert.equal(html, `<p>${text}</p>`);
+const formulas = (markdown: string): Formula[] => parse(markdown).formulas;
+
+/** The text a reader sees outside formulas, tags stripped. */
+function text(markdown: string): string {
+  return parse(markdown)
+    .html.replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+const codes = (value: string): number[] => Array.from(value, (char) => char.charCodeAt(0));
+
+describe("delimiters", () => {
+  const cases: Array<[source: string, expected: Formula[]]> = [
+    // The four delimiters models emit.
+    ["Inline $x^2$ and \\(y_1\\), display $$a+b$$ and \\[c\\].", [["inline", "x^2"], ["inline", "y_1"], ["inline", "a+b"], ["display", "c"]]],
+    ["$x$", [["inline", "x"]]],
+    ["\\(x\\)", [["inline", "x"]]],
+    ["\\[x\\]", [["display", "x"]]],
+    ["$$x$$", [["display", "x"]]],
+    ["so $$a+b$$ here", [["inline", "a+b"]]],
+    // Blocks.
+    ["$$\n\\frac{a}{b}\n$$", [["display", "\\frac{a}{b}"]]],
+    ["\\[\n\\frac{a}{b}\n\\]", [["display", "\\frac{a}{b}"]]],
+    ["Where\n\\[\n\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}\n\\]\nholds.", [["display", "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}"]]],
+    ["\\[\nx\n- y\n# z\n\\]\nafter", [["display", "x\n- y\n# z"]]],
+    ["\\[\na\n=\nb\n\\]", [["display", "a\n=\nb"]]],
+    // A `\]` after content is not a block's closer: this is inline math alone in its paragraph.
+    ["\\[\nx \\]", [["display", "x"]]],
+    ["\\[\nx\n   \\]", [["display", "x"]]],
+    ["> $$\n> x\n> $$", [["display", "x"]]],
+    ["> \\[\n> x\n> \\]", [["display", "x"]]],
+    ["- intro\n\n  $$\n  x^2\n  $$", [["display", "x^2"]]],
+    ["$$x^2\n+y^2$$", [["display", "x^2\n+y^2"]]],
+    ["Intro\n\n$$ E = mc^2 $$\n\nOutro", [["display", "E = mc^2"]]],
+    ["Intro\n\n\\[ E = mc^2 \\]\n\nOutro", [["display", "E = mc^2"]]],
+    ["$$a$$ is the first formula.\nSome prose.\n$$\nb\n$$", [["inline", "a"], ["display", "b"]]],
+    // Fences.
+    ["```math\nx^2\n```", [["display", "x^2"]]],
+    ["~~~math\nx^2\n~~~", [["display", "x^2"]]],
+    ["```Math\nx^2\n```", [["display", "x^2"]]],
+    ["> ```math\n> x^2\n> ```", [["display", "x^2"]]],
+    // TeX inside formulas.
+    ["\\(\\left(x\\right)\\)", [["inline", "\\left(x\\right)"]]],
+    ["\\(a \\\\ b\\)", [["inline", "a \\\\ b"]]],
+    ["\\(\\{x\\}\\)", [["inline", "\\{x\\}"]]],
+    ["\\(x\n+y\\)", [["inline", "x\n+y"]]],
+    ["\\[\\alpha\\]", [["display", "\\alpha"]]],
+    ["\\[x_1, x_2\\]", [["display", "x_1, x_2"]]],
+    ["\\(1\\)", [["inline", "1"]]],
+    ["Pay \\$$x$ now.", [["inline", "x"]]],
+    // Containers and other inline syntax.
+    ["- [ ] check \\(x\\)\n- [x] then $y$", [["inline", "x"], ["inline", "y"]]],
+    ["**bold \\(x\\)** and *em $y$*", [["inline", "x"], ["inline", "y"]]],
+    ["[label \\(x\\)](https://example.com)", [["inline", "x"]]],
+    ["| A | B |\n| --- | --- |\n| \\(x\\) | $y$ |", [["inline", "x"], ["inline", "y"]]],
+    ["| Name | Value |\n| --- | --- |\n| first | \\(x |\n| second | y\\) |\n| valid | $z$ |", [["inline", "z"]]],
+    // Not math.
+    ["As shown in \\[1\\] and \\[2, 3\\].", []],
+    ["call f\\(\\) here", []],
+    ["empty \\( \\) parens", []],
+    ["Escaped \\\\(x\\\\) stays.", []],
+    ["\\(a `\\)` b", []],
+    ["text \\[a`\\]`", []],
+    ["See [docs](https://example.com/\\(a\\)) here.", []],
+    ["Energy \\(E = mc", []],
+    ["$$\nx^2", []],
+    ["\\[\nx^2\n- y", []],
+    ["$$E=mc^2", []],
+    ["```math\nx^2", []],
+    ["`\\(x\\)` and `$y$`", []],
+    ["    \\(x\\)", []],
+    ["```\n$x$ \\(y\\) \\[z\\]\n```", []]
+  ];
+  for (const [source, expected] of cases) {
+    it(JSON.stringify(source), () => {
+      assert.deepEqual(formulas(source), expected);
+    });
+  }
+});
+
+describe("what is left as text", () => {
+  const cases: Array<[source: string, rendered: string]> = [
+    ["As shown in \\[1\\] and \\[2, 3\\].", "As shown in [1] and [2, 3]."],
+    ["Escaped \\\\(x\\\\) stays.", "Escaped \\(x\\) stays."],
+    ["Escaped \\$x\\$ stays.", "Escaped $x$ stays."],
+    ["\\(a `\\)` b", "(a \\) b"],
+    ["call f\\(\\) here", "call f() here"],
+    ["Energy \\(E = mc", "Energy (E = mc"],
+    ["$$E=mc^2", "$$E=mc^2"],
+    ["Use `$x$` in code.", "Use $x$ in code."],
+    ["`\\(x\\)` and `\\[y\\]`", "\\(x\\) and \\[y\\]"]
+  ];
+  for (const [source, rendered] of cases) {
+    it(JSON.stringify(source), () => {
+      assert.equal(text(source).trim(), rendered);
     });
   }
 
-  it("still finds real math next to currency", () => {
-    const html = render("costs $5, then $x$ is the unknown");
-    assert.equal(isMath(html), true);
-    assert.ok(html.startsWith("<p>costs $5, then "), html);
-    assert.ok(html.includes('<annotation encoding="application/x-tex">x</annotation>'));
-    assert.ok(html.endsWith(" is the unknown</p>"));
+  it("keeps the code a code block holds, delimiters and all", () => {
+    const { html, formulas: found } = parse("```\n$x$ \\(y\\) \\[z\\]\n$$\nw\n$$\n```");
+    assert.deepEqual(found, []);
+    assert.ok(html.includes("$x$ \\(y\\) \\[z\\]\n$$\nw\n$$"), html);
+  });
+
+  it("keeps an unclosed math fence a code block showing its source", () => {
+    const { html } = parse("```math\nx^2");
+    assert.ok(html.includes('<code class="language-math">x^2'), html);
+  });
+
+  it("keeps link destinations with dollars and parentheses intact", () => {
+    const { html, formulas: found } = parse(
+      "Set $TOKEN, then open [users](https://graph.microsoft.com/v1.0/users?$select=id) and \\(x\\)."
+    );
+    assert.ok(html.includes('href="https://graph.microsoft.com/v1.0/users?$select=id"'), html);
+    assert.deepEqual(found, [["inline", "x"]]);
+    const autolink = parse("Set $TOKEN, then open <https://graph.microsoft.com/v1.0/users?$select=id>.").html;
+    assert.ok(autolink.includes('href="https://graph.microsoft.com/v1.0/users?$select=id"'), autolink);
+  });
+
+  it("keeps an adjacent code span whole", () => {
+    for (const [source, code] of [
+      ["$a`$HOME`", "$HOME"],
+      ["\\(a`\\)`", "\\)"],
+      ["\\(a\\alpha`\\)`", "\\)"],
+      ["text \\[a`\\]`", "\\]"]
+    ] as const) {
+      const { html, formulas: found } = parse(source);
+      assert.deepEqual(found, [], source);
+      assert.ok(html.includes(`<code>${code}</code>`), `${source}: ${html}`);
+    }
   });
 });
 
-describe("math renders", () => {
-  it("renders $…$ inline inside the paragraph", () => {
-    const html = render("Euler: $e^{i\\pi}+1=0$ holds");
-    assert.ok(html.startsWith("<p>Euler: <span class=\"katex\">"), html);
-    assert.ok(html.includes('encoding="application/x-tex">e^{i\\pi}+1=0<'));
-    assert.ok(!html.includes("katex-display"));
+describe("currency", () => {
+  for (const prose of [
+    "It costs $5 and then $10.",
+    "It costs $5 and $10.",
+    "price $20,000 or $30,000",
+    "Between $5 and $10 per seat, plus $3.50 tax",
+    "Budget $5-$10 per seat, or $20,000-$30,000 a year.",
+    "Plans are $5/$10 monthly.",
+    "We paid $ 5 and $ 10",
+    "Run $browser then $deploy on it.",
+    "Set $HOME before running.",
+    "$5",
+    "just a lone $ sign"
+  ]) {
+    it(JSON.stringify(prose), () => {
+      assert.deepEqual(formulas(prose), []);
+      assert.equal(text(prose).trim(), prose);
+    });
+  }
+
+  it("keeps prices as prose when real math follows on the same line", () => {
+    for (const price of ["$5-$10", "$5 and $10", "$5/$10", "$20,000-$30,000"]) {
+      const source = `Price ${price} stays literal. The formula is $x_i$ and \\(y\\).`;
+      assert.deepEqual(formulas(source), [["inline", "x_i"], ["inline", "y"]], source);
+      assert.ok(text(source).startsWith(`Price ${price} stays literal.`), source);
+    }
   });
 
-  it("renders $$…$$ blocks as display math", () => {
-    const html = render("$$\n\\int_0^1 x^2\\,dx\n$$");
-    assert.ok(html.includes("katex-display"), html);
-    assert.ok(html.includes('display="block"'));
+  it("still finds real math next to currency", () => {
+    assert.deepEqual(formulas("costs $5, then $x$ is the unknown"), [["inline", "x"]]);
+  });
+});
+
+describe("structure around an unclosed block (streaming)", () => {
+  it("keeps the lists and quotes after an unclosed $$ or \\[ as they are", () => {
+    for (const opener of ["$$", "\\["]) {
+      const { html } = parse(`${opener}\nx^2\n- y\n\n> q`);
+      assert.ok(html.includes("<ul>\n<li>y</li>\n</ul>"), html);
+      assert.ok(html.includes("<blockquote>"), html);
+    }
   });
 
-  it("accepts a double-dollar run inline in a sentence", () => {
-    assert.equal(isMath(render("so $$a+b$$ here")), true);
+  it("does not split the paragraph above an unclosed block", () => {
+    for (const opener of ["$$", "\\["]) {
+      const { html } = parse(`text\n${opener}\nx^2`);
+      assert.equal(html.match(/<p>/g)?.length, 1, html);
+    }
   });
 
-  it("leaves escaped dollars and code alone", () => {
-    assert.equal(render("a \\$x\\$ b"), "<p>a $x$ b</p>");
-    assert.equal(render("`$x$` code"), "<p><code>$x$</code> code</p>");
-    assert.equal(isMath(render("```\n$x$\n```")), false);
+  it("does not let a `\\]` ending a later line of prose close a block", () => {
+    const { html, formulas: found } = parse("\\[\na+b\n\n- item one\n- item see foo\\]");
+    assert.deepEqual(found, []);
+    assert.equal(html.match(/<li>/g)?.length, 2, html);
   });
 
-  it("renders a bad formula as marked source, not an exception", () => {
-    const html = render("bad $\\foo{$ done");
-    assert.ok(html.includes('class="katex-error"'), html);
-    assert.ok(html.includes("color:rgb(var(--sem-danger-400))"), "in the theme's danger colour, not a fixed one");
-    assert.ok(html.includes("done"));
+  it("parses every prefix of a streamed message without throwing", () => {
+    const message = "Energy \\(E = mc^2\\) and $$\\sum_i x_i$$ done.\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n```math\na^2\n```\n";
+    for (let end = 0; end <= message.length; end += 1) {
+      assert.doesNotThrow(() => parse(message.slice(0, end)), message.slice(0, end));
+    }
+    assert.deepEqual(formulas(message), [
+      ["inline", "E = mc^2"],
+      ["inline", "\\sum_i x_i"],
+      ["display", "\\int_0^1 x\\,dx"],
+      ["display", "a^2"]
+    ]);
   });
 
-  it("ignores unknown commands quietly (strict: ignore)", () => {
-    assert.doesNotThrow(() => render("$\\unknowncommand x$"));
-  });
-
-  it("refuses links and remote loads from inside a formula (trust: false)", () => {
-    const html = render("$\\href{https://evil.example/}{click}$ and $\\includegraphics{https://evil.example/x.png}$");
-    assert.ok(!html.includes("<a "), html);
-    assert.ok(!html.includes("evil.example/x.png\""), html);
-    assert.ok(!html.includes("href=\"https://evil.example"), html);
-  });
-
-  it("never turns provider HTML into elements", () => {
-    const html = render("<img src=x onerror=alert(1)> and $x$");
-    assert.ok(!html.includes("<img"), html);
+  it("finds a block's closer in the source before the tokenizer reads it", () => {
+    assert.equal(hasClosingLine("$$\nx\n$$", 0), true);
+    assert.equal(hasClosingLine("$$\nx\n$$$", 0), true);
+    assert.equal(hasClosingLine("$$$\nx\n$$", 0), false);
+    assert.equal(hasClosingLine("$$\nx", 0), false);
+    assert.equal(hasClosingLine("$$", 0), false);
+    assert.equal(hasClosingLine("> $$\n> x\n> $$", 2), true);
+    assert.equal(hasClosingLine("\\[\nx\n\\]", 0), true);
+    assert.equal(hasClosingLine("\\[\nx \\]", 0), false, "a block's `\\]` starts its line");
+    assert.equal(hasClosingLine("\\[\nx\n  \\]  ", 0), true);
+    assert.equal(hasClosingLine("$$\nx\n\\]\n$", 0), false);
+    assert.equal(hasClosingLine("$$$\nx\n$$\ny\n$$$$", 0), true, "a longer run further on closes");
+    assert.equal(hasClosingLine("$$\n$$\nx", 3), false, "only lines after the opener's count");
+    assert.equal(hasClosingLine("\\[\nx\n\\] trailing", 0), false);
+    assert.equal(hasClosingLine("\\[\r\nx\r\n\\]", 0), true);
   });
 
   it("composes with the incremental fence cache", () => {
     const plugin = createIncrementalMarkdownPlugin();
     const prefix = "```text\ncode\n```\n\n";
-    render(`${prefix}$a$ and tail`, [plugin]);
-    const html = render(`${prefix}$a$ and $b$ tail`, [plugin]);
-    assert.equal((html.match(/class="katex"/g) ?? []).length, 2, html);
+    parse(`${prefix}$a$ and \\(b`, [plugin]);
+    const second = parse(`${prefix}$a$ and \\(b\\) and\n\\[\nc\n\\]\n`, [plugin]);
+    assert.deepEqual(second.formulas, [["inline", "a"], ["inline", "b"], ["display", "c"]]);
+  });
+});
+
+/**
+ * A remark plugin, run after `remarkChatMath`, that counts the characters the
+ * math constructs (`$` and `\` keyed, text and flow) consume in a parse.
+ */
+function countMathWork(counter: { consumed: number }): unknown {
+  type Construct = { tokenize: (this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) => unknown };
+  return function countMathConsumes(this: {
+    data(): { micromarkExtensions?: Array<Partial<Record<"text" | "flow", Record<number, unknown>>>> };
+  }): void {
+    for (const extension of this.data().micromarkExtensions ?? []) {
+      for (const map of [extension.text, extension.flow]) {
+        for (const code of [36, 92]) {
+          const construct = map?.[code] as Construct | Construct[] | undefined;
+          if (map === undefined || construct === undefined || Array.isArray(construct)) continue;
+          map[code] = {
+            ...construct,
+            tokenize(this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) {
+              const consume = effects.consume as (code: number | null) => void;
+              const counting = {
+                ...effects,
+                consume(next: number | null) {
+                  counter.consumed += 1;
+                  consume(next);
+                }
+              };
+              return construct.tokenize.call(this, counting, ok, nok);
+            }
+          };
+        }
+      }
+    }
+  };
+}
+
+describe("parse work stays linear in unclosed openers", () => {
+  // Each unclosed opener used to rescan the rest of its paragraph, so 5,000 of
+  // them took tens of seconds, and a streamed message re-parses per token.
+  // The guard is the characters the math constructs read, which does not
+  // depend on the machine's load: linear work stays within a small multiple
+  // of the message, and a quadratic scan misses it by three orders of
+  // magnitude. Wall time is not a reliable signal here: micromark's own
+  // `resolveAllText` merges data runs with `splice` in a loop, which takes
+  // 0.5 s or (while V8 is marking the heap) 5–10 s for a paragraph with
+  // thousands of escapes, with or without the math plugins. The wall-clock
+  // cap is only a backstop against a hang.
+  const WALL_CAP_MS = 30_000;
+  const work = (source: string): number => {
+    const counter = { consumed: 0 };
+    parse(source, [countMathWork(counter)]);
+    return counter.consumed;
+  };
+
+  for (const [label, unit, tail, count] of [
+    ["unclosed \\( in one paragraph", "x \\( y ", "", 5000],
+    ["unclosed \\[ in one paragraph", "x \\[ y ", "", 5000],
+    ["alternating unclosed \\( and \\[", "x \\( y \\[ z ", "", 3000],
+    ["openers before one backtick", "\\( a ", "`", 5000],
+    ["citations before one closer", "\\[ 1 ", "\\]", 5000],
+    ["unclosed $ in one paragraph", "x $ y ", "", 5000],
+    ["lines of \\[", "\\[\n", "", 5000],
+    ["lines of $$", "$$\n", "", 5000]
+  ] as const) {
+    it(`${count.toLocaleString("en")} ${label}`, () => {
+      const source = unit.repeat(count) + tail;
+      const small = work(unit.repeat(count / 5) + tail);
+      const start = performance.now();
+      const large = work(source);
+      const elapsed = performance.now() - start;
+      // At most one full scan per opener kind (`\(`, `\[`), plus the delimiters.
+      assert.ok(large <= 3 * source.length, `${large} characters read for a ${source.length}-character message`);
+      // Linear is 5x; a quadratic scan is 25x.
+      assert.ok(large <= 10 * Math.max(small, 1), `${small} -> ${large} characters read for 5x the openers`);
+      assert.ok(elapsed < WALL_CAP_MS, `${Math.round(elapsed)} ms`);
+    });
+  }
+
+  it("still finds the formula after a run of unclosed openers", () => {
+    assert.deepEqual(formulas("a \\( b ".repeat(50) + "`c` and \\(x\\) and \\[y\\]"), [
+      ["inline", "x"],
+      ["display", "y"]
+    ]);
+    assert.deepEqual(formulas("\\( a `b` \\( c \\)"), [["inline", "c"]]);
   });
 });
 
 describe("single-dollar rules", () => {
-  const verdict = (text: string, next: string | null): boolean =>
-    isPlausibleSingleDollarMath(codes(text), next === null ? null : next.charCodeAt(0));
+  const verdict = (value: string, next: string | null): boolean =>
+    isPlausibleSingleDollarMath(codes(value), next === null ? null : next.charCodeAt(0));
 
   it("accepts tight pairs not followed by a digit", () => {
     assert.equal(verdict("$x$", " "), true);
     assert.equal(verdict("$x$", null), true);
     assert.equal(verdict("$x$", "."), true);
     assert.equal(verdict("$a b$", ","), true);
+    assert.equal(verdict("$a\\\\$", " "), true);
   });
 
   it("rejects padded pairs and a closing dollar before a digit", () => {
@@ -119,62 +379,159 @@ describe("single-dollar rules", () => {
     assert.equal(verdict("$5 and $", "1"), false);
   });
 
-  it("does not second-guess runs of two or more dollars", () => {
+  it("rejects runs holding a backtick, a URL, or an escaped closer, whatever their size", () => {
+    assert.equal(verdict("$a`$", "H"), false);
+    assert.equal(verdict("$$a`b$$", " "), false);
+    assert.equal(verdict("$TOKEN https://x.example/?$", "s"), false);
+    assert.equal(verdict("$a\\$", "b"), false);
+  });
+
+  it("does not second-guess runs of two or more dollars otherwise", () => {
     assert.equal(verdict("$$ x $$", "1"), true);
   });
 });
 
-describe("gate", () => {
-  it("arms the math plugins only when the text has a dollar sign", () => {
+describe("gate and helpers", () => {
+  it("arms the math plugins only for text with a delimiter or a math fence", () => {
     assert.equal(mightContainMath("plain prose"), false);
+    assert.equal(mightContainMath("a (b) [c] \\n"), false);
     assert.equal(mightContainMath("costs $5"), true);
+    assert.equal(mightContainMath("so \\(x\\)"), true);
+    assert.equal(mightContainMath("so \\[x\\]"), true);
+    assert.equal(mightContainMath("```math\nx\n```"), true);
+    assert.equal(mightContainMath("~~~ math\nx\n~~~"), true);
+    assert.equal(mightContainMath("```mathematica\nx\n```"), false);
+  });
+
+  it("reads a formula's kind from its class", () => {
+    assert.equal(mathKind("language-math math-inline"), "inline");
+    assert.equal(mathKind("language-math math-display"), "display");
+    assert.equal(mathKind("language-math"), null, "a math fence still streaming is code");
+    assert.equal(mathKind("language-ts"), null);
+    assert.equal(mathKind("language-mathematica math-inline"), null);
+    assert.equal(mathKind(undefined), null);
+  });
+
+  it("writes a formula's source in unambiguous delimiters", () => {
+    assert.equal(mathSource(" x^2 ", false), "\\(x^2\\)");
+    assert.equal(mathSource("x^2", true), "\\[\nx^2\n\\]");
   });
 });
 
-describe("one-line display math", () => {
-  it("promotes a paragraph that is only a $$…$$ run to display math", () => {
-    const html = render("Intro\n\n$$ E = mc^2 $$\n\nOutro");
-    assert.ok(html.includes("katex-display"), html);
-    assert.ok(!html.includes("<p><span"), html);
+describe("rendered in a message", () => {
+  before(async () => {
+    await loadMathEngine();
   });
 
-  it("keeps a $$ run inside a sentence, and a lone $x$ line, inline", () => {
-    assert.ok(!render("so $$a+b$$ here").includes("katex-display"));
-    assert.ok(!render("$x$").includes("katex-display"));
+  const message = (value: string, streaming = false): string =>
+    renderToStaticMarkup(createElement(ChatMarkdown, { text: value, streaming }));
+  const katexCount = (html: string): number => (html.match(/class="katex"/g) ?? []).length;
+
+  it("typesets every delimiter, inline and display", () => {
+    const html = message("Inline $x$ and \\(y\\).\n\n$$\na\n$$\n\n\\[\nb\n\\]\n\n```math\nc\n```");
+    assert.equal(katexCount(html), 5, html);
+    assert.equal((html.match(/data-markdown-math="display"/g) ?? []).length, 3, html);
+    assert.equal((html.match(/data-markdown-math="inline"/g) ?? []).length, 2, html);
+    assert.ok(html.includes('data-markdown-copy="\\(x\\)"'), html);
+    assert.ok(html.includes('data-markdown-copy="\\[\na\n\\]"'), html);
   });
 
-  it("promotes inside list items and block quotes too", () => {
-    assert.ok(render("- item\n\n  $$a+b$$\n").includes("katex-display"));
-    assert.ok(render("> $$a+b$$").includes("katex-display"));
+  it("gives display math a Copy TeX button and inline math none", () => {
+    const html = message("$x$\n\n$$\ny\n$$");
+    assert.equal((html.match(/aria-label="Copy TeX"/g) ?? []).length, 1, html);
+  });
+
+  it("keeps formulas reachable by keyboard", () => {
+    const html = message("$x$ and $$\ny\n$$");
+    assert.ok(html.includes('aria-label="Scroll inline equation"'), html);
+    assert.ok(html.includes('tabindex="0"'), html);
+  });
+
+  it("shows a formula KaTeX cannot parse as its source, not an error", () => {
+    const html = message("bad \\(\\frac{1}{\\) done");
+    assert.ok(!html.includes("katex-error"), html);
+    assert.ok(html.includes(">\\(\\frac{1}{\\)<"), html);
+    assert.ok(html.includes("done"));
+  });
+
+  it("ignores unknown commands quietly (strict: ignore)", () => {
+    assert.doesNotThrow(() => message("$\\unknowncommand x$"));
+  });
+
+  it("refuses links and remote loads from inside a formula (trust: false)", () => {
+    // `\(…\)`: a dollar run holding `://` is not math at all (a link's URL).
+    const html = message("\\(\\href{https://evil.example/}{click}\\) and \\(\\includegraphics{https://evil.example/x.png}\\)");
+    assert.equal(katexCount(html), 2, html);
+    assert.ok(!html.includes("<a "), html);
+    assert.ok(!html.includes('href="https://evil.example'), html);
+    assert.ok(!html.includes('src="https://evil.example'), html);
+  });
+
+  it("never turns provider HTML into elements", () => {
+    const html = message("<img src=x onerror=alert(1)> and $x$ and \\(<b>y</b>\\)");
+    assert.ok(!html.includes("<img"), html);
+    assert.ok(!html.includes("<b>"), html);
+  });
+
+  it("shows a streaming math fence as code until it closes", () => {
+    const open = message("```math\nx_i^2", true);
+    assert.equal(katexCount(open), 0, open);
+    assert.ok(open.includes("x_i^2"), open);
+    assert.equal(katexCount(message("```math\nx_i^2\n```", true)), 1);
+  });
+
+  it("keeps an unclosed display block and the prose after it readable while streaming", () => {
+    for (const opener of ["$$\nx^2\n", "\\[\nx^2\n"]) {
+      const html = message(`${opener}\nFollowing prose.`, true);
+      assert.equal(katexCount(html), 0, html);
+      assert.ok(!html.includes("data-markdown-math"), html);
+      assert.ok(html.includes("x^2") && html.includes("Following prose."), html);
+    }
+  });
+
+  it("renders math in a control's inline markdown without a tab stop or a button", () => {
+    const html = renderToStaticMarkup(createElement(ChatInlineMarkdown, { text: "Use \\(x^2\\) here" }));
+    assert.equal(katexCount(html), 1, html);
+    assert.ok(!html.includes("tabindex=\"0\""), html);
+    assert.ok(!html.includes('role="group"'), html);
+  });
+
+  it("does not arm math for a message without delimiters", () => {
+    const html = message("plain (parens) and [brackets]");
+    assert.ok(!html.includes("data-markdown-math"), html);
   });
 });
 
 describe("untrusted size limits", () => {
+  before(async () => {
+    await loadMathEngine();
+  });
+
+  const message = (value: string): string => renderToStaticMarkup(createElement(ChatMarkdown, { text: value }));
   const dimensions = (html: string): number[] =>
     [...html.matchAll(/(?:width|height):([\d.]+)em/g)].map((match) => Number(match[1]));
 
   it("clamps user-specified lengths (\\rule) to maxSize", () => {
     assert.equal(KATEX_OPTIONS.maxSize, 20);
-    const html = render("$\\rule{999em}{999em}$");
-    const sizes = dimensions(html);
-    assert.ok(sizes.length > 0, html);
-    assert.ok(Math.max(...sizes) <= 20, `largest dimension ${Math.max(...sizes)}em in ${html}`);
+    const sizes = dimensions(message("$\\rule{999em}{999em}$"));
+    assert.ok(sizes.length > 0);
+    assert.ok(Math.max(...sizes) <= 20, `largest dimension ${Math.max(...sizes)}em`);
   });
 
   it("bounds macro expansion (maxExpand)", () => {
     assert.equal(KATEX_OPTIONS.maxExpand, 1000);
-    const html = render("$\\def\\a{\\a\\a}\\a$");
-    assert.ok(html.includes("katex-error"), "a runaway macro is an error span, not a hang");
+    const html = message("$\\def\\a{\\a\\a}\\a$");
+    assert.ok(!html.includes('class="katex"'), "a runaway macro shows its source, not a hang");
   });
 });
 
 describe("known limit: tight dollar pairs that are not math", () => {
   it("reads ${A}/${B} and $a/$b as math (documented in math.ts)", () => {
-    assert.equal(isMath(render("path ${A}/${B}")), true);
-    assert.equal(isMath(render("cost is $a/$b")), true);
+    assert.equal(formulas("path ${A}/${B}").length, 1);
+    assert.equal(formulas("cost is $a/$b").length, 1);
   });
 
   it("still reads 'the $n$th term' as math, which is why the rules stop at digits", () => {
-    assert.equal(isMath(render("the $n$th term")), true);
+    assert.deepEqual(formulas("the $n$th term"), [["inline", "n"]]);
   });
 });

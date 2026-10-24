@@ -43,6 +43,7 @@ import {
 import type { SessionUploadResponse } from "@orquester/api";
 
 import type { BinaryBody, StreamHandle, Transporter } from "../transporter";
+import { scheduleRetry, type PendingRetry } from "../connection/backoff";
 import {
   NdjsonLineBuffer,
   parseStreamLine,
@@ -415,8 +416,10 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     turnDiff(sessionId, turnCount, options) {
       return send<TurnDiffResponse>("GET", agentChatRoutes.turnDiff(sessionId, turnCount), {
-        // §5.4: whitespace is ignored by default; only an explicit `false` turns it off.
-        query: { ignoreWhitespace: options?.ignoreWhitespace === false ? 0 : 1 },
+        // Every change shows by default; only an explicit `true` hides
+        // whitespace-only ones. Always sent, so a host of either default
+        // answers the same.
+        query: { ignoreWhitespace: options?.ignoreWhitespace === true ? 1 : 0 },
         ...(options?.signal === undefined ? {} : { signal: options.signal })
       });
     },
@@ -597,6 +600,13 @@ function openAgentChatStream(
   let closed = false;
   /** The host said the thread does not exist: no reconnect until `retry()`. */
   let gone = false;
+  /**
+   * The daemon refused the bearer (401): the session was revoked or lapsed. Retrying with the same
+   * token can only fail again — and each failure counts against the daemon's per-IP throttle — so
+   * this reader stops. A sign-in rebuilds the transport, and the thread store reopens the stream
+   * on it (`rebind`, from `ensureThreadStore`).
+   */
+  let unauthorized = false;
   let attempt = 0;
   let lastSeq = options.after ?? 0;
   let hostInstanceId: string | null = options.hostInstanceId ?? null;
@@ -607,7 +617,7 @@ function openAgentChatStream(
    */
   let knownHostInstanceId: string | null = options.hostInstanceId ?? null;
   let inner: StreamHandle | null = null;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryTimer: PendingRetry | null = null;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   const lines = new NdjsonLineBuffer();
 
@@ -630,17 +640,19 @@ function openAgentChatStream(
   };
 
   const scheduleReconnect = (reason: string): void => {
-    if (closed || gone || retryTimer !== null) {
+    if (closed || gone || unauthorized || retryTimer !== null) {
       return;
     }
     clearStall();
     const delayMs = reconnectDelayMs(attempt);
     attempt = Math.min(attempt + 1, 32);
     handlers.onReconnect?.({ attempt, delayMs, reason });
-    retryTimer = setTimeout(() => {
+    // A wake (back online, page visible again) retries at once and starts over.
+    retryTimer = scheduleRetry(Math.min(delayMs, RECONNECT_MAX_MS), (woken) => {
       retryTimer = null;
+      if (woken) attempt = 0;
       connect();
-    }, Math.min(delayMs, RECONNECT_MAX_MS));
+    });
   };
 
   const connect = (): void => {
@@ -728,6 +740,10 @@ function openAgentChatStream(
         if (closed || gone) {
           return;
         }
+        if ((error as { status?: unknown } | null)?.status === 401) {
+          unauthorized = true;
+          clearStall();
+        }
         handlers.onError?.(error);
       }
     });
@@ -762,7 +778,7 @@ function openAgentChatStream(
       closed = true;
       clearStall();
       if (retryTimer !== null) {
-        clearTimeout(retryTimer);
+        retryTimer.cancel();
         retryTimer = null;
       }
       inner?.close();

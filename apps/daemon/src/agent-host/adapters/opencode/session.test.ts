@@ -19,7 +19,7 @@ import {
   type RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import type { AdapterContext } from "../../adapter.ts";
+import { APPROVAL_REDIRECT_MESSAGE, type AdapterContext } from "../../adapter.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { OpenCodeThreadSession } from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
@@ -1076,6 +1076,64 @@ test("an approval reply reaches `POST /permission/{id}/reply`, never the SDK tra
   );
   const resolved = await waitFor(harness, "request.resolved");
   assert.equal(resolved.payload.decision, "acceptForSession");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a redirecting decline rejects WITH the redirect message; a plain decline rejects bare", async () => {
+  for (const redirect of [true, false]) {
+    const harness = makeHarness();
+    const session = await startSession(harness);
+    await session.sendTurn({
+      threadId: "thread-1",
+      input: "run it",
+      attachments: [],
+      interactionMode: "default"
+    });
+    harness.fake.push({
+      type: "permission.asked",
+      properties: { id: "per_1", sessionID: session.sessionId, permission: "bash", patterns: ["rm -rf x"] }
+    });
+    await waitFor(harness, "request.opened");
+    await session.respondToApproval("per_1", "decline", redirect ? { redirect: true } : undefined);
+    const reply = harness.fake.find("POST", "/permission/per_1/reply");
+    assert.deepEqual(
+      reply?.body,
+      redirect ? { reply: "reject", message: APPROVAL_REDIRECT_MESSAGE } : { reply: "reject" }
+    );
+    const resolved = await waitFor(harness, "request.resolved");
+    assert.equal(resolved.payload.decision, "decline");
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
+});
+
+test("a child session's permission names its subagent, and a decline with the user's words rejects with them", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  announceChild(harness.fake, sessionId, "digging (@explore subagent)");
+  await waitFor(harness, "task.started");
+  harness.fake.push({
+    type: "permission.asked",
+    properties: { id: "per_child", sessionID: "ses_child", permission: "bash", patterns: ["rm -rf build"] }
+  });
+  const opened = await waitFor(harness, "request.opened");
+  assert.equal(opened.payload.requestingAgentId, "ses_child");
+  await session.respondToApproval("per_child", "decline", { redirect: true, feedback: " keep build/, clean dist/ " });
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_child/reply")?.body, {
+    reply: "reject",
+    message: "keep build/, clean dist/"
+  });
+
+  // The parent's own permission names nobody.
+  harness.fake.push({
+    type: "permission.asked",
+    properties: { id: "per_parent", sessionID: sessionId, permission: "bash", patterns: ["ls"] }
+  });
+  const parent = await waitFor(harness, "request.opened", (event) => event.requestId === "per_parent");
+  assert.equal("requestingAgentId" in parent.payload, false);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

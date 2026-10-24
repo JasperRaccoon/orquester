@@ -48,6 +48,10 @@ import {
   isUnfinishedGoal,
   agentAdapterLabel,
   agentModelLabel,
+  continuationBudgetBytes,
+  HANDOFF_PREAMBLE_BYTES,
+  handoffBudgetBytes,
+  handoffContextWindow,
   parseThreadLineage,
   recallablePromptText,
   SETTLED_TURN_STATES,
@@ -104,7 +108,16 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { parseCausedBy, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import {
+  APPROVAL_ALREADY_ANSWERED_REASON,
+  APPROVAL_ARRIVED_REASON,
+  parseCausedBy,
+  QUESTION_ALREADY_ANSWERED_REASON,
+  REDIRECT_COMPACT_REASON,
+  SUBAGENT_FEEDBACK_ATTACHMENTS_REASON,
+  usageLimitNoticeOf
+} from "@orquester/api/agent-chat";
+import { IDLE_COMPACTION_SENT_BY, idleCompactionCandidateOf, type ThreadMessageSentBy } from "@orquester/api/agent-chat";
 import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
@@ -113,6 +126,7 @@ import { stat } from "node:fs/promises";
 import type {
   AdapterLogger,
   AgentAdapter,
+  ApprovalResponseOptions,
   GoalCommandOptions,
   GoalCommandResult,
   HostGoalCommand
@@ -242,6 +256,7 @@ import {
   parseAttachments,
   parseAttachmentsByQuestionId,
   parseComposerContext,
+  parseDeclineApprovals,
   parseInteractionMode,
   parseModelSelection,
   parseOptionalTurnId,
@@ -251,13 +266,15 @@ import {
   parseTargetTurnCount,
   parseTurnInput,
   requireBody,
-  requireCommandId
+  requireCommandId,
+  idleCompactionOf
 } from "./validate.ts";
 import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
 import {
   buildContinuationTranscript,
   buildForkTranscript,
   continuationDetail,
+  FORK_TRANSCRIPT_MAX_BYTES,
   parseForkContinuation,
   createMemoryForkHandoffStore,
   ForkRefusal,
@@ -3064,7 +3081,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const approvalEffect = async (
     runtime: ThreadRuntime,
     requestId: string,
-    decision: Parameters<AgentAdapter["respondToApproval"]>[2]
+    decision: Parameters<AgentAdapter["respondToApproval"]>[2],
+    responseOptions?: ApprovalResponseOptions
   ): Promise<void> => {
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
@@ -3078,7 +3096,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     try {
-      await adapter.respondToApproval(runtime.id, requestId, decision);
+      await adapter.respondToApproval(
+        runtime.id,
+        requestId,
+        decision,
+        ...(responseOptions !== undefined ? [responseOptions] : [])
+      );
     } catch (error) {
       await appendActivity(runtime, {
         kind: "provider.approval.respond.failed",
@@ -3324,6 +3347,50 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     schedule?: () => void;
   }
 
+  /**
+   * The approvals a redirect declines (`TurnCommandBody.declineApprovals`): every
+   * pending approval nobody has answered yet, when the user saw them all. One
+   * already answered — resolved, or its answer committed and the provider's
+   * resolution still on its way (the fold's `answeredApprovals`: another tab's
+   * Approve, an MCP `respond_to_request`) — is skipped: declining it too would
+   * answer it twice. Refused when an unanswered approval is pending that the
+   * list does not name: it arrived after the user sent, and they have not read it.
+   */
+  const redirectDeclines = (runtime: ThreadRuntime, listed: readonly string[] | undefined): string[] => {
+    if (listed === undefined) return [];
+    const seen = new Set(listed);
+    const answered = runtime.state.answeredApprovals;
+    const open = (runtime.state.pending?.approvals ?? []).filter(
+      (approval) => answered?.has(approval.requestId) !== true
+    );
+    if (open.some((approval) => !seen.has(approval.requestId))) {
+      throw commandRejected(APPROVAL_ARRIVED_REASON);
+    }
+    return open.map((approval) => approval.requestId);
+  };
+
+  /**
+   * The declined approvals that are a subagent's (`PendingApproval.requestingAgentId`) on an
+   * adapter that hands a denial's text to the agent that asked
+   * (`AdapterCapabilities.approvalFeedbackToSubagents`): those get the user's words.
+   */
+  const subagentFeedbackRequests = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    declined: readonly string[]
+  ): Set<string> => {
+    if (declined.length === 0) return new Set();
+    if (options.adapters.get(head.adapter)?.capabilities.approvalFeedbackToSubagents !== true) {
+      return new Set();
+    }
+    const listed = new Set(declined);
+    return new Set(
+      (runtime.state.pending?.approvals ?? [])
+        .filter((approval) => listed.has(approval.requestId) && approval.requestingAgentId !== undefined)
+        .map((approval) => approval.requestId)
+    );
+  };
+
   const turnIsActive = (runtime: ThreadRuntime): boolean => {
     const session = currentSession(runtime);
     if (session.activeTurnId !== null) return true;
@@ -3343,10 +3410,41 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return (pending?.approvals.length ?? 0) === 0 && (pending?.userInputs.length ?? 0) === 0;
   };
 
+  /**
+   * Idle compaction (`@orquester/api` `idle-compaction.ts`): the daemon's own `/compact`, sent
+   * before the chat's prompt cache expires. Refused before anything is committed — and so with no
+   * receipt, the same id may come again for the next window — unless `turnId` is still the latest
+   * turn, settled `completed`, and the chat is idle as a delivery reads it (no turn, no session
+   * starting or running, no compaction, no approval or question). A chat that moved on since the
+   * daemon looked is never compacted under the user. Then the ordinary compaction, its message
+   * marked as sent by Orquester.
+   */
+  const decideIdleCompaction = (
+    runtime: ThreadRuntime,
+    commandId: string,
+    idle: { turnId: string }
+  ): Decision => {
+    const latest = (runtime.state.turns ?? []).at(-1);
+    if (latest === undefined || latest.turnId !== idle.turnId || latest.state !== "completed") {
+      throw new IdleCompactionRefusal("The chat moved on since this idle compaction was scheduled.");
+    }
+    if (!threadIdleForDelivery(runtime)) {
+      throw new IdleCompactionRefusal("The chat is not idle; the idle compaction waits for its next idle point.");
+    }
+    try {
+      return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT, IDLE_COMPACTION_SENT_BY);
+    } catch (error) {
+      // Every refusal of an idle compaction is of the moment: none may become this id's receipt.
+      if (error instanceof AgentChatCommandError) throw new IdleCompactionRefusal(error.message);
+      throw error;
+    }
+  };
+
   const decideCompaction = (
     runtime: ThreadRuntime,
     commandId: string,
-    text: string
+    text: string,
+    sentBy?: ThreadMessageSentBy
   ): Decision => {
     const session = currentSession(runtime);
     const userMessages = (runtime.state.items ?? []).filter(
@@ -3389,7 +3487,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             // Persisted verbatim and rendered as a compaction marker (§4.6.5(b)).
             text,
             streaming: false,
-            turnId: null
+            turnId: null,
+            ...(sentBy !== undefined ? { sentBy } : {})
           },
           { commandId, occurredAt }
         )
@@ -3531,6 +3630,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // this turn in (unified MCP design 2026-10-15 §8.4). The daemon alone sets it — the remote
         // transport strips it — so a value that does not parse is dropped, never a refusal.
         const causedBy = parseCausedBy(body.causedBy);
+        // A redirect over pending approvals (`TurnCommandBody.declineApprovals`); parsed up
+        // front so a malformed list refuses before anything else is decided.
+        const declineApprovals = parseDeclineApprovals(body.declineApprovals);
         // `ifIdle: true` (unified MCP design 2026-10-15 §8.3, additive): the daemon's delivery
         // queue posts a reply-bound message or a reply only as a NEW turn, never a steer. With a
         // turn active the command is refused — not recorded, so the same id may be posted again at
@@ -3552,6 +3654,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const blocked = blockedProviderCommandMessage(head.adapter, input);
         if (blocked !== null) {
           throw invalidCommand(blocked);
+        }
+        // A compaction waits for the turn the card holds, so it can redirect nothing.
+        if (declineApprovals !== undefined && isHostNativeCompact({ text: input, attachments })) {
+          throw commandRejected(REDIRECT_COMPACT_REASON);
         }
         // §4.6.5(b): the same host path as the `/compact` command, including
         // its refusal and queueing rules.
@@ -3576,9 +3682,35 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
         }
 
+        // The approvals this message declines, in the order the fold holds them: every listed
+        // one still pending. One the user never saw refuses the whole send — declining it on
+        // their behalf would answer a request they have not read.
+        const declined = redirectDeclines(runtime, declineApprovals);
+        // A subagent's approval takes the user's words as its denial — the only
+        // way they reach the agent that asked. When every declined approval is
+        // a subagent's, the message goes there alone: nothing is steered into
+        // the main agent, and a denial carries no files.
+        const feedbackTo = subagentFeedbackRequests(runtime, head, declined);
+        const feedbackOnly = declined.length > 0 && feedbackTo.size === declined.length;
+        if (feedbackOnly && attachments.length > 0) {
+          throw commandRejected(SUBAGENT_FEEDBACK_ATTACHMENTS_REASON);
+        }
+
         const messageId = ids.messageId("user:");
         const occurredAt = clock.nowIso();
         const events: AppendableDomainEvent[] = [];
+        // Each decline is the same `approval-response-requested` an answer on the card writes,
+        // under this command, ahead of the message it makes way for.
+        for (const requestId of declined) {
+          events.push(
+            buildEvent(
+              runtime.id,
+              "thread.approval-response-requested",
+              { requestId, decision: "decline" },
+              { commandId, occurredAt, metadata: { requestId } }
+            )
+          );
+        }
         if (
           modelSelection !== undefined &&
           !modelSelectionEquals(modelSelection, head.modelSelection)
@@ -3604,16 +3736,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               // OpenCode send it with the steered prompt), so a default turn
               // steered into plan now plans — `currentInteractionMode` reads
               // it off this message (T6-M2). A new turn's mode is on its
-              // `turn-start-requested` instead.
-              ...(session.activeTurnId !== null ? { interactionMode } : {})
+              // `turn-start-requested` instead. A subagent's answer steers
+              // nothing, so it carries none.
+              ...(session.activeTurnId !== null && !feedbackOnly ? { interactionMode } : {})
             },
             { commandId, occurredAt }
           )
         );
         // Steering: `sendTurn` while a turn is active reuses the active turn id
         // and injects into the running loop. It is neither an error nor a
-        // second turn (§4.1), so no pending turn row is opened for it.
-        if (session.activeTurnId === null) {
+        // second turn (§4.1), so no pending turn row is opened for it. A
+        // subagent's answer is recorded as the user's message and starts nothing.
+        if (session.activeTurnId === null && !feedbackOnly) {
           events.push(
             buildEvent(
               runtime.id,
@@ -3648,6 +3782,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return {
           events,
           schedule: () => {
+            // The declines go first, on the same effect queue: the provider
+            // is unblocked (and, where it takes one, told why) before the
+            // message reaches it as a steer. A decline that fails writes its
+            // `respond.failed` row and the message is sent all the same.
+            if (declined.length > 0) {
+              void runEffect(runtime, async () => {
+                for (const requestId of declined) {
+                  await approvalEffect(
+                    runtime,
+                    requestId,
+                    "decline",
+                    feedbackTo.has(requestId) ? { redirect: true, feedback: input } : { redirect: true }
+                  );
+                }
+              });
+            }
+            if (feedbackOnly) return;
             // A `/turn` that arrives during a compaction is queued per thread
             // and replayed in order afterwards, each awaited before the next is
             // dispatched and the original message id reused so the user sees
@@ -3705,6 +3856,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       case "approval": {
         const requestId = parseRequestId(body);
         const decision = parseApprovalDecision(body.decision);
+        // One answer per request: a second one (another tab, the MCP, a
+        // redirect that got there first) while the provider's resolution of
+        // the first is on its way would answer it twice. A retry of the SAME
+        // command is its receipt's; this is a different command.
+        if (runtime.state.answeredApprovals?.has(requestId) === true) {
+          throw commandRejected(APPROVAL_ALREADY_ANSWERED_REASON);
+        }
         return {
           events: [
             buildEvent(
@@ -3720,6 +3878,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       case "answer": {
         const requestId = parseRequestId(body);
+        // One answer per question, as for an approval: a second one (another
+        // tab, the MCP) while the provider's resolution of the first is on its
+        // way would answer it twice. A retry of the SAME command is its receipt's.
+        if (runtime.state.answeredQuestions?.has(requestId) === true) {
+          throw commandRejected(QUESTION_ALREADY_ANSWERED_REASON);
+        }
         const answers = parseAnswers(body.answers);
         const attachmentsByQuestionId = parseAttachmentsByQuestionId(
           body.attachmentsByQuestionId
@@ -3924,8 +4088,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         };
       }
 
-      case "compact":
-        return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT);
+      case "compact": {
+        const idle = idleCompactionOf(body);
+        return idle === null
+          ? decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT)
+          : decideIdleCompaction(runtime, commandId, idle);
+      }
 
       case "background": {
         // The user's Ctrl+B (§4.5). Refused, not ignored, where the provider
@@ -4691,6 +4859,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       snapshots.get(parentHead.adapter)?.models.find((model) => model.slug === sourceModel)?.name ?? sourceModel
     );
     const targetLabel = agentAdapterLabel(adapterId);
+    // The child's model's window sizes its handoff: its catalogue entry's, else the parent's own
+    // reading when the child runs the very same model, else the fallback (`handoffContextWindow`).
+    const childWindow = handoffContextWindow({
+      target: modelSelection,
+      catalog: snapshots.get(adapterId)?.models,
+      sameAgent: parentHead.adapter === adapterId,
+      source: { modelSelection: parentHead.modelSelection, items: parent.state.items }
+    });
     if (continuation !== undefined && cut.retained.length > 0) {
       const built = buildContinuationTranscript({
         items: parent.state.items,
@@ -4699,7 +4875,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         parentTitle: parentHead.title,
         sourceLabel,
         targetLabel,
-        ...(continuation.gitStatus !== undefined ? { gitStatus: continuation.gitStatus } : {})
+        ...(continuation.gitStatus !== undefined ? { gitStatus: continuation.gitStatus } : {}),
+        budgetBytes: continuationBudgetBytes(childWindow)
       });
       transcript = built?.transcript ?? null;
       handoff = built?.summary;
@@ -4708,7 +4885,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       transcript = buildForkTranscript({
         items: parent.state.items,
         retained: cut.retained,
-        parentTitle: parentHead.title
+        parentTitle: parentHead.title,
+        budgetBytes: handoffBudgetBytes({
+          contextWindow: childWindow,
+          reservedBytes: HANDOFF_PREAMBLE_BYTES,
+          capBytes: FORK_TRANSCRIPT_MAX_BYTES
+        })
       });
       strategy = transcript !== null ? "transcript" : "unavailable";
     }
@@ -5788,6 +5970,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (afterSeq < 0 || afterSeq > runtime.state.seq) {
       return null;
     }
+    // Up to date (a reconnect after a blip with nothing new): nothing to read. Not for a thread
+    // whose log did not fold cleanly — its replay answers a snapshot, as the read below would.
+    if (afterSeq === runtime.state.seq && runtime.parseError === null) {
+      return [];
+    }
     // `seq` is per thread and increments by one per event, so the head minus
     // the cursor IS the row count. Checking it before the read keeps an
     // oversized range from being loaded just to be discarded.
@@ -5935,7 +6122,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           cwd: head.cwd,
           fromTurnCount,
           toTurnCount: turnCount,
-          ignoreWhitespace: diffOptions.ignoreWhitespace ?? true
+          ignoreWhitespace: diffOptions.ignoreWhitespace ?? false
         });
         return { fromTurnCount, toTurnCount: turnCount, diff };
       } catch (error) {
@@ -6002,7 +6189,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : {}),
       usageLimits: liveUsageLimits.get(threadId) ?? null,
       // Usage-limit recovery (`usage-limit.ts`): the limit the thread stopped on, if it still is.
-      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns)
+      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns),
+      // Idle compaction (`idle-compaction.ts`): the prompt cache the latest completed turn left.
+      idleCompaction: idleCompactionCandidateOf(runtime.state.items ?? [], turns)
     };
   };
 
@@ -9296,6 +9485,18 @@ function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppR
 class TurnNotIdleRefusal extends AgentChatCommandError {
   constructor() {
     super("TURN_NOT_IDLE", "The thread is working; the message waits for its next idle point.");
+  }
+}
+
+/**
+ * An idle compaction's precondition (`CompactCommandBody.idle`) refused. 409 `TURN_NOT_IDLE`, never
+ * recorded as a receipt — the same fixed id `idle-compact:<chat>:<turn>` may come again inside the
+ * window once the chat is idle (the daemon's scheduler re-posts it), and a recorded refusal would
+ * replay to that retry and lose the turn's compaction.
+ */
+class IdleCompactionRefusal extends AgentChatCommandError {
+  constructor(message: string) {
+    super("TURN_NOT_IDLE", message);
   }
 }
 

@@ -22,6 +22,7 @@ import { randomBytes } from "node:crypto";
 import { lstat, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isValidCommandName, isValidSkillName } from "@orquester/api";
+import { claudePluginSkillName } from "./claude-names.ts";
 import { copyTree } from "../agent-profile/infra/tree.ts";
 
 /** Claude's plugin-name rule (no `@`, `:`, whitespace or separators), kept to a plain slug. */
@@ -69,7 +70,7 @@ export async function generateClaudeLocalPlugin(input: ClaudeLocalPluginInput): 
   };
   const skillIds = input.skills.map((skill) => {
     if (!isValidSkillName(skill.name)) throw new Error(`"${skill.name}" is not a valid skill name.`);
-    return claim(`${input.name}:${skill.name}`);
+    return claim(claudePluginSkillName(input.name, skill.name));
   });
   const commandIds = input.commands.map((command) => {
     if (!isValidCommandName(command.name)) throw new Error(`"${command.name}" is not a valid command name.`);

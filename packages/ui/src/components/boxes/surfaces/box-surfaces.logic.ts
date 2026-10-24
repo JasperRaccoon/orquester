@@ -402,18 +402,22 @@ export function newTabMenuGates(info: ProjectBoxInfo | null | undefined): NewTab
 
 /**
  * The quiet line under "New desktop…" in a VM project, from the VM's desktop
- * status (`GET /api/desktops/host?projectPath=`): what opening one will do when
- * packages are missing — required ones, or optional ones (sound, the compositor,
- * a terminal, fonts), which the first desktop installs too — or what it will
- * lack; null when nothing is missing (or not known yet).
+ * status (`GET /api/desktops/host?projectPath=`): only what the user must act on
+ * — packages the VM cannot install by itself, or what a desktop there will lack.
+ * Null when nothing is missing, when the first desktop installs what is missing
+ * itself (`installsOnOpen`), or when the status is not known yet.
  */
 export function vmDesktopNote(
-  status: { available: boolean; audioAvailable?: boolean; installHint: string | null; warnings: readonly string[] } | null | "error"
+  status:
+    | { available: boolean; audioAvailable?: boolean; installHint: string | null; installsOnOpen?: boolean; warnings: readonly string[] }
+    | null
+    | "error"
 ): string | null {
   if (status === null) return null;
   if (status === "error") return "Could not check the VM's desktop packages; they are installed when a desktop opens.";
+  if (status.installsOnOpen === true) return null;
   if (status.installHint) return status.installHint;
-  if (!status.available) return status.warnings[0] ?? "Installs the desktop packages in the VM on first open.";
+  if (!status.available) return status.warnings[0] ?? null;
   if (status.audioAvailable === false) return "Desktops in this VM run without sound.";
   return null;
 }

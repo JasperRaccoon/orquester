@@ -200,7 +200,10 @@ export function skillMentionsInText(
 ): string[] {
   const known = new Set(knownSkillNames.map((name) => name.toLowerCase()));
   const found: string[] = [];
-  for (const match of text.matchAll(/(?:^|\s)\p{Sc}([\w.-]+)/gu)) {
+  // `:` too: a plugin's skill is `plugin:skill` (Claude's, dotted plugin names included), the
+  // shape the daemon's dispatch accepts. A trailing `.` or `:` stays in the token, so `$review.`
+  // or `$1.50` is no known name and no chip, as dispatch leaves them literal too.
+  for (const match of text.matchAll(/(?:^|\s)\p{Sc}([\w.:-]+)/gu)) {
     const name = match[1];
     if (name && known.has(name.toLowerCase()) && !found.includes(name)) {
       found.push(name);

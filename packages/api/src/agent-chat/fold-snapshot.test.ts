@@ -422,6 +422,19 @@ test("anything that is not a serialized fold state deserializes to null", () => 
   }
 });
 
+test("an approval answered before the snapshot is still answered after it", () => {
+  const state = {
+    ...foldThread(richLog()),
+    answeredApprovals: new Map([["r1", "2026-01-01T00:00:09.000Z"]]),
+    answeredQuestions: new Map([["q1", "2026-01-01T00:00:10.000Z"]])
+  };
+  const restored = throughDisk(state);
+  assert.deepEqual([...(restored.answeredApprovals ?? [])], [["r1", "2026-01-01T00:00:09.000Z"]]);
+  assert.deepEqual([...(restored.answeredQuestions ?? [])], [["q1", "2026-01-01T00:00:10.000Z"]]);
+  const { answeredApprovals: _dropped, ...older } = state;
+  assert.equal("answeredApprovals" in serializeFoldState(older), false, "absent stays absent");
+});
+
 test("a missing top-level field is rejected; only closedRequestAt is optional", () => {
   const state = foldThread(richLog());
   for (const key of ["head", "items", "turns", "checkpoints", "pending", "roster", "goal", "closedRequestIds", "closedRequestAt", "seq", "deleted"]) {
@@ -461,6 +474,8 @@ test("a field of the wrong shape anywhere in the state is rejected", () => {
     ["a non-string tombstone", (copy) => (copy.closedRequestIds = ["a", 1])],
     ["a tombstone stamp that is not a pair", (copy) => (copy.closedRequestAt = [["a"]])],
     ["tombstone stamps that are not a list", (copy) => (copy.closedRequestAt = {})],
+    ["an answered approval that is not a pair", (copy) => (copy.answeredApprovals = [["r1"]])],
+    ["an answered question that is not a pair", (copy) => (copy.answeredQuestions = [[1, "x"]])],
     ["a negative seq", (copy) => (copy.seq = -1)],
     ["a fractional seq", (copy) => (copy.seq = 1.5)],
     ["a string seq", (copy) => (copy.seq = String(copy.seq))],

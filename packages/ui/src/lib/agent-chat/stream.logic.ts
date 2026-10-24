@@ -17,6 +17,8 @@ import {
   type AgentChatStreamFrame
 } from "@orquester/api/agent-chat";
 
+import { backoffDelayMs } from "../connection/backoff";
+
 /**
  * Incremental NDJSON line splitter.
  *
@@ -139,16 +141,17 @@ export function parseStreamLine(line: string): StreamLine {
 // Reconnect schedule
 // ---------------------------------------------------------------------------
 
-/** Full jitter, capped. Attempt 0 is the first retry after a clean-ish drop. */
+/** Attempt 0 is the first retry after a clean-ish drop. */
 export const RECONNECT_BASE_MS = 500;
 export const RECONNECT_MAX_MS = 15_000;
 
 /**
- * Exponential backoff with full jitter.
+ * Exponential backoff with full jitter: the app's one reconnect policy
+ * (`lib/connection/backoff.ts`), with a short cap because a chat tab is
+ * something the user is looking at.
  */
-export function reconnectDelayMs(attempt: number): number {
-  const capped = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.max(0, attempt));
-  return Math.round(capped * (0.5 + Math.random() * 0.5));
+export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  return backoffDelayMs(attempt, { baseMs: RECONNECT_BASE_MS, maxMs: RECONNECT_MAX_MS }, random);
 }
 
 /**

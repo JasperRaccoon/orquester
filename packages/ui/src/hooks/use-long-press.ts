@@ -1,9 +1,16 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 /** How long a finger rests before it is a long press (Android's default). */
 export const LONG_PRESS_MS = 500;
 /** A finger that moves this far is scrolling or panning, not pressing. */
 const SLOP_PX = 10;
+
+/**
+ * For a long-press surface (a row whose menu a long press opens): no iOS
+ * callout ("Open in new tab", the link preview) and no text selection with
+ * its loupe, both of which a resting finger would otherwise trigger instead.
+ */
+export const LONG_PRESS_SURFACE = "select-none [-webkit-touch-callout:none]";
 
 export interface LongPressHandlers {
   onPointerDown: (event: React.PointerEvent) => void;
@@ -13,6 +20,8 @@ export interface LongPressHandlers {
   onPointerLeave: () => void;
   /** Swallows the click that follows a long press. */
   onClickCapture: (event: React.MouseEvent) => void;
+  /** Keeps the mouse event a touch may still emit after a long press from closing the menu it opened. */
+  onMouseDown: (event: React.MouseEvent) => void;
   onContextMenu: (event: React.MouseEvent) => void;
 }
 
@@ -20,8 +29,12 @@ export interface LongPressHandlers {
  * Long-press handlers for an element (touch and pen only — a mouse has a
  * right click, which `onContextMenu` maps to the same action). The press
  * fires after {@link LONG_PRESS_MS} without moving; the click that follows it
- * is swallowed. Never the only way in: every long-press menu also has a
- * visible button.
+ * is swallowed. A finger that moves (a scroll: the browser cancels the
+ * pointer) is not a press, and a quick tap stays a click. Android's own
+ * long-press `contextmenu` and the timer open the menu once between them;
+ * iOS Safari fires no `contextmenu` at all, so there the timer is the only
+ * way. Pair it with {@link LONG_PRESS_SURFACE}. Never the only way in: every
+ * long-press menu also has a visible button.
  */
 export function useLongPress(onLongPress: (point: { x: number; y: number }, target: EventTarget | null) => void): LongPressHandlers {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,6 +48,8 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }, targ
     timer.current = null;
     start.current = null;
   }, []);
+  // A row that goes away mid-press opens nothing.
+  useEffect(() => clear, [clear]);
 
   return {
     onPointerDown: (event) => {
@@ -71,9 +86,17 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }, targ
       event.preventDefault();
       event.stopPropagation();
     },
+    onMouseDown: (event) => {
+      if (fired.current) event.stopPropagation();
+    },
     onContextMenu: (event) => {
       event.preventDefault();
       if (fired.current) return;
+      // Android's long press: the touch it ends is the press, so the timer stands down and its click is swallowed.
+      if (timer.current) {
+        clear();
+        fired.current = true;
+      }
       callback.current({ x: event.clientX, y: event.clientY }, event.target);
     }
   };

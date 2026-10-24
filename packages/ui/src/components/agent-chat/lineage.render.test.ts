@@ -45,7 +45,7 @@ const bar = (session: SessionSummary, sessions: SessionSummary[]) =>
     createElement(ThreadLineageBar, {
       session,
       sessions,
-      defaultMergeText: "B works",
+      readDefaultMergeText: () => "B works",
       notice: null,
       onDismissNotice: () => undefined,
       onOpenSession: () => undefined,
@@ -70,6 +70,17 @@ test("a child whose parent was closed says so, and offers no merge", () => {
 test("a parent's bar counts its forks and tasks; a thread with neither shows nothing", () => {
   assert.match(bar(parent, [parent, fork, task]), /1 fork · 1 task/);
   assert.equal(bar(tab("lonely"), [tab("lonely")]), "");
+});
+
+test("a reply held after a stop is said quietly as held, with Deliver now — never as a failed merge", () => {
+  const merge = { kind: "reply" as const, mergeId: "d-1", parentSessionId: "parent", childSessionId: "task", queuedAt: "t", preview: "Done", attempts: 0 };
+  const held = { ...merge, state: "failed" as const, held: true as const, error: "Held because this chat was stopped: Deliver now to hand it over, or Discard it." };
+  const html = bar(tab("parent", { title: "Plan the API", pendingMerges: [held] }), [parent, task]);
+  assert.match(html, /Reply from “Write tests” is held: this chat was stopped/);
+  assert.match(html, /Deliver now/);
+  assert.doesNotMatch(html, /failed:|Retry|text-danger/);
+  const refused = bar(tab("parent", { title: "Plan the API", pendingMerges: [{ ...merge, state: "failed" as const, error: "No." }] }), [parent, task]);
+  assert.match(refused, /failed: No\./);
 });
 
 test("the tab mark is titled with the relation and the parent", () => {

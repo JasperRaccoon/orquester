@@ -91,7 +91,10 @@ import type {
 // 7: `thread.created`'s `lineage` reaches the head (spec 2026-10-14 §6).
 // 8: `thread.created`'s and `thread.meta-updated`'s `profileId` reach the head (Agent Profiles).
 // 9: a question option's `preview` and `previewFormat` reach the pending question.
-export const FOLD_SNAPSHOT_VERSION = 9;
+// 10: an approval's `reason` reaches the pending approval.
+// 11: `answeredApprovals` / `answeredQuestions` — a pending request someone already answered.
+// 12: an approval's `requestingAgentId` reaches the pending approval.
+export const FOLD_SNAPSHOT_VERSION = 12;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -112,6 +115,10 @@ export interface SerializedFoldState {
   closedRequestIds: string[];
   /** `[requestId, resolvedAt]`; absent exactly when the state had no stamp map. */
   closedRequestAt?: Array<[string, string]>;
+  /** `[requestId, answeredAt]`; absent exactly when the state had no such map. */
+  answeredApprovals?: Array<[string, string]>;
+  /** `[requestId, answeredAt]`; absent exactly when the state had no such map. */
+  answeredQuestions?: Array<[string, string]>;
   seq: number;
   deleted: boolean;
   /** Absent exactly when retention never dropped anything. */
@@ -150,6 +157,12 @@ export function serializeFoldState(state: ThreadFoldState): SerializedFoldState 
     ...(state.closedRequestAt !== undefined
       ? { closedRequestAt: [...state.closedRequestAt] }
       : {}),
+    ...(state.answeredApprovals !== undefined
+      ? { answeredApprovals: [...state.answeredApprovals] }
+      : {}),
+    ...(state.answeredQuestions !== undefined
+      ? { answeredQuestions: [...state.answeredQuestions] }
+      : {}),
     seq: state.seq,
     deleted: state.deleted,
     ...(state.evicted !== undefined ? { evicted: state.evicted } : {})
@@ -180,6 +193,8 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     goal,
     closedRequestIds,
     closedRequestAt,
+    answeredApprovals,
+    answeredQuestions,
     seq,
     deleted,
     evicted
@@ -209,6 +224,12 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
   if (closedRequestAt !== undefined && !isListOf(closedRequestAt, isStringPair)) {
     return null;
   }
+  if (answeredApprovals !== undefined && !isListOf(answeredApprovals, isStringPair)) {
+    return null;
+  }
+  if (answeredQuestions !== undefined && !isListOf(answeredQuestions, isStringPair)) {
+    return null;
+  }
   return {
     head,
     items,
@@ -220,6 +241,8 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     goal,
     closedRequestIds: new Set(closedRequestIds),
     ...(closedRequestAt !== undefined ? { closedRequestAt: new Map(closedRequestAt) } : {}),
+    ...(answeredApprovals !== undefined ? { answeredApprovals: new Map(answeredApprovals) } : {}),
+    ...(answeredQuestions !== undefined ? { answeredQuestions: new Map(answeredQuestions) } : {}),
     seq,
     deleted,
     ...(evicted !== undefined
@@ -452,6 +475,7 @@ const isMessageItem = shaped<ThreadMessageItem>({
   reasoningKind: optional(isString),
   messageKind: optional(isString),
   interactionMode: optional(isString),
+  sentBy: optional(isString),
   streaming: isBoolean,
   createdAt: isString,
   updatedAt: isString
@@ -525,6 +549,8 @@ const isPendingApproval = shaped<PendingApproval>({
   requestKind: isString,
   createdAt: isString,
   detail: optional(isString),
+  reason: optional(isString),
+  requestingAgentId: optional(isString),
   appName: optional(isString),
   toolUseId: optional(isString),
   options: optional(listOf(isApprovalOption))

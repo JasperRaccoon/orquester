@@ -197,6 +197,7 @@ export async function createClaudeAdapterWith(
             await buildClaudeWorkspaceSnapshot({
               cwd,
               configDir,
+              ...(env.CLAUDE_CODE_PLUGIN_CACHE_DIR !== undefined ? { pluginCacheDir: env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : {}),
               checkedAt: built.snapshot.checkedAt,
               slashCommands: built.snapshot.slashCommands
             })
@@ -366,6 +367,7 @@ export async function createClaudeAdapterWith(
           await buildClaudeWorkspaceSnapshot({
             cwd,
             configDir: claudeConfigDir(env),
+            ...(env.CLAUDE_CODE_PLUGIN_CACHE_DIR !== undefined ? { pluginCacheDir: env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : {}),
             checkedAt: context.clock.nowIso(),
             // The machine list rides along, or the client's
             // `overlay.slashCommands ?? provider.slashCommands` resolves to an
@@ -459,12 +461,12 @@ export async function createClaudeAdapterWith(
       await sessions.get(threadId)?.interruptTurn(turnId);
     },
 
-    async respondToApproval(threadId, requestId, decision: ApprovalDecision) {
+    async respondToApproval(threadId, requestId, decision: ApprovalDecision, options) {
       const session = sessions.get(threadId);
       if (session === undefined) {
         throw new Error(`No live Claude session for thread ${threadId}.`);
       }
-      session.respondToApproval(requestId, decision);
+      session.respondToApproval(requestId, decision, options);
     },
 
     async respondToUserInput(threadId, requestId, answers) {

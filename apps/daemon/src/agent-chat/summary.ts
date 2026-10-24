@@ -32,6 +32,7 @@ import type {
   AgentGoalStatus,
   AgentProvidersChangedPayload,
   BackgroundLiveness,
+  IdleCompactionCandidate,
   LatestTurnSummary,
   ThreadSessionStatus,
   ThreadUsageLimitNotice,
@@ -110,6 +111,13 @@ interface AgentChatSummaryOptions {
    * (`limit-recovery.ts`) is the listener.
    */
   onUsageLimitNotice?: (threadId: string, notice: ThreadUsageLimitNotice | null) => void;
+  /**
+   * A thread's idle-compaction candidate (`AgentHostThreadSummary.idleCompaction`) on every read,
+   * after the tab's own fields were updated from the same read: the idle compaction
+   * (`idle-compaction.ts`) decides again only when its inputs moved. Never called for a host older
+   * than the field.
+   */
+  onIdleCompactionCandidate?: (threadId: string, candidate: IdleCompactionCandidate | null) => void;
 }
 
 /** A thread's live account-usage reading, with the tab's registry entry. */
@@ -323,6 +331,19 @@ export class AgentChatSummaryService {
     this.applyFields(threadId, sanitizeFields(raw), sanitizePendingRequests(raw));
     this.applyUsageLimits(threadId, sanitizeUsageLimits(raw));
     this.applyUsageLimitNotice(threadId, raw);
+    this.applyIdleCompaction(threadId, raw);
+  }
+
+  /** Hand a thread's idle-compaction candidate on. Never throws. */
+  private applyIdleCompaction(threadId: string, raw: unknown): void {
+    const candidate = sanitizeIdleCompactionCandidate(raw);
+    // `undefined`: a host older than the field — nothing is known, nothing is scheduled.
+    if (candidate === undefined || !this.opts.chat.has(threadId)) return;
+    try {
+      this.opts.onIdleCompactionCandidate?.(threadId, candidate);
+    } catch (error) {
+      this.opts.logger?.warn?.("agent-chat: idle-compaction listener failed", error);
+    }
   }
 
   /** Hand a thread's usage-limit notice on when it moved (or on its first read). Never throws. */
@@ -690,6 +711,28 @@ export function sanitizeUsageLimitNotice(value: unknown): ThreadUsageLimitNotice
     message: typeof row.message === "string" ? row.message.slice(0, 500) : "",
     at: row.at,
     parked: row.parked === true
+  };
+}
+
+/**
+ * `AgentHostThreadSummary.idleCompaction`, validated field-wise: `undefined` from a host older than
+ * the field, `null` for none or a malformed one (nothing is scheduled on a guess).
+ */
+export function sanitizeIdleCompactionCandidate(value: unknown): IdleCompactionCandidate | null | undefined {
+  if (!value || typeof value !== "object" || !("idleCompaction" in value)) return undefined;
+  const raw = (value as { idleCompaction?: unknown }).idleCompaction;
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.turnId !== "string" || row.turnId.length === 0 || row.turnId.length > 200) return null;
+  if (typeof row.usedTokens !== "number" || !Number.isFinite(row.usedTokens) || row.usedTokens < 0) return null;
+  if (typeof row.promptCacheExpiresAt !== "string" || !Number.isFinite(Date.parse(row.promptCacheExpiresAt))) return null;
+  const ttl = row.promptCacheTtlMs;
+  return {
+    turnId: row.turnId,
+    usedTokens: row.usedTokens,
+    promptCacheExpiresAt: row.promptCacheExpiresAt,
+    ...(typeof ttl === "number" && Number.isFinite(ttl) && ttl > 0 ? { promptCacheTtlMs: ttl } : {})
   };
 }
 

@@ -180,9 +180,35 @@ function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState
     goal: parseThreadGoal(snapshot.goal),
     closedRequestIds,
     closedRequestAt,
+    // Answers the host already holds, so a card answered elsewhere reads as
+    // answered here too (`answeredRequestIds`). A field of any other shape is none.
+    answeredApprovals: new Map(stringPairs(snapshot.answeredApprovals)),
+    answeredQuestions: new Map(stringPairs(snapshot.answeredQuestions)),
     seq: snapshot.seq,
     deleted: false
   };
+}
+
+/** The `[string, string]` entries of a wire list; anything else is dropped. */
+function stringPairs(value: unknown): Array<[string, string]> {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is [string, string] =>
+      Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" && typeof entry[1] === "string"
+  );
+}
+
+/** The ids of both answered maps, sorted; `previous` when it already says so. */
+function answeredRequestIdsOf(
+  fold: ThreadFoldState,
+  previous: readonly string[] | undefined
+): readonly string[] | undefined {
+  const ids = [...(fold.answeredApprovals?.keys() ?? []), ...(fold.answeredQuestions?.keys() ?? [])].sort();
+  if (ids.length === 0) return previous === undefined || previous.length === 0 ? previous : [];
+  if (previous !== undefined && previous.length === ids.length && previous.every((id, index) => id === ids[index])) {
+    return previous;
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +236,9 @@ export function projectSlice(
   // Goals §8.1: the fold's own goal object. A fold built before the field
   // existed has none (`undefined` reads as `null`, goals §4.4).
   const goal = fold.goal ?? null;
+  const answeredRequestIds = answeredRequestIdsOf(fold, previous.answeredRequestIds);
   if (
+    previous.answeredRequestIds === answeredRequestIds &&
     previous.head === fold.head &&
     previous.entries === fold.items &&
     previous.turns === fold.turns &&
@@ -231,6 +259,7 @@ export function projectSlice(
     turns: fold.turns,
     checkpoints: fold.checkpoints,
     pending: fold.pending,
+    ...(answeredRequestIds !== undefined ? { answeredRequestIds } : {}),
     roster: fold.roster,
     seq: fold.seq,
     turnStatus,

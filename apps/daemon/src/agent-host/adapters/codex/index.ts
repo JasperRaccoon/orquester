@@ -31,6 +31,7 @@ import {
   type AdapterFactory,
   type AdapterMcpApps,
   type AgentAdapter,
+  type ApprovalResponseOptions,
   type GoalCommandOptions,
   type GoalCommandResult,
   type HostGoalCommand,
@@ -521,7 +522,10 @@ export const createCodexAdapter: AdapterFactory = async (
     respondToApproval(
       threadId: string,
       requestId: string,
-      decision: ApprovalDecision
+      decision: ApprovalDecision,
+      // A redirect declines as any decline does (`decline`, so the turn goes on): the approval
+      // reply takes no reason, and the host's steer that follows carries the user's message.
+      _options?: ApprovalResponseOptions
     ): Promise<void> {
       sessions.get(threadId)?.respondToApproval(requestId, decision);
       return Promise.resolve();

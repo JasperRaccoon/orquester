@@ -308,7 +308,7 @@ test("pull_request: opened, updated, merged and closed; the base filter; payload
   poller.stop();
 });
 
-test("pull_request: Bitbucket Cloud's 12-char head sha compares consistently and polls every 180 s", async () => {
+test("pull_request: Bitbucket Cloud's 12-char head sha compares consistently, first polls within 60 s and then every 180 s", async () => {
   const remote = new FakeRemote();
   const bbUrl = "git@bitbucket.org:acme/app.git";
   remote.prs = [pull(7, "open", "0123456789ab")];
@@ -317,7 +317,10 @@ test("pull_request: Bitbucket Cloud's 12-char head sha compares consistently and
     { remote }
   );
   await poller.start();
-  await run(5 * S);
+  // A Bitbucket repo's first REST poll is spread over 60 s (random() is pinned at 0.5), not 10 s.
+  await run(30 * S - 1);
+  assert.equal(remote.prCalls.length, 0);
+  await run(1);
   assert.deepEqual(remote.prCalls[0], { accountId: "acc1", url: bbUrl });
   await run(180 * S - 1);
   assert.equal(remote.prCalls.length, 1);
@@ -584,7 +587,7 @@ test("pull_request: an abbreviated head (Bitbucket Cloud) is completed from the 
     { remote }
   );
   await poller.start();
-  await run(5 * S);
+  await run(30 * S);
   assert.equal(remote.lsCalls.length, 0, "nothing to complete, nothing read");
   remote.prs = [pull(7, "open", "fedcba987654"), pull(8, "open", "0123456789ab", { head: "fork-branch" })];
   remote.heads = { main: sha("a"), "feature/7": full };

@@ -27,6 +27,7 @@ export * from "./history-cursor.ts";
 export * from "./lineage.ts";
 export * from "./delegation.ts";
 export * from "./handoff.ts";
+export * from "./idle-compaction.ts";
 export * from "./message-liveness.ts";
 export * from "./open-work.ts";
 export * from "./interaction-mode.ts";

@@ -92,7 +92,7 @@ export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved" 
 /** One programmed turn. */
 export type MockTurnScript =
   | { kind: "text"; text: string }
-  | { kind: "command-approval"; command: string; afterAsking?: MockParentAskEnd }
+  | { kind: "command-approval"; command: string; /** Codex's own "why", as `05-…` carries one. */ reason?: string; afterAsking?: MockParentAskEnd }
   | { kind: "file-change-approval"; path: string; diff: string; /** Stay silent after the answer, until a wire notification or interrupt. */ holdAfterApproval?: boolean }
   | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[] | null; isOther?: boolean; isSecret?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
   | {
@@ -510,6 +510,7 @@ async function runTurn(turnId, script) {
       const asked = askServerRequest("item/commandExecution/requestApproval", {
         kind: "command", threadId, turnId, itemId, startedAtMs: 0, environmentId: "local",
         command: script.command, cwd: process.cwd(), commandActions: [],
+        ...(script.reason !== undefined ? { reason: script.reason } : { reason: null }),
         proposedExecpolicyAmendment: ["ls", "-1"],
         availableDecisions: ["accept", { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] } }, "cancel"]
       });

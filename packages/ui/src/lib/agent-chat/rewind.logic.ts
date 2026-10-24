@@ -26,6 +26,47 @@ export interface RewindTarget {
 }
 
 /**
+ * {@link deriveRewindTargets} with a memory: the same rows and turns answer
+ * the same list without deriving again, and a list equal to the last one
+ * answers the last one, by identity. A streamed delta replaces the rows but
+ * rarely the targets, and the composer's footer re-renders only when they
+ * change (spec §7.2, the re-render isolation tests).
+ */
+export function createRewindTargetsMemo(): (
+  rows: readonly AgentChatTimelineRow[],
+  turns: readonly Turn[]
+) => RewindTarget[] {
+  let lastRows: readonly AgentChatTimelineRow[] | null = null;
+  let lastTurns: readonly Turn[] | null = null;
+  let last: RewindTarget[] = [];
+  return (rows, turns) => {
+    if (rows === lastRows && turns === lastTurns) return last;
+    lastRows = rows;
+    lastTurns = turns;
+    const next = deriveRewindTargets(rows, turns);
+    if (!sameRewindTargets(last, next)) last = next;
+    return last;
+  };
+}
+
+function sameRewindTargets(left: readonly RewindTarget[], right: readonly RewindTarget[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((target, index) => {
+      const other = right[index]!;
+      return (
+        target.messageId === other.messageId &&
+        target.text === other.text &&
+        target.createdAt === other.createdAt &&
+        target.targetTurnCount === other.targetTurnCount &&
+        target.droppedTurnCount === other.droppedTurnCount &&
+        target.attachmentCount === other.attachmentCount
+      );
+    })
+  );
+}
+
+/**
  * Every user message the thread can rewind to, NEWEST first — the order the
  * picker lists them in, like the CLI's own. A row qualifies exactly when the
  * timeline stamped it with `revertTurnCount` (the adapter supports rollback,

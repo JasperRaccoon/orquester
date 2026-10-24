@@ -23,6 +23,7 @@ import {
   nextCausedBy,
   parseThreadMessage,
   replyNoticeText,
+  STOP_CASCADED_ACTIVITY_KIND,
   THREAD_MESSAGE_CONTEXT_KIND,
   THREAD_REPLY_CONTEXT_KIND,
   type CausedBy,
@@ -33,8 +34,9 @@ import {
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { headFromThreadRead } from "../mcp/testing.ts";
+import { DelegateStopCascade } from "./delegates.ts";
 import { LineageService } from "./lineage.ts";
-import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
+import { HELD_AFTER_STOP_TEXT, HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -78,11 +80,14 @@ function fakeHost() {
   const sessions = new Map<string, SessionSummary>();
   const threads = new Map<string, FakeThread>();
   const posts: Post[] = [];
+  const interrupts: Post[] = [];
   const receipts = new Map<string, DaemonResponse>();
   const listeners = new Set<(event: EventMessage) => void>();
   let ids = 0;
   /** Called on every accepted `/turn` before it lands (assert what is on disk then). */
   let beforePost: ((post: Post) => void) | null = null;
+  /** Called on every head read, before it is answered (a stop landing mid-hand-off). */
+  let beforeHeadRead: ((id: string) => void) | null = null;
   /** The next post's refusal, once. */
   let refuseNext: DaemonResponse | null = null;
   /** An older host: `ifIdle` ignored (a busy target is steered). */
@@ -168,6 +173,7 @@ function fakeHost() {
         const id = decodeURIComponent(head[1]!);
         if (!sessions.has(id)) return { status: 404, body: null };
         headReads.set(id, (headReads.get(id) ?? 0) + 1);
+        beforeHeadRead?.(id);
         return headFromThreadRead({ status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } }, opts?.query);
       }
       const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
@@ -196,6 +202,26 @@ function fakeHost() {
             seq: t.seq
           }
         };
+      }
+      const interruptPath = /^\/api\/sessions\/([^/]+)\/interrupt$/.exec(path);
+      if (method === "POST" && interruptPath) {
+        // The host's interrupt: the running turn settles `interrupted`; a cascade's cause leaves
+        // its `STOP_CASCADED_ACTIVITY_KIND` row on that turn, as the host writes it.
+        const sessionId = decodeURIComponent(interruptPath[1]!);
+        const body = (opts?.body ?? {}) as Record<string, unknown>;
+        interrupts.push({ sessionId, body });
+        const t = thread(sessionId);
+        const turn = active(t);
+        if (turn) {
+          if (body.cause !== undefined) {
+            t.items.push({ kind: "activity", id: `stop-${turn.turnId}`, activityKind: STOP_CASCADED_ACTIVITY_KIND, tone: "info", summary: "Stopped", payload: body.cause, turnId: turn.turnId, createdAt: "t" } as unknown as ThreadItem);
+          }
+          turn.state = "interrupted";
+          turn.completedAt = "t";
+          t.seq += 1;
+          touch(sessionId);
+        }
+        return { status: 200, body: { seq: t.seq } };
       }
       const turnPath = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
       if (method === "POST" && turnPath) {
@@ -270,12 +296,16 @@ function fakeHost() {
     sessions,
     threads,
     posts,
+    interrupts,
     receipts,
     thread,
     touch,
     listing: { get: (id: string) => sessions.get(id), list: () => [...sessions.values()] },
     onBeforePost(fn: ((post: Post) => void) | null) {
       beforePost = fn;
+    },
+    onBeforeHeadRead(fn: ((id: string) => void) | null) {
+      beforeHeadRead = fn;
     },
     refuseNextWith(response: DaemonResponse) {
       refuseNext = response;
@@ -2018,6 +2048,271 @@ describe("attention: a delegated child's question wakes its parent", () => {
     w.host.openQuestion("tgt", "q-1", "Proceed?");
     await idle(w);
     assert.equal(notices(w.host).length, 0);
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A Stop sticks: the delegate stop cascade and the reply router together
+// ---------------------------------------------------------------------------
+
+describe("a stopped chat is not woken by the delegates its stop interrupted", () => {
+  const delegate = (parentThreadId: string): Partial<SessionSummary> => ({ lineage: { parentThreadId, relation: "delegate", createdAt: "t", agentCreated: true } });
+
+  /** `req` delegated a task to `tgt` (`reply: "notify"`, as `create_session {delegate: true}`), now running; the cascade is wired as the daemon wires it. */
+  async function stoppable(options: { reply?: "wait" | "notify" } = {}) {
+    const w = await world();
+    w.host.sessions.set("tgt", summary("tgt", delegate("req")));
+    const cascade = new DelegateStopCascade({ sessions: w.host.listing });
+    cascade.attachApi(w.host.api);
+    cascade.setListener(w.router);
+    const res = await w.router.subscribe("tgt", request(options.reply ?? "notify", { origin: "delegated" }));
+    await idle(w);
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the task is running");
+    // Its summary says so (the cascade interrupts only unfinished chats).
+    w.host.touch("tgt");
+    const stop = async (sessionId = "req", command: "interrupt" | "session/stop" = "interrupt"): Promise<void> => {
+      cascade.commandAccepted(sessionId, command, { commandId: `stop-${sessionId}` });
+      await cascade.whenIdle();
+      await idle(w);
+    };
+    return { ...w, cascade, res, stop };
+  }
+  const sub = (w: World, id: string) => w.router.subscriptions().find((candidate) => candidate.id === id)!;
+
+  it("an idle parent stopped by the user gets no 'interrupted before it replied' turn", async () => {
+    const w = await stoppable();
+    await w.stop();
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "tgt").length, 1, "the delegate was interrupted");
+    assert.equal(w.host.threads.get("tgt")!.turns.at(-1)!.state, "interrupted");
+    assert.equal(postsTo(w.host, "req").length, 0, "no turn on the chat the user stopped");
+    assert.deepEqual([sub(w, w.res.subscriptionId).state, (sub(w, w.res.subscriptionId) as { ended?: string }).ended], ["done", "stopped"]);
+    assert.equal(w.router.deliveries().length, 0);
+    // Persisted: a restart delivers nothing either.
+    const again = await world({ host: w.host, dir: w.dir });
+    await idle(again);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await again.cleanup(false);
+    await w.cleanup();
+  });
+
+  it("a session/stop does the same", async () => {
+    const w = await stoppable();
+    await w.stop("req", "session/stop");
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "tgt").length, 1);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a parent waiting in wait_for_session returns at once, told the task stopped with it, and is not woken after", async () => {
+    const w = await stoppable({ reply: "wait" });
+    const waiting = w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 60 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    await until(() => sub(w, w.res.subscriptionId).state === "waiting" && w.timers.pending() > 0);
+    await w.stop();
+    const answer = await waiting;
+    assert.equal(answer.outcome, "replied");
+    assert.match((answer as { error?: string }).error ?? "", /You were stopped while waiting for "Codex review"/);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    // A later wait on it says the same, truthfully.
+    const later = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 1 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    assert.equal((later as { state?: string }).state, "interrupted");
+    await w.cleanup();
+  });
+
+  it("a delegate the user stops directly, its parent left alone, still reports back", async () => {
+    const w = await stoppable();
+    // The user's own Stop on the child: no cause, no cascade above it.
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", { body: { commandId: "user-stop" } });
+    await idle(w);
+    const sent = postsTo(w.host, "req");
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!.body.input as string, /interrupted/);
+    await w.cleanup();
+  });
+
+  it("deliveries already waiting when the Stop lands are not posted: a notice is dropped, a reply is held for the user", async () => {
+    const w = await stoppable();
+    // A second delegate, finished: its reply waits while the parent works.
+    w.host.sessions.set("tgt2", summary("tgt2", delegate("req")));
+    w.host.thread("tgt2");
+    await w.router.subscribe("tgt2", request("notify", { origin: "delegated", causedBy: exchange(1, "ex-2") }));
+    await idle(w);
+    w.host.userTurn("req", "parent-turn");
+    w.host.touch("req");
+    w.host.settle("tgt2", { reply: "The cache uses Redis." });
+    // The first delegate is stopped by its own user meanwhile: an "interrupted" notice waits too.
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", { body: { commandId: "user-stop" } });
+    await idle(w);
+    assert.equal(w.queue.pendingFor("req").length, 2, "both wait for the busy parent");
+    // The user stops the parent: its turn settles, and it goes idle.
+    await w.stop();
+    w.host.settle("req", { state: "interrupted" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "nothing wakes the stopped parent");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1, "the notice is gone, the reply is kept");
+    assert.equal(pending[0]!.childSessionId, "tgt2");
+    assert.equal(pending[0]!.state, "failed");
+    assert.equal(pending[0]!.error, HELD_AFTER_STOP_TEXT);
+    const dropped = w.router.deliveries().find((d) => d.fromThreadId === "tgt") as { state: string; stopped?: true };
+    assert.deepEqual([dropped.state, dropped.stopped], ["dropped", true]);
+    // A later turn of the parent's own does not release it either; Deliver now does.
+    w.host.userTurn("req", "later-turn");
+    w.host.settle("req", { reply: "ok" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.queue.actOnMerge("req", pending[0]!.mergeId, { action: "deliver" });
+    await idle(w);
+    assert.match(postsTo(w.host, "req")[0]!.body.input as string, /The cache uses Redis\./);
+    await w.cleanup();
+  });
+
+  it("a message still queued for the delegate is taken back, so the stop sticks below too", async () => {
+    const w = await stoppable();
+    w.host.settle("tgt", { reply: "first done" });
+    await idle(w);
+    w.host.userTurn("tgt", "own-turn");
+    w.host.touch("tgt");
+    const next = await w.router.subscribe("tgt", request("notify", { origin: "delegated", causedBy: exchange(3, "ex-3") }));
+    await idle(w);
+    assert.equal(w.queue.pendingFor("tgt").length, 1, "queued behind the child's own turn");
+    const before = postsTo(w.host, "req").length;
+    await w.stop();
+    assert.equal(w.queue.pendingFor("tgt").length, 0, "never runs");
+    assert.equal((sub(w, next.subscriptionId) as { ended?: string }).ended, "stopped");
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the child got no new turn");
+    assert.equal(postsTo(w.host, "req").length, before);
+    await w.cleanup();
+  });
+
+  it("the stop runs down the whole tree: a grandchild's notice wakes neither chat", async () => {
+    const w = await stoppable();
+    w.host.sessions.set("g", summary("g", delegate("tgt")));
+    w.host.thread("g");
+    await w.router.subscribe("g", { ...request("notify", { origin: "delegated", causedBy: { threadId: "tgt", exchangeId: "ex-g", hop: 2 } }), fromThreadId: "tgt" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "g").length, 1);
+    w.host.touch("g");
+    await w.stop();
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "g").length, 1);
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the child got no notice turn");
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a reply being handed over when the Stop lands is held, never posted (the hand-off race)", async () => {
+    const w = await stoppable();
+    // The stop lands while the hand-off reads whether the parent is idle — the moment before it posts.
+    let stopped = false;
+    w.host.onBeforeHeadRead((id) => {
+      if (id !== "req" || stopped) return;
+      stopped = true;
+      w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-mid" });
+    });
+    w.host.settle("tgt", { reply: "The fix is in." });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.ok(stopped, "the stop landed mid-hand-off");
+    assert.equal(postsTo(w.host, "req").length, 0, "the stopped parent is not woken");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1);
+    assert.deepEqual([pending[0]!.state, pending[0]!.held], ["failed", true]);
+    const delivery = w.router.deliveries()[0] as { state: string; held?: true };
+    assert.deepEqual([delivery.state, delivery.held], ["queued", true]);
+    await w.cleanup();
+  });
+
+  it("an attention notice being handed over when the Stop lands is dropped, never posted", async () => {
+    const w = await stoppable();
+    let stopped = false;
+    w.host.onBeforeHeadRead((id) => {
+      if (id !== "req" || stopped) return;
+      stopped = true;
+      w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-mid" });
+    });
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.ok(stopped);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal(w.queue.pendingFor("req").length, 0, "taken off the queue");
+    await w.cleanup();
+  });
+
+  it("a delegate that finished just before the Stop keeps its reply: held for the user, never lost", async () => {
+    const w = await stoppable();
+    // It completed; the router has not claimed the reply yet when the stop lands.
+    w.host.settle("tgt", { reply: "All 42 tests pass." });
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-after" });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(w.host.interrupts.length, 0, "a finished delegate is not interrupted");
+    assert.equal(postsTo(w.host, "req").length, 0, "the stopped parent is not woken");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.held, true);
+    assert.match(pending[0]!.preview, /All 42 tests pass\./);
+    assert.notEqual((sub(w, w.res.subscriptionId) as { ended?: string }).ended, "stopped", "it replied: never said stopped");
+    await w.queue.actOnMerge("req", pending[0]!.mergeId, { action: "deliver" });
+    await idle(w);
+    assert.match(postsTo(w.host, "req")[0]!.body.input as string, /All 42 tests pass\./);
+    await w.cleanup();
+  });
+
+  it("after a stop, a wait on a reply still to come says it will be held for the user, never that it comes as a message", async () => {
+    const w = await stoppable();
+    // A finished delegate's turn is not interrupted: its subscription stays open, held.
+    w.host.threads.get("tgt")!.turns.at(-1)!.state = "pending";
+    w.host.sessions.set("tgt", { ...w.host.sessions.get("tgt")!, latestTurn: undefined, chatSessionStatus: "ready" } as SessionSummary);
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-1" });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(sub(w, w.res.subscriptionId).state, "notify");
+    const answer = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 5 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    assert.equal(answer.outcome, "replied");
+    assert.equal((answer as { state?: string }).state, "failed");
+    assert.match((answer as { error?: string }).error ?? "", /not delivered as a message: when it comes, it is held for the user to deliver or discard/);
+    assert.equal((answer as { willNotify?: true }).willNotify, undefined);
+    await w.cleanup();
+  });
+
+  it("while a stop is on its way to the host, replies to that chat wait; a refused stop lets them go", async () => {
+    const w = await stoppable();
+    const done = w.cascade.commandRequested("req", "interrupt", { commandId: "stop-pending" });
+    w.host.settle("tgt", { reply: "Finished." });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "not posted while the stop is in flight");
+    assert.equal(w.queue.pendingFor("req").length, 1);
+    // The host refused the stop: nothing was marked, so the reply goes out.
+    done();
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("a stop the host takes in that window marks the reply before it can be posted", async () => {
+    const w = await stoppable();
+    const done = w.cascade.commandRequested("req", "interrupt", { commandId: "stop-1" });
+    w.host.settle("tgt", { reply: "Finished." });
+    await idle(w);
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-1" });
+    done();
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal(w.queue.pendingFor("req")[0]?.held, true);
+    await w.cleanup();
+  });
+
+  it("without the stop's own record, the cascade's row on the interrupted turn still keeps the parent asleep", async () => {
+    const w = await stoppable();
+    // The cascade's interrupt lands, but the router never heard the stop (its write was lost).
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", {
+      body: { commandId: "cascade", cause: { kind: "parent-stopped", parentSessionId: "req", parentTitle: "Implement auth", action: "interrupted" } }
+    });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal((sub(w, w.res.subscriptionId) as { ended?: string }).ended, "stopped");
     await w.cleanup();
   });
 });

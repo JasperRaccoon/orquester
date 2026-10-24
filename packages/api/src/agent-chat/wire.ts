@@ -695,7 +695,52 @@ export interface TurnCommandBody extends AgentChatCommandBase {
    * Additive: an older host ignores it (the steer race stays there).
    */
   ifIdle?: true;
+  /**
+   * The message REDIRECTS the agent: the pending approvals the user saw when they sent it
+   * (`requestId`s). The host declines every one of them still pending and unanswered, telling the
+   * provider the user is redirecting where it takes a reason with a denial, then sends this message
+   * as a steer — one command, so a retry under the same `commandId` neither declines nor sends
+   * twice. An approval already answered — resolved, or its answer committed and the provider's
+   * resolution on its way (another tab's Approve, the MCP's `respond_to_request`) — is skipped,
+   * listed or not. An unanswered approval pending but NOT listed (one that arrived after the user
+   * looked) refuses the whole command 409 `COMMAND_REJECTED` ({@link APPROVAL_ARRIVED_REASON})
+   * before anything is written, so the message goes back to the draft and a new send declines that
+   * one too. Additive: an older host ignores it and the message steers in behind the open card.
+   *
+   * **A subagent's approval** (`PendingApproval.requestingAgentId`, on an adapter with
+   * `approvalFeedbackToSubagents`) gets the message itself as its denial, capped at
+   * {@link APPROVAL_FEEDBACK_MAX_CHARS}: the subagent that asked reads the user's words, which a
+   * steer into the main agent would never reach. When every declined approval is a subagent's,
+   * nothing is steered — the message is recorded in the thread as the user's and sent nowhere
+   * else — and attachments are refused ({@link SUBAGENT_FEEDBACK_ATTACHMENTS_REASON}). With a
+   * main-agent approval among them, the main agent is redirected and steered as above.
+   */
+  declineApprovals?: string[];
 }
+
+/** Why a redirect ({@link TurnCommandBody.declineApprovals}) was refused: an approval the user had not seen is pending. */
+export const APPROVAL_ARRIVED_REASON =
+  "Another approval arrived, so your message wasn't sent. Read it, then send again to decline it too.";
+
+/** Why an `approval` command was refused: the request already has an answer on its way to the provider. */
+export const APPROVAL_ALREADY_ANSWERED_REASON = "This request has already been answered.";
+
+/** Why an `answer` command was refused: the question already has an answer on its way to the provider. */
+export const QUESTION_ALREADY_ANSWERED_REASON = "This question has already been answered.";
+
+/**
+ * Why a message over a subagent's approval was refused: it goes to that
+ * subagent as its approval's denial, which carries text only.
+ */
+export const SUBAGENT_FEEDBACK_ATTACHMENTS_REASON =
+  "This message goes to the subagent that asked, as its answer, and can't carry attachments. Remove them, or answer on the card.";
+
+/** The longest a message handed to an agent as its approval's denial is, in characters; the rest is cut. */
+export const APPROVAL_FEEDBACK_MAX_CHARS = 16_000;
+
+/** Why a redirect that is a `/compact` was refused: a compaction waits for the turn the card holds. */
+export const REDIRECT_COMPACT_REASON =
+  "A compaction can't redirect the agent. Answer the request above first, or stop the turn.";
 
 /** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
 export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies readonly (keyof TurnCommandBody)[];
@@ -774,7 +819,17 @@ export interface RevertCommandBody extends AgentChatCommandBase {
   targetTurnCount: number;
 }
 
-export type CompactCommandBody = AgentChatCommandBase;
+export interface CompactCommandBody extends AgentChatCommandBase {
+  /**
+   * Idle compaction (`idle-compaction.ts`): the daemon's own `/compact`, sent before the chat's
+   * prompt cache expires. A precondition and a label: the host refuses it (409
+   * {@link TURN_NOT_IDLE}, never recorded, so the same id may come again) unless `turnId` is still the chat's latest turn, settled
+   * `completed`, with nothing pending — so a chat that moved on since the daemon looked is never
+   * compacted under the user — and records the message with `sentBy: "idle-compaction"`.
+   * Additive: an older host ignores it and compacts as asked.
+   */
+  idle?: { turnId: string };
+}
 
 /**
  * `/background`: `toolUseId` names the one running call to move (the
@@ -967,7 +1022,10 @@ export const AGENT_CHAT_ERROR_CODES = [
   "TURN_NOT_IDLE"
 ] as const satisfies readonly AgentChatErrorCode[];
 
-/** {@link AgentChatErrorCode} `TURN_NOT_IDLE`: the `ifIdle` precondition of a `turn` refused. */
+/**
+ * {@link AgentChatErrorCode} `TURN_NOT_IDLE`: the `ifIdle` precondition of a `turn` refused, or the
+ * `idle` precondition of an idle compaction (`CompactCommandBody.idle`).
+ */
 export const TURN_NOT_IDLE = "TURN_NOT_IDLE" satisfies AgentChatErrorCode;
 
 /** A failed command answers this, and it is not a transport error to swallow. */
@@ -1131,7 +1189,10 @@ export type ThreadReadResponse =
   | { kind: "events"; seq: number; events: DomainEvent[] };
 
 export interface TurnDiffQuery {
-  /** Defaults to true (§5.4). */
+  /**
+   * Hide whitespace-only changes (`git diff --ignore-all-space`); `1`/`0` on
+   * the wire. Absent is false: every change shows, indentation included.
+   */
   ignoreWhitespace?: boolean;
 }
 

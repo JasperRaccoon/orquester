@@ -12,6 +12,7 @@ import {
 import type { Checkpoint } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../../lib/cn";
+import { ChangeKindSplit } from "../../../git/ChangeKindSplit";
 import { ChatIconButton } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import {
@@ -43,7 +44,8 @@ function DiffStatLabel({ stat }: { stat: DiffStat }): React.ReactElement | null 
  * `thread.turn-diff-completed`.
  *
  * `sticky top-2` on the header is the nice touch: scroll a long file list and
- * the "N changed files · +a −b" summary stays.
+ * the "N changed files · +a −b" summary stays, with the turn's split into
+ * code, tests, docs and generated files beside it when there is more than code.
  * *T3: `ChangedFilesTree.tsx:51-56, 183, 192-212`.*
  */
 export const ChangedFilesCard = React.memo(function ChangedFilesCard({
@@ -144,6 +146,7 @@ export const ChangedFilesCard = React.memo(function ChangedFilesCard({
               <span className="text-[color:var(--diff-del-fg)]">−{summary.deletions}</span>
             </span>
           ) : null}
+          <ChangeKindSplit files={files} />
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {hasDirectories ? (

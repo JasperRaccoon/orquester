@@ -464,6 +464,13 @@ export interface FakeCheckpointService extends CheckpointService {
     turnId: string | null;
     turnCount?: number;
   }>;
+  /** Every `readTurnDiff` request, in order, as the host made it. */
+  readonly diffRequests: Array<{
+    threadId: string;
+    fromTurnCount: number;
+    toTurnCount: number;
+    ignoreWhitespace?: boolean;
+  }>;
   /** Set to model a project that is not a git repo (§5.4 skips silently). */
   nonGit: boolean;
   /** Adapters whose rollback is refused (§5.5 step 2). Grok by default. */
@@ -485,12 +492,14 @@ export function createFakeCheckpointService(): FakeCheckpointService {
   const baselines: string[] = [];
   const baselineRequests: FakeCheckpointService["baselineRequests"] = [];
   const turnEndRequests: FakeCheckpointService["turnEndRequests"] = [];
+  const diffRequests: FakeCheckpointService["diffRequests"] = [];
   const fake: FakeCheckpointService = {
     pruned,
     deleted,
     baselines,
     baselineRequests,
     turnEndRequests,
+    diffRequests,
     nonGit: false,
     rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
@@ -550,7 +559,13 @@ export function createFakeCheckpointService(): FakeCheckpointService {
         completedAt: new Date(0).toISOString()
       };
     },
-    async readTurnDiff(): Promise<string> {
+    async readTurnDiff(input): Promise<string> {
+      diffRequests.push({
+        threadId: input.threadId,
+        fromTurnCount: input.fromTurnCount,
+        toTurnCount: input.toTurnCount,
+        ...(input.ignoreWhitespace !== undefined ? { ignoreWhitespace: input.ignoreWhitespace } : {})
+      });
       return fake.diff;
     },
     async pruneAbove(input): Promise<void> {

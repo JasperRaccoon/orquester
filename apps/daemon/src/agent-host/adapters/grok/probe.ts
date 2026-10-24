@@ -229,7 +229,7 @@ function displayNameFromSlug(slug: string): string {
 // ---------------------------------------------------------------------------
 
 /** `_meta.modelState` → the model catalog, with its effort descriptor. */
-function modelsFromInitialize(initialize: InitializeResponse): ProviderModel[] {
+export function modelsFromInitialize(initialize: InitializeResponse): ProviderModel[] {
   const state = modelStateOf(initialize._meta);
   if (state === null || typeof state !== "object") {
     return [];
@@ -255,10 +255,17 @@ function modelsFromInitialize(initialize: InitializeResponse): ProviderModel[] {
     seen.add(slug);
     const name = typeof model["name"] === "string" && model["name"].trim().length > 0 ? model["name"].trim() : slug;
     const descriptors = effortDescriptors(model["_meta"]);
+    // `_meta.totalContextTokens`, the window the meter divides by (`contextWindowFromModelState`).
+    const meta = model["_meta"];
+    const context =
+      meta !== null && typeof meta === "object" ? (meta as Record<string, unknown>)["totalContextTokens"] : undefined;
     models.push({
       slug,
       name,
       ...(slug === currentModelId ? { isDefault: true } : {}),
+      ...(typeof context === "number" && Number.isFinite(context) && context > 0
+        ? { contextWindow: Math.round(context) }
+        : {}),
       capabilities: descriptors === null ? null : { optionDescriptors: [descriptors] }
     });
   }

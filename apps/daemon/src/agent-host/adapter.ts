@@ -33,10 +33,12 @@ import type {
   SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
+import { APPROVAL_FEEDBACK_MAX_CHARS } from "@orquester/api/agent-chat";
 
 import type { HostThreadBox, HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
 import type { AgentHostBoxes } from "./boxes/index.ts";
+import type { IdleCompactionMode } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Operation inputs
@@ -321,6 +323,34 @@ export interface ForkConversationInput {
   cut: ForkCut;
 }
 
+/** {@link AgentAdapter.respondToApproval}'s options. */
+export interface ApprovalResponseOptions {
+  /** A decline the user's next message redirects; see {@link APPROVAL_REDIRECT_MESSAGE}. */
+  redirect?: boolean;
+  /**
+   * The user's own words, for a subagent's request on an adapter with
+   * `approvalFeedbackToSubagents`: the denial carries them (trimmed, capped at
+   * `APPROVAL_FEEDBACK_MAX_CHARS`) in place of {@link APPROVAL_REDIRECT_MESSAGE},
+   * so the subagent that asked reads them. Only with `decline`.
+   */
+  feedback?: string;
+}
+
+/** The user's words as an approval's denial: trimmed and capped. `undefined` when nothing is left. */
+export function approvalFeedbackText(feedback: string | undefined): string | undefined {
+  const trimmed = feedback?.trim() ?? "";
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > APPROVAL_FEEDBACK_MAX_CHARS ? trimmed.slice(0, APPROVAL_FEEDBACK_MAX_CHARS) : trimmed;
+}
+
+/**
+ * The denial a redirect hands a provider that takes one: the agent must not
+ * retry the declined action, and the user's message — steered in right
+ * after — is its new instruction.
+ */
+export const APPROVAL_REDIRECT_MESSAGE =
+  "The user declined this request and sent a new message instead. Do not retry it; follow the user's new message.";
+
 export interface AgentAdapter {
   readonly id: AgentAdapterId;
   readonly capabilities: AdapterCapabilities;
@@ -329,11 +359,28 @@ export interface AgentAdapter {
   sendTurn(input: SendTurnInput): Promise<SendTurnResult>;
 
   interruptTurn(threadId: string, turnId?: string): Promise<void>;
-  /** T3 names it `respondToRequest`; same contract. */
+  /**
+   * T3 names it `respondToRequest`; same contract.
+   *
+   * `options.redirect` (only with `decline`): the user sent a message over
+   * the card, which the host steers into the turn right after this answer
+   * (`TurnCommandBody.declineApprovals`). A provider that takes a reason with
+   * a denial is told so ({@link APPROVAL_REDIRECT_MESSAGE}: Claude's deny
+   * `message`, OpenCode's reject `message`); the others decline as usual
+   * (Codex `decline`, Grok `reject_once`) and the steer carries the message.
+   *
+   * `options.feedback` (a subagent's request, on an adapter with
+   * `approvalFeedbackToSubagents`): the user's own words are the denial — Claude's deny `message`
+   * for a Task tool agent's `canUseTool`, OpenCode's reject `message` for a child session's
+   * permission — because nothing is steered into the subagent. Codex (a collab child's card) and
+   * Grok (a child session's permission) have no such channel: their subagent gets the plain
+   * decline, and the host steers the message into the main agent, as for any redirect.
+   */
   respondToApproval(
     threadId: string,
     requestId: string,
-    decision: ApprovalDecision
+    decision: ApprovalDecision,
+    options?: ApprovalResponseOptions
   ): Promise<void>;
   /**
    * Attachments are folded into the answer text by the host before this call.
@@ -712,6 +759,13 @@ export interface AdapterContext {
    * names `box` launches through it; absent, such a start fails (never runs here instead).
    */
   boxes?: AgentHostBoxes;
+  /**
+   * The idle-compaction mode (`@orquester/config` `resolveIdleCompaction`) a chat on `home` runs
+   * under, read from `app.json` at each call so a change applies at once. The Claude adapter reads
+   * it when the CLI asks its resume question: `off` answers "keep full history" without asking
+   * (T3 Code's "Never"). Optional: without it the question is always asked.
+   */
+  idleCompactionMode?(home: AccountHome): Promise<IdleCompactionMode>;
 }
 
 /**

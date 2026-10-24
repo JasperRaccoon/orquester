@@ -1,8 +1,11 @@
 import {
   OrquesterApp,
   createLocalStorageAppConfigAdapter,
+  parseSessionDeepLink,
   parseWorkflowDeepLink,
+  requestSessionDeepLink,
   requestWorkflowDeepLink,
+  stripSessionDeepLink,
   stripWorkflowDeepLink
 } from "@orquester/ui";
 import React from "react";
@@ -21,9 +24,17 @@ if (workflowLink) {
   window.history.replaceState(window.history.state, "", stripWorkflowDeepLink(window.location.href));
 }
 
+// A session's notification opened a fresh window on `/?session=<id>`: the
+// same, for that session's tab.
+const sessionLink = parseSessionDeepLink(window.location.search);
+if (sessionLink) {
+  requestSessionDeepLink(sessionLink);
+  window.history.replaceState(window.history.state, "", stripSessionDeepLink(window.location.href));
+}
+
 // When served by the daemon itself the API is same-origin; in standalone dev
 // VITE_ORQUESTER_API_URL points at the daemon. A password-protected daemon
-// triggers an in-app prompt (the bearer is a stored bcrypt hash).
+// triggers an in-app sign-in (the bearer is a stored, revocable session token).
 const endpoint = import.meta.env.VITE_ORQUESTER_API_URL ?? window.location.origin;
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
