@@ -3171,6 +3171,66 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     await host.stop();
   });
 
+  it("a bounded snapshot with on-demand agent rows: the trim first, then the settled agents' rows; their anchors stay in trimmed turns, and the frame brings every row back", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await host.createThread();
+    const agentRow = (id: string, turnId: string, activityKind: string, payload: Record<string, unknown>, agentId?: string) =>
+      sinkEvent(host, threadId, `ingest-${id}`, "thread.activity-appended", {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind,
+          summary: activityKind,
+          payload,
+          turnId,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso(),
+          ...(agentId !== undefined ? { agentId } : {})
+        }
+      });
+    for (let n = 1; n <= 15; n += 1) {
+      host.clock.advance(1_000);
+      await seedTurn(host, `w-${n}`, { threadId });
+      await bulkActivities(host, `w-${n}`, 3, threadId);
+      if (n === 2 || n === 14) {
+        const agent = n === 2 ? "old-a" : "new-b";
+        const turnId = `w-${n}`;
+        await host.orchestrator.ingestionSink(threadId, [
+          agentRow(`${agent}-launch`, turnId, "task.started", { taskId: agent, agentKind: "agent", title: agent }),
+          agentRow(`${agent}-1-start`, turnId, "tool.started", { toolUseId: `${agent}-1`, title: "Bash" }, agent),
+          agentRow(`${agent}-1-done`, turnId, "tool.completed", { toolUseId: `${agent}-1`, title: "Bash" }, agent),
+          agentRow(`${agent}-end`, turnId, "task.completed", { taskId: agent, agentKind: "agent", status: "completed" })
+        ]);
+      }
+    }
+    await host.settle();
+    await index.drain();
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+    const both = await host.orchestrator.readThread(threadId, undefined, { window: "recent", agentRows: "on-demand" });
+    assert.equal(both.kind, "snapshot");
+    if (both.kind !== "snapshot") return;
+    const ids = (items: readonly ThreadItem[]) => items.map((item) => item.id);
+    assert.ok(recent.items.length < full.items.length, "the trim cut older turns");
+    assert.ok(!ids(recent.items).includes("w-2-bulk-0"));
+    // The trim keeps every agent's rows; the omission then takes the settled agents' own.
+    for (const id of ["old-a-1-start", "old-a-1-done", "new-b-1-start"]) {
+      assert.ok(ids(recent.items).includes(id), `${id}: the trim keeps it`);
+      assert.ok(!ids(both.thread.items).includes(id), `${id}: on demand`);
+    }
+    for (const id of ["old-a-launch", "old-a-end", "new-b-launch", "new-b-end"]) {
+      assert.ok(ids(both.thread.items).includes(id), `${id}: an anchor stays, in a trimmed turn too`);
+    }
+    assert.deepEqual(both.thread.omittedAgentIds, ["new-b", "old-a"]);
+    assert.deepEqual(both.thread.history, recent.history, "the trim's bounds, its window cut included");
+    assert.deepEqual(ids(both.thread.items), ids(recent.items).filter((id) => !/-1-(start|done)$/.test(id)));
+    // The frame: the agent's rows as the full window holds them.
+    const frame = host.orchestrator.agentRowsFrame(threadId, ["old-a"]);
+    assert.ok(frame);
+    assert.deepEqual(frame.items, full.items.filter((item) => item.agentId === "old-a"));
+  });
+
   it("a bounded read is the whole window without a usable index, or one that has not caught up", async (t) => {
     const unindexed = createTestHost();
     const threadId = await fifteenTurns(unindexed, null);

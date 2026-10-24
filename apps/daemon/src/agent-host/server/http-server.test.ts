@@ -700,7 +700,7 @@ describe("agent host server — the event stream (§6.3)", () => {
     assert.deepEqual(reads, [
       undefined,
       { window: "recent" },
-      { window: "recent" },
+      { window: "recent", agentRows: "on-demand" },
       undefined,
       { window: "recent" },
       undefined

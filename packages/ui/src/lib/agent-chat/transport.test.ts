@@ -834,7 +834,7 @@ describe("on-demand agent rows", () => {
     const frames: AgentChatStreamFrame[] = [];
     mock.timers.enable({ apis: ["setTimeout"] });
     const handle = transport.stream("s1", { agentRows: "on-demand" }, { onFrame: (frame) => frames.push(frame) });
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?agentRows=on-demand");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?window=recent&agentRows=on-demand");
     transporter.latest.handlers.onData(
       line({ kind: "event", seq: 7, event: ev("thread.reverted", { turnCount: 1 }, { seq: 7 }) }) +
         line({ kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" }) +
@@ -844,7 +844,7 @@ describe("on-demand agent rows", () => {
     assert.equal(handle.lastSeq, 7);
     transporter.latest.handlers.onEnd();
     mock.timers.tick(1_000);
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&agentRows=on-demand");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&window=recent&agentRows=on-demand");
     handle.close();
   });
 

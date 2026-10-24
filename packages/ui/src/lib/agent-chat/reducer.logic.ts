@@ -36,6 +36,7 @@ import type {
 } from "./contracts";
 import {
   EMPTY_HISTORY,
+  historyAfterAgentRows,
   historyAfterEvent,
   historyBoundsFromSnapshot,
   resetHistory
@@ -363,7 +364,9 @@ export function applyFrame(
         return state;
       }
       const { omittedAgentIds: _loaded, ...rest } = state.slice;
-      const base = left === undefined ? rest : { ...rest, omittedAgentIds: left };
+      // The window cut counts window rows: recounted over the replaced list.
+      const history = historyAfterAgentRows(state.slice.history, state.fold.items, fold.items);
+      const base = { ...rest, history, ...(left === undefined ? {} : { omittedAgentIds: left }) };
       return { ...state, fold, slice: projectSlice(base, fold) };
     }
     case "event": {

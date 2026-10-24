@@ -824,7 +824,12 @@ describe("on-demand agent rows", () => {
   function partialState(seq: number): PersistableThreadState {
     let reducer = applyFrame(createReducerState("s1"), {
       kind: "snapshot",
-      thread: { ...threadSnapshot(seq), omittedAgentIds: ["a", "b"] }
+      thread: {
+        ...threadSnapshot(seq),
+        omittedAgentIds: ["a", "b"],
+        // A bounded snapshot's too: the device keeps its cut beside what it lacks.
+        history: { indexed: true, hasOlder: true, beforeCursor: "c1", oldestRetainedOrdinal: 4, totalTurns: 9, windowCut: "c1" }
+      }
     });
     reducer = applyFrame(reducer, { kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" });
     return { reducer, slice: reducer.slice };
@@ -838,9 +843,11 @@ describe("on-demand agent rows", () => {
     const record = await loadPersistedThread(SCOPE_A, "s1");
     assert.ok(record);
     assert.deepEqual(record.snapshot.omittedAgentIds, ["a", "b"]);
+    assert.equal(record.snapshot.history?.windowCut, "c1", "and the bounded snapshot's cut with them");
     assert.deepEqual(record.snapshot, persistableSnapshotOf(state));
     const refolded = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: record.snapshot });
     assert.deepEqual(refolded.slice.omittedAgentIds, ["a", "b"], "a restored copy knows what it lacks");
+    assert.equal(refolded.slice.history.bounds?.windowCut, "c1");
     // A whole copy is still the format every bundle reads.
     await save(transportFor("https://a.example"), synchronizedState(6));
     assert.equal((backend.metas.get(key) as ThreadCacheMeta).v, THREAD_CACHE_VERSION);

@@ -239,7 +239,7 @@ test("the replacement drops the rows the host no longer holds and takes a stream
   assert.ok(ids(smaller.items).includes("a-launch"), "a kept row is never touched");
 });
 
-test("a placement the client does not hold falls back to the agent's launch, then to the previous row", () => {
+test("a placement the client does not hold falls back to the agent's launch", () => {
   reset();
   const events = fleet();
   const { fold, snapshot } = fullSnapshot(events);
@@ -297,4 +297,33 @@ test("the fold keeps folding and trimming after a replacement", () => {
   assert.ok(host.evicted?.activities === true && client.evicted?.activities === true, "both trimmed");
   assert.deepEqual(client.roster, host.roster);
   assert.deepEqual(client.pending, host.pending);
+});
+
+test("with the parent's rows left to load older, each of a relaunched agent's runs lands after its own launch", () => {
+  reset();
+  const events = [
+    created(),
+    ev("thread.session-set", { session: session("running", "t1") }),
+    row(activity("task.started", agentTask("a", { toolUseId: "first" }), { id: "launch-1", turnId: "t1" })),
+    words("p1", "parent one"),
+    ...call("a", "a1"),
+    row(activity("task.completed", agentTask("a", { status: "completed" }), { id: "end-1", turnId: "t1" })),
+    words("p2", "parent two"),
+    row(activity("task.started", agentTask("a", { toolUseId: "second" }), { id: "launch-2", turnId: "t2" })),
+    words("p3", "parent three"),
+    ...call("a", "a2"),
+    row(activity("task.completed", agentTask("a", { status: "completed" }), { id: "end-2", turnId: "t2" }))
+  ];
+  const { fold, snapshot } = fullSnapshot(events);
+  const omitted = omitOnDemandAgentRows(snapshot);
+  // A bounded snapshot kept none of the parent's words the frame is placed after.
+  const bounded = { ...omitted, items: omitted.items.filter((item) => item.kind !== "message") };
+  const loaded = applyAgentRows(
+    clientFold(bounded, events),
+    agentRowsFrameOf({ items: snapshot.items, roster: fold.roster, seq: fold.seq, agentIds: ["a"] })
+  );
+  assert.deepEqual(ids(loaded.items), [
+    "launch-1", "a1-start", "a1-out", "a1-done", "end-1",
+    "launch-2", "a2-start", "a2-out", "a2-done", "end-2"
+  ]);
 });

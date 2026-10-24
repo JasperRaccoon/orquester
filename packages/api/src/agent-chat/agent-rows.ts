@@ -254,11 +254,12 @@ function isLaunchRowOf(item: ThreadItem, agentIds: ReadonlySet<string>): boolean
  * whole.
  *
  * A placement row this client does not hold — its own retention trims at
- * other moments than the host's, with fewer rows — falls back to the previous
- * row's place, and for the first row to the agent's latest launch or anchor
- * row created before it (kept rows, never on demand), else the window's head;
+ * other moments than the host's, with fewer rows, and a bounded snapshot
+ * (`?window=recent`) left the older turns' parent rows to "load older" — falls
+ * back to the agent's latest launch or anchor row created before it (kept
+ * rows, never on demand, and never trimmed), else the window's head;
  * placements never move backwards, so the agent's own rows keep the host's
- * order. Past its placement row a row also goes after the other agents'
+ * order, and each run after its own launch. Past its placement row a row also goes after the other agents'
  * on-demand rows this client holds that were created before it (the host
  * names no such row as a placement: a client may lack it). So what can
  * differ from the host's window is only where its rows sit among OTHER
@@ -288,6 +289,17 @@ export function applyAgentRows(state: ThreadFoldState, frame: Pick<AgentRowsFram
   if (removed === 0 && frame.items.length === 0) return state;
   const positions = new Map<string, number>();
   kept.forEach((item, index) => positions.set(item.id, index));
+  // The frame's agents' launch and anchor rows (kept rows, never on demand), in list order.
+  const launches: number[] = [];
+  kept.forEach((item, index) => {
+    if (isLaunchRowOf(item, requested)) launches.push(index);
+  });
+  const launchBefore = (createdAt: string): number => {
+    for (let at = launches.length - 1; at >= 0; at -= 1) {
+      if (kept[launches[at]!]!.createdAt <= createdAt) return launches[at]!;
+    }
+    return -1;
+  };
   // Where each frame row goes: after `kept[slot]`, -1 for the head.
   const slots: number[] = [];
   let previous: number | null = null;
@@ -298,20 +310,8 @@ export function applyAgentRows(state: ThreadFoldState, frame: Pick<AgentRowsFram
       slot = -1;
     } else {
       const found = positions.get(anchor);
-      if (found !== undefined) {
-        slot = found;
-      } else if (previous !== null) {
-        slot = previous;
-      } else {
-        slot = -1;
-        for (let at = kept.length - 1; at >= 0; at -= 1) {
-          const candidate = kept[at]!;
-          if (candidate.createdAt <= item.createdAt && isLaunchRowOf(candidate, requested)) {
-            slot = at;
-            break;
-          }
-        }
-      }
+      // Not held here: after the agent's latest launch or ending created before it.
+      slot = found ?? launchBefore(item.createdAt);
     }
     if (previous !== null && slot < previous) slot = previous;
     // The placement row is the nearest one EVERY client holds, so other
