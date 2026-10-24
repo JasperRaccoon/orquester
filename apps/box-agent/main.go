@@ -123,6 +123,9 @@ func serve(dataDir string, asService bool) int {
 		return fail(err)
 	}
 	cfg.Service = asService
+	if err := agent.ProtectService(); err != nil {
+		logger.Printf("could not keep package upgrades from restarting orq-agent: %v", err)
+	}
 	a, err := agent.New(cfg, logger)
 	if err != nil {
 		return fail(err)

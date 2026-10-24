@@ -15,3 +15,6 @@ func RunService(func() int) (bool, error) { return false, nil }
 
 // SetServiceStop is only meaningful on Windows.
 func SetServiceStop(func()) {}
+
+// ProtectService is only meaningful on Linux.
+func ProtectService() error { return nil }
