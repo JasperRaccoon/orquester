@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
@@ -61,6 +61,17 @@ beforeEach(() => {
   container = dom.window.document.createElement("div");
   dom.window.document.body.replaceChildren(container);
   root = createRoot(container);
+});
+
+afterEach(async () => {
+  // Unmount while the DOM globals still exist, then let the zero-delay timers the cleanups queue
+  // run (the Modal hands focus back a tick after it closes). Left pending, the last test's would
+  // fire after `after()` removed `document` and fail the file as asynchronous activity after the
+  // test ended. Equal-delay timers run in the order they were set, so this one runs after theirs.
+  await act(async () => {
+    root.unmount();
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 });
 
 /** Renders the block and lets every load and mount settle. */
