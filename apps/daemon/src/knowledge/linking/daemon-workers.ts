@@ -206,7 +206,9 @@ export function createDaemonWorkerSessions(deps: DaemonWorkerSessionsDeps): Work
       for (const turn of snapshot.turns) {
         const usage = turn.tokenUsage;
         if (!usage) continue;
-        tokensIn += (usage.inputTokens ?? 0) + (usage.cachedInputTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+        // `inputTokens` already holds the cache reads and writes (the adapters' convention, see
+        // `mcp/usage-view.ts`); a partial record without it counts what it does report.
+        tokensIn += usage.inputTokens ?? (usage.cachedInputTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
         tokensOut += usage.outputTokens ?? 0;
       }
       return { in: tokensIn, out: tokensOut };
