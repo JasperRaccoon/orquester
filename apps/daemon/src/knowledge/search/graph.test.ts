@@ -234,3 +234,11 @@ test("overlapping loads: the graph ends up as the one loaded last, never an olde
   assert.deepEqual(graph.counts(), { nodes: 1, edges: 0 });
   assert.ok(graph.hasConcept("tool-latest"));
 });
+
+test("conceptTypes counts the concepts of each type in the whole graph", () => {
+  const { graph } = fixture();
+  // tactic, tool ×2, person, metric
+  assert.deepEqual(Object.fromEntries(graph.conceptTypes()), { tactic: 1, tool: 2, person: 1, metric: 1 });
+  graph.replace([], []);
+  assert.equal(graph.conceptTypes().size, 0);
+});

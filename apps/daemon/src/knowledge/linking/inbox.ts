@@ -32,6 +32,14 @@
  *   `intermediate/orquester-answer-reuse.ndjson` (prompt hash → task id), so the index outlives
  *   the run.
  *
+ * A new myKG process on a session first gets an inbox with only answered tasks
+ * ({@link clearUnansweredTasks}, before it is spawned): a task the previous process (failed,
+ * cancelled, or left by a restart) asked for and nobody answered may never be asked again — its
+ * entry was edited or deleted, a batch label moved — and a worker answering it would spend tokens
+ * on nothing. myKG names a task by its prompt and label (`_make_task_id`), first returns a cached
+ * answer (`.done` + `.answer.json`) and otherwise (re)writes the task file, so every task the new
+ * process waits for reappears under the same id; the answers (the cache) are never touched.
+ *
  * `next` long-polls: with no task waiting it holds the call until one appears, the run ends, or
  * `nextWaitMs` passes (then the chat is retired; the pool restarts one when work appears). Every
  * wait is an event or the injected clock — no sleeps.
@@ -40,7 +48,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { watch as fsWatch } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { KnowledgeWorkerNextResponse, KnowledgeWorkerSubmitResponse, KnowledgeWorkerTask } from "@orquester/api";
 import type { Clock } from "../../workflows/contracts.ts";
@@ -618,6 +626,31 @@ export class InboxBroker {
       this.events.emit("change");
     });
   }
+}
+
+/**
+ * Removes the task files of a session's inbox (`<intermediate>/agent_inbox`) that have no `.done`
+ * (see the module header). Only while no myKG process runs on the session: the caller runs it
+ * before spawning one. Answers its ids. A missing inbox clears nothing.
+ */
+export async function clearUnansweredTasks(intermediateDir: string): Promise<string[]> {
+  const inbox = join(intermediateDir, INBOX_DIR);
+  const outbox = join(intermediateDir, OUTBOX_DIR);
+  let names: string[];
+  try {
+    names = await readdir(inbox);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.endsWith(TASK_SUFFIX)) continue;
+    const id = name.slice(0, -TASK_SUFFIX.length);
+    if (!id || (await nodeInboxFiles.exists(join(outbox, `${id}.done`)))) continue;
+    await rm(join(inbox, name), { force: true });
+    removed.push(id);
+  }
+  return removed;
 }
 
 function compareTasks(a: TaskEntry, b: TaskEntry): number {

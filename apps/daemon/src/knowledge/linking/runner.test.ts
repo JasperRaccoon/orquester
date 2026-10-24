@@ -8,7 +8,7 @@ import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
 import { InboxBroker } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
-import { mykgArgs, mykgEnv, startMykgRun, stopStaleMykg } from "./runner.ts";
+import { mykgArgs, mykgEnv, procMykgProbe, startMykgRun, stopStaleMykg, type MykgProcessProbe } from "./runner.ts";
 import { FAKE_RUNTIME as RUNTIME, defaultAnswer, fakeSpawn } from "./testing.ts";
 
 const roots: string[] = [];
@@ -171,14 +171,95 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
   });
 });
 
+const MYKG_CMDLINE = "/venv/bin/python /venv/bin/mykg extract-graph /plugin/input --session s --update";
+
+/** A process table of one pid the test steers: what it is, and how it answers signals. */
+function fakeProcess(options: { cmdline?: string; startTime?: number; exitsOn?: NodeJS.Signals[] }) {
+  const signals: { signal: NodeJS.Signals; at: number }[] = [];
+  let alive = true;
+  let clock: FakeClock | null = null;
+  const probe: MykgProcessProbe = {
+    cmdline: async () => (alive ? (options.cmdline ?? MYKG_CMDLINE) : null),
+    startTime: async () => (alive ? (options.startTime ?? 777) : null),
+    signal: (_pid, signal) => {
+      if (!alive) return false;
+      signals.push({ signal, at: clock!.now().getTime() });
+      if ((options.exitsOn ?? ["SIGTERM"]).includes(signal)) alive = false;
+      return true;
+    }
+  };
+  return {
+    probe,
+    signals,
+    get alive() {
+      return alive;
+    },
+    use(c: FakeClock) {
+      clock = c;
+    }
+  };
+}
+
 describe("stopStaleMykg", () => {
-  it("only signals a pid whose command line is a myKG extract", async () => {
-    assert.equal(await stopStaleMykg(null), false);
-    assert.equal(await stopStaleMykg(1234, async () => "/usr/bin/python3 -m http.server"), false);
-    assert.equal(await stopStaleMykg(1234, async () => null), false);
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    const exited = new Promise((resolve) => child.on("exit", resolve));
-    assert.equal(await stopStaleMykg(child.pid!, async () => "/venv/bin/python /venv/bin/mykg extract-graph /in --session s --update"), true);
-    assert.equal(await exited, null);
+  it("leaves alone a pid that is not the recorded myKG child (another command, a reused pid, no process)", async () => {
+    const clock = new FakeClock();
+    const other = fakeProcess({ cmdline: "/usr/bin/python3 -m http.server" });
+    other.use(clock);
+    assert.equal(await stopStaleMykg({ pid: null, startTime: null }, { clock, probe: other.probe }), "none");
+    assert.equal(await stopStaleMykg({ pid: 1234, startTime: null }, { clock, probe: other.probe }), "none");
+    const reused = fakeProcess({ startTime: 999 });
+    reused.use(clock);
+    assert.equal(await stopStaleMykg({ pid: 1234, startTime: 777 }, { clock, probe: reused.probe }), "none", "same command line, another start time");
+    const elsewhere = fakeProcess({});
+    elsewhere.use(clock);
+    assert.equal(await stopStaleMykg({ pid: 1234, startTime: 777, inputDir: "/other/input" }, { clock, probe: elsewhere.probe }), "none", "another appdir's myKG");
+    for (const proc of [other, reused, elsewhere]) assert.deepEqual(proc.signals, []);
+  });
+
+  it("waits for the child to exit after SIGTERM", async () => {
+    const clock = new FakeClock();
+    const proc = fakeProcess({ exitsOn: ["SIGTERM"] });
+    proc.use(clock);
+    const result = await clock.drive(stopStaleMykg({ pid: 1234, startTime: 777, inputDir: "/plugin/input" }, { clock, probe: proc.probe }));
+    assert.equal(result, "stopped");
+    assert.deepEqual(proc.signals.map((s) => s.signal), ["SIGTERM"]);
+  });
+
+  it("escalates to SIGKILL after the grace, and resolves only once the child is gone", async () => {
+    const clock = new FakeClock();
+    const start = clock.now().getTime();
+    const proc = fakeProcess({ exitsOn: ["SIGKILL"] });
+    proc.use(clock);
+    let settled = false;
+    const stopping = stopStaleMykg({ pid: 1234, startTime: 777 }, { clock, probe: proc.probe, termGraceMs: 10_000 }).finally(() => (settled = true));
+    await clock.advance(9_000);
+    assert.equal(settled, false, "still waiting for the SIGTERM to take");
+    assert.deepEqual(proc.signals.map((s) => s.signal), ["SIGTERM"]);
+    assert.equal(await clock.drive(stopping), "stopped");
+    assert.deepEqual(proc.signals.map((s) => [s.signal, s.at - start]), [["SIGTERM", 0], ["SIGKILL", 10_000]]);
+  });
+
+  it("answers alive when even SIGKILL does not end it within the bound", async () => {
+    const clock = new FakeClock();
+    const proc = fakeProcess({ exitsOn: [] });
+    proc.use(clock);
+    assert.equal(await clock.drive(stopStaleMykg({ pid: 1234, startTime: 777 }, { clock, probe: proc.probe, termGraceMs: 1_000, killWaitMs: 1_000 })), "alive");
+    assert.deepEqual(proc.signals.map((s) => s.signal), ["SIGTERM", "SIGKILL"]);
+  });
+
+  it("stops a real process through /proc (command line and start time)", { skip: process.platform !== "linux" }, async () => {
+    const clock = new FakeClock();
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "mykg", "extract-graph", "/plugin/input"], { stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", (_code, signal) => resolve(signal)));
+    const startTime = await procMykgProbe.startTime(child.pid!);
+    assert.equal(typeof startTime, "number");
+    assert.equal(await stopStaleMykg({ pid: child.pid!, startTime: startTime! + 1, inputDir: "/plugin/input" }, { clock }), "none", "a pid reused by another process");
+    let result: string | undefined;
+    const stopping = stopStaleMykg({ pid: child.pid!, startTime, inputDir: "/plugin/input" }, { clock }).then((value) => (result = value));
+    assert.equal(await exited, "SIGTERM");
+    // The child is gone: the next liveness check on the (fake) clock sees it.
+    while (result === undefined) await clock.advance(100);
+    await stopping;
+    assert.equal(result, "stopped");
   });
 });

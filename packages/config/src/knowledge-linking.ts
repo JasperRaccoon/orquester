@@ -11,6 +11,12 @@
 // build's rewrite; every field reads with a default (`.catch`), so a bad value costs that field, never
 // the file. A list entry that does not read is dropped.
 //
+// A file a NEWER build wrote (a higher `version`, e.g. after a rollback) is read, not moved aside:
+// `readKnowledgeLinkingState` reads the fields this build knows (the myKG session, the runs …),
+// says whether every one of them read exactly as written (`intact`), and keeps the newer version
+// and every unknown field for a rewrite. The daemon runs no linking on it and writes it back only
+// when it read intact (`apps/daemon/src/knowledge/linking/state.ts`).
+//
 // **Any change to an existing field's TYPE or MEANING must bump the file `version`.**
 
 import { z } from "zod";
@@ -92,7 +98,12 @@ export const knowledgeCurrentRunSchema = z
     tokensIn: count,
     tokensOut: count,
     /** The child's pid while it runs (a restart stops a survivor before re-running). */
-    pid: z.number().int().positive().nullable().catch(null)
+    pid: z.number().int().positive().nullable().catch(null),
+    /**
+     * That pid's start time (Linux: `/proc/<pid>/stat` field 22, clock ticks since boot), so a
+     * restart never signals another process that reused the pid; null when it was not read.
+     */
+    pidStartTime: z.number().int().nonnegative().nullable().catch(null)
   })
   .passthrough();
 export type KnowledgeCurrentRunRecord = z.infer<typeof knowledgeCurrentRunSchema>;
@@ -176,6 +187,55 @@ export function parseKnowledgeLinkingState(value: unknown): KnowledgeLinkingStat
   return parsed.data;
 }
 
-export function serializeKnowledgeLinkingState(state: KnowledgeLinkingStateRecord): string {
-  return `${JSON.stringify(state, null, 2)}\n`;
+export type KnowledgeLinkingStateRead =
+  | { kind: "current"; state: KnowledgeLinkingStateRecord }
+  | {
+      kind: "newer";
+      /** The file's version (written back on a rewrite). */
+      version: number;
+      /** What this build reads of it (its unknown fields kept); `state.version` is this build's. */
+      state: KnowledgeLinkingStateRecord;
+      /**
+       * Every field this build knows that the file holds read exactly as written (none fell back
+       * to a default, no list entry was dropped): only then may the file be written back.
+       */
+      intact: boolean;
+    };
+
+/**
+ * Reads a `state.json` value, a newer build's included (see the header). Throws when it is neither
+ * a version-1 object nor an object of a higher integer version.
+ */
+export function readKnowledgeLinkingState(value: unknown): KnowledgeLinkingStateRead {
+  if (isPlainObject(value) && Number.isInteger(value.version) && (value.version as number) > KNOWLEDGE_LINKING_STATE_VERSION) {
+    const parsed = knowledgeLinkingStateSchema.safeParse({ ...value, version: KNOWLEDGE_LINKING_STATE_VERSION });
+    if (!parsed.success) throw new Error("Not a readable knowledge linking state.");
+    const state = parsed.data as Record<string, unknown>;
+    const intact = Object.keys(knowledgeLinkingStateSchema.shape).every(
+      (key) => key === "version" || !Object.prototype.hasOwnProperty.call(value, key) || jsonEqual(value[key], state[key])
+    );
+    return { kind: "newer", version: value.version as number, state: parsed.data, intact };
+  }
+  return { kind: "current", state: parseKnowledgeLinkingState(value) };
+}
+
+/** The file text; `version` is a newer file's own (`readKnowledgeLinkingState`), else this build's. */
+export function serializeKnowledgeLinkingState(state: KnowledgeLinkingStateRecord, version: number = KNOWLEDGE_LINKING_STATE_VERSION): string {
+  return `${JSON.stringify({ ...state, version }, null, 2)}\n`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Deep equality of JSON values (object key order aside). */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((item, index) => jsonEqual(item, b[index]));
+  }
+  if (!isPlainObject(a) || !isPlainObject(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && jsonEqual(a[key], b[key]));
 }

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, describe, it } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
@@ -13,9 +13,9 @@ import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowl
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type { KnowledgeEntryChange, KnowledgeGraphPort, KnowledgeRuntime, KnowledgeRuntimePort, KnowledgeSettingsPort, KnowledgeStorePort } from "../ports.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
-import type { SpawnMykg } from "./runner.ts";
-import { KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
-import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, type FakeAccountBehaviour } from "./testing.ts";
+import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
+import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
+import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -78,15 +78,23 @@ class FakeStore implements KnowledgeStorePort {
 
 class FakeGraph implements KnowledgeGraphPort {
   readonly loads: string[] = [];
-  private nodes = 0;
+  private nodes: { type?: string }[] = [];
   async load(outputDir: string): Promise<{ nodes: number; edges: number }> {
     this.loads.push(outputDir);
     const text = await readFile(join(outputDir, "nodes.jsonl"), "utf8");
-    this.nodes = text.split("\n").filter(Boolean).length;
-    return { nodes: this.nodes, edges: 0 };
+    this.nodes = text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string });
+    return { nodes: this.nodes.length, edges: 0 };
   }
   counts(): { nodes: number; edges: number } {
-    return { nodes: this.nodes, edges: 0 };
+    return { nodes: this.nodes.length, edges: 0 };
+  }
+  conceptTypes(): Map<string, number> {
+    const types = new Map<string, number>();
+    for (const node of this.nodes) if (typeof node.type === "string") types.set(node.type, (types.get(node.type) ?? 0) + 1);
+    return types;
+  }
+  set(types: Record<string, number>): void {
+    this.nodes = Object.entries(types).flatMap(([type, n]) => Array.from({ length: n }, () => ({ type })));
   }
 }
 
@@ -201,7 +209,7 @@ async function harness(options: {
     workers: port,
     clock,
     spawn: options.spawn ?? fakeSpawn,
-    readCmdline: async () => null,
+    processProbe: { cmdline: async () => null, startTime: async () => 777, signal: () => false },
     ...options.extra
   });
   const mykgDir = knowledgeMykgDir(appdir);
@@ -342,6 +350,165 @@ describe("KnowledgeLinkingService — one child per run", () => {
     await starting;
     await flushAsync(20);
     assert.equal(children.length, 2, "no child after stop()");
+  });
+});
+
+describe("KnowledgeLinkingService — a myKG child left running by the previous daemon", () => {
+  it("is stopped (SIGTERM, SIGKILL after the grace) and gone before the resumed run starts its own child", async () => {
+    const events: string[] = [];
+    const children: FakeChild[] = [];
+    const spawn: SpawnMykg = (_file, args) => {
+      const child = new FakeChild(args);
+      children.push(child);
+      events.push("spawn");
+      return child as unknown as ChildProcess;
+    };
+    const probe = (alive: () => boolean, onSignal: (signal: NodeJS.Signals) => void): MykgProcessProbe => ({
+      cmdline: async (pid) => (pid === 4242 && alive() ? `/venv/bin/python /venv/bin/mykg extract-graph ${knowledgeMykgInputDir(first.appdir)} --session s` : null),
+      startTime: async (pid) => (pid === 4242 && alive() ? 777 : null),
+      signal: (_pid, signal) => (onSignal(signal), true)
+    });
+    const first = await harness({ spawn, workerMode: "manual", extra: { processProbe: probe(() => true, () => undefined) } });
+    await first.service.start();
+    first.service.entriesChanged(await first.store.put(ID(1), "one"));
+    await first.clock.advance(20_000);
+    await first.until(() => children.length === 1);
+    await first.service.stop();
+    const recorded = (await readState(first)).currentRun!;
+    assert.equal(recorded.pid, 4242);
+    assert.equal(recorded.pidStartTime, 777, "the child's start time is recorded with its pid");
+
+    // The daemon died without stopping its child: it is still running, and ignores SIGTERM.
+    let survivor = true;
+    const second = await harness({
+      appdir: first.appdir,
+      store: first.store,
+      spawn,
+      workerMode: "manual",
+      extra: {
+        processProbe: probe(
+          () => survivor,
+          (signal) => {
+            events.push(signal);
+            if (signal === "SIGKILL") survivor = false;
+          }
+        )
+      }
+    });
+    let started = false;
+    const starting = second.service.start().then(() => (started = true));
+    await second.clock.advance(9_000);
+    assert.deepEqual(events, ["spawn", "SIGTERM"], "no new child while the old one may still write to the session");
+    assert.equal(started, false);
+    await second.clock.advance(1_000);
+    await starting;
+    assert.deepEqual(events, ["spawn", "SIGTERM", "SIGKILL", "spawn"]);
+    await second.service.stop();
+  });
+
+  it("a survivor that cannot be stopped pauses the run with an error instead of starting a second child", async () => {
+    let spawned = 0;
+    const spawn: SpawnMykg = (_file, args) => {
+      spawned += 1;
+      return new FakeChild(args) as unknown as ChildProcess;
+    };
+    const first = await harness({ spawn, workerMode: "manual" });
+    await first.service.start();
+    first.service.entriesChanged(await first.store.put(ID(1), "one"));
+    await first.clock.advance(20_000);
+    await first.until(() => spawned === 1);
+    await first.service.stop();
+    const stuck: MykgProcessProbe = {
+      cmdline: async () => `/venv/bin/mykg extract-graph ${knowledgeMykgInputDir(first.appdir)}`,
+      startTime: async () => 777,
+      signal: () => true
+    };
+    const second = await harness({ appdir: first.appdir, store: first.store, spawn, workerMode: "manual", extra: { processProbe: stuck } });
+    let started = false;
+    const starting = second.service.start().then(() => (started = true));
+    // The service waits on its clock (SIGTERM's grace, then SIGKILL's): time moves until it gives up.
+    while (!started) await second.clock.advance(1_000);
+    await starting;
+    assert.equal(spawned, 1);
+    const status = second.service.status();
+    assert.equal(status.state, "paused");
+    assert.equal(status.state === "paused" && status.reason, "error");
+    assert.match(second.service.snapshot().lastError?.message ?? "", /did not stop/);
+    assert.ok((await readState(second)).currentRun, "the run stays recorded for the retry");
+    await second.service.stop();
+  });
+});
+
+describe("KnowledgeLinkingService — tasks a previous myKG process left in the inbox", () => {
+  it("a re-run hands workers only the tasks its own process asks for; answered tasks stay cached", async () => {
+    const children: FakeChild[] = [];
+    const h = await harness({
+      workerMode: "manual",
+      spawn: (_file, args) => {
+        const child = new FakeChild(args);
+        children.push(child);
+        return child as unknown as ChildProcess;
+      }
+    });
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    await h.clock.advance(20_000);
+    await h.until(() => children.length === 1);
+    const session = "2026-10-23T10-00-20";
+    children[0]!.stdout.write(`Session: ${session}\n`);
+    const paths = mykgSessionPaths(h.mykgDir, session);
+    const inbox = join(paths.intermediate, "agent_inbox");
+    const outbox = join(paths.intermediate, "agent_outbox");
+    await h.until(() => h.service.snapshot().lastRun?.outcome === "running");
+    await mkdir(inbox, { recursive: true });
+    await mkdir(outbox, { recursive: true });
+    // The first process asked for two tasks; one was answered, then it died.
+    const answered = await writeMykgTask(inbox, { system: "PASS1", user: "corpus", step: "pass1", context: "pass1 batch 0/1", createdAt: "2026-10-23T10:00:21.000Z" });
+    await writeFile(join(outbox, `${answered}.answer.json`), JSON.stringify({ task_id: answered, answer: "{}" }));
+    await writeFile(join(outbox, `${answered}.done`), "");
+    const leftover = await writeMykgTask(inbox, { system: "PASS2", user: "FILE old.md", step: "pass2", context: "pass2 batch 1", createdAt: "2026-10-23T10:00:22.000Z" });
+    children[0]!.exit(1);
+    // The run waits for its chats to end their turns (they never do here), then records the failure.
+    await h.clock.advance(120_000);
+    await h.service.idle();
+    assert.equal(lastRun(h)?.outcome, "failed");
+
+    // The retry resumes the session with a new process.
+    await h.clock.advance(30 * 60_000);
+    await h.until(() => children.length === 2);
+    await h.until(() => h.service.status().state === "running");
+    assert.deepEqual(children[1]!.args.slice(-2), ["--session", session]);
+    assert.deepEqual(await readdir(inbox), [`${answered}.task.json`], "the previous process's unanswered task is gone");
+    assert.deepEqual((await readdir(outbox)).sort(), [`${answered}.answer.json`, `${answered}.done`].sort(), "answers are kept for myKG's cache");
+    // The live process asks for its own task (created later than the leftover was).
+    const live = await writeMykgTask(inbox, { system: "PASS2", user: "FILE ke_000000000001.md", step: "pass2", context: "pass2 batch 1", createdAt: "2026-10-23T10:32:00.000Z" });
+    const reply = await h.service.workerNext("probe-worker");
+    assert.equal(reply.kind, "task");
+    assert.equal(reply.kind === "task" && reply.task.taskId, live);
+    assert.notEqual(live, leftover);
+    children[1]!.exit(1);
+    await h.clock.advance(120_000);
+    await h.service.idle();
+    await h.service.stop();
+  });
+});
+
+describe("KnowledgeLinkingService — the rebuild estimate", () => {
+  it("counts one name-normalization call per concept type of the current graph that has names to merge", async () => {
+    const h = await harness();
+    await h.service.start();
+    assert.deepEqual(await h.service.rebuildEstimate(), { entries: 0, tasks: 0 });
+    for (let i = 1; i <= 100; i += 1) await h.store.put(ID(i), "x".repeat(400));
+    // Pass 1: one 16k batch + harmonize + review = 3; Pass 2: one call per entry = 100.
+    h.graph.set({ Person: 30, Organization: 12, Tool: 2, Metric: 1 });
+    assert.deepEqual(await h.service.rebuildEstimate(), { entries: 100, tasks: 3 + 100 + 3 }, "a type with a single name is never sent");
+    h.graph.set({});
+    assert.deepEqual(
+      await h.service.rebuildEstimate(),
+      { entries: 100, tasks: 3 + 100 + DEFAULT_NORMALIZE_TYPES },
+      "no graph yet: the default number of types"
+    );
+    await h.service.stop();
   });
 });
 
@@ -576,7 +743,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 1));
     const before = (await readState(h)).session!;
-    assert.deepEqual(await h.service.rebuildEstimate(), { entries: 1, tasks: 5 }, "Pass 1 + harmonize + review, one Pass 2 call, one normalization call");
     await h.service.rebuild();
     await h.until(ranOk(h, 2));
     const run = lastRun(h)!;
@@ -629,6 +795,72 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     assert.equal(h.service.isActiveWorker(undefined), false);
     h.settings.set(false);
     await h.service.idle();
+    await h.service.stop();
+  });
+});
+
+describe("KnowledgeLinkingService — a state.json a newer Orquester wrote", () => {
+  const SESSION = "2026-10-20T08-00-00";
+  async function newerState(h: Harness, extra: Record<string, unknown>): Promise<string> {
+    const paths = mykgSessionPaths(h.mykgDir, SESSION);
+    await mkdir(paths.output, { recursive: true });
+    await writeFile(paths.nodes, '{"id":"a","type":"Person"}\n');
+    const text = `${JSON.stringify(
+      {
+        version: 2,
+        session: SESSION,
+        pendingEntryIds: [],
+        currentRun: { id: "kr_newer", mode: "update", startedAt: "2026-10-23T09:00:00.000Z", session: SESSION, entryIds: [ID(1)], entryHashes: {}, tasks: 0, tokensIn: 0, tokensOut: 0, pid: null, pidStartTime: null, stage: "newer" },
+        recentRuns: [{ id: "kr_0", mode: "full", startedAt: "t0", finishedAt: "t1", durationMs: 5, entries: 1, tasks: 3, tokensIn: 10, tokensOut: 4, outcome: "ok", error: null }],
+        futureField: { kept: true },
+        ...extra
+      },
+      null,
+      2
+    )}\n`;
+    await mkdir(dirname(knowledgeStatePath(h.appdir)), { recursive: true });
+    await writeFile(knowledgeStatePath(h.appdir), text);
+    return text;
+  }
+
+  it("keeps the session and runs, links nothing, says why, and rewrites the file with its version and unknown fields", async () => {
+    let spawned = 0;
+    const h = await harness({ spawn: (file, args, options) => (spawned++, fakeSpawn(file, args, options)) });
+    await newerState(h, {});
+    await h.service.start();
+    assert.deepEqual(h.graph.loads, [mykgSessionPaths(h.mykgDir, SESSION).output], "the recorded graph is still served");
+    assert.equal(h.service.graphDir(), mykgSessionPaths(h.mykgDir, SESSION).output);
+    const status = h.service.status();
+    assert.equal(status.state, "paused");
+    assert.equal(status.state === "paused" && status.reason, "error");
+    assert.match(status.state === "paused" ? status.message : "", /newer Orquester/);
+    assert.match(h.service.snapshot().lastError?.message ?? "", /newer Orquester/);
+    assert.deepEqual(h.service.snapshot().recentRuns.map((run) => run.id), ["kr_0"]);
+
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    await h.service.rebuild();
+    await h.clock.advance(60 * 60_000);
+    await h.service.idle();
+    assert.equal(spawned, 0, "no myKG child on a newer build's session");
+    assert.equal(h.service.status().state, "paused");
+    const written = JSON.parse(await readFile(knowledgeStatePath(h.appdir), "utf8")) as Record<string, unknown>;
+    assert.equal(written.version, 2);
+    assert.deepEqual(written.futureField, { kept: true });
+    assert.equal((written.currentRun as Record<string, unknown>).stage, "newer");
+    assert.deepEqual(written.pendingEntryIds, [ID(2)]);
+    assert.equal(written.lastError ?? null, null, "the notice is not written into the newer file");
+    assert.deepEqual((await readdir(dirname(knowledgeStatePath(h.appdir)))).filter((name) => name.includes("unreadable")), [], "never moved aside");
+    await h.service.stop();
+  });
+
+  it("never writes over a newer file holding a field this build cannot read", async () => {
+    const h = await harness();
+    const text = await newerState(h, { pendingEntryIds: { byCollection: { c1: [ID(1)] } } });
+    await h.service.start();
+    assert.equal(h.service.status().state, "paused");
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    await h.service.rebuild();
+    assert.equal(await readFile(knowledgeStatePath(h.appdir), "utf8"), text, "byte for byte as the newer build wrote it");
     await h.service.stop();
   });
 });
