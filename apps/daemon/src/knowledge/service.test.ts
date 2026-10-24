@@ -160,6 +160,24 @@ test("the first switch-on opens the knowledge base and builds and starts linking
   (h.knowledge.linking()!.events as EventEmitter).emit("status");
   await h.knowledge.settled();
   assert.ok(h.events.some((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true));
+  // A run that reloads a graph of the same size (an edited entry re-linked) still announces it.
+  const graphEvents = () => h.events.filter((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true).length;
+  const before = graphEvents();
+  ports.graph.replace([{ id: "tactic-y", name: "Y", type: "Tactic", source_files: [] }], []);
+  (h.knowledge.linking()!.events as EventEmitter).emit("status");
+  await h.knowledge.settled();
+  assert.equal(graphEvents(), before + 1, "a reload of the same size is announced");
+  (h.knowledge.linking()!.events as EventEmitter).emit("status");
+  await h.knowledge.settled();
+  assert.equal(graphEvents(), before + 1, "a status move without a reload is not");
+  // A run's verdict on its entries (linked / failed) reaches the UI's entry lists and panels.
+  const entryId = (saved.body!.results as { entryId: string }[])[0]!.entryId;
+  await ports.store.setLinkState([entryId], "linked");
+  await h.knowledge.settled();
+  assert.ok(
+    h.events.some((e) => e.type === "knowledge.changed" && JSON.stringify((e.payload as { entryIds?: string[] }).entryIds) === JSON.stringify([entryId])),
+    "link states moved → knowledge.changed {entryIds}"
+  );
 
   h.plugins.set(false);
   await h.knowledge.settled();

@@ -196,8 +196,8 @@ export class KnowledgeService {
   private toolsEnabled: boolean;
   /** The collections (id and name, in order) the chats' manifests were last pushed for. */
   private collectionsKey: string | null = null;
-  /** The graph's counts last announced (`knowledge.changed {graph: true}` when they move). */
-  private graphKey = "0/0";
+  /** The graph's revision last announced (`knowledge.changed {graph: true}` when it moves). */
+  private graphRevision = 0;
   private profiles: { at: number; map: ProfilesByCollection } | null = null;
   private profilesRead: { generation: number; promise: Promise<ProfilesByCollection> } | null = null;
   /** Bumped by every profile event: a read started before it is not cached. */
@@ -340,6 +340,9 @@ export class KnowledgeService {
         this.publishStatus();
       })
     );
+    // A run's verdict on its entries: the entry lists and panels show the link state and count.
+    // (A whole rebuild's worth is sent as `[]`, which clients read as "refetch every entry".)
+    opening.unsubscribe.push(store.onLinkStateChange((entryIds) => this.publishChanged({ entryIds: entryIds.length > 500 ? [] : [...entryIds] })));
     const onLinkingStatus = (): void => this.linkingMoved();
     linking.events.on("status", onLinkingStatus);
     opening.unsubscribe.push(() => linking.events.off("status", onLinkingStatus));
@@ -441,12 +444,11 @@ export class KnowledgeService {
     });
   }
 
-  /** Linking moved: the status, and `knowledge.changed {graph: true}` when a run (re)loaded the graph. */
+  /** Linking moved: the status, and `knowledge.changed {graph: true}` when a run (re)loaded the graph (whatever its size). */
   private linkingMoved(): void {
-    const counts = this.opening?.graph.counts();
-    const key = counts ? `${counts.nodes}/${counts.edges}` : this.graphKey;
-    if (key !== this.graphKey) {
-      this.graphKey = key;
+    const revision = this.opening?.graph.revision() ?? this.graphRevision;
+    if (revision !== this.graphRevision) {
+      this.graphRevision = revision;
       this.publishChanged({ graph: true });
     }
     this.publishStatus();

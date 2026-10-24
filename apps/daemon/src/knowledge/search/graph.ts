@@ -355,6 +355,11 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     return { nodes: this.snapshot.concepts.size, edges: this.snapshot.edges.length };
   }
 
+  /** Moves whenever a load or replace swaps in a snapshot (even one of the same size). */
+  revision(): number {
+    return this.applied;
+  }
+
   private view(scope: KnowledgeScope): View {
     return new View(this.snapshot, this.getMeta, scope);
   }

@@ -130,6 +130,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
   private collectionsReadOnly: string | null = null;
   private metaCache: readonly KnowledgeEntryMeta[] | null = null;
   private readonly listeners = new Set<(change: KnowledgeEntryChange) => void>();
+  private readonly linkStateListeners = new Set<(entryIds: readonly string[]) => void>();
   private chain: Promise<unknown> = Promise.resolve();
 
   private constructor(options: KnowledgeStoreOptions) {
@@ -176,23 +177,46 @@ export class KnowledgeStore implements KnowledgeStorePort {
   }
 
   async setLinkState(ids: readonly string[], state: KnowledgeLinkState): Promise<void> {
-    await this.serialize(async () => {
-      for (const id of new Set(ids)) {
-        const stored = this.entries.get(id);
-        if (!stored || stored.meta.linkState === state) continue;
-        const body = await this.readBody(id);
-        if (body === null) continue;
-        const meta = frozenMeta({ ...stored.meta, linkState: state });
-        await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
-        this.entries.set(id, { ...stored, meta });
-        this.metaCache = null;
+    const changed: string[] = [];
+    try {
+      await this.serialize(async () => {
+        for (const id of new Set(ids)) {
+          const stored = this.entries.get(id);
+          if (!stored || stored.meta.linkState === state) continue;
+          const body = await this.readBody(id);
+          if (body === null) continue;
+          const meta = frozenMeta({ ...stored.meta, linkState: state });
+          await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
+          this.entries.set(id, { ...stored, meta });
+          this.metaCache = null;
+          changed.push(id);
+        }
+      });
+    } finally {
+      if (changed.length > 0) {
+        for (const listener of this.linkStateListeners) {
+          try {
+            listener(changed);
+          } catch (error) {
+            this.logger.error(`knowledge: a link-state listener failed (${(error as Error).message})`);
+          }
+        }
       }
-    });
+    }
   }
 
   onChange(listener: (change: KnowledgeEntryChange) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Entries whose link state moved (a linking run's verdict). Not a {@link KnowledgeEntryChange}:
+   * nothing needs re-linking or re-indexing, only what shows the state (the UI) refetches.
+   */
+  onLinkStateChange(listener: (entryIds: readonly string[]) => void): () => void {
+    this.linkStateListeners.add(listener);
+    return () => this.linkStateListeners.delete(listener);
   }
 
   // -------------------------------------------------------------------------
