@@ -98,7 +98,7 @@ async function harness(t: TestContext) {
       pushes += 1;
     },
     linking: (ports) => {
-      linking = new KnowledgeLinkingService({ appdir, ...ports, workers, clock, spawn: fakeSpawn, readCmdline: async () => null });
+      linking = new KnowledgeLinkingService({ appdir, ...ports, workers, clock, spawn: fakeSpawn, processProbe: { cmdline: async () => null, startTime: async () => null, signal: () => false } });
       return linking;
     },
     runtime,
