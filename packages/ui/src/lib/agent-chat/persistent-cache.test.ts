@@ -11,6 +11,7 @@ import { FOLD_SNAPSHOT_VERSION, type AgentChatStreamFrame } from "@orquester/api
 
 import {
   bindThreadCacheScope,
+  clearGenerationOf,
   clearThreadCache,
   evictionsFor,
   indexedDbThreadCacheBackend,
@@ -145,9 +146,17 @@ function transportFor(endpoint: string): object {
 }
 
 let backend: MemoryBackend;
+/** The page's `localStorage`: where clears are recorded. */
+const local = new Map<string, string>();
+(globalThis as { localStorage?: unknown }).localStorage = {
+  getItem: (key: string) => local.get(key) ?? null,
+  setItem: (key: string, value: string) => void local.set(key, value),
+  removeItem: (key: string) => void local.delete(key)
+};
 
 beforeEach(async () => {
   resetBuilders();
+  local.clear();
   backend = memoryBackend();
   setThreadCacheBackend(backend);
   await clearThreadCache();
@@ -327,6 +336,7 @@ function meta(key: string, usedAt: number, chars = 10): ThreadCacheMeta {
     sessionId: key,
     seq: 1,
     hostInstanceId: "h",
+    cleared: clearGenerationOf(SCOPE_A)!,
     savedAt: usedAt,
     usedAt,
     chars
@@ -559,6 +569,37 @@ describe("the write cadence", () => {
     }
   });
 
+  it("never writes the device's own copy before the host confirmed it, even reconnecting", async () => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+    const link = linkThreadCache(transportFor("https://a.example"), "s1", { load: false })!;
+    const store = fakeStore(EMPTY);
+    link.watch(store);
+    const copy = synchronizedState(5);
+    const unconfirmed = patchSlice(
+      { ...copy.reducer, fold: { ...copy.reducer.fold } },
+      { connection: "reconnecting", fromDeviceCache: true }
+    );
+    store.set({ reducer: unconfirmed, slice: unconfirmed.slice });
+    mock.timers.tick(60_000);
+    link.close();
+    await settled();
+    assert.equal(backend.bodyWrites, 0);
+  });
+
+  it("refuses a write once another tab cleared the scope", async () => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+    const link = linkThreadCache(transportFor("https://a.example"), "s1", { load: false })!;
+    const store = fakeStore(EMPTY);
+    link.watch(store);
+    store.set(synchronizedState(5));
+    // Another tab's sign-out: only its durable record is shared.
+    for (const key of [...local.keys()]) local.delete(key);
+    local.set(`orquester:agent-chat-device-cache-cleared:${SCOPE_A}`, "other-tab");
+    link.close();
+    await settled();
+    assert.equal(backend.bodyWrites, 0);
+  });
+
   it("does not rewrite the copy it was painted from", async () => {
     mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
     await save(transportFor("https://a.example"), synchronizedState(5));
@@ -636,6 +677,37 @@ describe("loading", () => {
     const warn = mock.method(console, "warn", () => {});
     assert.equal(await loadPersistedThread(SCOPE_A, "s1"), null);
     warn.mock.restore();
+  });
+
+  it("never touches a newer save back to the meta it read", async () => {
+    mock.timers.enable({ apis: ["Date"], now: 5_000 });
+    await save(transportFor("https://a.example"), synchronizedState(5));
+    mock.timers.tick(1_000);
+    // A newer save, stuck in the write queue for now…
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let gated = true;
+    setThreadCacheBackend({
+      ...backend,
+      readMetas: async () => {
+        if (gated) {
+          gated = false;
+          await gate;
+        }
+        return backend.readMetas();
+      }
+    });
+    const link = linkThreadCache(transportFor("https://a.example"), "s1", { load: false })!;
+    const store = fakeStore(EMPTY);
+    link.watch(store);
+    store.set(synchronizedState(6));
+    link.close();
+    // … and a read of the older copy, whose touch queues behind it.
+    assert.equal((await loadPersistedThread(SCOPE_A, "s1"))?.seq, 5);
+    release();
+    await settled();
+    setThreadCacheBackend(backend);
+    assert.equal((await loadPersistedThread(SCOPE_A, "s1"))?.seq, 6, "the newer copy still validates");
   });
 
   it("touches what it reads, so it is the last to be evicted", async () => {

@@ -2140,6 +2140,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removeRemote: async (id) => {
+    // The chats this device saved from that daemon go with it.
+    const removed = get().connections.find((c) => c.id === id);
+    if (removed) void clearThreadCache(threadCacheScopeFor(removed));
     const connections = get().connections.filter((c) => c.id !== id);
     set({ connections });
     await persistRemotes(connections);

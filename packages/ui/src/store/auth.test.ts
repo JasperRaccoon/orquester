@@ -127,6 +127,19 @@ describe("the chats this device saved", () => {
     }
   });
 
+  it("go when the remote is removed", async () => {
+    const backend = keysBackend([ours, theirs]);
+    setThreadCacheBackend(backend);
+    try {
+      useAppStore.setState({ activeConnectionId: "local" });
+      await store().removeRemote(CONNECTION.id);
+      await threadCacheIdle();
+      assert.deepEqual([...backend.keys], [theirs]);
+    } finally {
+      setThreadCacheBackend(undefined);
+    }
+  });
+
   it("go on sign-out", async () => {
     const backend = keysBackend([ours]);
     setThreadCacheBackend(backend);

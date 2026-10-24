@@ -45,11 +45,15 @@
  * {@link THREAD_CACHE_MAX_ENTRY_CHARS} is not kept at all.
  *
  * **Privacy.** Chat content rests on the device: {@link clearThreadCache} runs
- * when the daemon credential is dropped (sign-out, a revoked session).
+ * when the daemon credential is dropped (sign-out, a revoked session) and
+ * when a remote is removed. A clear is recorded durably (`localStorage`)
+ * before anything is deleted, and every read and write checks it, so it is
+ * final even when IndexedDB is stuck or the page closes at once.
  *
- * **No IndexedDB** (Node tests, private modes that refuse it, a runtime
- * without it): every entry point answers "nothing" and the store behaves
- * exactly as it does without this module.
+ * **No IndexedDB, or no `localStorage` to record clears in** (Node tests,
+ * private modes that refuse them, a runtime without them): every entry point
+ * answers "nothing" and the store behaves exactly as it does without this
+ * module.
  */
 
 import {
@@ -76,7 +80,7 @@ export const THREAD_CACHE_MAX_ENTRIES = 20;
 /** One thread's serialized snapshot above this is not kept (UTF-16 code units). */
 export const THREAD_CACHE_MAX_ENTRY_CHARS = 8 * 1024 * 1024;
 /** Every thread's serialized snapshot together, at most (UTF-16 code units). */
-export const THREAD_CACHE_MAX_TOTAL_CHARS = 40 * 1024 * 1024;
+export const THREAD_CACHE_MAX_TOTAL_CHARS = 16 * 1024 * 1024;
 /** The first write waits this long after the first change (T3: 500 ms). */
 export const THREAD_CACHE_FIRST_SAVE_DELAY_MS = 500;
 /** Then at most one write per thread per this interval (T3: 10 s). */
@@ -146,6 +150,8 @@ export interface ThreadCacheMeta {
   sessionId: string;
   seq: number;
   hostInstanceId: string;
+  /** The clear generation of its scope it was written under (`clearGenerationOf`). */
+  cleared: string;
   /** Epoch ms of the write. */
   savedAt: number;
   /** Epoch ms of the last write or read: the eviction order. */
@@ -331,7 +337,7 @@ export function threadCacheKey(scope: string, sessionId: string): string {
 /** A meta of THIS format and fold, internally consistent; `null` for anything else. */
 function parseMeta(value: unknown): ThreadCacheMeta | null {
   if (!isRecord(value)) return null;
-  const { key, v, fold, scope, sessionId, seq, hostInstanceId, savedAt, usedAt, chars } = value;
+  const { key, v, fold, scope, sessionId, seq, hostInstanceId, cleared, savedAt, usedAt, chars } = value;
   if (
     v !== THREAD_CACHE_VERSION ||
     fold !== FOLD_SNAPSHOT_VERSION ||
@@ -343,6 +349,9 @@ function parseMeta(value: unknown): ThreadCacheMeta | null {
     typeof hostInstanceId !== "string" ||
     hostInstanceId.length === 0 ||
     hostInstanceId.length > 256 ||
+    typeof cleared !== "string" ||
+    cleared.length === 0 ||
+    cleared.length > 256 ||
     !isStamp(savedAt) ||
     !isStamp(usedAt) ||
     typeof chars !== "number" ||
@@ -352,7 +361,7 @@ function parseMeta(value: unknown): ThreadCacheMeta | null {
   ) {
     return null;
   }
-  return { key, v, fold, scope, sessionId, seq, hostInstanceId, savedAt, usedAt, chars };
+  return { key, v, fold, scope, sessionId, seq, hostInstanceId, cleared, savedAt, usedAt, chars };
 }
 
 /**
@@ -470,14 +479,83 @@ export function persistableSnapshotOf(state: PersistableThreadState): ThreadSnap
 }
 
 // ---------------------------------------------------------------------------
-// Operations
+// Clears that outlive the page
 // ---------------------------------------------------------------------------
 
 /**
- * Bumped by every clear: a write decided before it — a pending save, a
- * teardown's flush — belongs to the content the clear removed and is dropped.
+ * The durable record of a clear (`localStorage`): one token per daemon scope,
+ * and one for "every scope", re-minted by every clear. A record is written
+ * with the generation of its scope as it stood (`ThreadCacheMeta.cleared`) and
+ * is valid only while that generation still stands — so a clear holds even
+ * when its deletes never ran (a stuck database, a page closed right after the
+ * sign-out), and a write decided before it, in this tab or another, is
+ * refused at the moment it would land.
  */
-let clearEpoch = 0;
+const CLEARED_KEY_PREFIX = "orquester:agent-chat-device-cache-cleared:";
+const CLEARED_ALL_KEY = `${CLEARED_KEY_PREFIX}*`;
+const CLEARED_TOKEN = /^[A-Za-z0-9-]{1,64}$/;
+/** The generation of a scope nothing ever cleared. */
+const NEVER_CLEARED = "0";
+
+function durableStorage(): Storage | null {
+  try {
+    const storage = (globalThis as { localStorage?: Storage }).localStorage;
+    return storage !== undefined && storage !== null && typeof storage.getItem === "function" ? storage : null;
+  } catch {
+    return null;
+  }
+}
+
+function mintToken(): string {
+  const cryptoRef = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  return cryptoRef?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/** One marker, validated; a corrupt one is replaced by a fresh clear. `null`: unreadable storage. */
+function readMarker(storage: Storage, key: string): string | null {
+  try {
+    const raw = storage.getItem(key);
+    if (raw === null) return NEVER_CLEARED;
+    if (CLEARED_TOKEN.test(raw)) return raw;
+    // Doubt about a clear is a clear: whatever was written under it is invalid.
+    const token = mintToken();
+    storage.setItem(key, token);
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The clear generation of `scope` now, or `null` when it cannot be read — and
+ * then nothing is cached at all: content whose clear could not be recorded
+ * must not be kept.
+ */
+export function clearGenerationOf(scope: string): string | null {
+  const storage = durableStorage();
+  if (storage === null) return null;
+  const all = readMarker(storage, CLEARED_ALL_KEY);
+  const own = readMarker(storage, `${CLEARED_KEY_PREFIX}${scope}`);
+  return all === null || own === null ? null : `${all}.${own}`;
+}
+
+function markCleared(scope: string | undefined): void {
+  try {
+    durableStorage()?.setItem(scope === undefined ? CLEARED_ALL_KEY : `${CLEARED_KEY_PREFIX}${scope}`, mintToken());
+  } catch {
+    /* storage refused the write: every later read fails `clearGenerationOf` the same way */
+  }
+}
+
+/** Whether a stored meta was written under its scope's standing generation. */
+function writtenUnderCurrentGeneration(meta: ThreadCacheMeta): boolean {
+  return meta.cleared === clearGenerationOf(meta.scope);
+}
+
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
+
 /** Writes run one at a time, in order; reads do not wait for them. */
 let chain: Promise<void> = Promise.resolve();
 /** The one write waiting per key: a newer save replaces it, so a stuck database holds one copy per thread. */
@@ -507,19 +585,26 @@ let storageUnresponsive = false;
 /** Epoch ms; replaceable in tests through `mock.timers`' `Date`. */
 const now = (): number => Date.now();
 
+/** The stored meta of `key`, validated, as it stands now. */
+async function currentMeta(backend: ThreadCacheBackend, key: string): Promise<ThreadCacheMeta | null> {
+  const found = (await backend.readMetas()).find((value) => isRecord(value) && value.key === key);
+  return found === undefined ? null : parseMeta(found);
+}
+
 /**
  * Read a saved thread. Resolves `null` — never rejects — when there is none,
- * when there is no storage, and for a record that does not validate (which is
- * deleted). A record read is touched, so it is the last to be evicted.
+ * when there is no storage, and for a record that does not validate or was
+ * written before its scope's last clear (which is deleted). A record read is
+ * touched, so it is the last to be evicted.
  */
 export async function loadPersistedThread(
   scope: string,
   sessionId: string
 ): Promise<PersistedThread | null> {
   const backend = activeBackend();
-  if (backend === null) return null;
+  const generation = clearGenerationOf(scope);
+  if (backend === null || generation === null) return null;
   const key = threadCacheKey(scope, sessionId);
-  const epoch = clearEpoch;
   let stored: { meta: unknown; body: unknown };
   try {
     stored = await backend.read(key);
@@ -529,35 +614,42 @@ export async function loadPersistedThread(
   }
   if (stored.meta === undefined && stored.body === undefined) return null;
   // Cleared while the read was out: what it found is gone.
-  if (epoch !== clearEpoch) return null;
-  const record = parsePersistedThread(stored.meta, stored.body, scope, sessionId);
+  if (clearGenerationOf(scope) !== generation) return null;
+  const meta = parseMeta(stored.meta);
+  const record =
+    meta !== null && meta.cleared === generation
+      ? parsePersistedThread(stored.meta, stored.body, scope, sessionId)
+      : null;
   if (record === null) {
     void enqueue(() => backend.write({ remove: [key] }));
     return null;
   }
-  const meta = parseMeta(stored.meta)!;
+  // Touched as it stands when the touch runs: a save queued meanwhile wrote a
+  // newer meta, which an older copy must not overwrite.
   void enqueue(async () => {
-    if (epoch !== clearEpoch) return;
-    await backend.write({ put: [{ meta: { ...meta, usedAt: now() } }] });
+    const current = await currentMeta(backend, key);
+    if (current === null || current.savedAt !== meta!.savedAt || !writtenUnderCurrentGeneration(current)) return;
+    await backend.write({ put: [{ meta: { ...current, usedAt: now() } }] });
   });
   return record;
 }
 
 /**
- * Save a thread (serialized already), evicting the least recently used
- * entries past the count and size bounds. Dropped when a clear has happened
- * since `epoch`.
+ * Save a thread (serialized already) under the clear generation it was read
+ * in, evicting the least recently used entries past the count and size
+ * bounds. Dropped when its scope has been cleared since — checked when the
+ * write runs, so a clear in another tab counts too.
  */
 function saveSerializedThread(
   input: { scope: string; sessionId: string; seq: number; hostInstanceId: string; json: string },
-  epoch: number
+  generation: string
 ): Promise<void> {
   const backend = activeBackend();
   if (backend === null) return Promise.resolve();
   const key = threadCacheKey(input.scope, input.sessionId);
   const first = !waitingWrites.has(key);
   waitingWrites.set(key, async () => {
-    if (epoch !== clearEpoch) return;
+    if (clearGenerationOf(input.scope) !== generation) return;
     const stamp = now();
     const meta: ThreadCacheMeta = {
       key,
@@ -567,13 +659,14 @@ function saveSerializedThread(
       sessionId: input.sessionId,
       seq: input.seq,
       hostInstanceId: input.hostInstanceId,
+      cleared: generation,
       savedAt: stamp,
       usedAt: stamp,
       chars: input.json.length
     };
     const body: ThreadCacheBody = { key, v: THREAD_CACHE_VERSION, seq: input.seq, json: input.json };
     const remove = evictionsFor(await backend.readMetas(), meta);
-    if (epoch !== clearEpoch) return;
+    if (clearGenerationOf(input.scope) !== generation) return;
     await backend.write({ put: [{ meta, body }], remove });
   });
   if (!first) return chain;
@@ -586,16 +679,21 @@ function saveSerializedThread(
 
 /**
  * Which stored entries go to make room for `incoming`: every meta that does
- * not validate (another version's, a corrupt one), and then, newest use
- * first, whatever no longer fits the count or the size bound.
+ * not validate (another version's, a corrupt one) or was written before its
+ * scope's last clear, and then, newest use first, whatever no longer fits the
+ * count or the size bound.
  */
-export function evictionsFor(stored: readonly unknown[], incoming: ThreadCacheMeta): string[] {
+export function evictionsFor(
+  stored: readonly unknown[],
+  incoming: ThreadCacheMeta,
+  current: (meta: ThreadCacheMeta) => boolean = writtenUnderCurrentGeneration
+): string[] {
   const remove: string[] = [];
   const kept: ThreadCacheMeta[] = [];
   for (const value of stored) {
     const meta = parseMeta(value);
-    if (meta === null) {
-      if (isRecord(value) && typeof value.key === "string") remove.push(value.key);
+    if (meta === null || !current(meta)) {
+      if (isRecord(value) && typeof value.key === "string" && value.key !== incoming.key) remove.push(value.key);
       continue;
     }
     if (meta.key !== incoming.key) kept.push(meta);
@@ -623,21 +721,57 @@ export function dropPersistedThread(scope: string, sessionId: string): Promise<v
   return enqueue(() => backend.write({ remove: [key] }));
 }
 
+/** The live generations' links, so a clear can stop them (`linkThreadCache`). */
+const liveLinks = new Set<{ scope: string; revoke(): void }>();
+
 /**
  * Forget every saved thread of one daemon connection — or of every
- * connection, with no scope. Run when the daemon credential is dropped: chat
- * content must not outlive the sign-in it was read under. Every save decided
- * before the clear is dropped with it.
+ * connection, with no scope. Run when the daemon credential is dropped and
+ * when a remote is removed: chat content must not outlive the sign-in it was
+ * read under.
+ *
+ * Final at once, whatever the database does: the clear is recorded durably
+ * first (`clearGenerationOf`), which invalidates every record written before
+ * it and refuses every write decided before it, here or in another tab; the
+ * live generations of the scope stop writing for good; and the deletes are
+ * queued. A page that dies before they run deletes the rest on its next
+ * start (`sweepStale`).
  */
 export function clearThreadCache(scope?: string): Promise<void> {
-  clearEpoch += 1;
-  waitingWrites.clear();
+  markCleared(scope);
+  for (const link of [...liveLinks]) {
+    if (scope === undefined || link.scope === scope) link.revoke();
+  }
+  const prefix = scope === undefined ? null : `${scope}${KEY_SEPARATOR}`;
+  for (const key of [...waitingWrites.keys()]) {
+    if (prefix === null || key.startsWith(prefix)) waitingWrites.delete(key);
+  }
   const backend = activeBackend();
   if (backend === null) return Promise.resolve();
   return enqueue(async () => {
     const keys = await backend.readKeys();
-    const prefix = scope === undefined ? null : `${scope}${KEY_SEPARATOR}`;
     const remove = prefix === null ? keys : keys.filter((key) => key.startsWith(prefix));
+    if (remove.length > 0) await backend.write({ remove });
+  });
+}
+
+/**
+ * Once per page, before its first thread links: delete every record that is
+ * not valid now — another version's, a corrupt one, one written before its
+ * scope's last clear (whose deletes a closed page never ran) — and every
+ * body without a meta.
+ */
+let swept = false;
+function sweepStale(backend: ThreadCacheBackend): void {
+  if (swept) return;
+  swept = true;
+  void enqueue(async () => {
+    const valid = new Set<string>();
+    for (const value of await backend.readMetas()) {
+      const meta = parseMeta(value);
+      if (meta !== null && writtenUnderCurrentGeneration(meta)) valid.add(meta.key);
+    }
+    const remove = (await backend.readKeys()).filter((key) => !valid.has(key));
     if (remove.length > 0) await backend.write({ remove });
   });
 }
@@ -673,9 +807,11 @@ export interface ThreadCacheLink {
 
 /**
  * Whether a state may be saved: a folded, headed, live thread whose fold and
- * host instance agree. Not while `connecting` — between a `snapshot` (or the
- * device copy) and the `synchronized` that confirms it — nor once the host
- * said the thread is `gone`.
+ * host instance agree and that the host has confirmed. Not while
+ * `connecting` — between a `snapshot` and the `synchronized` that confirms it
+ * — nor while it is still the device's own unconfirmed copy
+ * (`fromDeviceCache`, in `reconnecting`/`error` too), nor once the host said
+ * the thread is `gone`.
  */
 function savable(state: PersistableThreadState): boolean {
   const { connection } = state.slice;
@@ -683,6 +819,7 @@ function savable(state: PersistableThreadState): boolean {
     connection !== "idle" &&
     connection !== "connecting" &&
     connection !== "gone" &&
+    state.slice.fromDeviceCache !== true &&
     state.reducer.hostInstanceId !== null &&
     persistableSnapshotOf(state) !== null
   );
@@ -698,7 +835,8 @@ function turnRunning(slice: AgentChatThreadSlice): boolean {
 
 /**
  * Link one store generation to the device cache, or `null` when there is
- * nothing to link to (no storage, or a transport bound to no connection).
+ * nothing to link to (no storage, no durable record of clears, or a transport
+ * bound to no connection).
  */
 export function linkThreadCache(
   transport: object,
@@ -706,25 +844,53 @@ export function linkThreadCache(
   options: { load: boolean }
 ): ThreadCacheLink | null {
   const scope = threadCacheScopeOf(transport);
-  if (scope === null || activeBackend() === null) {
+  const backend = activeBackend();
+  if (scope === null || backend === null) {
     return null;
   }
+  /** The clear generation this generation reads and writes under; a clear ends it. */
+  const generation = clearGenerationOf(scope);
+  if (generation === null) {
+    return null;
+  }
+  sweepStale(backend);
   let store: WatchableThreadStore | null = null;
   let unsubscribe: (() => void) | null = null;
   let closed = false;
+  /** The scope was cleared (a sign-out): this generation never writes again. */
+  let revoked = false;
   /** What the device holds for this thread, as far as this generation knows. */
   let saved: { seq: number; hostInstanceId: string } | null = null;
-  /** The clear epoch a pending change was made in; `null` when nothing is pending. */
-  let dirtyEpoch: number | null = null;
+  /** A change not yet written. */
+  let dirty = false;
   let lastWriteAt: number | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   /** A due write waiting for the page to be idle; no other is scheduled meanwhile. */
   let idleWait = false;
   /**
-   * The host changed under the stream and its re-read has not landed yet: the
-   * fold is the old host's, the instance id the new one's. Never saved so.
+   * The host changed under the stream and the fresh snapshot has not landed
+   * yet: the fold is the old host's, the instance id the new one's. Never
+   * saved so.
    */
   let resyncPending = false;
+
+  const cancelTimer = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const registration = {
+    scope,
+    revoke(): void {
+      revoked = true;
+      dirty = false;
+      saved = null;
+      cancelTimer();
+    }
+  };
+  liveLinks.add(registration);
 
   // Storage that left a read hanging is not waited on again until it answers.
   const restored = options.load && !storageUnresponsive
@@ -737,20 +903,13 @@ export function linkThreadCache(
         void loadPersistedThread(scope, sessionId).then((record) => {
           storageUnresponsive = false;
           clearTimeout(bound);
-          if (record !== null && saved === null) {
+          if (record !== null && saved === null && !revoked) {
             saved = { seq: record.seq, hostInstanceId: record.hostInstanceId };
           }
-          resolve(record);
+          resolve(revoked ? null : record);
         });
       })
     : null;
-
-  const cancelTimer = (): void => {
-    if (timer !== null) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  };
 
   /**
    * Write what is pending, if it may be written. `final` — the page going
@@ -759,10 +918,10 @@ export function linkThreadCache(
    */
   const flush = (final: boolean): void => {
     cancelTimer();
-    if (store === null || dirtyEpoch === null) return;
-    if (dirtyEpoch !== clearEpoch) {
-      // A clear since the change: it belonged to what the clear removed.
-      dirtyEpoch = null;
+    if (store === null || !dirty) return;
+    if (revoked || clearGenerationOf(scope) !== generation) {
+      // Cleared since — here or in another tab: what is pending belonged to it.
+      registration.revoke();
       return;
     }
     const state = store.getState();
@@ -770,7 +929,7 @@ export function linkThreadCache(
     if (resyncPending || !savable(state) || (!final && turnRunning(state.slice))) return;
     const seq = state.reducer.fold.seq;
     const hostInstanceId = state.reducer.hostInstanceId!;
-    dirtyEpoch = null;
+    dirty = false;
     if (saved !== null && saved.seq === seq && saved.hostInstanceId === hostInstanceId) {
       // The device already holds this cursor under this host (the copy it was painted from).
       return;
@@ -784,11 +943,11 @@ export function linkThreadCache(
       return;
     }
     saved = { seq, hostInstanceId };
-    void saveSerializedThread({ scope, sessionId, seq, hostInstanceId, json }, clearEpoch);
+    void saveSerializedThread({ scope, sessionId, seq, hostInstanceId, json }, generation);
   };
 
   const schedule = (): void => {
-    if (timer !== null || idleWait || closed) return;
+    if (timer !== null || idleWait || closed || revoked) return;
     const delay =
       lastWriteAt === null
         ? THREAD_CACHE_FIRST_SAVE_DELAY_MS
@@ -813,13 +972,13 @@ export function linkThreadCache(
 
   const drop = (): void => {
     cancelTimer();
-    dirtyEpoch = null;
+    dirty = false;
     saved = null;
     void dropPersistedThread(scope, sessionId);
   };
 
   const onChange = (state: PersistableThreadState, previous: PersistableThreadState): void => {
-    if (closed) return;
+    if (closed || revoked) return;
     const { reducer, slice } = state;
     // The host holds no such thread, or it was deleted: nothing of it stays.
     if (slice.connection === "gone" || reducer.fold.deleted) {
@@ -841,11 +1000,11 @@ export function linkThreadCache(
       reducer.hostInstanceId !== previous.reducer.hostInstanceId ||
       slice.history.bounds !== previous.slice.history.bounds
     ) {
-      dirtyEpoch = clearEpoch;
+      dirty = true;
     }
     // A pending change waits for a state it may be saved in — the
     // `synchronized` after a replay is a change of its own.
-    if (dirtyEpoch !== null) schedule();
+    if (dirty) schedule();
   };
 
   const pageHidden = (): boolean =>
@@ -877,6 +1036,7 @@ export function linkThreadCache(
       flush(true);
       closed = true;
       cancelTimer();
+      liveLinks.delete(registration);
       unsubscribe?.();
       unsubscribe = null;
       if (lifecycle) {

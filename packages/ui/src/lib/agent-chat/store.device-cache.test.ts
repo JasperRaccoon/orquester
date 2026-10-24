@@ -22,13 +22,21 @@ import {
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
-import type { ThreadCacheBackend } from "./persistent-cache";
+import { threadCacheScopeFor, type ThreadCacheBackend } from "./persistent-cache";
 import type { AgentChatThreadState, ThreadStore } from "./store";
 import type { AgentChatStreamOptions, AgentChatTransport } from "./transport";
 import { activity, ev, resetBuilders } from "./test-helpers";
 
 type Page = ReturnType<typeof isolatedPage>;
 type Destroyable = ThreadStore & { destroy?: () => void };
+
+/** The tab's `localStorage`, which survives a reload: where clears are recorded. */
+const local = new Map<string, string>();
+(globalThis as { localStorage?: unknown }).localStorage = {
+  getItem: (key: string) => local.get(key) ?? null,
+  setItem: (key: string, value: string) => void local.set(key, value),
+  removeItem: (key: string) => void local.delete(key)
+};
 
 const pages: Page[] = [];
 function newPage(): Page {
@@ -200,6 +208,7 @@ async function leaveDeviceCopy(log: DomainEvent[], backend: ThreadCacheBackend, 
 
 beforeEach(() => {
   resetBuilders();
+  local.clear();
 });
 
 // ---------------------------------------------------------------------------
@@ -281,28 +290,139 @@ describe("a thread opened with a copy on the device", () => {
     reopened.store.destroy?.();
   });
 
-  it("re-reads the thread when the host restarted, and replaces the device copy", async () => {
+  it("re-reads the thread over a fresh stream when the host restarted, and replaces the device copy", async () => {
     const log = hostLog();
     const backend = memoryBackend();
     await leaveDeviceCopy(log, backend, 5);
+    const scope = threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" });
 
     const reopened = await openPage(log, backend);
     await settle();
     assert.deepEqual(reopened.host.opened, [{ after: 5, hostInstanceId: "host-1" }]);
-    // The new host replays, but under another instance: resync, not resume.
-    reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-2" });
+    // The new host replays — and then some, while a separate re-read would
+    // still be on its way — but under another instance: resync, not resume.
+    reopened.host.push(...eventFrames(log, 5).slice(0, 1), { kind: "synchronized", hostInstanceId: "host-2" });
+    reopened.host.push(...eventFrames(log, 6));
     await settle();
-    assert.equal(reopened.host.reads, 1, "a full snapshot was read");
-    assert.equal(reopened.state().slice.connection, "synchronized", "and the thread is live again");
-    assert.equal(reopened.state().slice.fromDeviceCache, false);
-    assert.equal(reopened.state().slice.seq, 8);
-
+    // The re-read rides the stream: reopened without a cursor, nothing read beside it.
+    assert.deepEqual(reopened.host.opened, [{ after: 5, hostInstanceId: "host-1" }, {}]);
+    assert.equal(reopened.host.reads, 0);
+    assert.equal(reopened.state().slice.fromDeviceCache, true, "nothing is confirmed yet");
+    // Nothing of this in-between state reaches the device.
     reopened.store.destroy?.();
     await reopened.cache.threadCacheIdle();
-    const scope = reopened.cache.threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" });
-    const saved = await reopened.cache.loadPersistedThread(scope, "s1");
+    assert.equal((await reopened.cache.loadPersistedThread(scope, "s1"))?.hostInstanceId, "host-1");
+
+    const again = await openPage(log, backend);
+    await settle();
+    again.host.push({ kind: "synchronized", hostInstanceId: "host-2" });
+    await settle();
+    assert.deepEqual(again.host.opened, [{ after: 5, hostInstanceId: "host-1" }, {}]);
+    // The fresh stream: the host's snapshot, then live.
+    again.host.push({ kind: "snapshot", thread: snapshotAt(log, 8) }, { kind: "synchronized", hostInstanceId: "host-2" });
+    assert.equal(again.state().slice.connection, "synchronized", "and the thread is live again");
+    assert.equal(again.state().slice.fromDeviceCache, false);
+    assert.equal(again.state().slice.seq, 8);
+    again.store.destroy?.();
+    await again.cache.threadCacheIdle();
+    const saved = await again.cache.loadPersistedThread(scope, "s1");
     assert.equal(saved?.hostInstanceId, "host-2");
     assert.equal(saved?.seq, 8);
+  });
+
+  it("never rolls a host change back over events the stream already delivered", async () => {
+    const log = hostLog();
+    const cold = await openPage(log, null);
+    await settle();
+    cold.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
+    // The host restarts: its stream says so, and goes on delivering.
+    cold.host.push({ kind: "synchronized", hostInstanceId: "host-2" }, ...eventFrames(log, 5));
+    await settle();
+    assert.equal(cold.host.reads, 0, "no re-read that could land older than the stream");
+    assert.deepEqual(cold.host.opened, [{}, {}]);
+    cold.host.push({ kind: "snapshot", thread: snapshotAt(log, 8) }, { kind: "synchronized", hostInstanceId: "host-2" });
+    assert.equal(cold.state().slice.seq, 8);
+    assert.equal(cold.state().slice.connection, "synchronized");
+    cold.store.destroy?.();
+  });
+
+  it("acts on nothing in the copy - rewind, Stop, a task's Stop - until the host confirms it", async () => {
+    const log = hostLog();
+    const backend = memoryBackend();
+    await leaveDeviceCopy(log, backend, 5);
+    const reopened = await openPage(log, backend);
+    await settle();
+    const { actions } = reopened.state();
+    await assert.rejects(actions.rewindTo({ messageId: "u1", targetTurnCount: 0 }), /catching up/);
+    await assert.rejects(actions.interrupt(), /catching up/);
+    await assert.rejects(actions.stopTask({ taskId: "task-1" }), /catching up/);
+    assert.equal(reopened.host.commands.length, 0, "nothing reached the host");
+    reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-1" });
+    await reopened.state().actions.interrupt();
+    assert.deepEqual(reopened.host.commands.map((command) => command.name), ["interrupt"]);
+    reopened.store.destroy?.();
+  });
+
+  it("stops a live thread's writes for good when its daemon is signed out of", async () => {
+    const log = hostLog();
+    const backend = memoryBackend();
+    const live = await openPage(log, backend);
+    await settle();
+    live.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
+    await live.cache.clearThreadCache(threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" }));
+    // Frames still in flight, then the teardown's flush: none of it is written back.
+    live.host.push(...eventFrames(log, 5));
+    live.store.destroy?.();
+    await live.cache.threadCacheIdle();
+    await settle();
+    assert.equal(backend.metas.size, 0);
+  });
+
+  it("holds a clear another tab recorded, and a clear whose deletes never ran", async () => {
+    const log = hostLog();
+    const backend = memoryBackend();
+    // Another tab signs out while this one has a pending change.
+    const live = await openPage(log, backend);
+    await settle();
+    live.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
+    const other = newPage();
+    other.persistentCache.setThreadCacheBackend(memoryBackend());
+    await other.persistentCache.clearThreadCache(threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" }));
+    live.store.destroy?.();
+    await live.cache.threadCacheIdle();
+    assert.equal(backend.metas.size, 0, "refused when it would land");
+
+    // A copy left on the device; its clear is recorded, but the deletes never ran.
+    await leaveDeviceCopy(log, backend, 5);
+    assert.equal(backend.metas.size, 1);
+    const stale = newPage();
+    stale.persistentCache.setThreadCacheBackend(memoryBackend());
+    await stale.persistentCache.clearThreadCache();
+    const reopened = await openPage(log, backend);
+    await settle();
+    assert.deepEqual(reopened.host.opened, [{}], "the cleared copy is not painted");
+    assert.equal(reopened.state().rows.length, 0);
+    await reopened.cache.threadCacheIdle();
+    assert.equal(backend.metas.size, 0, "and the next page deletes it");
+    reopened.store.destroy?.();
+  });
+
+  it("caches nothing where clears cannot be recorded", async () => {
+    const log = hostLog();
+    const backend = memoryBackend();
+    const globals = globalThis as { localStorage?: unknown };
+    const saved = globals.localStorage;
+    delete globals.localStorage;
+    try {
+      const page = await openPage(log, backend);
+      await settle();
+      page.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
+      page.store.destroy?.();
+      await page.cache.threadCacheIdle();
+      assert.equal(backend.metas.size, 0);
+    } finally {
+      globals.localStorage = saved;
+    }
   });
 
   it("drops the copy of a thread the host no longer has", async () => {

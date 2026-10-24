@@ -483,7 +483,7 @@ const REWIND_IN_PROGRESS = "A rewind is already in progress.";
 const REWIND_TIMED_OUT =
   "The rewind is taking too long; the thread will update when the host finishes.";
 
-/** An answer to a request painted from the device cache, before the host confirmed the thread. */
+/** An action on a thread painted from the device cache, before the host confirmed it. */
 const DEVICE_COPY_UNCONFIRMED = "This chat is still catching up with the server. Try again in a moment.";
 
 /**
@@ -1108,12 +1108,20 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
     };
 
-    const withResponding = async <T>(requestId: string, run: () => Promise<T>): Promise<T> => {
-      // A request painted from the device cache may have been answered long
-      // since: nothing is answered until the host has confirmed the thread.
+    /**
+     * A thread painted from the device cache may be hours old until the host
+     * confirms it: a request in it may have been answered long since, the
+     * turn it shows running may be over, the turn a rewind counts to may not
+     * be the one the user sees. Nothing acts on that copy.
+     */
+    const refuseOnDeviceCopy = (): void => {
       if (get().slice.fromDeviceCache === true) {
         throw new Error(DEVICE_COPY_UNCONFIRMED);
       }
+    };
+
+    const withResponding = async <T>(requestId: string, run: () => Promise<T>): Promise<T> => {
+      refuseOnDeviceCopy();
       update((state) => {
         const ids = state.slice.respondingRequestIds;
         if (ids.includes(requestId)) {
@@ -1784,6 +1792,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async interrupt(input) {
+        refuseOnDeviceCopy();
         // Interrupting returns EVERY queued message to the composer rather
         // than discarding it (§7.4), and it happens BEFORE the command so the
         // drain generation is already bumped when the post lands.
@@ -1834,6 +1843,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async rewindTo(input) {
+        refuseOnDeviceCopy();
         // One at a time. A second rewind racing the first would post a second
         // `/revert`, and the one truncation would then hand the same message
         // back to the composer twice.
@@ -1900,6 +1910,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async stopTask(input) {
+        refuseOnDeviceCopy();
         const { taskId } = input;
         update((state) =>
           state.stoppingTaskIds.includes(taskId)
@@ -2317,25 +2328,21 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
       if (resyncWanted) {
         resyncWanted = false;
-        // The re-read below brings fresh history bounds as well.
+        // The fresh snapshot below brings fresh history bounds as well.
         historyResyncWanted = false;
-        // A changed host instance id means re-read, not resume; the transport's
-        // own sequence floor is reset with it so a host that restarted its
-        // sequence space lower cannot have its live frames suppressed (Q2-8).
-        stream?.resetCursor();
-        void actions
-          .refresh()
-          .then(() => {
-            // The stream synchronized with the new host before the re-read:
-            // once the re-read has landed the thread is live, and no second
-            // `synchronized` frame would ever say so.
-            if (!closed && get().slice.connection === "connecting") {
-              setSlice({ connection: "synchronized", fromDeviceCache: false });
-            }
-          })
-          .catch(() => {
-            /* the stream's own reconnect will try again */
-          });
+        // A changed host instance id means re-read, not resume (§6.3, §8) —
+        // and the re-read rides the stream itself: it is reopened without a
+        // cursor, so the host answers with a snapshot and then everything
+        // after it, in one ordered stream. A separate `GET …/thread` beside
+        // the live stream could land older than events the stream had
+        // already delivered and roll the fold back over them for good, and
+        // when it failed the thread stayed "connecting" on a healthy stream.
+        // A fresh reader also starts from no sequence floor, so a host that
+        // restarted its sequence space lower is followed (Q2-8).
+        if (!closed && stream !== null && openStream !== null) {
+          stream.close();
+          stream = openStream({});
+        }
       } else if (historyResyncWanted) {
         historyResyncWanted = false;
         void resyncHistory().catch(() => {
@@ -2375,8 +2382,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * synchronized with — so the cursor resume that follows, and a changed
      * host's re-read, are the store's own (§6.3). Only onto a thread nothing
      * has been folded into yet. Until the host confirms it (`synchronized`)
-     * the slice says it is the device's copy, and nothing pending in it can
-     * be answered (`withResponding`, `useAgentChatPending`).
+     * the slice says it is the device's copy: nothing pending in it is
+     * offered (`useAgentChatPending`), and nothing acts on it
+     * (`refuseOnDeviceCopy`).
      */
     const restoreFromDevice = (record: PersistedThread): boolean => {
       if (closed || get().reducer.fold.seq !== 0) {
