@@ -20,6 +20,14 @@ import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
 import { SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import { createServer } from "./index.ts";
 import { testAuthSessions } from "./auth/testing.ts";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { knowledgeRoutes } from "@orquester/api";
+import { KnowledgeService } from "./knowledge/service.ts";
+import { FAKE_RUNTIME } from "./knowledge/linking/testing.ts";
+import { silentLogger } from "./knowledge/search/test-fakes.ts";
+import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./knowledge/test-fakes.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
@@ -256,5 +264,53 @@ test("the request_secret routes are mounted on remote HTTP behind its bearer, ne
     assert.ok(!unknown.body.includes("never-echoed-value"));
   } finally {
     await app.close();
+  }
+});
+
+test("the Knowledge Graph routes are bearer-gated on the remote transport, worker routes absent there", async (t) => {
+  const appdir = await mkdtemp(join(tmpdir(), "kg-http-"));
+  const runtime = new FakeRuntime();
+  runtime.set(FAKE_RUNTIME);
+  const knowledge = new KnowledgeService({
+    appdir,
+    plugins: new FakeKnowledgePlugins(true),
+    accounts: { getRecord: () => undefined },
+    session: () => null,
+    profiles: { list: async () => ({ profiles: [], errors: [] }), read: async () => { throw new Error("no profiles"); } },
+    publisher: { publish() {} },
+    toolsChanged: () => {},
+    runtime,
+    embedders: fakeEmbedders().factory,
+    logger: silentLogger()
+  });
+  await knowledge.start();
+  const app = remoteApp({ knowledge });
+  t.after(async () => {
+    await app.close();
+    await knowledge.stop();
+    await rm(appdir, { recursive: true, force: true });
+  });
+  const gated: { method: "GET" | "POST" | "PUT"; url: string; payload?: object }[] = [
+    { method: "GET", url: knowledgeRoutes.status },
+    { method: "GET", url: knowledgeRoutes.settings },
+    { method: "PUT", url: knowledgeRoutes.settings, payload: { concurrency: 2 } },
+    { method: "GET", url: knowledgeRoutes.collections },
+    { method: "GET", url: knowledgeRoutes.entries },
+    { method: "GET", url: knowledgeRoutes.graph },
+    { method: "POST", url: knowledgeRoutes.search, payload: { query: "seo" } },
+    { method: "POST", url: knowledgeRoutes.save, payload: { entries: [] } },
+    { method: "POST", url: knowledgeRoutes.rebuild, payload: {} }
+  ];
+  for (const route of gated) {
+    const res = await app.inject({ method: route.method, url: route.url, ...(route.payload ? { payload: route.payload } : {}) });
+    assert.equal(res.statusCode, 401, `${route.method} ${route.url} without a bearer answered ${res.statusCode}`);
+  }
+  const status = await app.inject({ method: "GET", url: knowledgeRoutes.status, headers: { authorization: BEARER } });
+  assert.equal(status.statusCode, 200, status.body);
+  const collections = await app.inject({ method: "GET", url: knowledgeRoutes.collections, headers: { authorization: BEARER } });
+  assert.equal(collections.statusCode, 200, collections.body);
+  for (const url of [knowledgeRoutes.workerNext, knowledgeRoutes.workerSubmit]) {
+    const res = await app.inject({ method: "POST", url, payload: {}, headers: { authorization: BEARER } });
+    assert.equal(res.statusCode, 404, `${url} must not exist on the remote transport (answered ${res.statusCode})`);
   }
 });
