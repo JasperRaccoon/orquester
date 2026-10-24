@@ -19,7 +19,7 @@ import {
   TONE_BAND_TEXT,
   useVisibleAnimation
 } from "../../primitives";
-import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
+import { useTimelineRoster, useTimelineRowContext, type TimelineRowContextValue } from "../context";
 import {
   liveWorkEntryLabel,
   omitSupersededLifecycleMarkers,
@@ -953,15 +953,16 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
   active?: boolean | undefined;
 }): React.ReactElement | null {
   const ctx = useTimelineRowContext();
+  const roster = useTimelineRoster();
   const spawn = entry.agentSpawn;
   const expanded = ctx.isAgentRowExpanded(entry.id);
 
   const { agents, coordinator, agentCount } = React.useMemo(
     () =>
       spawn
-        ? resolveSpawnRowAgents(ctx.roster, spawn)
+        ? resolveSpawnRowAgents(roster, spawn)
         : { agents: [] as RuntimeSubagent[], coordinator: null, agentCount: 0 },
-    [ctx.roster, spawn]
+    [roster, spawn]
   );
 
   if (!spawn) return null;

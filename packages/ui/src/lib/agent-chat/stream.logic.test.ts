@@ -28,6 +28,59 @@ describe("NdjsonLineBuffer", () => {
     assert.deepEqual(buffer.push('":2}\n'), ['{"b":2}']);
   });
 
+  it("closes a line held across many chunks, and keeps empty lines and a reset", () => {
+    const buffer = new NdjsonLineBuffer();
+    assert.deepEqual(buffer.push('{"snap'), []);
+    assert.deepEqual(buffer.push(""), []);
+    assert.deepEqual(buffer.push("shot"), []);
+    assert.deepEqual(buffer.push('":1}\n\n:hb\n{"x'), ['{"snapshot":1}', "", ":hb"]);
+    buffer.reset();
+    assert.deepEqual(buffer.push('"y":2}\n'), ['"y":2}']);
+    assert.deepEqual(buffer.push("\n"), [""]);
+  });
+
+  it("yields the lines the whole text splits into, however it is chunked", () => {
+    // The previous implementation, kept here as the reference the linear one must match.
+    const reference = (chunks: readonly string[]): string[] => {
+      let held = "";
+      const out: string[] = [];
+      for (const chunk of chunks) {
+        held += chunk;
+        let newline = held.indexOf("\n");
+        while (newline !== -1) {
+          out.push(held.slice(0, newline));
+          held = held.slice(newline + 1);
+          newline = held.indexOf("\n");
+        }
+      }
+      return out;
+    };
+    let seed = 7;
+    const random = (): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const alphabet = ['{"a":1}', "\n", "é", "x", ":hb", "\n\n", '"', "ü"];
+    for (let round = 0; round < 200; round += 1) {
+      let text = "";
+      const parts = Math.floor(random() * 60);
+      for (let index = 0; index < parts; index += 1) {
+        text += alphabet[Math.floor(random() * alphabet.length)];
+      }
+      const chunks: string[] = [];
+      for (let at = 0; at < text.length; ) {
+        const size = Math.floor(random() * 9);
+        chunks.push(text.slice(at, at + size));
+        at += size;
+      }
+      const buffer = new NdjsonLineBuffer();
+      assert.deepEqual(
+        chunks.flatMap((chunk) => buffer.push(chunk)),
+        reference(chunks),
+        JSON.stringify(chunks)
+      );
+    }
+  });
 });
 
 describe("parseStreamLine", () => {

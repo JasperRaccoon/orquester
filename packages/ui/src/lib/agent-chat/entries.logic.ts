@@ -572,14 +572,12 @@ const nonBlankId = (value: unknown): string | undefined =>
 function callOwnersOf(items: readonly ThreadItem[]): Map<string, string> {
   const owners = new Map<string, string>();
   for (const item of items) {
-    if (item.kind !== "activity" || !CALL_LIFECYCLE_KINDS.has(item.activityKind)) {
+    if (item.kind !== "activity") {
       continue;
     }
-    const payload = asRecord(item.payload);
-    const callId = asTrimmedString(payload?.toolUseId);
-    const owner = nonBlankId(item.agentId) ?? nonBlankId(payload?.agentId);
-    if (callId !== undefined && owner !== undefined) {
-      owners.set(callId, owner);
+    const { lifecycle, callId, callOwner } = activityFacts(item);
+    if (lifecycle && callId !== undefined && callOwner !== undefined) {
+      owners.set(callId, callOwner);
     }
   }
   return owners;
@@ -595,7 +593,7 @@ function inheritedChunkOwner(
   chunk: ThreadActivityItem,
   callOwners: ReadonlyMap<string, string>
 ): string | undefined {
-  const callId = asTrimmedString(asRecord(chunk.payload)?.toolUseId);
+  const { callId } = activityFacts(chunk);
   return callId === undefined ? undefined : callOwners.get(callId);
 }
 
@@ -635,12 +633,11 @@ function inheritedChunkOwner(
  * MCP's transcript builds no entry from them either, and a host's first load
  * writes them no closer, which would bring the call back as a failed row.
  */
-function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
-  const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
-  if (callId === undefined || supersededCalls.has(callId)) {
+function startIsCallRow(start: ActivityFacts, supersededCalls: ReadonlySet<string>): boolean {
+  if (start.callId === undefined || supersededCalls.has(start.callId)) {
     return false;
   }
-  return anchorsCall(activity);
+  return start.anchorsCall;
 }
 
 // ---------------------------------------------------------------------------
@@ -656,10 +653,10 @@ interface CallHeading {
 function noteCallHeading(
   headings: Map<string, CallHeading>,
   callId: string,
-  payload: Record<string, unknown> | null
+  row: ActivityFacts
 ): void {
-  const command = asTrimmedString(payload?.command) ?? asTrimmedString(asRecord(payload?.data)?.command);
-  const title = asTrimmedString(payload?.title);
+  const command = row.headingCommand;
+  const title = row.headingTitle;
   if (command === undefined && title === undefined) {
     return;
   }
@@ -758,14 +755,12 @@ function streamedCallRow(activity: ThreadActivityItem): DerivedWorkLogEntry {
   return entry;
 }
 
-/** Whether `activity` is a lifecycle row of one of `streamedCalls`, and no file change. */
-function isStreamedCallRow(activity: ThreadActivityItem, streamedCalls: ReadonlySet<string>): boolean {
-  if (!CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
+/** Whether the row is a lifecycle row of one of `streamedCalls`, and no file change. */
+function isStreamedCallRow(row: ActivityFacts, streamedCalls: ReadonlySet<string>): boolean {
+  if (!row.lifecycle) {
     return false;
   }
-  const payload = asRecord(activity.payload);
-  const callId = asTrimmedString(payload?.toolUseId);
-  return callId !== undefined && streamedCalls.has(callId) && payload?.itemType !== "file_change";
+  return row.callId !== undefined && streamedCalls.has(row.callId) && row.notFileChange;
 }
 
 /** Activity kinds that never become a work-log row. */
@@ -869,10 +864,93 @@ function isOwnTaskRow(activity: ThreadActivityItem, agentId: string | undefined)
   );
 }
 
+/**
+ * What {@link deriveWorkLogEntries} reads off one activity on its own — its
+ * kind's class, its call, its heading, and every filter that needs no other
+ * row and no viewer — memoised by activity identity. The derivation walks the
+ * whole window on every appended row (each of its passes read the rows'
+ * payloads again: the call id, the heading, the quiet-timeline tests); a row
+ * never changes once folded, so it is read once. What depends on the rest of
+ * the input (the superseded starts, the headings, the streamed calls, the
+ * launch rows, an unstamped chunk's owner) or on the viewer (`ownerAgentId`)
+ * is still decided per derivation, from these facts.
+ */
+interface ActivityFacts {
+  /** One of the call's lifecycle kinds (`CALL_LIFECYCLE_KINDS`). */
+  readonly lifecycle: boolean;
+  /** The call it belongs to: its `toolUseId`, trimmed. */
+  readonly callId: string | undefined;
+  /** What a lifecycle row names its call (`noteCallHeading`). */
+  readonly headingCommand: string | undefined;
+  readonly headingTitle: string | undefined;
+  /** A `tool.output` chunk of a command's printed output (`isCommandOutputChunk`). */
+  readonly commandOutputChunk: boolean;
+  /** An agent's task row (`isAgentTaskStartedActivity`): the launch call its row replaces. */
+  readonly launchToolId: string | undefined;
+  /** Never a row, whatever else the input holds and whoever views it. */
+  readonly dropped: boolean;
+  /** `anchorsCall`, for a `tool.started` (`startIsCallRow`). */
+  readonly anchorsCall: boolean;
+  /** `isAgentInternalActivity`. */
+  readonly agentInternal: boolean;
+  /** `isUnstampedOutputChunk`. */
+  readonly unstampedChunk: boolean;
+  /** A lifecycle row's owner, for `callOwnersOf`. */
+  readonly callOwner: string | undefined;
+  /** Its payload's `itemType` is no file change (`isStreamedCallRow`). */
+  readonly notFileChange: boolean;
+}
+
+const factsByActivity = new WeakMap<ThreadActivityItem, ActivityFacts>();
+
+function activityFacts(activity: ThreadActivityItem): ActivityFacts {
+  const cached = factsByActivity.get(activity);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const kind = activity.activityKind;
+  const payload = asRecord(activity.payload);
+  const lifecycle = CALL_LIFECYCLE_KINDS.has(kind);
+  const callId = asTrimmedString(payload?.toolUseId);
+  const isAgentTaskKind = kind === "task.started" || kind === "task.progress" || kind === "task.completed";
+  const facts: ActivityFacts = {
+    lifecycle,
+    callId,
+    headingCommand: lifecycle
+      ? (asTrimmedString(payload?.command) ?? asTrimmedString(asRecord(payload?.data)?.command))
+      : undefined,
+    headingTitle: lifecycle ? asTrimmedString(payload?.title) : undefined,
+    commandOutputChunk: kind === "tool.output" && isCommandOutputChunk(payload),
+    launchToolId: isAgentTaskKind && isAgentTaskStartedActivity(activity) ? callId : undefined,
+    dropped:
+      // Hook notifications are provider bookkeeping. Keep failed or cancelled
+      // completions, including those already present in persisted transcripts.
+      kind === "hook.started" ||
+      kind === "hook.progress" ||
+      (kind === "hook.completed" && payload?.outcome === "success") ||
+      DROPPED_ACTIVITY_KINDS.has(kind) ||
+      // Goals §8.4: `progress` is the goal's heartbeat — it keeps the chip
+      // current and is not narrative.
+      isHiddenGoalActivity(activity) ||
+      (kind === "task.started" && !isAgentTaskStartedActivity(activity)) ||
+      isNoContentRuntimeWarning(activity) ||
+      isPlanBoundaryToolActivity(activity),
+    anchorsCall: kind === "tool.started" && anchorsCall(activity),
+    agentInternal: isAgentInternalActivity(activity),
+    unstampedChunk: isUnstampedOutputChunk(activity),
+    callOwner: lifecycle ? (nonBlankId(activity.agentId) ?? nonBlankId(payload?.agentId)) : undefined,
+    notFileChange: payload?.itemType !== "file_change"
+  };
+  factsByActivity.set(activity, facts);
+  return facts;
+}
+
 export function deriveWorkLogEntries(
   activities: readonly ThreadActivityItem[],
   options?: DeriveWorkLogOptions
 ): WorkLogEntry[] {
+  const ownerAgentId = options?.ownerAgentId;
+  const facts = activities.map(activityFacts);
   // A launch tool and its task lifecycle describe the same run. Only hide the
   // launch row once its tool-use id has an agent row to replace it.
   const agentLaunchToolIds = new Set<string>();
@@ -882,104 +960,69 @@ export function deriveWorkLogEntries(
   const callHeadings = new Map<string, CallHeading>();
   // The calls whose command output streamed, for their rows (`streamedCallRow`).
   const streamedCalls = new Set<string>();
-  for (const activity of activities) {
-    if (CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
-      const payload = asRecord(activity.payload);
-      const toolUseId = asTrimmedString(payload?.toolUseId);
-      if (toolUseId) {
+  // Each call's owner, for an older log's unstamped chunk (see `callOwnersOf`),
+  // read in this same pass over the lifecycle rows.
+  const callOwners = new Map<string, string>();
+  for (let index = 0; index < activities.length; index += 1) {
+    const activity = activities[index]!;
+    const fact = facts[index]!;
+    if (fact.lifecycle) {
+      if (fact.callId !== undefined) {
         if (activity.activityKind !== "tool.started") {
-          supersededCalls.add(toolUseId);
+          supersededCalls.add(fact.callId);
         }
-        noteCallHeading(callHeadings, toolUseId, payload);
+        noteCallHeading(callHeadings, fact.callId, fact);
+        if (fact.callOwner !== undefined) {
+          callOwners.set(fact.callId, fact.callOwner);
+        }
       }
       continue;
     }
     if (activity.activityKind === "tool.output") {
-      const payload = asRecord(activity.payload);
-      const toolUseId = asTrimmedString(payload?.toolUseId);
-      if (toolUseId && isCommandOutputChunk(payload)) {
-        streamedCalls.add(toolUseId);
+      if (fact.callId !== undefined && fact.commandOutputChunk) {
+        streamedCalls.add(fact.callId);
       }
       continue;
     }
-    if (
-      (activity.activityKind === "task.started" ||
-        activity.activityKind === "task.progress" ||
-        activity.activityKind === "task.completed") &&
-      isAgentTaskStartedActivity(activity)
-    ) {
-      const toolUseId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
-      if (toolUseId) {
-        agentLaunchToolIds.add(toolUseId);
-      }
+    if (fact.launchToolId !== undefined) {
+      agentLaunchToolIds.add(fact.launchToolId);
     }
   }
 
-  // For an older log's unstamped chunk (see `callOwnersOf`). Built at the
-  // first unstamped chunk — and the parent's own command output is unstamped
-  // too, so that is nearly every thread: one more pass over the input.
-  let callOwners: Map<string, string> | undefined;
-
   const derived: DerivedWorkLogEntry[] = [];
-  for (const activity of activities) {
-    // Hook notifications are provider bookkeeping. Keep failed or cancelled
-    // completions, including those already present in persisted transcripts.
-    if (activity.activityKind === "hook.started" || activity.activityKind === "hook.progress") {
+  for (let index = 0; index < activities.length; index += 1) {
+    const activity = activities[index]!;
+    const fact = facts[index]!;
+    if (fact.dropped) {
       continue;
     }
-    if (
-      activity.activityKind === "hook.completed" &&
-      asRecord(activity.payload)?.outcome === "success"
-    ) {
-      continue;
-    }
-    if (DROPPED_ACTIVITY_KINDS.has(activity.activityKind)) {
-      continue;
-    }
-    if (activity.activityKind === "tool.started" && !startIsCallRow(activity, supersededCalls)) {
-      continue;
-    }
-    // Goals §8.4: `progress` is the goal's heartbeat — it keeps the chip
-    // current and is not narrative.
-    if (isHiddenGoalActivity(activity)) {
-      continue;
-    }
-    if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {
+    if (activity.activityKind === "tool.started" && !startIsCallRow(fact, supersededCalls)) {
       continue;
     }
     // A drill-in never lists its own agent as a spawn row. Codex, OpenCode
     // and Grok stamp an agent's own task rows with its id, so they are the
     // agent's rows too — but they describe the agent itself, which the
     // drill-in's header and the roster already say (R8).
-    if (isOwnTaskRow(activity, options?.ownerAgentId)) {
+    if (isOwnTaskRow(activity, ownerAgentId)) {
       continue;
     }
-    if (isNoContentRuntimeWarning(activity)) {
-      continue;
-    }
-    if (isPlanBoundaryToolActivity(activity)) {
-      continue;
-    }
-    if (isAgentInternalActivity(activity) && !ownedByAgent(activity, options?.ownerAgentId)) {
+    if (fact.agentInternal && !ownedByAgent(activity, ownerAgentId)) {
       continue;
     }
     // An older log's unstamped chunk of an agent's call is that agent's, and
     // renders in its view alone (see `callOwnersOf`).
-    if (isUnstampedOutputChunk(activity)) {
-      callOwners ??= callOwnersOf(activities);
-      const inherited = inheritedChunkOwner(activity, callOwners);
-      if (inherited !== undefined && inherited !== options?.ownerAgentId) {
+    if (fact.unstampedChunk) {
+      const inherited = fact.callId === undefined ? undefined : callOwners.get(fact.callId);
+      if (inherited !== undefined && inherited !== ownerAgentId) {
         continue;
       }
     }
     const heading =
-      activity.activityKind === "tool.output"
-        ? callHeadings.get(asTrimmedString(asRecord(activity.payload)?.toolUseId) ?? "")
-        : undefined;
+      activity.activityKind === "tool.output" ? callHeadings.get(fact.callId ?? "") : undefined;
     const entry =
       heading !== undefined
         ? headedChunk(activity, heading)
-        : isStreamedCallRow(activity, streamedCalls)
+        : isStreamedCallRow(fact, streamedCalls)
           ? streamedCallRow(activity)
           : derivedWorkLogEntry(activity);
     // A native agent launch gets its visible row from `task.started`; defer
@@ -1087,6 +1130,86 @@ function mergeDerived(
   };
 }
 
+/**
+ * The collapse's merged rows, memoised by the rows they merge, so a
+ * derivation over the same rows answers the same objects. Every row the
+ * collapse starts from is already memoised per activity
+ * (`derivedWorkLogEntry`, `headedChunk`, `streamedCallRow`); without these the
+ * merged ones alone came back new each time, and an appended activity changed
+ * the identity of every merged row before it — the timeline's append path
+ * (`deriveTimelineEntriesWithState`) and the stable rows' reuse then never held
+ * for a thread with a single collapsed call, and every row with one re-rendered.
+ * Rows are never mutated once derived, so sharing them is safe.
+ *
+ * Keyed by the row that joins, holding the one row it last joined: a row
+ * joins the same row on every derivation until the input before it changes.
+ */
+const mergedByJoiner = new WeakMap<
+  DerivedWorkLogEntry,
+  { readonly into: DerivedWorkLogEntry; readonly merged: DerivedWorkLogEntry }
+>();
+
+function mergedOnce(previous: DerivedWorkLogEntry, next: DerivedWorkLogEntry): DerivedWorkLogEntry {
+  const cached = mergedByJoiner.get(next);
+  if (cached !== undefined && cached.into === previous) {
+    return cached.merged;
+  }
+  const merged = mergeDerived(previous, next);
+  mergedByJoiner.set(next, { into: previous, merged });
+  return merged;
+}
+
+interface SpawnRowMemo {
+  readonly workflowId: string | null;
+  readonly row: DerivedWorkLogEntry;
+}
+
+/** A spawn group's first row, memoised by the row and its group's workflow. */
+const spawnAnchorByEntry = new WeakMap<DerivedWorkLogEntry, SpawnRowMemo>();
+/** A spawn group's row after one more of its rows joined, by the joining row, as `mergedOnce`. */
+const spawnMergeByJoiner = new WeakMap<DerivedWorkLogEntry, SpawnRowMemo & { readonly into: DerivedWorkLogEntry }>();
+
+function spawnAnchorRow(
+  entry: DerivedWorkLogEntry & { taskId: string },
+  workflowId: string | null
+): DerivedWorkLogEntry {
+  const cached = spawnAnchorByEntry.get(entry);
+  if (cached !== undefined && cached.workflowId === workflowId) {
+    return cached.row;
+  }
+  const row: DerivedWorkLogEntry = { ...entry, agentSpawn: { workflowId, agentTaskIds: [entry.taskId] } };
+  spawnAnchorByEntry.set(entry, { workflowId, row });
+  return row;
+}
+
+function spawnMergedRow(
+  existing: DerivedWorkLogEntry,
+  entry: DerivedWorkLogEntry & { taskId: string },
+  workflowId: string | null
+): DerivedWorkLogEntry {
+  const cached = spawnMergeByJoiner.get(entry);
+  if (cached !== undefined && cached.into === existing && cached.workflowId === workflowId) {
+    return cached.row;
+  }
+  const agentTaskIds = existing.agentSpawn?.agentTaskIds.includes(entry.taskId)
+    ? existing.agentSpawn.agentTaskIds
+    : [...(existing.agentSpawn?.agentTaskIds ?? []), entry.taskId];
+  const row: DerivedWorkLogEntry = {
+    ...mergeDerived(existing, entry),
+    // The spawn row keeps the group's ANCHOR identity, never the last
+    // agent's, so it renders where the run launched instead of drifting
+    // below the whole conversation as progress ticks arrive.
+    id: existing.id,
+    createdAt: existing.createdAt,
+    turnId: existing.turnId ?? null,
+    ...(existing.taskId !== undefined ? { taskId: existing.taskId } : {}),
+    label: existing.label,
+    agentSpawn: { workflowId, agentTaskIds }
+  };
+  spawnMergeByJoiner.set(entry, { into: existing, workflowId, row });
+  return row;
+}
+
 /** *T3: `session-logic.ts:718-810`.* */
 function collapseDerivedWorkLogEntries(
   entries: readonly DerivedWorkLogEntry[]
@@ -1116,27 +1239,13 @@ function collapseDerivedWorkLogEntries(
       }
       const workflowId = groupKey.startsWith("wf:") ? groupKey.slice(3) : null;
       const existingIndex = spawnRowIndex.get(groupKey);
+      const taskEntry = entry as DerivedWorkLogEntry & { taskId: string };
       if (existingIndex !== undefined) {
-        const existing = collapsed[existingIndex]!;
-        const agentTaskIds = existing.agentSpawn?.agentTaskIds.includes(entry.taskId)
-          ? existing.agentSpawn.agentTaskIds
-          : [...(existing.agentSpawn?.agentTaskIds ?? []), entry.taskId];
-        collapsed[existingIndex] = {
-          ...mergeDerived(existing, entry),
-          // The spawn row keeps the group's ANCHOR identity, never the last
-          // agent's, so it renders where the run launched instead of drifting
-          // below the whole conversation as progress ticks arrive.
-          id: existing.id,
-          createdAt: existing.createdAt,
-          turnId: existing.turnId ?? null,
-          ...(existing.taskId !== undefined ? { taskId: existing.taskId } : {}),
-          label: existing.label,
-          agentSpawn: { workflowId, agentTaskIds }
-        };
+        collapsed[existingIndex] = spawnMergedRow(collapsed[existingIndex]!, taskEntry, workflowId);
         continue;
       }
       spawnRowIndex.set(groupKey, collapsed.length);
-      collapsed.push({ ...entry, agentSpawn: { workflowId, agentTaskIds: [entry.taskId] } });
+      collapsed.push(spawnAnchorRow(taskEntry, workflowId));
       continue;
     }
 
@@ -1145,7 +1254,7 @@ function collapseDerivedWorkLogEntries(
       const matchingIndex = lifecycleRowIndex.get(lifecycleKey);
       const matching = matchingIndex === undefined ? undefined : collapsed[matchingIndex];
       if (matchingIndex !== undefined && matching && shouldCollapseToolLifecycle(matching, entry)) {
-        collapsed[matchingIndex] = mergeDerived(matching, entry);
+        collapsed[matchingIndex] = mergedOnce(matching, entry);
         continue;
       }
       lifecycleRowIndex.delete(lifecycleKey);
@@ -1157,7 +1266,7 @@ function collapseDerivedWorkLogEntries(
       if (previousKey !== undefined) {
         lifecycleRowIndex.delete(previousKey);
       }
-      const merged = mergeDerived(previous, entry);
+      const merged = mergedOnce(previous, entry);
       collapsed[previousIndex] = merged;
       const mergedKey = lifecycleCollapseMapKey(merged);
       if (mergedKey !== undefined) {
@@ -1564,6 +1673,87 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
 }
 
 /**
+ * The split's messages when `items` is `previous.items` with nothing moved
+ * but streamed text — each item the same object, or a streaming message whose
+ * text grew (`isStreamingMessageTextUpdate`) — else `null`.
+ *
+ * Such a change leaves everything else `splitThreadItems` reads as it was:
+ * the activities and so the work rows and the plans; which messages the view
+ * keeps (owner, role and turn are unchanged); and the re-emitted copies
+ * (`reEmittedAssistantCopies` only ever counts a FINISHED message, and both
+ * sides of the update are streaming). So the split is the previous one with
+ * those messages swapped in place, and a streamed token no longer walks the
+ * whole window twice to learn that — once to split it, once more to look for
+ * repeated answers.
+ */
+function streamedMessagesOf(
+  items: readonly ThreadItem[],
+  previous: ThreadTimelineProjection
+): ThreadMessageItem[] | null {
+  const previousItems = previous.items;
+  if (items.length !== previousItems.length) {
+    return null;
+  }
+  let replacements: Map<ThreadMessageItem, ThreadMessageItem> | null = null;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const before = previousItems[index]!;
+    if (item === before) {
+      continue;
+    }
+    if (item.kind !== "message" || before.kind !== "message" || !isStreamingMessageTextUpdate(before, item)) {
+      return null;
+    }
+    (replacements ??= new Map()).set(before, item);
+  }
+  if (replacements === null) {
+    return [...previous.messages];
+  }
+  const swapped = replacements;
+  return previous.messages.map((message) => swapped.get(message) ?? message);
+}
+
+/**
+ * The split of `items` when it is `previous.items` with activities appended
+ * — the shape of most live events — else `null`.
+ *
+ * An appended activity is one more activity and nothing else to the split:
+ * the messages, and so the re-emitted copies (`reEmittedAssistantCopies`
+ * reads messages alone), are the previous ones, and so are the plans unless
+ * the activity is a plan's own (`turn.proposed.*`), which this leaves to the
+ * full split. The work rows are still derived from the whole list.
+ */
+function appendedSplitOf(
+  items: readonly ThreadItem[],
+  previous: ThreadTimelineProjection
+): SplitThreadItems | null {
+  const previousItems = previous.items;
+  if (items.length <= previousItems.length) {
+    return null;
+  }
+  for (let index = previousItems.length; index < items.length; index += 1) {
+    const item = items[index]!;
+    if (
+      item.kind !== "activity" ||
+      item.activityKind === "turn.proposed.delta" ||
+      item.activityKind === "turn.proposed.completed"
+    ) {
+      return null;
+    }
+  }
+  for (let index = 0; index < previousItems.length; index += 1) {
+    if (items[index] !== previousItems[index]) {
+      return null;
+    }
+  }
+  return {
+    messages: [...previous.messages],
+    activities: [...previous.activities, ...(items.slice(previousItems.length) as ThreadActivityItem[])],
+    proposedPlans: [...previous.proposedPlans]
+  };
+}
+
+/**
  * The whole layer, from a fold's items.
  *
  * `splitThreadItems` allocates fresh arrays on every call, so the two derived
@@ -1587,7 +1777,28 @@ export function deriveTimelineEntriesFromItems(
   ) {
     return previous;
   }
-  const split = splitThreadItems(items, ownerAgentId, options);
+  if (
+    previous !== null &&
+    previous.ownerAgentId === ownerAgentId &&
+    (previous.dropsRepeatedAssistantMessages === true) === dropsRepeats
+  ) {
+    const messages = streamedMessagesOf(items, previous);
+    if (messages !== null) {
+      return {
+        ...deriveTimelineEntriesWithState(messages, previous.proposedPlans, previous.workEntries, previous),
+        items,
+        activities: previous.activities,
+        ...(ownerAgentId !== undefined ? { ownerAgentId } : {}),
+        ...(dropsRepeats ? { dropsRepeatedAssistantMessages: true } : {})
+      };
+    }
+  }
+  const split =
+    (previous !== null &&
+    previous.ownerAgentId === ownerAgentId &&
+    (previous.dropsRepeatedAssistantMessages === true) === dropsRepeats
+      ? appendedSplitOf(items, previous)
+      : null) ?? splitThreadItems(items, ownerAgentId, options);
   const activities =
     previous !== null && sameByIdentity(previous.activities, split.activities)
       ? previous.activities

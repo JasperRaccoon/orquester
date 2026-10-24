@@ -182,6 +182,23 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("a background task's start is no row, and its launch call keeps its own; an agent's replaces it", () => {
+    const launch = activity(
+      "tool.updated",
+      { itemType: "mcp_tool_call", toolUseId: "launch-1", title: "Task", status: "inProgress" },
+      { turnId: "turn-1" }
+    );
+    const background = activity("task.started", { taskId: "sh1", agentKind: "background", toolUseId: "launch-1" }, { turnId: "turn-1" });
+    assert.deepEqual(deriveWorkLogEntries([background]), [], "a background start is not narrative");
+    assert.deepEqual(
+      deriveWorkLogEntries([launch, background]).map((entry) => entry.id),
+      [launch.id],
+      "a background task replaces no launch row"
+    );
+    const agent = activity("task.started", { taskId: "a1", agentKind: "agent", toolUseId: "launch-1" }, { turnId: "turn-1" });
+    assert.deepEqual(deriveWorkLogEntries([launch, agent]).map((entry) => entry.id), [agent.id]);
+  });
+
 });
 
 describe("a started call's own row", () => {
@@ -296,6 +313,16 @@ describe("a started call's own row", () => {
     const [orphan] = deriveWorkLogEntries([output]);
     assert.deepEqual([orphan?.command, orphan?.toolTitle, orphan && workEntryDisplayLabel(orphan)], [undefined, undefined, "Tool output"]);
   });
+
+  it("a chunk takes its call's command from the row's `data` when the row names none of its own", () => {
+    const start = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "call-1", status: "inProgress", data: { command: "cargo build" } },
+      { turnId: "t1" }
+    );
+    const [, headed] = deriveWorkLogEntries([start, chunk("Compiling\n")]);
+    assert.equal(headed?.command, "cargo build");
+  });
 });
 
 describe("a call that streamed a command's output: its whole output is the host's join", () => {
@@ -354,6 +381,12 @@ describe("a call that streamed a command's output: its whole output is the host'
     for (const entry of deriveWorkLogEntries([edit, result])) {
       assert.equal(entry.streamedOutput, undefined, entry.id);
     }
+    // Each guard on its own: a file change is never marked, even by a chunk that says command output,
+    // and a command is marked by its printed output only.
+    const printed = chunk("x\n", { toolUseId: "call-e" });
+    assert.equal(deriveWorkLogEntries([edit, printed]).find((entry) => entry.id === edit.id)?.streamedOutput, undefined);
+    const resultText = chunk("x\n", { streamKind: "file_change_output" });
+    assert.equal(deriveWorkLogEntries([plain, resultText]).find((entry) => entry.id === plain.id)?.streamedOutput, undefined);
   });
 
   it("a Claude background shell's rows say so with no chunk in view: its output only ever streams", () => {
@@ -527,6 +560,18 @@ describe("drill-in ownership and streamed output", () => {
     assert.deepEqual(drillInRows(items, "ag1"), [["sub-1", "a.txt\n"]]);
     assert.deepEqual(itemsForAgent(items, "ag2"), [], "and no other agent's does");
     assert.deepEqual(deriveWorkLogEntries(items, { ownerAgentId: "ag2" }), []);
+  });
+
+  it("an unstamped chunk follows its call's owner when only the payload names it", () => {
+    const payloadOwned = (activityKind: string, status: string) =>
+      activity(
+        activityKind,
+        { itemType: "command_execution", toolUseId: "sub-2", title: "Command run", status, detail: "Bash: ls", agentId: "ag1" },
+        { turnId: "t1" }
+      );
+    const items = [payloadOwned("tool.updated", "inProgress"), outputChunk("sub-2", "a.txt\n"), payloadOwned("tool.completed", "completed")];
+    assert.deepEqual(deriveWorkLogEntries(items), [], "no stray \"Tool output\" row in the parent");
+    assert.deepEqual(drillInRows(items, "ag1"), [["sub-2", "a.txt\n"]]);
   });
 
   it("an unstamped PARENT chunk still joins its parent row", () => {

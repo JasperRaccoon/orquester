@@ -126,14 +126,28 @@ export function isCompactingThread(input: {
   ) {
     return false;
   }
-  for (let index = input.activities.length - 1; index >= 0; index -= 1) {
-    const activity = input.activities[index]!;
+  return latestCompactionIsInFlight(input.activities);
+}
+
+/** Whether the latest compaction marker of `activities` is the in-flight one; by list, as a list never changes. */
+const compactionInFlightByList = new WeakMap<readonly ThreadActivityItem[], boolean>();
+
+function latestCompactionIsInFlight(activities: readonly ThreadActivityItem[]): boolean {
+  const cached = compactionInFlightByList.get(activities);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let inFlight = false;
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
     if (!isCompactionActivity(activity)) {
       continue;
     }
-    return compactionMarkerState(activity) === "compacting";
+    inFlight = compactionMarkerState(activity) === "compacting";
+    break;
   }
-  return false;
+  compactionInFlightByList.set(activities, inFlight);
+  return inFlight;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +215,28 @@ export function resolveActivityLabel(input: {
 /** The latest `context-window.updated` activity, newest first. *T3: `contextWindow.ts:28-42`.* */
 export function latestContextWindowActivity(
   activities: readonly ThreadActivityItem[]
-): { usage: ThreadTokenUsage; updatedAt: string } | null {
+): ContextWindowActivity | null {
+  // Read on every projection, of a list a streamed token leaves as it was.
+  const cached = contextWindowByList.get(activities);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const latest = scanLatestContextWindowActivity(activities);
+  contextWindowByList.set(activities, latest);
+  return latest;
+}
+
+interface ContextWindowActivity {
+  usage: ThreadTokenUsage;
+  updatedAt: string;
+}
+
+/** {@link latestContextWindowActivity} by list — the lists are never mutated once built. */
+const contextWindowByList = new WeakMap<readonly ThreadActivityItem[], ContextWindowActivity | null>();
+
+function scanLatestContextWindowActivity(
+  activities: readonly ThreadActivityItem[]
+): ContextWindowActivity | null {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index]!;
     if (activity.activityKind !== "context-window.updated") {

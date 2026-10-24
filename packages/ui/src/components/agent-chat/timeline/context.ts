@@ -54,8 +54,6 @@ export interface TimelineRowContextValue {
    */
   startedTurnCount: number;
   disclosures: DisclosureState;
-  /** The roster a spawn row resolves its label and member list against. */
-  roster: readonly RuntimeSubagent[];
   /**
    * The current per-cwd skill names, for re-chipping `$mentions` in a sent
    * message (§4.6.7). Empty means no chips — a mention only reads as one while
@@ -143,7 +141,6 @@ const FALLBACK: TimelineRowContextValue = {
     expandedReasoningIds: [],
     toolOutputOffsets: {}
   },
-  roster: [],
   skills: [],
   isExpanded: () => false,
   setExpanded: NOOP,
@@ -175,4 +172,19 @@ export const TimelineRowContext = React.createContext<TimelineRowContextValue>(F
 
 export function useTimelineRowContext(): TimelineRowContextValue {
   return React.useContext(TimelineRowContext);
+}
+
+const NO_AGENTS: readonly RuntimeSubagent[] = [];
+
+/**
+ * The roster a spawn row resolves its label and member list against — on a
+ * context of its own, apart from {@link TimelineRowContext}. The roster moves
+ * with every subagent's progress; on the shared row context that re-rendered
+ * every row of the timeline (each message's markdown included) for each tick,
+ * when only the spawn rows read it.
+ */
+export const TimelineRosterContext = React.createContext<readonly RuntimeSubagent[]>(NO_AGENTS);
+
+export function useTimelineRoster(): readonly RuntimeSubagent[] {
+  return React.useContext(TimelineRosterContext);
 }
