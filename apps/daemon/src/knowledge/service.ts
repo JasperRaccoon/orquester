@@ -150,7 +150,8 @@ class NoLinking implements KnowledgeLinking {
   }
 
   async rebuild(): Promise<{ queued: boolean; running: boolean }> {
-    throw new KnowledgeError("KNOWLEDGE_NOT_INSTALLED", this.message);
+    // The runtime is there (the route checked): linking itself failed, an unexpected error.
+    throw new KnowledgeError("KNOWLEDGE_ERROR", this.message);
   }
 
   async rebuildEstimate(): Promise<{ entries: number; tasks: number }> {
@@ -195,8 +196,8 @@ export class KnowledgeService {
   private toolsEnabled: boolean;
   /** The collections (id and name, in order) the chats' manifests were last pushed for. */
   private collectionsKey: string | null = null;
-  /** The graph's counts last announced (`knowledge.changed {graph: true}` when they move). */
-  private graphKey = "0/0";
+  /** The graph's revision last announced (`knowledge.changed {graph: true}` when it moves). */
+  private graphRevision = 0;
   private profiles: { at: number; map: ProfilesByCollection } | null = null;
   private profilesRead: { generation: number; promise: Promise<ProfilesByCollection> } | null = null;
   /** Bumped by every profile event: a read started before it is not cached. */
@@ -339,6 +340,9 @@ export class KnowledgeService {
         this.publishStatus();
       })
     );
+    // A run's verdict on its entries: the entry lists and panels show the link state and count.
+    // (A whole rebuild's worth is sent as `[]`, which clients read as "refetch every entry".)
+    opening.unsubscribe.push(store.onLinkStateChange((entryIds) => this.publishChanged({ entryIds: entryIds.length > 500 ? [] : [...entryIds] })));
     const onLinkingStatus = (): void => this.linkingMoved();
     linking.events.on("status", onLinkingStatus);
     opening.unsubscribe.push(() => linking.events.off("status", onLinkingStatus));
@@ -440,12 +444,11 @@ export class KnowledgeService {
     });
   }
 
-  /** Linking moved: the status, and `knowledge.changed {graph: true}` when a run (re)loaded the graph. */
+  /** Linking moved: the status, and `knowledge.changed {graph: true}` when a run (re)loaded the graph (whatever its size). */
   private linkingMoved(): void {
-    const counts = this.opening?.graph.counts();
-    const key = counts ? `${counts.nodes}/${counts.edges}` : this.graphKey;
-    if (key !== this.graphKey) {
-      this.graphKey = key;
+    const revision = this.opening?.graph.revision() ?? this.graphRevision;
+    if (revision !== this.graphRevision) {
+      this.graphRevision = revision;
       this.publishChanged({ graph: true });
     }
     this.publishStatus();
@@ -517,7 +520,10 @@ export class KnowledgeService {
     return promise;
   }
 
-  /** A profile changed or was deleted: re-read the profiles and push manifests when its collections changed. */
+  /**
+   * A profile changed or was deleted: re-read the profiles, push manifests when its collections
+   * changed, and tell the collection views (their profile chips) when what they show of it moved.
+   */
   private profileChanged(profileId: string): void {
     const run = this.profileChain.then(async () => {
       const before = this.profiles?.map ?? null;
@@ -530,6 +536,7 @@ export class KnowledgeService {
         return null;
       });
       if (before === null || after === null || ticked(before, profileId) !== ticked(after, profileId)) this.toolsChanged();
+      if (after !== null && (before === null || shown(before, profileId) !== shown(after, profileId))) this.publishChanged({ collections: true });
     });
     this.profileChain = run.catch(() => undefined);
   }
@@ -597,6 +604,16 @@ export class KnowledgeService {
 /** The collections as the manifests name them: ids and names, in order. */
 function collectionsKeyOf(store: KnowledgeStore): string {
   return JSON.stringify(store.listCollections().map((collection) => [collection.id, collection.name]));
+}
+
+/** What the collection views show of one profile (its name under each collection it ticks), as a comparable key. */
+function shown(map: ProfilesByCollection, profileId: string): string {
+  const parts: string[] = [];
+  for (const [collectionId, profiles] of map) {
+    const profile = profiles.find((p) => p.id === profileId);
+    if (profile) parts.push(`${collectionId}=${profile.name}`);
+  }
+  return JSON.stringify(parts.sort());
 }
 
 /** The collection ids one profile ticks in a profiles-by-collection map, as a comparable key. */

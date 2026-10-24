@@ -56,7 +56,8 @@ describe("createDaemonWorkerSessions", () => {
     const snapshot = {
       head: { session: { status: "ready", activeTurnId: null } },
       turns: [
-        { turnId: "t1", state: "completed", tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 100, cachedInputTokens: 900, cacheCreationTokens: 50, outputTokens: 40, hasSubagents: false } },
+        // The adapters' convention: `inputTokens` already holds the cache reads and writes (100 fresh + 900 + 50).
+        { turnId: "t1", state: "completed", tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 1050, cachedInputTokens: 900, cacheCreationTokens: 50, outputTokens: 40, hasSubagents: false } },
         { turnId: "t2", state: "completed" }
       ],
       items: [],
@@ -135,7 +136,7 @@ describe("createDaemonWorkerSessions", () => {
     );
   });
 
-  it("counts every input token of the chat's turns (cached and cache writes included) and closes the tab", async () => {
+  it("counts every input token of the chat's turns once (cached and cache writes are inside inputTokens) and closes the tab", async () => {
     const { api, requests } = fakeApi();
     const sessions = port(api);
     assert.deepEqual(await sessions.usage("s1"), { in: 1050, out: 40 });

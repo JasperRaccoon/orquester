@@ -311,9 +311,12 @@ export function entryFormPatch(entry: KnowledgeEntry, form: EntryForm): { patch:
   return { patch };
 }
 
-/** Whether a PATCH changes what the graph reads (anything but collections): saving it queues linking. */
+/**
+ * Whether a PATCH changes what the graph reads (anything but collections and the URL, which the
+ * myKG input never carries — the daemon files those as a relabel): saving it queues linking.
+ */
 export function patchNeedsLinking(patch: UpdateKnowledgeEntryRequest): boolean {
-  return Object.keys(patch).some((key) => key !== "collections");
+  return Object.keys(patch).some((key) => key !== "collections" && key !== "url");
 }
 
 /** Kinds offered while editing (free-form: any other text is kept). */

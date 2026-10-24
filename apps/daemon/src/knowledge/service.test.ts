@@ -160,6 +160,24 @@ test("the first switch-on opens the knowledge base and builds and starts linking
   (h.knowledge.linking()!.events as EventEmitter).emit("status");
   await h.knowledge.settled();
   assert.ok(h.events.some((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true));
+  // A run that reloads a graph of the same size (an edited entry re-linked) still announces it.
+  const graphEvents = () => h.events.filter((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true).length;
+  const before = graphEvents();
+  ports.graph.replace([{ id: "tactic-y", name: "Y", type: "Tactic", source_files: [] }], []);
+  (h.knowledge.linking()!.events as EventEmitter).emit("status");
+  await h.knowledge.settled();
+  assert.equal(graphEvents(), before + 1, "a reload of the same size is announced");
+  (h.knowledge.linking()!.events as EventEmitter).emit("status");
+  await h.knowledge.settled();
+  assert.equal(graphEvents(), before + 1, "a status move without a reload is not");
+  // A run's verdict on its entries (linked / failed) reaches the UI's entry lists and panels.
+  const entryId = (saved.body!.results as { entryId: string }[])[0]!.entryId;
+  await ports.store.setLinkState([entryId], "linked");
+  await h.knowledge.settled();
+  assert.ok(
+    h.events.some((e) => e.type === "knowledge.changed" && JSON.stringify((e.payload as { entryIds?: string[] }).entryIds) === JSON.stringify([entryId])),
+    "link states moved → knowledge.changed {entryIds}"
+  );
 
   h.plugins.set(false);
   await h.knowledge.settled();
@@ -225,7 +243,10 @@ test("a linking module that cannot be built, or cannot start, leaves linking pau
   assert.equal(built.state === "paused" && built.reason, "error");
   assert.match(built.state === "paused" ? built.message : "", /no python/);
   assert.equal((await broken.inject("GET", knowledgeRoutes.collections)).status, 200);
-  assert.equal((await broken.inject("POST", knowledgeRoutes.rebuild)).status, 500);
+  const rebuild = await broken.inject("POST", knowledgeRoutes.rebuild);
+  assert.equal(rebuild.status, 500);
+  assert.equal(rebuild.body!.code, "KNOWLEDGE_ERROR");
+  assert.match(String(rebuild.body!.message), /no python/);
 
   const failing = recordingLinking({ failStart: true });
   const h = await harness(t, { enabled: true, over: { linking: failing.factory } });
@@ -280,4 +301,36 @@ test("the profiles behind the collection views are listed once and reused until 
   assert.equal(h.profileReads.list, baseline + 1, "an event re-lists once");
   await h.inject("GET", knowledgeRoutes.collections);
   assert.equal(h.profileReads.list, baseline + 1);
+});
+
+test("a profile ticking or unticking a collection (or renamed while it ticks one) refreshes the collection views; an unrelated edit does not", async (t) => {
+  const listeners: ((profileId: string) => void)[] = [];
+  const profiles = [{ manifest: { id: "p1", name: "SEO expert", settings: { knowledgeCollections: [] as string[] } } }];
+  const h = await harness(t, {
+    enabled: true,
+    over: {
+      onProfileChange: (listener) => (listeners.push(listener), () => undefined),
+      profiles: { list: async () => ({ profiles: structuredClone(profiles) as never, errors: [] }), read: async () => structuredClone(profiles[0]) as never }
+    }
+  });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  const collectionEvents = () => h.events.filter((e) => e.type === "knowledge.changed" && (e.payload as { collections?: boolean }).collections === true).length;
+  const pushesBefore = h.pushes();
+
+  profiles[0]!.manifest.settings.knowledgeCollections = ["kc_aaaaaaaaaa"];
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 1, "ticking a collection moves its profile chips");
+  assert.equal(h.pushes(), pushesBefore + 1, "and the chats' manifests");
+
+  profiles[0]!.manifest.name = "SEO lead";
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 2, "a rename shows under the collections it ticks");
+  assert.equal(h.pushes(), pushesBefore + 1, "a rename changes no manifest");
+
+  listeners[0]!("p1");
+  await h.knowledge.settled();
+  assert.equal(collectionEvents(), 2, "an edit that moves nothing the views show");
 });

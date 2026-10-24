@@ -209,7 +209,9 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   };
 
   const note = graph ? truncationNote(graph, focus !== null) : null;
-  const noEntries = status.entries === 0;
+  // The counts read 0 also while the knowledge base cannot be opened: a refused graph read shows
+  // its error instead of the empty state.
+  const noEntries = status.entries === 0 && !(load.status === "error" && !graph);
   const unlinked = graph !== null && graph.nodes.length === 0 && filter.length === 0 && focus === null;
 
   return (

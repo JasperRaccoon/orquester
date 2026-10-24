@@ -33,6 +33,7 @@ import {
 } from "@orquester/api";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
+import { KnowledgeError } from "./store/errors.ts";
 
 /** Largest worker answer accepted, in UTF-16 code units (myKG's own cap is `max_tokens` = 32k). */
 export const KNOWLEDGE_WORKER_ANSWER_MAX = 1_000_000;
@@ -116,9 +117,9 @@ function clientGone(reply: FastifyReply): AbortSignal {
 export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: KnowledgeLinkingRoutesDeps): void {
   const { linking } = deps;
   const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
-    if (error instanceof RouteError) return reply.code(error.status).send({ code: error.code, message: error.message });
+    if (error instanceof RouteError || error instanceof KnowledgeError) return reply.code(error.status).send({ code: error.code, message: error.message });
     deps.logger?.error(`knowledge: a linking request failed (${error instanceof Error ? error.name : typeof error})`);
-    return reply.code(500).send({ code: "KNOWLEDGE_INVALID", message: "The request failed." });
+    return reply.code(500).send({ code: "KNOWLEDGE_ERROR", message: "The request failed." });
   };
   const status = (): KnowledgeStatus => buildKnowledgeStatus(linking.snapshot(), deps.counts());
   const requireWorker = (sessionId: string): void => {
