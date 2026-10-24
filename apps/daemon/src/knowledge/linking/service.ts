@@ -288,7 +288,9 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
 
   status(): KnowledgeLinkingState {
     const state = this.state;
-    const pendingEntries = state?.pendingEntryIds.length ?? 0;
+    // Before `start()` has loaded the state, the changes it buffered (`early`) are what waits: they
+    // are replayed once it has, so a save made meanwhile is queued, never "nothing to link".
+    const pendingEntries = state ? state.pendingEntryIds.length : new Set(this.early.flatMap((change) => change.entryIds)).size;
     if (!this.opts.settings.enabled()) {
       return { state: "paused", reason: "plugin-off", message: "The Knowledge Graph plugin is off.", resumesAt: null, pendingEntries };
     }
@@ -304,6 +306,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if (state?.pause) {
       return { state: "paused", reason: state.pause.reason, message: state.pause.message, resumesAt: state.pause.resumesAt, pendingEntries };
     }
+    if (!state && pendingEntries > 0) return { state: "queued", pendingEntries, startsAt: this.opts.clock.now().toISOString() };
     if (state && (pendingEntries > 0 || state.rebuildRequested || state.currentRun)) {
       const at = this.startsAt ?? this.opts.clock.now().getTime();
       return { state: "queued", pendingEntries, startsAt: new Date(at).toISOString() };
