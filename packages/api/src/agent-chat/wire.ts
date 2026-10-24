@@ -1154,6 +1154,13 @@ export interface HistoryImportFrame {
  */
 export const AGENT_CHAT_HEARTBEAT_LINE = ":hb";
 export const AGENT_CHAT_HEARTBEAT_MS = 15_000;
+/**
+ * The daemon's own, faster heartbeat on the stream it forwards: a
+ * {@link AGENT_CHAT_HEARTBEAT_LINE} after this long without a byte, written
+ * between two lines only. A client that sees it may tell a dead link from a
+ * quiet thread sooner; one talking to an older daemon sees only the host's.
+ */
+export const AGENT_CHAT_DAEMON_HEARTBEAT_MS = 5_000;
 
 /**
  * Backpressure: if the response's write buffer exceeds this the host closes

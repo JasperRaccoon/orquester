@@ -43,6 +43,12 @@ import {
 import { agentHostRoutes, type HostThreadCatalogResponse } from "../agent-host/host-protocol.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { AgentHostClient, HostUnavailableError, type HostJsonResponse } from "./host-client.ts";
+import {
+  DAEMON_STREAM_HEARTBEAT_MS,
+  NdjsonForwarder,
+  acceptsGzip,
+  createStreamingGzip
+} from "./ndjson-forward.ts";
 import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
 
 /** Maps a §6.2 command name onto the host's route for the same command. */
@@ -947,7 +953,8 @@ function noteSeqFrom(deps: AgentChatRouteDeps, id: string, value: unknown): void
  * - **cancellation**: the upstream is destroyed on client disconnect, or the
  *   host would keep a subscription alive for a reader that is gone;
  * - **no buffering**: the response is hijacked, so Fastify neither serializes
- *   nor compresses it, and `:hb` comment lines reach the client immediately.
+ *   nor buffers it, and `:hb` comment lines reach the client immediately — the
+ *   gzip a client may ask for flushes every write (`ndjson-forward.ts`).
  */
 async function pipeStream(
   deps: AgentChatRouteDeps,
@@ -994,24 +1001,47 @@ async function pipeStream(
 
   reply.hijack();
   const socket = reply.raw;
+  // A cold open's snapshot is megabytes of JSON that no proxy in front of us
+  // compresses (`ndjson-forward.ts`), so the daemon does, for a client that asks.
+  const gzip = acceptsGzip(request.headers["accept-encoding"]) ? createStreamingGzip() : null;
   socket.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
     // Proxy buffering would hold the heartbeat and every event until a buffer
     // filled — the whole point of the stream is that it does not.
-    "x-accel-buffering": "no"
+    "x-accel-buffering": "no",
+    ...(gzip ? { "content-encoding": "gzip" } : {}),
+    vary: "accept-encoding"
   });
-  const done = (): void => {
+  const forwarder = new NdjsonForwarder();
+  const heartbeat = setInterval(() => {
+    forwarder.heartbeatIfIdle(DAEMON_STREAM_HEARTBEAT_MS / 2);
+  }, DAEMON_STREAM_HEARTBEAT_MS);
+  let finished = false;
+  const teardown = (): void => {
+    clearInterval(heartbeat);
     controller.abort();
     upstream.abort();
-    if (!socket.destroyed) socket.end();
+  };
+  const done = (): void => {
+    if (finished) return;
+    finished = true;
+    teardown();
+    // Ending the forwarder drains what it still holds, then ends the encoder
+    // (which writes its trailer) and the socket, through the pipes below.
+    if (!socket.destroyed) forwarder.end();
   };
   socket.on("close", () => {
-    controller.abort();
-    upstream.abort();
+    finished = true;
+    teardown();
+    forwarder.destroy();
+    gzip?.destroy();
   });
   upstream.body.on("error", done);
   upstream.body.on("end", done);
-  upstream.body.pipe(socket, { end: false });
+  // Backpressure end to end: a socket that stops draining pauses the encoder,
+  // which pauses the forwarder, which pauses the host's response.
+  upstream.body.pipe(forwarder, { end: false });
+  (gzip ? forwarder.pipe(gzip) : forwarder).pipe(socket);
 }

@@ -314,6 +314,97 @@ describe("the stream reader", () => {
   });
 });
 
+describe("stream liveness on a bad link", () => {
+  const synchronizedLine = line({ kind: "synchronized", hostInstanceId: "h1" });
+
+  it("drops a live stream on the daemon's fast heartbeat after 20 s of silence", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+    mock.timers.tick(19_999);
+    assert.equal(transporter.streams[0]?.closed, false);
+    mock.timers.tick(1);
+    assert.equal(transporter.streams[0]?.closed, true, "three missed fast beats and a margin");
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, 2);
+    handle.close();
+  });
+
+  it("keeps the patient window before synchronized: a snapshot in flight is not thrown away", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(':hb\n{"kind":"snapshot","thread":');
+    mock.timers.tick(49_999);
+    assert.equal(transporter.streams[0]?.closed, false);
+    mock.timers.tick(1);
+    assert.equal(transporter.streams[0]?.closed, true);
+    handle.close();
+  });
+
+  it("keeps the patient window for the host's own 15 s beats and for beats a proxy held together", () => {
+    for (const [gapMs, chunk] of [
+      [15_000, ":hb\n"],
+      [0, ":hb\n:hb\n"]
+    ] as const) {
+      mock.timers.reset();
+      const transporter = new FakeTransporter();
+      const transport = createAgentChatTransport(transporter);
+      mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const handle = transport.stream("s1", {}, { onFrame: () => {} });
+      transporter.latest.handlers.onData(chunk);
+      mock.timers.tick(gapMs);
+      transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+      mock.timers.tick(49_999);
+      assert.equal(transporter.streams[0]?.closed, false, `a ${gapMs} ms gap proves no fast cadence`);
+      mock.timers.tick(1);
+      assert.equal(transporter.streams[0]?.closed, true);
+      handle.close();
+    }
+  });
+
+  it("a wake resumes a live stream that went silent, and leaves a delivering one alone", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", { after: 3 }, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+    mock.timers.tick(4_000);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, false, "bytes 4 s ago: alive");
+    mock.timers.tick(8_001);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, true, "12 s without a byte on a 5 s heartbeat: dead");
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, 2);
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=3", "resumed by cursor");
+    handle.close();
+  });
+
+  it("a wake leaves a host-cadence stream alone until its stall window has passed", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(synchronizedLine);
+    mock.timers.tick(30_000);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, false);
+    handle.close();
+    wakeReconnects();
+    assert.equal(transporter.streams.length, 1, "a closed stream ignores wakes");
+  });
+});
+
 describe("commands", () => {
   it("posts to the right route and returns the receipt", async () => {
     const transporter = new FakeTransporter();

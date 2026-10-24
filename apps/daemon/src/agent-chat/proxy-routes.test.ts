@@ -1,9 +1,10 @@
 import { strict as assert } from "node:assert";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createGunzip, gunzipSync } from "node:zlib";
 import { test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { SessionSummary } from "@orquester/api";
@@ -488,6 +489,90 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
   // A client that goes away must not leave the host holding a subscription.
   controller.abort();
   await h.host.streamClosed;
+  await h.close();
+});
+
+/** A raw GET on the daemon, so the test decides what `Accept-Encoding` says (fetch always asks gzip). */
+function rawGet(port: number, path: string, headers: Record<string, string>): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET", headers }, resolve);
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("a client that accepts gzip gets the stream gzipped, each line flushed as it is written", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  // Big and repetitive, like a snapshot: crosses many socket chunks and compresses well.
+  const snapshot = JSON.stringify({ kind: "snapshot", thread: { seq: 3, items: Array.from({ length: 4000 }, (_, i) => ({ id: `item-${i}`, text: "hello" })) } });
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    res.write(`${snapshot}\n`);
+    res.write(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+    // Still open: the client must decode both lines before the stream ends.
+    void released.then(() => res.end());
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), { "accept-encoding": "gzip, deflate, br" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-encoding"], "gzip");
+  assert.equal(response.headers["content-type"], "application/x-ndjson; charset=utf-8");
+  let wire = 0;
+  response.on("data", (chunk: Buffer) => (wire += chunk.length));
+  const decoded = response.pipe(createGunzip());
+  let text = "";
+  for await (const chunk of decoded) {
+    text += (chunk as Buffer).toString("utf8");
+    if (text.includes('"synchronized"')) break;
+  }
+  const lines = text.split("\n").filter((line) => line.length > 0 && !line.startsWith(":"));
+  assert.equal(lines[0], snapshot);
+  assert.deepEqual(JSON.parse(lines[1]!), { kind: "synchronized", hostInstanceId: "host-1" });
+  assert.ok(wire * 4 < snapshot.length, `gzip shrinks the snapshot (wire ${wire} B for ${snapshot.length} B)`);
+  release();
+  response.destroy();
+  await h.host.streamClosed;
+  await h.close();
+});
+
+test("a client that does not ask for gzip gets plain NDJSON, every byte through the host's end", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const snapshot = JSON.stringify({ kind: "snapshot", thread: { seq: 3, items: Array.from({ length: 4000 }, (_, i) => ({ id: `item-${i}` })) } });
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    res.write(`${snapshot}\n`);
+    res.end(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), {});
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-encoding"], undefined);
+  let text = "";
+  for await (const chunk of response) text += (chunk as Buffer).toString("utf8");
+  assert.equal(text, `${snapshot}\n${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+  await h.close();
+});
+
+test("a gzipped stream the host ends is ended with its trailer, nothing lost", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const lines = Array.from({ length: 50 }, (_, i) => JSON.stringify({ kind: "event", seq: i + 1, event: { type: "x", seq: i + 1, pad: "y".repeat(5000) } }));
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    for (const line of lines) res.write(`${line}\n`);
+    res.end();
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), { "accept-encoding": "gzip" });
+  assert.equal(response.headers["content-encoding"], "gzip");
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) chunks.push(chunk as Buffer);
+  // A whole gzip member: `gunzipSync` throws on a missing trailer.
+  assert.equal(gunzipSync(Buffer.concat(chunks)).toString("utf8"), lines.map((line) => `${line}\n`).join(""));
   await h.close();
 });
 

@@ -43,14 +43,17 @@ import {
 import type { SessionUploadResponse } from "@orquester/api";
 
 import type { BinaryBody, StreamHandle, Transporter } from "../transporter";
-import { scheduleRetry, type PendingRetry } from "../connection/backoff";
+import { onWake, scheduleRetry, type PendingRetry } from "../connection/backoff";
 import {
+  isFastHeartbeatGap,
   NdjsonLineBuffer,
   parseStreamLine,
   RECONNECT_MAX_MS,
   reconnectDelayMs,
   resumeCursorFor,
-  STREAM_STALL_TIMEOUT_MS
+  stallTimeoutFor,
+  wakeStaleAfterMs,
+  type StreamLiveness
 } from "./stream.logic";
 
 // ---------------------------------------------------------------------------
@@ -620,6 +623,10 @@ function openAgentChatStream(
   let retryTimer: PendingRetry | null = null;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   const lines = new NdjsonLineBuffer();
+  /** What the current connection has shown about itself; reset on every connect. */
+  let liveness: StreamLiveness = { fastHeartbeat: false, synchronized: false };
+  let lastHeartbeatAt: number | null = null;
+  let lastByteAt = Date.now();
 
   const clearStall = (): void => {
     if (stallTimer !== null) {
@@ -636,8 +643,24 @@ function openAgentChatStream(
       inner?.close();
       inner = null;
       scheduleReconnect("stalled");
-    }, STREAM_STALL_TIMEOUT_MS);
+    }, stallTimeoutFor(liveness));
   };
+
+  // A page coming back (visible, online) checks the connection at once: the
+  // stall timer of a frozen tab fires late, and a mobile OS drops a background
+  // socket without a word. A connection still delivering is left alone.
+  const offWake = onWake(() => {
+    if (closed || gone || unauthorized || retryTimer !== null || inner === null) {
+      return;
+    }
+    if (Date.now() - lastByteAt <= wakeStaleAfterMs(liveness)) {
+      return;
+    }
+    inner.close();
+    inner = null;
+    attempt = 0;
+    scheduleReconnect("stalled");
+  });
 
   const scheduleReconnect = (reason: string): void => {
     if (closed || gone || unauthorized || retryTimer !== null) {
@@ -669,6 +692,9 @@ function openAgentChatStream(
     knownHostInstanceId = hostInstanceId;
     const query = after === undefined ? "" : `?after=${after}`;
     let opened = false;
+    liveness = { fastHeartbeat: false, synchronized: false };
+    lastHeartbeatAt = null;
+    lastByteAt = Date.now();
 
     inner = transporter.openStream(`${agentChatRoutes.events(sessionId)}${query}`, {
       onData: (chunk) => {
@@ -679,10 +705,18 @@ function openAgentChatStream(
           opened = true;
           handlers.onOpen?.();
         }
-        armStall();
+        const now = Date.now();
+        lastByteAt = now;
         const frames: AgentChatStreamFrame[] = [];
         for (const line of lines.push(chunk)) {
           const parsed = parseStreamLine(line);
+          if (parsed.kind === "heartbeat") {
+            if (lastHeartbeatAt !== null && isFastHeartbeatGap(now - lastHeartbeatAt)) {
+              liveness.fastHeartbeat = true;
+            }
+            lastHeartbeatAt = now;
+            continue;
+          }
           if (parsed.kind === "error" && isThreadGoneStreamError(parsed.error)) {
             // The host holds no such thread — a fork whose create never landed, a thread
             // deleted there. Reconnecting would read the same miss forever: stop, and say so.
@@ -717,9 +751,13 @@ function openAgentChatStream(
             // A live stream is proof of health: reset the backoff only here,
             // so a host that accepts and immediately drops us still backs off.
             attempt = 0;
+            liveness.synchronized = true;
           }
           frames.push(frame);
         }
+        // Re-armed for what this chunk showed: a stream that just went live
+        // on a fast heartbeat gets the short window from here on.
+        armStall();
         if (frames.length === 0) {
           return;
         }
@@ -777,6 +815,7 @@ function openAgentChatStream(
       }
       closed = true;
       clearStall();
+      offWake();
       if (retryTimer !== null) {
         retryTimer.cancel();
         retryTimer = null;

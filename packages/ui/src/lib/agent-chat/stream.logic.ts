@@ -11,6 +11,7 @@
  */
 
 import {
+  AGENT_CHAT_DAEMON_HEARTBEAT_MS,
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_ERROR_CODES,
   type AgentChatStreamErrorLine,
@@ -160,6 +161,60 @@ export function reconnectDelayMs(attempt: number, random: () => number = Math.ra
  * missing three in a row is a wedged proxy, not a quiet thread.
  */
 export const STREAM_STALL_TIMEOUT_MS = AGENT_CHAT_HEARTBEAT_MS * 3 + 5_000;
+
+/**
+ * The same window against the daemon's faster heartbeat
+ * ({@link AGENT_CHAT_DAEMON_HEARTBEAT_MS}): three missed beats and a margin.
+ * A mobile link that died without a FIN is noticed in 20 s instead of 50 s.
+ */
+export const LIVE_STREAM_STALL_TIMEOUT_MS = AGENT_CHAT_DAEMON_HEARTBEAT_MS * 3 + 5_000;
+
+/**
+ * Two heartbeats this far apart prove the daemon's cadence. Closer than the
+ * floor is one chunk carrying two beats (a proxy that held them), which
+ * proves nothing; the host's own beats are 15 s apart, far past the ceiling.
+ */
+const FAST_HEARTBEAT_MIN_GAP_MS = 1_000;
+const FAST_HEARTBEAT_MAX_GAP_MS = AGENT_CHAT_DAEMON_HEARTBEAT_MS * 2 - 1_000;
+
+export function isFastHeartbeatGap(gapMs: number): boolean {
+  return gapMs >= FAST_HEARTBEAT_MIN_GAP_MS && gapMs <= FAST_HEARTBEAT_MAX_GAP_MS;
+}
+
+/** What one connection has shown about itself, for {@link stallTimeoutFor}. */
+export interface StreamLiveness {
+  /** Its heartbeats came at the daemon's cadence ({@link isFastHeartbeatGap}). */
+  fastHeartbeat: boolean;
+  /** It reached `synchronized`: a reconnect now resumes by cursor, cheaply. */
+  synchronized: boolean;
+}
+
+/**
+ * How long a connection may stay silent before it is dropped and resumed.
+ *
+ * The short window applies only once the stream is both proven to beat fast
+ * and live: before `synchronized` the connection may be carrying a snapshot,
+ * and cutting it over a brief outage TCP would have ridden out would throw
+ * away everything received and start the snapshot over.
+ */
+export function stallTimeoutFor(liveness: StreamLiveness): number {
+  return liveness.fastHeartbeat && liveness.synchronized
+    ? LIVE_STREAM_STALL_TIMEOUT_MS
+    : STREAM_STALL_TIMEOUT_MS;
+}
+
+/**
+ * How long a connection may have been silent when the page wakes (visible
+ * again, back online) before it is taken for dead and resumed at once: a
+ * frozen tab's timers fire late, and a mobile OS drops a background socket
+ * without a word. Two missed fast beats for a live, fast stream; otherwise
+ * the stall window itself, which a timer that ran would already have hit.
+ */
+export function wakeStaleAfterMs(liveness: StreamLiveness): number {
+  return liveness.fastHeartbeat && liveness.synchronized
+    ? AGENT_CHAT_DAEMON_HEARTBEAT_MS * 2 + 2_000
+    : STREAM_STALL_TIMEOUT_MS;
+}
 
 // ---------------------------------------------------------------------------
 // Cursor rules (§6.3, §6.6)

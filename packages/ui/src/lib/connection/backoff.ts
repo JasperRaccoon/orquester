@@ -58,6 +58,18 @@ export function wakeReconnects(): void {
   }
 }
 
+/**
+ * Hear every wake, for a channel that is connected rather than waiting — a
+ * stream checks whether its connection outlived the freeze. Returns the
+ * unsubscribe.
+ */
+export function onWake(listener: () => void): () => void {
+  wakeListeners.add(listener);
+  return () => {
+    wakeListeners.delete(listener);
+  };
+}
+
 /** A retry waiting for its delay or a wake. */
 export interface PendingRetry {
   cancel(): void;
