@@ -224,28 +224,107 @@ export function startMykgRun(spec: MykgRunSpec, deps: MykgRunDeps): MykgRun {
   return new MykgRun(spec, deps);
 }
 
-/**
- * A child a previous daemon process left running (its pid recorded with the run): stopped before
- * the run is started again, so two myKG processes never share a session. Linux only checks that
- * the pid is still a myKG process (`/proc/<pid>/cmdline`); elsewhere nothing is killed.
- */
-export async function stopStaleMykg(pid: number | null, readCmdline: (pid: number) => Promise<string | null> = procCmdline): Promise<boolean> {
-  if (pid === null || pid <= 1) return false;
-  const cmdline = await readCmdline(pid);
-  if (cmdline === null || !/mykg/.test(cmdline) || !/extract-graph/.test(cmdline)) return false;
-  try {
-    process.kill(pid, "SIGTERM");
-    return true;
-  } catch {
-    return false;
-  }
+/** What a stale-child check reads of a pid and how it signals it (Linux `/proc`; tests stub it). */
+export interface MykgProcessProbe {
+  /** The pid's command line (NULs as spaces), or null when there is no such process or it cannot be read. */
+  cmdline(pid: number): Promise<string | null>;
+  /** The pid's start time (`/proc/<pid>/stat` field 22, clock ticks since boot), or null. */
+  startTime(pid: number): Promise<number | null>;
+  /** Sends `signal`; false when the process is gone or may not be signalled. */
+  signal(pid: number, signal: NodeJS.Signals): boolean;
 }
 
-async function procCmdline(pid: number): Promise<string | null> {
-  if (process.platform !== "linux") return null;
-  try {
-    return (await readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ");
-  } catch {
-    return null;
+export const procMykgProbe: MykgProcessProbe = {
+  async cmdline(pid) {
+    if (process.platform !== "linux") return null;
+    try {
+      return (await readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ").trim() || null;
+    } catch {
+      return null;
+    }
+  },
+  async startTime(pid) {
+    if (process.platform !== "linux") return null;
+    try {
+      const text = await readFile(`/proc/${pid}/stat`, "utf8");
+      // `pid (comm) state ppid …`: comm may hold spaces and parens, so fields start after the last ")".
+      const fields = text.slice(text.lastIndexOf(")") + 2).split(" ");
+      const value = Number(fields[19]);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    } catch {
+      return null;
+    }
+  },
+  signal(pid, signal) {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
   }
+};
+
+/** The run's recorded child (`KnowledgeCurrentRunRecord.pid` / `pidStartTime`). */
+export interface StaleMykgChild {
+  pid: number | null;
+  /** Its start time when it was spawned; null = not recorded (the command line alone decides). */
+  startTime: number | null;
+  /** The entry mirror it was given (`extract-graph <inputDir>`): another appdir's myKG is never touched. */
+  inputDir?: string;
+}
+
+export interface StopStaleMykgOptions {
+  clock: Clock;
+  probe?: MykgProcessProbe;
+  /** How long SIGTERM gets before SIGKILL. */
+  termGraceMs?: number;
+  /** How long a SIGKILL'd child gets to be gone before it is reported alive. */
+  killWaitMs?: number;
+  /** Liveness re-checks while waiting (on the injected clock). */
+  pollMs?: number;
+}
+
+const STALE_POLL_MS = 100;
+const STALE_KILL_WAIT_MS = 5_000;
+
+/**
+ * A child a previous daemon process left running (its pid and start time recorded with the run):
+ * stopped before the run is started again, so two myKG processes never share a session. It is
+ * signalled only while the pid is still that child — a myKG `extract-graph` of this plugin's input
+ * whose start time matches the recorded one (a reused pid is left alone); elsewhere than Linux
+ * nothing is read, so nothing is killed. SIGTERM, then a wait for the exit (liveness re-checked
+ * every `pollMs` on the injected clock), SIGKILL after `termGraceMs`, then a bounded wait again.
+ *
+ * `none`: no such child; `stopped`: it is gone; `alive`: it outlived even SIGKILL's wait (the
+ * caller must not start another myKG on its session).
+ */
+export async function stopStaleMykg(child: StaleMykgChild, options: StopStaleMykgOptions): Promise<"none" | "stopped" | "alive"> {
+  const { pid } = child;
+  if (pid === null || pid <= 1) return "none";
+  const probe = options.probe ?? procMykgProbe;
+  const isChild = async (): Promise<boolean> => {
+    const cmdline = await probe.cmdline(pid);
+    if (cmdline === null || !/mykg/.test(cmdline) || !/extract-graph/.test(cmdline)) return false;
+    if (child.inputDir !== undefined && !cmdline.includes(child.inputDir)) return false;
+    if (child.startTime !== null && (await probe.startTime(pid)) !== child.startTime) return false;
+    return true;
+  };
+  const pollMs = options.pollMs ?? STALE_POLL_MS;
+  /** True once the child is gone, false when `ms` passed with it still there. */
+  const gone = async (ms: number): Promise<boolean> => {
+    const deadline = options.clock.now().getTime() + ms;
+    for (;;) {
+      if (!(await isChild())) return true;
+      const left = deadline - options.clock.now().getTime();
+      if (left <= 0) return false;
+      await new Promise<void>((resolve) => options.clock.setTimeout(resolve, Math.min(pollMs, left)));
+    }
+  };
+  if (!(await isChild())) return "none";
+  if (!probe.signal(pid, "SIGTERM")) return (await isChild()) ? "alive" : "stopped";
+  if (await gone(options.termGraceMs ?? DEFAULT_KILL_GRACE_MS)) return "stopped";
+  // Still the same child (checked just now): no other process gets the SIGKILL.
+  probe.signal(pid, "SIGKILL");
+  return (await gone(options.killWaitMs ?? STALE_KILL_WAIT_MS)) ? "stopped" : "alive";
 }

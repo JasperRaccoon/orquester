@@ -98,6 +98,8 @@ export interface KnowledgeGraphPort {
    */
   load(outputDir: string): Promise<{ nodes: number; edges: number }>;
   counts(): { nodes: number; edges: number };
+  /** The whole graph's concept types → how many concepts each has (the rebuild estimate reads it). */
+  conceptTypes(): ReadonlyMap<string, number>;
 }
 
 // ---------------------------------------------------------------------------

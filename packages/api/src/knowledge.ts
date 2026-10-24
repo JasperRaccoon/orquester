@@ -386,7 +386,7 @@ export interface KnowledgeStatus {
 
 export interface KnowledgeRebuildEstimate {
   entries: number;
-  /** Expected myKG tasks (LLM calls) for a full re-extraction. */
+  /** Expected myKG tasks (LLM calls) for a full re-extraction: an approximation (`KnowledgeLinkingService.rebuildEstimate`). */
   tasks: number;
 }
 

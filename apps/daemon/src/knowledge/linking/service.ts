@@ -18,9 +18,15 @@
  *   (those in `failed_chunks.json` `failed`); failure → `failed`, the error kept as `lastError`,
  *   the entries back in the pending set and a retry after `errorRetryMs` (any new change retries
  *   sooner); cancelled → back in the pending set.
- * - A daemon restart re-runs an interrupted run under the same id (a survivor child is stopped
- *   first): `--update` resumes from myKG's finished steps, cached shards and answered tasks; a
- *   full/rebuild run resumes its session. Worker chats still working are adopted. Every update
+ * - A daemon restart re-runs an interrupted run under the same id. A survivor child is stopped
+ *   first (`runner.ts` `stopStaleMykg`: only the recorded pid while it is still that myKG child,
+ *   by command line and start time; SIGTERM, a wait for its exit on the clock, SIGKILL after the
+ *   grace); one that outlives that pauses the run with an error rather than start a second myKG on
+ *   its session. Every new child on a known session starts from an inbox holding only answered
+ *   tasks (`inbox.ts` `clearUnansweredTasks`), so workers answer only what that child asks for, and
+ *   myKG's answer cache stays. `--update` resumes from myKG's finished steps, cached shards and
+ *   answered tasks; a full/rebuild run resumes its session. Worker chats still working are
+ *   adopted. Every update
  *   after one that did not succeed (interrupted, failed, cancelled) first puts back the last good
  *   run's `file_manifest.json` (`mykg-files.ts` `guardMykgManifest`), else myKG would never see
  *   that run's edits and deletes again.
@@ -33,7 +39,9 @@
  *
  * Pauses (status `paused` with a reason): `plugin-off` (a run in flight is cancelled and its chats
  * ended), `not-installed` (likewise), `usage-limit` / `no-account` (the pool waits, the myKG child
- * keeps waiting on its inbox — its task timeout is 48 h), `error` (a failed run, retried later).
+ * keeps waiting on its inbox — its task timeout is 48 h), `error` (a failed run, retried later;
+ * also, with no retry, a `state.json` a newer Orquester wrote: nothing is linked or written over —
+ * `state.ts` — while the graph it built is still loaded).
  */
 
 import { randomBytes } from "node:crypto";
@@ -75,7 +83,7 @@ import type {
   KnowledgeSettingsPort,
   KnowledgeStorePort
 } from "../ports.ts";
-import { InboxBroker, type InboxWatch } from "./inbox.ts";
+import { clearUnansweredTasks, InboxBroker, type InboxWatch } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
 import {
   commitMykgManifest,
@@ -86,12 +94,14 @@ import {
   readManifestEntryIds,
   readMykgProgress
 } from "./mykg-files.ts";
-import { startMykgRun, stopStaleMykg, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
+import { procMykgProbe, startMykgRun, stopStaleMykg, type MykgProcessProbe, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
 
 export const GROW_MIN_ENTRIES = 20;
 export const GROW_RATIO = 0.5;
+/** Name-normalization calls a rebuild estimate counts while there is no graph to count types in. */
+export const DEFAULT_NORMALIZE_TYPES = 10;
 
 const DEFAULT_TIMINGS = {
   debounceMs: KNOWLEDGE_LINK_DEBOUNCE_MS,
@@ -128,8 +138,8 @@ export interface KnowledgeLinkingOptions {
   nextWaitMs?: number;
   /** `null` = rescans on demand only (tests). */
   inboxWatch?: InboxWatch | null;
-  /** Reads a pid's command line (stale-child check); tests stub it. */
-  readCmdline?: (pid: number) => Promise<string | null>;
+  /** Reads and signals a pid (the stale-child check, `runner.ts` `stopStaleMykg`); tests stub it. */
+  processProbe?: MykgProcessProbe;
   logger?: KnowledgeLinkingLogger;
 }
 
@@ -181,6 +191,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private stopped = false;
   /** Changes reported before `start` loaded the state. */
   private early: KnowledgeEntryChange[] = [];
+  /** `state.json` is a newer Orquester's: nothing is linked (see `state.ts`), and this says why. */
+  private newerNotice: { message: string; at: string } | null = null;
   private readonly offs: (() => void)[] = [];
 
   constructor(options: KnowledgeLinkingOptions) {
@@ -198,6 +210,16 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   async start(): Promise<void> {
     this.stopped = false;
     this.state = await this.stateFile.load();
+    const newer = this.stateFile.newer;
+    this.newerNotice = newer
+      ? {
+          message:
+            `The linking state was written by a newer Orquester (state version ${newer.version}). Linking is paused so this version does not ` +
+            `change that version's runs; the graph it built is still shown. Update Orquester to link again.` +
+            (newer.writable ? "" : " The state file is kept exactly as it is."),
+          at: this.opts.clock.now().toISOString()
+        }
+      : null;
     for (const change of this.early.splice(0)) this.entriesChanged(change);
     this.offs.push(this.opts.settings.onChange(() => this.onEnvironmentChanged()));
     this.offs.push(this.opts.runtime.onChange(() => this.onEnvironmentChanged()));
@@ -211,9 +233,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       }
     }
     const current = this.state.currentRun;
-    if (current) {
-      await stopStaleMykg(current.pid, this.opts.readCmdline);
+    if (this.newerNotice) {
+      // A newer build's run is not this build's to resume or stop.
+    } else if (current) {
+      // A resumed run stops the previous daemon's child itself (`launchNow`); else it is stopped here.
       if (this.canRun()) await this.launch(current, { resume: true });
+      else await this.stopStale(current);
     } else {
       this.schedule();
     }
@@ -236,6 +261,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       active.run.cancel();
       await active.finished;
     }
+    await this.stateFile.flush();
   }
 
   // --- KnowledgeLinkingPort --------------------------------------------------------------------
@@ -269,6 +295,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if (!this.opts.runtime.current()) {
       return { state: "paused", reason: "not-installed", message: "myKG is not installed.", resumesAt: null, pendingEntries };
     }
+    if (this.newerNotice) return { state: "paused", reason: "error", message: this.newerNotice.message, resumesAt: null, pendingEntries };
     const active = this.active;
     if (active) {
       if (active.poolPause) return { state: "paused", ...active.poolPause, pendingEntries };
@@ -303,7 +330,15 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     return { queued: false, running: this.active !== null };
   }
 
-  /** Expected myKG tasks for a rebuild (information only; spec "Schema growth"). */
+  /**
+   * Expected myKG tasks for a rebuild — an APPROXIMATION shown as information only (spec "Schema
+   * growth"); the rebuild induces its schema afresh, so its types, and myKG's batching, may differ:
+   * - Pass 1: one call per ~16k-token batch of the corpus (at most 25), plus harmonize and review;
+   * - Pass 2: one call per ~16k tokens of each entry (one entry per call, `batch_per_file`);
+   * - name normalization: one call per concept type (`batch_token_target: 1`, `mykg-config.ts`)
+   *   that has at least two names to merge (myKG skips a type with one) — counted on the CURRENT
+   *   graph's types, or {@link DEFAULT_NORMALIZE_TYPES} while there is no graph.
+   */
   async rebuildEstimate(): Promise<KnowledgeRebuildEstimate> {
     const entries = this.opts.store.listMeta();
     let total = 0;
@@ -319,10 +354,9 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       pass2 += Math.max(1, Math.ceil(tokens / 16_000));
     }
     if (entries.length === 0) return { entries: 0, tasks: 0 };
-    // Pass 1: one call per 16k-token batch, at most 25 proposals, then harmonize + review;
-    // name normalization: one call per ~16k tokens of names (about one per 40 entries).
     const pass1 = Math.min(25, Math.max(1, Math.ceil(total / 16_000))) + 2;
-    const normalize = Math.max(1, Math.ceil(entries.length / 40));
+    const types = [...this.opts.graph.conceptTypes().values()];
+    const normalize = types.length === 0 ? DEFAULT_NORMALIZE_TYPES : types.filter((concepts) => concepts >= 2).length;
     return { entries: entries.length, tasks: pass1 + pass2 + normalize };
   }
 
@@ -361,7 +395,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         week: weekTokens(state, this.opts.clock.now()),
         total: { in: state?.tokens.total.in ?? 0, out: state?.tokens.total.out ?? 0 }
       },
-      lastError: state?.lastError ? { message: state.lastError.message, at: state.lastError.at } : null
+      lastError: this.newerNotice ? { ...this.newerNotice } : state?.lastError ? { message: state.lastError.message, at: state.lastError.at } : null
     };
   }
 
@@ -379,7 +413,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   // --- scheduling ----------------------------------------------------------------------------------
 
   private canRun(): boolean {
-    return !this.stopped && this.opts.settings.enabled() && this.opts.runtime.current() !== null;
+    return !this.stopped && this.newerNotice === null && this.opts.settings.enabled() && this.opts.runtime.current() !== null;
   }
 
   private onEnvironmentChanged(): void {
@@ -465,7 +499,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         tasks: 0,
         tokensIn: 0,
         tokensOut: 0,
-        pid: null
+        pid: null,
+        pidStartTime: null
       };
       for (const meta of metas) if (record.entryIds.includes(meta.id)) record.entryHashes[meta.id] = meta.contentHash;
       state.currentRun = record;
@@ -540,6 +575,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if (!runtime || this.active) return;
     // A record that names no session cannot update one: it extracts in full.
     if ((record.mode === "update" || record.mode === "grow-schema") && !record.session) record.mode = "full";
+    if (options.resume && (await this.stopStale(record)) === "alive") {
+      // Two myKG processes must never share a session: the run waits for the error retry.
+      this.pauseForError(`A myKG process from before the restart (pid ${record.pid}) did not stop, so the run was not started again. It is tried again later.`);
+      return;
+    }
     const settings = this.opts.settings.get();
     await mkdir(this.mykgDir, { recursive: true, mode: 0o700 });
     await mkdir(join(this.homeDir, "tmp"), { recursive: true, mode: 0o700 });
@@ -548,6 +588,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     // An update after one that did not succeed starts from the last good run's manifest (`guardMykgManifest`).
     if ((record.mode === "update" || record.mode === "grow-schema") && record.session && isMykgSessionName(record.session)) {
       await guardMykgManifest(mykgSessionPaths(this.mykgDir, record.session));
+    }
+    // No myKG runs on the session now (a survivor was stopped above): the tasks an earlier process
+    // left unanswered go, so workers are only handed what the new one asks for (`inbox.ts`).
+    if (record.session && isMykgSessionName(record.session)) {
+      const cleared = await clearUnansweredTasks(mykgSessionPaths(this.mykgDir, record.session).intermediate);
+      if (cleared.length > 0) this.opts.logger?.info?.("knowledge linking: cleared tasks an earlier myKG process left unanswered", { runId: record.id, tasks: cleared.length });
     }
     // The daemon began stopping, or the plugin went off, meanwhile: the run stays recorded for later.
     if (!this.canRun() || this.active) return;
@@ -603,6 +649,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       void this.attachInbox(active, session);
     });
     record.pid = run.pid;
+    // With its start time, so a later daemon never signals another process that reused the pid.
+    record.pidStartTime = run.pid !== null ? await this.probe().startTime(run.pid).catch(() => null) : null;
     this.persist();
     // Chats from before a restart first, so no new chat is started beside one that still works.
     if (options.resume) {
@@ -809,6 +857,29 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   }
 
   // --- helpers ---------------------------------------------------------------------------------------
+
+  private probe(): MykgProcessProbe {
+    return this.opts.processProbe ?? procMykgProbe;
+  }
+
+  /** Stops the run's recorded child if a previous daemon left it running (`stopStaleMykg`). */
+  private stopStale(record: KnowledgeCurrentRunRecord): Promise<"none" | "stopped" | "alive"> {
+    return stopStaleMykg(
+      { pid: record.pid, startTime: record.pidStartTime, inputDir: this.opts.store.mykgInputDir },
+      { clock: this.opts.clock, probe: this.probe() }
+    );
+  }
+
+  /** A run that could not start: the error is kept and the run is tried again after `errorRetryMs`. */
+  private pauseForError(message: string): void {
+    const state = this.requireState();
+    const at = this.opts.clock.now();
+    state.lastError = { message, at: at.toISOString() };
+    state.pause = { reason: "error", message, resumesAt: new Date(at.getTime() + this.timings.errorRetryMs).toISOString() };
+    this.persist();
+    this.schedule();
+    this.emitStatus();
+  }
 
   private requireState(): KnowledgeLinkingStateRecord {
     if (!this.state) throw new Error("The knowledge linking service is not started.");

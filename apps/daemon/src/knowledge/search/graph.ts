@@ -355,6 +355,12 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     return { nodes: this.snapshot.concepts.size, edges: this.snapshot.edges.length };
   }
 
+  conceptTypes(): Map<string, number> {
+    const types = new Map<string, number>();
+    for (const concept of this.snapshot.concepts.values()) types.set(concept.type, (types.get(concept.type) ?? 0) + 1);
+    return types;
+  }
+
   private view(scope: KnowledgeScope): View {
     return new View(this.snapshot, this.getMeta, scope);
   }

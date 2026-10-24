@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
-import { InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxFiles } from "./inbox.ts";
+import { clearUnansweredTasks, InboxBroker, nodeInboxFiles, parseWorkerAnswer, type InboxFiles } from "./inbox.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -324,5 +324,37 @@ describe("InboxBroker", () => {
     assert.equal(h.broker.demand(), 1);
     assert.equal(h.broker.engaged("w1"), true);
     assert.equal(h.broker.engaged("w9"), false);
+  });
+});
+
+describe("clearUnansweredTasks", () => {
+  it("removes the task files no answer was written for, and keeps every answer (the cache) and answered task", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "orq-inbox-clear-"));
+    roots.push(dir);
+    const inbox = join(dir, "agent_inbox");
+    const outbox = join(dir, "agent_outbox");
+    await mkdir(inbox, { recursive: true });
+    await mkdir(outbox, { recursive: true });
+    const answered = taskId("S", "answered", "pass2 0");
+    const waiting = taskId("S", "waiting", "pass2 1");
+    const torn = taskId("S", "torn", "pass2 2");
+    for (const id of [answered, waiting, torn]) await writeFile(join(inbox, `${id}.task.json`), JSON.stringify({ task_id: id, system: "S", user: "u" }));
+    await writeFile(join(outbox, `${answered}.answer.json`), JSON.stringify({ task_id: answered, answer: "{}" }));
+    await writeFile(join(outbox, `${answered}.done`), "");
+    // An answer written without its `.done` (a crash between the two renames): myKG never read it.
+    await writeFile(join(outbox, `${torn}.answer.json`), JSON.stringify({ task_id: torn, answer: "{}" }));
+    await writeFile(join(dir, "orquester-answer-reuse.ndjson"), "");
+
+    const removed = await clearUnansweredTasks(dir);
+    assert.deepEqual(removed.sort(), [waiting, torn].sort());
+    assert.deepEqual(await readdir(inbox), [`${answered}.task.json`]);
+    assert.deepEqual((await readdir(outbox)).sort(), [`${answered}.answer.json`, `${answered}.done`, `${torn}.answer.json`].sort());
+    assert.deepEqual(await readdir(dir).then((names) => names.sort()), ["agent_inbox", "agent_outbox", "orquester-answer-reuse.ndjson"]);
+  });
+
+  it("a session without an inbox yet clears nothing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "orq-inbox-clear-"));
+    roots.push(dir);
+    assert.deepEqual(await clearUnansweredTasks(join(dir, "missing")), []);
   });
 });
