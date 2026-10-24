@@ -77,6 +77,7 @@ function parseRememberedPosition(value: unknown): RememberedTimelinePosition | n
   const interactionMode = record.interactionMode;
   return {
     rowId: typeof record.rowId === "string" ? record.rowId : null,
+    ...(typeof record.turnId === "string" && record.turnId.length > 0 ? { turnId: record.turnId } : {}),
     offsetWithinRow: asFiniteNumber(record.offsetWithinRow, 0),
     scrollOffset: asFiniteNumber(record.scrollOffset, 0),
     atEnd: record.atEnd !== false,

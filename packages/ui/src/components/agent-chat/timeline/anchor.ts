@@ -15,6 +15,9 @@
  * testable without a DOM.
  */
 
+import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { rowTurnId } from "../../../lib/agent-chat/history.logic";
+
 /** What the search needs to know about one child of the rows container. */
 export interface RowMetric {
   /** Offset of the row's top edge from the top of the scrollable content. */
@@ -94,4 +97,22 @@ export function findRowElement(scroller: ParentNode, rowId: string): HTMLElement
     return null;
   }
   return scroller.querySelector<HTMLElement>(`[data-timeline-row-id="${CSS.escape(rowId)}"]`);
+}
+
+/**
+ * The turn a restore whose row is gone should page back in: the remembered
+ * row's turn, when the list holds rows but none of that turn — its turn was
+ * left to "load older" (the stream's bounded snapshot, retention), so the
+ * pixel offset would land in some other turn. `null` otherwise: a drill-in
+ * (it has no history), a list not painted yet, a row of no remembered turn,
+ * or a turn the list still shows, where the offset is the better guess.
+ */
+export function restoreTurnOf(
+  scroll: { readonly turnId?: string | undefined },
+  rows: readonly AgentChatTimelineRow[],
+  agentId: string | undefined
+): string | null {
+  const turnId = scroll.turnId;
+  if (agentId !== undefined || turnId === undefined || rows.length === 0) return null;
+  return rows.some((row) => rowTurnId(row) === turnId) ? null : turnId;
 }

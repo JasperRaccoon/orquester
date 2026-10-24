@@ -255,6 +255,35 @@ describe("a thread opened with a copy on the device", () => {
     assert.equal(saved?.seq, 8);
   });
 
+  it("keeps a bounded snapshot's history cursor: the copy loads older from it after a reload", async () => {
+    const log = hostLog();
+    const backend = memoryBackend();
+    // The stream's bounded snapshot: the turns before the window are a "load older" away.
+    const bounds = { indexed: true, hasOlder: true, beforeCursor: "cursor-recent", oldestRetainedOrdinal: 6, totalTurns: 15 };
+    const first = await openPage(log, backend);
+    await settle();
+    first.host.push(
+      { kind: "snapshot", thread: { ...snapshotAt(log, 5), history: bounds } },
+      { kind: "synchronized", hostInstanceId: "host-1" }
+    );
+    first.store.destroy?.();
+    await first.cache.threadCacheIdle();
+    await settle();
+
+    const reopened = await openPage(log, backend);
+    const asked: Array<string | undefined> = [];
+    reopened.host.transport.readHistory = async (_sessionId, query) => {
+      asked.push(query.before);
+      return { threadId: "s1", turns: [], items: [], checkpoints: [], page: { beforeCursor: null }, seq: 8 };
+    };
+    await settle();
+    assert.deepEqual(reopened.state().slice.history.bounds, bounds, "the copy's bounds are the snapshot's");
+    reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-1" });
+    await reopened.state().actions.loadOlderHistory();
+    assert.deepEqual(asked, ["cursor-recent"], "load older asks below the bounded window");
+    reopened.store.destroy?.();
+  });
+
   it("offers nothing pending from the copy until the host confirms the thread", async () => {
     const log = hostLog();
     const backend = memoryBackend();

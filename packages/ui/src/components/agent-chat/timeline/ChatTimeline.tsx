@@ -27,6 +27,7 @@ import {
   findFirstVisibleIndex,
   findRowElement,
   offsetWithinRow,
+  restoreTurnOf,
   scrollRowTo,
   type RowMetric
 } from "./anchor";
@@ -450,7 +451,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const anchorAtOffset = React.useCallback(
     (
       scrollOffset: number
-    ): { rowId: string | null; offsetWithinRow: number; signedOffset: number } => {
+    ): { rowId: string | null; turnId?: string; offsetWithinRow: number; signedOffset: number } => {
       const container = contentRef.current;
       if (!container) return { rowId: null, offsetWithinRow: 0, signedOffset: 0 };
       const children = container.children;
@@ -467,8 +468,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         const rowId = element.dataset["timelineRowId"];
         if (rowId !== undefined) {
           const metric = metricAt(index);
+          const turnId = element.dataset["timelineTurnId"];
           return {
             rowId,
+            ...(turnId !== undefined && turnId.length > 0 ? { turnId } : {}),
             offsetWithinRow: offsetWithinRow(metric, scrollOffset),
             signedOffset: scrollOffset - metric.top
           };
@@ -488,6 +491,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       }
       const position: TimelineScrollPosition = {
         rowId: anchor.rowId,
+        ...(anchor.turnId !== undefined ? { turnId: anchor.turnId } : {}),
         offsetWithinRow: anchor.offsetWithinRow,
         scrollOffset,
         atEnd
@@ -623,6 +627,13 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         scrollRowTo(node, target, scroll.offsetWithinRow);
       } else {
         node.scrollTop = scroll.scrollOffset;
+        // The row's whole turn is gone from the list — left to "load older" by
+        // the stream's bounded snapshot, or by retention — so its turn is paged
+        // back in and scrolled to. A turn still in the list keeps the offset.
+        const turnId = restoreTurnOf(scroll, rows, agentId);
+        if (turnId !== null) {
+          void peekThreadStore(sessionId)?.getState().actions.revealTurn(turnId).catch(() => false);
+        }
       }
     } else {
       node.scrollTop = scroll.scrollOffset;

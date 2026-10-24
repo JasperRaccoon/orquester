@@ -2093,8 +2093,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // that writes `localStorage` is not replay-safe (fix-wave Q2-9).
         let remembered: RememberedTimelinePosition | null = null;
         update((state) => {
+          // A new row brings its own turn, or none: never the previous row's.
+          const kept = state.slice.scroll ?? DEFAULT_SCROLL_POSITION;
+          const { turnId: _previousTurnId, ...withoutTurn } = kept;
           const next: RememberedTimelinePosition = {
-            ...(state.slice.scroll ?? DEFAULT_SCROLL_POSITION),
+            ...(position.rowId !== undefined ? withoutTurn : kept),
             ...position,
             // Never let a caller's stale copy overwrite live client state.
             disclosures: state.slice.disclosures,
@@ -2171,6 +2174,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           if (!isStartedTurn(slice.turns, turnId)) {
             return false;
           }
+          const promptId = userMessageIdForTurn(turnId, slice.turns, slice.history.pages);
           const plan = planReveal(turnId, {
             liveTurnIds: liveTurnIdsOf(slice.entries, slice.turns),
             // A turn the window evicted into the bridge is on screen too.
@@ -2181,17 +2185,21 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
               slice.turns
             ),
             pages: slice.history.pages,
-            hasOlder: canLoadOlderHistory(slice.history)
+            hasOlder: canLoadOlderHistory(slice.history),
+            ...(promptId === null
+              ? {}
+              : {
+                  promptShown:
+                    slice.entries.some((item) => item.id === promptId) ||
+                    slice.history.bridge.some((item) => item.id === promptId) ||
+                    slice.history.pages.some((page) => page.items.some((item) => item.id === promptId))
+                })
           });
           if (plan === "absent") {
             return false;
           }
           if (plan === "present") {
-            const rowId = rowIdForTurn(
-              state.rows,
-              turnId,
-              userMessageIdForTurn(turnId, slice.turns, slice.history.pages)
-            );
+            const rowId = rowIdForTurn(state.rows, turnId, promptId);
             if (rowId === null) {
               return false;
             }

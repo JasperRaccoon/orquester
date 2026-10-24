@@ -50,6 +50,13 @@ import type { ComposerDraft } from "./composer.logic";
 /** Where the timeline is scrolled, remembered per thread in a 100-entry LRU. */
 export interface RememberedTimelinePosition {
   rowId: string | null;
+  /**
+   * The turn `rowId` belongs to, when its row says (`rowTurnId`). Restoring a
+   * row the timeline no longer holds — its turn left to "load older" — brings
+   * that turn back in instead (`revealTurn`). Absent from an older bundle's
+   * record and for a row of no turn.
+   */
+  turnId?: string;
   offsetWithinRow: number;
   scrollOffset: number;
   atEnd: boolean;

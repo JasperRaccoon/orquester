@@ -3,6 +3,7 @@ import React from "react";
 import { cn } from "../../../lib/cn";
 import { agentPromptOf } from "../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { rowTurnId } from "../../../lib/agent-chat/history.logic";
 import { isCompactCommandMessage } from "./row-chrome";
 import { rowBottomPadding } from "./row-format";
 import {
@@ -110,6 +111,7 @@ export const TimelineRow = React.memo(function TimelineRow({
   return (
     <div
       data-timeline-row-id={row.id}
+      data-timeline-turn-id={rowTurnId(row) ?? undefined}
       data-timeline-row-kind={row.kind}
       className={cn(
         "mx-auto w-full min-w-0 max-w-3xl overflow-x-clip",
