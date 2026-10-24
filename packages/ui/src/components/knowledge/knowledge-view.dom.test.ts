@@ -216,6 +216,16 @@ describe("the Knowledge tab", () => {
     assert.doesNotMatch(text(), /No entries yet/);
   });
 
+  it("says how many entries could not be linked instead of calling an idle linking complete", async () => {
+    await show();
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, failedEntries: 2 }) }));
+    const bar = doc().querySelector('[role="status"][aria-label="Knowledge status"]');
+    assert.ok(bar, "the status bar");
+    assert.match(bar.textContent ?? "", /2 entries could not be linked/);
+    assert.match(bar.textContent ?? "", /Settings → Plugins → Knowledge Graph/);
+    assert.doesNotMatch(bar.innerHTML, /Every entry is linked/);
+  });
+
   it("opens on the graph; a concept opens its panel, and an entry in it opens the entry, with Back", async () => {
     await show();
     assert.ok(doc().querySelector('[data-testid="canvas"]'), "the graph view is first");

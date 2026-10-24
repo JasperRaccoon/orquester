@@ -42,7 +42,7 @@ function setup(options: { counts?: Partial<KnowledgeStatusCounts>; owners?: Reco
       return { accepted: false, error: "nope" };
     }
   };
-  const counts: KnowledgeStatusCounts = { enabled: true, installed: true, entries: 5, concepts: 9, edges: 4, collections: 2, ...options.counts };
+  const counts: KnowledgeStatusCounts = { enabled: true, installed: true, entries: 5, concepts: 9, edges: 4, collections: 2, failedEntries: 0, ...options.counts };
   const app: FastifyInstance = Fastify();
   // The daemon stamps `request.principal` server-side; the test reads it off a header.
   app.decorateRequest("principal", null);
@@ -61,7 +61,7 @@ describe("knowledge linking routes", () => {
     const { app } = setup();
     const res = await app.inject({ method: "GET", url: knowledgeRoutes.status });
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { enabled: true, installed: true, entries: 5, concepts: 9, edges: 4, collections: 2, ...SNAPSHOT });
+    assert.deepEqual(res.json(), { enabled: true, installed: true, entries: 5, concepts: 9, edges: 4, collections: 2, failedEntries: 0, ...SNAPSHOT });
   });
 
   it("rebuild is refused while the plugin is off or not installed, else starts and answers the status", async () => {
@@ -144,7 +144,7 @@ describe("knowledge linking routes", () => {
     const off = publishKnowledgeStatus(
       { events, snapshot: () => SNAPSHOT },
       { publish: (channel, type, payload) => published.push({ channel, type, payload }) },
-      () => ({ enabled: true, installed: false, entries: 0, concepts: 0, edges: 0, collections: 0 })
+      () => ({ enabled: true, installed: false, entries: 0, concepts: 0, edges: 0, collections: 0, failedEntries: 0 })
     );
     events.emit("status");
     assert.equal(published.length, 1);

@@ -376,6 +376,8 @@ export interface KnowledgeStatus {
   concepts: number;
   edges: number;
   collections: number;
+  /** Entries whose last run could not link them (`linkState: "failed"`); see `lastError`. 0 from a daemon that predates it. */
+  failedEntries: number;
   linking: KnowledgeLinkingState;
   lastRun: KnowledgeRunSummary | null;
   recentRuns: KnowledgeRunSummary[];

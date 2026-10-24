@@ -75,6 +75,20 @@ describe("the status bar text", () => {
     assert.equal(paused.label, "Linking paused: every Claude account is at its usage limit");
     assert.equal(paused.detail, "Resets soon.");
   });
+
+  it("does not call idle linking complete while some entries failed", () => {
+    const now = Date.parse("2026-10-20T10:00:00Z");
+    const allLinked = linkingView({ state: "idle" }, [], now, 0);
+    assert.equal(allLinked.tone, "idle");
+    assert.equal(allLinked.detail, "Every entry is linked.");
+
+    const failed = linkingView({ state: "idle" }, [], now, 3);
+    assert.equal(failed.tone, "failed");
+    assert.equal(failed.label, "3 entries could not be linked");
+    assert.equal(failed.detail, "See Settings → Plugins → Knowledge Graph for the last error.");
+    assert.doesNotMatch(`${failed.label} ${failed.detail}`, /Every entry is linked/);
+    assert.equal(linkingView({ state: "idle" }, [], now, 1).label, "1 entry could not be linked");
+  });
 });
 
 describe("the collection form", () => {

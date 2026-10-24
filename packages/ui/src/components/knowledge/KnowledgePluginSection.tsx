@@ -123,7 +123,7 @@ const KnowledgeActivity: React.FC = () => {
 
 const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) => {
   const runs = status.lastRun ? [status.lastRun, ...status.recentRuns] : status.recentRuns;
-  const linking = linkingView(status.linking, runs);
+  const linking = linkingView(status.linking, runs, Date.now(), status.failedEntries);
   const last = status.lastRun ? knowledgeRunLine(status.lastRun, relativeTime) : null;
   const workers = knowledgeWorkersShown(status.workers);
   const [transcript, setTranscript] = useState<string | null>(null);
@@ -139,7 +139,7 @@ const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) 
       <InfoRow label="Knowledge" value={knowledgeCountsText(status)} />
       <DetailRow
         label="Linking"
-        value={<span className={cn(linking.tone === "paused" && "text-warn")}>{linking.label}</span>}
+        value={<span className={cn((linking.tone === "paused" || linking.tone === "failed") && "text-warn")}>{linking.label}</span>}
         detail={linking.detail}
       />
       <DetailRow

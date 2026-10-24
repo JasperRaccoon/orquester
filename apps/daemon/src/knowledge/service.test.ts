@@ -178,6 +178,15 @@ test("the first switch-on opens the knowledge base and builds and starts linking
     h.events.some((e) => e.type === "knowledge.changed" && JSON.stringify((e.payload as { entryIds?: string[] }).entryIds) === JSON.stringify([entryId])),
     "link states moved → knowledge.changed {entryIds}"
   );
+  // An entry a run could not link is counted in the status, which is published again.
+  assert.equal(h.knowledge.status().failedEntries, 0);
+  const statusEvents = () => h.statuses().length;
+  const statusBefore = statusEvents();
+  await ports.store.setLinkState([entryId], "failed");
+  await h.knowledge.settled();
+  assert.equal(h.knowledge.status().failedEntries, 1);
+  assert.ok(statusEvents() > statusBefore, "a link-state move publishes knowledge.status");
+  assert.equal(h.statuses().at(-1)!.failedEntries, 1);
 
   h.plugins.set(false);
   await h.knowledge.settled();

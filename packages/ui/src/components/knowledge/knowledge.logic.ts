@@ -116,7 +116,8 @@ const PAUSE_TEXT: Record<KnowledgePauseReason, string> = {
 };
 
 export interface LinkingView {
-  tone: "idle" | "queued" | "running" | "paused";
+  /** `failed`: idle, but some entries' last run could not link them. */
+  tone: "idle" | "queued" | "running" | "paused" | "failed";
   /** The short line the status bar shows. */
   label: string;
   /** More context (a tooltip / second line), or null. */
@@ -131,10 +132,27 @@ function clock(iso: string): string | null {
   return at.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 }
 
-/** How the status bar describes linking; `runs` gives the running run's entry count. */
-export function linkingView(linking: KnowledgeLinkingState, runs: readonly KnowledgeRunSummary[] = [], now = Date.now()): LinkingView {
+/**
+ * How the status bar describes linking; `runs` gives the running run's entry count, and
+ * `failedEntries` the entries a run could not link (an idle state then says so, never "Every entry
+ * is linked.").
+ */
+export function linkingView(
+  linking: KnowledgeLinkingState,
+  runs: readonly KnowledgeRunSummary[] = [],
+  now = Date.now(),
+  failedEntries = 0
+): LinkingView {
   switch (linking.state) {
     case "idle":
+      if (failedEntries > 0) {
+        return {
+          tone: "failed",
+          label: `${plural(failedEntries, "entry", "entries")} could not be linked`,
+          detail: "See Settings → Plugins → Knowledge Graph for the last error.",
+          progress: null
+        };
+      }
       return { tone: "idle", label: "Linking idle", detail: "Every entry is linked.", progress: null };
     case "queued": {
       const startsIn = Math.round((new Date(linking.startsAt).getTime() - now) / 1000);
