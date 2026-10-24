@@ -3,9 +3,19 @@ import type { ServerResponse } from "node:http";
 import { describe, it } from "node:test";
 
 import {
+  agentRowsFrameOf,
+  applyAgentRows,
+  applyDomainEvent,
+  createEmptyThreadState,
+  omitOnDemandAgentRows,
+  toThreadSnapshot,
   type AgentChatStreamFrame,
+  type AgentRowsFrame,
   type DomainEvent,
   type HistoryImportProgress,
+  type ThreadActivityItem,
+  type ThreadFoldState,
+  type ThreadItem,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
@@ -397,6 +407,264 @@ describe("thread stream — history replay progress", () => {
       parse(fake.lines).map((frame) => frame.kind),
       ["snapshot", "synchronized"]
     );
+    stream.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// On-demand agent rows: the frame rides the stream in order
+// ---------------------------------------------------------------------------
+
+/** A tiny host: a real fold, applied and then published in one step, as `commit` does. */
+function foldHost() {
+  let seq = 0;
+  let state: ThreadFoldState = createEmptyThreadState();
+  let listener: (events: DomainEvent[]) => void = () => undefined;
+  const at = (n: number): string => new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString();
+  const build = (type: DomainEvent["type"], payload: unknown): DomainEvent =>
+    ({
+      seq: ++seq,
+      eventId: `e${seq}`,
+      threadId: "t1",
+      type,
+      payload,
+      occurredAt: at(seq),
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as DomainEvent;
+  const commit = (events: DomainEvent[]): void => {
+    for (const one of events) state = applyDomainEvent(state, one);
+    listener(events);
+  };
+  const activityOf = (
+    activityKind: string,
+    payload: Record<string, unknown>,
+    id: string,
+    agentId?: string
+  ): ThreadActivityItem => ({
+    kind: "activity",
+    id,
+    tone: "tool",
+    activityKind,
+    summary: activityKind,
+    payload,
+    turnId: "turn-1",
+    createdAt: at(seq + 1),
+    updatedAt: at(seq + 1),
+    ...(agentId !== undefined ? { agentId } : {})
+  });
+  return {
+    get state() {
+      return state;
+    },
+    listen(next: (events: DomainEvent[]) => void) {
+      listener = next;
+    },
+    created(): DomainEvent {
+      return build("thread.created", {
+        projectPath: "/w/p",
+        cwd: "/w/p",
+        title: "t",
+        adapter: "claude",
+        refId: "claude",
+        accountId: "acc-1",
+        home: "account",
+        modelSelection: { model: "sonnet" },
+        runtimeMode: "approval-required"
+      });
+    },
+    running(): DomainEvent {
+      return build("thread.session-set", { session: { status: "running", activeTurnId: "turn-1" } });
+    },
+    row(activityKind: string, payload: Record<string, unknown>, id: string, agentId?: string): DomainEvent {
+      return build("thread.activity-appended", { activity: activityOf(activityKind, payload, id, agentId) });
+    },
+    words(messageId: string, text: string, agentId: string, streaming: boolean): DomainEvent {
+      return build("thread.message-sent", { messageId, role: "assistant", text, streaming, turnId: "turn-1", agentId });
+    },
+    commit,
+    snapshot(): ThreadSnapshotPayload {
+      return toThreadSnapshot(state);
+    },
+    frame(agentIds: readonly string[]): AgentRowsFrame {
+      return agentRowsFrameOf({ items: state.items, roster: state.roster, seq: state.seq, agentIds });
+    }
+  };
+}
+
+/** The client side: frames applied in wire order, as the reducer does. */
+function clientOf(lines: string[]): { fold: ThreadFoldState; omitted: Set<string>; frames: Array<{ kind: string }> } {
+  let fold = createEmptyThreadState();
+  const omitted = new Set<string>();
+  const frames = parse(lines);
+  for (const frame of frames) {
+    if (frame.kind === "snapshot") {
+      const thread = (frame as { thread: ThreadSnapshotPayload }).thread;
+      fold = {
+        ...createEmptyThreadState(),
+        head: thread.head,
+        items: thread.items,
+        activities: thread.items.filter((item): item is ThreadActivityItem => item.kind === "activity"),
+        turns: thread.turns,
+        roster: thread.roster,
+        pending: thread.pending,
+        seq: thread.seq
+      };
+      for (const id of thread.omittedAgentIds ?? []) omitted.add(id);
+    } else if (frame.kind === "event") {
+      fold = applyDomainEvent(fold, (frame as { event: DomainEvent }).event);
+    } else if (frame.kind === "agent-rows") {
+      const rows = frame as AgentRowsFrame;
+      assert.equal(rows.seq, fold.seq, "the frame lands at exactly the position the client applied");
+      fold = applyAgentRows(fold, rows);
+      for (const id of rows.agentIds) omitted.delete(id);
+    }
+  }
+  return { fold, omitted, frames };
+}
+
+const ownRows = (items: readonly ThreadItem[], agentId: string): ThreadItem[] =>
+  items.filter((item) => item.agentId === agentId);
+
+const activityIdOf = (frame: { kind: string }): string | null => {
+  if (frame.kind !== "event") return null;
+  const event = (frame as unknown as { event: DomainEvent }).event;
+  return event.type === "thread.activity-appended" ? event.payload.activity.id : null;
+};
+
+describe("thread stream — on-demand agent rows", () => {
+  it("announces its id on `synchronized`, and a stream without the opt-in takes no request", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const plain = fakeResponse();
+    const without = createThreadStream({
+      response: plain.response,
+      hostInstanceId: "host-1",
+      subscribe: async () => () => undefined,
+      read: async () => [{ kind: "snapshot", thread: snapshot(1) }]
+    });
+    await without.start();
+    assert.deepEqual(parse(plain.lines).at(-1), { kind: "synchronized", hostInstanceId: "host-1" });
+    assert.equal(without.streamId, undefined);
+    assert.equal(without.requestAgentRows(["a"]), false);
+    without.close();
+
+    const fake = fakeResponse();
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async () => () => undefined,
+      read: async () => [{ kind: "snapshot", thread: snapshot(1) }],
+      agentRows: { streamId: "s-1", frame: () => null }
+    });
+    await stream.start();
+    assert.deepEqual(parse(fake.lines).at(-1), { kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" });
+    assert.equal(stream.streamId, "s-1");
+    stream.close();
+    assert.equal(stream.requestAgentRows(["a"]), false, "a closed stream takes none");
+  });
+
+  it("an agent message streaming while the request lands ends up whole, with no delta twice", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const host = foldHost();
+    // A settled agent `a` with a call and words; the snapshot leaves them out.
+    host.commit([
+      host.created(),
+      host.running(),
+      host.row("task.started", { taskId: "a", agentKind: "agent", title: "A" }, "a-launch"),
+      host.row("tool.started", { toolUseId: "a1", title: "Bash" }, "a1-start", "a"),
+      host.row("tool.completed", { toolUseId: "a1", title: "Bash" }, "a1-done", "a"),
+      host.words("aw1", "first words", "a", false),
+      host.row("task.completed", { taskId: "a", agentKind: "agent", status: "completed" }, "a-end")
+    ]);
+    const fake = fakeResponse();
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (listener) => {
+        host.listen(listener);
+        return () => undefined;
+      },
+      read: async () => [{ kind: "snapshot", thread: omitOnDemandAgentRows(host.snapshot()) }],
+      agentRows: { streamId: "s-1", frame: (agentIds) => host.frame(agentIds) }
+    });
+    await stream.start();
+    assert.deepEqual(clientOf(fake.lines).omitted, new Set(["a"]));
+
+    // The agent is resumed: a new message streams, a call's update waits on the coalescing window…
+    host.commit([host.row("task.started", { taskId: "a", agentKind: "agent", title: "A" }, "a-relaunch")]);
+    host.commit([host.words("aw2", "Hel", "a", true)]);
+    host.commit([host.row("tool.updated", { toolUseId: "a2", title: "Bash" }, "a2-update", "a")]);
+    // …and the client's request lands mid-message.
+    assert.equal(stream.requestAgentRows(["a"]), true);
+    host.commit([host.words("aw2", "lo", "a", true)]);
+    host.commit([host.words("aw2", " world", "a", true)]);
+    // The close: empty text keeps what streamed.
+    host.commit([host.words("aw2", "", "a", false)]);
+    t.mock.timers.tick(50);
+
+    const client = clientOf(fake.lines);
+    const kinds = client.frames.map((frame) => frame.kind);
+    const rowsAt = kinds.indexOf("agent-rows");
+    assert.ok(rowsAt > kinds.indexOf("synchronized"));
+    // The update in its window was committed before the frame's fold: it went first.
+    const updateAt = client.frames.findIndex((frame) => activityIdOf(frame) === "a2-update");
+    assert.ok(updateAt >= 0 && updateAt < rowsAt, "flushed ahead of the frame");
+    assert.deepEqual(client.omitted, new Set());
+    const words = client.fold.items.filter((item) => item.id === "aw2");
+    assert.equal(words.length, 1, "one message");
+    assert.equal(words[0]?.kind === "message" ? words[0].text : null, "Hello world", "every delta exactly once");
+    // The agent's rows are exactly the host's, and so is the whole window.
+    assert.deepEqual(ownRows(client.fold.items, "a"), ownRows(host.state.items, "a"));
+    assert.deepEqual(
+      client.fold.items.map((item) => item.id),
+      host.state.items.map((item) => item.id)
+    );
+    stream.close();
+  });
+
+  it("a request before the stream is live is written right after `synchronized`, every buffered event before it", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const host = foldHost();
+    host.commit([
+      host.created(),
+      host.running(),
+      host.row("task.started", { taskId: "a", agentKind: "agent" }, "a-launch"),
+      host.row("tool.started", { toolUseId: "a1" }, "a1-start", "a"),
+      host.row("task.completed", { taskId: "a", agentKind: "agent", status: "completed" }, "a-end")
+    ]);
+    const fake = fakeResponse();
+    let releaseRead: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (listener) => {
+        host.listen(listener);
+        return () => undefined;
+      },
+      read: async () => {
+        const read = omitOnDemandAgentRows(host.snapshot());
+        await gate;
+        return [{ kind: "snapshot", thread: read }];
+      },
+      agentRows: { streamId: "s-1", frame: (agentIds) => host.frame(agentIds) }
+    });
+    const started = stream.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    // A row lands while the read is out, and a request is already in.
+    host.commit([host.row("tool.output", { toolUseId: "a1", delta: "late" }, "a1-out", "a")]);
+    assert.equal(stream.requestAgentRows(["a"]), true);
+    releaseRead();
+    await started;
+    const client = clientOf(fake.lines);
+    assert.deepEqual(
+      client.frames.map((frame) => frame.kind),
+      ["snapshot", "event", "synchronized", "agent-rows"]
+    );
+    assert.deepEqual(ownRows(client.fold.items, "a"), ownRows(host.state.items, "a"));
     stream.close();
   });
 });

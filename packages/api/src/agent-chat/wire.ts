@@ -235,6 +235,16 @@ export const agentChatRoutes = {
    */
   threadHead: (sessionId: string): string => `${sessionBase(sessionId)}/head`,
   events: (sessionId: string): string => `${sessionBase(sessionId)}/events`,
+  /**
+   * `POST` {@link AgentRowsRequest} → {@link AgentRowsResponse}: load the rows a
+   * `?agentRows=on-demand` snapshot left out ({@link ThreadSnapshotPayload.omittedAgentIds})
+   * for some agents. The rows never come back on this response: the host writes ONE
+   * {@link AgentRowsFrame} into the stream the body names (its `synchronized.streamId`), in
+   * order with its live events. 404 `STREAM_NOT_FOUND` when that stream is gone (ask again on
+   * the next one); a host that predates the route answers its generic route-miss 404
+   * `THREAD_NOT_FOUND` ("No route for …").
+   */
+  agentRows: (sessionId: string): string => `${sessionBase(sessionId)}/agent-rows`,
   turnDiff: (sessionId: string, turnCount: number): string =>
     `${sessionBase(sessionId)}/turns/${turnCount}/diff`,
   item: (sessionId: string, itemId: string): string =>
@@ -1017,7 +1027,14 @@ export type AgentChatErrorCode =
    * it. A refusal of the moment, never recorded as a receipt: the same `commandId` may land at the
    * next idle point ({@link TurnCommandBody.ifIdle}).
    */
-  | "TURN_NOT_IDLE";
+  | "TURN_NOT_IDLE"
+  /**
+   * 404 — only `POST …/agent-rows` answers it: the thread has no open stream with that
+   * `streamId` (it closed, or the client is reconnecting). The client asks again on the stream
+   * it opens next. Its own code because a host that predates the route answers its generic
+   * route-miss 404 `THREAD_NOT_FOUND`, and the client must tell "ask again" from "never".
+   */
+  | "STREAM_NOT_FOUND";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -1029,7 +1046,8 @@ export const AGENT_CHAT_ERROR_CODES = [
   "INDEX_UNAVAILABLE",
   "ITEM_NOT_FOUND",
   "PROMPT_NOT_FOUND",
-  "TURN_NOT_IDLE"
+  "TURN_NOT_IDLE",
+  "STREAM_NOT_FOUND"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /**
@@ -1105,8 +1123,76 @@ export type AgentChatStreamFrame =
        * sequence.
        */
       hostInstanceId: string;
+      /**
+       * This connection's id, sent only on a stream opened with
+       * `?agentRows=on-demand` ({@link AGENT_ROWS_QUERY_PARAM}): what a
+       * `POST …/agent-rows` names to have its {@link AgentRowsFrame} written
+       * into this stream. Absent from a host that predates on-demand agent rows —
+       * which never omits any either. Additive: an older client ignores it.
+       */
+      streamId?: string;
     }
-  | HistoryImportFrame;
+  | HistoryImportFrame
+  | AgentRowsFrame;
+
+/**
+ * The opt-in of a §6.3 stream and of `GET …/thread`: `?agentRows=on-demand`.
+ * A snapshot then leaves out the rows only a SETTLED agent's own drill-in
+ * renders (`agent-rows.ts`: {@link ThreadSnapshotPayload.omittedAgentIds}
+ * names whose), and the client loads them per agent through
+ * `POST …/agent-rows` ({@link agentChatRoutes.agentRows}). A host that
+ * predates it ignores the parameter and sends the whole snapshot; a reader
+ * that does not send it — an older bundle, the daemon's own MCP and reply
+ * readers — gets the whole snapshot as before.
+ */
+export const AGENT_ROWS_QUERY_PARAM = "agentRows";
+/** The one value of {@link AGENT_ROWS_QUERY_PARAM}. */
+export const AGENT_ROWS_ON_DEMAND = "on-demand";
+export type AgentRowsMode = typeof AGENT_ROWS_ON_DEMAND;
+
+/** The mode a query value asks for; anything but {@link AGENT_ROWS_ON_DEMAND} asks for none. */
+export function agentRowsModeOf(value: unknown): AgentRowsMode | undefined {
+  return value === AGENT_ROWS_ON_DEMAND ? AGENT_ROWS_ON_DEMAND : undefined;
+}
+
+/** At most this many agents per `POST …/agent-rows`; a client batches beyond it. */
+export const AGENT_ROWS_MAX_AGENTS = 64;
+
+/** `POST …/agent-rows` ({@link agentChatRoutes.agentRows}). No `commandId`: it changes no thread state, and a repeat only writes the same rows again. */
+export interface AgentRowsRequest {
+  /** The stream to write the frame into: its `synchronized.streamId`. */
+  streamId: string;
+  /** 1–{@link AGENT_ROWS_MAX_AGENTS} agent ids (roster ids, the rows' `agentId`). */
+  agentIds: string[];
+}
+
+/** Accepted: the frame is in the stream's ordered path (after `synchronized` when it has not gone live yet). */
+export interface AgentRowsResponse {
+  ok: true;
+}
+
+/**
+ * The rows the agents in `agentIds` own, as the host's fold holds them at
+ * `seq` — written into the ONE stream a `POST …/agent-rows` named, through its
+ * ordered path: every event at or below `seq` precedes it, every later one
+ * follows it. So it is exactly the state the client has applied when it lands,
+ * and the client REPLACES those agents' on-demand rows with `items` (`agent-rows.ts`:
+ * `applyAgentRows`) — a message streaming meanwhile is whole, never doubled.
+ *
+ * `items` are the snapshot's own projection (slimmed, §5.6), in the fold's
+ * order. `after[i]` places `items[i]`: the id of the nearest row before it in
+ * the host's window that every opted-in client holds (never an on-demand row),
+ * or `null` when there is none. Transient: never persisted, never sequenced
+ * (`seq` is the position, not a new one). A client that does not know the kind
+ * skips the line, as for every frame.
+ */
+export interface AgentRowsFrame {
+  kind: "agent-rows";
+  seq: number;
+  agentIds: string[];
+  items: ThreadItem[];
+  after: Array<string | null>;
+}
 
 /**
  * The stream's last line when it cannot be served at all — the thread read
@@ -1196,6 +1282,8 @@ export interface AgentChatEventsQuery {
    * whole retained window, as every client before the parameter expects.
    */
   window?: ThreadReadWindow;
+  /** {@link AGENT_ROWS_QUERY_PARAM}: leave a settled agent's own rows out of a snapshot. */
+  agentRows?: AgentRowsMode;
 }
 
 /**

@@ -23,7 +23,9 @@ import {
   MCP_APP_OPERATIONS,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatCommandPath,
+  AGENT_ROWS_QUERY_PARAM,
   agentChatRoutes,
+  agentRowsModeOf,
   isHtmlRenderAttachmentId,
   threadHeadOf,
   threadHeadQueryOf,
@@ -183,7 +185,8 @@ const CHAT_ERROR_STATUS: Record<AgentChatErrorCode, number> = {
   INDEX_UNAVAILABLE: 503,
   ITEM_NOT_FOUND: 404,
   PROMPT_NOT_FOUND: 404,
-  TURN_NOT_IDLE: 409
+  TURN_NOT_IDLE: 409,
+  STREAM_NOT_FOUND: 404
 };
 
 /**
@@ -356,7 +359,10 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   // --- §6.3 reads ----------------------------------------------------------
 
-  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string } }>(
+  // `?agentRows=on-demand` (`AGENT_ROWS_QUERY_PARAM`) passes through to the host on both
+  // reads, beside `window`: a host that knows it leaves the settled agents' on-demand rows out of
+  // a snapshot, one that predates it ignores it. Only the one value: anything else is no opt-in.
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string; agentRows?: string } }>(
     pattern(agentChatRoutes.thread(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -367,7 +373,11 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         reply,
         "GET",
         // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
-        withQuery(agentHostRoutes.read(id), { after: request.query.after, window: request.query.window })
+        withQuery(agentHostRoutes.read(id), {
+          after: request.query.after,
+          window: request.query.window,
+          [AGENT_ROWS_QUERY_PARAM]: agentRowsModeOf(request.query.agentRows)
+        })
       );
       noteSeqFrom(deps, id, value);
       return value;
@@ -587,7 +597,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never
   // sees it: the response is raw chunked NDJSON, piped from the host with
   // backpressure, and the upstream is cancelled the moment the client goes.
-  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string; agentRows?: string } }>(
     pattern(agentChatRoutes.events(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -604,8 +614,25 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         request,
         reply,
         // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
-        withQuery(agentHostRoutes.events(id), { after: request.query.after, window: request.query.window })
+        withQuery(agentHostRoutes.events(id), {
+          after: request.query.after,
+          window: request.query.window,
+          [AGENT_ROWS_QUERY_PARAM]: agentRowsModeOf(request.query.agentRows)
+        })
       );
+    }
+  );
+
+  // On-demand agent rows: the host writes the rows into the stream the body names — the
+  // client's own, through this daemon's pipe, in order with its events — and answers only that
+  // it did. Forwarded as it is; the host validates it, and an older host answers its route miss.
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    pattern(agentChatRoutes.agentRows(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(deps, reply, "POST", agentHostRoutes.agentRows(id), request.body ?? {});
     }
   );
 

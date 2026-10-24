@@ -24,6 +24,7 @@ import {
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
   type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
+  type AgentRowsFrame,
   type DomainEvent,
   type HistoryImportProgress
 } from "@orquester/api/agent-chat";
@@ -140,6 +141,17 @@ export interface ThreadStreamOptions {
    */
   read(): Promise<AgentChatStreamFrame[]>;
   onClose?: (reason: "client" | "budget" | "host") => void;
+  /**
+   * On-demand agent rows (`?agentRows=on-demand`): this stream's id, announced
+   * on its `synchronized` frame, and the frame a `POST …/agent-rows` naming it
+   * writes — built SYNCHRONOUSLY from the fold as it stands when it is written,
+   * so every event at or below its `seq` has already been offered here.
+   * Absent: the stream announces no id and takes no request.
+   */
+  agentRows?: {
+    streamId: string;
+    frame(agentIds: readonly string[]): AgentRowsFrame | null;
+  };
 }
 
 export interface ThreadStream {
@@ -148,6 +160,15 @@ export interface ThreadStream {
   /** Close from the host side (shutdown). */
   close(reason?: "client" | "budget" | "host"): void;
   readonly closed: boolean;
+  /** {@link ThreadStreamOptions.agentRows}' id, or undefined for a stream without it. */
+  readonly streamId: string | undefined;
+  /**
+   * Write the agents' {@link AgentRowsFrame} into this stream, in order: now
+   * (after the tool updates still in their coalescing window, which were
+   * committed first) when the stream is live, else right after its
+   * `synchronized`. False when it cannot: closed, or opened without the opt-in.
+   */
+  requestAgentRows(agentIds: readonly string[]): boolean;
 }
 
 /**
@@ -183,6 +204,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
    */
   let pendingDrainBytes = 0;
   let drainArmed = false;
+  /** Agent ids asked for before the stream went live, in order of asking; written after `synchronized`. */
+  const preLiveAgentRows: string[] = [];
 
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
@@ -302,6 +325,33 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     writeFrame({ kind: "history-import", progress });
   };
 
+  /**
+   * The frame goes through the same ordered path as the live tail: the tool
+   * updates waiting on their window were committed before the fold this frame
+   * reads, so they go first — a row they update must never land after the
+   * frame that already holds it, nor a frame's state be followed by an older
+   * update of it. Built here, in the same synchronous step that writes it.
+   */
+  const writeAgentRows = (agentIds: readonly string[]): void => {
+    const agentRows = options.agentRows;
+    if (closed || agentRows === undefined || agentIds.length === 0) return;
+    flushPending();
+    const frame = agentRows.frame(agentIds);
+    if (frame !== null) writeFrame(frame);
+  };
+
+  const requestAgentRows = (agentIds: readonly string[]): boolean => {
+    if (closed || options.agentRows === undefined) return false;
+    if (!live) {
+      for (const agentId of agentIds) {
+        if (!preLiveAgentRows.includes(agentId)) preLiveAgentRows.push(agentId);
+      }
+      return true;
+    }
+    writeAgentRows(agentIds);
+    return true;
+  };
+
   const start = async (): Promise<void> => {
     response.statusCode = 200;
     response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
@@ -382,7 +432,11 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     // Events at or below what the read already carried are dropped here as
     // well as on the client, so the overlapping windows of §6.6 are safe.
     emitEvents(coalesceToolUpdates(buffered.filter((event) => event.seq > highest)));
-    writeFrame({ kind: "synchronized", hostInstanceId });
+    writeFrame({
+      kind: "synchronized",
+      hostInstanceId,
+      ...(options.agentRows !== undefined ? { streamId: options.agentRows.streamId } : {})
+    });
     live = true;
     // A replay still running is announced after the marker, which clears
     // the client's view of it; one that ended meanwhile needs nothing.
@@ -390,13 +444,19 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       writeFrame({ kind: "history-import", progress: preReadImport });
     }
     preReadImport = null;
+    // Asked for before the marker: every event the fold holds is out by now.
+    writeAgentRows(preLiveAgentRows.splice(0, preLiveAgentRows.length));
   };
 
   return {
     start,
     close,
+    requestAgentRows,
     get closed() {
       return closed;
+    },
+    get streamId() {
+      return options.agentRows?.streamId;
     }
   };
 }

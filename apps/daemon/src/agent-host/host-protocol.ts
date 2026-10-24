@@ -148,6 +148,16 @@ export const agentHostRoutes = {
    */
   head: (threadId: string): string => `${thread(threadId)}/head`,
   events: (threadId: string): string => `${thread(threadId)}/events`,
+  /**
+   * `POST` `AgentRowsRequest` → `AgentRowsResponse`: write ONE `agent-rows` frame — the
+   * agents' on-demand rows, at the fold's sequence — into the open `/events` stream the body's
+   * `streamId` names (one opened with `?agentRows=on-demand`, which announces the id on its
+   * `synchronized`), in order with its live events. 404 `STREAM_NOT_FOUND` when no such stream
+   * of the thread is open. Additive: a host that predates it answers its generic route-miss 404
+   * `THREAD_NOT_FOUND` ("No route for …") — and ignores the opt-in, so it never omitted a row —
+   * so `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  agentRows: (threadId: string): string => `${thread(threadId)}/agent-rows`,
   turnDiff: (threadId: string, turnCount: number): string =>
     `${thread(threadId)}/turns/${turnCount}/diff`,
   item: (threadId: string, itemId: string): string =>

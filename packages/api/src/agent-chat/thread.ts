@@ -809,6 +809,14 @@ export interface ThreadSnapshotPayload {
    */
   answeredApprovals?: Array<[string, string]>;
   answeredQuestions?: Array<[string, string]>;
+  /**
+   * The agents whose on-demand rows this snapshot left out (`agent-rows.ts`),
+   * sorted: only on a read that opted in (`?agentRows=on-demand`) and only
+   * when it left any out. Their drill-ins need `POST …/agent-rows` first;
+   * nothing else the client derives reads those rows. Absent = every row is
+   * here — always, from a host that predates the opt-in.
+   */
+  omittedAgentIds?: string[];
 }
 
 /**

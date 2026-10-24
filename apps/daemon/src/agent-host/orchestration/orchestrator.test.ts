@@ -3884,3 +3884,80 @@ describe("orchestrator — a message over a subagent's approval goes to that sub
     await host.stop();
   });
 });
+
+describe("orchestrator — on-demand agent rows", () => {
+  /** A settled agent `a` (a big call), a running agent `b`, as an adapter's ingested rows. */
+  async function fleet(host: TestHost): Promise<string> {
+    const threadId = await host.createThread();
+    const at = "1970-01-01T00:00:01.000Z";
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>, agentId?: string): AppendableDomainEvent => ({
+      eventId: `ingest-${id}`,
+      threadId,
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind,
+          summary: activityKind,
+          payload,
+          turnId: null,
+          createdAt: at,
+          updatedAt: at,
+          ...(agentId !== undefined ? { agentId } : {})
+        }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    await host.orchestrator.ingestionSink(threadId, [
+      row("a-launch", "task.started", { taskId: "a", agentKind: "agent" }),
+      row("b-launch", "task.started", { taskId: "b", agentKind: "agent" }),
+      // Persisted whole, slimmed on the way to the wire (§5.6).
+      row("a1-done", "tool.completed", { toolUseId: "a1", output: "x".repeat(200_000) }, "a"),
+      row("b1-start", "tool.started", { toolUseId: "b1" }, "b"),
+      row("a-end", "task.completed", { taskId: "a", agentKind: "agent", status: "completed" })
+    ]);
+    await host.settle();
+    return threadId;
+  }
+
+  it("leaves the settled agent's rows out of an opted-in snapshot only, after slimming", async () => {
+    const host = createTestHost();
+    const threadId = await fleet(host);
+    const full = await host.orchestrator.readThread(threadId);
+    const again = await host.orchestrator.readThread(threadId, undefined, {});
+    assert.equal(JSON.stringify(again), JSON.stringify(full), "no opt-in: the snapshot as it always was");
+    const lazy = await host.orchestrator.readThread(threadId, undefined, { agentRows: "on-demand" });
+    assert.equal(full.kind, "snapshot");
+    assert.equal(lazy.kind, "snapshot");
+    if (full.kind !== "snapshot" || lazy.kind !== "snapshot") return;
+    assert.equal(lazy.thread.omittedAgentIds?.includes("a"), true);
+    assert.equal(lazy.thread.items.some((item) => item.id === "a1-done"), false);
+    assert.ok(lazy.thread.items.some((item) => item.id === "a-launch") && lazy.thread.items.some((item) => item.id === "a-end"));
+    // The frame carries the row exactly as the full snapshot does: slimmed.
+    const frame = host.orchestrator.agentRowsFrame(threadId, ["a"]);
+    assert.ok(frame !== null);
+    assert.equal(frame.seq, full.thread.seq);
+    assert.deepEqual(frame.items, full.thread.items.filter((item) => item.id === "a1-done"));
+    assert.ok(JSON.stringify(frame.items).length < 100_000, "slimmed like the snapshot");
+    // The fold itself is untouched.
+    const after = await host.orchestrator.readThread(threadId);
+    assert.equal(JSON.stringify(after), JSON.stringify(full));
+    await host.stop();
+  });
+
+  it("a replay is never touched by the opt-in, and a thread it has not loaded has no frame", async () => {
+    const host = createTestHost();
+    const threadId = await fleet(host);
+    const replay = await host.orchestrator.readThread(threadId, 1, { agentRows: "on-demand" });
+    const plain = await host.orchestrator.readThread(threadId, 1);
+    assert.equal(replay.kind, "events");
+    assert.deepEqual(replay, plain);
+    assert.equal(host.orchestrator.agentRowsFrame("never-loaded", ["a"]), null);
+    await host.stop();
+  });
+});

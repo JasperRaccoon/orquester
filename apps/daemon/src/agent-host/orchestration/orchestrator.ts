@@ -104,7 +104,12 @@ import {
   type ThreadSnapshotPayload,
   type Turn,
   AGENT_CHAT_REPLAY_MAX_EVENTS,
-  AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
+  AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES,
+  AGENT_ROWS_ON_DEMAND,
+  agentRowsFrameOf,
+  omitOnDemandAgentRows,
+  type AgentRowsFrame,
+  type AgentRowsMode
 } from "@orquester/api/agent-chat";
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
@@ -323,6 +328,14 @@ export type HostThreadStore = ThreadStore & {
     window: ThreadItemOutputWindowQuery
   ): Promise<ThreadItemOutputWindowResponse | null>;
 };
+
+/** How one thread read is projected (`readThread`). */
+export interface ThreadReadOptions {
+  /** `?window=recent`: a snapshot keeps the latest turns whole, the rest is load older (`wire-window.ts`). */
+  window?: ThreadReadWindow;
+  /** `?agentRows=on-demand`: a snapshot then leaves out the settled agents' on-demand rows. */
+  agentRows?: AgentRowsMode;
+}
 
 export interface OrchestratorOptions {
   store: HostThreadStore;
@@ -771,13 +784,18 @@ export interface Orchestrator {
   /**
    * The §6.3 read. With `window: "recent"` — asked for by a client on the stream or on
    * `GET …/thread` (`ThreadReadWindow`) — a snapshot keeps only the latest turns whole and leaves the settled turns before
-   * them to `readHistory` (`recentSnapshotOf`); a replay is the same either way.
+   * them to `readHistory` (`recentSnapshotOf`); with `agentRows: "on-demand"` (`?agentRows=on-demand`) it then
+   * leaves out the settled agents' on-demand rows (`omitOnDemandAgentRows`, `@orquester/api`'s `agent-rows.ts`).
+   * Both are steps of the projection, in that order; a replay is the same either way.
    */
-  readThread(
-    threadId: string,
-    afterSeq?: number,
-    options?: { window?: ThreadReadWindow }
-  ): Promise<ThreadReadResponse>;
+  readThread(threadId: string, afterSeq?: number, options?: ThreadReadOptions): Promise<ThreadReadResponse>;
+  /**
+   * The `agent-rows` frame of `agentIds` over the thread's fold as it stands NOW
+   * (`agentRowsFrameOf`), or null for a thread this host has not loaded. Synchronous on
+   * purpose: an open stream writes it in the same step it builds it, so every event at or
+   * below its `seq` has already been offered to that stream (`stream.ts`).
+   */
+  agentRowsFrame(threadId: string, agentIds: readonly string[]): AgentRowsFrame | null;
   /**
    * The thread's head (`threadHeadOf`, `@orquester/api`'s `thread-head.ts`) from the in-memory fold:
    * the same answer the daemon derives from a snapshot at the same `seq`, without serialising the
@@ -5390,6 +5408,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // Reads (§6.3)
   // -------------------------------------------------------------------------
 
+  /**
+   * On-demand agent rows: the projection's last step, after slimming and after the turn trim
+   * (which keeps every agent's rows: the drill-in reads the window alone) — the read that did
+   * not opt in gets its snapshot byte for byte.
+   */
+  const withOnDemandAgentRows = (read: ThreadReadOptions, snapshot: ThreadSnapshotPayload): ThreadSnapshotPayload =>
+    read.agentRows === AGENT_ROWS_ON_DEMAND ? omitOnDemandAgentRows(snapshot) : snapshot;
+
   const snapshotOf = (runtime: ThreadRuntime): ThreadSnapshotPayload => {
     const payload = toThreadSnapshot(runtime.state);
     // §5.6's two snapshot-time drops are not applied on the write path, so the
@@ -6072,14 +6098,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const readThread = async (
     threadId: string,
     afterSeq?: number,
-    readOptions?: { window?: ThreadReadWindow }
+    readOptions: ThreadReadOptions = {}
   ): Promise<ThreadReadResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       requireHead(runtime);
       const snapshot = async (): Promise<ThreadReadResponse> => ({
         kind: "snapshot",
-        thread: readOptions?.window === "recent" ? await recentSnapshotOf(runtime) : snapshotOf(runtime)
+        thread: withOnDemandAgentRows(
+          readOptions,
+          readOptions.window === "recent" ? await recentSnapshotOf(runtime) : snapshotOf(runtime)
+        )
       });
       if (afterSeq === undefined) {
         return snapshot();
@@ -6090,6 +6119,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       return snapshot();
     });
+
+  const agentRowsFrame = (threadId: string, agentIds: readonly string[]): AgentRowsFrame | null => {
+    const runtime = runtimes.get(threadId);
+    if (runtime === undefined || runtime.deleted || runtime.state.head === null) return null;
+    // The snapshot's own projection of the window (§5.6), so the rows are exactly the ones a
+    // full snapshot at this sequence carries.
+    return agentRowsFrameOf({
+      items: slimItemsForRead(runtime.state.items ?? []),
+      roster: runtime.state.roster ?? [],
+      seq: runtime.state.seq,
+      agentIds
+    });
+  };
 
   /**
    * Snapshot-or-replay is the SERVER's decision (§6.3). Events after `after`
@@ -8691,6 +8733,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     deleteThread,
     command,
     readThread,
+    agentRowsFrame,
     readThreadHead,
     readHistory,
     searchThreads,
