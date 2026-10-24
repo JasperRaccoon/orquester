@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { Button, Input, Modal } from ".";
+import { Button } from "./button";
+import { Input } from "./input";
+import { Modal } from "./modal";
 import { cn } from "../../lib/cn";
 
 export interface ConfirmDialogProps {

@@ -15,33 +15,6 @@ import DeepSeek from "./agents/deepseek.svg?react";
 import Grok from "./agents/grok.svg?react";
 import OpenCode from "./agents/opencode.svg?react";
 
-// IDEs - bare ids, matching daemon where possible; filename variants mapped to id
-import Antigravity from "./ides/antigravity.svg?react";
-import CLion from "./ides/clion.svg?react";
-import Cursor from "./ides/cursor.svg?react";
-import GoLand from "./ides/goland.svg?react";
-import IntelliJ from "./ides/intellij-idea.svg?react";
-import PhpStorm from "./ides/phpstorm.svg?react";
-import PyCharm from "./ides/pycharm.svg?react";
-import RustRover from "./ides/rustrover.svg?react";
-import Sublime from "./ides/sublime.svg?react";
-import VSCode from "./ides/vscode.svg?react";
-import Windsurf from "./ides/windsurf.svg?react";
-import Zed from "./ides/zed.svg?react";
-
-// Explorers - only those with SVGs
-import Dolphin from "./explorers/dolphin.svg?react";
-import Explorer from "./explorers/explorer.svg?react";
-import Thunar from "./explorers/thunar.svg?react";
-
-// Browsers - only those with SVGs
-import Brave from "./browsers/brave.svg?react";
-import Chrome from "./browsers/chrome.svg?react";
-import Chromium from "./browsers/chromium.svg?react";
-import Edge from "./browsers/edge.svg?react";
-import Firefox from "./browsers/firefox.svg?react";
-import Vivaldi from "./browsers/vivaldi.svg?react";
-
 // Shells - bare ids matching daemon where SVG exists
 import Bash from "./shells/bash.svg?react";
 import Fish from "./shells/fish.svg?react";
@@ -69,34 +42,6 @@ const specific: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>
   grok: Grok,
   opencode: OpenCode,
 
-  // ides (bare ids from daemon + jetbrains from user SVGs)
-  vscode: VSCode,
-  cursor: Cursor,
-  antigravity: Antigravity,
-  windsurf: Windsurf,
-  zed: Zed,
-  intellij: IntelliJ,
-  sublime: Sublime,
-  clion: CLion,
-  goland: GoLand,
-  phpstorm: PhpStorm,
-  pycharm: PyCharm,
-  rustrover: RustRover,
-
-  // explorers (only existing SVGs; system-files falls back or maps if present)
-  dolphin: Dolphin,
-  thunar: Thunar,
-  explorer: Explorer,
-  "system-files": Explorer,
-
-  // browsers
-  chrome: Chrome,
-  chromium: Chromium,
-  firefox: Firefox,
-  brave: Brave,
-  edge: Edge,
-  vivaldi: Vivaldi,
-
   // shells (bare, matching daemon ids that have SVGs)
   bash: Bash,
   zsh: Zsh,
@@ -104,6 +49,47 @@ const specific: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>
   nu: NuShell,
   pwsh: Pwsh
 };
+
+/** The ids whose artwork is in `app-icons.tsx`, loaded with the first one drawn. */
+const LAZY_ICON_IDS = [
+  "vscode",
+  "cursor",
+  "antigravity",
+  "windsurf",
+  "zed",
+  "intellij",
+  "sublime",
+  "clion",
+  "goland",
+  "phpstorm",
+  "pycharm",
+  "rustrover",
+  "dolphin",
+  "thunar",
+  "explorer",
+  "system-files",
+  "chrome",
+  "chromium",
+  "firefox",
+  "brave",
+  "edge",
+  "vivaldi"
+] as const;
+
+export type LazyIconId = (typeof LAZY_ICON_IDS)[number];
+
+const lazyIconIds: ReadonlySet<string> = new Set(LAZY_ICON_IDS);
+
+type AppIconProps = { refId: LazyIconId; size: number | string; fallback: React.ReactNode };
+
+// A chunk that fails to load (offline, or gone after a deploy) leaves the
+// generic icon in place rather than taking the menu or tab down with it.
+const AppIcon = React.lazy(() =>
+  import("./app-icons").then(
+    (module): { default: React.ComponentType<AppIconProps> } => ({ default: module.AppIcon }),
+    () => ({ default: ({ fallback }: AppIconProps) => <>{fallback}</> })
+  )
+);
 
 export function getRegistryIcon(
   kind: RegistryKind,
@@ -117,7 +103,20 @@ export function getRegistryIcon(
     if (Comp) {
       return React.createElement(Comp, { width: size, height: size });
     }
+    if (lazyIconIds.has(refId)) {
+      // The generic icon stands in while the artwork loads.
+      const fallback = genericIcon(kind, size);
+      return (
+        <React.Suspense fallback={fallback}>
+          <AppIcon refId={refId as LazyIconId} size={size} fallback={fallback} />
+        </React.Suspense>
+      );
+    }
   }
+  return genericIcon(kind, size);
+}
+
+function genericIcon(kind: RegistryKind, size: number | string): React.ReactNode {
   const Gen = Object.hasOwn(generic, kind) ? generic[kind] : undefined;
   if (Gen) {
     return React.createElement(Gen, { size });

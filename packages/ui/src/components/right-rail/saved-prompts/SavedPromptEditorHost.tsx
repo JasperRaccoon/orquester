@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { subscribeSavedPromptEditor, type SavedPromptEditorRequest } from "./editor-bridge";
-import { SavedPromptEditor } from "./SavedPromptEditor";
+import { LazyBoundary, LoadingOverlay, lazyNamed } from "../../ui/lazy";
+
+// Loads with its first opening.
+const SavedPromptEditor = lazyNamed(() => import("./SavedPromptEditor"), "SavedPromptEditor");
 
 /**
  * The one saved-prompt editor, mounted once by the rail: it listens on
@@ -28,10 +31,12 @@ export const SavedPromptEditorHost: React.FC = () => {
   if (open === null) return null;
   const { key } = open;
   return (
-    <SavedPromptEditor
-      key={key}
-      request={open.request}
-      onClose={() => setOpen((current) => (current?.key === key ? null : current))}
-    />
+    <LazyBoundary inline={false} fallback={<LoadingOverlay />}>
+      <SavedPromptEditor
+        key={key}
+        request={open.request}
+        onClose={() => setOpen((current) => (current?.key === key ? null : current))}
+      />
+    </LazyBoundary>
   );
 };

@@ -13,10 +13,13 @@ import { useSecretFilesEnabled, useSecretVault } from "../../lib/secret-files/ho
 import type { RepoProjectGroup } from "../../lib/repo-groups";
 import { RepoIcon } from "../repo/RepoIcon";
 import { RepoIconDialog } from "../repo/RepoIconDialog";
-import { SecretFilesDialog } from "../secret-files/SecretFilesDialog";
+import { lazyDialog, lazyNamed } from "../ui/lazy";
 import { repoSecretCount } from "../secret-files/drift.logic";
 import { ContextMenu, Input, type ContextMenuItem } from "../ui";
 import { CountPill, RowActionsButton } from "./parts";
+
+// Loads with its first opening.
+const SecretFilesDialog = lazyDialog(lazyNamed(() => import("../secret-files/SecretFilesDialog"), "SecretFilesDialog"));
 
 /** The daemon's wording when it sent one. */
 function describeError(err: unknown, fallback: string): string {

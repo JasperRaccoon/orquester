@@ -1,13 +1,11 @@
 import React from "react";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
-import {
-  RIGHT_RAIL_PANEL_REGISTRY,
-  dockKeyDownHandler,
-  useActiveChatTarget,
-  useDockKeyboardLayer,
-  useFocusInside,
-  useOpenProjectPath
-} from "../right-rail";
+// Not the rail's barrel: it also exports the panels, which load lazily.
+import { useActiveChatTarget } from "../right-rail/chat-target";
+import { useDockKeyboardLayer, useFocusInside } from "../right-rail/dock-keyboard";
+import { RIGHT_RAIL_PANEL_REGISTRY } from "../right-rail/panels";
+import { dockKeyDownHandler } from "../right-rail/RightRailDock";
+import { useOpenProjectPath } from "../right-rail/RightRailFrame";
 import type { SidebarView } from "./sidebar-view";
 
 /**

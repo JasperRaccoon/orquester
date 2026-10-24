@@ -5,9 +5,13 @@ import { useAppStore } from "../../store/app";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
 import { OpenedAgents } from "./OpenedAgents";
 import { WorkspaceList, type WorkspaceCreateKind } from "./WorkspaceList";
-import { NewProjectModal, type NewProjectPreset } from "./NewProjectModal";
+import type { NewProjectPreset } from "./NewProjectModal";
+import { lazyDialog, lazyNamed } from "../ui/lazy";
 import { NewWorkspaceModal } from "./NewWorkspaceModal";
 import type { InlineCreate } from "./WorkspaceProjects";
+
+// Loads with its first opening.
+const NewProjectModal = lazyDialog(lazyNamed(() => import("./NewProjectModal"), "NewProjectModal"));
 
 /**
  * The sidebar's main view: a search over agents, workspaces and projects with
