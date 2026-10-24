@@ -89,6 +89,53 @@ describe("establish", () => {
   });
 });
 
+describe("establish on a bad link", () => {
+  it("an auth-info request that got no answer is retried, never taken for 'no sign-in needed'", async () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    const signals: Array<AbortSignal | undefined> = [];
+    const api = {
+      ...fakeApi(TOKEN),
+      authInfo: async (signal?: AbortSignal) => {
+        signals.push(signal);
+        throw new TypeError("Failed to fetch");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api });
+    await assert.rejects(store().establish(api), TypeError, "the caller's backoff loop takes it");
+    assert.deepEqual(infoCalls, [], "no request went out without the stored token");
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN, "the sign-in is kept");
+    assert.ok(signals[0] instanceof AbortSignal, "the request is bounded by a timeout");
+  });
+
+  it("a daemon that answers without auth info (an older build's 404) still needs no sign-in", async () => {
+    const api = {
+      ...fakeApi(),
+      authInfo: async () => {
+        throw new ApiError(404, "GET", "/api/auth/info");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api, authPrompt: null });
+    await store().establish(api);
+    assert.deepEqual(infoCalls, [""], "the pre-check ran, unauthenticated, as before");
+  });
+
+  it("the credential pre-check is bounded by a timeout too", async () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    let signal: AbortSignal | undefined;
+    const api = {
+      ...fakeApi(TOKEN),
+      info: async (given?: AbortSignal) => {
+        signal = given;
+        throw new TypeError("Failed to fetch");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api });
+    await assert.rejects(store().establish(api), TypeError);
+    assert.ok(signal instanceof AbortSignal);
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+  });
+});
+
 describe("submitCredentials", () => {
   it("stores the returned token and the username, never the password", async () => {
     let connected = 0;
