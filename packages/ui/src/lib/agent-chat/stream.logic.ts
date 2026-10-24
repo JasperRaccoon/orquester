@@ -29,23 +29,41 @@ import { backoffDelayMs } from "../connection/backoff";
  * `{ stream: true }` before pushing text in here.
  */
 export class NdjsonLineBuffer {
-  private buffer = "";
+  /**
+   * The open line's pieces, joined once when its newline arrives. Appending
+   * every chunk to one string and searching it from the start again made a
+   * multi-megabyte `snapshot` line cost O(n²) in its chunk count — seconds
+   * of CPU for a 4 MB line arriving in 1.4 KB pieces, which is how a slow
+   * mobile link (and a decompressed body) delivers it. Only the new chunk is
+   * searched now.
+   */
+  private parts: string[] = [];
 
   /** Feed a decoded chunk; returns every complete line it closed. */
   push(chunk: string): string[] {
-    this.buffer += chunk;
     const lines: string[] = [];
-    let newline = this.buffer.indexOf("\n");
+    let start = 0;
+    let newline = chunk.indexOf("\n");
     while (newline !== -1) {
-      lines.push(this.buffer.slice(0, newline));
-      this.buffer = this.buffer.slice(newline + 1);
-      newline = this.buffer.indexOf("\n");
+      const piece = chunk.slice(start, newline);
+      if (this.parts.length > 0) {
+        this.parts.push(piece);
+        lines.push(this.parts.join(""));
+        this.parts = [];
+      } else {
+        lines.push(piece);
+      }
+      start = newline + 1;
+      newline = chunk.indexOf("\n", start);
+    }
+    if (start < chunk.length) {
+      this.parts.push(start === 0 ? chunk : chunk.slice(start));
     }
     return lines;
   }
 
   reset(): void {
-    this.buffer = "";
+    this.parts = [];
   }
 }
 

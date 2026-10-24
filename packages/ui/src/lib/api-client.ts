@@ -114,6 +114,7 @@ import {
   resolveAgentChatTransport,
   type AgentChatTransport
 } from "./agent-chat/transport";
+import { NdjsonLineBuffer } from "./agent-chat/stream.logic";
 import { bindThreadCacheScope } from "./agent-chat/persistent-cache";
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
@@ -414,7 +415,7 @@ export class ApiClient {
     onEnd?: () => void,
     opts?: { project?: string }
   ): () => void {
-    let buffer = "";
+    const lines = new NdjsonLineBuffer();
     // `?project=` additionally subscribes this stream to that project's git
     // status: the daemon polls it only while such a stream is open, and sends
     // `project.git.changed` to these subscribers alone. Refcounted server-side
@@ -422,11 +423,7 @@ export class ApiClient {
     const query = opts?.project ? `?project=${encodeURIComponent(opts.project)}` : "";
     const handle = this.transporter.openStream(`/events${query}`, {
       onData: (chunk) => {
-        buffer += chunk;
-        let newline = buffer.indexOf("\n");
-        while (newline !== -1) {
-          const line = buffer.slice(0, newline);
-          buffer = buffer.slice(newline + 1);
+        for (const line of lines.push(chunk)) {
           if (line.trim()) {
             try {
               onEvent(JSON.parse(line) as EventMessage);
@@ -434,7 +431,6 @@ export class ApiClient {
               /* ignore malformed line */
             }
           }
-          newline = buffer.indexOf("\n");
         }
       },
       onEnd: () => onEnd?.()
