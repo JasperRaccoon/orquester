@@ -328,7 +328,7 @@ test("knowledge tools end to end: save from Global and profile chats, visibility
   assert.ok(!mirrorBefore.includes("SEO"), "collections are not in the mirror");
   // A duplicate save (same text) adds its collections to the entry that exists.
   const duplicate = await h.text("global", "knowledge_save", { entries: [{ body: cloudflare, collections: ["SEO", "SaaS"] }] });
-  assert.match(duplicate, /already saved as ke_[a-z0-9]{12} \(new collections added\) · in SEO, SaaS/);
+  assert.match(duplicate, /already saved as ke_[a-z0-9]{12} \(not saved again; the collections it is in now\) · in SEO, SaaS/);
   assert.deepEqual(savedIds(duplicate), [cloudflareId]);
   // The user ticks Ads on it in the Knowledge tab.
   const patched = await h.user("PATCH", knowledgeRoutes.entry(cloudflareId!), { collections: [seo.id, saas.id, ads.id] });

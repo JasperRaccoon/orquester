@@ -175,7 +175,7 @@ test("knowledge_save: one call, many items, the session named, handles without @
     const out = textOf(r);
     assert.match(out, /^Saved 1 entry, 1 already saved; linking queued\.\nCreated collection "AI search": tell the user\.\n/);
     assert.ok(out.includes(`- saved ke_aaaaaaaaaaaa · in SEO, AI search · cite: ${meta().citation}`));
-    assert.match(out, /- already saved as ke_bbbbbbbbbbbb \(new collections added\) · in Ads · cite: \[Old\]/);
+    assert.match(out, /- already saved as ke_bbbbbbbbbbbb \(not saved again; the collections it is in now\) · in Ads · cite: \[Old\]/);
   }
   assert.deepEqual(api.calls.find((call) => call.path === knowledgeRoutes.save)!.body, {
     entries: [

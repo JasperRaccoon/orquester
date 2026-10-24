@@ -253,7 +253,7 @@ export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<s
   }
   for (const result of response.results) {
     const where = inCollections(result.collections, all);
-    lines.push(result.status === "saved" ? `- saved ${result.entryId} · ${where} · cite: ${result.citation}` : `- already saved as ${result.entryId} (new collections added) · ${where} · cite: ${result.citation}`);
+    lines.push(result.status === "saved" ? `- saved ${result.entryId} · ${where} · cite: ${result.citation}` : `- already saved as ${result.entryId} (not saved again; the collections it is in now) · ${where} · cite: ${result.citation}`);
   }
   return lines.join("\n");
 }
