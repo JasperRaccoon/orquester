@@ -10,7 +10,7 @@ import { isContentChangedError, pushSecretFiles, resetCloneSecretFiles } from ".
 import { useAppStore } from "../../store/app";
 import { Button, ConfirmDialog } from "../ui";
 import { SecretFileCompareModal } from "./SecretFileCompareModal";
-import { SecretFilesDialog } from "./SecretFilesDialog";
+import { lazyDialog, lazyNamed } from "../ui/lazy";
 import {
   CONTENT_CHANGED_TEXT,
   addBarDismissal,
@@ -25,6 +25,9 @@ import {
   pushConfirmText,
   resetConfirmText
 } from "./drift.logic";
+
+// Loads with its first opening.
+const SecretFilesDialog = lazyDialog(lazyNamed(() => import("./SecretFilesDialog"), "SecretFilesDialog"));
 
 const DISMISS_STORAGE_KEY = "orquester:secret-files-bar-dismissed";
 

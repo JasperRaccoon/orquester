@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 
 import { testEdge, testNode, testWorkflow, T0 } from "./testing.ts";
 import type { WorkflowProblem } from "./types.ts";
-import { hasWorkflowErrors, validateWorkflow, workflowSummaryErrors, type ValidateWorkflowOptions } from "./validate.ts";
+import { workflowSummaryErrors } from "./summary-errors.ts";
+import { hasWorkflowErrors, validateWorkflow, type ValidateWorkflowOptions } from "./validate.ts";
 
 function codes(problems: WorkflowProblem[]): string[] {
   return problems.map((problem) => problem.code);

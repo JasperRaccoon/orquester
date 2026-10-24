@@ -12,25 +12,32 @@
  * point of `language-data`.)
  *
  * The browser half lives here so `highlight-core.ts` stays importable from
- * plain node: this module reaches `@codemirror/language`, which reaches
- * `@codemirror/view`.
+ * plain node. The catalog itself (`language-catalog.ts`) reaches
+ * `@codemirror/language`, which reaches `@codemirror/view`, so it is
+ * `import()`ed too, by the first fenced block that asks for a parser.
  */
 
-import { LanguageDescription } from "@codemirror/language";
-import { languages } from "@codemirror/language-data";
 import type { Parser } from "@lezer/common";
 import React from "react";
 
-import { resolveLanguageEntry, type LanguageEntry } from "./highlight-core";
+import { resolveLanguageEntry } from "./highlight-core";
+import type { CatalogEntry } from "./language-catalog";
 
-const ENTRIES: readonly (LanguageEntry & { description: LanguageDescription })[] = languages.map(
-  (description) => ({
-    name: description.name,
-    alias: description.alias,
-    extensions: description.extensions,
-    description
-  })
-);
+/** The catalog once loaded; `null` before. */
+let catalog: readonly CatalogEntry[] | null = null;
+let catalogLoad: Promise<readonly CatalogEntry[] | null> | null = null;
+
+/** Loads the catalog once; `null` when its chunk fails (a later block tries again). */
+function loadCatalog(): Promise<readonly CatalogEntry[] | null> {
+  catalogLoad ??= import("./language-catalog").then(
+    (module) => (catalog = module.ENTRIES),
+    () => {
+      catalogLoad = null;
+      return null;
+    }
+  );
+  return catalogLoad;
+}
 
 /** Resolved parsers, by canonical language name. `null` = tried and unavailable. */
 const parsers = new Map<string, Parser | null>();
@@ -44,7 +51,11 @@ const inFlight = new Map<string, Promise<Parser | null>>();
  * chunk that 404s after a deploy must not take the message down with it.
  */
 export async function loadLanguageParser(info: string | undefined): Promise<Parser | null> {
-  const entry = resolveLanguageEntry(info, ENTRIES);
+  // A fence with no language name never loads the catalog.
+  if ((info ?? "").trim().length === 0) return null;
+  const entries = catalog ?? (await loadCatalog());
+  if (entries === null) return null;
+  const entry = resolveLanguageEntry(info, entries);
   if (entry === null) return null;
   const key = entry.name;
   const known = parsers.get(key);
@@ -71,7 +82,8 @@ export async function loadLanguageParser(info: string | undefined): Promise<Pars
 
 /** The parser if it is already resolved, without starting a load. */
 function resolvedLanguageParser(info: string | undefined): Parser | null {
-  const entry = resolveLanguageEntry(info, ENTRIES);
+  if (catalog === null) return null;
+  const entry = resolveLanguageEntry(info, catalog);
   if (entry === null) return null;
   return parsers.get(entry.name) ?? null;
 }

@@ -23,10 +23,8 @@ import {
   isTriggerType,
   WORKFLOW_LIMITS,
   WORKFLOW_NODE_NAME_PATTERN,
-  WORKFLOW_SUMMARY_MAX_ERRORS,
   type Workflow,
-  type WorkflowProblem,
-  type WorkflowSummary
+  type WorkflowProblem
 } from "./types.ts";
 
 /**
@@ -84,27 +82,6 @@ export interface ValidateWorkflowResult {
 /** True when any problem is an error (enabling is refused). */
 export function hasWorkflowErrors(problems: readonly WorkflowProblem[]): boolean {
   return problems.some((problem) => problem.severity === "error");
-}
-
-/**
- * A `WorkflowSummary`'s error fields from a validation: the count, the first errors (each copied
- * field-wise), and how many of them are left out. `errors` / `errorsOmitted` are absent when empty.
- * One derivation for the daemon's rows and a client's own row from a write answer.
- */
-export function workflowSummaryErrors(
-  problems: readonly WorkflowProblem[]
-): Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted"> {
-  const errors = problems.filter((problem) => problem.severity === "error");
-  if (errors.length === 0) return { errorCount: 0 };
-  const shown = errors.slice(0, WORKFLOW_SUMMARY_MAX_ERRORS).map((problem) => {
-    const copy: WorkflowProblem = { severity: "error", code: problem.code, message: problem.message };
-    if (problem.nodeId !== undefined) copy.nodeId = problem.nodeId;
-    if (problem.edgeId !== undefined) copy.edgeId = problem.edgeId;
-    if (problem.field !== undefined) copy.field = problem.field;
-    return copy;
-  });
-  const omitted = errors.length - shown.length;
-  return { errorCount: errors.length, errors: shown, ...(omitted > 0 ? { errorsOmitted: omitted } : {}) };
 }
 
 /** UTF-8 byte length without allocating. */
