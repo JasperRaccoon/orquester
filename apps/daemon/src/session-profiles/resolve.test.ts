@@ -112,6 +112,12 @@ describe("resolveForAgent", () => {
     assert.equal(resolveForAgent(source(items), "grok").skills.length, 0);
   });
 
+  it("honours claudeBuiltinTools: false only on a managed profile", () => {
+    const settings = { claudeBuiltinTools: false };
+    assert.equal(resolveForAgent(source([], { settings, managed: "knowledge-indexer" }), "claude").settings.claudeBuiltinTools, false);
+    assert.equal("claudeBuiltinTools" in resolveForAgent(source([], { settings }), "claude").settings, false, "a user profile keeps its built-in tools");
+  });
+
   it("resolves the settings with their defaults, per agent", () => {
     assert.deepEqual(resolveSessionProfileSettings(undefined), {
       hideBuiltinSkills: { claude: true, codex: true, grok: true, opencode: true },

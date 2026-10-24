@@ -35,6 +35,9 @@
       "allowedVersions": {
         "@anthropic-ai/claude-agent-sdk>zod": "3"
       }
-    }
+    },
+    "ignoredBuiltDependencies": [
+      "onnxruntime-node"
+    ]
   }
 }

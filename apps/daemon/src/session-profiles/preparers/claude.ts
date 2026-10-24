@@ -233,7 +233,9 @@ async function prepareClaude(ctx: SessionProfilePrepareContext<"claude">): Promi
     hooks: claudeHooksSetting(resolved.hooks),
     ...(instructions.length > 0 ? { instructionsFile: INSTRUCTIONS_FILE } : {}),
     ...(skills !== undefined ? { skills } : {}),
-    disableWorkflows: !workflowOn
+    disableWorkflows: !workflowOn,
+    // Only written when set, so every other profile's section (and its fingerprint) is unchanged.
+    ...(resolved.settings.claudeBuiltinTools === false ? { disableBuiltinTools: true } : {})
   };
 }
 

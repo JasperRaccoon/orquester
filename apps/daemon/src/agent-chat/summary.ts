@@ -522,6 +522,8 @@ export class AgentChatSummaryService {
     if (approvalPushed && pushType === "needs-input") return;
     const summary = this.opts.chat.get(threadId);
     if (!summary) return;
+    // The Knowledge Graph indexer's worker chats are background machinery: never a push.
+    if (summary.owner?.kind === "knowledge-indexer") return;
     void this.opts.push.notifyStructural(summary, pushType);
   }
 
@@ -530,6 +532,10 @@ export class AgentChatSummaryService {
     const notify = this.opts.push.notifyApprovalNeeded;
     const summary = this.opts.chat.get(threadId);
     if (!notify || !summary) return false;
+    // A Knowledge Graph worker chat is the plugin's background machinery (its watcher answers what it
+    // asks, `knowledge/linking/daemon-workers.ts`), never the user's to answer: no push (and
+    // "pushed", so the structural push stays quiet too).
+    if (summary.owner?.kind === "knowledge-indexer") return true;
     try {
       void notify.call(this.opts.push, summary, cardTitle).catch((error: unknown) => {
         this.opts.logger?.warn?.("agent-chat: approval push failed", error instanceof Error ? error.name : typeof error);

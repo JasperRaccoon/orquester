@@ -189,6 +189,9 @@ import type { PluginInfo } from "@orquester/api";
 import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
 import { DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT, type DaemonStoppingPayload } from "@orquester/api";
 import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn } from "../lib/boxes/store";
+// The Knowledge Graph plugin's module store (status + collections; loaded while the plugin is on).
+import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
+import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowledge/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -694,6 +697,28 @@ export interface WorkflowTab {
   runId?: string | null;
 }
 
+/**
+ * What a Knowledge tab is asked to show: an entry or a concept, selected in its
+ * side panel. `nonce` moves with every request, so asking for the same item
+ * again (a citation clicked twice) selects it again after the panel closed.
+ */
+export interface KnowledgeFocus {
+  kind: "entry" | "concept";
+  id: string;
+  nonce: number;
+}
+
+/**
+ * The client-local Knowledge tab (the Knowledge Graph plugin): at most one per
+ * project, showing the server-wide knowledge base whichever project it is in.
+ */
+export interface KnowledgeTab {
+  id: string;
+  projectPath: string;
+  title: string;
+  focus: KnowledgeFocus | null;
+}
+
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "agent-chat"; sessionId: string; session: SessionSummary }
@@ -702,6 +727,7 @@ export type ProjectTab =
   | { id: string; type: "todo"; todoId: string; title: string }
   | { id: string; type: "workflow"; workflowId: string; title: string; runId?: string | null }
   | { id: string; type: "whiteboard"; path: string; title: string }
+  | { id: string; type: "knowledge"; title: string; focus: KnowledgeFocus | null }
   | { id: string; type: "browser"; browser: BrowserSummary }
   | { id: string; type: "desktop"; desktop: DesktopSummary };
 
@@ -1032,6 +1058,8 @@ export interface AppState {
   /** Client-local automated-workflow editor tabs per project path. */
   workflowTabsByProject: Record<string, WorkflowTab[]>;
   whiteboardTabsByProject: Record<string, WhiteboardTab[]>;
+  /** The Knowledge tab per project path (a list of at most one, like the other tool tabs). */
+  knowledgeTabsByProject: Record<string, KnowledgeTab[]>;
   /** Server cache of to-do records (all loaded scopes/refs). */
   todos: TodoListRecord[];
   /**
@@ -1249,6 +1277,15 @@ export interface AppState {
    */
   createWhiteboard: () => Promise<void>;
   /**
+   * Open (or focus) the Knowledge tab of project `projectPath` (default: the
+   * current project) — one per project. Does nothing outside a project.
+   */
+  openKnowledge: (projectPath?: string) => void;
+  /** Open (or focus) the Knowledge tab like {@link openKnowledge}, with entry `entryId` selected in its side panel. */
+  openKnowledgeEntry: (entryId: string, projectPath?: string) => void;
+  /** Open (or focus) the Knowledge tab like {@link openKnowledge}, with concept `conceptId` selected in its side panel. */
+  openKnowledgeConcept: (conceptId: string, projectPath?: string) => void;
+  /**
    * Open (or focus) the editor tab of workflow `workflowId` in project
    * `projectPath` — one per workflow, reused when open; `runId` selects a run
    * in its run view (`null` clears it; absent leaves it). `title` is used only
@@ -1417,6 +1454,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   todoTabsByContext: {},
   workflowTabsByProject: {},
   whiteboardTabsByProject: {},
+  knowledgeTabsByProject: {},
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
@@ -1601,6 +1639,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const secretFilesWasOn = secretFilesOn(get().plugins);
     // boxes: same rule as the secret files — a reconnect with the plugin on reloads.
     const boxesWasOn = boxesOn(get().plugins);
+    const knowledgeWasOn = knowledgeOn(get().plugins);
     await Promise.all([
       get().loadWorkspaces(),
       get().loadRecentProjects(),
@@ -1647,6 +1686,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           // boxes: the plugin's boxes, providers, kinds and config changes, likewise.
           if (boxesWasOn && boxesOn(get().plugins) && get().api === active) {
             void loadBoxes(active).catch(() => undefined);
+          }
+          // The knowledge status and collections, likewise.
+          if (knowledgeWasOn && knowledgeOn(get().plugins) && get().api === active) {
+            void loadKnowledge(active).catch(() => undefined);
           }
           // boxes: with the plugin off, boxes may still be running (and billing): the list
           // is read to find them (the store keeps it only while one is). An older daemon
@@ -2027,6 +2070,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSecretFiles();
     // boxes: another daemon's boxes.
     resetBoxes();
+    resetKnowledge();
     stopSetupFollows();
     projectsLoadSeq += 1;
     resetSecretRequests();
@@ -2472,6 +2516,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.todoTabsByContext,
         state.workflowTabsByProject,
         state.whiteboardTabsByProject,
+        state.knowledgeTabsByProject,
         project.path
       );
       return {
@@ -3114,6 +3159,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     }
   },
+
+  openKnowledge: (projectPath) => set((state) => openKnowledgeTab(state, projectPath, null)),
+
+  openKnowledgeEntry: (entryId, projectPath) =>
+    set((state) => openKnowledgeTab(state, projectPath, { kind: "entry", id: entryId })),
+
+  openKnowledgeConcept: (conceptId, projectPath) =>
+    set((state) => openKnowledgeTab(state, projectPath, { kind: "concept", id: conceptId })),
 
   openWorkflowTab: (projectPath, workflowId, opts) =>
     set((state) => {
@@ -3813,6 +3866,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (get().plugins !== null) applyBoxesEvent(event);
       return;
     }
+    if (event.channel === KNOWLEDGE_CHANNEL) {
+      // Knowledge status and collections live in their own module store (validated); held only
+      // while the plugin is on.
+      if (knowledgeOn(get().plugins)) applyKnowledgeEvent(event);
+      return;
+    }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
       // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
@@ -3977,6 +4036,21 @@ useAppStore.subscribe((state, previous) => {
   if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
 });
 
+// Knowledge Graph: wired like the secret files — status and collections load when
+// the plugin turns on and are forgotten when it turns off (or with the plugins list
+// on a connection switch). Knowledge tabs stay open and show the plugin's state.
+function knowledgeOn(plugins: readonly PluginInfo[] | null): boolean {
+  return isGlobalPluginEnabled(plugins, KNOWLEDGE_GRAPH_PLUGIN_ID);
+}
+
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === previous.plugins) return;
+  const on = knowledgeOn(state.plugins);
+  if (on === knowledgeOn(previous.plugins)) return;
+  if (!on) resetKnowledge();
+  else if (state.api) void loadKnowledge(state.api).catch(() => undefined);
+});
+
 // Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this
 // client was away, or another daemon's id) would make every new chat of that agent fail. Each
 // time its profile list loads cleanly, the picks it does not know are forgotten (an unreadable
@@ -4020,7 +4094,7 @@ setProviderSideEffects({
 
 /**
  * First remaining tab id for a context (session, then browser, then desktop,
- * then file, then git, then to-do, then workflow, then whiteboard —
+ * then file, then git, then to-do, then workflow, then whiteboard, then knowledge —
  * `useProjectTabs`' order).
  */
 function firstTabId(
@@ -4032,6 +4106,7 @@ function firstTabId(
   todoTabs: Record<string, TodoTab[]>,
   workflowTabs: Record<string, WorkflowTab[]>,
   whiteboardTabs: Record<string, WhiteboardTab[]>,
+  knowledgeTabs: Record<string, KnowledgeTab[]>,
   path: string
 ): string | null {
   return (
@@ -4043,6 +4118,7 @@ function firstTabId(
     todoTabs[path]?.[0]?.id ??
     workflowTabs[path]?.[0]?.id ??
     whiteboardTabs[path]?.[0]?.id ??
+    knowledgeTabs[path]?.[0]?.id ??
     null
   );
 }
@@ -4057,12 +4133,13 @@ function reassignActive(
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
   workflowTabs: Record<string, WorkflowTab[]>,
-  whiteboardTabs: Record<string, WhiteboardTab[]>
+  whiteboardTabs: Record<string, WhiteboardTab[]>,
+  knowledgeTabs: Record<string, KnowledgeTab[]>
 ): Record<string, string | null> {
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, browsers, desktops, fileTabs, gitTabs, todoTabs, workflowTabs, whiteboardTabs, path);
+      next[path] = firstTabId(sessions, browsers, desktops, fileTabs, gitTabs, todoTabs, workflowTabs, whiteboardTabs, knowledgeTabs, path);
     }
   }
   return next;
@@ -4083,7 +4160,8 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       state.gitTabsByProject,
       state.todoTabsByContext,
       state.workflowTabsByProject,
-      state.whiteboardTabsByProject
+      state.whiteboardTabsByProject,
+      state.knowledgeTabsByProject
     )
   };
 }
@@ -4103,7 +4181,8 @@ function removeBrowser(state: AppState, id: string): Partial<AppState> {
       state.gitTabsByProject,
       state.todoTabsByContext,
       state.workflowTabsByProject,
-      state.whiteboardTabsByProject
+      state.whiteboardTabsByProject,
+      state.knowledgeTabsByProject
     )
   };
 }
@@ -4128,12 +4207,13 @@ function removeDesktopState(state: AppState, id: string): Partial<AppState> {
       state.gitTabsByProject,
       state.todoTabsByContext,
       state.workflowTabsByProject,
-      state.whiteboardTabsByProject
+      state.whiteboardTabsByProject,
+      state.knowledgeTabsByProject
     )
   };
 }
 
-/** Drop a client-local (non-session) tab — file browser, git, to-do, workflow OR whiteboard — by id. */
+/** Drop a client-local (non-session) tab — file browser, git, to-do, workflow, whiteboard OR knowledge — by id. */
 function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   const fileTabsByProject: Record<string, FileTab[]> = {};
   for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
@@ -4155,12 +4235,17 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   for (const [path, tabs] of Object.entries(state.whiteboardTabsByProject)) {
     whiteboardTabsByProject[path] = tabs.filter((t) => t.id !== id);
   }
+  const knowledgeTabsByProject: Record<string, KnowledgeTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.knowledgeTabsByProject)) {
+    knowledgeTabsByProject[path] = tabs.filter((t) => t.id !== id);
+  }
   return {
     fileTabsByProject,
     gitTabsByProject,
     todoTabsByContext,
     workflowTabsByProject,
     whiteboardTabsByProject,
+    knowledgeTabsByProject,
     activeTabByProject: reassignActive(
       state.activeTabByProject,
       id,
@@ -4171,24 +4256,47 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       gitTabsByProject,
       todoTabsByContext,
       workflowTabsByProject,
-      whiteboardTabsByProject
+      whiteboardTabsByProject,
+      knowledgeTabsByProject
     )
   };
 }
 
 /**
- * Drop the previous daemon's workflow editor and whiteboard tabs on a
- * connection switch, and any active-tab pointer at one.
+ * Drop the previous daemon's workflow editor, whiteboard and knowledge tabs on
+ * a connection switch, and any active-tab pointer at one.
  */
 function withoutDaemonTabs(
-  state: Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject">
-): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject"> {
+  state: Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "knowledgeTabsByProject" | "activeTabByProject">
+): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "knowledgeTabsByProject" | "activeTabByProject"> {
   const ids = new Set<string>();
   for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
   for (const tabs of Object.values(state.whiteboardTabsByProject)) for (const tab of tabs) ids.add(tab.id);
+  for (const tabs of Object.values(state.knowledgeTabsByProject)) for (const tab of tabs) ids.add(tab.id);
   const activeTabByProject: Record<string, string | null> = {};
   for (const [path, id] of Object.entries(state.activeTabByProject)) activeTabByProject[path] = id !== null && ids.has(id) ? null : id;
-  return { workflowTabsByProject: {}, whiteboardTabsByProject: {}, activeTabByProject };
+  return { workflowTabsByProject: {}, whiteboardTabsByProject: {}, knowledgeTabsByProject: {}, activeTabByProject };
+}
+
+let knowledgeFocusNonce = 0;
+
+/** Open or focus a project's one Knowledge tab, with `focus` selected when given. */
+function openKnowledgeTab(
+  state: AppState,
+  projectPath: string | undefined,
+  focus: Omit<KnowledgeFocus, "nonce"> | null
+): Partial<AppState> {
+  const path = projectPath ?? state.currentProject?.path;
+  if (!path) return {};
+  const nextFocus = focus ? { ...focus, nonce: ++knowledgeFocusNonce } : null;
+  const existing = state.knowledgeTabsByProject[path]?.[0];
+  const tab: KnowledgeTab = existing
+    ? { ...existing, focus: nextFocus ?? existing.focus }
+    : { id: crypto.randomUUID(), projectPath: path, title: "Knowledge", focus: nextFocus };
+  return {
+    knowledgeTabsByProject: { ...state.knowledgeTabsByProject, [path]: [tab] },
+    activeTabByProject: { ...state.activeTabByProject, [path]: tab.id }
+  };
 }
 
 /** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */
@@ -4307,6 +4415,12 @@ function clearProjectLocalState(
       whiteboardTabsByProject[path] = tabs;
     }
   }
+  const knowledgeTabsByProject: Record<string, KnowledgeTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.knowledgeTabsByProject)) {
+    if (!match(path)) {
+      knowledgeTabsByProject[path] = tabs;
+    }
+  }
   // To-do tabs are keyed by context key (project path here); drop matching keys.
   const todoTabsByContext: Record<string, TodoTab[]> = {};
   for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
@@ -4329,6 +4443,7 @@ function clearProjectLocalState(
     todoTabsByContext,
     workflowTabsByProject,
     whiteboardTabsByProject,
+    knowledgeTabsByProject,
     todos
   };
 }
@@ -4366,6 +4481,7 @@ export function useProjectTabs(): ProjectTab[] {
   const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
   const workflowTabsByProject = useAppStore((s) => s.workflowTabsByProject);
   const whiteboardTabsByProject = useAppStore((s) => s.whiteboardTabsByProject);
+  const knowledgeTabsByProject = useAppStore((s) => s.knowledgeTabsByProject);
   const project = useAppStore((s) => s.currentProject);
   const workspace = useAppStore((s) => s.currentWorkspace);
   return useMemo(() => {
@@ -4424,7 +4540,23 @@ export function useProjectTabs(): ProjectTab[] {
       path: t.path,
       title: t.title
     }));
-    return [...sessionTabs, ...browserTabs, ...desktopTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs, ...whiteboardTabs];
+    const knowledgeTabs = (knowledgeTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
+      type: "knowledge",
+      title: t.title,
+      focus: t.focus
+    }));
+    return [
+      ...sessionTabs,
+      ...browserTabs,
+      ...desktopTabs,
+      ...fileTabs,
+      ...gitTabs,
+      ...todoTabs,
+      ...workflowTabs,
+      ...whiteboardTabs,
+      ...knowledgeTabs
+    ];
   }, [
     sessions,
     browsers,
@@ -4434,6 +4566,7 @@ export function useProjectTabs(): ProjectTab[] {
     todoTabsByContext,
     workflowTabsByProject,
     whiteboardTabsByProject,
+    knowledgeTabsByProject,
     project,
     workspace
   ]);

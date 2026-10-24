@@ -164,6 +164,55 @@ export function tsRustPreloadPath(baseDir: string): string {
   return joinPath(tsRustPluginDir(baseDir), "preload.cjs");
 }
 
+/**
+ * `<appdir>/daemon/plugins/knowledge-graph` (docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md):
+ * entries/ (durable record), collections.json, index/ (disposable search cache),
+ * mykg/ (generated config, input/ mirror, myKG sessions), state.json (linking state),
+ * runtime/ (uv, the myKG venv versions, the embedding model).
+ */
+export function knowledgeGraphPluginDir(baseDir: string): string {
+  return joinPath(pluginsDir(baseDir), "knowledge-graph");
+}
+
+export function knowledgeEntriesDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "entries");
+}
+
+export function knowledgeCollectionsPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "collections.json");
+}
+
+export function knowledgeIndexDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "index");
+}
+
+export function knowledgeMykgDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "mykg");
+}
+
+/** What myKG reads: one generated `<entryId>.md` per entry, no frontmatter, no collections. */
+export function knowledgeMykgInputDir(baseDir: string): string {
+  return joinPath(knowledgeMykgDir(baseDir), "input");
+}
+
+export function knowledgeStatePath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "state.json");
+}
+
+export function knowledgeRuntimeDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "runtime");
+}
+
+/** The empty directory the indexer's worker chats run in (no project files, no CLAUDE.md). */
+export function knowledgeWorkersDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "workers");
+}
+
+/** `HOME` of the myKG child, so it writes nothing into the user's real home. */
+export function knowledgeMykgHomeDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
+}
+
 // appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
@@ -1247,7 +1296,13 @@ export const pluginStateSchema = z
      */
     engine: z.unknown().optional(),
     /** ts-rust: the tsrs engine's versions and checks. */
-    tsrs: pluginEngineVersionsSchema.optional()
+    tsrs: pluginEngineVersionsSchema.optional(),
+    /**
+     * The plugin's own settings object (knowledge-graph: `KnowledgeSettings`). Not validated
+     * here: its owner reads it field by field ({@link storedKnowledgeSettings}), so a value
+     * another build wrote never makes the record unreadable, and unknown keys are kept.
+     */
+    settings: z.unknown().optional()
   })
   .passthrough();
 
@@ -1286,6 +1341,31 @@ export function parsePluginsConfig(value: unknown): PluginsConfig {
  */
 export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
   return pluginStateSchema.parse(config.plugins[id] ?? {});
+}
+
+/** The knowledge-graph settings fields a record carries with a usable type; others read as absent. */
+export interface StoredKnowledgeSettings {
+  accountId?: string | null;
+  model?: string | null;
+  concurrency?: number;
+}
+
+/**
+ * The knowledge-graph record's `settings`, field by field: a field of the wrong type (or a
+ * `settings` that is not an object) reads as absent, so the caller falls back to its default.
+ * Range checks are the caller's (the limits live in `@orquester/api`).
+ */
+export function storedKnowledgeSettings(state: PluginState): StoredKnowledgeSettings {
+  const raw = state.settings;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  const out: StoredKnowledgeSettings = {};
+  const nullableString = (value: unknown): value is string | null =>
+    value === null || (typeof value === "string" && value.trim() !== "");
+  if (nullableString(record.accountId)) out.accountId = record.accountId;
+  if (nullableString(record.model)) out.model = record.model;
+  if (typeof record.concurrency === "number" && Number.isInteger(record.concurrency)) out.concurrency = record.concurrency;
+  return out;
 }
 
 /** The engine a ts-rust record names, or undefined when it names none this build knows. */
@@ -1434,6 +1514,20 @@ export const workflowSessionOwnerSchema = z.object({
 export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSchema>;
 
 /**
+ * A worker chat the Knowledge Graph plugin's indexer started for one linking run. Mirrors
+ * `KnowledgeSessionOwner` in `@orquester/api`.
+ */
+export const knowledgeSessionOwnerSchema = z.object({
+  kind: z.literal("knowledge-indexer"),
+  runId: ownerIdSchema
+});
+export type KnowledgeSessionOwnerRecord = z.infer<typeof knowledgeSessionOwnerSchema>;
+
+/** Every owner a chat tab may carry; the daemon validates a create's `owner` against it (400 `INVALID_OWNER`). */
+export const sessionOwnerSchema = z.union([workflowSessionOwnerSchema, knowledgeSessionOwnerSchema]);
+export type SessionOwnerRecord = z.infer<typeof sessionOwnerSchema>;
+
+/**
  * A chat thread's parent (spec 2026-10-14 §6). Mirrors `ThreadLineage` in
  * `@orquester/api` (`parseThreadLineage`, the same rules). Read with `.catch`
  * wherever it is persisted: a lineage that does not parse is dropped, never
@@ -1492,11 +1586,12 @@ export const sessionRecordSchema = z.object({
   // parseSessionsConfig: a bad chat block drops that ONE session, never the
   // index — an unparseable index disables orphan reaping for every terminal.
   chat: sessionChatRecordSchema.optional(),
-  // Set when an automated workflow run started this (chat) tab (workflows spec §5.10).
-  // Tolerant: a malformed owner — a newer shape, a hand edit — is DROPPED, never the record
-  // (`.catch`), so a bad owner can't cost the user a tab. An older daemon strips the key on
-  // rollback, which only loses the Workflow chip.
-  owner: workflowSessionOwnerSchema.optional().catch(undefined),
+  // Set when an automated workflow run (workflows spec §5.10) or the Knowledge Graph indexer
+  // started this (chat) tab. Tolerant: a malformed owner — a newer shape, a hand edit — is
+  // DROPPED, never the record (`.catch`), so a bad owner can't cost the user a tab. An older
+  // daemon strips the key on rollback (a knowledge-indexer owner included), which only loses the
+  // Workflow chip, or shows a former worker chat as an ordinary tab.
+  owner: sessionOwnerSchema.optional().catch(undefined),
   // Agent-chat tabs: the thread this one was forked from or delegated by (spec 2026-10-14 §6).
   // Tolerant like `owner`: a malformed lineage is dropped, never the record; an older daemon
   // strips the key, which only loses the lineage chip.
@@ -2735,7 +2830,9 @@ export * from "./auth-sessions.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
+export * from "./knowledge-linking.ts";
 export * from "./boxes.ts";
 export * from "./tooling.ts";
 // boxes:
 export * from "./box-mcp.ts";
+export * from "./knowledge-store.ts";

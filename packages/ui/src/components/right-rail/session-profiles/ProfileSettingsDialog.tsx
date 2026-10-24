@@ -5,18 +5,27 @@
  * it empty to create one (`mode: "create"`). Rename in the "⋯" menu opens it
  * with the name focused.
  *
- * Saving sends only what changed (`UpdateSessionProfileRequest`); a cleared
- * icon is `icon: null`. The daemon's refusal — a taken name, a stale
+ * While the Knowledge Graph plugin is on, a "Knowledge" section ticks the
+ * collections this profile's chats may search (`knowledgeCollections`, ids).
+ * Ids of collections deleted since are kept as they are (the daemon ignores
+ * them, and the contract keeps them): they are not shown, and only leave the
+ * list when it would otherwise exceed its cap.
+ *
+ * Saving sends only what changed (`UpdateSessionProfileRequest`) from the
+ * profile as the dialog opened on it — not as it reads now, so a change made
+ * elsewhere meanwhile is not undone; a cleared icon is `icon: null`. The daemon's refusal — a taken name, a stale
  * revision — is shown in the dialog, which stays open.
  */
 
-import React, { useId, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 
 import {
+  KNOWLEDGE_GRAPH_PLUGIN_ID,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_DEFAULT_SETTINGS,
   SESSION_PROFILE_DESCRIPTION_MAX,
   SESSION_PROFILE_ICON_MAX,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX,
   SESSION_PROFILE_NAME_MAX,
   type CreateSessionProfileRequest,
   type SessionProfileAgentId,
@@ -26,10 +35,15 @@ import {
 } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
+import { loadKnowledgeCollections, useKnowledgeCollections, useKnowledgeState } from "../../../lib/knowledge/store";
+import { knowledgeErrorText } from "../../knowledge/knowledge.logic";
+import { isGlobalPluginEnabled } from "../../../lib/plugins-state";
 import { agentLabel } from "../../../lib/session-profiles/logic";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Modal, ModalCloseButton } from "../../ui/modal";
+import { useAppStore } from "../../../store/app";
+import { CollectionDot } from "../../knowledge/parts";
 import { RailSwitch } from "../primitives";
 import { PROFILE_ICON_PRESETS, ProfileIcon } from "./ProfileIcon";
 
@@ -70,8 +84,33 @@ export function createRequestFromForm(form: ProfileSettingsForm): CreateSessionP
     name: form.name.trim(),
     ...(icon !== "" ? { icon } : {}),
     ...(form.description.trim() !== "" ? { description: form.description.trim() } : {}),
-    settings: { hideBuiltinSkills: { ...form.settings.hideBuiltinSkills }, claudeWorkflowTool: form.settings.claudeWorkflowTool }
+    settings: {
+      hideBuiltinSkills: { ...form.settings.hideBuiltinSkills },
+      claudeWorkflowTool: form.settings.claudeWorkflowTool,
+      ...(form.settings.knowledgeCollections?.length ? { knowledgeCollections: [...form.settings.knowledgeCollections] } : {})
+    }
   };
+}
+
+/** Whether two collection-id lists tick the same collections (order does not matter). */
+function sameCollections(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  return left.size === right.size && [...left].every((id) => right.has(id));
+}
+
+/**
+ * Tick or untick collection `id`. Every other id is kept, including those of
+ * deleted collections (not in `known`) — unless the list would exceed the cap,
+ * when those go first.
+ */
+export function toggleKnowledgeCollection(ids: readonly string[], id: string, on: boolean, known: readonly string[]): string[] {
+  const rest = ids.filter((other) => other !== id);
+  if (!on) return rest;
+  const next = [...rest, id];
+  if (next.length <= SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX) return next;
+  const live = new Set(known);
+  return next.filter((other) => live.has(other)).slice(0, SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX);
 }
 
 /** What an edit sends: only the fields that changed (the revision is the store's). */
@@ -97,6 +136,8 @@ export function updatePatchFromForm(
   if (form.settings.claudeWorkflowTool !== profile.settings.claudeWorkflowTool) {
     settings.claudeWorkflowTool = form.settings.claudeWorkflowTool;
   }
+  const knowledge = form.settings.knowledgeCollections ?? [];
+  if (!sameCollections(knowledge, profile.settings.knowledgeCollections ?? [])) settings.knowledgeCollections = [...knowledge];
   if (Object.keys(settings).length > 0) patch.settings = settings;
   return patch;
 }
@@ -109,8 +150,11 @@ export const ProfileSettingsDialog: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  /** Resolves to the refusal's words, or `null` once saved (the dialog then closes). */
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  /**
+   * Resolves to the refusal's words, or `null` once saved (the dialog then closes). `base` is the
+   * profile the form was filled from (null when creating): diff against it, not the profile now.
+   */
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ open, ...props }) => (
   <Modal open={open} onClose={props.onCancel} className="max-w-md">
     {open ? <SettingsBody {...props} /> : null}
@@ -123,9 +167,11 @@ const SettingsBody: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ mode, profile, focusName = false, sheet, onCancel, onSubmit }) => {
   const ids = useId();
+  // What the form was filled from: the profile may move on while the dialog is open.
+  const [base] = useState(profile);
   const [form, setForm] = useState<ProfileSettingsForm>(() => profileSettingsForm(profile));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -144,7 +190,7 @@ const SettingsBody: React.FC<{
       return;
     }
     setBusy(true);
-    const refusal = await onSubmit(form);
+    const refusal = await onSubmit(form, base);
     setBusy(false);
     if (refusal !== null) setError(refusal);
   };
@@ -256,6 +302,10 @@ const SettingsBody: React.FC<{
             onChange={(value) => change({ settings: { ...form.settings, claudeWorkflowTool: value } })}
           />
         </div>
+        <KnowledgeSection
+          ids={form.settings.knowledgeCollections ?? []}
+          onChange={(next) => change({ settings: { ...form.settings, knowledgeCollections: next } })}
+        />
       </div>
       <footer className="shrink-0 space-y-2 border-t border-neutral-800 px-4 py-3">
         {error ? (
@@ -273,5 +323,75 @@ const SettingsBody: React.FC<{
         </div>
       </footer>
     </form>
+  );
+};
+
+/**
+ * The Knowledge Graph plugin's collections, ticked for this profile; nothing
+ * while the plugin is off. The collections are the knowledge store's (loaded
+ * while the plugin is on); read here when that load has not answered, with a
+ * retry when it failed.
+ */
+const KnowledgeSection: React.FC<{ ids: readonly string[]; onChange: (ids: string[]) => void }> = ({ ids, onChange }) => {
+  const on = useAppStore((s) => isGlobalPluginEnabled(s.plugins, KNOWLEDGE_GRAPH_PLUGIN_ID));
+  const api = useAppStore((s) => s.api);
+  const collections = useKnowledgeCollections();
+  const collectionsError = useKnowledgeState((s) => s.collectionsError);
+  const missing = on && collections === null;
+  const read = () => {
+    if (api) void loadKnowledgeCollections(api).catch(() => undefined);
+  };
+  // Once per open (single-flight in the store): a failed or missed load would
+  // otherwise leave the section "Loading" until the next connect.
+  useEffect(() => {
+    if (missing) read();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missing, api]);
+  if (!on) return null;
+  const list = collections?.collections ?? null;
+  const known = list?.map((c) => c.id) ?? [];
+  const ticked = new Set(ids);
+  return (
+    <fieldset className="space-y-1" aria-label="Knowledge">
+      <legend className="text-xs font-medium text-neutral-300">Knowledge</legend>
+      <p className="pb-1 text-[11px] leading-4 text-neutral-500">
+        Chats with this profile can only search the ticked collections. Chats without a profile see everything.
+      </p>
+      {list === null && collectionsError ? (
+        <div className="flex items-center gap-2 text-[12px] text-danger">
+          <span className="min-w-0 flex-1">Could not read the collections: {knowledgeErrorText(collectionsError)}</span>
+          <Button type="button" size="sm" variant="outline" onClick={read}>
+            Retry
+          </Button>
+        </div>
+      ) : list === null ? (
+        <p className="text-[12px] text-neutral-500">Loading collections…</p>
+      ) : list.length === 0 ? (
+        <p className="text-[12px] text-neutral-500">No collections yet. Create them in the Knowledge tab.</p>
+      ) : (
+        <ul className="space-y-0.5">
+          {list.map((collection) => (
+            <li key={collection.id}>
+              <label className="flex cursor-pointer items-start gap-2 rounded-md px-1 py-1 hover:bg-neutral-800/50">
+                <input
+                  type="checkbox"
+                  data-knowledge-collection={collection.id}
+                  checked={ticked.has(collection.id)}
+                  onChange={(event) => onChange(toggleKnowledgeCollection(ids, collection.id, event.target.checked, known))}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-neutral-300"
+                />
+                <CollectionDot color={collection.color} className="mt-[5px]" />
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] text-neutral-200">{collection.name}</span>
+                  {collection.description ? (
+                    <span className="block text-[11px] leading-4 text-neutral-500">{collection.description}</span>
+                  ) : null}
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+    </fieldset>
   );
 };

@@ -20,6 +20,7 @@
     "autoprefixer": "^10.4.21",
     "better-sqlite3": "^12.0.0",
     "node-pty": "^1.1.0",
+    "onnxruntime-node": "^1.30.0",
     "postcss": "^8.5.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -53,7 +54,10 @@
     ],
     "mac": {
       "target": "dmg",
-      "executableName": "orquester"
+      "executableName": "orquester",
+      "files": [
+        "!**/node_modules/onnxruntime-node/bin/napi-v*/{linux,win32}/**"
+      ]
     },
     "win": {
       "target": [
@@ -62,12 +66,18 @@
           "arch": ["x64"]
         }
       ],
-      "executableName": "orquester"
+      "executableName": "orquester",
+      "files": [
+        "!**/node_modules/onnxruntime-node/bin/napi-v*/{linux,darwin}/**"
+      ]
     },
     "linux": {
       "target": ["AppImage"],
       "executableName": "orquester",
-      "category": "Utility"
+      "category": "Utility",
+      "files": [
+        "!**/node_modules/onnxruntime-node/bin/napi-v*/{darwin,win32}/**"
+      ]
     }
   }
 }

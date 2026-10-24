@@ -10,6 +10,7 @@ import {
   PLUGINS_CHANGED_EVENT,
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
+  KNOWLEDGE_GRAPH_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   PLUGINS_CHANNEL,
   TS_RUST_PLUGIN_ID,
@@ -142,7 +143,8 @@ test("GET lists the built-in plugins", async (t) => {
       [ID, "Better TS Typecheck", "global", true, "supported", "idle"],
       [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"],
       [SECRET_FILES_PLUGIN_ID, "Secret files", "global", false, "supported", "idle"],
-      [EPHEMERAL_VMS_PLUGIN_ID, "Ephemeral AI VMs", "global", false, "supported", "idle"]
+      [EPHEMERAL_VMS_PLUGIN_ID, "Ephemeral AI VMs", "global", false, "supported", "idle"],
+      [KNOWLEDGE_GRAPH_PLUGIN_ID, "Knowledge Graph", "global", true, "supported", "idle"]
     ]
   );
   assert.equal(body.plugins[0]?.enabled, false);

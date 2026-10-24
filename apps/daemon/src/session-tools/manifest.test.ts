@@ -12,8 +12,8 @@ import { z } from "zod";
 
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type Tier, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
-import { composeOrquesterInstructions } from "./instructions.ts";
-import { advertisedChatTools, buildSessionToolsManifest, denyFor, type ManifestThread } from "./manifest.ts";
+import { composeOrquesterInstructions, KNOWLEDGE_WORKER_INSTRUCTIONS, ORQUESTER_INSTRUCTIONS_FIXED, orquesterInstructionsCap, WORKFLOW_OWNED_LINE } from "./instructions.ts";
+import { advertisedChatTools, buildSessionToolsManifest, denyFor, type ManifestKnowledge, type ManifestThread } from "./manifest.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: Tier | ((args: Record<string, unknown>) => Tier)): AnyOrquesterTool =>
   defineTool({
@@ -134,13 +134,13 @@ test("the manifest: tools, the composed block and the deny list; no legacy tools
 
 test("the production catalog: a fresh chat of any agent, with nothing configured, is advertised every chat tool", () => {
   const chat = catalogFor("chat");
-  // boxes: the box tools only while a box can be rented.
-  const withoutBoxes = chat.filter((t) => t.toolset !== "boxes");
+  // boxes: the box tools only while a box can be rented. Knowledge Graph: its tools only while the plugin is on.
+  const withoutBoxes = chat.filter((t) => t.toolset !== "boxes" && t.toolset !== "knowledge");
   for (const agentId of ["claude", "codex", "grok", "opencode"] as const) {
     const manifest = buildSessionToolsManifest({ thread: thread({ agentId }), catalog: chat, daemonPointing: [] });
     assert.deepEqual(manifest.tools, withoutBoxes.map((t) => t.name), agentId);
     const renting = buildSessionToolsManifest({ thread: thread({ agentId }), catalog: chat, daemonPointing: [], boxesAvailable: true });
-    assert.deepEqual(renting.tools, chat.map((t) => t.name), agentId);
+    assert.deepEqual(renting.tools, chat.filter((t) => t.toolset !== "knowledge").map((t) => t.name), agentId);
   }
   // A workflow-owned chat may rent a box too (its card waits for the owner): create_box is not Admin.
   const ownedRenting = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], boxesAvailable: true }).tools;
@@ -153,4 +153,69 @@ test("the production catalog: a fresh chat of any agent, with nothing configured
   const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [] }).tools;
   assert.deepEqual(owned, withoutBoxes.filter((t) => t.tier !== "admin").map((t) => t.name));
   assert.ok(owned.includes("update_todos") && !owned.includes("edit_agent_profile"));
+});
+
+// ---------------------------------------------------------------------------
+// Knowledge Graph plugin: the `knowledge` toolset's gating and the knowledge line
+// ---------------------------------------------------------------------------
+
+const USER_KNOWLEDGE = ["knowledge_search", "knowledge_get", "knowledge_save", "knowledge_collections"];
+const WORKER_KNOWLEDGE = ["knowledge_worker_next_task", "knowledge_worker_submit"];
+const KNOWLEDGE_LINE = /\nKnowledge: .*knowledge_search/;
+
+const knowledge = (over: Partial<ManifestKnowledge> = {}): ManifestKnowledge => ({ enabled: true, worker: false, searchable: true, visibleCollectionNames: ["SEO", "Ads"], ...over });
+
+test("knowledge gating matrix: plugin off/on × Global / profile with collections / profile without × worker / not", () => {
+  const chat = catalogFor("chat");
+  const base = chat.filter((t) => t.toolset !== "boxes" && t.toolset !== "knowledge").map((t) => t.name);
+  const build = (k?: ManifestKnowledge, workflowOwned = false) => buildSessionToolsManifest({ thread: thread({ workflowOwned }), catalog: chat, daemonPointing: [], ...(k ? { knowledge: k } : {}) });
+  const knowledgeOf = (tools: string[]) => tools.filter((name) => name.startsWith("knowledge_"));
+
+  // Plugin off (unwired, or off): no knowledge tool, no line — whatever the chat sees.
+  for (const k of [undefined, knowledge({ enabled: false }), knowledge({ enabled: false, searchable: false, visibleCollectionNames: [] })]) {
+    const manifest = build(k);
+    assert.deepEqual(manifest.tools, base);
+    assert.equal(manifest.instructions, composeOrquesterInstructions({ workflowOwned: false }));
+  }
+  // On, Global (every collection) and a profile ticking collections: the four user tools, the line naming them.
+  for (const names of [["SEO", "Ads", "SaaS"], ["SEO"]]) {
+    const manifest = build(knowledge({ visibleCollectionNames: names }));
+    assert.deepEqual(knowledgeOf(manifest.tools), USER_KNOWLEDGE);
+    assert.deepEqual(manifest.tools.filter((name) => !name.startsWith("knowledge_")), base);
+    assert.equal(manifest.instructions, composeOrquesterInstructions({ workflowOwned: false, knowledgeCollections: names }));
+    assert.match(manifest.instructions, new RegExp(`\\nKnowledge: ${names.join(", ")}\\. Search it`));
+  }
+  // On, Global with no collection yet (Unfiled entries only): search stays, no line to write.
+  const unfiledOnly = build(knowledge({ visibleCollectionNames: [] }));
+  assert.deepEqual(knowledgeOf(unfiledOnly.tools), USER_KNOWLEDGE);
+  assert.doesNotMatch(unfiledOnly.instructions, KNOWLEDGE_LINE);
+  // On, a profile with none ticked (or only deleted ones): save and collections, no search/get, no line.
+  const blind = build(knowledge({ searchable: false, visibleCollectionNames: [] }));
+  assert.deepEqual(knowledgeOf(blind.tools), ["knowledge_save", "knowledge_collections"]);
+  assert.equal(blind.instructions, ORQUESTER_INSTRUCTIONS_FIXED);
+  // A non-worker never gets the worker tools.
+  for (const k of [knowledge(), knowledge({ searchable: false }), knowledge({ enabled: false })]) {
+    for (const name of WORKER_KNOWLEDGE) assert.ok(!build(k).tools.includes(name), name);
+  }
+  // A worker gets ONLY the two worker tools and its own short block — on or off, whatever it "sees".
+  for (const k of [knowledge({ worker: true }), knowledge({ worker: true, searchable: false, visibleCollectionNames: [] }), knowledge({ worker: true, enabled: false })]) {
+    for (const workflowOwned of [false, true]) {
+      const manifest = build(k, workflowOwned);
+      assert.deepEqual(manifest.tools, WORKER_KNOWLEDGE);
+      assert.equal(manifest.instructions, KNOWLEDGE_WORKER_INSTRUCTIONS);
+      assert.deepEqual(manifest.deny, []);
+    }
+  }
+  // Boxes and knowledge gate independently.
+  const both = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], boxesAvailable: true, knowledge: knowledge() });
+  assert.deepEqual(both.tools, chat.filter((t) => !WORKER_KNOWLEDGE.includes(t.name)).map((t) => t.name));
+});
+
+test("knowledge: a workflow-owned chat keeps the knowledge tools (none is Admin) and gets both lines, under the raised cap", () => {
+  const chat = catalogFor("chat");
+  const manifest = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], knowledge: knowledge({ visibleCollectionNames: Array.from({ length: 100 }, (_, i) => `Collection ${i}`) }) });
+  assert.deepEqual(manifest.tools.filter((name) => name.startsWith("knowledge_")), USER_KNOWLEDGE);
+  assert.ok(manifest.instructions.includes(`\n${WORKFLOW_OWNED_LINE}\nKnowledge: `));
+  assert.ok(Buffer.byteLength(manifest.instructions, "utf8") <= orquesterInstructionsCap(true));
+  assert.deepEqual(advertisedChatTools(chat, false, false, knowledge({ worker: true })), WORKER_KNOWLEDGE);
 });

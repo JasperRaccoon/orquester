@@ -17,6 +17,8 @@ import { catalogFamily } from "../tools/catalog.ts";
 import { desktopsFamily } from "../tools/desktops.ts";
 import { filesFamily } from "../tools/files.ts";
 import { gitFamily } from "../tools/git.ts";
+// Knowledge Graph plugin: the shared knowledge base for agent chats (its spec, "Agent tools").
+import { knowledgeFamily } from "../tools/knowledge.ts";
 import { lineageFamily } from "../tools/lineage.ts";
 import { messagesFamily } from "../tools/messages.ts";
 import { notifyFamily } from "../tools/notify.ts";
@@ -78,7 +80,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   secretsFamily,
   secretFilesFamily,
   // boxes: chat-only, advertised while a box can be rented.
-  boxesFamily
+  boxesFamily,
+  // Knowledge Graph: chat-only, advertised while the plugin is on.
+  knowledgeFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

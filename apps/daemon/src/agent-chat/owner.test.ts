@@ -135,3 +135,25 @@ test("POST /api/sessions refuses an owner on a terminal tab", async (t) => {
   assert.equal(res.statusCode, 400);
   assert.equal(res.json().code, "INVALID_OWNER");
 });
+
+const KNOWLEDGE_OWNER = { kind: "knowledge-indexer", runId: "kr_1" } as const;
+
+test("parseSessionOwner accepts a knowledge-indexer owner (runId only) and refuses a malformed one", () => {
+  assert.deepEqual(parseSessionOwner({ ...KNOWLEDGE_OWNER, nodeId: "dropped" }), { ok: true, owner: KNOWLEDGE_OWNER });
+  for (const bad of [{ kind: "knowledge-indexer" }, { kind: "knowledge-indexer", runId: " " }, { kind: "knowledge-indexer", runId: "r".repeat(201) }]) {
+    assert.equal(parseSessionOwner(bad).ok, false, JSON.stringify(bad));
+  }
+});
+
+test("POST /api/sessions keeps a knowledge-indexer owner on the chat it creates", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const res = await h.inject({
+    method: "POST",
+    url: "/api/sessions",
+    payload: { kind: "agent-chat", refId: "claude", projectPath: "/plugin/workers/w1", owner: KNOWLEDGE_OWNER }
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(res.json().owner, KNOWLEDGE_OWNER);
+  assert.deepEqual(h.created[0]!.owner, KNOWLEDGE_OWNER);
+});

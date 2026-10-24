@@ -564,6 +564,13 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   box_download: "Copied out of a box",
   box_forward_port: "Forwarded a box port",
   destroy_box: "Destroyed a box",
+  // knowledge (Knowledge Graph plugin)
+  knowledge_search: "Searched the knowledge base",
+  knowledge_get: "Read a knowledge entry",
+  knowledge_save: "Saved to the knowledge base",
+  knowledge_collections: "Listed knowledge collections",
+  knowledge_worker_next_task: "Took an indexing task",
+  knowledge_worker_submit: "Submitted an indexing answer",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
   // Older builds' toolset request (every chat tool is on now).

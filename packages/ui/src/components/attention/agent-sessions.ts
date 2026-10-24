@@ -67,7 +67,10 @@ export function bucketOf(
  * the same list from `useAppStore.getState()` outside of React.
  *
  * Sessions with no `projectPath` are dropped: there is nowhere to navigate to,
- * and the daemon only ever creates agent sessions as project tabs. Archived
+ * and the daemon only ever creates agent sessions as project tabs. So are the
+ * Knowledge Graph indexer's worker chats (`owner.kind === "knowledge-indexer"`):
+ * their "project" is the plugin's workers folder, and they are background
+ * machinery the plugin's settings show, never an agent waiting on the user. Archived
  * projects/workspaces are dropped too — the panel must not be a hole in the
  * "Protect archived data" curtain.
  */
@@ -83,7 +86,7 @@ export function deriveAgentSessions(
     // agent terminal keeps reattaching until it is closed (§5.2). Filtering on
     // `kind === "agent"` alone would make every chat session disappear from the
     // sidebar, the badge and the Ctrl+Shift+A cycle.
-    if (!isAgentLikeSession(session) || session.projectPath === "") {
+    if (!isAgentLikeSession(session) || session.projectPath === "" || session.owner?.kind === "knowledge-indexer") {
       continue;
     }
     const project = resolveProjectRef(session.projectPath, workspaces, projects);

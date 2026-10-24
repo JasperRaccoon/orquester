@@ -11,6 +11,7 @@ import {
   Search,
   Server,
   Trash2,
+  Waypoints,
   X
 } from "lucide-react";
 import { SECRET_FILES_PLUGIN_ID, type PluginId, type PluginInfo, type TsCheckerEngine } from "@orquester/api";
@@ -44,13 +45,17 @@ import { takeBoxesSettingsFocus, useBoxesSettingsFocus } from "../../lib/boxes/h
 // boxes: a plugin's per-box tooling installs that failed (Status).
 import { useBoxes } from "../../lib/boxes/store";
 import { pluginBoxIssues, type PluginBoxIssue } from "./plugins.logic";
+// knowledge: the Knowledge Graph plugin's Activity and indexing settings.
+import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
+import { KnowledgePluginSection } from "../knowledge/KnowledgePluginSection";
 
 /** What each built-in plugin's icon tile shows. */
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
   "ts-rust": "TS",
   excalidraw: <PenTool size={15} />,
   "secret-files": <KeyRound size={15} />,
-  "ephemeral-vms": <Server size={15} />
+  "ephemeral-vms": <Server size={15} />,
+  "knowledge-graph": <Waypoints size={15} />
 };
 
 /** The daemon's error text for a failed request, else the error's own. */
@@ -504,6 +509,7 @@ const PluginDetail: React.FC<{
 
       {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
       {plugin.id === EPHEMERAL_VMS_PLUGIN_ID && <BoxesPluginSection enabled={plugin.enabled} />}
+      {plugin.id === KNOWLEDGE_GRAPH_PLUGIN_ID && <KnowledgePluginSection enabled={plugin.enabled} />}
 
       <SettingsSection title="Settings">
         <SettingRow

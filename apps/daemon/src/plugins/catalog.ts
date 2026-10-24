@@ -5,6 +5,7 @@
 import {
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
+  KNOWLEDGE_GRAPH_PLUGIN_ID,
   type PluginEngineInfo,
   type PluginId,
   type PluginInfo,
@@ -59,6 +60,18 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     provider: "Orquester",
     scope: "global",
     updates: false
+  },
+  {
+    // Downloads uv, a pinned myKG venv and an embedding model under its runtime/ dir
+    // (knowledge/install); the knowledge service runs only while it's on.
+    id: KNOWLEDGE_GRAPH_PLUGIN_ID,
+    name: "Knowledge Graph",
+    description:
+      "Turn the posts and notes you save from chats into a searchable knowledge graph your agents use, built with myKG.",
+    source: { label: "SenolIsci/mykg", url: "https://github.com/SenolIsci/mykg" },
+    provider: "Community",
+    scope: "global",
+    updates: true
   }
 ];
 

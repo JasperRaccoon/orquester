@@ -17,8 +17,8 @@ import type {
   ChatUsageLimitState,
   PendingMergeBack,
   SessionSummary,
-  ThreadLineage,
-  WorkflowSessionOwner
+  SessionOwner,
+  ThreadLineage
 } from "@orquester/api";
 import type { AgentChatHome, ChatLimitFailoverRecord, ChatUsageLimitRecord, SessionRecord } from "@orquester/config";
 
@@ -45,8 +45,8 @@ export interface ChatSessionCreateInput {
   accountId: string;
   home: AgentChatHome;
   createdAt?: string;
-  /** The workflow run that started this tab (workflows spec §5.10), already validated by the route. */
-  owner?: WorkflowSessionOwner;
+  /** The workflow run or knowledge indexer run that started this tab, already validated by the route. */
+  owner?: SessionOwner;
   /** The thread this one was forked from or delegated by (spec 2026-10-14 §6), already checked. */
   lineage?: ThreadLineage;
   /** A keyed fork's requested fork point (`AgentChatService.forkSession`), persisted with the tab. */
