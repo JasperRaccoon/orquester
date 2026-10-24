@@ -178,7 +178,7 @@ export function historyBoundsFromSnapshot(snapshot: ThreadSnapshotPayload): Thre
   if (!isRecord(raw)) {
     return null;
   }
-  const { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns } = raw;
+  const { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns, windowCut } = raw;
   if (
     typeof indexed !== "boolean" ||
     typeof hasOlder !== "boolean" ||
@@ -189,7 +189,15 @@ export function historyBoundsFromSnapshot(snapshot: ThreadSnapshotPayload): Thre
   ) {
     return null;
   }
-  return { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns };
+  return {
+    indexed,
+    hasOlder,
+    beforeCursor,
+    oldestRetainedOrdinal,
+    totalTurns,
+    // A bounded snapshot's cut: anything but a cursor string is none.
+    ...(typeof windowCut === "string" && windowCut.length > 0 ? { windowCut } : {})
+  };
 }
 
 /**
@@ -672,6 +680,21 @@ export function nextHistoryCursor(history: AgentChatHistoryState): string | unde
     return undefined;
   }
   return history.bounds?.beforeCursor ?? undefined;
+}
+
+/**
+ * The `windowCut` of the next `GET …/history` (`ThreadHistoryQuery`): the cut
+ * of the bounded snapshot the window came from, whenever the page is asked
+ * without a cursor and nothing is loaded yet — once the window has evicted,
+ * or after the device cache kept the cut but not its stale cursor. The host
+ * then never ends the page below a row that snapshot left out. `undefined`
+ * otherwise: a page's own cursor, or a window no bounded snapshot cut.
+ */
+export function nextHistoryWindowCut(history: AgentChatHistoryState): string | undefined {
+  if (history.pages.length > 0 || nextHistoryCursor(history) !== undefined) {
+    return undefined;
+  }
+  return history.bounds?.windowCut;
 }
 
 /**

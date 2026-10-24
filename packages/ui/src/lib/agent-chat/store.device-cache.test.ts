@@ -255,33 +255,42 @@ describe("a thread opened with a copy on the device", () => {
     assert.equal(saved?.seq, 8);
   });
 
-  it("keeps a bounded snapshot's history cursor: the copy loads older from it after a reload", async () => {
-    const log = hostLog();
-    const backend = memoryBackend();
-    // The stream's bounded snapshot: the turns before the window are a "load older" away.
-    const bounds = { indexed: true, hasOlder: true, beforeCursor: "cursor-recent", oldestRetainedOrdinal: 6, totalTurns: 15 };
-    const first = await openPage(log, backend);
-    await settle();
-    first.host.push(
-      { kind: "snapshot", thread: { ...snapshotAt(log, 5), history: bounds } },
-      { kind: "synchronized", hostInstanceId: "host-1" }
-    );
-    first.store.destroy?.();
-    await first.cache.threadCacheIdle();
-    await settle();
+  it("keeps a bounded snapshot's history cursor and cut: the copy loads older from them after a reload", async () => {
+    // The stream's bounded snapshot: the turns before the window are a "load older" away. Saved
+    // before its window evicted — its cursor — and after (`boundsOfWindow`) — its cut alone.
+    const fresh = { indexed: true, hasOlder: true, beforeCursor: "cursor-recent", oldestRetainedOrdinal: 6, totalTurns: 15, windowCut: "cursor-recent" };
+    const evicted = { ...fresh, beforeCursor: null, oldestRetainedOrdinal: null };
+    for (const [bounds, expected] of [
+      [fresh, [{ before: "cursor-recent", windowCut: undefined }]],
+      [evicted, [{ before: undefined, windowCut: "cursor-recent" }]]
+    ] as const) {
+      resetBuilders();
+      const log = hostLog();
+      const backend = memoryBackend();
+      const first = await openPage(log, backend);
+      await settle();
+      first.host.push(
+        { kind: "snapshot", thread: { ...snapshotAt(log, 5), history: bounds } },
+        { kind: "synchronized", hostInstanceId: "host-1" }
+      );
+      first.store.destroy?.();
+      await first.cache.threadCacheIdle();
+      await settle();
 
-    const reopened = await openPage(log, backend);
-    const asked: Array<string | undefined> = [];
-    reopened.host.transport.readHistory = async (_sessionId, query) => {
-      asked.push(query.before);
-      return { threadId: "s1", turns: [], items: [], checkpoints: [], page: { beforeCursor: null }, seq: 8 };
-    };
-    await settle();
-    assert.deepEqual(reopened.state().slice.history.bounds, bounds, "the copy's bounds are the snapshot's");
-    reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-1" });
-    await reopened.state().actions.loadOlderHistory();
-    assert.deepEqual(asked, ["cursor-recent"], "load older asks below the bounded window");
-    reopened.store.destroy?.();
+      const reopened = await openPage(log, backend);
+      const asked: Array<{ before: string | undefined; windowCut: string | undefined }> = [];
+      reopened.host.transport.readHistory = async (_sessionId, query) => {
+        asked.push({ before: query.before, windowCut: query.windowCut });
+        return { threadId: "s1", turns: [], items: [], checkpoints: [], page: { beforeCursor: null }, seq: 8 };
+      };
+      await settle();
+      assert.deepEqual(reopened.state().slice.history.bounds, bounds, "the copy's bounds are the snapshot's");
+      reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-1" });
+      await reopened.state().actions.loadOlderHistory();
+      assert.deepEqual(asked, expected, "load older asks below the bounded window, never below its cut");
+      reopened.store.destroy?.();
+      for (const page of pages.splice(0)) page.dispose();
+    }
   });
 
   it("offers nothing pending from the copy until the host confirms the thread", async () => {

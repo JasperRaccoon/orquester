@@ -3097,12 +3097,14 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     // The cursor names the line the kept window begins at: w-6's prompt.
     const w6 = index.turnById(threadId, "w-6");
     assert.ok(w6);
+    const cut = encodeHistoryCursor({ threadId, beforeAnchorAt: w6.requestedAt, beforeTurnId: "w-6", beforeSeq: w6.firstSeq });
     assert.deepEqual(recent.history, {
       indexed: true,
       hasOlder: true,
-      beforeCursor: encodeHistoryCursor({ threadId, beforeAnchorAt: w6.requestedAt, beforeTurnId: "w-6", beforeSeq: w6.firstSeq }),
+      beforeCursor: cut,
       oldestRetainedOrdinal: 6,
-      totalTurns: 15
+      totalTurns: 15,
+      windowCut: cut
     });
 
     // Load older: exactly the dropped rows, as the full snapshot held them, each once, in order.
@@ -3139,16 +3141,25 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     await host.stop();
   });
 
-  it("a page asked without a cursor never ends below a cut a bounded snapshot may have named", async (t) => {
+  it("a page asked without a cursor but with the window's cut never ends below that cut, and without it is as ever", async (t) => {
     const { index, host } = await indexedHost(t);
     const threadId = await fifteenTurns(host, index);
     const full = await snapshotRead(host, threadId);
+    const unbounded = await host.orchestrator.readHistory(threadId, {});
     const recent = await recentRead(host, threadId);
-    // A client whose window evicted a row asks without the snapshot's cursor. The page ends at the
-    // second newest turn — no bounded snapshot keeps fewer turns — so the rows it left out are
-    // below it; the rows above them it repeats are ones that window holds.
-    const first = await host.orchestrator.readHistory(threadId, {});
-    assert.equal(first.page.endItemId, "user:w-14");
+    const windowCut = recent.history?.windowCut;
+    assert.ok(windowCut);
+    // Any other cursorless request: the block below the whole window, as the host holds it —
+    // which, nothing evicted, is nothing at all.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, {}), unbounded);
+    assert.deepEqual(unbounded.items, []);
+    // A client whose bounded window evicted a row asks without the snapshot's cursor, naming
+    // the cut: the page ends there, so every row that snapshot left out is a page away.
+    const first = await host.orchestrator.readHistory(threadId, { windowCut });
+    assert.equal(first.page.endItemId, "user:w-6");
+    assert.deepEqual(first, await host.orchestrator.readHistory(threadId, { before: windowCut }));
+    // A cursor wins over the cut, and a cut that is not one of ours is none.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, { windowCut: "not a cursor" }), unbounded);
     const pages = [first, ...(await walkHistory(host, threadId, first.page.beforeCursor))];
     const paged = new Set(pages.flatMap((page) => page.items).map(rowKey));
     const windowRows = new Set(recent.items.map(rowKey));

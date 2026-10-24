@@ -20,6 +20,7 @@ import {
   isThreadItemOutputWindow,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  THREAD_READ_WINDOW_RECENT,
   type AccountCommandBody,
   type ProfileCommandBody,
   type AgentChatCommandBodies,
@@ -412,7 +413,7 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     readHistory(sessionId, query, signal) {
       return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
-        query: definedQuery({ before: query.before, turns: query.turns }),
+        query: definedQuery({ before: query.before, turns: query.turns, windowCut: query.windowCut }),
         ...(signal === undefined ? {} : { signal })
       });
     },
@@ -697,7 +698,9 @@ function openAgentChatStream(
       observedHostInstanceId: hostInstanceId
     });
     knownHostInstanceId = hostInstanceId;
-    const query = after === undefined ? "" : `?after=${after}`;
+    // This client handles a bounded snapshot (`ThreadReadWindow`): its history bounds name the
+    // turns it leaves out, which "load older" pages back in.
+    const query = `?${after === undefined ? "" : `after=${after}&`}window=${THREAD_READ_WINDOW_RECENT}`;
     let opened = false;
     liveness = { fastHeartbeat: false, synchronized: false };
     lastHeartbeatAt = null;

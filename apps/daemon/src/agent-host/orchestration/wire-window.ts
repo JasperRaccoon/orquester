@@ -1,6 +1,7 @@
 /**
- * The stream's bounded snapshot: which rows of the retained window a cold
- * `snapshot` frame leaves to "load older" (`GET …/history`).
+ * The bounded snapshot: which rows of the retained window a cold `snapshot`
+ * frame leaves to "load older" (`GET …/history`), for a client that asks
+ * for one (`ThreadReadWindow` `"recent"`, on the stream and on `GET …/thread`).
  *
  * The fold keeps up to 2 000 messages and 500 parent activities (plus every
  * agent's own), and a cold stream used to send all of it in one line — 4 MiB on
@@ -39,7 +40,12 @@
  *   - every row of a call or a background task still open (`openWorkOf`);
  *   - the newest parent row of each activity kind and the newest parent
  *     message of each role: whatever "latest of" reading a surface makes —
- *     the plan checklist, the context meter — answers what it answered;
+ *     the plan checklist, the context meter — answers what it answered. Not
+ *     where a row is only read beside another the trim may drop: request
+ *     rows go by the rule above, a plan's deltas only with their plan, and
+ *     the newest plan proposal only while no later prompt implemented it (a
+ *     kept plan whose implementing prompt went would read as not
+ *     implemented, and the composer would offer it again);
  *   - a call is dropped whole or kept whole: one kept row keeps all of its.
  *
  * The cut's cursor is one the history route already honours (`blockCursor`,
@@ -53,6 +59,7 @@ import {
   CALL_OPENER_KINDS,
   isAgentOwnedActivity,
   isCompactionActivity,
+  isPlanImplementationMessage,
   openWorkOf,
   REQUEST_ACTIVITY_KINDS,
   SETTLED_TURN_STATES,
@@ -112,11 +119,14 @@ export function wireWindowCut(turns: readonly Turn[], items: readonly ThreadItem
   }
   const turnOf = (item: ThreadItem): string | null =>
     item.turnId ?? (item.kind === "message" && item.role === "user" ? (promptTurn.get(item.id) ?? null) : null);
-  const bytesByTurn = new Map<string, number>();
+  // Grouped by turn first; only the turns the walk below reaches are measured.
+  const rowsByTurn = new Map<string, ThreadItem[]>();
   for (const item of items) {
     const turnId = turnOf(item);
     if (turnId === null || !startedIds.has(turnId) || ownedByAgent(item)) continue;
-    bytesByTurn.set(turnId, (bytesByTurn.get(turnId) ?? 0) + JSON.stringify(item).length);
+    const rows = rowsByTurn.get(turnId);
+    if (rows) rows.push(item);
+    else rowsByTurn.set(turnId, [item]);
   }
   let oldest = started.length;
   let kept = 0;
@@ -127,7 +137,9 @@ export function wireWindowCut(turns: readonly Turn[], items: readonly ThreadItem
     }
     oldest -= 1;
     kept += 1;
-    bytes += bytesByTurn.get(started[oldest]!.turnId) ?? 0;
+    for (const item of rowsByTurn.get(started[oldest]!.turnId) ?? []) {
+      bytes += JSON.stringify(item).length;
+    }
   }
   oldest = Math.min(oldest, floor);
   if (oldest === 0) {
@@ -141,13 +153,15 @@ export function wireWindowCut(turns: readonly Turn[], items: readonly ThreadItem
 }
 
 /**
- * `items` without the trimmable rows `below` places wholly under the cut —
- * see the module doc for what is never trimmed. Null when nothing goes.
+ * `items` without the trimmable rows the caller places wholly under the cut —
+ * `placeBelow` is asked once, with every candidate, and answers the ones it
+ * places there — see the module doc for what is never trimmed. Null when
+ * nothing goes.
  */
 export function trimToWireWindow(
   items: readonly ThreadItem[],
   cut: Pick<WireWindowCut, "trimmable" | "turnOf">,
-  below: (item: ThreadItem) => boolean
+  placeBelow: (candidates: readonly ThreadItem[]) => ReadonlySet<ThreadItem>
 ): ThreadItem[] | null {
   const activities = items.filter((item): item is ThreadActivityItem => item.kind === "activity");
   const open = openWorkOf(activities);
@@ -167,16 +181,48 @@ export function trimToWireWindow(
     const requestId = requestIdOf(activity);
     if (requestId !== null && activity.activityKind.endsWith(".resolved")) resolved.add(requestId);
   }
-  // The newest parent row of each kind and the newest parent message of each role.
+  // The newest parent row of each kind and the newest parent message of each role — but
+  // never a request row (the rule above decides those as a pair: a lone `*.requested` would
+  // reopen as pending on the client) nor a plan's streamed delta (it is read only with its
+  // plan, below).
   const newest = new Set<ThreadItem>();
   const seen = new Set<string>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
     if (ownedByAgent(item)) continue;
+    if (
+      item.kind === "activity" &&
+      (REQUEST_ACTIVITY_KINDS.has(item.activityKind) || item.activityKind === PLAN_DELTA_KIND)
+    ) {
+      continue;
+    }
     const key = item.kind === "activity" ? `activity:${item.activityKind}` : `message:${item.role}`;
     if (!seen.has(key)) {
       seen.add(key);
       newest.add(item);
+    }
+  }
+  // The newest plan proposal is kept only while nothing implemented it: the client retires a
+  // plan by the first later prompt that implements it, which a trimmed turn takes with it, and
+  // a kept plan without it would offer "Implement" again. Implemented, it goes with its turn
+  // like any row; the composer then offers nothing, as it does for an implemented plan. A
+  // plan that streamed its text keeps its turn's deltas, which hold it.
+  for (const item of newest) {
+    if (item.kind !== "activity" || item.activityKind !== PLAN_COMPLETED_KIND) continue;
+    const implemented = items.some(
+      (other) =>
+        other.kind === "message" &&
+        other.role === "user" &&
+        !ownedByAgent(other) &&
+        other.createdAt > item.createdAt &&
+        isPlanImplementationMessage(other.text)
+    );
+    if (implemented) {
+      newest.delete(item);
+    } else if (typeof asRecord(item.payload)?.planMarkdown !== "string") {
+      for (const delta of activities) {
+        if (delta.activityKind === PLAN_DELTA_KIND && delta.turnId === item.turnId) newest.add(delta);
+      }
     }
   }
   const isProtected = (item: ThreadItem): boolean => {
@@ -196,12 +242,14 @@ export function trimToWireWindow(
     return taskId !== null && openTasks.has(taskId);
   };
 
-  const dropped = new Set<ThreadItem>();
+  const candidates: ThreadItem[] = [];
   for (const item of items) {
     const turnId = cut.turnOf(item);
     if (turnId === null || !cut.trimmable.has(turnId) || isProtected(item)) continue;
-    if (below(item)) dropped.add(item);
+    candidates.push(item);
   }
+  const placed = candidates.length === 0 ? new Set<ThreadItem>() : placeBelow(candidates);
+  const dropped = new Set<ThreadItem>(candidates.filter((item) => placed.has(item)));
   if (dropped.size === 0) {
     return null;
   }
@@ -219,6 +267,9 @@ export function trimToWireWindow(
   }
   return dropped.size === 0 ? null : items.filter((item) => !dropped.has(item));
 }
+
+const PLAN_COMPLETED_KIND = "turn.proposed.completed";
+const PLAN_DELTA_KIND = "turn.proposed.delta";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)

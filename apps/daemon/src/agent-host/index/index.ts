@@ -80,6 +80,20 @@ export interface IndexedTurn {
   endByte: number;
 }
 
+/** The ids `latestSeqs` is asked for, by the table that positions them. */
+export interface LatestSeqsQuery {
+  activities: readonly string[];
+  messages: readonly string[];
+}
+
+/** `latestSeqs`' answer: id → seq of its latest line. */
+export interface LatestSeqs {
+  activities: ReadonlyMap<string, number>;
+  messages: ReadonlyMap<string, number>;
+}
+
+const NO_LATEST_SEQS: LatestSeqs = { activities: new Map(), messages: new Map() };
+
 /**
  * Where an activity's line sits in `events.ndjson` — its LATEST write: an
  * activity rewritten under the same id (last write wins, like `readItem`) is
@@ -253,10 +267,11 @@ export interface ThreadIndex {
    */
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
   /**
-   * One message's lines — its first and its latest — or null when the index
-   * holds no such message of the thread.
+   * The seq of the latest line of each activity and message asked for, in one
+   * read each: an activity's latest write, a message's final chunk. An id the
+   * index does not hold for the thread is absent from the answer.
    */
-  messageLines(threadId: string, messageId: string): SpanningMessage | null;
+  latestSeqs(threadId: string, ids: LatestSeqsQuery): LatestSeqs;
   /**
    * The first line past `seq` a page boundary may sit on — the lowest
    * activity line or message first line above it — or null when there is none.
@@ -749,8 +764,8 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.messagesSpanning(threadId, seq), []) : [];
     },
 
-    messageLines(threadId, messageId) {
-      return serving() ? read(() => queries.messageLines(threadId, messageId), null) : null;
+    latestSeqs(threadId, ids) {
+      return serving() ? read(() => queries.latestSeqs(threadId, ids), NO_LATEST_SEQS) : NO_LATEST_SEQS;
     },
 
     firstBoundaryAfter(threadId, seq) {
@@ -854,7 +869,7 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     turnOfSeq: () => null,
     eventPositionBySeq: () => null,
     messagesSpanning: () => [],
-    messageLines: () => null,
+    latestSeqs: () => NO_LATEST_SEQS,
     firstBoundaryAfter: () => null,
     latestRevertSeq: () => 0,
     turnByPrompt: () => null,

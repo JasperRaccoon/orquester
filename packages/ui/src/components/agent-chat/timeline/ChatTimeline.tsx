@@ -3,7 +3,7 @@ import { TriangleAlert, X } from "lucide-react";
 
 import { noteRender } from "../../../lib/render-probe";
 import { cn } from "../../../lib/cn";
-import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatActions, AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
@@ -27,8 +27,10 @@ import {
   findFirstVisibleIndex,
   findRowElement,
   offsetWithinRow,
+  promptIdOfTurn,
   restoreTurnOf,
   scrollRowTo,
+  type RememberedScroll,
   type RowMetric
 } from "./anchor";
 import {
@@ -597,6 +599,41 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
   /** Whether this list has ever had rows, per identity. */
   const hadRowsRef = React.useRef(rows.length > 0);
+  /**
+   * A remembered reading position the mount could not restore yet: the list
+   * had no rows (a cold open — a fresh stream, a reload, a device copy still
+   * being read). Restored once, when the rows first land.
+   */
+  const pendingRestoreRef = React.useRef<RememberedScroll | null>(null);
+
+  /**
+   * Restore a remembered non-end position: its row, at its offset; else, when
+   * the row's turn is gone from the list — or shows only rows kept out of it,
+   * without its prompt (`restoreTurnOf`) — that turn paged back in and
+   * scrolled to (`revealTurn`); else the pixel offset.
+   */
+  const restoreRemembered = React.useCallback(
+    (node: HTMLDivElement, remembered: RememberedScroll, current: readonly AgentChatTimelineRow[]) => {
+      const target = remembered.rowId === null ? null : findRowElement(node, remembered.rowId);
+      if (target) {
+        // `offsetWithinRow` is how far the edge sat INTO the row, so the row's
+        // top goes that far above the edge (it used to be subtracted, which
+        // restored the position 2 × offset too high).
+        scrollRowTo(node, target, remembered.offsetWithinRow);
+        return;
+      }
+      // A row id that cannot be found (or quoted) falls back to the pixel offset.
+      node.scrollTop = remembered.scrollOffset;
+      const store = peekThreadStore(sessionId);
+      const turnId = restoreTurnOf(remembered, current, agentId, (turn) =>
+        promptIdOfTurn(store?.getState().slice.turns ?? [], turn)
+      );
+      if (turnId !== null) {
+        void store?.getState().actions.revealTurn(turnId).catch(() => false);
+      }
+    },
+    [sessionId, agentId]
+  );
 
   /**
    * **The list mounts at its end.**
@@ -615,25 +652,15 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     const node = scrollerRef.current;
     if (!node) return;
     ignoreScrollUntilRef.current = Date.now() + 80;
+    pendingRestoreRef.current = null;
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
-      // A row id that cannot be found (or quoted) falls back to the pixel offset.
-      const target = findRowElement(node, scroll.rowId);
-      if (target) {
-        // `offsetWithinRow` is how far the edge sat INTO the row, so the row's
-        // top goes that far above the edge (it used to be subtracted, which
-        // restored the position 2 × offset too high).
-        scrollRowTo(node, target, scroll.offsetWithinRow);
+      if (rows.length > 0) {
+        restoreRemembered(node, scroll, rows);
       } else {
         node.scrollTop = scroll.scrollOffset;
-        // The row's whole turn is gone from the list — left to "load older" by
-        // the stream's bounded snapshot, or by retention — so its turn is paged
-        // back in and scrolled to. A turn still in the list keeps the offset.
-        const turnId = restoreTurnOf(scroll, rows, agentId);
-        if (turnId !== null) {
-          void peekThreadStore(sessionId)?.getState().actions.revealTurn(turnId).catch(() => false);
-        }
+        pendingRestoreRef.current = scroll;
       }
     } else {
       node.scrollTop = scroll.scrollOffset;
@@ -662,10 +689,19 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     if (!hadRowsRef.current && rows.length > 0) {
       hadRowsRef.current = true;
       armSettling(listIdentity);
+      // The remembered position the mount had no rows for, restored once they land.
+      const pending = pendingRestoreRef.current;
+      pendingRestoreRef.current = null;
+      const node = scrollerRef.current;
+      if (pending !== null && node) {
+        ignoreScrollUntilRef.current = Date.now() + 80;
+        restoreRemembered(node, pending, rows);
+        return;
+      }
     }
     if (!follow) return;
     scrollToEnd(animateNow(firstPaintRef.current));
-  }, [rows, follow, scrollToEnd, animateNow, armSettling, listIdentity]);
+  }, [rows, follow, scrollToEnd, animateNow, armSettling, listIdentity, restoreRemembered]);
 
   // Re-pin on row GROWTH and layout: a streamed paragraph grows a row that is
   // already mounted, which no render of ours observes.

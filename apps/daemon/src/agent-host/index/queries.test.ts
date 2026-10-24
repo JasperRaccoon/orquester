@@ -583,13 +583,16 @@ describe("thread index: message spans", () => {
     assert.deepEqual(index.messagesSpanning("other-thread", 6), []);
   });
 
-  it("messageLines: a message's first and latest line, by id", async () => {
+  it("latestSeqs: each id's latest line, activities and messages apart, in one read each", async () => {
     const log = await streamedAroundActivities();
     const id = log.threadId;
-    assert.deepEqual(index.messageLines(id, "m1"), { messageId: "m1", firstSeq: 5, firstByte: log.at(5).byteOffset, lastSeq: 10 });
-    assert.equal(index.messageLines(id, "b1"), null, "an activity is no message");
-    assert.equal(index.messageLines(id, "nope"), null);
-    assert.equal(index.messageLines("other-thread", "m1"), null);
+    const latest = index.latestSeqs(id, { activities: ["b1", "b2", "m1", "nope"], messages: ["m1", "b1", "nope"] });
+    assert.deepEqual([...latest.activities], [["b1", 6], ["b2", 8]], "a message is no activity");
+    assert.deepEqual([...latest.messages], [["m1", 10]], "its final chunk; an activity is no message");
+    const other = index.latestSeqs("other-thread", { activities: ["b1"], messages: ["m1"] });
+    assert.equal(other.activities.size + other.messages.size, 0);
+    const none = index.latestSeqs(id, { activities: [], messages: [] });
+    assert.equal(none.activities.size + none.messages.size, 0);
   });
 
   it("eventPositionBySeq answers for an activity line and a message's first line, nothing else", async () => {

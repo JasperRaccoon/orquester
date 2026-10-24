@@ -24,6 +24,8 @@ import type {
   IndexedPrompt,
   IndexedPromptsPage,
   IndexedTurn,
+  LatestSeqs,
+  LatestSeqsQuery,
   SpanningMessage
 } from "./index.ts";
 import { MAX_INDEXED_TEXT_CHARS } from "./indexer.ts";
@@ -39,7 +41,7 @@ export interface ThreadIndexQueries {
   turnOfSeq(threadId: string, seq: number): IndexedTurn | null;
   eventPositionBySeq(threadId: string, seq: number): IndexedItemPosition | null;
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
-  messageLines(threadId: string, messageId: string): SpanningMessage | null;
+  latestSeqs(threadId: string, ids: LatestSeqsQuery): LatestSeqs;
   firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null;
   latestRevertSeq(threadId: string): number;
   turnById(threadId: string, turnId: string): IndexedTurn | null;
@@ -124,9 +126,14 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
        WHERE thread_id = ? AND first_seq < ? AND seq >= ?
        ORDER BY first_seq, message_id`
     ),
-    messageLines: db.prepare(
-      `SELECT message_id, first_seq, first_byte, seq FROM message_docs
-       WHERE thread_id = ? AND message_id = ?`
+    // One statement for any number of ids: the ids ride as one JSON array.
+    itemSeqsOf: db.prepare(
+      `SELECT item_id AS id, seq FROM items
+       WHERE thread_id = ? AND item_id IN (SELECT value FROM json_each(?))`
+    ),
+    messageSeqsOf: db.prepare(
+      `SELECT message_id AS id, seq FROM message_docs
+       WHERE thread_id = ? AND message_id IN (SELECT value FROM json_each(?))`
     ),
     itemAfter: db.prepare(
       `SELECT seq, byte_offset, byte_length FROM items
@@ -348,11 +355,22 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         .filter((span): span is SpanningMessage => span !== null);
     },
 
-    messageLines(threadId, messageId) {
-      if (typeof messageId !== "string") {
-        return null;
-      }
-      return toSpanningMessage(sql.messageLines.get(threadId, messageId));
+    latestSeqs(threadId, ids) {
+      const seqsOf = (statement: typeof sql.itemSeqsOf, wanted: readonly string[]): Map<string, number> => {
+        const seqs = new Map<string, number>();
+        if (wanted.length === 0) return seqs;
+        for (const row of statement.all(threadId, JSON.stringify(wanted))) {
+          const record = asRecord(row);
+          if (record !== null && typeof record.id === "string" && isCount(record.seq)) {
+            seqs.set(record.id, record.seq);
+          }
+        }
+        return seqs;
+      };
+      return {
+        activities: seqsOf(sql.itemSeqsOf, ids.activities),
+        messages: seqsOf(sql.messageSeqsOf, ids.messages)
+      };
     },
 
     /**

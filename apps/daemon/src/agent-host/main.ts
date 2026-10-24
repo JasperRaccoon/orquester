@@ -952,7 +952,7 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     turnOfSeq: (threadId, seq) => target.turnOfSeq(threadId, seq),
     eventPositionBySeq: (threadId, seq) => target.eventPositionBySeq(threadId, seq),
     messagesSpanning: (threadId, seq) => target.messagesSpanning(threadId, seq),
-    messageLines: (threadId, messageId) => target.messageLines(threadId, messageId),
+    latestSeqs: (threadId, ids) => target.latestSeqs(threadId, ids),
     firstBoundaryAfter: (threadId, seq) => target.firstBoundaryAfter(threadId, seq),
     latestRevertSeq: (threadId) => target.latestRevertSeq(threadId),
     turnByPrompt: (threadId, messageId) => target.turnByPrompt(threadId, messageId),

@@ -88,6 +88,7 @@ import {
   liveTurnIdsOf,
   mergeTimelineRows,
   nextHistoryCursor,
+  nextHistoryWindowCut,
   planReveal,
   projectHistoryRows,
   rowIdForTurn,
@@ -1639,6 +1640,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           // Without a cursor once the window has evicted since its snapshot
           // (`windowEvicted`): that snapshot's cursor no longer meets it.
           const before = nextHistoryCursor(asked);
+          // And then the cut of the bounded snapshot the window came from, so the page
+          // never ends below a row that snapshot left out.
+          const windowCut = nextHistoryWindowCut(asked);
           // What the page is asked against. A snapshot (or a rewind into a
           // page or the bridge, or the cap) replaces `pages` with a fresh
           // array and a snapshot mints new bounds, so a page that lands after
@@ -1651,6 +1655,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           try {
             page = await transport.readHistory(sessionId, {
               ...(before === undefined ? {} : { before }),
+              ...(windowCut === undefined ? {} : { windowCut }),
               turns: THREAD_HISTORY_DEFAULT_TURNS
             });
           } catch (error) {

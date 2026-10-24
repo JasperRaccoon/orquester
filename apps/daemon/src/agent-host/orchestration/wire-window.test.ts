@@ -85,7 +85,7 @@ function thread(count: number): { turns: Turn[]; items: ThreadItem[] } {
   return { turns, items };
 }
 
-const everyRowBelow = () => true;
+const everyRowBelow = (candidates: readonly ThreadItem[]): ReadonlySet<ThreadItem> => new Set(candidates);
 const ids = (items: readonly ThreadItem[]) => items.map((item) => item.id);
 
 describe("wire window — where the frame's window begins", () => {
@@ -146,9 +146,9 @@ describe("wire window — what the frame leaves to load older", () => {
 
   it("keeps a row the caller does not place below the cut, and answers null when nothing goes", () => {
     const t = long();
-    const kept = trimToWireWindow(t.items, cutOf(t), (item) => item.id !== "reply:t-2");
+    const kept = trimToWireWindow(t.items, cutOf(t), (candidates) => new Set(candidates.filter((item) => item.id !== "reply:t-2")));
     assert.ok(kept?.some((item) => item.id === "reply:t-2"));
-    assert.equal(trimToWireWindow(t.items, cutOf(t), () => false), null);
+    assert.equal(trimToWireWindow(t.items, cutOf(t), () => new Set()), null);
   });
 
   it("never drops a subagent's row, a task or roster row, an open request, a compaction, a goal row or open work", () => {
@@ -198,6 +198,36 @@ describe("wire window — what the frame leaves to load older", () => {
     assert.ok(kept?.includes(plan), "the plan checklist still has its plan");
     assert.ok(kept?.includes(thinking));
     assert.ok(!kept?.includes(olderPlan));
+  });
+
+  it("never keeps a lone request row as the newest of its kind: a resolved request goes as a pair", () => {
+    const t = long();
+    // The thread's only approval, resolved in an old turn: kept alone, its `*.requested` row
+    // would re-derive as pending on the client.
+    const asked = row("asked", "t-2", "approval.requested", { requestId: "a-1" });
+    const answered = row("answered", "t-2", "approval.resolved", { requestId: "a-1" });
+    const kept = trimToWireWindow([...t.items.slice(0, 8), asked, answered, ...t.items.slice(8)], cutOf(t), everyRowBelow);
+    assert.ok(kept && !kept.includes(asked) && !kept.includes(answered));
+  });
+
+  it("keeps the newest plan proposal only while nothing implemented it, with the deltas that hold its text", () => {
+    const t = long();
+    const plan = row("plan-2", "t-2", "turn.proposed.completed", {});
+    const deltas = [
+      row("delta-a", "t-2", "turn.proposed.delta", { delta: "# Plan\n" }),
+      row("delta-b", "t-2", "turn.proposed.delta", { delta: "step one" })
+    ];
+    const withPlan = [...t.items.slice(0, 4), ...t.items.slice(4, 8), ...deltas, plan, ...t.items.slice(8)];
+    const open = trimToWireWindow(withPlan, cutOf(t), everyRowBelow);
+    assert.ok(open?.includes(plan), "not implemented: the composer still offers it");
+    assert.ok(deltas.every((delta) => open?.includes(delta)), "its text streamed: its deltas stay with it");
+    // The next turn's prompt implemented it: kept, the plan would read as not implemented.
+    const implementing = { ...prompt(3), text: "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nstep one", createdAt: "2026-10-24T00:00:01.000Z" };
+    const plan2 = { ...plan, createdAt: AT };
+    const implemented = withPlan.map((item) => (item.id === "user:t-3" ? implementing : item === plan ? plan2 : item));
+    const gone = trimToWireWindow(implemented, cutOf(t), everyRowBelow);
+    assert.ok(gone && !gone.includes(plan2) && !gone.includes(implementing));
+    assert.ok(!deltas.some((delta) => gone.includes(delta)));
   });
 
   it("drops a call whole or keeps it whole", () => {

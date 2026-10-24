@@ -251,7 +251,7 @@ import {
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
 import { checkMinimumVersion } from "./version-gate.ts";
-import { trimToWireWindow, WIRE_WINDOW_MIN_TURNS, wireWindowCut } from "./wire-window.ts";
+import { trimToWireWindow, wireWindowCut } from "./wire-window.ts";
 import {
   parseAnswers,
   parseApprovalDecision,
@@ -769,8 +769,8 @@ export interface Orchestrator {
   ): Promise<{ seq: number }>;
 
   /**
-   * The §6.3 read. With `window: "recent"` — the stream's cold snapshot, and a client that asks
-   * for it — a snapshot keeps only the latest turns whole and leaves the settled turns before
+   * The §6.3 read. With `window: "recent"` — asked for by a client on the stream or on
+   * `GET …/thread` (`ThreadReadWindow`) — a snapshot keeps only the latest turns whole and leaves the settled turns before
    * them to `readHistory` (`recentSnapshotOf`); a replay is the same either way.
    */
   readThread(
@@ -791,7 +791,7 @@ export interface Orchestrator {
    */
   readHistory(
     threadId: string,
-    query: { before?: string; turns?: number }
+    query: { before?: string; turns?: number; windowCut?: string }
   ): Promise<ThreadHistoryPage>;
   /** Full-text search over every indexed thread; `indexed: false` without an index. */
   searchThreads(query: { q: string; limit: number; projectPath?: string }): ThreadSearchResponse;
@@ -5519,13 +5519,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return null;
     }
     const endSeq = end.seq;
-    const items = trimToWireWindow(snapshot.items, cut, (item) => {
-      if (item.kind === "activity") {
-        const position = index.itemPosition(threadId, item.id);
-        return position !== null && position.seq < endSeq;
-      }
-      const lines = index.messageLines(threadId, item.id);
-      return lines !== null && lines.lastSeq < endSeq;
+    const items = trimToWireWindow(snapshot.items, cut, (candidates) => {
+      // One read per table for every candidate: the latest line of each.
+      const latest = index.latestSeqs(threadId, {
+        activities: candidates.flatMap((item) => (item.kind === "activity" ? [item.id] : [])),
+        messages: candidates.flatMap((item) => (item.kind === "message" ? [item.id] : []))
+      });
+      return new Set(
+        candidates.filter((item) => {
+          const seq = (item.kind === "activity" ? latest.activities : latest.messages).get(item.id);
+          return seq !== undefined && seq < endSeq;
+        })
+      );
     });
     if (items === null) {
       return null;
@@ -5538,37 +5543,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (anchor === null) {
       return null;
     }
+    const cursor = encodeHistoryCursor(blockCursor(threadId, anchor, endSeq));
     return {
       ...snapshot,
       items,
       history: {
         indexed: true,
         hasOlder: true,
-        beforeCursor: encodeHistoryCursor(blockCursor(threadId, anchor, endSeq)),
+        beforeCursor: cursor,
         oldestRetainedOrdinal: anchor.ordinal,
-        totalTurns: history.totalTurns
+        totalTurns: history.totalTurns,
+        // A client whose window evicts since asks without the cursor: with this, never below it.
+        windowCut: cursor
       }
     };
-  };
-
-  /**
-   * The lowest end a history page asked without a cursor may have: at or above every cut a
-   * bounded snapshot of this thread has named since its latest revert — the first line of its
-   * `WIRE_WINDOW_MIN_TURNS`-th newest started turn, since every such snapshot kept at least that
-   * many turns and turns are only ever added — and past the latest revert, at or above every
-   * cut named before it (each lies below the revert). Null for a thread with neither: too few
-   * turns ever to be bounded, and never rewound.
-   */
-  const recentCutFloor = (runtime: ThreadRuntime, index: ThreadIndex): BlockEnd | null => {
-    const threadId = runtime.id;
-    const started = startedTurns(runtime.state.turns);
-    const turn = started.length > WIRE_WINDOW_MIN_TURNS ? started[started.length - WIRE_WINDOW_MIN_TURNS] : undefined;
-    const cut = turn === undefined ? null : turnCutOf(index, threadId, turn.turnId);
-    const pastRevert = pastLatestRevert(index, threadId);
-    if (cut === null || (pastRevert !== null && pastRevert.seq > cut.seq)) {
-      return pastRevert;
-    }
-    return cut;
   };
 
   const indexUnavailable = (): AgentChatCommandError =>
@@ -5600,7 +5588,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   const readHistory = async (
     threadId: string,
-    query: { before?: string; turns?: number }
+    query: { before?: string; turns?: number; windowCut?: string }
   ): Promise<ThreadHistoryPage> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -5735,14 +5723,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   /**
    * Where a block ends, in seqs and in bytes: the request's cursor, else the
-   * window's boundary, or the floor of a bounded snapshot's cut where that
-   * lies higher (`recentCutFloor`) — a malformed, foreign or no-longer-known
-   * cursor is a first-page request. Null when there is nothing to end at.
+   * window's boundary — or the cut of the bounded snapshot the client's window
+   * came from (`windowCut`, `boundedSnapshot`) where that lies higher: a client
+   * whose window evicted since its snapshot asks without its cursor, and the
+   * rows that snapshot left out lie below its cut. A malformed, foreign or
+   * no-longer-known cursor is a first-page request. Null when there is
+   * nothing to end at.
    */
   const historyBlockEnd = (
     runtime: ThreadRuntime,
     index: ThreadIndex,
-    query: { before?: string }
+    query: { before?: string; windowCut?: string }
   ): BlockEnd | null => {
     const threadId = runtime.id;
     const cursor =
@@ -5753,13 +5744,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (end === null) {
       const boundary = windowBoundary(runtime.state, index, threadId);
       end = boundary === null ? null : { seq: boundary.seq, byteOffset: boundary.byteOffset };
-      // Never below a cut a bounded snapshot may have named (`recentSnapshotOf`): a client asks
-      // without its cursor once its window evicted a row, and the rows that snapshot left out
-      // lie below its cut, so a page ending lower would leave the ones above it unserved. A
-      // higher end only repeats rows a window holds, which a reader renders once.
-      const floor = recentCutFloor(runtime, index);
-      if (floor !== null && (end === null || floor.seq > end.seq)) {
-        end = floor;
+      // Never below the cut the client's window was bounded at: a page ending lower would leave
+      // the rows that snapshot left out above it unserved. Only for a client that says so — any
+      // other asks for the block just below the window as the host holds it, as always.
+      const windowCut =
+        query.windowCut !== undefined && query.windowCut.length > 0
+          ? decodeHistoryCursor(query.windowCut, threadId)
+          : null;
+      const cutEnd = windowCut === null ? null : endOfCursor(index, threadId, windowCut);
+      if (cutEnd !== null && (end === null || cutEnd.seq > end.seq)) {
+        end = cutEnd;
       }
     }
     if (end === null) {

@@ -298,7 +298,8 @@ describe("records", () => {
   });
 
   it("saves the window only, with a cursor-less bound once the window has evicted", () => {
-    const bounds = { indexed: true, hasOlder: false, beforeCursor: "c1", oldestRetainedOrdinal: 1, totalTurns: 3 };
+    // A bounded snapshot's: its cut outlives the cursor an eviction makes stale.
+    const bounds = { indexed: true, hasOlder: false, beforeCursor: "c1", oldestRetainedOrdinal: 1, totalTurns: 3, windowCut: "c1" };
     const base = synchronizedState(5);
     const withBounds = patchSlice(base.reducer, { history: { ...base.slice.history, bounds } });
     const kept = persistableSnapshotOf({ reducer: withBounds, slice: withBounds.slice })!;
@@ -312,6 +313,12 @@ describe("records", () => {
     });
     const saved = persistableSnapshotOf({ reducer: evicted, slice: evicted.slice })!;
     assert.deepEqual(saved.history, { ...bounds, hasOlder: true, beforeCursor: null, oldestRetainedOrdinal: null });
+    assert.equal(saved.history?.windowCut, "c1", "the cut is kept with the window it describes");
+    assert.equal(
+      parsePersistedSnapshot(JSON.parse(JSON.stringify(saved)), "s1", 5)?.history?.windowCut,
+      "c1",
+      "and read back"
+    );
     assert.ok(!JSON.stringify(saved).includes("older"), "a loaded page is never saved");
   });
 

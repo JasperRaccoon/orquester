@@ -489,7 +489,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // NOT noted — it names the thread's current sequence while the page carries
   // only old turns, so moving the tab's reconnect cursor to it would let a
   // §6.3 reconnect skip live events the client was never sent.
-  app.get<{ Params: { id: string }; Querystring: { before?: string; turns?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { before?: string; turns?: string; windowCut?: string } }>(
     pattern(agentChatRoutes.history(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -501,7 +501,8 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         "GET",
         withQuery(agentHostRoutes.history(id), {
           before: request.query.before,
-          turns: request.query.turns
+          turns: request.query.turns,
+          windowCut: request.query.windowCut
         })
       );
     }
@@ -586,7 +587,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never
   // sees it: the response is raw chunked NDJSON, piped from the host with
   // backpressure, and the upstream is cancelled the moment the client goes.
-  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string } }>(
     pattern(agentChatRoutes.events(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -602,7 +603,8 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         deps,
         request,
         reply,
-        withQuery(agentHostRoutes.events(id), { after: request.query.after })
+        // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
+        withQuery(agentHostRoutes.events(id), { after: request.query.after, window: request.query.window })
       );
     }
   );

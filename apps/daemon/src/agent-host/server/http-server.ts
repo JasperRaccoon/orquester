@@ -701,8 +701,10 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         max: THREAD_HISTORY_MAX_TURNS,
         fallback: THREAD_HISTORY_DEFAULT_TURNS
       });
+      const windowCut = url.searchParams.get("windowCut");
       const body: ThreadHistoryPage = await orchestrator.readHistory(threadId, {
         ...(before !== null && before.length > 0 ? { before } : {}),
+        ...(windowCut !== null && windowCut.length > 0 ? { windowCut } : {}),
         turns
       });
       sendJson(response, 200, body);
@@ -775,6 +777,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/events" && method === "GET") {
       const after = parseAfter(url);
+      const window = parseReadWindow(url);
       const releaseWatcher = options.addProviderWatcher?.();
       const stream = createThreadStream({
         response,
@@ -785,8 +788,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
             ...(onHistoryImport ? { onHistoryImport } : {})
           }),
         read: async (): Promise<AgentChatStreamFrame[]> => {
-          // A cold snapshot carries the latest turns; the rest is "load older" (`ThreadReadWindow`).
-          const read = await orchestrator.readThread(threadId, after, { window: "recent" });
+          // Only for a client that asked: an older one expects the whole window (`ThreadReadWindow`).
+          const read = await orchestrator.readThread(threadId, after, window === undefined ? undefined : { window });
           if (read.kind === "snapshot") {
             return [{ kind: "snapshot", thread: read.thread }];
           }

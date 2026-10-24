@@ -827,4 +827,14 @@ export interface ThreadHistoryBounds {
   oldestRetainedOrdinal: number | null;
   /** How many started turns the index knows for this thread. */
   totalTurns: number;
+  /**
+   * On a bounded snapshot whose window the host cut above its own boundary
+   * (`ThreadReadWindow` `"recent"`): the cursor of that cut — `beforeCursor`
+   * as the snapshot sent it. A client whose window has evicted rows since asks
+   * its first older page without a cursor; it sends this as `windowCut`
+   * (`ThreadHistoryQuery`) so that page never ends below the cut, and keeps it
+   * with the window it describes (the device cache) after `beforeCursor` is
+   * dropped. Absent from every other snapshot and from an older host.
+   */
+  windowCut?: string;
 }
