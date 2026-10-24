@@ -93,7 +93,12 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.nonce]);
 
-  // Filters naming a collection that no longer exists let go of it.
+  // Filters naming a collection that no longer exists let go of it: at once for one this client
+  // deleted (before anything refetches with it), else when the collections are read again.
+  const collectionDeleted = useCallback((id: string) => {
+    setListCollection((c) => (c === id ? "all" : c));
+    setGraphFilter((f) => (f.includes(id) ? f.filter((other) => other !== id) : f));
+  }, []);
   const list = collections?.collections;
   useEffect(() => {
     if (!list) return;
@@ -229,6 +234,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
           collection={dialog.collection}
           collections={collectionList}
           onClose={() => setDialog((d) => ({ ...d, open: false }))}
+          onDeleted={collectionDeleted}
         />
       </>
     );

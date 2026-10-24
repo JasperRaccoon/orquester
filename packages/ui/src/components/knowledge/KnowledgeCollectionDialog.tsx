@@ -37,9 +37,11 @@ export interface KnowledgeCollectionDialogProps {
   collection: KnowledgeCollectionView | null;
   collections: readonly KnowledgeCollectionView[];
   onClose: () => void;
+  /** A collection was deleted: called before the lists refetch, so a filter naming it falls back first. */
+  onDeleted?: (id: string) => void;
 }
 
-export const KnowledgeCollectionDialog: React.FC<KnowledgeCollectionDialogProps> = ({ api, open, collection, collections, onClose }) => {
+export const KnowledgeCollectionDialog: React.FC<KnowledgeCollectionDialogProps> = ({ api, open, collection, collections, onClose, onDeleted }) => {
   const id = useId();
   const [form, setForm] = useState<CollectionForm>({ name: "", description: "", color: KNOWLEDGE_COLORS[0]! });
   const [touched, setTouched] = useState(false);
@@ -94,7 +96,7 @@ export const KnowledgeCollectionDialog: React.FC<KnowledgeCollectionDialogProps>
     setBusy(true);
     setError(null);
     try {
-      await deleteKnowledgeCollection(api, collection.id);
+      await deleteKnowledgeCollection(api, collection.id, onDeleted);
       onClose();
     } catch (err) {
       setError(knowledgeErrorText(err));
