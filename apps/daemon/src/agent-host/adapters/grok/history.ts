@@ -39,9 +39,11 @@ import {
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import { stripForkHandoff } from "../../orchestration/fork.ts";
+import { isHostRestartPrompt } from "../../orchestration/pending-wake.ts";
 import { goalCommandFromReminder } from "./goal.ts";
 import { isGrokSessionToolCall } from "./session-tools.ts";
-import { GROK_TOOL_NAMESPACE, SPAWN_SUBAGENT_TOOL } from "./subagents.ts";
+import { taskSnapshotEnd } from "./background-tasks.ts";
+import { finishedStatus, GROK_TOOL_NAMESPACE, SPAWN_SUBAGENT_TOOL, subagentAnswerText } from "./subagents.ts";
 import {
   acpKindFromVendorKind,
   boundRawOutput,
@@ -51,6 +53,7 @@ import {
   normalizeToolKind,
   toolContentText
 } from "./tool-output.ts";
+import { asRecord } from "./normalizer-state.ts";
 import { xaiToolMeta } from "./xai-meta.ts";
 
 /**
@@ -86,6 +89,18 @@ export type GrokHistoryItem =
       readonly content?: unknown;
       readonly locations?: unknown;
     }
+  /**
+   * A background task's end the replay recorded (`subagent_finished`,
+   * `task_completed`): the live path's `task.completed` row.
+   */
+  | {
+      readonly kind: "task_completed";
+      readonly taskId: string;
+      readonly status: "completed" | "failed" | "stopped";
+      readonly taskType?: string;
+      readonly summary?: string;
+      readonly exitCode?: number;
+    }
   /** A turn this process observed live; it carries no restorable content. */
   | {
       readonly kind: "observed_turn";
@@ -108,6 +123,7 @@ function isGrokHistoryItem(value: unknown): value is GrokHistoryItem {
     kind === "assistant_message" ||
     kind === "reasoning" ||
     kind === "tool_call" ||
+    kind === "task_completed" ||
     kind === "observed_turn"
   );
 }
@@ -169,6 +185,10 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
     index += 1;
     switch (item.kind) {
       case "user_message": {
+        if (isHostRestartPrompt(item.text)) {
+          // The host's own prompt after a restart: live, no message row.
+          break;
+        }
         // The replay echoes the text the adapter SENT, with any
         // `Attached files:` block it appended (`attachment-lines.ts`):
         // provider input, not the user's own text. Stripped here, from the
@@ -211,6 +231,11 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
       case "tool_call":
         events.push(event("item.completed", toolCallPayload(item), item.toolCallId));
         break;
+      case "task_completed": {
+        const { kind: _kind, ...payload } = item;
+        events.push(event("task.completed", payload));
+        break;
+      }
       default:
         break;
     }
@@ -314,6 +339,13 @@ export class GrokHistoryCollector {
       return;
     }
     const textKind = TEXT_CHUNK_KINDS[kind];
+    if (textKind === "user_message" && asRecord(update["_meta"])?.["hideFromScrollback"] === true) {
+      // A prompt the CLI wrote itself and hides from its own scrollback — a
+      // background subagent's or monitor's report that wakes the agent. Live,
+      // the wake turn has no user row; the end is its own task row, replayed
+      // from `subagent_finished` / `task_completed` ({@link observeXaiUpdate}).
+      return;
+    }
     if (textKind !== undefined) {
       const text = textOf(update["content"]);
       if (text.length === 0) {
@@ -332,7 +364,15 @@ export class GrokHistoryCollector {
   }
 
   /** One replayed `_x.ai/session/update` body. */
-  observeXaiUpdate(update: { sessionUpdate?: unknown; prompt_id?: unknown }): void {
+  observeXaiUpdate(update: { sessionUpdate?: unknown; prompt_id?: unknown } & Record<string, unknown>): void {
+    if (update.sessionUpdate === "subagent_finished" || update.sessionUpdate === "task_completed") {
+      const end = taskEndOf(update);
+      if (end !== undefined) {
+        this.flushText();
+        this.pending.push(end);
+      }
+      return;
+    }
     if (update.sessionUpdate !== "turn_completed") {
       return;
     }
@@ -412,6 +452,43 @@ export class GrokHistoryCollector {
     this.pending = [];
     this.calls = new Map();
   }
+}
+
+/**
+ * A replayed `subagent_finished` or `task_completed` as the end the live path
+ * reports for it (`subagentFinished`, `taskCompleted`), or `undefined` when it
+ * names no task.
+ */
+function taskEndOf(update: Record<string, unknown>): Extract<GrokHistoryItem, { kind: "task_completed" }> | undefined {
+  if (update["sessionUpdate"] === "task_completed") {
+    const end = taskSnapshotEnd(update);
+    if (end === undefined) {
+      return undefined;
+    }
+    const summary = end.output?.trim();
+    return {
+      kind: "task_completed",
+      taskId: end.taskId,
+      status: end.status,
+      ...(summary === undefined || summary.length === 0 ? {} : { summary }),
+      ...(end.exitCode === undefined ? {} : { exitCode: end.exitCode })
+    };
+  }
+  const taskId = typeof update["subagent_id"] === "string" ? update["subagent_id"].trim() : "";
+  if (taskId.length === 0) {
+    return undefined;
+  }
+  const status = finishedStatus(update["status"], update["error"]);
+  const answer = subagentAnswerText(typeof update["output"] === "string" ? update["output"] : undefined);
+  const error = typeof update["error"] === "string" && update["error"].trim().length > 0 ? update["error"].trim() : undefined;
+  const summary = status === "completed" ? answer : (error ?? answer);
+  return {
+    kind: "task_completed",
+    taskId,
+    status,
+    taskType: "subagent",
+    ...(summary === undefined ? {} : { summary })
+  };
 }
 
 function textOf(content: unknown): string {

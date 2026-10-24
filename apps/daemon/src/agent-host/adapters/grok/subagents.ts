@@ -254,7 +254,7 @@ function subagentUsage(
  * vocabulary; a status nobody knows ends the run failed when it carries an
  * `error`, else completed.
  */
-function finishedStatus(status: unknown, error: unknown): "completed" | "failed" | "stopped" {
+export function finishedStatus(status: unknown, error: unknown): "completed" | "failed" | "stopped" {
   switch (typeof status === "string" ? status.trim().toLowerCase() : undefined) {
     case "interrupted":
     case "aborted":

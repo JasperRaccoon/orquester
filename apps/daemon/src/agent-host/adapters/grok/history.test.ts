@@ -20,6 +20,7 @@ import {
   type ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
+import { CONTINUATION_PROMPT } from "../../host-protocol.ts";
 import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 
 import { agentFrames, readCapture, type JsonRpcFrame } from "./fixtures.ts";
@@ -583,4 +584,84 @@ test("a replayed use_tool call of another server stays the row it was", () => {
   assert.notEqual(row.payload.itemType, "mcp_tool_call");
   const [activity] = runtimeEventToActivities(row, { sessionToolNames: new Set(["html_render", "show_widget"]) });
   assert.equal((activity!.payload as { data: { sessionTool?: unknown } }).data.sessionTool, undefined);
+});
+
+test("a background end the CLI wakes the agent with is the live task row, never a user bubble", () => {
+  // Shapes from real `updates.jsonl` replays: the CLI's own wake prompt is a
+  // `user_message_chunk` marked `hideFromScrollback`, and the end itself is
+  // the `subagent_finished` / `task_completed` row recorded before it.
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "audit it" } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Spawned." } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  collector.observeXaiUpdate({
+    sessionUpdate: "subagent_finished",
+    subagent_id: "01a0d90c-575a-7432-8ce9-bbbab47c83cc",
+    status: "completed",
+    output: "sub-ok",
+    will_wake: true
+  });
+  collector.observeXaiUpdate({
+    sessionUpdate: "task_completed",
+    task_snapshot: { task_id: "call-1-0", output: "bg-done\n", exit_code: 2, explicitly_killed: false }
+  });
+  collector.observeAcpUpdate({
+    sessionUpdate: "user_message_chunk",
+    content: { type: "text", text: "<system-reminder>\nWhile you were idle, 1 background subagent completed:\n</system-reminder>" },
+    _meta: { modelId: "grok-4.7", promptIndex: 1, hideFromScrollback: true }
+  });
+  collector.observeAcpUpdate({
+    sessionUpdate: "user_message_chunk",
+    content: { type: "text", text: '<monitor-event task_id="m1">\n[tick watch] tick 1\n</monitor-event>' },
+    _meta: { hideFromScrollback: true }
+  });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "It passed." } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "subagent-completed-1" });
+
+  const events = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  );
+  const userTexts = events
+    .filter((event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed")
+    .filter((event) => event.payload.itemType === "user_message")
+    .map((event) => (event.payload.data as { text?: string }).text);
+  assert.deepEqual(userTexts, ["audit it"]);
+
+  const ends = events
+    .filter((event): event is Extract<RuntimeEvent, { type: "task.completed" }> => event.type === "task.completed")
+    .map((event) => ({ turnId: event.turnId, source: event.raw?.source, ...event.payload }));
+  assert.deepEqual(ends, [
+    {
+      turnId: "subagent-completed-1",
+      source: HISTORICAL_RAW_SOURCE,
+      taskId: "01a0d90c-575a-7432-8ce9-bbbab47c83cc",
+      status: "completed",
+      taskType: "subagent",
+      summary: "sub-ok"
+    },
+    {
+      turnId: "subagent-completed-1",
+      source: HISTORICAL_RAW_SOURCE,
+      taskId: "call-1-0",
+      status: "failed",
+      summary: "bg-done",
+      exitCode: 2
+    }
+  ]);
+});
+
+test("the host's own prompt after a restart replays as nothing, never as the user's words", () => {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: CONTINUATION_PROMPT } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Resuming." } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+
+  const items = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  )
+    .filter((event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed")
+    .map((event) => event.payload.itemType);
+  assert.deepEqual(items, ["assistant_message"]);
 });

@@ -22,13 +22,15 @@ import type {
   ItemLifecyclePayload,
   RuntimeEvent,
   RuntimeEventRaw,
+  TaskCompletedPayload,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
-import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE, isProviderInternalUserText } from "@orquester/api/agent-chat";
 
 import type { Clock, IdGen } from "../../adapter.ts";
 import { isAttachmentPathBlock, stripAttachmentPathLines } from "../attachment-lines.ts";
 import { stripForkHandoff } from "../../orchestration/fork.ts";
+import { isHostRestartPrompt } from "../../orchestration/pending-wake.ts";
 import {
   classifyToolItemType,
   cliDenialReason,
@@ -38,6 +40,7 @@ import {
   titleForTool,
   trimmedString
 } from "./classify.ts";
+import { parseBackgroundShellExitCode } from "./normalize.ts";
 import { WORKFLOW_HISTORY_ITEM_TYPE, type WorkflowHistoryRun } from "./workflow-history.ts";
 import { WORKFLOW_MEMBER_TASK_TYPE, WORKFLOW_TASK_TYPE, workflowMemberTaskId } from "./workflow.ts";
 
@@ -152,6 +155,69 @@ function carriesUserText(text: string): boolean {
   return t.length > 0 && !isAttachmentPathBlock(t);
 }
 
+interface TaskNotification {
+  taskId: string;
+  status: TaskCompletedPayload["status"];
+  summary?: string;
+}
+
+const TASK_NOTIFICATION_RE = /<task-notification>([\s\S]*?)<\/task-notification>/g;
+
+function taggedField(body: string, tag: string): string | undefined {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(body);
+  return trimmedString(match?.[1]);
+}
+
+/**
+ * The task ends a user text block reports, or `undefined` when it is not the
+ * CLI's `<task-notification>` row. The CLI writes one when a background task's
+ * end wakes the session — as a `user` row, the shape of a prompt nobody typed.
+ * Live, the same end arrives as a `system/task_notification` frame, which the
+ * transcript does not keep.
+ */
+function taskNotifications(text: string): TaskNotification[] | undefined {
+  if (!text.trimStart().startsWith("<task-notification>")) {
+    return undefined;
+  }
+  const notifications: TaskNotification[] = [];
+  for (const match of text.matchAll(TASK_NOTIFICATION_RE)) {
+    const body = match[1] ?? "";
+    const taskId = taggedField(body, "task-id");
+    if (taskId === undefined) {
+      continue;
+    }
+    const status = taggedField(body, "status");
+    const summary = taggedField(body, "summary");
+    notifications.push({
+      taskId,
+      status: status === "completed" || status === "failed" ? status : "stopped",
+      ...(summary !== undefined ? { summary } : {})
+    });
+  }
+  return notifications;
+}
+
+/** What the CLI writes as a `user` row when the user stops a turn. */
+const INTERRUPT_MARKER_RE = /^\[Request interrupted by user(?: for tool use)?\]$/;
+
+/**
+ * The slash command a `<command-name>` row records, as the user typed it
+ * (`/compact`, `/review the auth module`), or `undefined` for any other text.
+ * Live, the prompt Orquester sent is the user message; the transcript keeps
+ * only the CLI's tagged echo of it.
+ */
+function slashCommandText(text: string): string | undefined {
+  if (!text.trimStart().startsWith("<command-name>")) {
+    return undefined;
+  }
+  const name = taggedField(text, "command-name");
+  if (name === undefined) {
+    return undefined;
+  }
+  const args = taggedField(text, "command-args");
+  return args === undefined ? name : `${name} ${args}`;
+}
+
 function isWorkflowHistoryRun(item: unknown): item is WorkflowHistoryRun {
   return (
     item !== null &&
@@ -169,6 +235,7 @@ export function projectClaudeHistory(
   deps: ProjectHistoryDeps
 ): RuntimeEvent[] {
   const events: RuntimeEvent[] = [];
+  let lastTurnCompleted: Extract<RuntimeEvent, { type: "turn.completed" }> | undefined;
 
   for (const turn of snapshot.turns) {
     const raw = (payload: unknown): RuntimeEventRaw => ({
@@ -191,6 +258,7 @@ export function projectClaudeHistory(
     const turnEvents: RuntimeEvent[] = [];
     let model: string | undefined;
     let hasSubagents = false;
+    let interrupted = false;
 
     /**
      * One `Workflow` run the history reader found beside the transcript
@@ -330,9 +398,9 @@ export function projectClaudeHistory(
         // A skill dispatch with attachments and no prose sends the block as a
         // text block of its OWN, ahead of the command block (`buildUserMessage`,
         // §4.5). Per block it is a whole message and the strip keeps it; per
-        // message it is provider input beside the user's text, and ingestion
-        // keeps one user message per turn — so the block was the bubble and the
-        // `/command` the user typed never showed. It is dropped exactly when
+        // message it is provider input beside the user's text — replayed, it
+        // would be a bubble the user never wrote, and it once hid the
+        // `/command` they typed. It is dropped exactly when
         // another text block of the same message carries text; alone, it stays
         // as the turn's only evidence.
         const dropBlockOnlyText =
@@ -450,12 +518,48 @@ export function projectClaudeHistory(
             if (agentId !== undefined && message.role === "user") {
               continue;
             }
+            if (message.role === "user" && INTERRUPT_MARKER_RE.test(text.trim())) {
+              // The user's stop: live, the turn settles interrupted and no
+              // bubble says so.
+              interrupted = true;
+              continue;
+            }
+            // A background task's end is the live `task.completed` row
+            // ("Received 1 update"), never a bubble the user did not write.
+            const notifications = message.role === "user" ? taskNotifications(text) : undefined;
+            if (notifications !== undefined) {
+              for (const notification of notifications) {
+                const exitCode = parseBackgroundShellExitCode(notification.summary);
+                turnEvents.push({
+                  ...base(),
+                  type: "task.completed",
+                  payload: {
+                    ...notification,
+                    ...(exitCode !== undefined ? { exitCode } : {})
+                  },
+                  raw: raw(block)
+                });
+              }
+              continue;
+            }
+            const command = message.role === "user" ? slashCommandText(text) : undefined;
+            if (
+              command === undefined &&
+              message.role === "user" &&
+              (isProviderInternalUserText(text) || isHostRestartPrompt(text))
+            ) {
+              // The CLI's own row — a local command's output, a caveat, a
+              // reminder — or the host's own prompt after a restart, neither
+              // of which the live stream shows as a message.
+              continue;
+            }
             // A prompt block is the text the adapter SENT, with any
             // `Attached files:` block it appended (`attachment-lines.ts`):
             // provider input, not the user's own text. The agent's text was
             // never the adapter's and stays as it is.
             const shown =
-              message.role === "user" ? stripAttachmentPathLines(stripForkHandoff(text)) : text;
+              command ??
+              (message.role === "user" ? stripAttachmentPathLines(stripForkHandoff(text)) : text);
             const itemId = deps.ids.messageId("msg");
             if (message.role === "assistant") {
               // The same shape the live path produces, so a consumer that
@@ -507,7 +611,12 @@ export function projectClaudeHistory(
     projectItems(turn.items);
 
     if (turnEvents.length === 0) {
-      // Nothing projectable in this turn: no empty turn shell either.
+      // Nothing projectable in this turn: no empty turn shell either. A stop
+      // the CLI wrote as a row of its own opens a turn here, but it ended the
+      // one before it.
+      if (interrupted && lastTurnCompleted !== undefined) {
+        lastTurnCompleted.payload.state = "interrupted";
+      }
       continue;
     }
 
@@ -518,17 +627,18 @@ export function projectClaudeHistory(
       raw: raw({ turnId: turn.id })
     });
     events.push(...turnEvents);
-    events.push({
+    lastTurnCompleted = {
       ...base(),
       type: "turn.completed",
       payload: {
-        state: "completed",
+        state: interrupted ? "interrupted" : "completed",
         // A transcript carries no per-turn totals, and inventing them would
         // corrupt the cost line.
         tokenUsage: { usageScope: "main_agent", usageStatus: "unavailable", hasSubagents }
       },
       raw: raw({ turnId: turn.id })
-    });
+    };
+    events.push(lastTurnCompleted);
   }
 
   return events;

@@ -19,7 +19,7 @@ import type { AdapterCapabilities, DomainEvent, RuntimeEvent } from "@orquester/
 
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import { CONTINUATION_PROMPT } from "../host-protocol.ts";
-import { WAKE_NOTE_SUMMARY } from "./pending-wake.ts";
+import { isHostRestartPrompt, WAKE_NOTE_SUMMARY, wakePrompt } from "./pending-wake.ts";
 import {
   createScriptedAdapter,
   createTestHost,
@@ -480,5 +480,31 @@ describe("a quiet background shell stays live while it runs (2026-10-23)", () =>
     adapter.close();
     await scene.consumed;
     await host.stop();
+  });
+});
+
+describe("pending wake — the host's own prompts are recognised as the host's", () => {
+  const task = (taskId: string) => ({
+    taskId,
+    status: "completed",
+    completedAt: "2026-10-24T00:00:00.000Z",
+    title: "Run tests",
+    result: "all green"
+  });
+
+  it("knows the continuation and every wake prompt, so a history projection never replays one as the user's", () => {
+    assert.equal(isHostRestartPrompt(CONTINUATION_PROMPT), true);
+    assert.equal(isHostRestartPrompt(`  ${CONTINUATION_PROMPT}\n`), true);
+    assert.equal(isHostRestartPrompt(wakePrompt({ since: "x", tasks: [task("t1")] }, [])), true);
+    assert.equal(
+      isHostRestartPrompt(wakePrompt({ since: "x", tasks: [task("t1"), task("t2")], moreTasks: 3 }, [])),
+      true
+    );
+  });
+
+  it("does not claim a prompt the user wrote, even one that mentions the continuation", () => {
+    assert.equal(isHostRestartPrompt("ok. Continue where you left off."), false);
+    assert.equal(isHostRestartPrompt("Continue where you left off. Then push."), false);
+    assert.equal(isHostRestartPrompt("While the agent host restarted, did anything break?"), false);
   });
 });

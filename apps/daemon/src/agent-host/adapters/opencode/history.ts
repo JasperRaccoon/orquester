@@ -38,6 +38,7 @@ import type {
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import { stripForkHandoff } from "../../orchestration/fork.ts";
+import { isHostRestartPrompt } from "../../orchestration/pending-wake.ts";
 import { toToolLifecycleItemType } from "./normalize.ts";
 import { isRecord, type OpenCodeMessageInfo, type OpenCodePart } from "./protocol.ts";
 
@@ -215,6 +216,11 @@ function projectPart(
     // row; replayed, it is none either, and a prompt made only of such parts
     // replays no "You" row at all.
     if (role === "user" && textPart.synthetic === true) {
+      return null;
+    }
+    // The host's own prompt after a restart (the continuation, a missed
+    // wake): live, no message row either.
+    if (role === "user" && isHostRestartPrompt(text)) {
       return null;
     }
     // OpenCode stores a prompt as the adapter SENT it, with any

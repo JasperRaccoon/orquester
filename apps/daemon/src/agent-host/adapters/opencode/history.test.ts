@@ -23,6 +23,7 @@ import test from "node:test";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
+import { CONTINUATION_PROMPT } from "../../host-protocol.ts";
 import { projectOpenCodeHistory } from "./history.ts";
 import type { OpenCodeMessageWithParts } from "./routes.ts";
 import type { AdapterContext } from "../../adapter.ts";
@@ -333,4 +334,49 @@ test("fixture 10: the per-turn system addendum — session-tool instructions inc
   const projected = await project("thread-1", messages);
   assert.ok(projected.length > 0);
   assert.ok(!JSON.stringify(projected).includes("## Orquester"), "no projected event carries the block");
+});
+
+test("fixture 10: the host's own prompt after a restart replays as nothing, never as the user's words", async () => {
+  // OpenCode declares no promptless continuation, so a crash resume sends
+  // `CONTINUATION_PROMPT` as a real prompt, stored as plain text (no
+  // `synthetic`); live, it is never a message row.
+  const messages = structuredClone(historyFor(FIXTURE_10, ROOT_SESSION));
+  const prompt = messages[0]!.parts.find((part) => part.type === "text");
+  assert.ok(prompt !== undefined);
+  Object.assign(prompt, { text: CONTINUATION_PROMPT });
+
+  const events = await project("thread-1", messages);
+  assert.deepEqual(
+    itemsOf(events).map((item) => [item.payload.itemType, item.payload.detail]),
+    [
+      ["assistant_message", "alpha"],
+      ["user_message", "Say the single word: bravo."]
+    ]
+  );
+});
+
+test("fixture 10: a prompt no reply names — the user sent another first — still replays as theirs", async () => {
+  // Real stores hold these: back-to-back "hello"s, a prompt a compaction
+  // overtook. OpenCode answers only the later one, so no assistant message
+  // names the earlier as its `parentID`; live, both were the user's bubbles.
+  const messages = structuredClone(historyFor(FIXTURE_10, ROOT_SESSION));
+  const prompt = messages[0]!;
+  const orphan = structuredClone(prompt);
+  orphan.info = { ...orphan.info, id: "msg_orphan" };
+  orphan.parts = orphan.parts
+    .filter((part) => part.type === "text")
+    .map((part) => ({ ...part, id: "prt_orphan", messageID: "msg_orphan", text: "hello" })) as typeof orphan.parts;
+  messages.splice(2, 0, orphan);
+
+  const events = await project("thread-1", messages);
+  assert.deepEqual(
+    itemsOf(events)
+      .filter((item) => item.payload.itemType === "user_message")
+      .map((item) => [item.turnId, item.payload.detail]),
+    [
+      [messages[1]!.info.id, "Say the single word: alpha."],
+      ["msg_orphan", "hello"],
+      [messages[3]!.info.id, "Say the single word: bravo."]
+    ]
+  );
 });

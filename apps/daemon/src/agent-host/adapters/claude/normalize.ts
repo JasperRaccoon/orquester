@@ -385,7 +385,7 @@ function parseBackgroundShellLaunch(
   return { taskId, outputFile };
 }
 
-function parseBackgroundShellExitCode(summary: unknown): number | undefined {
+export function parseBackgroundShellExitCode(summary: unknown): number | undefined {
   if (typeof summary !== "string") {
     return undefined;
   }

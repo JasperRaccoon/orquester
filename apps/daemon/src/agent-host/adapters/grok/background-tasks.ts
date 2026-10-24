@@ -650,12 +650,30 @@ export function taskCompleted(
   update: Record<string, unknown>,
   raw: RuntimeEventRaw
 ): RuntimeEvent[] {
-  const snapshot = asRecord(update["task_snapshot"]) as Partial<XaiTaskSnapshot> | undefined;
-  const taskId = textArgument(snapshot as Record<string, unknown> | undefined, "task_id");
-  if (snapshot === undefined || taskId === undefined) {
+  const end = taskSnapshotEnd(update);
+  if (end === undefined) {
     return [
       event(state, "runtime.warning", { message: "grok: task_completed without a task_snapshot.task_id" }, undefined, raw)
     ];
+  }
+  return endBackgroundTask(state, end.taskId, end.status, end.output, raw, end.exitCode);
+}
+
+/**
+ * The end a `task_completed` update's `task_snapshot` reports, by
+ * {@link taskCompleted}'s rules, or `undefined` when it names no task. The
+ * history projection reads a replayed one through it too.
+ */
+export function taskSnapshotEnd(update: Record<string, unknown>): {
+  taskId: string;
+  status: "completed" | "failed" | "stopped";
+  output?: string;
+  exitCode?: number;
+} | undefined {
+  const snapshot = asRecord(update["task_snapshot"]) as Partial<XaiTaskSnapshot> | undefined;
+  const taskId = textArgument(snapshot as Record<string, unknown> | undefined, "task_id");
+  if (snapshot === undefined || taskId === undefined) {
+    return undefined;
   }
   const exitCode =
     typeof snapshot.exit_code === "number" && Number.isInteger(snapshot.exit_code) ? snapshot.exit_code : undefined;
@@ -670,7 +688,12 @@ export function taskCompleted(
           ? "failed"
           : "completed";
   const output = typeof snapshot.output === "string" ? snapshot.output : undefined;
-  return endBackgroundTask(state, taskId, status, output, raw, exitCode);
+  return {
+    taskId,
+    status,
+    ...(output === undefined ? {} : { output }),
+    ...(exitCode === undefined ? {} : { exitCode })
+  };
 }
 
 /**

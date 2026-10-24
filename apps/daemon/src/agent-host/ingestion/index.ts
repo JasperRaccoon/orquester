@@ -168,7 +168,13 @@ interface ThreadState {
    */
   historicalTurns: Map<
     string,
-    { startedAt: string; userMessageId?: string; assistantMessageId?: string }
+    {
+      startedAt: string;
+      userMessageId?: string;
+      assistantMessageId?: string;
+      /** The user texts already replayed in the turn, so an echo is not a second bubble. */
+      userTexts?: Set<string>;
+    }
   >;
   messages: DeltaBufferSet;
   toolOutput: DeltaBufferSet;
@@ -1472,14 +1478,18 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         return;
       }
       const turn = eventTurnId === null ? undefined : state.historicalTurns.get(eventTurnId);
-      // One user message per turn: a provider that echoes the prompt as more
-      // than one item must not produce a stack of identical bubbles.
-      if (turn?.userMessageId !== undefined) {
+      // One bubble per thing the user said: a provider that echoes the prompt
+      // as more than one item must not produce a stack of identical bubbles.
+      // A DIFFERENT text in the same turn is the user's too — a steer, an
+      // answer sent while the turn ran (Codex keeps those in the turn) — and
+      // was a bubble live. The turn still opens at its first.
+      if (turn?.userTexts?.has(text) === true) {
         return;
       }
       const messageId = historicalUserMessageId(event);
       if (turn !== undefined) {
-        turn.userMessageId = messageId;
+        turn.userMessageId ??= messageId;
+        (turn.userTexts ??= new Set()).add(text);
       }
       emit(state, threadId, event, now, "thread.message-sent", {
         messageId,

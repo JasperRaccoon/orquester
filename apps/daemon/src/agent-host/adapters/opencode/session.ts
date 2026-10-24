@@ -2741,8 +2741,11 @@ function addRelated(state: OpenCodeSessionState, sessionId: string): void {
  * Each turn's `items` additionally carry the **user message that prompted it**
  * — `parentID` links them, and OpenCode can answer one prompt with several
  * assistant messages, so the prompt is attached to the first of them only. A
- * trailing prompt with no answer yet becomes a turn of its own, or replaying
- * the history would silently lose the last thing the user said.
+ * prompt no assistant message names becomes a turn of its own, where it
+ * stands: the trailing one not answered yet, and one the user overtook — a
+ * second prompt sent before the first was answered, or a compaction — which
+ * OpenCode never answers. Either way replaying the history would otherwise
+ * silently lose something the user said.
  *
  * `items` is `unknown[]` by contract; `history.ts` is the only reader that
  * knows this shape.
@@ -2761,15 +2764,23 @@ function toThreadSnapshot(
   const turns: ThreadSnapshot["turns"] = [];
   const answeredPrompts = new Set<string>();
   const claimedPrompts = new Set<string>();
+  for (const entry of messages) {
+    if (entry?.info?.role === "assistant" && typeof entry.info.parentID === "string") {
+      answeredPrompts.add(entry.info.parentID);
+    }
+  }
 
   for (const entry of messages) {
+    if (entry?.info?.role === "user" && !answeredPrompts.has(entry.info.id)) {
+      turns.push({ id: entry.info.id, items: [entry.info, ...((entry.parts ?? []) as OpenCodePart[])] });
+      continue;
+    }
     if (entry?.info?.role !== "assistant") {
       continue;
     }
     const parentId = entry.info.parentID;
     const items: unknown[] = [];
     if (typeof parentId === "string") {
-      answeredPrompts.add(parentId);
       const prompt = byId.get(parentId);
       // Only the FIRST assistant message of a prompt carries it, so a
       // multi-message answer does not replay the user's text twice.
@@ -2780,14 +2791,6 @@ function toThreadSnapshot(
     }
     items.push(entry.info, ...((entry.parts ?? []) as OpenCodePart[]));
     turns.push({ id: entry.info.id, items });
-  }
-
-  const last = messages.at(-1);
-  if (last?.info?.role === "user" && !answeredPrompts.has(last.info.id)) {
-    turns.push({
-      id: last.info.id,
-      items: [last.info, ...((last.parts ?? []) as OpenCodePart[])]
-    });
   }
 
   return { threadId, turns };

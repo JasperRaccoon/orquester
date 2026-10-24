@@ -239,7 +239,7 @@ describe("E6: a replayed row never looks live", () => {
     ]);
   });
 
-  it("one user message per replayed turn, however many items echo it", async () => {
+  it("one bubble per prompt, however many items echo it", async () => {
     const { sink } = await replay([
       historical("turn.started", {}, { turnId: "turn-1" }),
       historical(
@@ -249,12 +249,43 @@ describe("E6: a replayed row never looks live", () => {
       ),
       historical(
         "item.completed",
-        { itemType: "user_message", status: "completed", detail: "twice" },
+        { itemType: "user_message", status: "completed", detail: "once" },
         { turnId: "turn-1", itemId: "u2" }
       ),
       historical("turn.completed", { state: "completed" }, { turnId: "turn-1" })
     ]);
     assert.deepEqual(roleText(sink.events()), ["user:once"]);
+  });
+
+  it("a message the user sent while the turn ran replays as theirs too, after the prompt", async () => {
+    // Codex keeps a mid-turn steer, or an answer sent while the turn ran, as a
+    // second `userMessage` of the same turn; live, each was a bubble.
+    const { sink } = await replay([
+      historical("turn.started", {}, { turnId: "turn-1" }),
+      historical(
+        "item.completed",
+        { itemType: "user_message", status: "completed", detail: "list the paths" },
+        { turnId: "turn-1", itemId: "u1" }
+      ),
+      historical(
+        "item.completed",
+        { itemType: "assistant_message", status: "completed", detail: "Listing." },
+        { turnId: "turn-1", itemId: "a1" }
+      ),
+      historical(
+        "item.completed",
+        { itemType: "user_message", status: "completed", detail: "oh and the agents too" },
+        { turnId: "turn-1", itemId: "u2" }
+      ),
+      historical("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    ]);
+    assert.deepEqual(roleText(sink.events()), ["user:list the paths", "assistant:Listing.", "user:oh and the agents too"]);
+    const settled = sink
+      .events()
+      .find((event) => event.type === "thread.turn-start-requested") as
+      | Extract<DomainEvent, { type: "thread.turn-start-requested" }>
+      | undefined;
+    assert.equal(settled?.payload.messageId, "user:u1", "the turn still opens at its prompt");
   });
 
   it("a replayed tool call is still an activity row", async () => {

@@ -14,6 +14,7 @@ import type { RuntimeEvent, ThreadSnapshot } from "@orquester/api/agent-chat";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
 import { countingIds, fixedClock, readClaudeFixture, replayClaudeFixture } from "./fixtures.ts";
+import { CONTINUATION_PROMPT } from "../../host-protocol.ts";
 import { projectClaudeHistory } from "./project-history.ts";
 import { groupClaudeHistoryTurns } from "./rollback.ts";
 
@@ -502,5 +503,233 @@ describe("claude history projection — a compaction summary is a marker, not a 
       .filter((event) => event.payload.itemType === "user_message")
       .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
     assert.deepEqual(userTexts, ["hello", "carry on"]);
+  });
+});
+
+describe("claude history projection — a task notification is an update, not a user turn", () => {
+  /**
+   * The row the CLI writes when a background task's end wakes the session:
+   * `type: "user"`, plain-string content, `origin.kind: "task-notification"`
+   * (a field `getSessionMessages` does not pass on). Live, the same end
+   * arrives as a `system/task_notification` frame and becomes a
+   * `task.completed` row; the frame is not in the transcript, so the row is
+   * all that is left of it.
+   */
+  const SHELL_DONE =
+    "<task-notification>\n<task-id>bwrpi22v7</task-id>\n" +
+    "<tool-use-id>toolu_01WVNkMbr9atZ5NvvHWLUxRe</tool-use-id>\n" +
+    "<output-file>/tmp/claude/tasks/bwrpi22v7.output</output-file>\n" +
+    "<status>completed</status>\n" +
+    "<summary>Background command \"Run tests three times\" completed (exit code 0)</summary>\n" +
+    "</task-notification>";
+  const AGENT_FAILED =
+    "<task-notification>\n<task-id>a02af14dc14297acc</task-id>\n" +
+    "<status>failed</status>\n" +
+    "<summary>Agent \"Implement PlacementWorld\" failed</summary>\n" +
+    "<note>The user can send it another message.</note>\n" +
+    "</task-notification>";
+  const transcript = [
+    {
+      type: "user" as const,
+      uuid: "turn-a",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "run the tests" }] }
+    },
+    {
+      type: "assistant" as const,
+      uuid: "a1",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "Started them." }] }
+    },
+    {
+      type: "user" as const,
+      uuid: "wake-1",
+      parent_tool_use_id: null,
+      message: { role: "user", content: SHELL_DONE }
+    },
+    {
+      type: "assistant" as const,
+      uuid: "a2",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "They passed." }] }
+    },
+    {
+      type: "user" as const,
+      uuid: "wake-2",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: `${AGENT_FAILED}\n${SHELL_DONE}` }] }
+    }
+  ];
+
+  it("never replays it as a user message the user never wrote", () => {
+    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
+    const userTexts = allOf(events, "item.completed")
+      .filter((event) => event.payload.itemType === "user_message")
+      .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
+    assert.deepEqual(userTexts, ["run the tests"]);
+  });
+
+  it("replays each notification as the task.completed row the live stream makes of it", () => {
+    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
+    const completed = allOf(events, "task.completed");
+    assert.deepEqual(
+      completed.map((event) => ({ turnId: event.turnId, ...event.payload })),
+      [
+        {
+          turnId: "wake-1",
+          taskId: "bwrpi22v7",
+          status: "completed",
+          summary: "Background command \"Run tests three times\" completed (exit code 0)",
+          exitCode: 0
+        },
+        {
+          turnId: "wake-2",
+          taskId: "a02af14dc14297acc",
+          status: "failed",
+          summary: "Agent \"Implement PlacementWorld\" failed"
+        },
+        {
+          turnId: "wake-2",
+          taskId: "bwrpi22v7",
+          status: "completed",
+          summary: "Background command \"Run tests three times\" completed (exit code 0)",
+          exitCode: 0
+        }
+      ]
+    );
+    for (const event of completed) {
+      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE, "a replayed row is the past");
+    }
+  });
+});
+
+describe("claude history projection — the CLI's own user rows", () => {
+  /**
+   * Rows the CLI writes as `type: "user"` that nobody typed in this shape, as
+   * found in real transcripts (`isMeta` rows never reach the projection:
+   * `getSessionMessages` drops them).
+   */
+  const transcript = [
+    {
+      type: "user" as const,
+      uuid: "turn-a",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "fix the bug" }] }
+    },
+    {
+      type: "assistant" as const,
+      uuid: "a1",
+      parent_tool_use_id: null,
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu-1", name: "Bash", input: { command: "make" } }]
+      }
+    },
+    {
+      type: "user" as const,
+      uuid: "r1",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tu-1", content: "interrupted", is_error: true },
+          { type: "text", text: "[Request interrupted by user for tool use]" }
+        ]
+      }
+    },
+    {
+      type: "user" as const,
+      uuid: "turn-b",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "try again" }] }
+    },
+    {
+      type: "assistant" as const,
+      uuid: "a2",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "Retrying." }] }
+    },
+    {
+      type: "user" as const,
+      uuid: "stop-b",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] }
+    },
+    {
+      type: "user" as const,
+      uuid: "turn-c",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content:
+          "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
+      }
+    },
+    {
+      type: "user" as const,
+      uuid: "out-c",
+      parent_tool_use_id: null,
+      message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" }
+    },
+    {
+      type: "user" as const,
+      uuid: "turn-d",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content:
+          "<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>the auth module</command-args>"
+      }
+    }
+  ];
+
+  const project1 = () => project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
+
+  it("replays only what the user typed as user messages, a command as they typed it", () => {
+    const userTexts = allOf(project1(), "item.completed")
+      .filter((event) => event.payload.itemType === "user_message")
+      .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
+    assert.deepEqual(userTexts, ["fix the bug", "try again", "/compact", "/review the auth module"]);
+  });
+
+  it("settles a turn the user interrupted as interrupted, as the live turn was", () => {
+    const states = allOf(project1(), "turn.completed").map((event) => [event.turnId, event.payload.state]);
+    assert.deepEqual(states, [
+      ["turn-a", "interrupted"],
+      ["turn-b", "interrupted"],
+      ["turn-c", "completed"],
+      ["turn-d", "completed"]
+    ]);
+  });
+});
+
+describe("claude history projection — the host's own prompt after a restart", () => {
+  it("replays the turn it opened without a user message, as live", () => {
+    const transcript = [
+      {
+        type: "user" as const,
+        uuid: "turn-a",
+        parent_tool_use_id: null,
+        message: { role: "user", content: [{ type: "text", text: "build it" }] }
+      },
+      {
+        type: "user" as const,
+        uuid: "turn-b",
+        parent_tool_use_id: null,
+        message: { role: "user", content: [{ type: "text", text: CONTINUATION_PROMPT }] }
+      },
+      {
+        type: "assistant" as const,
+        uuid: "a2",
+        parent_tool_use_id: null,
+        message: { role: "assistant", content: [{ type: "text", text: "Picking up the build." }] }
+      }
+    ];
+    const items = allOf(project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) }), "item.completed")
+      .map((event) => [event.turnId, event.payload.itemType]);
+    assert.deepEqual(items, [
+      ["turn-a", "user_message"],
+      ["turn-b", "assistant_message"]
+    ]);
   });
 });

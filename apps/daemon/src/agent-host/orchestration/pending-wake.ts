@@ -27,6 +27,8 @@ import {
   type Turn
 } from "@orquester/api/agent-chat";
 
+import { CONTINUATION_PROMPT } from "../host-protocol.ts";
+
 /**
  * How long a pending wake is held at all. A provider wakes within seconds of
  * the end (Claude: 1-5 s across 88 ends of the owner's log); one that has not
@@ -186,9 +188,7 @@ function stoppedName(row: RuntimeSubagent): string {
  */
 export function wakePrompt(wake: PendingWake, stopped: readonly RuntimeSubagent[]): string {
   const lines: string[] = [
-    wake.tasks.length + (wake.moreTasks ?? 0) === 1
-      ? "While the agent host restarted, a background task you started finished, and its completion notification may not have reached you. Its result:"
-      : "While the agent host restarted, background tasks you started finished, and their completion notifications may not have reached you. Their results:"
+    wake.tasks.length + (wake.moreTasks ?? 0) === 1 ? WAKE_PROMPT_OPENINGS[0] : WAKE_PROMPT_OPENINGS[1]
   ];
   wake.tasks.forEach((task, index) => {
     lines.push("");
@@ -205,8 +205,28 @@ export function wakePrompt(wake: PendingWake, stopped: readonly RuntimeSubagent[
       `This background work was still running when the agent host stopped, and it was stopped with it: ${stopped.map(stoppedName).join(", ")}. Start it again if it is still needed.`
     );
   }
-  lines.push("", "Continue where you left off.");
+  lines.push("", CONTINUATION_PROMPT);
   return lines.join("\n");
+}
+
+/** {@link wakePrompt}'s first line, for one task and for several. */
+const WAKE_PROMPT_OPENINGS = [
+  "While the agent host restarted, a background task you started finished, and its completion notification may not have reached you. Its result:",
+  "While the agent host restarted, background tasks you started finished, and their completion notifications may not have reached you. Their results:"
+] as const;
+
+/**
+ * Whether a prompt is one the host sent on its own after a restart — the
+ * continuation (§3.3) or a {@link wakePrompt} — never one the user wrote. Live,
+ * neither is a message row; a history projection that finds one in the
+ * provider's transcript must not replay it as the user's.
+ */
+export function isHostRestartPrompt(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    trimmed === CONTINUATION_PROMPT ||
+    (WAKE_PROMPT_OPENINGS.some((opening) => trimmed.startsWith(opening)) && trimmed.endsWith(CONTINUATION_PROMPT))
+  );
 }
 
 /** The visible note's detail: what finished, what was stopped, and what happens now. */
