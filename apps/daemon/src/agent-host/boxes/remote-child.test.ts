@@ -135,3 +135,40 @@ test("a detached child whose box never comes back ends as SIGHUP at the reattach
   // The test's own process in the "box" is cleaned up.
   await connection.killAll();
 });
+
+/** A detached child that saw `ready`, its link dropped, and `orq-agent` restarted under it. */
+async function childAcrossARestart(mode: "lose" | "forget"): Promise<{ reason: unknown; errText: string; notices: string[] }> {
+  const connection = reattachableBoxConnection();
+  const notices: string[] = [];
+  const child = spawnBoxChild({
+    connection,
+    command: process.execPath,
+    args: ["-e", ECHO],
+    env: {},
+    cwd: process.cwd(),
+    detach: { procId: `agent-test-${mode}` },
+    onNotice: (message) => notices.push(message)
+  });
+  const out = collect(child.stdout);
+  const err = collect(child.stderr);
+  await out.until((text) => text.includes("ready\n"));
+  connection.dropLink();
+  await connection.restartAgent(mode, "orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped");
+  connection.restoreLink();
+  const reason = await child.exited;
+  await connection.killAll();
+  return { reason, errText: err.text(), notices };
+}
+
+test("a child orq-agent lost in a restart ends with the box's reason and the signal that stopped it", async () => {
+  const { reason, errText, notices } = await childAcrossARestart("lose");
+  assert.deepEqual(reason, { kind: "signal", code: null, signal: "SIGTERM" });
+  assert.equal(errText, "[orquester] orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped\n");
+  assert.ok(notices.some((notice) => notice.includes("could no longer be followed")));
+});
+
+test("a child the box has no record of ends as SIGHUP, saying the box no longer knows it", async () => {
+  const { reason, errText } = await childAcrossARestart("forget");
+  assert.deepEqual(reason, { kind: "signal", code: null, signal: "SIGHUP" });
+  assert.match(errText, /^\[orquester\] the box no longer knows this process \(orq-agent restarted there\)/);
+});

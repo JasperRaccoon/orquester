@@ -204,6 +204,12 @@ export interface BoxDetachedProcInfo {
   outputBytes: number;
   /** Offset of the first byte still in the ring buffer. */
   bufferStart: number;
+  /**
+   * Set when a previous `orq-agent` started the process and this one could not follow it after
+   * a restart (its output ended with that `orq-agent`): why, and whether it was stopped. Such a
+   * process is not running, refuses an attach (`LOST`), and is released like any ended one.
+   */
+  lost?: string;
 }
 
 export interface BoxHello {

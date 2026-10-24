@@ -423,7 +423,8 @@ export class BoxTerminalManager {
     try {
       const procs = await connection.request("proc.list", {}).catch(() => connection.detachedProcs());
       if (this.sessions.get(id) !== session) return;
-      const info = procs.find((proc) => proc.procId === id);
+      // A process a restarted orq-agent lost (stopped, its output gone) cannot be attached: as if it were not listed.
+      const info = procs.find((proc) => proc.procId === id && proc.lost === undefined);
       if (info) {
         const start = Math.max(session.offsetKnown ? session.offset : info.bufferStart, info.bufferStart);
         // After a restart the hot ring is rebuilt from the box's buffer.

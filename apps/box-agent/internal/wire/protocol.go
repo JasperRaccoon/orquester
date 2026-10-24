@@ -88,6 +88,8 @@ type DetachedProcInfo struct {
 	Signal      *string `json:"signal"`
 	OutputBytes int64   `json:"outputBytes"`
 	BufferStart int64   `json:"bufferStart"`
+	// Lost: a previous orq-agent started it and this one could not follow it; why, and what became of it.
+	Lost *string `json:"lost,omitempty"`
 }
 
 type Hello struct {

@@ -98,6 +98,10 @@ func handleProcSignal(_ context.Context, a *Agent, _ *Link, raw json.RawMessage)
 	if proc == nil {
 		return nil, rpcErr("NOT_FOUND", "no detached process "+p.ProcID)
 	}
+	if proc.proc == nil {
+		// Lost (procstate.go): already ended.
+		return nil, nil
+	}
 	return nil, proc.proc.signal(p.Signal)
 }
 

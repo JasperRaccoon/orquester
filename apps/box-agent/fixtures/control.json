@@ -88,6 +88,16 @@
           "signal": "SIGKILL",
           "outputBytes": 0,
           "bufferStart": 0
+        },
+        {
+          "procId": "p4",
+          "pid": null,
+          "running": false,
+          "exitCode": null,
+          "signal": "SIGTERM",
+          "outputBytes": 0,
+          "bufferStart": 0,
+          "lost": "orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped"
         }
       ]
     },
