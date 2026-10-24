@@ -202,6 +202,14 @@ export interface AgentChatThreadSlice {
   contextWindow: ThreadTokenUsage | null;
   seq: number;
   connection: AgentChatConnectionState;
+  /**
+   * The thread on screen is this device's saved copy (`persistent-cache.ts`)
+   * that the host has not confirmed yet: true from that paint until the
+   * stream first synchronizes. Its pending requests may have been answered
+   * long since, so none is offered or answerable meanwhile. Absent reads as
+   * false.
+   */
+  fromDeviceCache?: boolean;
   /** Live-follow is a render-visible flag, never a ref (§7.3). */
   follow: boolean;
   scroll: RememberedTimelinePosition | null;

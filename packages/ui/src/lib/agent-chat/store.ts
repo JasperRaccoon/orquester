@@ -191,6 +191,7 @@ import {
   ThreadRetentionCache,
   type RetainedThread
 } from "./retention";
+import { linkThreadCache, type PersistedThread } from "./persistent-cache";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -481,6 +482,9 @@ const REWIND_TARGET_UNAVAILABLE = "The message to rewind to is no longer availab
 const REWIND_IN_PROGRESS = "A rewind is already in progress.";
 const REWIND_TIMED_OUT =
   "The rewind is taking too long; the thread will update when the host finishes.";
+
+/** An answer to a request painted from the device cache, before the host confirmed the thread. */
+const DEVICE_COPY_UNCONFIRMED = "This chat is still catching up with the server. Try again in a moment.";
 
 /**
  * How long a reveal waits for the thread's stream to synchronize before it
@@ -986,6 +990,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   // then `resumeCache.owner = owner`.
   const retained = retention.take(sessionId);
   const retentionOwner = retention.claim(sessionId);
+  // The device cache (`persistent-cache.ts`): read only when nothing was
+  // retained in memory — that is newer — and saved by every generation.
+  const deviceCache = linkThreadCache(deps.transport, sessionId, { load: retained === null });
 
   let stream: AgentChatStreamHandle | null = null;
   let closed = false;
@@ -1102,6 +1109,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     const withResponding = async <T>(requestId: string, run: () => Promise<T>): Promise<T> => {
+      // A request painted from the device cache may have been answered long
+      // since: nothing is answered until the host has confirmed the thread.
+      if (get().slice.fromDeviceCache === true) {
+        throw new Error(DEVICE_COPY_UNCONFIRMED);
+      }
       update((state) => {
         const ids = state.slice.respondingRequestIds;
         if (ids.includes(requestId)) {
@@ -2192,7 +2204,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
     const applyStreamFrame = (
       frame: Parameters<typeof applyFrame>[1],
-      options: { keepConnection?: boolean } = {}
+      options: { keepConnection?: boolean; fromDevice?: boolean } = {}
     ): void => applyStreamFrames([frame], options);
 
     /**
@@ -2209,6 +2221,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
          * follows it to take the thread out of "connecting" again.
          */
         keepConnection?: boolean;
+        /**
+         * The device cache's snapshot (`restoreFromDevice`): folded like any
+         * snapshot, but it drives nothing — the queue waits for the host's
+         * own frames rather than acting on a copy that may be hours old.
+         */
+        fromDevice?: boolean;
       } = {}
     ): void => {
       // §7.7: when an open chat tab's stream delivers `thread.turn-diff-completed`
@@ -2239,6 +2257,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         if (options.keepConnection === true) {
           reducer = withConnection(reducer, state.slice.connection);
+        }
+        // The host has confirmed the thread: the device copy is the live one now.
+        if (reducer.slice.fromDeviceCache === true && reducer.slice.connection === "synchronized") {
+          reducer = patchSlice(reducer, { fromDeviceCache: false });
         }
         // The bridge is the one part of the history that grows without the
         // user asking, so it is where the cap is held (design 2026-09-23 fold
@@ -2301,9 +2323,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // own sequence floor is reset with it so a host that restarted its
         // sequence space lower cannot have its live frames suppressed (Q2-8).
         stream?.resetCursor();
-        void actions.refresh().catch(() => {
-          /* the stream's own reconnect will try again */
-        });
+        void actions
+          .refresh()
+          .then(() => {
+            // The stream synchronized with the new host before the re-read:
+            // once the re-read has landed the thread is live, and no second
+            // `synchronized` frame would ever say so.
+            if (!closed && get().slice.connection === "connecting") {
+              setSlice({ connection: "synchronized", fromDeviceCache: false });
+            }
+          })
+          .catch(() => {
+            /* the stream's own reconnect will try again */
+          });
       } else if (historyResyncWanted) {
         historyResyncWanted = false;
         void resyncHistory().catch(() => {
@@ -2334,7 +2366,31 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         if (stoppingTaskIds !== state.stoppingTaskIds) set({ stoppingTaskIds });
       }
-      driveQueue();
+      if (options.fromDevice !== true) driveQueue();
+    };
+
+    /**
+     * Paint the device cache's copy of the thread (`persistent-cache.ts`) as
+     * the snapshot frame it was saved from, under the host instance it
+     * synchronized with — so the cursor resume that follows, and a changed
+     * host's re-read, are the store's own (§6.3). Only onto a thread nothing
+     * has been folded into yet. Until the host confirms it (`synchronized`)
+     * the slice says it is the device's copy, and nothing pending in it can
+     * be answered (`withResponding`, `useAgentChatPending`).
+     */
+    const restoreFromDevice = (record: PersistedThread): boolean => {
+      if (closed || get().reducer.fold.seq !== 0) {
+        return false;
+      }
+      set((state) => {
+        const reducer = patchSlice(
+          { ...state.reducer, hostInstanceId: record.hostInstanceId },
+          { fromDeviceCache: true }
+        );
+        return { ...state, reducer, slice: reducer.slice };
+      });
+      applyStreamFrame({ kind: "snapshot", thread: record.snapshot }, { fromDevice: true });
+      return true;
     };
 
     /**
@@ -2533,7 +2589,24 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           onGone: () => setSlice({ connection: "gone" })
         }
       );
-      stream = openStream(resumeOptions);
+      const deviceCopy = deviceCache?.restored ?? null;
+      if (deviceCopy === null) {
+        stream = openStream(resumeOptions);
+        return;
+      }
+      const open = openStream;
+      // Nothing retained in memory: paint the device's copy, if it has one,
+      // and resume from its cursor exactly as a warm remount does.
+      void deviceCopy.then((record) => {
+        if (closed || stream !== null) {
+          return;
+        }
+        stream = open(
+          record !== null && restoreFromDevice(record)
+            ? { after: record.seq, hostInstanceId: record.hostInstanceId }
+            : resumeOptions
+        );
+      });
     });
 
     const initialState: InternalState = {
@@ -2569,6 +2642,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     // bubbles, held or not — rather than at the thread's first frame.
     return seedChanged ? project(initialState) : initialState;
   });
+
+  deviceCache?.watch(store);
 
   // The tab's outbox holds this thread's queue as it stands (§7.4): a reload
   // brings it back in order, and so does a generation that starts with
@@ -2633,6 +2708,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     // remount paints it instantly and resumes by cursor (§6.5, §7.2). Refused
     // outright when a newer generation already claimed this key.
     retention.retain(sessionId, retentionOwner, retainableFrom(store.getState()));
+    // And the device keeps what this generation had not written yet.
+    deviceCache?.close();
     // A wait on the stream settles now rather than at its timeout: no frame
     // will ever reach this generation again.
     for (const listener of [...destroyListeners]) {

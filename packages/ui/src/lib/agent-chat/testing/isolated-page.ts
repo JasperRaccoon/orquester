@@ -18,6 +18,9 @@ export function isolatedPage() {
     get transport(): typeof import("../transport") {
       return loader.require("../transport.ts", import.meta.url);
     },
+    get persistentCache(): typeof import("../persistent-cache") {
+      return loader.require("../persistent-cache.ts", import.meta.url);
+    },
     get sends(): typeof import("../../../components/agent-chat/composer/composer-sends") {
       return loader.require("../../../components/agent-chat/composer/composer-sends.ts", import.meta.url);
     },

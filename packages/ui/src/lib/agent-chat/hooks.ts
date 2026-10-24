@@ -287,10 +287,15 @@ export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
 };
 
 const NO_ANSWERED_REQUEST_IDS: readonly string[] = [];
+const NO_PENDING: AgentChatThreadSlice["pending"] = { approvals: [], userInputs: [] };
 
 export const useAgentChatPending: UseAgentChatPending = (sessionId) => {
   const store = useThreadStore(sessionId);
-  const pending = useThreadState(store, (state) => state.slice.pending);
+  // A device-cache copy the host has not confirmed offers nothing to answer:
+  // those requests may have been settled long since (`fromDeviceCache`).
+  const pending = useThreadState(store, (state) =>
+    state.slice.fromDeviceCache === true ? NO_PENDING : state.slice.pending
+  );
   const respondingRequestIds = useThreadState(
     store,
     (state) => state.slice.respondingRequestIds
