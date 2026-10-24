@@ -1,8 +1,8 @@
 import React from "react";
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
-import { parseForgeLink } from "@orquester/api";
+import { parseForgeLink, parseKnowledgeCitationHref } from "@orquester/api";
 
 import { useApi } from "../../../../context/orquester-context";
 import { useObjectUrl } from "../../../../hooks";
@@ -15,6 +15,7 @@ import { useTimelineRowContext } from "../context";
 import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
 import { createIncrementalMarkdownPlugin } from "./incremental";
+import { KnowledgeCitation } from "./KnowledgeCitation";
 import { resolveMarkdownImageSource } from "./local-image";
 import { KATEX_OPTIONS, mightContainMath, remarkChatMath } from "./math";
 import { MermaidBlock } from "./MermaidBlock";
@@ -125,6 +126,16 @@ function MarkdownCode({
   return <CodeBlock code={code} info={language} streaming={streaming} mode={mode} />;
 }
 
+/**
+ * `react-markdown`'s URL filter, which keeps relative URLs and http(s),
+ * mailto, irc(s) and xmpp — plus exactly one more: a link to a knowledge
+ * entry (`orquester-knowledge:entry/<id>`, the Knowledge Graph's citation),
+ * which renders as a chip and never navigates. Nothing else of that scheme,
+ * and nothing as an image source.
+ */
+export const chatUrlTransform: UrlTransform = (url, key) =>
+  key === "href" && parseKnowledgeCitationHref(url) ? url : defaultUrlTransform(url);
+
 function MarkdownLink({
   href,
   children
@@ -134,6 +145,20 @@ function MarkdownLink({
 }): React.ReactElement {
   const { onOpenFile } = React.useContext(MarkdownConfigCtx);
   const target = href ?? "";
+  const citation = parseKnowledgeCitationHref(target);
+  if (citation) return <KnowledgeCitation entryId={citation.id}>{children}</KnowledgeCitation>;
+  return <MarkdownAnchor target={target} onOpenFile={onOpenFile}>{children}</MarkdownAnchor>;
+}
+
+function MarkdownAnchor({
+  target,
+  onOpenFile,
+  children
+}: {
+  target: string;
+  onOpenFile: ((path: string) => void) | undefined;
+  children?: React.ReactNode;
+}): React.ReactElement {
   const forge = React.useMemo(() => parseForgeLink(target), [target]);
   // A GitHub (or GitLab/Bitbucket change request) link is a pill: an autolink shows the short
   // label, a link with the author's own words keeps them. An image-only link (a badge) stays a
@@ -294,6 +319,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
           remarkPlugins={plugins}
           rehypePlugins={math ? MATH_REHYPE_PLUGINS : NO_REHYPE_PLUGINS}
           components={COMPONENTS}
+          urlTransform={chatUrlTransform}
         >
           {text}
         </Markdown>

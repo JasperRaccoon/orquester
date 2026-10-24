@@ -696,6 +696,31 @@ describe("Export and import of a profile", () => {
     assert.match(imported.notes.join(" "), /replaced with REDACTED.*MCP server "local": its arguments.*hook "notify": its command/);
   });
 
+  it("an import never makes a managed profile nor carries the managed-only no-built-in-tools setting; a managed profile is never exported or copied from", async () => {
+    const h = await harness();
+    const profile = await h.service.create({ name: "Plain" });
+    const { data } = await h.service.exportProfile(profile.id);
+    const good = join(h.root, "plain.zip");
+    await writeFile(good, data);
+    const read = await readZipEntries(good);
+    const manifest = JSON.parse(read.find((entry) => entry.path === "profile.json")!.data.toString("utf8")) as Record<string, unknown>;
+    const forged = { ...manifest, managed: "knowledge-indexer", settings: { ...(manifest.settings as object), claudeBuiltinTools: false } };
+    const zipPath = join(h.root, "forged.zip");
+    await writeFile(zipPath, buildZip([...read.filter((entry) => entry.path !== "profile.json"), { path: "profile.json", data: Buffer.from(JSON.stringify(forged)), mode: 0o644 }]));
+    const imported = await h.service.importProfile("forged.zip", zipPath);
+    assert.ok((await h.service.list()).profiles.some((p) => p.id === imported.profile.id), "the imported profile is the user's: listed");
+    const stored = await h.store.read(imported.profile.id);
+    assert.equal(stored.manifest.managed, undefined);
+    assert.equal("claudeBuiltinTools" in stored.manifest.settings, false);
+
+    await h.store.ensureManaged({ id: "orquester-test-managed", managed: "test", name: "Indexer", description: "", settings: { claudeBuiltinTools: false }, instructions: "Only the two tools." });
+    await assert.rejects(h.service.exportProfile("orquester-test-managed"), (error: { code?: string }) => error.code === "PROFILE_NOT_FOUND");
+    await assert.rejects(
+      h.service.copyFrom(profile.id, { revision: profile.revision, fromProfileId: "orquester-test-managed", itemIds: [] }),
+      (error: { code?: string }) => error.code === "PROFILE_NOT_FOUND"
+    );
+  });
+
   it("refuses an export that is not exactly one", async () => {
     const h = await harness();
     const profile = await h.service.create({ name: "Strict" });

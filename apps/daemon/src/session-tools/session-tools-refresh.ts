@@ -33,7 +33,8 @@ import type { AnyOrquesterTool } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { listSessions } from "../mcp/reads.ts";
-import { buildSessionToolsManifest, isWithinDir, type ManifestThread } from "./manifest.ts";
+import { KNOWLEDGE_WORKER_OWNER_KIND, ownerKindOf } from "../knowledge/visibility.ts";
+import { buildSessionToolsManifest, isWithinDir, type ManifestKnowledge, type ManifestThread } from "./manifest.ts";
 
 /** How long a read of the daemon-pointing servers is reused (the read walks every account home). */
 export const DAEMON_POINTING_CACHE_MS = 30_000;
@@ -51,6 +52,9 @@ export const DAEMON_POINTING_READ_TIMEOUT_MS = 4_000;
 
 /** How long the session list read for the workflow-owned trait may take before it counts as owned. */
 export const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 3_000;
+
+/** How long the Knowledge Graph read of a chat may take before the manifest treats the plugin as off. */
+export const KNOWLEDGE_INFO_TIMEOUT_MS = 2_000;
 
 /** At most this many per-chat-cwd reads are cached (the all-projects read is always kept). */
 export const MAX_POINTING_SCOPES = 32;
@@ -95,6 +99,16 @@ export interface SessionToolsRefreshDeps {
   catalog(): readonly AnyOrquesterTool[];
   /** boxes: whether temporary boxes can be rented now (their tools are advertised only then). Absent: never. */
   boxesAvailable?(): boolean;
+  /**
+   * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
+   * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
+   * manifest; push a refresh when the plugin is switched, a collection is created, renamed or
+   * deleted, or a profile's `knowledgeCollections` change. Absent, failing or slower than
+   * {@link KNOWLEDGE_INFO_TIMEOUT_MS}: the plugin counts as off for that manifest — except that a
+   * session the session list shows owned by the plugin (`owner.kind === "knowledge-indexer"`) is
+   * still a worker, advertised only its two tools.
+   */
+  knowledgeForSession?(threadId: string): Promise<ManifestKnowledge>;
   /** The daemon's in-process API (null while it does not exist yet). */
   api(): DaemonApi | null;
   /**
@@ -107,6 +121,8 @@ export interface SessionToolsRefreshDeps {
   pointingReadTimeoutMs?: number;
   /** Overrides {@link MANIFEST_SESSIONS_READ_TIMEOUT_MS} (tests). */
   sessionsReadTimeoutMs?: number;
+  /** Overrides {@link KNOWLEDGE_INFO_TIMEOUT_MS} (tests). */
+  knowledgeInfoTimeoutMs?: number;
   logger?: { log?(message: string): void; warn?(message: string, detail?: unknown): void };
 }
 
@@ -319,6 +335,9 @@ export class SessionToolsRefresher {
     // closed — an unreadable (or unanswered, bounded) list counts as owned, so no Admin tool is
     // advertised.
     let workflowOwned = true;
+    // Knowledge Graph: a worker session says so in its owner too — the second signal that keeps it
+    // to its two tools when the knowledge read fails, hangs or is not wired.
+    let knowledgeWorker = false;
     if (api) {
       let timer: NodeJS.Timeout | undefined;
       try {
@@ -329,7 +348,10 @@ export class SessionToolsRefresher {
           })
         ]);
         if (sessions === "timeout") this.deps.logger?.warn?.("session-tools: the session list did not answer in time; the chat counts as workflow-owned");
-        else workflowOwned = isWorkflowOwned(sessions, threadId);
+        else {
+          workflowOwned = isWorkflowOwned(sessions, threadId);
+          knowledgeWorker = ownerKindOf(sessions.find((session) => session.id === threadId)?.owner) === KNOWLEDGE_WORKER_OWNER_KIND;
+        }
       } catch {
         workflowOwned = true;
       } finally {
@@ -344,14 +366,39 @@ export class SessionToolsRefresher {
       ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
       workflowOwned
     };
+    const read = await this.knowledgeFor(threadId);
+    const knowledge: ManifestKnowledge | undefined = knowledgeWorker && read?.worker !== true ? { enabled: read?.enabled === true, worker: true, searchable: false, visibleCollectionNames: [] } : read;
     const manifest = buildSessionToolsManifest({
       thread: manifestThread,
       catalog: this.deps.catalog(),
       daemonPointing,
       // boxes: the box tools only while a box can be rented.
-      boxesAvailable: this.deps.boxesAvailable?.() === true
+      boxesAvailable: this.deps.boxesAvailable?.() === true,
+      ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };
+  }
+
+  /** Knowledge Graph: the plugin's view of the chat, or undefined (off) when unwired, failing or slow. Never throws. */
+  private async knowledgeFor(threadId: string): Promise<ManifestKnowledge | undefined> {
+    const read = this.deps.knowledgeForSession;
+    if (!read) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const answer = await Promise.race([
+        read(threadId),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), this.deps.knowledgeInfoTimeoutMs ?? KNOWLEDGE_INFO_TIMEOUT_MS);
+        })
+      ]);
+      if (answer !== "timeout") return answer;
+      this.deps.logger?.warn?.("session-tools: the knowledge read did not answer in time; the chat gets no knowledge tools");
+    } catch (error) {
+      this.deps.logger?.warn?.("session-tools: the knowledge read failed; the chat gets no knowledge tools", error instanceof Error ? error.message : String(error));
+    } finally {
+      clearTimeout(timer);
+    }
+    return undefined;
   }
 
   private pushLogged(threadId: string): Promise<RefreshAnswer> {

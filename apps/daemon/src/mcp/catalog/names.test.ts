@@ -22,7 +22,7 @@ import type { z } from "zod";
 
 import { audienceDescription, audienceShape } from "../executor.ts";
 import { SERVER_INSTRUCTIONS, SERVER_VERSION } from "../server.ts";
-import { composeOrquesterInstructions } from "../../session-tools/instructions.ts";
+import { composeOrquesterInstructions, KNOWLEDGE_WORKER_INSTRUCTIONS } from "../../session-tools/instructions.ts";
 import type { AnyOrquesterTool, Audience } from "./contract.ts";
 import { catalogFor } from "./index.ts";
 
@@ -88,9 +88,12 @@ test("the external server: version 3.0.0, instructions ≤ 2 KB, and every tool 
 test("the in-chat server: the instruction block (every variant) and every chat tool's texts name only chat tools", () => {
   const chat = new Set(catalogFor("chat").map((tool) => tool.name));
   for (const workflowOwned of [false, true]) {
-    const block = composeOrquesterInstructions({ workflowOwned });
-    assert.deepEqual(strays(block, chat), [], "instruction block");
+    for (const knowledgeCollections of [[], ["SEO", "Ads"]]) {
+      const block = composeOrquesterInstructions({ workflowOwned, knowledgeCollections });
+      assert.deepEqual(strays(block, chat), [], "instruction block");
+    }
   }
+  assert.deepEqual(strays(KNOWLEDGE_WORKER_INSTRUCTIONS, chat), [], "the knowledge worker block");
   for (const tool of catalogFor("chat")) {
     for (const text of toolTexts(tool, "chat")) assert.deepEqual(strays(text, chat), [], `${tool.name}: ${text.slice(0, 80)}`);
   }

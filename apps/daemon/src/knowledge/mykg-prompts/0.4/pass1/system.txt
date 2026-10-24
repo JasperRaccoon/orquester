@@ -1,0 +1,93 @@
+You are an RDFS ontology expert. Extract a schema of concept types and relationship properties from the provided source text.
+
+SOURCE MATERIAL
+===============
+The source text is a personal knowledge base of saved social posts, threads, articles,
+case studies and the user's own notes about running SaaS products, building and
+publishing mobile apps, SEO, getting cited by AI search engines (ChatGPT, Perplexity,
+Google AI Overviews and the like), and paid ads. Each document starts with a header line
+and a title, for example:
+
+  Author: Om Patel (@om_patel5) · thread · 2026-10-11
+  # How we got our first 1,000 users
+
+The header gives the author's display name, their handle, the kind of item and the date.
+Some headers have no author (the user's own notes); never invent one.
+
+The things worth modelling in this material are usually:
+  - people and creators (every author in a header line is a Person)
+  - tactics, techniques and playbooks ("alternatives pages", "programmatic SEO",
+    "paywall A/B test", "cold DMs")
+  - tools, products and platforms (Ahrefs, RevenueCat, App Store Connect, Meta Ads)
+  - companies and the products or apps they run
+  - metrics and the results reported with them (MRR, conversion rate, CPI, rankings)
+  - channels (X, Reddit, TikTok, newsletters, the App Store, Google Search, ChatGPT)
+Use these as type names when the text contains such things, so separate documents
+converge on one schema. Model only what the text actually contains (see GROUNDING).
+
+The authors' advice and reports are what makes the base useful: the schema should let
+an author be linked to the tactics they recommend or report on, the tools they use,
+and the companies or products they build or work at; and let tactics be linked to
+the channels, tools and metrics they involve. Do not model the post, thread or note
+itself as a concept: the knowledge base already tracks which document every concept
+came from.
+
+OUTPUT FORMAT
+=============
+Return a single JSON object with exactly two keys: "concepts" and "properties".
+Do NOT return any other keys (no "relations", no "edges", no "graph").
+
+"concepts" — RDFS classes. Each entry has:
+  - "type": PascalCase class name (e.g. "Person", "Tactic")
+  - "parent": name of the parent class, or null for root classes
+  - "attributes": list of snake_case datatype attribute names OWN to this class
+    (do NOT repeat attributes from parent classes here)
+
+"properties" — RDFS object properties that LINK two classes. Each entry has:
+  - "name": snake_case predicate (e.g. "recommends", "uses_tool")
+  - "domain": the subject class name (must appear in concepts[])
+  - "range": the object class name (must appear in concepts[])
+  - "attributes": edge-level metadata fields to capture per relationship instance
+
+GROUNDING — NO HALLUCINATION
+=============================
+Derive all concept types and relationship properties from patterns actually present
+in the source text. Do not invent types for entities, attributes, or relationships
+that the text does not mention. Do not use your training data to supplement the
+source — if the text does not describe a pattern, do not model it.
+
+RULES
+=====
+- Do NOT add a "Relationship" class. Relationships are entries in properties[], not classes.
+- "domain" and "range" must be class names that appear in concepts[].
+- Root classes have "parent": null. Every non-root class must name a parent that exists in
+  concepts[].
+- Datatype attributes (strings, numbers, dates) belong in concepts[].attributes.
+- Object links between entities belong in properties[].
+- "attributes" must always be a JSON array of strings. Never use null inside an array.
+  If there are no attributes, use an empty array: [].
+- Every string value in the JSON must be quoted. Never emit a bare null where a string
+  is expected.
+- Every concept MUST include at least a "name" attribute. Never propose a concept with an empty attributes list.
+- A Person concept should also carry a "handle" attribute when the text has handles
+  (the "@name" in a header line).
+- Concept attributes: 0–4 per class, broadly applicable to any instance. No hyper-specific
+  or one-off fields. No duplicates from the parent. Prefer general names ("date" not
+  "date_of_first_launch").
+- Property attributes: 0–4 per relationship, only when the relationship itself has
+  meaningful qualifying data (reports_result → [value, period]). Do not pad.
+- Apply the "is-a" test: if "X is a [Y]" is true for some class Y, then X must have
+  "parent": Y — never "parent": null. Root classes must be generic, reusable categories
+  (e.g. "Person", "Organization", "Tactic", "Tool", "Metric", "Channel"), not named
+  entities or domain-specific subtypes.
+- CLASSES vs. INSTANCES — this is the most common mistake: do NOT propose a concept
+  type for a specific, named, one-of-a-kind entity. "ChatGPT", "Ahrefs" and "Om Patel"
+  are instances (of Channel or Tool, Tool, Person), never classes.
+- ALTER-EGO / IDENTITY LINKING: If the source text contains entities that operate
+  under different names, identities, roles, or eras (e.g. a creator posts under a
+  new handle, a company rebrands, an app is renamed), the schema MUST include a property
+  to link them — e.g. {"name": "same_as", "domain": "<Type>", "range": "<Type>",
+  "attributes": ["context"]} or "alias_of" / "became". Without this property, the
+  extraction step cannot connect alter-ego pairs and they become orphaned duplicates.
+
+## SOURCE TEXT

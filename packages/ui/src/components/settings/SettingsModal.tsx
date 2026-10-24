@@ -168,7 +168,21 @@ const SECTIONS: SectionDef[] = [
     label: "Plugins",
     icon: <Puzzle size={15} />,
     desc: "Optional built-in features",
-    keywords: ["plugin", "plugins", "typescript", "tsc", "ts-rust", "tsc-rs", "tsrs", "typecheck"],
+    keywords: [
+      "plugin",
+      "plugins",
+      "typescript",
+      "tsc",
+      "ts-rust",
+      "tsc-rs",
+      "tsrs",
+      "typecheck",
+      "knowledge",
+      "graph",
+      "mykg",
+      "notes",
+      "collections"
+    ],
     render: () => <PluginsSettings />
   },
   {

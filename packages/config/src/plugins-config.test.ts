@@ -6,6 +6,7 @@ import {
   parsePluginsConfig,
   pluginStateOf,
   pluginsConfigPath,
+  storedKnowledgeSettings,
   storedTsCheckerEngine,
   tsRustPluginDir,
   tsRustPreloadPath,
@@ -130,4 +131,27 @@ test("appending the preload twice leaves NODE_OPTIONS unchanged", () => {
 
 test("a preload path with spaces is quoted", () => {
   assert.equal(appendNodeRequireOption(undefined, "/My Apps/preload.cjs"), '--require "/My Apps/preload.cjs"');
+});
+
+test("knowledge-graph settings read field by field; a bad value never makes the record unreadable", () => {
+  const read = (settings: unknown) =>
+    storedKnowledgeSettings(pluginStateOf(parsePluginsConfig({ plugins: { "knowledge-graph": { settings } } }), "knowledge-graph"));
+  assert.deepEqual(read({ accountId: "acc-1", model: "claude-sonnet-4-5", concurrency: 3, future: { x: 1 } }), {
+    accountId: "acc-1",
+    model: "claude-sonnet-4-5",
+    concurrency: 3
+  });
+  assert.deepEqual(read({ accountId: null, model: null }), { accountId: null, model: null });
+  assert.deepEqual(read({ accountId: 7, model: "", concurrency: 2.5 }), {});
+  assert.deepEqual(read("on"), {});
+  assert.deepEqual(read(undefined), {});
+});
+
+test("a plugin record's settings and their unknown keys survive a parse", () => {
+  const config = parsePluginsConfig({
+    plugins: { "knowledge-graph": { enabled: true, settings: { concurrency: 2, future: [1, 2] }, other: "kept" } }
+  });
+  const state = pluginStateOf(config, "knowledge-graph");
+  assert.deepEqual(state.settings, { concurrency: 2, future: [1, 2] });
+  assert.equal((state as Record<string, unknown>).other, "kept");
 });

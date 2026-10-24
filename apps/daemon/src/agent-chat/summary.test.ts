@@ -126,6 +126,29 @@ test("a daemon restart NEVER pushes for state it is merely discovering", async (
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
 });
 
+test("a knowledge indexer's worker chat never pushes", async (t) => {
+  const h = await harness(t);
+  h.chat.create({
+    id: "w1",
+    refId: "claude",
+    title: "Knowledge indexer",
+    projectPath: "/plugin/workers/w1",
+    cwd: "/plugin/workers/w1",
+    order: 0,
+    accountId: "acc-1",
+    home: "account",
+    owner: { kind: "knowledge-indexer", runId: "kr1" }
+  });
+  seedTab(h.chat, "t1");
+  for (const id of ["w1", "t1"]) {
+    await h.read(id, { chatSessionStatus: "ready" as const });
+    await h.read(id, { hasPendingApprovals: true });
+  }
+  assert.equal(h.chat.get("w1")?.activity?.attention, "needs-input");
+  assert.deepEqual(h.pushes.filter((p) => p.id === "w1"), [], "the worker chat never pushes");
+  assert.ok(h.pushes.some((p) => p.id === "t1" && p.type === "needs-input"), "an ordinary chat still does");
+});
+
 test("a re-adopted thread (after forget) also seeds silently", async (t) => {
   const h = await harness(t);
   seedTab(h.chat, "t1");
@@ -779,6 +802,34 @@ test("without an approval push the card's needs-input transition pushes the stru
   cards.push({ approvalId: "a1", title: "Claude wants to open a desktop" });
   h.service.secretRequestsChanged("t1");
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
+});
+
+test("an approval card on a knowledge indexer's worker chat pushes nothing (neither the card's push nor the structural one)", async (t) => {
+  const approvalPushes: Array<{ id: string; title: string }> = [];
+  const h = await harness(t, undefined, undefined, undefined, undefined, approvalPushes);
+  const cards = new Map<string, Array<{ approvalId: string; title: string }>>();
+  h.service.setSecretRequests({ list: () => [], approvals: (threadId) => cards.get(threadId) ?? [] });
+  h.chat.create({
+    id: "w1",
+    refId: "claude",
+    title: "Knowledge indexer",
+    projectPath: "/plugin/workers",
+    cwd: "/plugin/workers",
+    order: 0,
+    accountId: "acc-1",
+    home: "account",
+    owner: { kind: "knowledge-indexer", runId: "kr1" }
+  });
+  seedTab(h.chat, "t1");
+  const working = { chatSessionStatus: "running" as const, latestTurn: { turnId: "a", state: "running" as const, startedAt: "2026-09-21T00:00:00.000Z", completedAt: null } };
+  for (const id of ["w1", "t1"]) await h.read(id, working);
+  for (const id of ["w1", "t1"]) {
+    cards.set(id, [{ approvalId: `a-${id}`, title: "Claude wants to open a desktop" }]);
+    h.service.secretRequestsChanged(id);
+  }
+  assert.equal(h.chat.get("w1")?.activity?.attention, "needs-input", "the tab still shows it");
+  assert.deepEqual(approvalPushes, [{ id: "t1", title: "Claude wants to open a desktop" }], "only the ordinary chat's card pushes");
+  assert.deepEqual(h.pushes, []);
 });
 
 test("an approval card pushes once for its life, even when its thread is forgotten and re-adopted", async (t) => {

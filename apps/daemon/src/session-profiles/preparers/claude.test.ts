@@ -133,6 +133,14 @@ describe("Claude preparer", () => {
     assert.deepEqual(section.skills, ["dev-kit:review", "dev-kit:git:pr", "toolbox:fmt", "toolbox:lint"]);
   });
 
+  it("a managed profile without built-in tools says so in its section; others never carry the key", async () => {
+    const { section } = await prepare({ claudeBuiltinTools: false });
+    assert.equal(section.disableBuiltinTools, true);
+    assert.deepEqual(claudePreparedSectionSchema.parse(section), section);
+    const { section: plain } = await prepare();
+    assert.equal("disableBuiltinTools" in plain, false);
+  });
+
   it("showing built-in skills omits the allow-list entirely", async () => {
     const { section } = await prepare({ hideBuiltinSkills: false });
     assert.equal("skills" in section, false);

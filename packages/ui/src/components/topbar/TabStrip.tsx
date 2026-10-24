@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ArrowRightLeft, Dot, FolderTree, GitBranch, Globe, ListTodo, MessageCircleQuestion, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
+import { ArrowRightLeft, Dot, FolderTree, GitBranch, Globe, ListTodo, MessageCircleQuestion, Monitor, Pencil, PenTool, Trash2, Waypoints, Workflow, X } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
@@ -234,6 +234,8 @@ export const TabStrip: React.FC = () => {
           <Workflow size={13} />
         ) : tab.type === "whiteboard" ? (
           <PenTool size={13} />
+        ) : tab.type === "knowledge" ? (
+          <Waypoints size={13} />
         ) : tab.type === "browser" ? (
           <Globe size={13} />
         ) : tab.type === "desktop" ? (

@@ -18,6 +18,7 @@
  *     instructionsFile?: "instructions.md",
  *     skills?: [...],                                          the SDK `skills` allow-list; absent = omit the option
  *     disableWorkflows: boolean                                the profile turned the Workflow tool off
+ *     disableBuiltinTools?: true                               no built-in tool at all (managed profiles)
  *   }
  */
 
@@ -48,7 +49,8 @@ export const claudePreparedSectionSchema = z
     hooks: z.record(z.array(hookMatcherSchema)).default({}),
     instructionsFile: preparedRelativePath.optional(),
     skills: z.array(z.string()).optional(),
-    disableWorkflows: z.boolean().default(false)
+    disableWorkflows: z.boolean().default(false),
+    disableBuiltinTools: z.boolean().optional()
   })
   .passthrough();
 export type ClaudePreparedSection = z.infer<typeof claudePreparedSectionSchema>;

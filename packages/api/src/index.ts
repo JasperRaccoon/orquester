@@ -1,5 +1,6 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import { workflowRoutes, type ProfileReferencesResponse, type WorkflowSessionOwner } from "./workflows/types.ts";
+import type { KnowledgeSessionOwner } from "./knowledge.ts";
 import type {
   AgentAdapterId,
   AgentChatGoalSummary,
@@ -74,6 +75,7 @@ export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
+export * from "./knowledge.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
@@ -1398,6 +1400,9 @@ export interface SubmitClaudeOAuthCodeRequest {
  */
 export const SYSTEM_ACCOUNT_ID = "system";
 
+/** `SessionSummary.owner` / `CreateSessionRequest.owner`: what started a session Orquester owns. */
+export type SessionOwner = WorkflowSessionOwner | KnowledgeSessionOwner;
+
 export interface SessionSummary {
   id: string;
   kind: RegistryKind;
@@ -1464,10 +1469,12 @@ export interface SessionSummary {
    */
   delegateView?: AgentChatDelegateView | null;
   /**
-   * Set when an automated workflow started this session (workflows spec §5.10): the tab shows a
-   * Workflow chip linking to the run, and the workflow tab sweeper may close it.
+   * Set when Orquester itself started this session: an automated workflow run (workflows spec
+   * §5.10: the tab shows a Workflow chip linking to the run, and the workflow tab sweeper may close
+   * it) or the Knowledge Graph plugin's indexer (a worker chat, never shown in the sidebar). Narrow
+   * on `owner.kind`; a client must ignore a kind it does not know.
    */
-  owner?: WorkflowSessionOwner;
+  owner?: SessionOwner;
   /**
    * Agent-chat tabs only: the thread this one was forked from or delegated by (spec 2026-10-14
    * §6). Persisted on the tab record; a parent's children are the tabs naming it here.
@@ -1599,8 +1606,11 @@ export interface CreateSessionRequest {
    * always uses the agent's Global setup.
    */
   profileId?: string;
-  /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
-  owner?: WorkflowSessionOwner;
+  /**
+   * Who starts this session (persisted on the tab record): a workflow run (workflows spec §5.10)
+   * or the Knowledge Graph plugin's indexer. Agent-chat sessions only.
+   */
+  owner?: SessionOwner;
   /**
    * boxes: run this terminal in that box (Ephemeral AI VMs spec §8.8, §13.3 "Watch"), whatever
    * `projectPath` is — a temporary box's terminal sits in its chat's project. `cwd` defaults to

@@ -278,7 +278,7 @@ export class FakeChatHost implements DaemonApi {
 
   /** The sessions a workflow block owns, in creation order. */
   sessionsOwnedBy(nodeId: string): FakeSessionState[] {
-    return [...this.sessions.values()].filter((s) => s.owner?.nodeId === nodeId);
+    return [...this.sessions.values()].filter((s) => s.owner?.kind === "workflow" && s.owner.nodeId === nodeId);
   }
 
   commandCount(name: string): number {

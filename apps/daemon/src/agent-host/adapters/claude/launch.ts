@@ -127,6 +127,13 @@ interface BuiltClaudeQueryOptions {
   profileFiles?: { settings: Record<string, unknown>; mcpConfig?: { mcpServers: Record<string, unknown> } };
 }
 
+/**
+ * Env of a launch with no built-in tools (a managed profile that works through MCP tools only):
+ * every MCP tool loaded up front (no tool search to reach a deferred one), and tool results up to
+ * 60k tokens — such a chat's tool results ARE its work (the Knowledge indexer's tasks).
+ */
+export const CLAUDE_NO_BUILTIN_TOOLS_ENV: Readonly<Record<string, string>> = { ENABLE_TOOL_SEARCH: "false", MAX_MCP_OUTPUT_TOKENS: "60000" };
+
 export function buildClaudeQueryOptions(
   input: BuildClaudeQueryOptionsInput
 ): BuiltClaudeQueryOptions {
@@ -211,7 +218,11 @@ export function buildClaudeQueryOptions(
     },
     // A profile chat drops the user source: no user CLAUDE.md, rules, skills, commands, agents,
     // MCP servers, hooks or settings (its runtime settings come back through `settings`, §6.0).
-    settingSources: profile !== undefined ? ["project", "local"] : ["user", "project", "local"],
+    // A managed profile without built-in tools (the Knowledge indexer) loads NO filesystem settings
+    // (SDK isolation mode, `[]`): no CLAUDE.md walked up from its cwd (a `~/CLAUDE.md` above a
+    // `~/.orquester` appdir), no project hooks or settings. Its own settings ride `settings`.
+    settingSources:
+      profile === undefined ? ["user", "project", "local"] : profile.launch.disableBuiltinTools === true ? [] : ["project", "local"],
     ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
     ...(wantsThinkingSummaries
       ? { thinking: { type: "adaptive" as const, display: "summarized" as const } }
@@ -244,7 +255,12 @@ export function buildClaudeQueryOptions(
     ...(input.onUserDialog !== undefined
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }
       : {}),
-    env: profile !== undefined ? { ...input.env, ...CLAUDE_PROFILE_ENV } : input.env,
+    // A profile without built-in tools also loads its MCP tools up front: with no ToolSearch to
+    // reach deferred ones, a deferred tool could never be called.
+    env:
+      profile !== undefined
+        ? { ...input.env, ...CLAUDE_PROFILE_ENV, ...(profile.launch.disableBuiltinTools === true ? CLAUDE_NO_BUILTIN_TOOLS_ENV : {}) }
+        : input.env,
     // The attachments grant lets the agent read every attachment it does not
     // get inline — a PDF, a CSV, a pasted-text file — at the absolute path the
     // turn text names (§4.1), without an approval prompt. It is a leaf
@@ -268,6 +284,9 @@ export function buildClaudeQueryOptions(
     ...(profile !== undefined ? { strictMcpConfig: true } : {}),
     ...(profile !== undefined && profile.launch.plugins.length > 0 ? { plugins: [...profile.launch.plugins] } : {}),
     ...(profile?.launch.skills !== undefined ? { skills: [...profile.launch.skills] } : {}),
+    // A managed profile that works only through MCP tools (the Knowledge Graph indexer): no
+    // built-in tool (Bash, Read, Edit, Agent, Skill…) is offered at all — SDK `tools: []`.
+    ...(profile?.launch.disableBuiltinTools === true ? { tools: [] } : {}),
     // Session tools never raise an approval card (§1.3): each one is
     // pre-approved by name in every permission mode (`session-tools.ts`).
     ...(input.sessionTools !== undefined ? { allowedTools: [...input.sessionTools.allowedTools] } : {}),
