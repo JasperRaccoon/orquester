@@ -15,6 +15,7 @@ import {
   isDeadlineRefusal,
   isThreadGoneStreamError,
   THREAD_HEAD_LOOKUP_MAX,
+  THREAD_HISTORY_DEFAULT_TURNS,
   threadHeadOf,
   threadHeadQueryParams,
   type AgentChatStreamErrorLine,
@@ -676,6 +677,54 @@ describe("agent host server — the event stream (§6.3)", () => {
     assert.ok(synchronizedIndex < messageIndex, "live frames follow the marker");
     live.close();
     await h.host.settle();
+    await h.stop();
+  });
+
+  it("reads a bounded snapshot for the stream and `GET …/thread` only when asked", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const reads: unknown[] = [];
+    const readThread = h.host.orchestrator.readThread;
+    h.host.orchestrator.readThread = (id, after, options) => {
+      reads.push(options);
+      return readThread(id, after, options);
+    };
+    for (const query of ["", "?window=recent", "?after=0&window=recent&agentRows=on-demand"]) {
+      const live = await h.stream(`${agentHostRoutes.events(threadId)}${query}`);
+      await live.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+      live.close();
+    }
+    assert.equal((await h.call("GET", agentHostRoutes.read(threadId))).status, 200);
+    assert.equal((await h.call("GET", `${agentHostRoutes.read(threadId)}?window=recent`)).status, 200);
+    assert.equal((await h.call("GET", `${agentHostRoutes.read(threadId)}?window=everything`)).status, 200);
+    assert.deepEqual(reads, [
+      undefined,
+      { window: "recent" },
+      { window: "recent" },
+      undefined,
+      { window: "recent" },
+      undefined
+    ]);
+    h.host.orchestrator.readThread = readThread;
+    await h.stop();
+  });
+
+  it("hands a history read the window's cut it names, and nothing for an empty one", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const queries: unknown[] = [];
+    const readHistory = h.host.orchestrator.readHistory;
+    h.host.orchestrator.readHistory = async (id, query) => {
+      queries.push(query);
+      return { threadId: id, turns: [], items: [], checkpoints: [], page: { beforeCursor: null }, seq: 1 };
+    };
+    await h.call("GET", `${agentHostRoutes.history(threadId)}?windowCut=cut-1`);
+    await h.call("GET", `${agentHostRoutes.history(threadId)}?before=c-2&windowCut=`);
+    assert.deepEqual(queries, [
+      { windowCut: "cut-1", turns: THREAD_HISTORY_DEFAULT_TURNS },
+      { before: "c-2", turns: THREAD_HISTORY_DEFAULT_TURNS }
+    ]);
+    h.host.orchestrator.readHistory = readHistory;
     await h.stop();
   });
 

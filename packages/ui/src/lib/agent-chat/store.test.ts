@@ -669,6 +669,13 @@ describe("client-local view state", () => {
     api.getState().actions.rememberScroll({ atEnd: true });
     assert.equal(state().slice.follow, true);
     assert.equal(state().slice.scroll?.rowId, "r9", "unspecified fields are kept");
+
+    // The row's turn rides with its row: a new row never inherits the previous one's.
+    api.getState().actions.rememberScroll({ rowId: "r10", turnId: "t4", atEnd: false });
+    api.getState().actions.rememberScroll({ atEnd: false });
+    assert.equal(state().slice.scroll?.turnId, "t4");
+    api.getState().actions.rememberScroll({ rowId: "r11", atEnd: false });
+    assert.equal(state().slice.scroll?.turnId, undefined);
   });
 });
 

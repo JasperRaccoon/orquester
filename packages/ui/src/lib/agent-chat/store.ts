@@ -88,6 +88,7 @@ import {
   liveTurnIdsOf,
   mergeTimelineRows,
   nextHistoryCursor,
+  nextHistoryWindowCut,
   planReveal,
   projectHistoryRows,
   rowIdForTurn,
@@ -1639,6 +1640,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           // Without a cursor once the window has evicted since its snapshot
           // (`windowEvicted`): that snapshot's cursor no longer meets it.
           const before = nextHistoryCursor(asked);
+          // And then the cut of the bounded snapshot the window came from, so the page
+          // never ends below a row that snapshot left out.
+          const windowCut = nextHistoryWindowCut(asked);
           // What the page is asked against. A snapshot (or a rewind into a
           // page or the bridge, or the cap) replaces `pages` with a fresh
           // array and a snapshot mints new bounds, so a page that lands after
@@ -1651,6 +1655,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           try {
             page = await transport.readHistory(sessionId, {
               ...(before === undefined ? {} : { before }),
+              ...(windowCut === undefined ? {} : { windowCut }),
               turns: THREAD_HISTORY_DEFAULT_TURNS
             });
           } catch (error) {
@@ -2093,8 +2098,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // that writes `localStorage` is not replay-safe (fix-wave Q2-9).
         let remembered: RememberedTimelinePosition | null = null;
         update((state) => {
+          // A new row brings its own turn, or none: never the previous row's.
+          const kept = state.slice.scroll ?? DEFAULT_SCROLL_POSITION;
+          const { turnId: _previousTurnId, ...withoutTurn } = kept;
           const next: RememberedTimelinePosition = {
-            ...(state.slice.scroll ?? DEFAULT_SCROLL_POSITION),
+            ...(position.rowId !== undefined ? withoutTurn : kept),
             ...position,
             // Never let a caller's stale copy overwrite live client state.
             disclosures: state.slice.disclosures,
@@ -2139,7 +2147,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async refresh() {
-        const response = await transport.read(sessionId);
+        const response = await transport.read(sessionId, { window: "recent" });
         if (response.kind === "snapshot") {
           applyStreamFrame({ kind: "snapshot", thread: response.thread });
           return;
@@ -2171,6 +2179,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           if (!isStartedTurn(slice.turns, turnId)) {
             return false;
           }
+          const promptId = userMessageIdForTurn(turnId, slice.turns, slice.history.pages);
           const plan = planReveal(turnId, {
             liveTurnIds: liveTurnIdsOf(slice.entries, slice.turns),
             // A turn the window evicted into the bridge is on screen too.
@@ -2181,17 +2190,21 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
               slice.turns
             ),
             pages: slice.history.pages,
-            hasOlder: canLoadOlderHistory(slice.history)
+            hasOlder: canLoadOlderHistory(slice.history),
+            ...(promptId === null
+              ? {}
+              : {
+                  promptShown:
+                    slice.entries.some((item) => item.id === promptId) ||
+                    slice.history.bridge.some((item) => item.id === promptId) ||
+                    slice.history.pages.some((page) => page.items.some((item) => item.id === promptId))
+                })
           });
           if (plan === "absent") {
             return false;
           }
           if (plan === "present") {
-            const rowId = rowIdForTurn(
-              state.rows,
-              turnId,
-              userMessageIdForTurn(turnId, slice.turns, slice.history.pages)
-            );
+            const rowId = rowIdForTurn(state.rows, turnId, promptId);
             if (rowId === null) {
               return false;
             }
@@ -2417,7 +2430,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * connection state.
      */
     const resyncHistory = async (): Promise<void> => {
-      const response = await transport.read(sessionId);
+      const response = await transport.read(sessionId, { window: "recent" });
       if (closed || response.kind !== "snapshot" || response.thread.seq < get().reducer.fold.seq) {
         return;
       }

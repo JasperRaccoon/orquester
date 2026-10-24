@@ -377,6 +377,21 @@ test("a thread read records the sequence it served (§5.2 lastSeq)", async () =>
   await h.close();
 });
 
+test("a thread read passes the window it asks for on to the host", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ kind: "snapshot", thread: { seq: 17 } }));
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?window=recent` });
+  await h.app.inject({ method: "GET", url: agentChatRoutes.thread("t1") });
+  assert.deepEqual(
+    h.host.requests.map((request) => request.url),
+    ["/threads/t1/thread?window=recent", "/threads/t1/thread"]
+  );
+  await h.close();
+});
+
 test("an events-shaped read records its sequence too", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   h.host.handler = (_req, res) =>
@@ -473,7 +488,7 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
   const port = (h.app.server.address() as AddressInfo).port;
   const controller = new AbortController();
   const response = await fetch(
-    `http://127.0.0.1:${port}${agentChatRoutes.events("t1")}?after=4`,
+    `http://127.0.0.1:${port}${agentChatRoutes.events("t1")}?after=4&window=recent`,
     { signal: controller.signal }
   );
   assert.equal(response.status, 200);
@@ -484,7 +499,7 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
   const first = await reader.read();
   const line = Buffer.from(first.value!).toString("utf8").trim();
   assert.deepEqual(JSON.parse(line), { kind: "synchronized", hostInstanceId: "host-1" });
-  assert.equal(h.host.requests[0].url, "/threads/t1/events?after=4");
+  assert.equal(h.host.requests[0].url, "/threads/t1/events?after=4&window=recent", "the window it asks for crosses too");
 
   // A client that goes away must not leave the host holding a subscription.
   controller.abort();
@@ -717,13 +732,13 @@ test("a history read forwards before/turns verbatim and passes the page through"
   // Clamping is the host's, in one place: an out-of-range count crosses unchanged.
   const response = await h.app.inject({
     method: "GET",
-    url: `${agentChatRoutes.history("t1")}?before=eyJ0IjoidDEifQ&turns=500`
+    url: `${agentChatRoutes.history("t1")}?before=eyJ0IjoidDEifQ&turns=500&windowCut=eyJ0IjoidDIifQ`
   });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), historyPage);
   assert.equal(h.host.requests.length, 1);
   assert.equal(h.host.requests[0].method, "GET");
-  assert.equal(h.host.requests[0].url, "/threads/t1/history?before=eyJ0IjoidDEifQ&turns=500");
+  assert.equal(h.host.requests[0].url, "/threads/t1/history?before=eyJ0IjoidDEifQ&turns=500&windowCut=eyJ0IjoidDIifQ");
   assert.equal(h.host.requests[0].auth, "Bearer tok");
   // The page names the thread's CURRENT seq but delivers only old turns:
   // noting it would move the tab's §6.3 reconnect cursor past live events the

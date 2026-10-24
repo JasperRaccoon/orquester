@@ -20,6 +20,7 @@ import {
   isThreadItemOutputWindow,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  THREAD_READ_WINDOW_RECENT,
   type AccountCommandBody,
   type ProfileCommandBody,
   type AgentChatCommandBodies,
@@ -36,6 +37,7 @@ import {
   type ThreadItemOutputWindowResponse,
   type ThreadItemResponse,
   type ThreadReadResponse,
+  type ThreadReadWindow,
   type ThreadSearchQuery,
   type ThreadSearchResponse,
   type TurnDiffResponse
@@ -158,7 +160,7 @@ export interface AgentChatTransport {
   ): Promise<CommandReceiptResponse>;
   read(
     sessionId: string,
-    options?: { after?: number; signal?: AbortSignal }
+    options?: { after?: number; window?: ThreadReadWindow; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
   /**
@@ -353,7 +355,13 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     read(sessionId, options) {
       return send<ThreadReadResponse>("GET", agentChatRoutes.thread(sessionId), {
-        query: options?.after === undefined ? undefined : { after: options.after },
+        query:
+          options?.after === undefined && options?.window === undefined
+            ? undefined
+            : {
+                ...(options?.after === undefined ? {} : { after: options.after }),
+                ...(options?.window === undefined ? {} : { window: options.window })
+              },
         ...(options?.signal === undefined ? {} : { signal: options.signal })
       });
     },
@@ -405,7 +413,7 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     readHistory(sessionId, query, signal) {
       return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
-        query: definedQuery({ before: query.before, turns: query.turns }),
+        query: definedQuery({ before: query.before, turns: query.turns, windowCut: query.windowCut }),
         ...(signal === undefined ? {} : { signal })
       });
     },
@@ -690,7 +698,9 @@ function openAgentChatStream(
       observedHostInstanceId: hostInstanceId
     });
     knownHostInstanceId = hostInstanceId;
-    const query = after === undefined ? "" : `?after=${after}`;
+    // This client handles a bounded snapshot (`ThreadReadWindow`): its history bounds name the
+    // turns it leaves out, which "load older" pages back in.
+    const query = `?${after === undefined ? "" : `after=${after}&`}window=${THREAD_READ_WINDOW_RECENT}`;
     let opened = false;
     liveness = { fastHeartbeat: false, synchronized: false };
     lastHeartbeatAt = null;

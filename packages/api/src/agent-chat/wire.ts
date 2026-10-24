@@ -359,6 +359,14 @@ export interface ThreadHistoryQuery {
   before?: string;
   /** Turns per page, clamped to `[1, THREAD_HISTORY_MAX_TURNS]`. */
   turns?: number;
+  /**
+   * With no usable `before`: the client's window came from a bounded snapshot
+   * cut at this cursor (`ThreadHistoryBounds.windowCut`) and has evicted rows
+   * since, so the page ends at the window's boundary as the host holds it now
+   * or at the cut, whichever is higher — never below a row that snapshot left
+   * out. Ignored with a `before`, and by a host that predates it.
+   */
+  windowCut?: string;
 }
 
 export const THREAD_HISTORY_DEFAULT_TURNS = 20;
@@ -399,7 +407,9 @@ export interface ThreadHistoryPage {
     /**
      * The id of the row at the page's upper boundary — the first row of the
      * log the page does NOT hold: the window's first row for a page asked
-     * without a cursor, the previous page's first row otherwise (a message's
+     * without a cursor (or a later row: such a page never ends below the cut a
+     * bounded snapshot may have named, and repeats what a window holds above
+     * it), the previous page's first row otherwise (a message's
      * first chunk when the boundary moved back to keep a message whole). The
      * client places every window row written before it in the history section,
      * so the timeline stays in log order when the page shares no row with the
@@ -1181,7 +1191,25 @@ export const AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 /** Query of the §6.3 stream and of `GET …/thread`. */
 export interface AgentChatEventsQuery {
   after?: number;
+  /**
+   * The snapshot the read may answer with (`ThreadReadWindow`): absent, the
+   * whole retained window, as every client before the parameter expects.
+   */
+  window?: ThreadReadWindow;
 }
+
+/**
+ * Which window a §6.3 snapshot carries — `?window=` on `GET …/events` and `GET …/thread`.
+ * `"recent"`: the latest turns whole, and of the settled turns before them only the rows live
+ * state is read from — the rest a history page away, the snapshot's `history.beforeCursor`
+ * naming the first one (the agent host's `wire-window.ts`). Opt-in on both routes: without it
+ * the host sends the whole retained window, which every older client and the daemon's own
+ * readers expect. A host that predates the parameter ignores it, with the same result.
+ */
+export type ThreadReadWindow = "recent";
+
+/** The `window` value a client asks a bounded snapshot with. */
+export const THREAD_READ_WINDOW_RECENT: ThreadReadWindow = "recent";
 
 // ---------------------------------------------------------------------------
 // §6.3 reads

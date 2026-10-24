@@ -31,7 +31,7 @@ import { createIngestion } from "../ingestion/index.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import { applyEventsChunked } from "./fold-ops.ts";
-import { createThreadIndex, createUnavailableThreadIndex } from "../index/index.ts";
+import { createThreadIndex, createUnavailableThreadIndex, type ThreadIndex } from "../index/index.ts";
 import { createTestHost, createScriptedAdapter, createRecordingLogger, type TestHost } from "./testing/index.ts";
 
 let commandSeq = 0;
@@ -3048,6 +3048,140 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
       });
     }
     await host.stop();
+  });
+
+  /** Fifteen settled turns, each its prompt and three rows; the index caught up. */
+  async function fifteenTurns(host: TestHost, index: ThreadIndex | null): Promise<string> {
+    const threadId = await host.createThread();
+    for (let n = 1; n <= 15; n += 1) {
+      host.clock.advance(1_000);
+      await seedTurn(host, `w-${n}`, { threadId });
+      await bulkActivities(host, `w-${n}`, 3, threadId);
+    }
+    await host.settle();
+    await index?.drain();
+    return threadId;
+  }
+
+  async function recentRead(host: TestHost, threadId: string) {
+    const read = await host.orchestrator.readThread(threadId, undefined, { window: "recent" });
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") throw new Error("unreachable");
+    return read.thread;
+  }
+
+  const rowKey = (item: ThreadItem) => `${item.kind}:${item.id}`;
+
+  it("a bounded snapshot leaves the settled turns before its latest to load older, and its cursor pages back exactly those rows", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, index);
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+
+    // The newest ten turns whole; everything but the window's rows is the snapshot's own.
+    const { items: _fullItems, history: _fullHistory, ...fullRest } = full;
+    const { items: _recentItems, history: _recentHistory, ...recentRest } = recent;
+    assert.deepEqual(recentRest, fullRest, "turns, checkpoints, pending, roster, head and seq are untouched");
+    const kept = new Set(recent.items.map(rowKey));
+    const dropped = full.items.filter((item) => !kept.has(rowKey(item)));
+    const keptTurns = Array.from({ length: 10 }, (_unused, at) => `w-${at + 6}`);
+    assert.deepEqual(
+      recent.items.map(rowKey),
+      full.items.filter((item) => keptTurns.some((turnId) => item.id.startsWith(`${turnId}-`) || item.id === `user:${turnId}`)).map(rowKey)
+    );
+    assert.deepEqual(
+      dropped.map(rowKey),
+      [1, 2, 3, 4, 5].flatMap((n) => [`message:user:w-${n}`, ...[0, 1, 2].map((row) => `activity:w-${n}-bulk-${row}`)])
+    );
+
+    // The cursor names the line the kept window begins at: w-6's prompt.
+    const w6 = index.turnById(threadId, "w-6");
+    assert.ok(w6);
+    const cut = encodeHistoryCursor({ threadId, beforeAnchorAt: w6.requestedAt, beforeTurnId: "w-6", beforeSeq: w6.firstSeq });
+    assert.deepEqual(recent.history, {
+      indexed: true,
+      hasOlder: true,
+      beforeCursor: cut,
+      oldestRetainedOrdinal: 6,
+      totalTurns: 15,
+      windowCut: cut
+    });
+
+    // Load older: exactly the dropped rows, as the full snapshot held them, each once, in order.
+    const pages = await walkHistory(host, threadId, recent.history?.beforeCursor ?? null);
+    assert.equal(pages[0]?.page.endItemId, "user:w-6", "the first page ends where the window begins");
+    const paged = [...pages].reverse().flatMap((page) => page.items);
+    assert.deepEqual(paged, dropped, "no gap, no duplicate, the same content");
+    assert.equal(pages.at(-1)!.page.beforeCursor, null);
+
+    // The persisted fold is untouched: the next whole read is the same window.
+    assert.deepEqual(await snapshotRead(host, threadId), full);
+    await host.stop();
+  });
+
+  it("where the window's own boundary lies above the cut, its cursor stands, and its pages hold what the frame left out", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, null);
+    // The latest turn outgrows the parent window: the fold evicts every older turn's rows but
+    // their prompts, so history begins inside w-15.
+    await bulkActivities(host, "w-15", ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK, threadId, 3);
+    await index.drain();
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+    assert.equal(full.history?.oldestRetainedOrdinal, 15);
+    assert.deepEqual(recent.history, full.history, "the window's own bounds");
+    const kept = new Set(recent.items.map(rowKey));
+    const dropped = full.items.filter((item) => !kept.has(rowKey(item)));
+    assert.deepEqual(dropped.map(rowKey), [1, 2, 3, 4, 5].map((n) => `message:user:w-${n}`));
+    const pages = await walkHistory(host, threadId, recent.history?.beforeCursor ?? null);
+    const paged = new Map(pages.flatMap((page) => page.items).map((item) => [rowKey(item), item]));
+    for (const item of dropped) {
+      assert.deepEqual(paged.get(rowKey(item)), item, `${item.id} is a page away`);
+    }
+    await host.stop();
+  });
+
+  it("a page asked without a cursor but with the window's cut never ends below that cut, and without it is as ever", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, index);
+    const full = await snapshotRead(host, threadId);
+    const unbounded = await host.orchestrator.readHistory(threadId, {});
+    const recent = await recentRead(host, threadId);
+    const windowCut = recent.history?.windowCut;
+    assert.ok(windowCut);
+    // Any other cursorless request: the block below the whole window, as the host holds it —
+    // which, nothing evicted, is nothing at all.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, {}), unbounded);
+    assert.deepEqual(unbounded.items, []);
+    // A client whose bounded window evicted a row asks without the snapshot's cursor, naming
+    // the cut: the page ends there, so every row that snapshot left out is a page away.
+    const first = await host.orchestrator.readHistory(threadId, { windowCut });
+    assert.equal(first.page.endItemId, "user:w-6");
+    assert.deepEqual(first, await host.orchestrator.readHistory(threadId, { before: windowCut }));
+    // A cursor wins over the cut, and a cut that is not one of ours is none.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, { windowCut: "not a cursor" }), unbounded);
+    const pages = [first, ...(await walkHistory(host, threadId, first.page.beforeCursor))];
+    const paged = new Set(pages.flatMap((page) => page.items).map(rowKey));
+    const windowRows = new Set(recent.items.map(rowKey));
+    assert.deepEqual(
+      full.items.filter((item) => !paged.has(rowKey(item)) && !windowRows.has(rowKey(item))),
+      [],
+      "nothing is lost"
+    );
+    await host.stop();
+  });
+
+  it("a bounded read is the whole window without a usable index, or one that has not caught up", async (t) => {
+    const unindexed = createTestHost();
+    const threadId = await fifteenTurns(unindexed, null);
+    assert.deepEqual(await recentRead(unindexed, threadId), await snapshotRead(unindexed, threadId));
+    await unindexed.stop();
+
+    const { index } = await indexedHost(t);
+    const behind = createTestHost({ index: { ...index, coverage: async () => "catching-up" } });
+    const caughtUpLater = await fifteenTurns(behind, index);
+    assert.deepEqual(await recentRead(behind, caughtUpLater), await snapshotRead(behind, caughtUpLater));
+    await behind.stop();
   });
 
   it("searches through the index, and answers `indexed: false` without one", async (t) => {

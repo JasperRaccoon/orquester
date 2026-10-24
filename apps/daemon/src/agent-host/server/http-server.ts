@@ -46,6 +46,7 @@ import {
   type ThreadItemResponse,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
+  type ThreadReadWindow,
   type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
@@ -293,6 +294,11 @@ function parseAfter(url: URL): number | undefined {
     throw new AgentChatCommandError("INVALID_COMMAND", "`after` must be a non-negative integer.");
   }
   return value;
+}
+
+/** `?window=` of `GET …/thread` (`ThreadReadWindow`); anything else is the whole window, as before. */
+function parseReadWindow(url: URL): ThreadReadWindow | undefined {
+  return url.searchParams.get("window") === "recent" ? "recent" : undefined;
 }
 
 /**
@@ -661,7 +667,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/thread" && method === "GET") {
       const after = parseAfter(url);
-      const body = await orchestrator.readThread(threadId, after);
+      const window = parseReadWindow(url);
+      const body = await orchestrator.readThread(threadId, after, window === undefined ? undefined : { window });
       sendJson(response, 200, body);
       return;
     }
@@ -694,8 +701,10 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         max: THREAD_HISTORY_MAX_TURNS,
         fallback: THREAD_HISTORY_DEFAULT_TURNS
       });
+      const windowCut = url.searchParams.get("windowCut");
       const body: ThreadHistoryPage = await orchestrator.readHistory(threadId, {
         ...(before !== null && before.length > 0 ? { before } : {}),
+        ...(windowCut !== null && windowCut.length > 0 ? { windowCut } : {}),
         turns
       });
       sendJson(response, 200, body);
@@ -768,6 +777,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/events" && method === "GET") {
       const after = parseAfter(url);
+      const window = parseReadWindow(url);
       const releaseWatcher = options.addProviderWatcher?.();
       const stream = createThreadStream({
         response,
@@ -778,7 +788,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
             ...(onHistoryImport ? { onHistoryImport } : {})
           }),
         read: async (): Promise<AgentChatStreamFrame[]> => {
-          const read = await orchestrator.readThread(threadId, after);
+          // Only for a client that asked: an older one expects the whole window (`ThreadReadWindow`).
+          const read = await orchestrator.readThread(threadId, after, window === undefined ? undefined : { window });
           if (read.kind === "snapshot") {
             return [{ kind: "snapshot", thread: read.thread }];
           }

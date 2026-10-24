@@ -79,7 +79,7 @@ describe("the stream reader", () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     const handle = transport.stream("s1", {}, { onFrame: (frame) => frames.push(frame) });
 
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?window=recent");
     transporter.latest.handlers.onData(
       line({ kind: "snapshot", thread: snapshot({ seq: 3 }) }) +
         ":hb\n" +
@@ -129,7 +129,7 @@ describe("the stream reader", () => {
     mock.timers.tick(1_000);
 
     assert.equal(transporter.streams.length, 2);
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&window=recent");
     handle.close();
   });
 
@@ -190,14 +190,14 @@ describe("the stream reader", () => {
       { after: 5, hostInstanceId: "h1" },
       { onFrame: () => {} }
     );
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=5");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=5&window=recent");
 
     transporter.latest.handlers.onData(line({ kind: "synchronized", hostInstanceId: "h2" }));
     transporter.latest.handlers.onEnd();
     mock.timers.tick(1_000);
     assert.equal(
       transporter.latest.path,
-      "/api/sessions/s1/events",
+      "/api/sessions/s1/events?window=recent",
       "a changed instance id is a resync, not a resume"
     );
     handle.close();
@@ -386,7 +386,7 @@ describe("stream liveness on a bad link", () => {
     assert.equal(transporter.streams[0]?.closed, true, "12 s without a byte on a 5 s heartbeat: dead");
     mock.timers.tick(500);
     assert.equal(transporter.streams.length, 2);
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=3", "resumed by cursor");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=3&window=recent", "resumed by cursor");
     handle.close();
   });
 
@@ -461,6 +461,25 @@ describe("commands", () => {
     assert.deepEqual(
       transporter.requests.map((request) => request.query),
       [{ ignoreWhitespace: 0 }, { ignoreWhitespace: 1 }, { ignoreWhitespace: 0 }]
+    );
+  });
+
+  it("asks a thread read for the window and cursor it was given, and nothing else", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    for (let at = 0; at < 3; at += 1) {
+      transporter.responses.push({ status: 200, ok: true, data: { kind: "events", seq: 1, events: [] } });
+    }
+    await transport.read("s1");
+    await transport.read("s1", { window: "recent" });
+    await transport.read("s1", { after: 4, window: "recent" });
+    assert.deepEqual(
+      transporter.requests.map((request) => [request.path, request.query]),
+      [
+        ["/api/sessions/s1/thread", undefined],
+        ["/api/sessions/s1/thread", { window: "recent" }],
+        ["/api/sessions/s1/thread", { after: 4, window: "recent" }]
+      ]
     );
   });
 });

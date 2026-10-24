@@ -178,7 +178,7 @@ export function historyBoundsFromSnapshot(snapshot: ThreadSnapshotPayload): Thre
   if (!isRecord(raw)) {
     return null;
   }
-  const { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns } = raw;
+  const { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns, windowCut } = raw;
   if (
     typeof indexed !== "boolean" ||
     typeof hasOlder !== "boolean" ||
@@ -189,7 +189,15 @@ export function historyBoundsFromSnapshot(snapshot: ThreadSnapshotPayload): Thre
   ) {
     return null;
   }
-  return { indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns };
+  return {
+    indexed,
+    hasOlder,
+    beforeCursor,
+    oldestRetainedOrdinal,
+    totalTurns,
+    // A bounded snapshot's cut: anything but a cursor string is none.
+    ...(typeof windowCut === "string" && windowCut.length > 0 ? { windowCut } : {})
+  };
 }
 
 /**
@@ -675,6 +683,21 @@ export function nextHistoryCursor(history: AgentChatHistoryState): string | unde
 }
 
 /**
+ * The `windowCut` of the next `GET …/history` (`ThreadHistoryQuery`): the cut
+ * of the bounded snapshot the window came from, whenever the page is asked
+ * without a cursor and nothing is loaded yet — once the window has evicted,
+ * or after the device cache kept the cut but not its stale cursor. The host
+ * then never ends the page below a row that snapshot left out. `undefined`
+ * otherwise: a page's own cursor, or a window no bounded snapshot cut.
+ */
+export function nextHistoryWindowCut(history: AgentChatHistoryState): string | undefined {
+  if (history.pages.length > 0 || nextHistoryCursor(history) !== undefined) {
+    return undefined;
+  }
+  return history.bounds?.windowCut;
+}
+
+/**
  * What a failed `GET …/history` tells the user, in words: an unavailable
  * index and a dropped connection each get their own sentence, and anything
  * else is the host's own message.
@@ -707,6 +730,12 @@ export type RevealPlan = "present" | "load-more" | "absent";
  * Where a turn is: on screen (the window, the bridge or a loaded page shows
  * something of it), one more older page away, or out of reach — nothing older
  * exists, or {@link HISTORY_REVEAL_PAGE_CAP} pages have already been pulled in.
+ *
+ * A turn whose prompt is known but not shown (`promptShown: false`) is one
+ * more page away while older pages remain, whatever else of it is on screen:
+ * a window can hold a few rows of a turn without the rest of it — retention
+ * keeps rows out of age order, and the stream's bounded snapshot keeps the
+ * rows live state is read from — and a rewind needs the prompt's own row.
  */
 export function planReveal(
   turnId: string,
@@ -724,16 +753,19 @@ export function planReveal(
     pageTurnIds: ReadonlySet<string>;
     pages: readonly ThreadHistoryPage[];
     hasOlder: boolean;
+    /** Whether the turn's prompt is on screen; absent when the turn names none. */
+    promptShown?: boolean;
   }
 ): RevealPlan {
+  const more = input.hasOlder && input.pages.length < HISTORY_REVEAL_PAGE_CAP;
   if (
     input.liveTurnIds.has(turnId) ||
     input.bridgeTurnIds?.has(turnId) === true ||
     input.pageTurnIds.has(turnId)
   ) {
-    return "present";
+    return input.promptShown === false && more ? "load-more" : "present";
   }
-  return input.hasOlder && input.pages.length < HISTORY_REVEAL_PAGE_CAP ? "load-more" : "absent";
+  return more ? "load-more" : "absent";
 }
 
 /**
@@ -769,7 +801,7 @@ export function liveTurnIdsOf(items: readonly ThreadItem[], turns: readonly Turn
  * drill-in's fold row carries a fold key there (`<turn>@<prompt id>`), and a
  * drill-in has no history section.
  */
-function rowTurnId(row: AgentChatTimelineRow): string | null {
+export function rowTurnId(row: AgentChatTimelineRow): string | null {
   switch (row.kind) {
     case "message":
     case "assistant-meta":
