@@ -679,6 +679,26 @@ describe("agent host server — the event stream (§6.3)", () => {
     await h.stop();
   });
 
+  it("reads the stream's snapshot as the recent window, and `GET …/thread` only when asked", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const reads: unknown[] = [];
+    const readThread = h.host.orchestrator.readThread;
+    h.host.orchestrator.readThread = (id, after, options) => {
+      reads.push(options);
+      return readThread(id, after, options);
+    };
+    const live = await h.stream(agentHostRoutes.events(threadId));
+    await live.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    live.close();
+    assert.equal((await h.call("GET", agentHostRoutes.read(threadId))).status, 200);
+    assert.equal((await h.call("GET", `${agentHostRoutes.read(threadId)}?window=recent`)).status, 200);
+    assert.equal((await h.call("GET", `${agentHostRoutes.read(threadId)}?window=everything`)).status, 200);
+    assert.deepEqual(reads, [{ window: "recent" }, undefined, { window: "recent" }, undefined]);
+    h.host.orchestrator.readThread = readThread;
+    await h.stop();
+  });
+
   it("replays by cursor when the range is small enough", async () => {
     const h = await harness();
     const threadId = await h.host.createThread();

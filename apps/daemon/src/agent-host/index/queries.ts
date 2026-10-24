@@ -39,6 +39,7 @@ export interface ThreadIndexQueries {
   turnOfSeq(threadId: string, seq: number): IndexedTurn | null;
   eventPositionBySeq(threadId: string, seq: number): IndexedItemPosition | null;
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
+  messageLines(threadId: string, messageId: string): SpanningMessage | null;
   firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null;
   latestRevertSeq(threadId: string): number;
   turnById(threadId: string, turnId: string): IndexedTurn | null;
@@ -122,6 +123,10 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
       `SELECT message_id, first_seq, first_byte, seq FROM message_docs
        WHERE thread_id = ? AND first_seq < ? AND seq >= ?
        ORDER BY first_seq, message_id`
+    ),
+    messageLines: db.prepare(
+      `SELECT message_id, first_seq, first_byte, seq FROM message_docs
+       WHERE thread_id = ? AND message_id = ?`
     ),
     itemAfter: db.prepare(
       `SELECT seq, byte_offset, byte_length FROM items
@@ -341,6 +346,13 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         .all(threadId, bound, bound)
         .map(toSpanningMessage)
         .filter((span): span is SpanningMessage => span !== null);
+    },
+
+    messageLines(threadId, messageId) {
+      if (typeof messageId !== "string") {
+        return null;
+      }
+      return toSpanningMessage(sql.messageLines.get(threadId, messageId));
     },
 
     /**

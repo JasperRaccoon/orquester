@@ -377,6 +377,21 @@ test("a thread read records the sequence it served (§5.2 lastSeq)", async () =>
   await h.close();
 });
 
+test("a thread read passes the window it asks for on to the host", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ kind: "snapshot", thread: { seq: 17 } }));
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?window=recent` });
+  await h.app.inject({ method: "GET", url: agentChatRoutes.thread("t1") });
+  assert.deepEqual(
+    h.host.requests.map((request) => request.url),
+    ["/threads/t1/thread?window=recent", "/threads/t1/thread"]
+  );
+  await h.close();
+});
+
 test("an events-shaped read records its sequence too", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   h.host.handler = (_req, res) =>

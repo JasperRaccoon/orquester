@@ -46,6 +46,7 @@ import {
   type ThreadItemResponse,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
+  type ThreadReadWindow,
   type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
@@ -293,6 +294,11 @@ function parseAfter(url: URL): number | undefined {
     throw new AgentChatCommandError("INVALID_COMMAND", "`after` must be a non-negative integer.");
   }
   return value;
+}
+
+/** `?window=` of `GET …/thread` (`ThreadReadWindow`); anything else is the whole window, as before. */
+function parseReadWindow(url: URL): ThreadReadWindow | undefined {
+  return url.searchParams.get("window") === "recent" ? "recent" : undefined;
 }
 
 /**
@@ -661,7 +667,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/thread" && method === "GET") {
       const after = parseAfter(url);
-      const body = await orchestrator.readThread(threadId, after);
+      const window = parseReadWindow(url);
+      const body = await orchestrator.readThread(threadId, after, window === undefined ? undefined : { window });
       sendJson(response, 200, body);
       return;
     }
@@ -778,7 +785,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
             ...(onHistoryImport ? { onHistoryImport } : {})
           }),
         read: async (): Promise<AgentChatStreamFrame[]> => {
-          const read = await orchestrator.readThread(threadId, after);
+          // A cold snapshot carries the latest turns; the rest is "load older" (`ThreadReadWindow`).
+          const read = await orchestrator.readThread(threadId, after, { window: "recent" });
           if (read.kind === "snapshot") {
             return [{ kind: "snapshot", thread: read.thread }];
           }

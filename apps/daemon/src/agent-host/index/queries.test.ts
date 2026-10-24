@@ -583,6 +583,15 @@ describe("thread index: message spans", () => {
     assert.deepEqual(index.messagesSpanning("other-thread", 6), []);
   });
 
+  it("messageLines: a message's first and latest line, by id", async () => {
+    const log = await streamedAroundActivities();
+    const id = log.threadId;
+    assert.deepEqual(index.messageLines(id, "m1"), { messageId: "m1", firstSeq: 5, firstByte: log.at(5).byteOffset, lastSeq: 10 });
+    assert.equal(index.messageLines(id, "b1"), null, "an activity is no message");
+    assert.equal(index.messageLines(id, "nope"), null);
+    assert.equal(index.messageLines("other-thread", "m1"), null);
+  });
+
   it("eventPositionBySeq answers for an activity line and a message's first line, nothing else", async () => {
     const log = await streamedAroundActivities();
     const id = log.threadId;

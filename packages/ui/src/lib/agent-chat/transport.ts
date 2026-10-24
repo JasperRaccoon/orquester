@@ -36,6 +36,7 @@ import {
   type ThreadItemOutputWindowResponse,
   type ThreadItemResponse,
   type ThreadReadResponse,
+  type ThreadReadWindow,
   type ThreadSearchQuery,
   type ThreadSearchResponse,
   type TurnDiffResponse
@@ -158,7 +159,7 @@ export interface AgentChatTransport {
   ): Promise<CommandReceiptResponse>;
   read(
     sessionId: string,
-    options?: { after?: number; signal?: AbortSignal }
+    options?: { after?: number; window?: ThreadReadWindow; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
   /**
@@ -353,7 +354,13 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     read(sessionId, options) {
       return send<ThreadReadResponse>("GET", agentChatRoutes.thread(sessionId), {
-        query: options?.after === undefined ? undefined : { after: options.after },
+        query:
+          options?.after === undefined && options?.window === undefined
+            ? undefined
+            : {
+                ...(options?.after === undefined ? {} : { after: options.after }),
+                ...(options?.window === undefined ? {} : { window: options.window })
+              },
         ...(options?.signal === undefined ? {} : { signal: options.signal })
       });
     },

@@ -253,6 +253,11 @@ export interface ThreadIndex {
    */
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
   /**
+   * One message's lines — its first and its latest — or null when the index
+   * holds no such message of the thread.
+   */
+  messageLines(threadId: string, messageId: string): SpanningMessage | null;
+  /**
    * The first line past `seq` a page boundary may sit on — the lowest
    * activity line or message first line above it — or null when there is none.
    */
@@ -744,6 +749,10 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.messagesSpanning(threadId, seq), []) : [];
     },
 
+    messageLines(threadId, messageId) {
+      return serving() ? read(() => queries.messageLines(threadId, messageId), null) : null;
+    },
+
     firstBoundaryAfter(threadId, seq) {
       return serving() ? read(() => queries.firstBoundaryAfter(threadId, seq), null) : null;
     },
@@ -845,6 +854,7 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     turnOfSeq: () => null,
     eventPositionBySeq: () => null,
     messagesSpanning: () => [],
+    messageLines: () => null,
     firstBoundaryAfter: () => null,
     latestRevertSeq: () => 0,
     turnByPrompt: () => null,

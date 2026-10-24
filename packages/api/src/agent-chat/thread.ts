@@ -814,8 +814,9 @@ export interface ThreadSnapshotPayload {
 /**
  * The history boundary stamped on a snapshot. `hasOlder` is the only field a
  * client branches on; `beforeCursor` is the opaque cursor of the FIRST older
- * page (the turns just below the retained window), and the ordinals are for
- * copy ("turn 12 of 87"). `indexed: false` means the host has no usable index
+ * page (the turns just below the retained window — or, on a bounded snapshot
+ * (`ThreadReadWindow` `"recent"`), just below the turns it kept whole), and
+ * the ordinals are for copy ("turn 12 of 87"). `indexed: false` means the host has no usable index
  * right now — nothing older can be offered, whatever the log holds.
  */
 export interface ThreadHistoryBounds {

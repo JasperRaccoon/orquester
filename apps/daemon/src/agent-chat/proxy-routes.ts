@@ -356,7 +356,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   // --- §6.3 reads ----------------------------------------------------------
 
-  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string } }>(
     pattern(agentChatRoutes.thread(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -366,7 +366,8 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         deps,
         reply,
         "GET",
-        withQuery(agentHostRoutes.read(id), { after: request.query.after })
+        // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
+        withQuery(agentHostRoutes.read(id), { after: request.query.after, window: request.query.window })
       );
       noteSeqFrom(deps, id, value);
       return value;

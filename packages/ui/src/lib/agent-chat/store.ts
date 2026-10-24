@@ -2139,7 +2139,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async refresh() {
-        const response = await transport.read(sessionId);
+        const response = await transport.read(sessionId, { window: "recent" });
         if (response.kind === "snapshot") {
           applyStreamFrame({ kind: "snapshot", thread: response.thread });
           return;
@@ -2417,7 +2417,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * connection state.
      */
     const resyncHistory = async (): Promise<void> => {
-      const response = await transport.read(sessionId);
+      const response = await transport.read(sessionId, { window: "recent" });
       if (closed || response.kind !== "snapshot" || response.thread.seq < get().reducer.fold.seq) {
         return;
       }

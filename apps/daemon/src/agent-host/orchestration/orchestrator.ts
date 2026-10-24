@@ -97,6 +97,7 @@ import {
   type ThreadHeadQuery,
   type ThreadHeadResponse,
   type ThreadReadResponse,
+  type ThreadReadWindow,
   type ThreadSearchResponse,
   type ThreadSessionState,
   type ThreadSessionStatus,
@@ -250,6 +251,7 @@ import {
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
 import { checkMinimumVersion } from "./version-gate.ts";
+import { trimToWireWindow, WIRE_WINDOW_MIN_TURNS, wireWindowCut } from "./wire-window.ts";
 import {
   parseAnswers,
   parseApprovalDecision,
@@ -766,7 +768,16 @@ export interface Orchestrator {
     body: unknown
   ): Promise<{ seq: number }>;
 
-  readThread(threadId: string, afterSeq?: number): Promise<ThreadReadResponse>;
+  /**
+   * The §6.3 read. With `window: "recent"` — the stream's cold snapshot, and a client that asks
+   * for it — a snapshot keeps only the latest turns whole and leaves the settled turns before
+   * them to `readHistory` (`recentSnapshotOf`); a replay is the same either way.
+   */
+  readThread(
+    threadId: string,
+    afterSeq?: number,
+    options?: { window?: ThreadReadWindow }
+  ): Promise<ThreadReadResponse>;
   /**
    * The thread's head (`threadHeadOf`, `@orquester/api`'s `thread-head.ts`) from the in-memory fold:
    * the same answer the daemon derives from a snapshot at the same `seq`, without serialising the
@@ -5446,6 +5457,120 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * The snapshot with only its latest turns whole (`wire-window.ts`): the rows of the settled
+   * turns before them that a history page serves are left to "load older", and the bounds name
+   * the page that serves them. `snapshotOf`'s own answer whenever any of that cannot be made
+   * exact: no usable index, an index that does not hold every line of the thread yet, a cut no
+   * cursor can name, or nothing to trim.
+   *
+   * Only rows whose every line lies below the cut go — the kept turn's first line, moved back
+   * past a message it would split (`outsideMessages`, as `historyBlockEnd` moves a cursor's end),
+   * so the pages below it fold each of them whole. A row the index cannot place stays. The
+   * cursor is the window's own when that already ends at or above the cut (the pages below it
+   * hold those rows already), else a `blockCursor` at the cut — the cursor a page hands the next
+   * older page, so every client pages it the way it pages any other. The cut lies past the
+   * thread's latest revert, so the cursor names a line no revert removed.
+   */
+  const recentSnapshotOf = async (runtime: ThreadRuntime): Promise<ThreadSnapshotPayload> => {
+    const index = options.index;
+    if (index === undefined || !index.available) {
+      return snapshotOf(runtime);
+    }
+    let coverage: Awaited<ReturnType<ThreadIndex["coverage"]>>;
+    try {
+      coverage = await index.coverage(runtime.id, runtime.state.seq);
+    } catch (error) {
+      logger.warn(`agent-host: the thread index could not say whether it holds ${runtime.id}`, error);
+      coverage = "failed";
+    }
+    // Read after the wait: the snapshot is never newer than the coverage it is judged by, bar
+    // rows landed since, which the index may not place yet and so stay.
+    const snapshot = snapshotOf(runtime);
+    if (coverage !== "complete" || snapshot.history?.indexed !== true) {
+      return snapshot;
+    }
+    try {
+      return boundedSnapshot(runtime, index, snapshot) ?? snapshot;
+    } catch (error) {
+      logger.warn(`agent-host: the thread index could not bound ${runtime.id}'s snapshot`, error);
+      return snapshot;
+    }
+  };
+
+  const boundedSnapshot = (
+    runtime: ThreadRuntime,
+    index: ThreadIndex,
+    snapshot: ThreadSnapshotPayload
+  ): ThreadSnapshotPayload | null => {
+    const history = snapshot.history;
+    const cut = wireWindowCut(snapshot.turns, snapshot.items);
+    if (history === undefined || cut === null) {
+      return null;
+    }
+    const threadId = runtime.id;
+    const end = turnCutOf(index, threadId, cut.oldestKept.turnId);
+    if (
+      end === null ||
+      end.seq <= index.latestRevertSeq(threadId) ||
+      // A page holds at least one activity: below a cut with none there is no page at all.
+      !index.hasItemsBefore(threadId, end.seq)
+    ) {
+      return null;
+    }
+    const endSeq = end.seq;
+    const items = trimToWireWindow(snapshot.items, cut, (item) => {
+      if (item.kind === "activity") {
+        const position = index.itemPosition(threadId, item.id);
+        return position !== null && position.seq < endSeq;
+      }
+      const lines = index.messageLines(threadId, item.id);
+      return lines !== null && lines.lastSeq < endSeq;
+    });
+    if (items === null) {
+      return null;
+    }
+    const boundary = windowBoundary(runtime.state, index, threadId);
+    if (boundary !== null && boundary.seq >= endSeq && history.hasOlder) {
+      return { ...snapshot, items };
+    }
+    const anchor = anchorTurnOf(index, threadId, endSeq);
+    if (anchor === null) {
+      return null;
+    }
+    return {
+      ...snapshot,
+      items,
+      history: {
+        indexed: true,
+        hasOlder: true,
+        beforeCursor: encodeHistoryCursor(blockCursor(threadId, anchor, endSeq)),
+        oldestRetainedOrdinal: anchor.ordinal,
+        totalTurns: history.totalTurns
+      }
+    };
+  };
+
+  /**
+   * The lowest end a history page asked without a cursor may have: at or above every cut a
+   * bounded snapshot of this thread has named since its latest revert — the first line of its
+   * `WIRE_WINDOW_MIN_TURNS`-th newest started turn, since every such snapshot kept at least that
+   * many turns and turns are only ever added — and past the latest revert, at or above every
+   * cut named before it (each lies below the revert). Null for a thread with neither: too few
+   * turns ever to be bounded, and never rewound.
+   */
+  const recentCutFloor = (runtime: ThreadRuntime, index: ThreadIndex): BlockEnd | null => {
+    const threadId = runtime.id;
+    const started = startedTurns(runtime.state.turns);
+    const turn = started.length > WIRE_WINDOW_MIN_TURNS ? started[started.length - WIRE_WINDOW_MIN_TURNS] : undefined;
+    const cut = turn === undefined ? null : turnCutOf(index, threadId, turn.turnId);
+    const pastRevert = pastLatestRevert(index, threadId);
+    if (cut === null || (pastRevert !== null && pastRevert.seq > cut.seq)) {
+      return pastRevert;
+    }
+    return cut;
+  };
+
   const indexUnavailable = (): AgentChatCommandError =>
     new AgentChatCommandError(
       "INDEX_UNAVAILABLE",
@@ -5610,9 +5735,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   /**
    * Where a block ends, in seqs and in bytes: the request's cursor, else the
-   * snapshot's own (the window's boundary) — a malformed, foreign or
-   * no-longer-known cursor is a first-page request. Null when there is
-   * nothing to end at.
+   * window's boundary, or the floor of a bounded snapshot's cut where that
+   * lies higher (`recentCutFloor`) — a malformed, foreign or no-longer-known
+   * cursor is a first-page request. Null when there is nothing to end at.
    */
   const historyBlockEnd = (
     runtime: ThreadRuntime,
@@ -5628,6 +5753,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (end === null) {
       const boundary = windowBoundary(runtime.state, index, threadId);
       end = boundary === null ? null : { seq: boundary.seq, byteOffset: boundary.byteOffset };
+      // Never below a cut a bounded snapshot may have named (`recentSnapshotOf`): a client asks
+      // without its cursor once its window evicted a row, and the rows that snapshot left out
+      // lie below its cut, so a page ending lower would leave the ones above it unserved. A
+      // higher end only repeats rows a window holds, which a reader renders once.
+      const floor = recentCutFloor(runtime, index);
+      if (floor !== null && (end === null || floor.seq > end.seq)) {
+        end = floor;
+      }
     }
     if (end === null) {
       return null;
@@ -5942,18 +6075,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       );
     });
 
-  const readThread = async (threadId: string, afterSeq?: number): Promise<ThreadReadResponse> =>
+  const readThread = async (
+    threadId: string,
+    afterSeq?: number,
+    readOptions?: { window?: ThreadReadWindow }
+  ): Promise<ThreadReadResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       requireHead(runtime);
+      const snapshot = async (): Promise<ThreadReadResponse> => ({
+        kind: "snapshot",
+        thread: readOptions?.window === "recent" ? await recentSnapshotOf(runtime) : snapshotOf(runtime)
+      });
       if (afterSeq === undefined) {
-        return { kind: "snapshot", thread: snapshotOf(runtime) };
+        return snapshot();
       }
       const replay = await measureReplay(runtime, afterSeq);
       if (replay) {
         return { kind: "events", seq: runtime.state.seq, events: replay };
       }
-      return { kind: "snapshot", thread: snapshotOf(runtime) };
+      return snapshot();
     });
 
   /**
@@ -8984,6 +9125,26 @@ function pastLatestRevert(index: ThreadIndex, threadId: string): BlockEnd | null
  */
 function anchorTurnOf(index: ThreadIndex, threadId: string, seq: number): IndexedTurn | null {
   return index.turnOfSeq(threadId, seq) ?? index.turnByOrdinal(threadId, 1);
+}
+
+/**
+ * Where a block that leaves a turn whole above it ends: the turn's first line a boundary may sit
+ * on — its prompt, as a rule — moved back past any message a boundary there would split, as
+ * `historyBlockEnd` moves a cursor's end. Null when the index cannot place it.
+ */
+function turnCutOf(index: ThreadIndex, threadId: string, turnId: string): BlockEnd | null {
+  const turn = index.turnById(threadId, turnId);
+  if (turn === null) {
+    return null;
+  }
+  const first =
+    index.eventPositionBySeq(threadId, turn.firstSeq) ?? index.firstBoundaryAfter(threadId, turn.firstSeq);
+  if (first === null) {
+    return null;
+  }
+  const seq = outsideMessages(index, threadId, first.seq);
+  const position = seq === first.seq ? first : index.eventPositionBySeq(threadId, seq);
+  return position === null ? null : { seq, byteOffset: position.byteOffset };
 }
 
 /** The cursor of the block that ends just below the activity line at `seq`. */

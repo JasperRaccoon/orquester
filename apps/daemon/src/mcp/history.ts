@@ -64,7 +64,9 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
   // Turn end + 1, when the range ends before the window's oldest turn: the first page ends where it begins. Up to the
   // window's oldest turn itself — none of that turn is in the range, so its evicted rows are not waded through first.
   const after = end < oldest ? ordered[end] : undefined;
-  let before = after ? encodeHistoryCursor({ threadId: sessionId, beforeAnchorAt: after.requestedAt, beforeTurnId: after.turnId }) : undefined;
+  // Else the window's own cursor, which names its boundary: a page asked without one ends no lower than the cut of the
+  // stream's bounded snapshot, above the whole window this read holds, and would wade through rows it already has.
+  let before = after ? encodeHistoryCursor({ threadId: sessionId, beforeAnchorAt: after.requestedAt, beforeTurnId: after.turnId }) : (bounds.beforeCursor ?? undefined);
   // The first turn read whole, and every later one of the range with it: below turn end + 1, none of the range yet;
   // from the window, the turn after its oldest, which may be partial.
   let wholeFrom = after ? end + 1 : oldest + 1;

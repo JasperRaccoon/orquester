@@ -399,7 +399,9 @@ export interface ThreadHistoryPage {
     /**
      * The id of the row at the page's upper boundary — the first row of the
      * log the page does NOT hold: the window's first row for a page asked
-     * without a cursor, the previous page's first row otherwise (a message's
+     * without a cursor (or a later row: such a page never ends below the cut a
+     * bounded snapshot may have named, and repeats what a window holds above
+     * it), the previous page's first row otherwise (a message's
      * first chunk when the boundary moved back to keep a message whole). The
      * client places every window row written before it in the history section,
      * so the timeline stays in log order when the page shares no row with the
@@ -1181,6 +1183,22 @@ export const AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 /** Query of the §6.3 stream and of `GET …/thread`. */
 export interface AgentChatEventsQuery {
   after?: number;
+}
+
+/**
+ * Which window a §6.3 snapshot carries. `"recent"`: the latest turns whole, and of the settled
+ * turns before them only the rows live state is read from — the rest a history page away, the
+ * snapshot's `history.beforeCursor` naming the first one (the agent host's `wire-window.ts`).
+ * The stream's cold snapshot is always `"recent"`; `GET …/thread` sends the whole retained
+ * window unless asked (`?window=recent`), since the daemon's own readers read that window. A
+ * host that predates the parameter ignores it and sends the whole window, which a client
+ * handles exactly as before.
+ */
+export type ThreadReadWindow = "recent";
+
+/** Query of `GET …/thread`. */
+export interface ThreadReadQuery extends AgentChatEventsQuery {
+  window?: ThreadReadWindow;
 }
 
 // ---------------------------------------------------------------------------

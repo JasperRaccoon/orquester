@@ -463,6 +463,25 @@ describe("commands", () => {
       [{ ignoreWhitespace: 0 }, { ignoreWhitespace: 1 }, { ignoreWhitespace: 0 }]
     );
   });
+
+  it("asks a thread read for the window and cursor it was given, and nothing else", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    for (let at = 0; at < 3; at += 1) {
+      transporter.responses.push({ status: 200, ok: true, data: { kind: "events", seq: 1, events: [] } });
+    }
+    await transport.read("s1");
+    await transport.read("s1", { window: "recent" });
+    await transport.read("s1", { after: 4, window: "recent" });
+    assert.deepEqual(
+      transporter.requests.map((request) => [request.path, request.query]),
+      [
+        ["/api/sessions/s1/thread", undefined],
+        ["/api/sessions/s1/thread", { window: "recent" }],
+        ["/api/sessions/s1/thread", { after: 4, window: "recent" }]
+      ]
+    );
+  });
 });
 
 describe("indexed history and search (design 2026-09-23 §C)", () => {
