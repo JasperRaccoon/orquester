@@ -50,6 +50,13 @@ import type { ComposerDraft } from "./composer.logic";
 /** Where the timeline is scrolled, remembered per thread in a 100-entry LRU. */
 export interface RememberedTimelinePosition {
   rowId: string | null;
+  /**
+   * The turn `rowId` belongs to, when its row says (`rowTurnId`). Restoring a
+   * row the timeline no longer holds — its turn left to "load older" — brings
+   * that turn back in instead (`revealTurn`). Absent from an older bundle's
+   * record and for a row of no turn.
+   */
+  turnId?: string;
   offsetWithinRow: number;
   scrollOffset: number;
   atEnd: boolean;
@@ -202,6 +209,36 @@ export interface AgentChatThreadSlice {
   contextWindow: ThreadTokenUsage | null;
   seq: number;
   connection: AgentChatConnectionState;
+  /**
+   * The thread on screen is this device's saved copy (`persistent-cache.ts`)
+   * that the host has not confirmed yet: true from that paint until the
+   * stream first synchronizes. Its pending requests may have been answered
+   * long since, so none is offered or answerable meanwhile. Absent reads as
+   * false.
+   */
+  fromDeviceCache?: boolean;
+  /**
+   * The agents whose on-demand rows this client does not hold (`agent-rows.ts`
+   * in `@orquester/api`): the last snapshot left them out
+   * (`ThreadSnapshotPayload.omittedAgentIds`), and no `agent-rows` frame has
+   * brought them since. Sorted. A drill-in of one of them is loading until its
+   * frame lands. Absent reads as none — every row is here.
+   */
+  omittedAgentIds?: readonly string[];
+  /**
+   * Of {@link omittedAgentIds}, the agents whose rows this client still shows
+   * from before the last snapshot left them out (a reconnect's): their drill-in
+   * keeps showing those rows — the agent was settled, so they are what the
+   * host holds bar retention — until the frame replaces them, rather than
+   * flipping back to "loading". Absent reads as none.
+   */
+  revalidatingAgentIds?: readonly string[];
+  /**
+   * The agents whose last `agent-rows` frame carried only their newest rows
+   * (`AgentRowsFrame.truncated`): their drill-in says the older ones are not
+   * loaded. Absent reads as none.
+   */
+  truncatedAgentIds?: readonly string[];
   /** Live-follow is a render-visible flag, never a ref (§7.3). */
   follow: boolean;
   scroll: RememberedTimelinePosition | null;
@@ -880,6 +917,15 @@ export interface AgentChatActions {
    * stale nonce clears nothing, so a newer request is never dropped.
    */
   acknowledgeReveal(nonce: number): void;
+  /**
+   * An open drill-in wants this agent's rows (on-demand agent rows,
+   * `agent-rows.ts`): while it is omitted (`slice.omittedAgentIds`) the store
+   * asks the host for them on the live stream — again after a reconnect whose
+   * snapshot left them out again — until they land. Returns the release; the
+   * drill-in calls it when it closes. Optional: a store built without it
+   * holds every row.
+   */
+  wantAgentRows?(agentId: string): () => void;
 }
 
 // ---------------------------------------------------------------------------

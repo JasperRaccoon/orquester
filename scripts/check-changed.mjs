@@ -86,15 +86,27 @@ export function selectTests(files, fs) {
  * The runner of a package's `test` script: the shell words before its first `--test` run's
  * file list (env assignments, `node`, its `--import`s, `--test` and `--test-concurrency=…`),
  * and the same without the `--test` flags for `*.check.*` scripts. Null without a node runner.
+ * Setup steps the script runs first (`node ../../scripts/ensure-node-native.mjs && …`) stay in
+ * front of both, so a focused run gets the same preparation as the package's own.
  */
 export function runnerOf(testScript) {
   if (typeof testScript !== "string") return null;
-  const first = testScript.split("&&")[0];
-  const match = /^\s*((?:\w+=\S+\s+)*node\b(?:\s+--import\s+\S+)*\s+--test\b(?:\s+--test-concurrency=\S+)?)/.exec(first);
-  if (!match) return null;
-  const test = match[1].trim();
-  const check = test.replace(/\s+--test-concurrency=\S+/, "").replace(/\s+--test\b/, "");
-  return { test, check };
+  const segments = testScript.split("&&");
+  const pattern = /^\s*((?:\w+=\S+\s+)*node\b(?:\s+--import\s+\S+)*\s+--test\b(?:\s+--test-concurrency=\S+)?)/;
+  for (let index = 0; index < segments.length; index += 1) {
+    const match = pattern.exec(segments[index]);
+    if (!match) continue;
+    const setup = segments
+      .slice(0, index)
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0)
+      .map((segment) => `${segment} && `)
+      .join("");
+    const run = match[1].trim();
+    const check = run.replace(/\s+--test-concurrency=\S+/, "").replace(/\s+--test\b/, "");
+    return { test: `${setup}${run}`, check: `${setup}${check}` };
+  }
+  return null;
 }
 
 /** A POSIX shell single-quoted word. */

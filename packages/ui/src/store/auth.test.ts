@@ -9,6 +9,13 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { AuthLoginRequest } from "@orquester/api";
 
+import {
+  setThreadCacheBackend,
+  threadCacheIdle,
+  threadCacheKey,
+  threadCacheScopeFor,
+  type ThreadCacheBackend
+} from "../lib/agent-chat/persistent-cache.ts";
 import { ApiError, type ApiClient } from "../lib/api-client.ts";
 import type { UiConnection } from "../types";
 import { useAppStore } from "./app.ts";
@@ -86,6 +93,112 @@ describe("establish", () => {
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
     assert.equal(store().connectionStatus, "error");
     assert.match(store().authError ?? "", /sign in again/i);
+  });
+});
+
+describe("establish on a bad link", () => {
+  it("an auth-info request that got no answer is retried, never taken for 'no sign-in needed'", async () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    const signals: Array<AbortSignal | undefined> = [];
+    const api = {
+      ...fakeApi(TOKEN),
+      authInfo: async (signal?: AbortSignal) => {
+        signals.push(signal);
+        throw new TypeError("Failed to fetch");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api });
+    await assert.rejects(store().establish(api), TypeError, "the caller's backoff loop takes it");
+    assert.deepEqual(infoCalls, [], "no request went out without the stored token");
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN, "the sign-in is kept");
+    assert.ok(signals[0] instanceof AbortSignal, "the request is bounded by a timeout");
+  });
+
+  it("a daemon that answers without auth info (an older build's 404) still needs no sign-in", async () => {
+    const api = {
+      ...fakeApi(),
+      authInfo: async () => {
+        throw new ApiError(404, "GET", "/api/auth/info");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api, authPrompt: null });
+    await store().establish(api);
+    assert.deepEqual(infoCalls, [""], "the pre-check ran, unauthenticated, as before");
+  });
+
+  it("the credential pre-check is bounded by a timeout too", async () => {
+    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
+    let signal: AbortSignal | undefined;
+    const api = {
+      ...fakeApi(TOKEN),
+      info: async (given?: AbortSignal) => {
+        signal = given;
+        throw new TypeError("Failed to fetch");
+      }
+    } as unknown as ApiClient;
+    useAppStore.setState({ api });
+    await assert.rejects(store().establish(api), TypeError);
+    assert.ok(signal instanceof AbortSignal);
+    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
+  });
+});
+
+describe("the chats this device saved", () => {
+  /** Keys alone: what a clear removes is all this asks about. */
+  function keysBackend(keys: string[]): ThreadCacheBackend & { keys: Set<string> } {
+    const held = new Set(keys);
+    return {
+      keys: held,
+      read: async () => ({ meta: undefined, body: undefined }),
+      readMetas: async () => [],
+      readKeys: async () => [...held],
+      write: async (change) => {
+        for (const key of change.remove ?? []) held.delete(key);
+      }
+    };
+  }
+  const ours = threadCacheKey(threadCacheScopeFor(CONNECTION), "s1");
+  const theirs = threadCacheKey(threadCacheScopeFor({ kind: "remote", endpoint: "https://other.example" }), "s1");
+
+  it("go with the credential when the daemon refuses it — that daemon's alone", async () => {
+    const backend = keysBackend([ours, theirs]);
+    setThreadCacheBackend(backend);
+    try {
+      const api = fakeApi(TOKEN);
+      useAppStore.setState({ api });
+      await store().establish(api);
+      await threadCacheIdle();
+      assert.deepEqual([...backend.keys], [theirs]);
+    } finally {
+      setThreadCacheBackend(undefined);
+    }
+  });
+
+  it("go when the remote is removed", async () => {
+    const backend = keysBackend([ours, theirs]);
+    setThreadCacheBackend(backend);
+    try {
+      useAppStore.setState({ activeConnectionId: "local" });
+      await store().removeRemote(CONNECTION.id);
+      await threadCacheIdle();
+      assert.deepEqual([...backend.keys], [theirs]);
+    } finally {
+      setThreadCacheBackend(undefined);
+    }
+  });
+
+  it("go on sign-out", async () => {
+    const backend = keysBackend([ours]);
+    setThreadCacheBackend(backend);
+    try {
+      const api = { ...fakeApi(TOKEN), logout: async () => {} } as unknown as ApiClient;
+      useAppStore.setState({ api });
+      await store().signOut();
+      await threadCacheIdle();
+      assert.equal(backend.keys.size, 0);
+    } finally {
+      setThreadCacheBackend(undefined);
+    }
   });
 });
 

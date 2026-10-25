@@ -809,13 +809,22 @@ export interface ThreadSnapshotPayload {
    */
   answeredApprovals?: Array<[string, string]>;
   answeredQuestions?: Array<[string, string]>;
+  /**
+   * The agents whose on-demand rows this snapshot left out (`agent-rows.ts`),
+   * sorted: only on a read that opted in (`?agentRows=on-demand`) and only
+   * when it left any out. Their drill-ins need `POST …/agent-rows` first;
+   * nothing else the client derives reads those rows. Absent = every row is
+   * here — always, from a host that predates the opt-in.
+   */
+  omittedAgentIds?: string[];
 }
 
 /**
  * The history boundary stamped on a snapshot. `hasOlder` is the only field a
  * client branches on; `beforeCursor` is the opaque cursor of the FIRST older
- * page (the turns just below the retained window), and the ordinals are for
- * copy ("turn 12 of 87"). `indexed: false` means the host has no usable index
+ * page (the turns just below the retained window — or, on a bounded snapshot
+ * (`ThreadReadWindow` `"recent"`), just below the turns it kept whole), and
+ * the ordinals are for copy ("turn 12 of 87"). `indexed: false` means the host has no usable index
  * right now — nothing older can be offered, whatever the log holds.
  */
 export interface ThreadHistoryBounds {
@@ -826,4 +835,14 @@ export interface ThreadHistoryBounds {
   oldestRetainedOrdinal: number | null;
   /** How many started turns the index knows for this thread. */
   totalTurns: number;
+  /**
+   * On a bounded snapshot whose window the host cut above its own boundary
+   * (`ThreadReadWindow` `"recent"`): the cursor of that cut — `beforeCursor`
+   * as the snapshot sent it. A client whose window has evicted rows since asks
+   * its first older page without a cursor; it sends this as `windowCut`
+   * (`ThreadHistoryQuery`) so that page never ends below the cut, and keeps it
+   * with the window it describes (the device cache) after `beforeCursor` is
+   * dropped. Absent from every other snapshot and from an older host.
+   */
+  windowCut?: string;
 }

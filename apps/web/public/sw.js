@@ -2,10 +2,12 @@
  * Copied verbatim into dist/ by Vite. Keep it dependency-free.
  *
  * Cache strategy:
- *   - navigations: network-first, offline fallback to cached /index.html
+ *   - navigations: network-first, falling back to cached /index.html when
+ *     offline or when the network has not answered in 3.5 s (a bad link)
  *   - /assets/* (content-hashed): cache-first, trimmed to ~200 entries, never
  *     evicting the assets the cached shell (/index.html) loads itself
- *   - root static files (icons, manifest): network-first, cache on success
+ *   - root static files (icons, manifest, theme-boot.js): network-first with
+ *     the same timeout, cache on success
  * Never-intercepted surfaces: non-GET requests and paths under /api, /events,
  * /ws, /health, /mcp, /devtools-frontend, /ws-devtools reach the network
  * untouched (auth, NDJSON streams, websockets, tokenized downloads, and the
@@ -139,29 +141,89 @@ function trimCache(cacheName, limit) {
   });
 }
 
-function networkFirstNavigation(event) {
-  return fetch(event.request)
-    .then(function (response) {
-      // Refresh the cached shell on each successful navigation so it stays
-      // current across deploys. Key it under "/index.html" (not the request URL,
-      // which is "/") to match the offline fallback's cache.match lookup.
-      if (response && response.ok) {
-        var copy = response.clone();
-        event.waitUntil(
-          caches.open(SHELL_CACHE).then(function (cache) {
-            return cache.put("/index.html", copy);
-          })
+// How long a navigation (or a root static file) waits on the network before a
+// cached copy answers instead. A good link answers well inside it; a bad
+// mobile one — connected, but losing most packets — can hold a fetch for a
+// minute before it fails, and the app would sit on a white screen all that
+// time. The network keeps going after the timeout and refreshes the cache for
+// the next start. Without a cached copy the network is waited on, as before.
+var NETWORK_FIRST_TIMEOUT_MS = 3500;
+
+// Network-first with a timeout: the network's answer when it comes in time (and
+// cached under `cacheKey` when ok), else the cached copy, else whatever the
+// network eventually answers.
+function networkFirstWithTimeout(event, cacheKey) {
+  var refreshed = null;
+  var network = fetch(event.request).then(function (response) {
+    if (response && response.ok) {
+      var copy = response.clone();
+      refreshed = caches.open(SHELL_CACHE).then(function (cache) {
+        return cache.put(cacheKey, copy);
+      });
+    }
+    return response;
+  });
+  // Keeps the worker alive for a network answer that comes after the timeout,
+  // so its copy still lands in the cache.
+  event.waitUntil(
+    network
+      .then(function () {
+        return refreshed;
+      })
+      .catch(function () {
+        return undefined;
+      })
+  );
+  var cached = function () {
+    return caches.open(SHELL_CACHE).then(function (cache) {
+      return cache.match(cacheKey);
+    });
+  };
+  return new Promise(function (resolve) {
+    var settled = false;
+    var answer = function (response) {
+      if (settled) return;
+      settled = true;
+      resolve(response);
+    };
+    var timer = setTimeout(function () {
+      cached().then(
+        function (copy) {
+          if (copy) answer(copy);
+        },
+        function () {
+          return undefined;
+        }
+      );
+    }, NETWORK_FIRST_TIMEOUT_MS);
+    network.then(
+      function (response) {
+        clearTimeout(timer);
+        answer(response);
+      },
+      function () {
+        clearTimeout(timer);
+        cached().then(
+          function (copy) {
+            // An offline miss must still resolve to a Response: `undefined`
+            // rejects respondWith with "Failed to convert value to 'Response'"
+            // instead of a plain network error.
+            answer(copy || Response.error());
+          },
+          function () {
+            answer(Response.error());
+          }
         );
       }
-      return response;
-    })
-    .catch(function () {
-      return caches.open(SHELL_CACHE).then(function (cache) {
-        return cache.match("/index.html").then(function (cached) {
-          return cached || Response.error();
-        });
-      });
-    });
+    );
+  });
+}
+
+// Navigations refresh the cached shell on each successful load so it stays
+// current across deploys, keyed under "/index.html" (not the request URL, which
+// is "/") to match the fallback's lookup.
+function networkFirstNavigation(event) {
+  return networkFirstWithTimeout(event, "/index.html");
 }
 
 function cacheFirstAsset(event) {
@@ -180,28 +242,7 @@ function cacheFirstAsset(event) {
 }
 
 function networkFirstStatic(event) {
-  return fetch(event.request)
-    .then(function (response) {
-      if (response && response.ok) {
-        var copy = response.clone();
-        event.waitUntil(
-          caches.open(SHELL_CACHE).then(function (cache) {
-            return cache.put(event.request, copy);
-          })
-        );
-      }
-      return response;
-    })
-    .catch(function () {
-      return caches.open(SHELL_CACHE).then(function (cache) {
-        return cache.match(event.request).then(function (cached) {
-          // An offline miss must still resolve to a Response: returning the
-          // `undefined` from cache.match rejects respondWith with "Failed to
-          // convert value to 'Response'" instead of a plain network error.
-          return cached || Response.error();
-        });
-      });
-    });
+  return networkFirstWithTimeout(event, event.request);
 }
 
 self.addEventListener("fetch", function (event) {

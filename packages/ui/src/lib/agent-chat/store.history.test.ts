@@ -626,6 +626,28 @@ describe("revealTurn", () => {
     assert.equal(state().reveal?.rowId, "u1");
   });
 
+  it("pages on past a window that holds a row of the turn but not its prompt — a bounded snapshot's kept row", async () => {
+    const { fake, state } = await open();
+    // The stream's bounded snapshot keeps t1's plan row (the newest of its kind) and leaves the
+    // rest of t1 to "load older": a rewind needs t1's prompt, so the reveal pages until it shows.
+    synchronize(
+      fake,
+      windowSnapshot({
+        items: [
+          activity("turn.plan.updated", { plan: [{ step: "one", status: "completed" }] }, { id: "plan-1", turnId: "t1", createdAt: stamp(12) }),
+          message("user", "third", { id: "u3", createdAt: stamp(30) }),
+          message("assistant", "three", { id: "a3", turnId: "t3", createdAt: stamp(31) })
+        ]
+      })
+    );
+    const revealing = state().actions.revealTurn("t1");
+    await until(() => fake.waiting === 1, "the page request");
+    fake.answer(turnsOneAndTwo());
+    assert.equal(await revealing, true);
+    assert.equal(fake.historyCalls.length, 1);
+    assert.equal(state().reveal?.rowId, "u1");
+  });
+
   it("gives up at once on a turn the thread no longer has", async () => {
     const { fake, state } = await open();
     synchronize(fake);

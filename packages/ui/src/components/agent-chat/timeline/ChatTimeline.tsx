@@ -3,7 +3,7 @@ import { TriangleAlert, X } from "lucide-react";
 
 import { noteRender } from "../../../lib/render-probe";
 import { cn } from "../../../lib/cn";
-import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatActions, AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
@@ -11,7 +11,12 @@ import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
-import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
+import {
+  readPlanWithoutStore,
+  TimelineRosterContext,
+  TimelineRowContext,
+  type TimelineRowContextValue
+} from "./context";
 import { drillInEmptyNotice, timelineChildren, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { QuoteSelectionToolbar } from "./QuoteSelectionToolbar";
@@ -22,7 +27,10 @@ import {
   findFirstVisibleIndex,
   findRowElement,
   offsetWithinRow,
+  promptIdOfTurn,
+  restoreTurnOf,
   scrollRowTo,
+  type RememberedScroll,
   type RowMetric
 } from "./anchor";
 import {
@@ -292,7 +300,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       revertBusy,
       startedTurnCount,
       disclosures,
-      roster: roster ?? [],
       skills: skills ?? [],
       // A tool row and an activity group both live in `expandedGroupIds`: their
       // ids come from disjoint id spaces (an activity item id and a group id),
@@ -347,7 +354,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       patchList,
       projectPath,
       revertBusy,
-      roster,
       sessionId,
       skills,
       startedTurnCount
@@ -447,7 +453,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const anchorAtOffset = React.useCallback(
     (
       scrollOffset: number
-    ): { rowId: string | null; offsetWithinRow: number; signedOffset: number } => {
+    ): { rowId: string | null; turnId?: string; offsetWithinRow: number; signedOffset: number } => {
       const container = contentRef.current;
       if (!container) return { rowId: null, offsetWithinRow: 0, signedOffset: 0 };
       const children = container.children;
@@ -464,8 +470,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         const rowId = element.dataset["timelineRowId"];
         if (rowId !== undefined) {
           const metric = metricAt(index);
+          const turnId = element.dataset["timelineTurnId"];
           return {
             rowId,
+            ...(turnId !== undefined && turnId.length > 0 ? { turnId } : {}),
             offsetWithinRow: offsetWithinRow(metric, scrollOffset),
             signedOffset: scrollOffset - metric.top
           };
@@ -485,6 +493,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       }
       const position: TimelineScrollPosition = {
         rowId: anchor.rowId,
+        ...(anchor.turnId !== undefined ? { turnId: anchor.turnId } : {}),
         offsetWithinRow: anchor.offsetWithinRow,
         scrollOffset,
         atEnd
@@ -590,6 +599,41 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
   /** Whether this list has ever had rows, per identity. */
   const hadRowsRef = React.useRef(rows.length > 0);
+  /**
+   * A remembered reading position the mount could not restore yet: the list
+   * had no rows (a cold open — a fresh stream, a reload, a device copy still
+   * being read). Restored once, when the rows first land.
+   */
+  const pendingRestoreRef = React.useRef<RememberedScroll | null>(null);
+
+  /**
+   * Restore a remembered non-end position: its row, at its offset; else, when
+   * the row's turn is gone from the list — or shows only rows kept out of it,
+   * without its prompt (`restoreTurnOf`) — that turn paged back in and
+   * scrolled to (`revealTurn`); else the pixel offset.
+   */
+  const restoreRemembered = React.useCallback(
+    (node: HTMLDivElement, remembered: RememberedScroll, current: readonly AgentChatTimelineRow[]) => {
+      const target = remembered.rowId === null ? null : findRowElement(node, remembered.rowId);
+      if (target) {
+        // `offsetWithinRow` is how far the edge sat INTO the row, so the row's
+        // top goes that far above the edge (it used to be subtracted, which
+        // restored the position 2 × offset too high).
+        scrollRowTo(node, target, remembered.offsetWithinRow);
+        return;
+      }
+      // A row id that cannot be found (or quoted) falls back to the pixel offset.
+      node.scrollTop = remembered.scrollOffset;
+      const store = peekThreadStore(sessionId);
+      const turnId = restoreTurnOf(remembered, current, agentId, (turn) =>
+        promptIdOfTurn(store?.getState().slice.turns ?? [], turn)
+      );
+      if (turnId !== null) {
+        void store?.getState().actions.revealTurn(turnId).catch(() => false);
+      }
+    },
+    [sessionId, agentId]
+  );
 
   /**
    * **The list mounts at its end.**
@@ -608,18 +652,15 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     const node = scrollerRef.current;
     if (!node) return;
     ignoreScrollUntilRef.current = Date.now() + 80;
+    pendingRestoreRef.current = null;
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
-      // A row id that cannot be found (or quoted) falls back to the pixel offset.
-      const target = findRowElement(node, scroll.rowId);
-      if (target) {
-        // `offsetWithinRow` is how far the edge sat INTO the row, so the row's
-        // top goes that far above the edge (it used to be subtracted, which
-        // restored the position 2 × offset too high).
-        scrollRowTo(node, target, scroll.offsetWithinRow);
+      if (rows.length > 0) {
+        restoreRemembered(node, scroll, rows);
       } else {
         node.scrollTop = scroll.scrollOffset;
+        pendingRestoreRef.current = scroll;
       }
     } else {
       node.scrollTop = scroll.scrollOffset;
@@ -648,10 +689,19 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     if (!hadRowsRef.current && rows.length > 0) {
       hadRowsRef.current = true;
       armSettling(listIdentity);
+      // The remembered position the mount had no rows for, restored once they land.
+      const pending = pendingRestoreRef.current;
+      pendingRestoreRef.current = null;
+      const node = scrollerRef.current;
+      if (pending !== null && node) {
+        ignoreScrollUntilRef.current = Date.now() + 80;
+        restoreRemembered(node, pending, rows);
+        return;
+      }
     }
     if (!follow) return;
     scrollToEnd(animateNow(firstPaintRef.current));
-  }, [rows, follow, scrollToEnd, animateNow, armSettling, listIdentity]);
+  }, [rows, follow, scrollToEnd, animateNow, armSettling, listIdentity, restoreRemembered]);
 
   // Re-pin on row GROWTH and layout: a streamed paragraph grows a row that is
   // already mounted, which no render of ours observes.
@@ -832,48 +882,50 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             already memoised, and a provider per row would be N context nodes
             re-rendering on every change to it. */}
         <TimelineRowContext.Provider value={context}>
-          <div
-            ref={contentRef}
-            // `h-full` (not `min-h-full`) when the panel shows: a min-height
-            // lets the column grow with the list and the whole timeline scrolls
-            // the title away; a fixed height is what makes ONLY the list scroll.
-            className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
-          >
-            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-            {showLoadOlder ? (
-              <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
-            ) : null}
-            {/* ONE keyed list, the empty notice spliced in at its place: a row
-                that crosses it never remounts, and with no notice the rows are
-                mapped directly under the same keys (`timelineChildren`). */}
-            {timelineChildren(
-              rows,
-              notice,
-              (row, key) => (
-                <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
-              ),
-              (shown, key) => (
-                <div
-                  key={key}
-                  className={cn(
-                    "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
-                    shown.at === 0 ? "py-12" : "py-4"
-                  )}
-                >
-                  {shown.text}
-                </div>
-              )
-            )}
-            {showEmptyPanel
-              ? // An empty thread shows the provider's resumable conversations
-                // (`EmptyThreadPanel`, built by the view). The wrapper fits the
-                // visible area so only the panel's own list scrolls.
-                emptyThreadPanel
-              : null}
-            {/* The footer spacer reserves exactly what the composer overlay hides. */}
-            {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
-            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-          </div>
+          <TimelineRosterContext.Provider value={roster ?? NO_ROSTER}>
+            <div
+              ref={contentRef}
+              // `h-full` (not `min-h-full`) when the panel shows: a min-height
+              // lets the column grow with the list and the whole timeline scrolls
+              // the title away; a fixed height is what makes ONLY the list scroll.
+              className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
+            >
+              <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+              {showLoadOlder ? (
+                <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
+              ) : null}
+              {/* ONE keyed list, the empty notice spliced in at its place: a row
+                  that crosses it never remounts, and with no notice the rows are
+                  mapped directly under the same keys (`timelineChildren`). */}
+              {timelineChildren(
+                rows,
+                notice,
+                (row, key) => (
+                  <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
+                ),
+                (shown, key) => (
+                  <div
+                    key={key}
+                    className={cn(
+                      "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
+                      shown.at === 0 ? "py-12" : "py-4"
+                    )}
+                  >
+                    {shown.text}
+                  </div>
+                )
+              )}
+              {showEmptyPanel
+                ? // An empty thread shows the provider's resumable conversations
+                  // (`EmptyThreadPanel`, built by the view). The wrapper fits the
+                  // visible area so only the panel's own list scrolls.
+                  emptyThreadPanel
+                : null}
+              {/* The footer spacer reserves exactly what the composer overlay hides. */}
+              {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
+              <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+            </div>
+          </TimelineRosterContext.Provider>
         </TimelineRowContext.Provider>
       </div>
 
@@ -893,6 +945,8 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 /** A read-only surface's rewind: the drill-in dispatches no commands (§7.6). */
 const NOOP_REVERT = (_input: { messageId: string; targetTurnCount: number }): void => {};
 const NOOP_STRING = (): void => {};
+/** No roster: one shared value, so a timeline given none never re-renders its spawn rows for it. */
+const NO_ROSTER: NonNullable<ChatTimelineProps["roster"]> = [];
 
 /**
  * The row context's plan reader for one thread: the store's

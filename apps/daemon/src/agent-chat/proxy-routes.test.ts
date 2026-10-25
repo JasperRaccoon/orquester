@@ -1,9 +1,10 @@
 import { strict as assert } from "node:assert";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createGunzip, gunzipSync } from "node:zlib";
 import { test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { SessionSummary } from "@orquester/api";
@@ -376,6 +377,21 @@ test("a thread read records the sequence it served (§5.2 lastSeq)", async () =>
   await h.close();
 });
 
+test("a thread read passes the window it asks for on to the host", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ kind: "snapshot", thread: { seq: 17 } }));
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?window=recent` });
+  await h.app.inject({ method: "GET", url: agentChatRoutes.thread("t1") });
+  assert.deepEqual(
+    h.host.requests.map((request) => request.url),
+    ["/threads/t1/thread?window=recent", "/threads/t1/thread"]
+  );
+  await h.close();
+});
+
 test("an events-shaped read records its sequence too", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   h.host.handler = (_req, res) =>
@@ -472,7 +488,7 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
   const port = (h.app.server.address() as AddressInfo).port;
   const controller = new AbortController();
   const response = await fetch(
-    `http://127.0.0.1:${port}${agentChatRoutes.events("t1")}?after=4`,
+    `http://127.0.0.1:${port}${agentChatRoutes.events("t1")}?after=4&window=recent`,
     { signal: controller.signal }
   );
   assert.equal(response.status, 200);
@@ -483,11 +499,95 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
   const first = await reader.read();
   const line = Buffer.from(first.value!).toString("utf8").trim();
   assert.deepEqual(JSON.parse(line), { kind: "synchronized", hostInstanceId: "host-1" });
-  assert.equal(h.host.requests[0].url, "/threads/t1/events?after=4");
+  assert.equal(h.host.requests[0].url, "/threads/t1/events?after=4&window=recent", "the window it asks for crosses too");
 
   // A client that goes away must not leave the host holding a subscription.
   controller.abort();
   await h.host.streamClosed;
+  await h.close();
+});
+
+/** A raw GET on the daemon, so the test decides what `Accept-Encoding` says (fetch always asks gzip). */
+function rawGet(port: number, path: string, headers: Record<string, string>): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET", headers }, resolve);
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("a client that accepts gzip gets the stream gzipped, each line flushed as it is written", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  // Big and repetitive, like a snapshot: crosses many socket chunks and compresses well.
+  const snapshot = JSON.stringify({ kind: "snapshot", thread: { seq: 3, items: Array.from({ length: 4000 }, (_, i) => ({ id: `item-${i}`, text: "hello" })) } });
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    res.write(`${snapshot}\n`);
+    res.write(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+    // Still open: the client must decode both lines before the stream ends.
+    void released.then(() => res.end());
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), { "accept-encoding": "gzip, deflate, br" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-encoding"], "gzip");
+  assert.equal(response.headers["content-type"], "application/x-ndjson; charset=utf-8");
+  let wire = 0;
+  response.on("data", (chunk: Buffer) => (wire += chunk.length));
+  const decoded = response.pipe(createGunzip());
+  let text = "";
+  for await (const chunk of decoded) {
+    text += (chunk as Buffer).toString("utf8");
+    if (text.includes('"synchronized"')) break;
+  }
+  const lines = text.split("\n").filter((line) => line.length > 0 && !line.startsWith(":"));
+  assert.equal(lines[0], snapshot);
+  assert.deepEqual(JSON.parse(lines[1]!), { kind: "synchronized", hostInstanceId: "host-1" });
+  assert.ok(wire * 4 < snapshot.length, `gzip shrinks the snapshot (wire ${wire} B for ${snapshot.length} B)`);
+  release();
+  response.destroy();
+  await h.host.streamClosed;
+  await h.close();
+});
+
+test("a client that does not ask for gzip gets plain NDJSON, every byte through the host's end", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const snapshot = JSON.stringify({ kind: "snapshot", thread: { seq: 3, items: Array.from({ length: 4000 }, (_, i) => ({ id: `item-${i}` })) } });
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    res.write(`${snapshot}\n`);
+    res.end(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), {});
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-encoding"], undefined);
+  let text = "";
+  for await (const chunk of response) text += (chunk as Buffer).toString("utf8");
+  assert.equal(text, `${snapshot}\n${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
+  await h.close();
+});
+
+test("a gzipped stream the host ends is ended with its trailer, nothing lost", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const lines = Array.from({ length: 50 }, (_, i) => JSON.stringify({ kind: "event", seq: i + 1, event: { type: "x", seq: i + 1, pad: "y".repeat(5000) } }));
+  h.host.handler = (_req, res) => {
+    res.writeHead(200, { "content-type": "application/x-ndjson" });
+    for (const line of lines) res.write(`${line}\n`);
+    res.end();
+  };
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.app.server.address() as AddressInfo).port;
+  const response = await rawGet(port, agentChatRoutes.events("t1"), { "accept-encoding": "gzip" });
+  assert.equal(response.headers["content-encoding"], "gzip");
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) chunks.push(chunk as Buffer);
+  // A whole gzip member: `gunzipSync` throws on a missing trailer.
+  assert.equal(gunzipSync(Buffer.concat(chunks)).toString("utf8"), lines.map((line) => `${line}\n`).join(""));
   await h.close();
 });
 
@@ -553,7 +653,8 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     INDEX_UNAVAILABLE: 503,
     ITEM_NOT_FOUND: 404,
     PROMPT_NOT_FOUND: 404,
-    TURN_NOT_IDLE: 409
+    TURN_NOT_IDLE: 409,
+    STREAM_NOT_FOUND: 404
   };
   for (const code of Object.keys(expected) as AgentChatErrorCode[]) {
     const response = await h.app.inject({
@@ -632,13 +733,13 @@ test("a history read forwards before/turns verbatim and passes the page through"
   // Clamping is the host's, in one place: an out-of-range count crosses unchanged.
   const response = await h.app.inject({
     method: "GET",
-    url: `${agentChatRoutes.history("t1")}?before=eyJ0IjoidDEifQ&turns=500`
+    url: `${agentChatRoutes.history("t1")}?before=eyJ0IjoidDEifQ&turns=500&windowCut=eyJ0IjoidDIifQ`
   });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), historyPage);
   assert.equal(h.host.requests.length, 1);
   assert.equal(h.host.requests[0].method, "GET");
-  assert.equal(h.host.requests[0].url, "/threads/t1/history?before=eyJ0IjoidDEifQ&turns=500");
+  assert.equal(h.host.requests[0].url, "/threads/t1/history?before=eyJ0IjoidDEifQ&turns=500&windowCut=eyJ0IjoidDIifQ");
   assert.equal(h.host.requests[0].auth, "Bearer tok");
   // The page names the thread's CURRENT seq but delivers only old turns:
   // noting it would move the tab's §6.3 reconnect cursor past live events the
@@ -1234,5 +1335,72 @@ test("a profile chat with no profile catalog to offer — or one that fails — 
   const failed = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
   assert.equal(failed.statusCode, 200);
   assert.deepEqual(failed.json(), empty);
+  await h.close();
+});
+
+// --- on-demand agent rows ------------------------------------------------------
+
+test("the on-demand opt-in passes through on both reads, and only its one value", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (req, res) => {
+    if ((req.url ?? "").includes("/events")) {
+      res.writeHead(200, { "content-type": "application/x-ndjson" });
+      res.end(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1", streamId: "s-1" })}\n`);
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ kind: "snapshot", thread: { seq: 2 } }));
+  };
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?after=3&agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.thread("t1")}?agentRows=everything` });
+  const stream = await h.app.inject({ method: "GET", url: `${agentChatRoutes.events("t1")}?after=4&agentRows=on-demand` });
+  await h.app.inject({ method: "GET", url: agentChatRoutes.events("t1") });
+  assert.deepEqual(
+    h.host.requests.map((request) => request.url),
+    [
+      "/threads/t1/thread?agentRows=on-demand",
+      "/threads/t1/thread?after=3&agentRows=on-demand",
+      "/threads/t1/thread",
+      "/threads/t1/events?after=4&agentRows=on-demand",
+      "/threads/t1/events"
+    ]
+  );
+  assert.equal(JSON.parse(stream.body.trim()).streamId, "s-1", "the stream's id reaches the client");
+  await h.close();
+});
+
+test("POST agent-rows is forwarded to the host as it is, and its answers come back verbatim", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res, body) => {
+    const parsed = JSON.parse(body) as { streamId: string };
+    if (parsed.streamId === "gone") {
+      res
+        .writeHead(404, { "content-type": "application/json" })
+        .end(JSON.stringify({ error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open." } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+  };
+  const ok = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.agentRows("t1"),
+    payload: { streamId: "s-1", agentIds: ["a", "b"] }
+  });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.json(), { ok: true });
+  assert.equal(h.host.requests[0]!.method, "POST");
+  assert.equal(h.host.requests[0]!.url, "/threads/t1/agent-rows");
+  assert.deepEqual(JSON.parse(h.host.requests[0]!.body), { streamId: "s-1", agentIds: ["a", "b"] });
+  assert.equal(h.host.requests[0]!.auth, "Bearer tok", "the daemon's own credential, never the client's");
+  const gone = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t1"), payload: { streamId: "gone", agentIds: ["a"] } });
+  assert.equal(gone.statusCode, 404);
+  assert.equal(gone.json().error.code, "STREAM_NOT_FOUND");
+  // No tab: never reaches the host. A host that is down: 503.
+  const none = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t9"), payload: { streamId: "s-1", agentIds: ["a"] } });
+  assert.equal(none.statusCode, 404);
+  h.healthy = false;
+  const down = await h.app.inject({ method: "POST", url: agentChatRoutes.agentRows("t1"), payload: { streamId: "s-1", agentIds: ["a"] } });
+  assert.equal(down.statusCode, 503);
+  assert.equal(h.host.requests.length, 2);
   await h.close();
 });

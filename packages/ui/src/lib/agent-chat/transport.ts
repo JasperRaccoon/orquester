@@ -17,9 +17,11 @@ import {
   isThreadGoneStreamError,
   agentChatCommandPath,
   agentChatRoutes,
+  AGENT_ROWS_QUERY_PARAM,
   isThreadItemOutputWindow,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  THREAD_READ_WINDOW_RECENT,
   type AccountCommandBody,
   type ProfileCommandBody,
   type AgentChatCommandBodies,
@@ -27,6 +29,9 @@ import {
   type AgentChatErrorCode,
   type AgentChatStreamFrame,
   type AgentProvidersResponse,
+  type AgentRowsMode,
+  type AgentRowsRequest,
+  type AgentRowsResponse,
   type AttachmentRef,
   type CommandReceiptResponse,
   type RefreshProviderResponse,
@@ -36,6 +41,7 @@ import {
   type ThreadItemOutputWindowResponse,
   type ThreadItemResponse,
   type ThreadReadResponse,
+  type ThreadReadWindow,
   type ThreadSearchQuery,
   type ThreadSearchResponse,
   type TurnDiffResponse
@@ -43,14 +49,17 @@ import {
 import type { SessionUploadResponse } from "@orquester/api";
 
 import type { BinaryBody, StreamHandle, Transporter } from "../transporter";
-import { scheduleRetry, type PendingRetry } from "../connection/backoff";
+import { onWake, scheduleRetry, type PendingRetry } from "../connection/backoff";
 import {
+  isFastHeartbeatGap,
   NdjsonLineBuffer,
   parseStreamLine,
   RECONNECT_MAX_MS,
   reconnectDelayMs,
   resumeCursorFor,
-  STREAM_STALL_TIMEOUT_MS
+  stallTimeoutFor,
+  wakeStaleAfterMs,
+  type StreamLiveness
 } from "./stream.logic";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +98,14 @@ export interface AgentChatStreamOptions {
    * with a different one, the client re-reads instead of resuming (§6.3, §8).
    */
   hostInstanceId?: string | null;
+  /**
+   * `?agentRows=on-demand` on every connection: a snapshot then leaves out the
+   * settled agents' on-demand rows (`ThreadSnapshotPayload.omittedAgentIds`),
+   * and the `synchronized` frame names the connection (`streamId`) for
+   * {@link AgentChatTransport.requestAgentRows}. A host that predates it
+   * ignores it.
+   */
+  agentRows?: AgentRowsMode;
 }
 
 /** A stream that reconnects itself; `close()` retires it for good. */
@@ -155,8 +172,19 @@ export interface AgentChatTransport {
   ): Promise<CommandReceiptResponse>;
   read(
     sessionId: string,
-    options?: { after?: number; signal?: AbortSignal }
+    options?: { after?: number; window?: ThreadReadWindow; agentRows?: AgentRowsMode; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
+  /**
+   * `POST …/agent-rows`: have the host write the agents' on-demand rows into
+   * the stream `body.streamId` names, as one `agent-rows` frame in order with
+   * its events. Answers only that it did; rejects with the §6.2 error — 404
+   * `STREAM_NOT_FOUND` for a stream that is gone (ask on the next one), the
+   * generic 404 `THREAD_NOT_FOUND` route miss of a host that predates it.
+   *
+   * Optional: a transport a runtime supplies itself (`Transporter.agentChat()`)
+   * may predate it, and the store then never asks for on-demand rows.
+   */
+  requestAgentRows?(sessionId: string, body: AgentRowsRequest, signal?: AbortSignal): Promise<AgentRowsResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
   /**
    * `GET …/items/:itemId/output`, whole — the streamed output of the tool
@@ -349,9 +377,21 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
     },
 
     read(sessionId, options) {
+      const query = definedQuery({
+        after: options?.after,
+        window: options?.window,
+        [AGENT_ROWS_QUERY_PARAM]: options?.agentRows
+      });
       return send<ThreadReadResponse>("GET", agentChatRoutes.thread(sessionId), {
-        query: options?.after === undefined ? undefined : { after: options.after },
+        query: Object.keys(query).length === 0 ? undefined : query,
         ...(options?.signal === undefined ? {} : { signal: options.signal })
+      });
+    },
+
+    requestAgentRows(sessionId, body, signal) {
+      return send<AgentRowsResponse>("POST", agentChatRoutes.agentRows(sessionId), {
+        body,
+        ...(signal === undefined ? {} : { signal })
       });
     },
 
@@ -402,7 +442,7 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     readHistory(sessionId, query, signal) {
       return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
-        query: definedQuery({ before: query.before, turns: query.turns }),
+        query: definedQuery({ before: query.before, turns: query.turns, windowCut: query.windowCut }),
         ...(signal === undefined ? {} : { signal })
       });
     },
@@ -620,6 +660,10 @@ function openAgentChatStream(
   let retryTimer: PendingRetry | null = null;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   const lines = new NdjsonLineBuffer();
+  /** What the current connection has shown about itself; reset on every connect. */
+  let liveness: StreamLiveness = { fastHeartbeat: false, synchronized: false };
+  let lastHeartbeatAt: number | null = null;
+  let lastByteAt = Date.now();
 
   const clearStall = (): void => {
     if (stallTimer !== null) {
@@ -636,8 +680,24 @@ function openAgentChatStream(
       inner?.close();
       inner = null;
       scheduleReconnect("stalled");
-    }, STREAM_STALL_TIMEOUT_MS);
+    }, stallTimeoutFor(liveness));
   };
+
+  // A page coming back (visible, online) checks the connection at once: the
+  // stall timer of a frozen tab fires late, and a mobile OS drops a background
+  // socket without a word. A connection still delivering is left alone.
+  const offWake = onWake(() => {
+    if (closed || gone || unauthorized || retryTimer !== null || inner === null) {
+      return;
+    }
+    if (Date.now() - lastByteAt <= wakeStaleAfterMs(liveness)) {
+      return;
+    }
+    inner.close();
+    inner = null;
+    attempt = 0;
+    scheduleReconnect("stalled");
+  });
 
   const scheduleReconnect = (reason: string): void => {
     if (closed || gone || unauthorized || retryTimer !== null) {
@@ -667,8 +727,18 @@ function openAgentChatStream(
       observedHostInstanceId: hostInstanceId
     });
     knownHostInstanceId = hostInstanceId;
-    const query = after === undefined ? "" : `?after=${after}`;
+    // This client handles a bounded snapshot (`ThreadReadWindow`): its history bounds name the
+    // turns it leaves out, which "load older" pages back in. And, when the caller asks, on-demand
+    // agent rows beside it.
+    const params = new URLSearchParams();
+    if (after !== undefined) params.set("after", String(after));
+    params.set("window", THREAD_READ_WINDOW_RECENT);
+    if (options.agentRows !== undefined) params.set(AGENT_ROWS_QUERY_PARAM, options.agentRows);
+    const query = `?${params.toString()}`;
     let opened = false;
+    liveness = { fastHeartbeat: false, synchronized: false };
+    lastHeartbeatAt = null;
+    lastByteAt = Date.now();
 
     inner = transporter.openStream(`${agentChatRoutes.events(sessionId)}${query}`, {
       onData: (chunk) => {
@@ -679,10 +749,18 @@ function openAgentChatStream(
           opened = true;
           handlers.onOpen?.();
         }
-        armStall();
+        const now = Date.now();
+        lastByteAt = now;
         const frames: AgentChatStreamFrame[] = [];
         for (const line of lines.push(chunk)) {
           const parsed = parseStreamLine(line);
+          if (parsed.kind === "heartbeat") {
+            if (lastHeartbeatAt !== null && isFastHeartbeatGap(now - lastHeartbeatAt)) {
+              liveness.fastHeartbeat = true;
+            }
+            lastHeartbeatAt = now;
+            continue;
+          }
           if (parsed.kind === "error" && isThreadGoneStreamError(parsed.error)) {
             // The host holds no such thread — a fork whose create never landed, a thread
             // deleted there. Reconnecting would read the same miss forever: stop, and say so.
@@ -717,9 +795,13 @@ function openAgentChatStream(
             // A live stream is proof of health: reset the backoff only here,
             // so a host that accepts and immediately drops us still backs off.
             attempt = 0;
+            liveness.synchronized = true;
           }
           frames.push(frame);
         }
+        // Re-armed for what this chunk showed: a stream that just went live
+        // on a fast heartbeat gets the short window from here on.
+        armStall();
         if (frames.length === 0) {
           return;
         }
@@ -777,6 +859,7 @@ function openAgentChatStream(
       }
       closed = true;
       clearStall();
+      offWake();
       if (retryTimer !== null) {
         retryTimer.cancel();
         retryTimer = null;

@@ -66,6 +66,17 @@ describe("the LRU", () => {
     assert.deepEqual([...restored.keys()], ["a", "b"]);
   });
 
+  it("keeps the remembered row's turn, and reads a record without one as before", () => {
+    const store = new TimelinePositionStore();
+    store.remember("a", { ...position(), turnId: "t-4" });
+    store.remember("b", position());
+    const restored = parseTimelinePositions(saved.get(storageKey) ?? null);
+    assert.equal(restored.get("a")?.turnId, "t-4");
+    assert.equal("turnId" in restored.get("b")!, false);
+    const odd = parseTimelinePositions(JSON.stringify([["c", { ...position(), turnId: 7 }]]));
+    assert.equal("turnId" in odd.get("c")!, false, "a turn id that is not one is none");
+  });
+
   it("forgets a thread", () => {
     const store = new TimelinePositionStore();
     store.remember("a", position());

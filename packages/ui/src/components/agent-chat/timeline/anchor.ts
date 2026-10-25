@@ -15,6 +15,11 @@
  * testable without a DOM.
  */
 
+import type { Turn } from "@orquester/api/agent-chat";
+
+import type { AgentChatTimelineRow, RememberedTimelinePosition } from "../../../lib/agent-chat/contracts";
+import { rowTurnId } from "../../../lib/agent-chat/history.logic";
+
 /** What the search needs to know about one child of the rows container. */
 export interface RowMetric {
   /** Offset of the row's top edge from the top of the scrollable content. */
@@ -94,4 +99,37 @@ export function findRowElement(scroller: ParentNode, rowId: string): HTMLElement
     return null;
   }
   return scroller.querySelector<HTMLElement>(`[data-timeline-row-id="${CSS.escape(rowId)}"]`);
+}
+
+/** What a restore reads off the remembered reading position. */
+export type RememberedScroll = Pick<
+  RememberedTimelinePosition,
+  "rowId" | "turnId" | "offsetWithinRow" | "scrollOffset"
+>;
+
+/** The prompt that opened `turnId`, as the fold names it; null for none. */
+export function promptIdOfTurn(turns: readonly Turn[], turnId: string): string | null {
+  return turns.find((turn) => turn.turnId === turnId)?.userMessageId ?? null;
+}
+
+/**
+ * The turn a restore whose row is gone should page back in: the remembered
+ * row's turn, when the list holds rows but not that turn — none of it, or
+ * only rows kept out of it without its prompt (the stream's bounded snapshot
+ * keeps a few; retention too) — so the pixel offset would land in some other
+ * turn. `null` otherwise: a drill-in (it has no history), a list not painted
+ * yet, a row of no remembered turn, or a turn the list shows with its prompt,
+ * where the offset is the better guess.
+ */
+export function restoreTurnOf(
+  scroll: { readonly turnId?: string | undefined },
+  rows: readonly AgentChatTimelineRow[],
+  agentId: string | undefined,
+  promptOf: (turnId: string) => string | null = () => null
+): string | null {
+  const turnId = scroll.turnId;
+  if (agentId !== undefined || turnId === undefined || rows.length === 0) return null;
+  if (!rows.some((row) => rowTurnId(row) === turnId)) return turnId;
+  const promptId = promptOf(turnId);
+  return promptId === null || rows.some((row) => row.kind === "message" && row.id === promptId) ? null : turnId;
 }

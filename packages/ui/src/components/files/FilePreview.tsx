@@ -8,7 +8,6 @@ import { BinaryCard } from "./viewers/BinaryCard";
 import { MediaViewer } from "./viewers/MediaViewer";
 import { ArchiveViewer } from "./viewers/ArchiveViewer";
 import { ParquetViewer } from "./viewers/ParquetViewer";
-import { PdfViewer } from "./viewers/PdfViewer";
 import { HtmlViewer } from "./viewers/HtmlViewer";
 import { MarkdownViewer } from "./viewers/MarkdownViewer";
 import { useApi } from "../../context/orquester-context";
@@ -18,6 +17,10 @@ import { downloadPath } from "../../lib/download";
 import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { isWhiteboardFile } from "../../lib/whiteboard";
 import { useAppStore } from "../../store/app";
+import { LazyBoundary, lazyNamed } from "../ui/lazy";
+
+// pdf.js loads with the first PDF opened.
+const PdfViewer = lazyNamed(() => import("./viewers/PdfViewer"), "PdfViewer");
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -118,7 +121,11 @@ export const FilePreview: React.FC<{
       <ArchiveViewer path={path} name={name} size={size} mime={mime} fetchBytes={fetchBytes} previewable={archivePreview} />
     );
   } else if (kind === "pdf") {
-    body = <PdfViewer path={path} fetchBytes={fetchBytes} />;
+    body = (
+      <LazyBoundary>
+        <PdfViewer path={path} fetchBytes={fetchBytes} />
+      </LazyBoundary>
+    );
   } else {
     body = (
       <BinaryCard path={path} name={name} size={size} mime={mime} downloadable title="Preview" fetchBytes={fetchBytes} />

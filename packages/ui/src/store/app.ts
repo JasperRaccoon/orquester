@@ -20,6 +20,7 @@ import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/s
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
 import { applySecretFilesEvent, loadSecretVaults, resetSecretFiles } from "../lib/secret-files/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
+import { clearThreadCache, threadCacheScopeFor } from "../lib/agent-chat/persistent-cache";
 import {
   applyAgentToolsEvent,
   applyToolApprovalEvent,
@@ -212,6 +213,22 @@ const wakeableDelay = (ms: number) => new Promise<boolean>((resolve) => schedule
 let lastEventAt = 0;
 /** /events heartbeats every 15s; three misses ⇒ the stream is dead. */
 const EVENTS_STALE_MS = 45_000;
+
+/**
+ * How long a request of the connect flow (/health, the auth info, the
+ * credential pre-check) may take before it counts as failed. Without it a
+ * request lost on a bad mobile link — the connection wedged, no error ever
+ * delivered — held the app on "Connecting…" for good; failed, it goes to the
+ * backoff loop and is asked again.
+ */
+const CONNECT_REQUEST_TIMEOUT_MS = 15_000;
+
+/** An abort signal for one connect-flow request ({@link CONNECT_REQUEST_TIMEOUT_MS}). */
+function connectTimeout(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(CONNECT_REQUEST_TIMEOUT_MS)
+    : undefined;
+}
 
 /** Last wakeConnections run — visibilitychange/pageshow/focus/online fire together. */
 let lastWakeAt = 0;
@@ -581,6 +598,8 @@ function dropCredential(
 ): void {
   stopReconnect();
   clearStoredToken(api.connection.endpoint);
+  // The chats this device saved from that daemon go with the credential they were read under.
+  void clearThreadCache(threadCacheScopeFor(api.connection));
   set({
     api: get().api === api ? apiWithCredential(api, "") : get().api,
     connectionStatus: "error",
@@ -1492,7 +1511,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       try {
-        noteServerHealth(checkHealth(await initial.health()));
+        noteServerHealth(checkHealth(await initial.health(connectTimeout())));
         break;
       } catch (error) {
         recordFailure(error);
@@ -1526,7 +1545,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const reconnectGenAtStart = reconnectGen;
     // Auth gate: restore the session token (web) or prompt.
     let active = api;
-    const info = await active.authInfo().catch(() => null);
+    // A daemon that answered without auth info (an older build's 404) needs no
+    // sign-in. A request that never got an answer is not that: proceeding
+    // without the stored token would make the pre-check below 401 and drop the
+    // user's sign-in over a bad link — it goes to the backoff loop instead.
+    const info = await active.authInfo(connectTimeout()).catch((error: unknown) => {
+      if (error instanceof ApiError) return null;
+      throw error;
+    });
     if (reconnectGenAtStart !== reconnectGen) {
       return;
     }
@@ -1562,7 +1588,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 401 (not five), and a locked-out client a single 429 — and we never enter
     // the reconnect loop on either. Only network errors fall through to retry.
     try {
-      noteServerInfo(await active.info());
+      noteServerInfo(await active.info(connectTimeout()));
     } catch (error) {
       // A newer flow preempted us while the pre-check was in flight: don't act on
       // this stale response (no creds-clear, no reschedule, no rethrow-to-retry).
@@ -1635,6 +1661,32 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
     );
+
+    // Health probe: detect a dropped/restarted transport and auto-reconnect.
+    // A silently stalled /events stream (killed while the tab was frozen, no
+    // error ever delivered) counts as dropped too: /health can succeed while
+    // the stream is dead, so heartbeat staleness is checked first. Started
+    // BEFORE the fan-out below: a link that dies while one of its requests is
+    // in flight leaves that request hanging with no error, and the fan-out —
+    // and this connect — would wait on it for good with nothing watching. A
+    // disconnect it detects preempts the fan-out (`reconnectGen`), which then
+    // drops its buffer and bails.
+    stopHealthProbe();
+    healthTimer = setInterval(() => {
+      const current = get().api;
+      if (!current) {
+        return;
+      }
+      if (Date.now() - lastEventAt > EVENTS_STALE_MS) {
+        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: Date.now() });
+        get().handleDisconnect();
+        return;
+      }
+      void current.health(connectTimeout()).catch((error: unknown) => {
+        recordFailure(error);
+        get().handleDisconnect();
+      });
+    }, 4000);
 
     const secretFilesWasOn = secretFilesOn(get().plugins);
     // boxes: same rule as the secret files — a reconnect with the plugin on reloads.
@@ -1724,26 +1776,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().applyEvent(event);
     }
 
-    // Health probe: detect a dropped/restarted transport and auto-reconnect.
-    // A silently stalled /events stream (killed while the tab was frozen, no
-    // error ever delivered) counts as dropped too: /health can succeed while
-    // the stream is dead, so heartbeat staleness is checked first.
-    stopHealthProbe();
-    healthTimer = setInterval(() => {
-      const current = get().api;
-      if (!current) {
-        return;
-      }
-      if (Date.now() - lastEventAt > EVENTS_STALE_MS) {
-        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: Date.now() });
-        get().handleDisconnect();
-        return;
-      }
-      void current.health().catch((error: unknown) => {
-        recordFailure(error);
-        get().handleDisconnect();
-      });
-    }, 4000);
   },
 
   handleDisconnect: () => {
@@ -1784,7 +1816,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
-          noteServerHealth(checkHealth(await current.health()));
+          noteServerHealth(checkHealth(await current.health(connectTimeout())));
           if (gen !== reconnectGen) {
             return;
           }
@@ -1857,7 +1889,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: now });
         get().handleDisconnect();
       } else {
-        void api.health().catch((error: unknown) => {
+        void api.health(connectTimeout()).catch((error: unknown) => {
           recordFailure(error);
           get().handleDisconnect();
         });
@@ -2137,6 +2169,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removeRemote: async (id) => {
+    // The chats this device saved from that daemon go with it.
+    const removed = get().connections.find((c) => c.id === id);
+    if (removed) void clearThreadCache(threadCacheScopeFor(removed));
     const connections = get().connections.filter((c) => c.id !== id);
     set({ connections });
     await persistRemotes(connections);

@@ -31,7 +31,7 @@ import { createIngestion } from "../ingestion/index.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import { applyEventsChunked } from "./fold-ops.ts";
-import { createThreadIndex, createUnavailableThreadIndex } from "../index/index.ts";
+import { createThreadIndex, createUnavailableThreadIndex, type ThreadIndex } from "../index/index.ts";
 import { createTestHost, createScriptedAdapter, createRecordingLogger, type TestHost } from "./testing/index.ts";
 
 let commandSeq = 0;
@@ -3050,6 +3050,200 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     await host.stop();
   });
 
+  /** Fifteen settled turns, each its prompt and three rows; the index caught up. */
+  async function fifteenTurns(host: TestHost, index: ThreadIndex | null): Promise<string> {
+    const threadId = await host.createThread();
+    for (let n = 1; n <= 15; n += 1) {
+      host.clock.advance(1_000);
+      await seedTurn(host, `w-${n}`, { threadId });
+      await bulkActivities(host, `w-${n}`, 3, threadId);
+    }
+    await host.settle();
+    await index?.drain();
+    return threadId;
+  }
+
+  async function recentRead(host: TestHost, threadId: string) {
+    const read = await host.orchestrator.readThread(threadId, undefined, { window: "recent" });
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") throw new Error("unreachable");
+    return read.thread;
+  }
+
+  const rowKey = (item: ThreadItem) => `${item.kind}:${item.id}`;
+
+  it("a bounded snapshot leaves the settled turns before its latest to load older, and its cursor pages back exactly those rows", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, index);
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+
+    // The newest ten turns whole; everything but the window's rows is the snapshot's own.
+    const { items: _fullItems, history: _fullHistory, ...fullRest } = full;
+    const { items: _recentItems, history: _recentHistory, ...recentRest } = recent;
+    assert.deepEqual(recentRest, fullRest, "turns, checkpoints, pending, roster, head and seq are untouched");
+    const kept = new Set(recent.items.map(rowKey));
+    const dropped = full.items.filter((item) => !kept.has(rowKey(item)));
+    const keptTurns = Array.from({ length: 10 }, (_unused, at) => `w-${at + 6}`);
+    assert.deepEqual(
+      recent.items.map(rowKey),
+      full.items.filter((item) => keptTurns.some((turnId) => item.id.startsWith(`${turnId}-`) || item.id === `user:${turnId}`)).map(rowKey)
+    );
+    assert.deepEqual(
+      dropped.map(rowKey),
+      [1, 2, 3, 4, 5].flatMap((n) => [`message:user:w-${n}`, ...[0, 1, 2].map((row) => `activity:w-${n}-bulk-${row}`)])
+    );
+
+    // The cursor names the line the kept window begins at: w-6's prompt.
+    const w6 = index.turnById(threadId, "w-6");
+    assert.ok(w6);
+    const cut = encodeHistoryCursor({ threadId, beforeAnchorAt: w6.requestedAt, beforeTurnId: "w-6", beforeSeq: w6.firstSeq });
+    assert.deepEqual(recent.history, {
+      indexed: true,
+      hasOlder: true,
+      beforeCursor: cut,
+      oldestRetainedOrdinal: 6,
+      totalTurns: 15,
+      windowCut: cut
+    });
+
+    // Load older: exactly the dropped rows, as the full snapshot held them, each once, in order.
+    const pages = await walkHistory(host, threadId, recent.history?.beforeCursor ?? null);
+    assert.equal(pages[0]?.page.endItemId, "user:w-6", "the first page ends where the window begins");
+    const paged = [...pages].reverse().flatMap((page) => page.items);
+    assert.deepEqual(paged, dropped, "no gap, no duplicate, the same content");
+    assert.equal(pages.at(-1)!.page.beforeCursor, null);
+
+    // The persisted fold is untouched: the next whole read is the same window.
+    assert.deepEqual(await snapshotRead(host, threadId), full);
+    await host.stop();
+  });
+
+  it("where the window's own boundary lies above the cut, its cursor stands, and its pages hold what the frame left out", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, null);
+    // The latest turn outgrows the parent window: the fold evicts every older turn's rows but
+    // their prompts, so history begins inside w-15.
+    await bulkActivities(host, "w-15", ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK, threadId, 3);
+    await index.drain();
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+    assert.equal(full.history?.oldestRetainedOrdinal, 15);
+    assert.deepEqual(recent.history, full.history, "the window's own bounds");
+    const kept = new Set(recent.items.map(rowKey));
+    const dropped = full.items.filter((item) => !kept.has(rowKey(item)));
+    assert.deepEqual(dropped.map(rowKey), [1, 2, 3, 4, 5].map((n) => `message:user:w-${n}`));
+    const pages = await walkHistory(host, threadId, recent.history?.beforeCursor ?? null);
+    const paged = new Map(pages.flatMap((page) => page.items).map((item) => [rowKey(item), item]));
+    for (const item of dropped) {
+      assert.deepEqual(paged.get(rowKey(item)), item, `${item.id} is a page away`);
+    }
+    await host.stop();
+  });
+
+  it("a page asked without a cursor but with the window's cut never ends below that cut, and without it is as ever", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await fifteenTurns(host, index);
+    const full = await snapshotRead(host, threadId);
+    const unbounded = await host.orchestrator.readHistory(threadId, {});
+    const recent = await recentRead(host, threadId);
+    const windowCut = recent.history?.windowCut;
+    assert.ok(windowCut);
+    // Any other cursorless request: the block below the whole window, as the host holds it —
+    // which, nothing evicted, is nothing at all.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, {}), unbounded);
+    assert.deepEqual(unbounded.items, []);
+    // A client whose bounded window evicted a row asks without the snapshot's cursor, naming
+    // the cut: the page ends there, so every row that snapshot left out is a page away.
+    const first = await host.orchestrator.readHistory(threadId, { windowCut });
+    assert.equal(first.page.endItemId, "user:w-6");
+    assert.deepEqual(first, await host.orchestrator.readHistory(threadId, { before: windowCut }));
+    // A cursor wins over the cut, and a cut that is not one of ours is none.
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, { windowCut: "not a cursor" }), unbounded);
+    const pages = [first, ...(await walkHistory(host, threadId, first.page.beforeCursor))];
+    const paged = new Set(pages.flatMap((page) => page.items).map(rowKey));
+    const windowRows = new Set(recent.items.map(rowKey));
+    assert.deepEqual(
+      full.items.filter((item) => !paged.has(rowKey(item)) && !windowRows.has(rowKey(item))),
+      [],
+      "nothing is lost"
+    );
+    await host.stop();
+  });
+
+  it("a bounded snapshot with on-demand agent rows: the trim first, then the settled agents' rows; their anchors stay in trimmed turns, and the frame brings every row back", async (t) => {
+    const { index, host } = await indexedHost(t);
+    const threadId = await host.createThread();
+    const agentRow = (id: string, turnId: string, activityKind: string, payload: Record<string, unknown>, agentId?: string) =>
+      sinkEvent(host, threadId, `ingest-${id}`, "thread.activity-appended", {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind,
+          summary: activityKind,
+          payload,
+          turnId,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso(),
+          ...(agentId !== undefined ? { agentId } : {})
+        }
+      });
+    for (let n = 1; n <= 15; n += 1) {
+      host.clock.advance(1_000);
+      await seedTurn(host, `w-${n}`, { threadId });
+      await bulkActivities(host, `w-${n}`, 3, threadId);
+      if (n === 2 || n === 14) {
+        const agent = n === 2 ? "old-a" : "new-b";
+        const turnId = `w-${n}`;
+        await host.orchestrator.ingestionSink(threadId, [
+          agentRow(`${agent}-launch`, turnId, "task.started", { taskId: agent, agentKind: "agent", title: agent }),
+          agentRow(`${agent}-1-start`, turnId, "tool.started", { toolUseId: `${agent}-1`, title: "Bash" }, agent),
+          agentRow(`${agent}-1-done`, turnId, "tool.completed", { toolUseId: `${agent}-1`, title: "Bash" }, agent),
+          agentRow(`${agent}-end`, turnId, "task.completed", { taskId: agent, agentKind: "agent", status: "completed" })
+        ]);
+      }
+    }
+    await host.settle();
+    await index.drain();
+    const full = await snapshotRead(host, threadId);
+    const recent = await recentRead(host, threadId);
+    const both = await host.orchestrator.readThread(threadId, undefined, { window: "recent", agentRows: "on-demand" });
+    assert.equal(both.kind, "snapshot");
+    if (both.kind !== "snapshot") return;
+    const ids = (items: readonly ThreadItem[]) => items.map((item) => item.id);
+    assert.ok(recent.items.length < full.items.length, "the trim cut older turns");
+    assert.ok(!ids(recent.items).includes("w-2-bulk-0"));
+    // The trim keeps every agent's rows; the omission then takes the settled agents' own.
+    for (const id of ["old-a-1-start", "old-a-1-done", "new-b-1-start"]) {
+      assert.ok(ids(recent.items).includes(id), `${id}: the trim keeps it`);
+      assert.ok(!ids(both.thread.items).includes(id), `${id}: on demand`);
+    }
+    for (const id of ["old-a-launch", "old-a-end", "new-b-launch", "new-b-end"]) {
+      assert.ok(ids(both.thread.items).includes(id), `${id}: an anchor stays, in a trimmed turn too`);
+    }
+    assert.deepEqual(both.thread.omittedAgentIds, ["new-b", "old-a"]);
+    assert.deepEqual(both.thread.history, recent.history, "the trim's bounds, its window cut included");
+    assert.deepEqual(ids(both.thread.items), ids(recent.items).filter((id) => !/-1-(start|done)$/.test(id)));
+    // The frame: the agent's rows as the full window holds them.
+    const frame = host.orchestrator.agentRowsFrame(threadId, ["old-a"]);
+    assert.ok(frame);
+    assert.deepEqual(frame.items, full.items.filter((item) => item.agentId === "old-a"));
+  });
+
+  it("a bounded read is the whole window without a usable index, or one that has not caught up", async (t) => {
+    const unindexed = createTestHost();
+    const threadId = await fifteenTurns(unindexed, null);
+    assert.deepEqual(await recentRead(unindexed, threadId), await snapshotRead(unindexed, threadId));
+    await unindexed.stop();
+
+    const { index } = await indexedHost(t);
+    const behind = createTestHost({ index: { ...index, coverage: async () => "catching-up" } });
+    const caughtUpLater = await fifteenTurns(behind, index);
+    assert.deepEqual(await recentRead(behind, caughtUpLater), await snapshotRead(behind, caughtUpLater));
+    await behind.stop();
+  });
+
   it("searches through the index, and answers `indexed: false` without one", async (t) => {
     const none = createTestHost();
     assert.deepEqual(none.orchestrator.searchThreads({ q: "hello", limit: 5 }), {
@@ -3747,6 +3941,83 @@ describe("orchestrator — a message over a subagent's approval goes to that sub
       [{ requestId: "req-sub", decision: "decline", redirect: true }]
     );
     assert.equal(host.adapter.lastTurn?.input, "do it later");
+    await host.stop();
+  });
+});
+
+describe("orchestrator — on-demand agent rows", () => {
+  /** A settled agent `a` (a big call), a running agent `b`, as an adapter's ingested rows. */
+  async function fleet(host: TestHost): Promise<string> {
+    const threadId = await host.createThread();
+    const at = "1970-01-01T00:00:01.000Z";
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>, agentId?: string): AppendableDomainEvent => ({
+      eventId: `ingest-${id}`,
+      threadId,
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind,
+          summary: activityKind,
+          payload,
+          turnId: null,
+          createdAt: at,
+          updatedAt: at,
+          ...(agentId !== undefined ? { agentId } : {})
+        }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    await host.orchestrator.ingestionSink(threadId, [
+      row("a-launch", "task.started", { taskId: "a", agentKind: "agent" }),
+      row("b-launch", "task.started", { taskId: "b", agentKind: "agent" }),
+      // Persisted whole, slimmed on the way to the wire (§5.6).
+      row("a1-done", "tool.completed", { toolUseId: "a1", output: "x".repeat(200_000) }, "a"),
+      row("b1-start", "tool.started", { toolUseId: "b1" }, "b"),
+      row("a-end", "task.completed", { taskId: "a", agentKind: "agent", status: "completed" })
+    ]);
+    await host.settle();
+    return threadId;
+  }
+
+  it("leaves the settled agent's rows out of an opted-in snapshot only, after slimming", async () => {
+    const host = createTestHost();
+    const threadId = await fleet(host);
+    const full = await host.orchestrator.readThread(threadId);
+    const again = await host.orchestrator.readThread(threadId, undefined, {});
+    assert.equal(JSON.stringify(again), JSON.stringify(full), "no opt-in: the snapshot as it always was");
+    const lazy = await host.orchestrator.readThread(threadId, undefined, { agentRows: "on-demand" });
+    assert.equal(full.kind, "snapshot");
+    assert.equal(lazy.kind, "snapshot");
+    if (full.kind !== "snapshot" || lazy.kind !== "snapshot") return;
+    assert.equal(lazy.thread.omittedAgentIds?.includes("a"), true);
+    assert.equal(lazy.thread.items.some((item) => item.id === "a1-done"), false);
+    assert.ok(lazy.thread.items.some((item) => item.id === "a-launch") && lazy.thread.items.some((item) => item.id === "a-end"));
+    // The frame carries the row exactly as the full snapshot does: slimmed.
+    const frame = host.orchestrator.agentRowsFrame(threadId, ["a"]);
+    assert.ok(frame !== null);
+    assert.equal(frame.seq, full.thread.seq);
+    assert.deepEqual(frame.items, full.thread.items.filter((item) => item.id === "a1-done"));
+    assert.ok(JSON.stringify(frame.items).length < 100_000, "slimmed like the snapshot");
+    // The fold itself is untouched.
+    const after = await host.orchestrator.readThread(threadId);
+    assert.equal(JSON.stringify(after), JSON.stringify(full));
+    await host.stop();
+  });
+
+  it("a replay is never touched by the opt-in, and a thread it has not loaded has no frame", async () => {
+    const host = createTestHost();
+    const threadId = await fleet(host);
+    const replay = await host.orchestrator.readThread(threadId, 1, { agentRows: "on-demand" });
+    const plain = await host.orchestrator.readThread(threadId, 1);
+    assert.equal(replay.kind, "events");
+    assert.deepEqual(replay, plain);
+    assert.equal(host.orchestrator.agentRowsFrame("never-loaded", ["a"]), null);
     await host.stop();
   });
 });

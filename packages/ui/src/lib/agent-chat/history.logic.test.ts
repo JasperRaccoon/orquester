@@ -34,11 +34,13 @@ import {
   EMPTY_HISTORY_ITEMS,
   EMPTY_HISTORY_ROWS,
   EMPTY_LIVE_SPLIT,
+  historyAfterAgentRows,
   historyAfterEvent,
   historyAfterRevert,
   historyBoundsFromSnapshot,
   historyWithinCap,
   nextHistoryCursor,
+  nextHistoryWindowCut,
   historyWithPage,
   projectHistoryRows,
   rowIdForTurn,
@@ -164,6 +166,31 @@ describe("historyBoundsFromSnapshot", () => {
       const payload = snapshot({ history: malformed as unknown as ThreadHistoryBounds });
       assert.equal(historyBoundsFromSnapshot(payload), null, JSON.stringify(malformed));
     }
+  });
+});
+
+describe("a bounded snapshot's cut", () => {
+  it("is read with the bounds when it is a cursor, and is none otherwise", () => {
+    const cut = { ...bounds(), windowCut: "cut-1" };
+    assert.deepEqual(historyBoundsFromSnapshot(snapshot({ history: cut })), cut);
+    for (const odd of [7, "", null]) {
+      const read = historyBoundsFromSnapshot(snapshot({ history: { ...bounds(), windowCut: odd } as never }));
+      assert.ok(read !== null && !("windowCut" in read), JSON.stringify(odd));
+    }
+  });
+
+  it("rides a cursorless first page only: once the window evicted, or with no cursor left", () => {
+    const cut = { ...bounds(), beforeCursor: "cut-1", windowCut: "cut-1" };
+    assert.equal(nextHistoryWindowCut(history({ bounds: cut })), undefined, "the snapshot's own cursor serves");
+    assert.equal(nextHistoryWindowCut(history({ bounds: cut, windowEvicted: true })), "cut-1");
+    // What the device cache keeps of an evicted window: no cursor, the cut.
+    assert.equal(nextHistoryWindowCut(history({ bounds: { ...cut, beforeCursor: null } })), "cut-1");
+    assert.equal(
+      nextHistoryWindowCut(history({ bounds: cut, windowEvicted: true, pages: [historyPage({ page: { beforeCursor: "older" } })] })),
+      undefined,
+      "a loaded page's cursor serves"
+    );
+    assert.equal(nextHistoryWindowCut(history({ bounds: bounds(), windowEvicted: true })), undefined, "no bounded window");
   });
 });
 
@@ -750,5 +777,22 @@ describe("windowHasDropped: the thread's retained window has evicted rows (§7.6
   it("this client's fold evicted rows since that snapshot — any row, an agent's included", () => {
     assert.equal(windowHasDropped({ evicted: { activities: true, messages: false } }, EMPTY_HISTORY), true);
     assert.equal(windowHasDropped({ evicted: { activities: false, messages: true } }, EMPTY_HISTORY), true);
+  });
+});
+
+describe("historyAfterAgentRows — an agent-rows frame replaced rows in the window", () => {
+  it("recounts the window cut over the replaced list: rows the frame put before it count, rows it took out do not", () => {
+    const parent = (id: string) => message("assistant", id, { id });
+    const owned = (id: string) => activity("tool.started", { toolUseId: id }, { id, agentId: "a" });
+    const before = [parent("p1"), owned("a-old"), parent("p2"), parent("p3"), parent("p4")];
+    // The cut held p1, a-old and p2; the frame drops a-old and places two rows before p2.
+    const history = { ...EMPTY_HISTORY, windowCut: 3 };
+    const after = [parent("p1"), owned("a1"), owned("a2"), parent("p2"), parent("p3"), parent("p4")];
+    assert.equal(historyAfterAgentRows(history, before, after).windowCut, 4);
+    // Nothing before the cut moved: the same history.
+    const unmoved = [parent("p1"), owned("a-old"), parent("p2"), owned("a9"), parent("p3"), parent("p4")];
+    assert.equal(historyAfterAgentRows(history, before, unmoved), history);
+    // No cut: nothing to recount.
+    assert.equal(historyAfterAgentRows(EMPTY_HISTORY, before, after), EMPTY_HISTORY);
   });
 });

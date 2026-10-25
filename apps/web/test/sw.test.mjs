@@ -27,7 +27,7 @@ function fakeCaches() {
   return { open: async (name) => open(name), stores, openSync: open };
 }
 
-function worker() {
+function worker(globals = {}) {
   const caches = fakeCaches();
   const listeners = {};
   const context = {
@@ -40,7 +40,8 @@ function worker() {
     caches,
     URL,
     Promise,
-    Response: {}
+    Response: {},
+    ...globals
   };
   vm.runInNewContext(source, context);
   return { context, caches, listeners };
@@ -201,5 +202,104 @@ describe("a notification's tap", () => {
     await waited;
     assert.deepEqual(shown[0].options.data, { sessionId: "s-1" });
     assert.equal(shown[0].options.tag, "session-s-1");
+  });
+});
+
+/** Timers the test advances by hand, and a fetch it answers by hand. */
+function controlledNetwork() {
+  const timers = [];
+  let pending = null;
+  return {
+    globals: {
+      setTimeout: (fn, ms) => {
+        const timer = { fn, ms, cleared: false };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout: (timer) => {
+        if (timer) timer.cleared = true;
+      },
+      fetch: () =>
+        new Promise((resolve, reject) => {
+          pending = { resolve, reject };
+        }),
+      Response: { error: () => ({ error: true }) }
+    },
+    fireTimers() {
+      for (const timer of timers.splice(0)) if (!timer.cleared) timer.fn();
+    },
+    answer(response) {
+      pending.resolve(response);
+    },
+    fail() {
+      pending.reject(new TypeError("Failed to fetch"));
+    }
+  };
+}
+
+function navigation() {
+  const lifetimes = [];
+  return { request: { url: "https://orq.example.com/", mode: "navigate" }, waitUntil: (promise) => lifetimes.push(promise), lifetimes };
+}
+
+// The fake cache stores what it is given, so the clone is the body itself.
+const response = (body) => ({ ok: true, body, clone: () => body });
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("a navigation on a bad link", () => {
+  it("answers from the network when it comes in time, and caches the shell", async () => {
+    const network = controlledNetwork();
+    const { context, caches } = worker(network.globals);
+    const event = navigation();
+    const answered = context.networkFirstNavigation(event);
+    network.answer(response("<html>new</html>"));
+    assert.equal((await answered).body, "<html>new</html>");
+    await Promise.all(event.lifetimes);
+    assert.equal(await (await caches.openSync("orq-shell-v6").match("/index.html")).text(), "<html>new</html>");
+  });
+
+  it("serves the cached shell once the timeout passes, and still caches the late answer", async () => {
+    const network = controlledNetwork();
+    const { context, caches } = worker(network.globals);
+    await caches.openSync("orq-shell-v6").put("/index.html", "<html>old</html>");
+    const event = navigation();
+    let result;
+    const answered = context.networkFirstNavigation(event).then((value) => (result = value));
+    await settle();
+    assert.equal(result, undefined, "nothing before the timeout");
+    assert.equal(context.NETWORK_FIRST_TIMEOUT_MS, 3500);
+    network.fireTimers();
+    await answered;
+    assert.equal(await result.text(), "<html>old</html>");
+    // The network answers later: the next start gets the new shell.
+    network.answer(response("<html>new</html>"));
+    await Promise.all(event.lifetimes);
+    assert.equal(await (await caches.openSync("orq-shell-v6").match("/index.html")).text(), "<html>new</html>");
+  });
+
+  it("without a cached shell, waits on the network past the timeout", async () => {
+    const network = controlledNetwork();
+    const { context } = worker(network.globals);
+    let result;
+    const answered = context.networkFirstNavigation(navigation()).then((value) => (result = value));
+    network.fireTimers();
+    await settle();
+    assert.equal(result, undefined);
+    network.answer(response("<html>slow</html>"));
+    await answered;
+    assert.equal(result.body, "<html>slow</html>");
+  });
+
+  it("offline, answers the cached shell, or a network error without one", async () => {
+    for (const shell of ["<html>old</html>", undefined]) {
+      const network = controlledNetwork();
+      const { context, caches } = worker(network.globals);
+      if (shell) await caches.openSync("orq-shell-v6").put("/index.html", shell);
+      const answered = context.networkFirstNavigation(navigation());
+      network.fail();
+      const result = await answered;
+      if (shell) assert.equal(await result.text(), shell);
+      else assert.deepEqual(plain(result), { error: true });
+    }
   });
 });

@@ -192,6 +192,40 @@ const printing = await shellDrillIn([shellStart, shellChunk], liveShell);
 assert.ok(printing.includes("pnpm test --watch"), "opening the shell shows its command");
 assert.ok(printing.includes("PASS src/a.test.ts"), "the seeded thread renders shell output without another click");
 
+// ---------------------------------------------------------------------------
+// On-demand agent rows: an omitted agent's drill-in says it is loading, then shows its rows
+// ---------------------------------------------------------------------------
+
+const SETTLED = "agent-settled";
+const settled = rosterRow(SETTLED, { status: "completed", completedAt: "2026-09-21T10:05:00.000Z" });
+const settledLaunch = wireActivity("task.started", { taskId: SETTLED, agentKind: "agent", title: SETTLED }, { id: "settled-launch" });
+const settledCall = wireActivity(
+  "tool.completed",
+  { toolUseId: "settled-1", itemType: "command_execution", title: "cargo build --release", command: "cargo build --release", status: "completed" },
+  { agentId: SETTLED, id: "settled-call" }
+);
+const lazySession = await seededThread({ items: [settledLaunch], roster: [settled], omittedAgentIds: [SETTLED] });
+const loading = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(loading.includes("data-drill-in-loading"), "an omitted agent's drill-in is loading");
+assert.ok(!loading.includes("cargo build"), "and shows nothing of rows it does not have");
+frameHandlers.get(lazySession)!({ kind: "agent-rows", seq: 1, agentIds: [SETTLED], items: [settledCall], after: ["settled-launch"] });
+const loaded = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(!loaded.includes("data-drill-in-loading"), "its frame landed");
+assert.ok(loaded.includes("cargo build --release"), "the agent's own rows render");
+assert.ok(!loaded.includes("data-drill-in-truncated"), "whole: no notice");
+// A reconnect's snapshot leaves it out again: its rows stay on screen until its frame lands.
+frameHandlers.get(lazySession)!({
+  kind: "snapshot",
+  thread: snapshot({ head: head({ id: lazySession }), seq: 2, items: [settledLaunch], roster: [settled], omittedAgentIds: [SETTLED] })
+});
+const revalidating = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(!revalidating.includes("data-drill-in-loading"), "not back to loading");
+assert.ok(revalidating.includes("cargo build --release"), "the rows it had stay meanwhile");
+// Its frame came truncated: the newest rows, and the drill-in says so.
+frameHandlers.get(lazySession)!({ kind: "agent-rows", seq: 2, agentIds: [SETTLED], items: [settledCall], after: ["settled-launch"], truncated: true });
+const truncated = render({ sessionId: lazySession, agentId: SETTLED, roster: [settled], bottomInset: 0, onBack: NOOP });
+assert.ok(truncated.includes("data-drill-in-truncated"), "a truncated frame is said");
+
 for (const sessionId of frameHandlers.keys()) releaseThreadStore(sessionId);
 console.error = consoleError;
 console.log("agent-chat seeded shell output check passed");

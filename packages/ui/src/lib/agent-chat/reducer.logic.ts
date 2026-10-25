@@ -13,12 +13,18 @@
  */
 
 import {
+  agentCallOwnersOf,
+  agentRowsFrameOf,
+  applyAgentRows,
   applyDomainEvent,
+  onDemandRowOwner,
+  startedTurns,
   createEmptyThreadState,
   DEFAULT_INTERACTION_MODE,
   isSettledTurnState,
   parseThreadGoal,
   type AgentChatStreamFrame,
+  type AgentRowsFrame,
   type PendingRequests,
   type ThreadActivityItem,
   type ThreadFoldState,
@@ -34,6 +40,7 @@ import type {
 } from "./contracts";
 import {
   EMPTY_HISTORY,
+  historyAfterAgentRows,
   historyAfterEvent,
   historyBoundsFromSnapshot,
   resetHistory
@@ -55,6 +62,12 @@ export interface AgentChatReducerState {
    * *T3: `packages/client-runtime/src/state/threads.ts:446-458` — the history epoch.*
    */
   historyEpoch: number;
+  /**
+   * The connection's on-demand id: the last `synchronized` frame's `streamId`
+   * (`?agentRows=on-demand`), what a `POST …/agent-rows` names. Null before the
+   * first marker, and for a host that sent none. Absent reads as null.
+   */
+  streamId?: string | null;
 }
 
 const EMPTY_DISCLOSURES: DisclosureState = {
@@ -189,6 +202,76 @@ function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState
   };
 }
 
+/**
+ * A snapshot's `omittedAgentIds`, validated: the non-empty strings, sorted and
+ * unique; `undefined` for none (and for a field of any other shape — a
+ * snapshot that says nothing readable about it is read as whole).
+ */
+export function omittedAgentIdsOf(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = [...new Set(value.filter((id): id is string => typeof id === "string" && id.length > 0))].sort();
+  return ids.length === 0 ? undefined : ids;
+}
+
+/** `omitted` without `loaded`; the same array when it loses nothing, `undefined` when nothing is left. */
+function withoutAgents(omitted: readonly string[] | undefined, loaded: readonly string[]): readonly string[] | undefined {
+  if (omitted === undefined) return undefined;
+  const drop = new Set(loaded);
+  const left = omitted.filter((id) => !drop.has(id));
+  if (left.length === omitted.length) return omitted;
+  return left.length === 0 ? undefined : left;
+}
+
+/**
+ * Whether an `agent-rows` frame can be applied here: it rides the stream in
+ * order, so its `seq` is the position this fold has applied — unless a
+ * snapshot read beside the stream (a refresh, the history's re-read) moved
+ * the fold past it, when the frame's rows are OLDER than the fold and would
+ * roll those agents back. Such a frame is dropped, its agents stay omitted,
+ * and the store asks again once the stream has caught up (`store.ts`).
+ */
+export function agentRowsFrameApplies(fold: ThreadFoldState, frame: Pick<AgentRowsFrame, "seq">): boolean {
+  return frame.seq >= fold.seq;
+}
+
+/**
+ * The rows a snapshot's omitted agents keep from the fold before it, when
+ * this client had them loaded (on-demand agent rows: stale-while-revalidate)
+ * — or null. Only for a snapshot that moved the thread forward and rewound no
+ * turn (its started turns begin with the previous fold's), so nothing carried
+ * is a row the host has since dropped by a revert; a row its retention
+ * evicted meanwhile goes when the agent's frame lands, as it does on any
+ * client. Placed as a frame would be (`agentRowsFrameOf` over the previous
+ * window, `applyAgentRows` onto the new one).
+ */
+function carriedAgentRows(
+  state: AgentChatReducerState,
+  next: ThreadFoldState,
+  omitted: readonly string[] | undefined
+): { fold: ThreadFoldState; agentIds: string[] } | null {
+  if (omitted === undefined || state.fold.items.length === 0 || next.seq < state.fold.seq) {
+    return null;
+  }
+  const before = startedTurns(state.fold.turns).map((turn) => turn.turnId);
+  const after = startedTurns(next.turns).map((turn) => turn.turnId);
+  if (before.length > after.length || before.some((turnId, index) => after[index] !== turnId)) {
+    return null;
+  }
+  const wasOmitted = new Set(state.slice.omittedAgentIds ?? []);
+  const callOwners = agentCallOwnersOf(state.fold.items);
+  const held = new Set<string>();
+  for (const item of state.fold.items) {
+    const owner = onDemandRowOwner(item, callOwners);
+    if (owner !== null) held.add(owner);
+  }
+  const agentIds = omitted.filter((agentId) => !wasOmitted.has(agentId) && held.has(agentId));
+  if (agentIds.length === 0) {
+    return null;
+  }
+  const frame = agentRowsFrameOf({ items: state.fold.items, roster: state.fold.roster, seq: next.seq, agentIds });
+  return { fold: applyAgentRows(next, frame), agentIds };
+}
+
 /** The `[string, string]` entries of a wire list; anything else is dropped. */
 function stringPairs(value: unknown): Array<[string, string]> {
   if (!Array.isArray(value)) return [];
@@ -298,14 +381,62 @@ export function applyFrame(
 ): AgentChatReducerState {
   switch (frame.kind) {
     case "snapshot": {
-      const fold = foldStateFromSnapshot(frame.thread);
+      const snapshotFold = foldStateFromSnapshot(frame.thread);
       const history = resetHistory(historyBoundsFromSnapshot(frame.thread), state.slice.history);
+      // The agents this snapshot left out are the ones not loaded now — whatever an
+      // earlier one left out, or a frame brought since (`agent-rows.ts`).
+      const omittedAgentIds = omittedAgentIdsOf(frame.thread.omittedAgentIds);
+      // Stale-while-revalidate: the omitted agents this client had loaded keep their rows
+      // until their frame replaces them.
+      const carried = carriedAgentRows(state, snapshotFold, omittedAgentIds);
+      const fold = carried === null ? snapshotFold : carried.fold;
+      const {
+        omittedAgentIds: _previous,
+        revalidatingAgentIds: _revalidating,
+        truncatedAgentIds: previousTruncated,
+        ...rest
+      } = state.slice;
+      const truncated = carried === null ? [] : (previousTruncated ?? []).filter((id) => carried.agentIds.includes(id));
+      const base = {
+        ...rest,
+        ...(omittedAgentIds !== undefined ? { omittedAgentIds } : {}),
+        ...(carried !== null ? { revalidatingAgentIds: carried.agentIds } : {}),
+        ...(truncated.length > 0 ? { truncatedAgentIds: truncated } : {})
+      };
       return {
         ...state,
         fold,
-        slice: projectSlice({ ...state.slice, connection: "connecting", history }, fold),
+        slice: projectSlice({ ...base, connection: "connecting", history }, fold),
         historyEpoch: state.historyEpoch + 1
       };
+    }
+    case "agent-rows": {
+      if (!agentRowsFrameApplies(state.fold, frame)) {
+        return state;
+      }
+      const fold = applyAgentRows(state.fold, frame);
+      const omitted = state.slice.omittedAgentIds;
+      const left = withoutAgents(omitted, frame.agentIds);
+      if (fold === state.fold && left === omitted && frame.truncated !== true && state.slice.truncatedAgentIds === undefined) {
+        return state;
+      }
+      const { omittedAgentIds: _loaded, revalidatingAgentIds, truncatedAgentIds, ...rest } = state.slice;
+      // The window cut counts window rows: recounted over the replaced list.
+      const history = historyAfterAgentRows(state.slice.history, state.fold.items, fold.items);
+      const revalidating = withoutAgents(revalidatingAgentIds, frame.agentIds);
+      const stillTruncated = withoutAgents(truncatedAgentIds, frame.agentIds);
+      const truncated =
+        frame.truncated === true
+          ? [...new Set([...(stillTruncated ?? []), ...frame.agentIds])].sort()
+          : stillTruncated;
+      const base = {
+        ...rest,
+        history,
+        ...(left === undefined ? {} : { omittedAgentIds: left }),
+        ...(revalidating === undefined ? {} : { revalidatingAgentIds: revalidating }),
+        ...(truncated === undefined || truncated.length === 0 ? {} : { truncatedAgentIds: truncated })
+      };
+      return { ...state, fold, slice: projectSlice(base, fold) };
     }
     case "event": {
       if (frame.seq <= state.fold.seq) {
@@ -327,14 +458,16 @@ export function applyFrame(
       const changed =
         state.hostInstanceId !== null && state.hostInstanceId !== frame.hostInstanceId;
       const connection: AgentChatConnectionState = changed ? "connecting" : "synchronized";
+      const streamId = frame.streamId ?? null;
       if (!changed && state.slice.connection === "synchronized") {
-        return state.hostInstanceId === frame.hostInstanceId
+        return state.hostInstanceId === frame.hostInstanceId && (state.streamId ?? null) === streamId
           ? state
-          : { ...state, hostInstanceId: frame.hostInstanceId };
+          : { ...state, hostInstanceId: frame.hostInstanceId, streamId };
       }
       return {
         ...state,
         hostInstanceId: frame.hostInstanceId,
+        streamId,
         // A replay still running is re-announced right after this frame;
         // one that ended while the stream was away must not linger.
         slice: { ...state.slice, connection, historyImport: null }

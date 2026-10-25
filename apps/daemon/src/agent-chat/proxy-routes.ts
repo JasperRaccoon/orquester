@@ -23,7 +23,9 @@ import {
   MCP_APP_OPERATIONS,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatCommandPath,
+  AGENT_ROWS_QUERY_PARAM,
   agentChatRoutes,
+  agentRowsModeOf,
   isHtmlRenderAttachmentId,
   threadHeadOf,
   threadHeadQueryOf,
@@ -43,6 +45,12 @@ import {
 import { agentHostRoutes, type HostThreadCatalogResponse } from "../agent-host/host-protocol.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { AgentHostClient, HostUnavailableError, type HostJsonResponse } from "./host-client.ts";
+import {
+  DAEMON_STREAM_HEARTBEAT_MS,
+  NdjsonForwarder,
+  acceptsGzip,
+  createStreamingGzip
+} from "./ndjson-forward.ts";
 import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
 
 /** Maps a §6.2 command name onto the host's route for the same command. */
@@ -177,7 +185,8 @@ const CHAT_ERROR_STATUS: Record<AgentChatErrorCode, number> = {
   INDEX_UNAVAILABLE: 503,
   ITEM_NOT_FOUND: 404,
   PROMPT_NOT_FOUND: 404,
-  TURN_NOT_IDLE: 409
+  TURN_NOT_IDLE: 409,
+  STREAM_NOT_FOUND: 404
 };
 
 /**
@@ -350,7 +359,10 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   // --- §6.3 reads ----------------------------------------------------------
 
-  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+  // `?agentRows=on-demand` (`AGENT_ROWS_QUERY_PARAM`) passes through to the host on both
+  // reads, beside `window`: a host that knows it leaves the settled agents' on-demand rows out of
+  // a snapshot, one that predates it ignores it. Only the one value: anything else is no opt-in.
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string; agentRows?: string } }>(
     pattern(agentChatRoutes.thread(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -360,7 +372,12 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         deps,
         reply,
         "GET",
-        withQuery(agentHostRoutes.read(id), { after: request.query.after })
+        // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
+        withQuery(agentHostRoutes.read(id), {
+          after: request.query.after,
+          window: request.query.window,
+          [AGENT_ROWS_QUERY_PARAM]: agentRowsModeOf(request.query.agentRows)
+        })
       );
       noteSeqFrom(deps, id, value);
       return value;
@@ -482,7 +499,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // NOT noted — it names the thread's current sequence while the page carries
   // only old turns, so moving the tab's reconnect cursor to it would let a
   // §6.3 reconnect skip live events the client was never sent.
-  app.get<{ Params: { id: string }; Querystring: { before?: string; turns?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { before?: string; turns?: string; windowCut?: string } }>(
     pattern(agentChatRoutes.history(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -494,7 +511,8 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         "GET",
         withQuery(agentHostRoutes.history(id), {
           before: request.query.before,
-          turns: request.query.turns
+          turns: request.query.turns,
+          windowCut: request.query.windowCut
         })
       );
     }
@@ -579,7 +597,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never
   // sees it: the response is raw chunked NDJSON, piped from the host with
   // backpressure, and the upstream is cancelled the moment the client goes.
-  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { after?: string; window?: string; agentRows?: string } }>(
     pattern(agentChatRoutes.events(":id")),
     async (request, reply) => {
       const { id } = request.params;
@@ -595,8 +613,26 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         deps,
         request,
         reply,
-        withQuery(agentHostRoutes.events(id), { after: request.query.after })
+        // `window` (`ThreadReadWindow`) crosses as-is; the host reads only the values it knows.
+        withQuery(agentHostRoutes.events(id), {
+          after: request.query.after,
+          window: request.query.window,
+          [AGENT_ROWS_QUERY_PARAM]: agentRowsModeOf(request.query.agentRows)
+        })
       );
+    }
+  );
+
+  // On-demand agent rows: the host writes the rows into the stream the body names — the
+  // client's own, through this daemon's pipe, in order with its events — and answers only that
+  // it did. Forwarded as it is; the host validates it, and an older host answers its route miss.
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    pattern(agentChatRoutes.agentRows(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(deps, reply, "POST", agentHostRoutes.agentRows(id), request.body ?? {});
     }
   );
 
@@ -947,7 +983,8 @@ function noteSeqFrom(deps: AgentChatRouteDeps, id: string, value: unknown): void
  * - **cancellation**: the upstream is destroyed on client disconnect, or the
  *   host would keep a subscription alive for a reader that is gone;
  * - **no buffering**: the response is hijacked, so Fastify neither serializes
- *   nor compresses it, and `:hb` comment lines reach the client immediately.
+ *   nor buffers it, and `:hb` comment lines reach the client immediately — the
+ *   gzip a client may ask for flushes every write (`ndjson-forward.ts`).
  */
 async function pipeStream(
   deps: AgentChatRouteDeps,
@@ -994,24 +1031,47 @@ async function pipeStream(
 
   reply.hijack();
   const socket = reply.raw;
+  // A cold open's snapshot is megabytes of JSON that no proxy in front of us
+  // compresses (`ndjson-forward.ts`), so the daemon does, for a client that asks.
+  const gzip = acceptsGzip(request.headers["accept-encoding"]) ? createStreamingGzip() : null;
   socket.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
     // Proxy buffering would hold the heartbeat and every event until a buffer
     // filled — the whole point of the stream is that it does not.
-    "x-accel-buffering": "no"
+    "x-accel-buffering": "no",
+    ...(gzip ? { "content-encoding": "gzip" } : {}),
+    vary: "accept-encoding"
   });
-  const done = (): void => {
+  const forwarder = new NdjsonForwarder();
+  const heartbeat = setInterval(() => {
+    forwarder.heartbeatIfIdle(DAEMON_STREAM_HEARTBEAT_MS / 2);
+  }, DAEMON_STREAM_HEARTBEAT_MS);
+  let finished = false;
+  const teardown = (): void => {
+    clearInterval(heartbeat);
     controller.abort();
     upstream.abort();
-    if (!socket.destroyed) socket.end();
+  };
+  const done = (): void => {
+    if (finished) return;
+    finished = true;
+    teardown();
+    // Ending the forwarder drains what it still holds, then ends the encoder
+    // (which writes its trailer) and the socket, through the pipes below.
+    if (!socket.destroyed) forwarder.end();
   };
   socket.on("close", () => {
-    controller.abort();
-    upstream.abort();
+    finished = true;
+    teardown();
+    forwarder.destroy();
+    gzip?.destroy();
   });
   upstream.body.on("error", done);
   upstream.body.on("end", done);
-  upstream.body.pipe(socket, { end: false });
+  // Backpressure end to end: a socket that stops draining pauses the encoder,
+  // which pauses the forwarder, which pauses the host's response.
+  upstream.body.pipe(forwarder, { end: false });
+  (gzip ? forwarder.pipe(gzip) : forwarder).pipe(socket);
 }

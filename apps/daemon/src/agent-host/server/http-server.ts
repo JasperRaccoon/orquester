@@ -13,13 +13,16 @@
  * is the readiness probe.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { chmod, mkdir, open, rm, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import {
   AGENT_CHAT_COMMAND_NAMES,
+  AGENT_ROWS_MAX_AGENTS,
+  AGENT_ROWS_QUERY_PARAM,
+  agentRowsModeOf,
   DEADLINE_REFUSAL_REASON,
   MAX_TURN_FILE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
@@ -37,6 +40,8 @@ import {
   type AgentChatStreamFrame,
   type AgentHostStopResponse,
   type AgentProvidersResponse,
+  type AgentRowsMode,
+  type AgentRowsResponse,
   type RefreshProviderResponse,
   type ThreadHeadResponse,
   type ThreadHistoryPage,
@@ -46,6 +51,7 @@ import {
   type ThreadItemResponse,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
+  type ThreadReadWindow,
   type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
@@ -285,6 +291,35 @@ const DEFAULT_SEARCH_RESULTS = 20;
  */
 const PROMPT_NOT_FOUND = "PROMPT_NOT_FOUND" satisfies AgentChatErrorCode;
 
+/** `?agentRows=on-demand` ({@link AGENT_ROWS_QUERY_PARAM}); any other value asks for nothing. */
+function parseAgentRows(url: URL): AgentRowsMode | undefined {
+  return agentRowsModeOf(url.searchParams.get(AGENT_ROWS_QUERY_PARAM));
+}
+
+/** A `POST …/agent-rows` agent id: a roster id, never anything a fold could not hold. */
+const MAX_AGENT_ID_CHARS = 512;
+
+/** The body of `POST …/agent-rows`, validated; throws `INVALID_COMMAND`. */
+function parseAgentRowsRequest(body: unknown): { streamId: string; agentIds: string[] } {
+  const record = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+  const { streamId, agentIds } = record;
+  if (typeof streamId !== "string" || streamId.length === 0 || streamId.length > 128) {
+    throw new AgentChatCommandError("INVALID_COMMAND", "`streamId` is required.");
+  }
+  if (
+    !Array.isArray(agentIds) ||
+    agentIds.length === 0 ||
+    agentIds.length > AGENT_ROWS_MAX_AGENTS ||
+    !agentIds.every((id) => typeof id === "string" && id.length > 0 && id.length <= MAX_AGENT_ID_CHARS)
+  ) {
+    throw new AgentChatCommandError(
+      "INVALID_COMMAND",
+      `\`agentIds\` must be 1-${AGENT_ROWS_MAX_AGENTS} non-empty agent ids.`
+    );
+  }
+  return { streamId, agentIds: [...new Set(agentIds as string[])] };
+}
+
 function parseAfter(url: URL): number | undefined {
   const raw = url.searchParams.get("after");
   if (raw === null) return undefined;
@@ -293,6 +328,20 @@ function parseAfter(url: URL): number | undefined {
     throw new AgentChatCommandError("INVALID_COMMAND", "`after` must be a non-negative integer.");
   }
   return value;
+}
+
+/** `?window=` of `GET …/thread` (`ThreadReadWindow`); anything else is the whole window, as before. */
+function parseReadWindow(url: URL): ThreadReadWindow | undefined {
+  return url.searchParams.get("window") === "recent" ? "recent" : undefined;
+}
+
+/** A read's projection (`ThreadReadOptions`): undefined when it asked for neither opt-in, as every read before them. */
+function readOptionsOf(
+  window: ThreadReadWindow | undefined,
+  agentRows: AgentRowsMode | undefined
+): { window?: ThreadReadWindow; agentRows?: AgentRowsMode } | undefined {
+  if (window === undefined && agentRows === undefined) return undefined;
+  return { ...(window !== undefined ? { window } : {}), ...(agentRows !== undefined ? { agentRows } : {}) };
 }
 
 /**
@@ -337,6 +386,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       ...(options.secretLiterals !== undefined ? { literals: options.secretLiterals } : {})
     });
   const streams = new Set<ThreadStream>();
+  /** The open streams that opted into on-demand agent rows, by their `streamId`. */
+  const agentRowStreams = new Map<string, { threadId: string; stream: ThreadStream }>();
 
   const handleAttachmentUpload = async (
     request: IncomingMessage,
@@ -661,7 +712,9 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/thread" && method === "GET") {
       const after = parseAfter(url);
-      const body = await orchestrator.readThread(threadId, after);
+      const window = parseReadWindow(url);
+      const agentRows = parseAgentRows(url);
+      const body = await orchestrator.readThread(threadId, after, readOptionsOf(window, agentRows));
       sendJson(response, 200, body);
       return;
     }
@@ -694,8 +747,10 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         max: THREAD_HISTORY_MAX_TURNS,
         fallback: THREAD_HISTORY_DEFAULT_TURNS
       });
+      const windowCut = url.searchParams.get("windowCut");
       const body: ThreadHistoryPage = await orchestrator.readHistory(threadId, {
         ...(before !== null && before.length > 0 ? { before } : {}),
+        ...(windowCut !== null && windowCut.length > 0 ? { windowCut } : {}),
         turns
       });
       sendJson(response, 200, body);
@@ -768,7 +823,12 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/events" && method === "GET") {
       const after = parseAfter(url);
+      const window = parseReadWindow(url);
+      const agentRows = parseAgentRows(url);
       const releaseWatcher = options.addProviderWatcher?.();
+      // On-demand agent rows: the stream gets an id a `POST …/agent-rows` names, and its
+      // frame is built from the fold in the step that writes it (`stream.ts`).
+      const streamId = agentRows !== undefined ? randomUUID() : undefined;
       const stream = createThreadStream({
         response,
         hostInstanceId,
@@ -777,8 +837,13 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
             onEvents: listener,
             ...(onHistoryImport ? { onHistoryImport } : {})
           }),
+        ...(streamId !== undefined
+          ? { agentRows: { streamId, frame: (agentIds) => orchestrator.agentRowsFrame(threadId, agentIds) } }
+          : {}),
         read: async (): Promise<AgentChatStreamFrame[]> => {
-          const read = await orchestrator.readThread(threadId, after);
+          // Only for a client that asked: an older one expects the whole window (`ThreadReadWindow`)
+          // and every agent's rows.
+          const read = await orchestrator.readThread(threadId, after, readOptionsOf(window, agentRows));
           if (read.kind === "snapshot") {
             return [{ kind: "snapshot", thread: read.thread }];
           }
@@ -790,11 +855,34 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         },
         onClose: () => {
           streams.delete(stream);
+          if (streamId !== undefined) agentRowStreams.delete(streamId);
           releaseWatcher?.();
         }
       });
       streams.add(stream);
+      if (streamId !== undefined) agentRowStreams.set(streamId, { threadId, stream });
       await stream.start();
+      return;
+    }
+
+    // On-demand agent rows: ONE frame of the agents' rows, written into the stream the body
+    // names, in order with its events — never on this response, which would race the stream.
+    // Additive: a host that predates it answers its generic route-miss 404.
+    if (rest === "/agent-rows" && method === "POST") {
+      const { streamId, agentIds } = parseAgentRowsRequest(await readJsonBody(request));
+      const open = agentRowStreams.get(streamId);
+      const outcome = open === undefined || open.threadId !== threadId ? "closed" : open.stream.requestAgentRows(agentIds);
+      if (outcome === "gone") {
+        throw new AgentChatCommandError("THREAD_NOT_FOUND", `Thread '${threadId}' was not found.`);
+      }
+      if (outcome === "closed") {
+        sendJson(response, 404, {
+          error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open; ask on the next one." }
+        });
+        return;
+      }
+      const body: AgentRowsResponse = { ok: true };
+      sendJson(response, 200, body);
       return;
     }
 

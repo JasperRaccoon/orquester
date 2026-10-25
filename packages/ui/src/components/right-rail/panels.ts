@@ -5,14 +5,35 @@
  * disagree on a name.
  */
 
-import type React from "react";
+import React from "react";
 import { Bookmark, History, Layers, Workflow, type LucideIcon } from "lucide-react";
 
-import { PromptHistoryPanel } from "./history/PromptHistoryPanel";
-import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
-import { SessionProfilesPanel } from "./session-profiles/SessionProfilesPanel";
-import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
+import { LazyBoundary, lazyNamed } from "../ui/lazy";
 import type { DockPanelId, RightRailPanelId, RightRailPanelProps } from "./types";
+
+/**
+ * A panel that loads the first time it is shown, never with the app: each is
+ * its own chunk (the workflows and Agent Profiles panels are big), drawn in its
+ * own loading boundary wherever the registry's `Component` is rendered.
+ */
+function lazyPanel(
+  lazy: React.ComponentType<RightRailPanelProps>
+): React.ComponentType<RightRailPanelProps> {
+  return function LazyPanel(props: RightRailPanelProps) {
+    return React.createElement(LazyBoundary, null, React.createElement(lazy, props));
+  };
+}
+
+const SavedPromptsPanel = lazyPanel(
+  lazyNamed(() => import("./saved-prompts/SavedPromptsPanel"), "SavedPromptsPanel")
+);
+const PromptHistoryPanel = lazyPanel(
+  lazyNamed(() => import("./history/PromptHistoryPanel"), "PromptHistoryPanel")
+);
+const WorkflowsPanel = lazyPanel(lazyNamed(() => import("./workflows/WorkflowsPanel"), "WorkflowsPanel"));
+const SessionProfilesPanel = lazyPanel(
+  lazyNamed(() => import("./session-profiles/SessionProfilesPanel"), "SessionProfilesPanel")
+);
 
 export interface RightRailPanelSpec {
   id: RightRailPanelId;
@@ -26,12 +47,7 @@ export interface RightRailPanelSpec {
 
 export type RightRailPanelRegistry = Readonly<Record<RightRailPanelId, RightRailPanelSpec>>;
 
-/*
- * `Component` is a getter: it is read at render, never while this module
- * evaluates. A panel that imports the rail's barrel (`..`) closes an import
- * cycle through this table, and a top-level read would then find the panel
- * not yet defined — a crash at load, not at first use.
- */
+/* `Component` is a getter: it is read at render, never while this module evaluates. */
 export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
   prompts: {
     id: "prompts",

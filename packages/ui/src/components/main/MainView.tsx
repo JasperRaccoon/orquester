@@ -1,22 +1,15 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Loader2, Monitor, PenTool, Waypoints, Workflow, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Monitor, PenTool, Waypoints, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
 import { RecentProjects } from "./RecentProjects";
-import { TerminalView } from "../terminal";
-import { FileBrowser } from "../files";
-import { GitView } from "../git";
-import { TodoView } from "../todo";
-import { WorkflowEditorTab } from "../workflows/WorkflowEditorTab";
-import { WhiteboardView } from "../whiteboard/WhiteboardView";
-import { BrowserView } from "../browser";
-import { DesktopView } from "../desktop/DesktopView";
 import { desktopTabTitle } from "../../lib/desktop-state";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { LimitedMarker } from "../ui/limited-marker";
 import { ResizeHandle } from "../ui";
+import { LazyBoundary, LoadingPane, lazyNamed } from "../ui/lazy";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
@@ -37,6 +30,18 @@ import {
 
 // The Knowledge tab (and its graph library) loads with the first Knowledge tab, never with the app.
 const KnowledgeView = React.lazy(() => import("../knowledge/KnowledgeView"));
+// Every other tab but the agent chat loads with the first tab of its kind: the
+// terminal (xterm), the file browser (CodeMirror, the PDF and Parquet
+// viewers), the workflow editor (React Flow), the remote desktop (noVNC)… An
+// agent chat — the first paint on a phone — never waits on them.
+const TerminalView = lazyNamed(() => import("../terminal/TerminalView"), "TerminalView");
+const FileBrowser = lazyNamed(() => import("../files/FileBrowser"), "FileBrowser");
+const GitView = lazyNamed(() => import("../git/GitView"), "GitView");
+const TodoView = lazyNamed(() => import("../todo/TodoView"), "TodoView");
+const WorkflowEditorTab = lazyNamed(() => import("../workflows/WorkflowEditorTab"), "WorkflowEditorTab");
+const WhiteboardView = lazyNamed(() => import("../whiteboard/WhiteboardView"), "WhiteboardView");
+const BrowserView = lazyNamed(() => import("../browser/BrowserView"), "BrowserView");
+const DesktopView = lazyNamed(() => import("../desktop/DesktopView"), "DesktopView");
 
 /** Icon shown in a grid-cell header — mirrors the tab strip. */
 function cellIcon(tab: ProjectTab): React.ReactNode {
@@ -373,65 +378,63 @@ export const MainView: React.FC = () => {
                 </button>
               </div>
               <div className="min-h-0 flex-1">
-                {tab.type === "session" ? (
-                  <TerminalView session={tab.session} active={active} viewMode={viewMode} />
-                ) : tab.type === "agent-chat" ? (
-                  // `active={show}`, not `active={active}`: in grid view every
-                  // visible cell keeps its thread stream open (§7.1 ties the
-                  // stream to tab VISIBILITY), while a hidden tab drops it and
-                  // repaints from the held snapshot when it comes back.
-                  <AgentChatView
-                    session={tab.session}
-                    projectPath={ctx.kind === "project" ? ctx.project.path : ""}
-                    active={show}
-                  />
-                ) : tab.type === "git" ? (
-                  // active={show}: in grid view every VISIBLE cell stays live, not
-                  // only the focused one (TerminalView keeps focus-only semantics).
-                  // Git/Files tabs only ever exist in project context, so the
-                  // ternary just satisfies the type — ctx.project.path is defined.
-                  <GitView projectPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
-                ) : tab.type === "files" ? (
-                  <FileBrowser
-                    rootPath={ctx.kind === "project" ? ctx.project.path : ""}
-                    active={show}
-                    reveal={tab.reveal}
-                  />
-                ) : tab.type === "browser" ? (
-                  <BrowserView browser={tab.browser} active={active} />
-                ) : tab.type === "desktop" ? (
-                  <DesktopView
-                    desktop={tab.desktop}
-                    active={active}
-                    onLaunchApp={() =>
-                      openLaunchDialog({ projectPath: tab.desktop.projectPath, targetDesktopId: tab.desktop.id })
-                    }
-                    onCloseTab={() => void requestCloseTab(tab.id)}
-                  />
-                ) : tab.type === "whiteboard" ? (
-                  <WhiteboardView path={tab.path} title={tab.title} active={show} />
-                ) : tab.type === "knowledge" ? (
-                  <React.Suspense
-                    fallback={
-                      <div className="flex h-full w-full items-center justify-center gap-2 text-sm text-neutral-500">
-                        <Loader2 size={16} className="motion-safe:animate-spin" /> Opening the knowledge…
-                      </div>
-                    }
-                  >
-                    <KnowledgeView focus={tab.focus} active={show} />
-                  </React.Suspense>
-                ) : tab.type === "workflow" ? (
-                  <WorkflowEditorTab
-                    workflowId={tab.workflowId}
-                    title={tab.title}
-                    runId={tab.runId ?? null}
-                    projectPath={ctx.kind === "project" ? ctx.project.path : ""}
-                    active={active}
-                    show={show}
-                  />
-                ) : (
-                  <TodoView todoId={tab.todoId} active={active} />
-                )}
+                {/* One boundary per tab: a tab whose view is still loading
+                    never blanks the others. */}
+                <LazyBoundary>
+                  {tab.type === "session" ? (
+                    <TerminalView session={tab.session} active={active} viewMode={viewMode} />
+                  ) : tab.type === "agent-chat" ? (
+                    // `active={show}`, not `active={active}`: in grid view every
+                    // visible cell keeps its thread stream open (§7.1 ties the
+                    // stream to tab VISIBILITY), while a hidden tab drops it and
+                    // repaints from the held snapshot when it comes back.
+                    <AgentChatView
+                      session={tab.session}
+                      projectPath={ctx.kind === "project" ? ctx.project.path : ""}
+                      active={show}
+                    />
+                  ) : tab.type === "git" ? (
+                    // active={show}: in grid view every VISIBLE cell stays live, not
+                    // only the focused one (TerminalView keeps focus-only semantics).
+                    // Git/Files tabs only ever exist in project context, so the
+                    // ternary just satisfies the type — ctx.project.path is defined.
+                    <GitView projectPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
+                  ) : tab.type === "files" ? (
+                    <FileBrowser
+                      rootPath={ctx.kind === "project" ? ctx.project.path : ""}
+                      active={show}
+                      reveal={tab.reveal}
+                    />
+                  ) : tab.type === "browser" ? (
+                    <BrowserView browser={tab.browser} active={active} />
+                  ) : tab.type === "desktop" ? (
+                    <DesktopView
+                      desktop={tab.desktop}
+                      active={active}
+                      onLaunchApp={() =>
+                        openLaunchDialog({ projectPath: tab.desktop.projectPath, targetDesktopId: tab.desktop.id })
+                      }
+                      onCloseTab={() => void requestCloseTab(tab.id)}
+                    />
+                  ) : tab.type === "whiteboard" ? (
+                    <WhiteboardView path={tab.path} title={tab.title} active={show} />
+                  ) : tab.type === "knowledge" ? (
+                    <React.Suspense fallback={<LoadingPane label="Opening the knowledge…" />}>
+                      <KnowledgeView focus={tab.focus} active={show} />
+                    </React.Suspense>
+                  ) : tab.type === "workflow" ? (
+                    <WorkflowEditorTab
+                      workflowId={tab.workflowId}
+                      title={tab.title}
+                      runId={tab.runId ?? null}
+                      projectPath={ctx.kind === "project" ? ctx.project.path : ""}
+                      active={active}
+                      show={show}
+                    />
+                  ) : (
+                    <TodoView todoId={tab.todoId} active={active} />
+                  )}
+                </LazyBoundary>
               </div>
             </div>
           );

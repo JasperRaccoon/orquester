@@ -235,6 +235,16 @@ export const agentChatRoutes = {
    */
   threadHead: (sessionId: string): string => `${sessionBase(sessionId)}/head`,
   events: (sessionId: string): string => `${sessionBase(sessionId)}/events`,
+  /**
+   * `POST` {@link AgentRowsRequest} → {@link AgentRowsResponse}: load the rows a
+   * `?agentRows=on-demand` snapshot left out ({@link ThreadSnapshotPayload.omittedAgentIds})
+   * for some agents. The rows never come back on this response: the host writes ONE
+   * {@link AgentRowsFrame} into the stream the body names (its `synchronized.streamId`), in
+   * order with its live events. 404 `STREAM_NOT_FOUND` when that stream is gone (ask again on
+   * the next one); a host that predates the route answers its generic route-miss 404
+   * `THREAD_NOT_FOUND` ("No route for …").
+   */
+  agentRows: (sessionId: string): string => `${sessionBase(sessionId)}/agent-rows`,
   turnDiff: (sessionId: string, turnCount: number): string =>
     `${sessionBase(sessionId)}/turns/${turnCount}/diff`,
   item: (sessionId: string, itemId: string): string =>
@@ -359,6 +369,14 @@ export interface ThreadHistoryQuery {
   before?: string;
   /** Turns per page, clamped to `[1, THREAD_HISTORY_MAX_TURNS]`. */
   turns?: number;
+  /**
+   * With no usable `before`: the client's window came from a bounded snapshot
+   * cut at this cursor (`ThreadHistoryBounds.windowCut`) and has evicted rows
+   * since, so the page ends at the window's boundary as the host holds it now
+   * or at the cut, whichever is higher — never below a row that snapshot left
+   * out. Ignored with a `before`, and by a host that predates it.
+   */
+  windowCut?: string;
 }
 
 export const THREAD_HISTORY_DEFAULT_TURNS = 20;
@@ -399,7 +417,9 @@ export interface ThreadHistoryPage {
     /**
      * The id of the row at the page's upper boundary — the first row of the
      * log the page does NOT hold: the window's first row for a page asked
-     * without a cursor, the previous page's first row otherwise (a message's
+     * without a cursor (or a later row: such a page never ends below the cut a
+     * bounded snapshot may have named, and repeats what a window holds above
+     * it), the previous page's first row otherwise (a message's
      * first chunk when the boundary moved back to keep a message whole). The
      * client places every window row written before it in the history section,
      * so the timeline stays in log order when the page shares no row with the
@@ -1007,7 +1027,14 @@ export type AgentChatErrorCode =
    * it. A refusal of the moment, never recorded as a receipt: the same `commandId` may land at the
    * next idle point ({@link TurnCommandBody.ifIdle}).
    */
-  | "TURN_NOT_IDLE";
+  | "TURN_NOT_IDLE"
+  /**
+   * 404 — only `POST …/agent-rows` answers it: the thread has no open stream with that
+   * `streamId` (it closed, or the client is reconnecting). The client asks again on the stream
+   * it opens next. Its own code because a host that predates the route answers its generic
+   * route-miss 404 `THREAD_NOT_FOUND`, and the client must tell "ask again" from "never".
+   */
+  | "STREAM_NOT_FOUND";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -1019,7 +1046,8 @@ export const AGENT_CHAT_ERROR_CODES = [
   "INDEX_UNAVAILABLE",
   "ITEM_NOT_FOUND",
   "PROMPT_NOT_FOUND",
-  "TURN_NOT_IDLE"
+  "TURN_NOT_IDLE",
+  "STREAM_NOT_FOUND"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /**
@@ -1095,8 +1123,92 @@ export type AgentChatStreamFrame =
        * sequence.
        */
       hostInstanceId: string;
+      /**
+       * This connection's id, sent only on a stream opened with
+       * `?agentRows=on-demand` ({@link AGENT_ROWS_QUERY_PARAM}): what a
+       * `POST …/agent-rows` names to have its {@link AgentRowsFrame} written
+       * into this stream. Absent from a host that predates on-demand agent rows —
+       * which never omits any either. Additive: an older client ignores it.
+       */
+      streamId?: string;
     }
-  | HistoryImportFrame;
+  | HistoryImportFrame
+  | AgentRowsFrame;
+
+/**
+ * The opt-in of a §6.3 stream and of `GET …/thread`: `?agentRows=on-demand`.
+ * A snapshot then leaves out the rows only a SETTLED agent's own drill-in
+ * renders (`agent-rows.ts`: {@link ThreadSnapshotPayload.omittedAgentIds}
+ * names whose), and the client loads them per agent through
+ * `POST …/agent-rows` ({@link agentChatRoutes.agentRows}). A host that
+ * predates it ignores the parameter and sends the whole snapshot; a reader
+ * that does not send it — an older bundle, the daemon's own MCP and reply
+ * readers — gets the whole snapshot as before.
+ */
+export const AGENT_ROWS_QUERY_PARAM = "agentRows";
+/** The one value of {@link AGENT_ROWS_QUERY_PARAM}. */
+export const AGENT_ROWS_ON_DEMAND = "on-demand";
+export type AgentRowsMode = typeof AGENT_ROWS_ON_DEMAND;
+
+/** The mode a query value asks for; anything but {@link AGENT_ROWS_ON_DEMAND} asks for none. */
+export function agentRowsModeOf(value: unknown): AgentRowsMode | undefined {
+  return value === AGENT_ROWS_ON_DEMAND ? AGENT_ROWS_ON_DEMAND : undefined;
+}
+
+/** At most this many agents per `POST …/agent-rows`; a client batches beyond it. */
+export const AGENT_ROWS_MAX_AGENTS = 64;
+
+/**
+ * One {@link AgentRowsFrame}'s line stays under this (UTF-8 bytes): an agent
+ * whose rows pass it is sent its NEWEST rows only, marked `truncated`. The
+ * host writes one frame per agent, the next one only once the stream's
+ * undrained bytes are back under it as well — so a request, whatever it
+ * names, never trips the stream's 8 MiB budget
+ * ({@link AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES}) and the reconnect it forces.
+ */
+export const AGENT_ROWS_FRAME_MAX_BYTES = 2 * 1024 * 1024;
+
+/** `POST …/agent-rows` ({@link agentChatRoutes.agentRows}). No `commandId`: it changes no thread state, and a repeat only writes the same rows again. */
+export interface AgentRowsRequest {
+  /** The stream to write the frame into: its `synchronized.streamId`. */
+  streamId: string;
+  /** 1–{@link AGENT_ROWS_MAX_AGENTS} agent ids (roster ids, the rows' `agentId`). */
+  agentIds: string[];
+}
+
+/** Accepted: the frame is in the stream's ordered path (after `synchronized` when it has not gone live yet). */
+export interface AgentRowsResponse {
+  ok: true;
+}
+
+/**
+ * The rows the agents in `agentIds` own, as the host's fold holds them at
+ * `seq` — written into the ONE stream a `POST …/agent-rows` named, through its
+ * ordered path: every event at or below `seq` precedes it, every later one
+ * follows it. So it is exactly the state the client has applied when it lands,
+ * and the client REPLACES those agents' on-demand rows with `items` (`agent-rows.ts`:
+ * `applyAgentRows`) — a message streaming meanwhile is whole, never doubled.
+ *
+ * `items` are the snapshot's own projection (slimmed, §5.6), in the fold's
+ * order. `after[i]` places `items[i]`: the id of the nearest row before it in
+ * the host's window that every opted-in client holds (never an on-demand row),
+ * or `null` when there is none. Transient: never persisted, never sequenced
+ * (`seq` is the position, not a new one). A client that does not know the kind
+ * skips the line, as for every frame.
+ */
+export interface AgentRowsFrame {
+  kind: "agent-rows";
+  seq: number;
+  agentIds: string[];
+  items: ThreadItem[];
+  after: Array<string | null>;
+  /**
+   * The rows passed {@link AGENT_ROWS_FRAME_MAX_BYTES}: `items` are the
+   * newest of them, and the agent's older rows are not on this client. Its
+   * drill-in says so. Absent: every row the host's window holds.
+   */
+  truncated?: true;
+}
 
 /**
  * The stream's last line when it cannot be served at all — the thread read
@@ -1154,6 +1266,13 @@ export interface HistoryImportFrame {
  */
 export const AGENT_CHAT_HEARTBEAT_LINE = ":hb";
 export const AGENT_CHAT_HEARTBEAT_MS = 15_000;
+/**
+ * The daemon's own, faster heartbeat on the stream it forwards: a
+ * {@link AGENT_CHAT_HEARTBEAT_LINE} after this long without a byte, written
+ * between two lines only. A client that sees it may tell a dead link from a
+ * quiet thread sooner; one talking to an older daemon sees only the host's.
+ */
+export const AGENT_CHAT_DAEMON_HEARTBEAT_MS = 5_000;
 
 /**
  * Backpressure: if the response's write buffer exceeds this the host closes
@@ -1174,7 +1293,27 @@ export const AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 /** Query of the §6.3 stream and of `GET …/thread`. */
 export interface AgentChatEventsQuery {
   after?: number;
+  /**
+   * The snapshot the read may answer with (`ThreadReadWindow`): absent, the
+   * whole retained window, as every client before the parameter expects.
+   */
+  window?: ThreadReadWindow;
+  /** {@link AGENT_ROWS_QUERY_PARAM}: leave a settled agent's own rows out of a snapshot. */
+  agentRows?: AgentRowsMode;
 }
+
+/**
+ * Which window a §6.3 snapshot carries — `?window=` on `GET …/events` and `GET …/thread`.
+ * `"recent"`: the latest turns whole, and of the settled turns before them only the rows live
+ * state is read from — the rest a history page away, the snapshot's `history.beforeCursor`
+ * naming the first one (the agent host's `wire-window.ts`). Opt-in on both routes: without it
+ * the host sends the whole retained window, which every older client and the daemon's own
+ * readers expect. A host that predates the parameter ignores it, with the same result.
+ */
+export type ThreadReadWindow = "recent";
+
+/** The `window` value a client asks a bounded snapshot with. */
+export const THREAD_READ_WINDOW_RECENT: ThreadReadWindow = "recent";
 
 // ---------------------------------------------------------------------------
 // §6.3 reads

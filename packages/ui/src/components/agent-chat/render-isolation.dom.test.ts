@@ -1,7 +1,8 @@
 /**
  * Re-render isolation, counted: a streamed reply delta re-renders the
  * streaming row (and the timeline that lays it out) — never the chat view, its
- * composer or the composer's footer; a keystroke re-renders the composer's
+ * composer or the composer's footer; a subagent's progress re-renders the view
+ * that shows the roster — never a message row; a keystroke re-renders the composer's
  * field — never the footer chips, the chat view or the timeline. Counted with
  * `lib/render-probe.ts` on the real `AgentChatView`, its real thread store and
  * a scripted transport.
@@ -16,7 +17,7 @@ import { JSDOM } from "jsdom";
 import type { AgentChatStreamFrame, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
 import type { AgentChatTransport } from "../../lib/agent-chat/transport";
-import { ev, head, message, snapshot } from "../../lib/agent-chat/test-helpers";
+import { activity, ev, head, message, snapshot } from "../../lib/agent-chat/test-helpers";
 
 let act: typeof import("react").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -225,6 +226,46 @@ describe("re-render isolation", () => {
     assert.ok(
       dom.window.document.body.textContent?.includes("It is a small fix."),
       "the streamed text reached the screen"
+    );
+  });
+
+  it("a subagent's progress re-renders no message row", async () => {
+    const probe = countRenders();
+    try {
+      for (const [kind, extra] of [
+        ["task.started", {}],
+        ["task.progress", { summary: "Reading the auth module" }],
+        ["task.progress", { summary: "Reading the session store" }]
+      ] as const) {
+        seq += 1;
+        await act(async () => {
+          push({
+            kind: "event",
+            seq,
+            event: ev(
+              "thread.activity-appended",
+              {
+                activity: activity(
+                  kind,
+                  { taskId: "agent-1", taskType: "subagent", agentKind: "agent", title: "Audit", ...extra },
+                  { id: `task-${seq}`, tone: "info", turnId: "t1", agentId: "agent-1" }
+                )
+              },
+              { seq, threadId: SESSION_ID }
+            )
+          } as AgentChatStreamFrame);
+        });
+      }
+    } finally {
+      probe.stop();
+    }
+    const rendered = Object.fromEntries(probe.counts);
+    console.log("render counts for 3 roster ticks:", JSON.stringify(rendered));
+    assert.ok((rendered.AgentChatView ?? 0) > 0, "the roster moved, and the view that shows it re-rendered");
+    assert.equal(rendered.AssistantMessageRow ?? 0, 0, "a message row re-rendered for a roster tick");
+    assert.ok(
+      (dom.window.document.body.textContent ?? "").includes("It is a small fix."),
+      "the reply is still on screen"
     );
   });
 

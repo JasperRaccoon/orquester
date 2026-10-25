@@ -11,6 +11,7 @@
  */
 
 import {
+  AGENT_CHAT_DAEMON_HEARTBEAT_MS,
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_ERROR_CODES,
   type AgentChatStreamErrorLine,
@@ -28,23 +29,41 @@ import { backoffDelayMs } from "../connection/backoff";
  * `{ stream: true }` before pushing text in here.
  */
 export class NdjsonLineBuffer {
-  private buffer = "";
+  /**
+   * The open line's pieces, joined once when its newline arrives. Appending
+   * every chunk to one string and searching it from the start again made a
+   * multi-megabyte `snapshot` line cost O(n²) in its chunk count — seconds
+   * of CPU for a 4 MB line arriving in 1.4 KB pieces, which is how a slow
+   * mobile link (and a decompressed body) delivers it. Only the new chunk is
+   * searched now.
+   */
+  private parts: string[] = [];
 
   /** Feed a decoded chunk; returns every complete line it closed. */
   push(chunk: string): string[] {
-    this.buffer += chunk;
     const lines: string[] = [];
-    let newline = this.buffer.indexOf("\n");
+    let start = 0;
+    let newline = chunk.indexOf("\n");
     while (newline !== -1) {
-      lines.push(this.buffer.slice(0, newline));
-      this.buffer = this.buffer.slice(newline + 1);
-      newline = this.buffer.indexOf("\n");
+      const piece = chunk.slice(start, newline);
+      if (this.parts.length > 0) {
+        this.parts.push(piece);
+        lines.push(this.parts.join(""));
+        this.parts = [];
+      } else {
+        lines.push(piece);
+      }
+      start = newline + 1;
+      newline = chunk.indexOf("\n", start);
+    }
+    if (start < chunk.length) {
+      this.parts.push(start === 0 ? chunk : chunk.slice(start));
     }
     return lines;
   }
 
   reset(): void {
-    this.buffer = "";
+    this.parts = [];
   }
 }
 
@@ -108,6 +127,37 @@ export function parseStreamLine(line: string): StreamLine {
       if (typeof decoded.hostInstanceId !== "string") {
         return { kind: "malformed", line };
       }
+      // The stream's on-demand id (`streamId`) is additive: one that is not a
+      // non-empty string is no id, and the marker still stands.
+      if (decoded.streamId !== undefined && !(typeof decoded.streamId === "string" && decoded.streamId.length > 0)) {
+        const marker: Record<string, unknown> = { ...decoded };
+        delete marker.streamId;
+        return { kind: "frame", frame: marker as unknown as AgentChatStreamFrame };
+      }
+      return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
+    }
+    case "agent-rows": {
+      // What the reducer indexes on: the position, the agents, and one
+      // placement (a row id or null) per row, each row an item with an id.
+      const { seq, agentIds, items, after } = decoded;
+      if (
+        typeof seq !== "number" ||
+        !Array.isArray(agentIds) ||
+        !agentIds.every((id) => typeof id === "string" && id.length > 0) ||
+        !Array.isArray(items) ||
+        !items.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.id === "string" &&
+            (item.kind === "message" || item.kind === "activity") &&
+            typeof item.createdAt === "string"
+        ) ||
+        !Array.isArray(after) ||
+        after.length !== items.length ||
+        !after.every((id) => id === null || typeof id === "string")
+      ) {
+        return { kind: "malformed", line };
+      }
       return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
     }
     case "history-import": {
@@ -160,6 +210,60 @@ export function reconnectDelayMs(attempt: number, random: () => number = Math.ra
  * missing three in a row is a wedged proxy, not a quiet thread.
  */
 export const STREAM_STALL_TIMEOUT_MS = AGENT_CHAT_HEARTBEAT_MS * 3 + 5_000;
+
+/**
+ * The same window against the daemon's faster heartbeat
+ * ({@link AGENT_CHAT_DAEMON_HEARTBEAT_MS}): three missed beats and a margin.
+ * A mobile link that died without a FIN is noticed in 20 s instead of 50 s.
+ */
+export const LIVE_STREAM_STALL_TIMEOUT_MS = AGENT_CHAT_DAEMON_HEARTBEAT_MS * 3 + 5_000;
+
+/**
+ * Two heartbeats this far apart prove the daemon's cadence. Closer than the
+ * floor is one chunk carrying two beats (a proxy that held them), which
+ * proves nothing; the host's own beats are 15 s apart, far past the ceiling.
+ */
+const FAST_HEARTBEAT_MIN_GAP_MS = 1_000;
+const FAST_HEARTBEAT_MAX_GAP_MS = AGENT_CHAT_DAEMON_HEARTBEAT_MS * 2 - 1_000;
+
+export function isFastHeartbeatGap(gapMs: number): boolean {
+  return gapMs >= FAST_HEARTBEAT_MIN_GAP_MS && gapMs <= FAST_HEARTBEAT_MAX_GAP_MS;
+}
+
+/** What one connection has shown about itself, for {@link stallTimeoutFor}. */
+export interface StreamLiveness {
+  /** Its heartbeats came at the daemon's cadence ({@link isFastHeartbeatGap}). */
+  fastHeartbeat: boolean;
+  /** It reached `synchronized`: a reconnect now resumes by cursor, cheaply. */
+  synchronized: boolean;
+}
+
+/**
+ * How long a connection may stay silent before it is dropped and resumed.
+ *
+ * The short window applies only once the stream is both proven to beat fast
+ * and live: before `synchronized` the connection may be carrying a snapshot,
+ * and cutting it over a brief outage TCP would have ridden out would throw
+ * away everything received and start the snapshot over.
+ */
+export function stallTimeoutFor(liveness: StreamLiveness): number {
+  return liveness.fastHeartbeat && liveness.synchronized
+    ? LIVE_STREAM_STALL_TIMEOUT_MS
+    : STREAM_STALL_TIMEOUT_MS;
+}
+
+/**
+ * How long a connection may have been silent when the page wakes (visible
+ * again, back online) before it is taken for dead and resumed at once: a
+ * frozen tab's timers fire late, and a mobile OS drops a background socket
+ * without a word. Two missed fast beats for a live, fast stream; otherwise
+ * the stall window itself, which a timer that ran would already have hit.
+ */
+export function wakeStaleAfterMs(liveness: StreamLiveness): number {
+  return liveness.fastHeartbeat && liveness.synchronized
+    ? AGENT_CHAT_DAEMON_HEARTBEAT_MS * 2 + 2_000
+    : STREAM_STALL_TIMEOUT_MS;
+}
 
 // ---------------------------------------------------------------------------
 // Cursor rules (§6.3, §6.6)

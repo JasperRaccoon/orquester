@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "sideEffects": [
+    "**/*.css",
+    "**/opus-worker-shim.ts"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },

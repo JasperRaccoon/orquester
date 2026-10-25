@@ -79,7 +79,7 @@ describe("the stream reader", () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     const handle = transport.stream("s1", {}, { onFrame: (frame) => frames.push(frame) });
 
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?window=recent");
     transporter.latest.handlers.onData(
       line({ kind: "snapshot", thread: snapshot({ seq: 3 }) }) +
         ":hb\n" +
@@ -129,7 +129,7 @@ describe("the stream reader", () => {
     mock.timers.tick(1_000);
 
     assert.equal(transporter.streams.length, 2);
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&window=recent");
     handle.close();
   });
 
@@ -190,14 +190,14 @@ describe("the stream reader", () => {
       { after: 5, hostInstanceId: "h1" },
       { onFrame: () => {} }
     );
-    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=5");
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=5&window=recent");
 
     transporter.latest.handlers.onData(line({ kind: "synchronized", hostInstanceId: "h2" }));
     transporter.latest.handlers.onEnd();
     mock.timers.tick(1_000);
     assert.equal(
       transporter.latest.path,
-      "/api/sessions/s1/events",
+      "/api/sessions/s1/events?window=recent",
       "a changed instance id is a resync, not a resume"
     );
     handle.close();
@@ -314,6 +314,97 @@ describe("the stream reader", () => {
   });
 });
 
+describe("stream liveness on a bad link", () => {
+  const synchronizedLine = line({ kind: "synchronized", hostInstanceId: "h1" });
+
+  it("drops a live stream on the daemon's fast heartbeat after 20 s of silence", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+    mock.timers.tick(19_999);
+    assert.equal(transporter.streams[0]?.closed, false);
+    mock.timers.tick(1);
+    assert.equal(transporter.streams[0]?.closed, true, "three missed fast beats and a margin");
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, 2);
+    handle.close();
+  });
+
+  it("keeps the patient window before synchronized: a snapshot in flight is not thrown away", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(':hb\n{"kind":"snapshot","thread":');
+    mock.timers.tick(49_999);
+    assert.equal(transporter.streams[0]?.closed, false);
+    mock.timers.tick(1);
+    assert.equal(transporter.streams[0]?.closed, true);
+    handle.close();
+  });
+
+  it("keeps the patient window for the host's own 15 s beats and for beats a proxy held together", () => {
+    for (const [gapMs, chunk] of [
+      [15_000, ":hb\n"],
+      [0, ":hb\n:hb\n"]
+    ] as const) {
+      mock.timers.reset();
+      const transporter = new FakeTransporter();
+      const transport = createAgentChatTransport(transporter);
+      mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const handle = transport.stream("s1", {}, { onFrame: () => {} });
+      transporter.latest.handlers.onData(chunk);
+      mock.timers.tick(gapMs);
+      transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+      mock.timers.tick(49_999);
+      assert.equal(transporter.streams[0]?.closed, false, `a ${gapMs} ms gap proves no fast cadence`);
+      mock.timers.tick(1);
+      assert.equal(transporter.streams[0]?.closed, true);
+      handle.close();
+    }
+  });
+
+  it("a wake resumes a live stream that went silent, and leaves a delivering one alone", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", { after: 3 }, { onFrame: () => {} });
+    transporter.latest.handlers.onData(":hb\n");
+    mock.timers.tick(5_000);
+    transporter.latest.handlers.onData(`:hb\n${synchronizedLine}`);
+    mock.timers.tick(4_000);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, false, "bytes 4 s ago: alive");
+    mock.timers.tick(8_001);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, true, "12 s without a byte on a 5 s heartbeat: dead");
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, 2);
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=3&window=recent", "resumed by cursor");
+    handle.close();
+  });
+
+  it("a wake leaves a host-cadence stream alone until its stall window has passed", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onData(synchronizedLine);
+    mock.timers.tick(30_000);
+    wakeReconnects();
+    assert.equal(transporter.streams[0]?.closed, false);
+    handle.close();
+    wakeReconnects();
+    assert.equal(transporter.streams.length, 1, "a closed stream ignores wakes");
+  });
+});
+
 describe("commands", () => {
   it("posts to the right route and returns the receipt", async () => {
     const transporter = new FakeTransporter();
@@ -370,6 +461,25 @@ describe("commands", () => {
     assert.deepEqual(
       transporter.requests.map((request) => request.query),
       [{ ignoreWhitespace: 0 }, { ignoreWhitespace: 1 }, { ignoreWhitespace: 0 }]
+    );
+  });
+
+  it("asks a thread read for the window and cursor it was given, and nothing else", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    for (let at = 0; at < 3; at += 1) {
+      transporter.responses.push({ status: 200, ok: true, data: { kind: "events", seq: 1, events: [] } });
+    }
+    await transport.read("s1");
+    await transport.read("s1", { window: "recent" });
+    await transport.read("s1", { after: 4, window: "recent" });
+    assert.deepEqual(
+      transporter.requests.map((request) => [request.path, request.query]),
+      [
+        ["/api/sessions/s1/thread", undefined],
+        ["/api/sessions/s1/thread", { window: "recent" }],
+        ["/api/sessions/s1/thread", { after: 4, window: "recent" }]
+      ]
     );
   });
 });
@@ -714,5 +824,55 @@ describe("attachments", () => {
         return true;
       }
     );
+  });
+});
+
+describe("on-demand agent rows", () => {
+  it("opts the stream in on every connection, a resume included, and passes the agent-rows frame through without moving the cursor", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const frames: AgentChatStreamFrame[] = [];
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", { agentRows: "on-demand" }, { onFrame: (frame) => frames.push(frame) });
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?window=recent&agentRows=on-demand");
+    transporter.latest.handlers.onData(
+      line({ kind: "event", seq: 7, event: ev("thread.reverted", { turnCount: 1 }, { seq: 7 }) }) +
+        line({ kind: "synchronized", hostInstanceId: "h1", streamId: "s-1" }) +
+        line({ kind: "agent-rows", seq: 7, agentIds: ["a"], items: [], after: [] })
+    );
+    assert.deepEqual(frames.map((frame) => frame.kind), ["event", "synchronized", "agent-rows"]);
+    assert.equal(handle.lastSeq, 7);
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(1_000);
+    assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7&window=recent&agentRows=on-demand");
+    handle.close();
+  });
+
+  it("reads the thread with the opt-in, and posts a request for an agent's rows", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({ status: 200, ok: true, data: { kind: "snapshot", thread: snapshot({ seq: 3 }) } });
+    await transport.read("s1", { agentRows: "on-demand" });
+    assert.deepEqual(transporter.requests.at(-1)?.query, { agentRows: "on-demand" });
+    transporter.responses.push({ status: 200, ok: true, data: { kind: "snapshot", thread: snapshot({ seq: 3 }) } });
+    await transport.read("s1");
+    assert.equal(transporter.requests.at(-1)?.query, undefined, "a read without it asks for the whole snapshot");
+    transporter.responses.push({ status: 200, ok: true, data: { ok: true } });
+    assert.deepEqual(await transport.requestAgentRows!("s1", { streamId: "s-1", agentIds: ["a"] }), { ok: true });
+    const posted = transporter.requests.at(-1)!;
+    assert.equal(posted.method, "POST");
+    assert.equal(posted.path, "/api/sessions/s1/agent-rows");
+    assert.deepEqual(posted.body, { streamId: "s-1", agentIds: ["a"] });
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "STREAM_NOT_FOUND", message: "That stream is no longer open." } }
+    });
+    await assert.rejects(transport.requestAgentRows!("s1", { streamId: "s-1", agentIds: ["a"] }), (error: unknown) => {
+      assert.ok(error instanceof AgentChatCommandError);
+      assert.equal(error.status, 404);
+      assert.equal(error.code, "STREAM_NOT_FOUND");
+      return true;
+    });
   });
 });

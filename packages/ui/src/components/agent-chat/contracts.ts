@@ -240,7 +240,7 @@ export interface ChatTimelineProps {
  */
 export type TimelineScrollPosition = Pick<
   RememberedTimelinePosition,
-  "rowId" | "offsetWithinRow" | "scrollOffset" | "atEnd"
+  "rowId" | "turnId" | "offsetWithinRow" | "scrollOffset" | "atEnd"
 >;
 
 export interface ChatComposerProps {
