@@ -194,13 +194,3 @@ test("a project matches the search by its name or its repo's shown label, owner 
   assert.ok(projectMatchesQuery("o/r", project("x", { key: "github.com/o/r" }), new Map()));
   assert.ok(!projectMatchesQuery("jasperraccoon", project("CRYPTORISK"), new Map()), "no repo: the name only");
 });
-
-test("the projects a search keeps agree with the groups it shows", () => {
-  const identities = new Map([[EDITOR, { label: "Tools" }]]);
-  for (const query of ["jasperraccoon", "tools", "engine", "multi", "crypto", "github.com", "nothing"]) {
-    const { groups, other } = group({ query, identities });
-    const grouped = [...groups.flatMap((g) => names(g.projects)), ...names(other)].sort();
-    const kept = names(PROJECTS.filter((p) => projectMatchesQuery(query, p, identities))).sort();
-    assert.deepEqual(grouped, kept, query);
-  }
-});

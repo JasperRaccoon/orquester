@@ -490,6 +490,10 @@ describe("claude history projection — a compaction summary is a marker, not a 
     assert.equal(markers.length, 1, "one marker for one compaction");
     assert.equal(markers[0]!.payload.state, "compacted");
     assert.equal(markers[0]!.payload.summary, SUMMARY);
+    const userTexts = allOf(events, "item.completed")
+      .filter((event) => event.payload.itemType === "user_message")
+      .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
+    assert.deepEqual(userTexts, ["hello", "carry on"]);
     assert.equal(
       markers[0]!.raw?.source,
       HISTORICAL_RAW_SOURCE,
@@ -497,13 +501,6 @@ describe("claude history projection — a compaction summary is a marker, not a 
     );
   });
 
-  it("never replays it as a user message the user never wrote", () => {
-    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
-    const userTexts = allOf(events, "item.completed")
-      .filter((event) => event.payload.itemType === "user_message")
-      .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
-    assert.deepEqual(userTexts, ["hello", "carry on"]);
-  });
 });
 
 describe("claude history projection — a task notification is an update, not a user turn", () => {
@@ -561,16 +558,12 @@ describe("claude history projection — a task notification is an update, not a 
     }
   ];
 
-  it("never replays it as a user message the user never wrote", () => {
+  it("replays each notification as the task.completed row the live stream makes of it", () => {
     const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
     const userTexts = allOf(events, "item.completed")
       .filter((event) => event.payload.itemType === "user_message")
       .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
     assert.deepEqual(userTexts, ["run the tests"]);
-  });
-
-  it("replays each notification as the task.completed row the live stream makes of it", () => {
-    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
     const completed = allOf(events, "task.completed");
     assert.deepEqual(
       completed.map((event) => ({ turnId: event.turnId, ...event.payload })),

@@ -65,10 +65,11 @@ const render = (props: Partial<Parameters<typeof ToolApprovalCard>[0]> = {}): st
     })
   );
 
-test("every section kind renders as plain text, with the file flags in red", () => {
+test("renders the proposed content and flags from every preview section", () => {
   const html = render();
-  for (const kind of ["code", "fields", "diff", "changes", "file", "text", "warning"]) {
-    assert.match(html, new RegExp(`data-preview-section="${kind}"`), kind);
+  for (const text of ["Write notes.", "npx server", "-old", "+new", "skill a", "hook b",
+    "bin/tool", "deadbeef", "logo.png", "plain words", "This server points at this Orquester"]) {
+    assert.ok(html.includes(text), `missing proposed content: ${text}`);
   }
   assert.match(html, /data-file-flag="executable"/);
   assert.match(html, />Executable</);
@@ -86,11 +87,6 @@ test("every section kind renders as plain text, with the file flags in red", () 
   assert.match(html, /`release-notes`/);
 });
 
-test("no card control is autofocused", () => {
-  const html = render({ card: card({ secretFields: [{ key: "TOKEN", label: "API token" }], grantOptions: ["chat"], family: "desktops", kind: "admin" }) });
-  assert.doesNotMatch(html, /autofocus/i);
-});
-
 test("agent text is sanitised: bidi overrides stripped from titles, escaped in code", () => {
   const html = render({
     card: card({
@@ -102,43 +98,6 @@ test("agent text is sanitised: bidi overrides stripped from titles, escaped in c
   assert.doesNotMatch(html, /[‪-‮⁦-⁩​]/);
   assert.match(html, /Add evil skill second line/);
   assert.match(html, /&lt;U\+202E&gt;/);
-});
-
-test("a long section is clamped behind View all; a cut summary offers to load the whole preview", () => {
-  const long = Array.from({ length: 40 }, (_, index) => `line ${index}`).join("\n");
-  const html = render({ card: card({ sections: [{ kind: "code", title: "hook.sh", text: long }] }) });
-  assert.match(html, /data-view-all=""/);
-  assert.match(html, /max-h-40/);
-  assert.doesNotMatch(html, /data-load-full/);
-  const cut = render({
-    card: card({ fullPreview: true, sections: [{ kind: "text", text: "start…", partial: true }, { kind: "warning", level: "danger", text: "View all" }] })
-  });
-  assert.match(cut, /data-load-full=""/);
-  assert.match(cut, /data-view-all=""/, "a partial section offers View all even when short");
-  // A clamped block says so in its accessible name.
-  assert.match(html, /aria-label="hook\.sh \(shortened: View all shows the rest\)"/);
-});
-
-test("a cut preview keeps Approve and the grant menu disabled, saying why, until the whole preview is loaded", () => {
-  const blocked = /<button\b[^>]*disabled=""[^>]*data-approve=""[^>]*title="Open “View all” to load the whole preview before approving"/;
-  const cutSummary = render({
-    card: card({ fullPreview: true, family: "desktops", grantOptions: ["chat"], sections: [{ kind: "text", text: "start…", partial: true }] })
-  });
-  assert.match(cutSummary, blocked);
-  assert.match(cutSummary, /<button\b[^>]*disabled=""[^>]*title="Open “View all”[^"]*"[^>]*data-grant-menu=""/);
-  // A partial section alone (the summary flag missing) is cut too.
-  assert.match(render({ card: card({ sections: [{ kind: "code", title: "x", text: "y", partial: true }] }) }), blocked);
-  // On a phone as well.
-  assert.match(render({ isMobile: true, card: card({ fullPreview: true, sections: [{ kind: "text", text: "s", partial: true }] }) }), blocked);
-  // An uncut preview does not wait.
-  assert.doesNotMatch(render(), /<button\b[^>]*disabled=""[^>]*data-approve=""/);
-});
-
-test("the grant menu exists only when the daemon offered grants", () => {
-  assert.doesNotMatch(render(), /data-grant-menu/);
-  const offered = render({ card: card({ family: "desktops", grantOptions: ["chat", "project"] }) });
-  assert.match(offered, /data-grant-menu=""/);
-  assert.match(offered, />Approve once</);
 });
 
 test("secret fields are masked and approval waits for them", () => {

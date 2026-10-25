@@ -9,8 +9,7 @@
  * animated PNG, an image that already fits, one the browser cannot decode, and
  * any result that would not be smaller.
  *
- * The decisions are pure functions; the browser's decode and encode sit behind
- * `ImageCodec` so they can be faked in tests.
+ * Browser decoding applies EXIF orientation before the resized image is drawn.
  */
 
 /**
@@ -19,12 +18,12 @@
  * unchanged, so one large paste breaks every later request in that thread.
  */
 // Adapted from T3 Code (MIT): packages/client-runtime/src/imageAttachmentSize.ts
-export const IMAGE_ATTACHMENT_MAX_EDGE = 2000;
+const IMAGE_ATTACHMENT_MAX_EDGE = 2000;
 
 // Adapted from T3 Code (MIT): apps/mobile/src/lib/composerImageFit.ts
-export const PHOTO_JPEG_QUALITY = 0.85;
+const PHOTO_JPEG_QUALITY = 0.85;
 
-export type DownscalableImageMimeType = "image/png" | "image/jpeg";
+type DownscalableImageMimeType = "image/png" | "image/jpeg";
 
 export function downscalableImageMimeType(mimeType: string): DownscalableImageMimeType | null {
   const normalized = mimeType.toLowerCase();
@@ -34,7 +33,7 @@ export function downscalableImageMimeType(mimeType: string): DownscalableImageMi
 }
 
 /** The size to draw at, or null when the image already fits. */
-export function fitImageAttachmentSize(size: {
+function fitImageAttachmentSize(size: {
   readonly width: number;
   readonly height: number;
 }): { width: number; height: number } | null {
@@ -54,7 +53,7 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
  * would keep only its first frame. Bytes that are not a readable PNG count as
  * animated, so an unknown file is left alone rather than flattened.
  */
-export function isAnimatedPng(bytes: Uint8Array): boolean {
+function isAnimatedPng(bytes: Uint8Array): boolean {
   if (bytes.length < PNG_SIGNATURE.length) return true;
   for (let i = 0; i < PNG_SIGNATURE.length; i += 1) {
     if (bytes[i] !== PNG_SIGNATURE[i]) return true;
@@ -77,7 +76,7 @@ const EXTENSIONS: Record<DownscalableImageMimeType, readonly string[]> = {
 };
 
 /** `name` with an extension that matches `mimeType` (kept when it already does). */
-export function downscaledFileName(name: string, mimeType: DownscalableImageMimeType): string {
+function downscaledFileName(name: string, mimeType: DownscalableImageMimeType): string {
   const allowed = EXTENSIONS[mimeType];
   const dot = name.lastIndexOf(".");
   const stem = dot > 0 ? name.slice(0, dot) : name;
@@ -87,13 +86,13 @@ export function downscaledFileName(name: string, mimeType: DownscalableImageMime
 }
 
 /** A decoded image, already turned upright by its EXIF orientation. */
-export interface DecodedImage {
+interface DecodedImage {
   readonly width: number;
   readonly height: number;
   close(): void;
 }
 
-export interface ImageCodec<D extends DecodedImage = DecodedImage> {
+interface ImageCodec<D extends DecodedImage = DecodedImage> {
   decode(file: Blob): Promise<D>;
   encode(
     image: D,
@@ -107,10 +106,8 @@ export interface ImageCodec<D extends DecodedImage = DecodedImage> {
  * The file to upload for `file`: a smaller re-encode when it is a large PNG or
  * JPEG, otherwise `file` itself. Never throws; a failure keeps the original.
  */
-export async function prepareImageForUpload(
-  file: File,
-  codec: ImageCodec | null = browserImageCodec()
-): Promise<File> {
+export async function prepareImageForUpload(file: File): Promise<File> {
+  const codec = browserImageCodec();
   const mimeType = downscalableImageMimeType(file.type);
   if (mimeType === null || codec === null) return file;
   try {

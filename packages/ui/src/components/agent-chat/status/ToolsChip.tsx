@@ -33,8 +33,8 @@ export function ToolsChip({ sessionId }: { sessionId: string }): React.ReactElem
   return <ToolsChipView sessionId={sessionId} data={entry.data} dismissOn={dismissOn} />;
 }
 
-/** The chip for loaded data — what a render check draws. */
-export function ToolsChipView({
+/** The chip for loaded data. */
+function ToolsChipView({
   sessionId,
   data,
   dismissOn

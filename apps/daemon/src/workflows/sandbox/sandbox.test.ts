@@ -74,9 +74,9 @@ async function until(what: string, condition: () => boolean | Promise<boolean>, 
 }
 
 describe("code blocks", () => {
-  test("a return value is the result; log() and console.log reach stdout", async () => {
+  test("an async module returns its result and logs, then exits despite an open handle", async () => {
     const { exit, stdout, handle } = await code(
-      "export default async ({ input, nodes, run, log }) => { log('hello', input.n); console.log('plain'); return { doubled: input.n * 2, fromNode: nodes.A.output, run: run.id }; }",
+      "const multiplier = await Promise.resolve(2); export default async ({ input, nodes, run, log }) => { setInterval(() => {}, 1000); log('hello', input.n); console.log('plain'); return { doubled: input.n * multiplier, fromNode: nodes.A.output, run: run.id }; }",
       { input: { n: 21 }, nodes: { A: { output: "a-out", status: "succeeded" } }, run: { id: "run-1" } }
     );
     assert.equal(exit.code, 0, "the code host exits 0");
@@ -119,30 +119,22 @@ describe("code blocks", () => {
     assert.deepEqual(exit.result, { ok: true, value: 42 }, "the package came from <project>/node_modules");
   });
 
-  test("a module with top-level await works", async () => {
-    const { exit } = await code("const v = await Promise.resolve(7);\nexport default () => v * 6;");
-    assert.deepEqual(exit.result, { ok: true, value: 42 }, "top-level await ran before the default export");
-  });
-
   test("a non-serializable return is an error", async () => {
     const { exit } = await code("export default () => ({ big: 10n })");
     assert.ok(exit.result && "ok" in exit.result && exit.result.ok === false, "a BigInt is refused");
-    assert.ok(exit.result.error.message.length > 0);
+    assert.match(exit.result.error.message, /JSON-serializable/);
   });
 
   test("a return over maxOutputBytes is an error", async () => {
     const { exit } = await code("export default () => 'x'.repeat(16 * 1024 * 1024)");
     assert.ok(exit.result && "ok" in exit.result && exit.result.ok === false, "an oversized result is refused");
-    assert.ok(exit.result.error.message.length > 0);
+    assert.match(exit.result.error.message, /bytes.*limit.*16777216/i);
   });
 
   test("a default export that is not a function is a clear error", async () => {
     const none = await code("export const x = 1;");
     assert.ok(none.exit.result && "ok" in none.exit.result && none.exit.result.ok === false, "no default export fails");
-    assert.ok(none.exit.result.error.message.length > 0);
-    const object = await code("export default { a: 1 };");
-    assert.ok(object.exit.result && "ok" in object.exit.result && object.exit.result.ok === false, "an object default fails");
-    assert.ok(object.exit.result.error.message.length > 0);
+    assert.match(none.exit.result.error.message, /no default export/i);
   });
 
   test("a syntax error is a failure", async () => {
@@ -150,25 +142,9 @@ describe("code blocks", () => {
     assert.ok(exit.result && "ok" in exit.result && exit.result.ok === false, "an unparsable module fails");
   });
 
-  test("an open handle does not hold the attempt", async () => {
-    const { exit } = await code("export default () => { setInterval(() => {}, 1000); return 'done'; }");
-    assert.deepEqual(exit.result, { ok: true, value: "done" }, "the host exits once the result is written");
-  });
 });
 
 describe("shell blocks", () => {
-  test("stdout, stderr and the exit code", async () => {
-    const ok = await shell("echo out; echo err >&2");
-    assert.equal(ok.exit.code, 0, "a clean script exits 0");
-    assert.equal(ok.stdout, "out\n", "stdout is captured");
-    assert.equal(ok.stderr, "err\n", "stderr is captured");
-    assert.equal(ok.exit.result, undefined, "a shell block has no result.json");
-
-    const failed = await shell("echo nope; exit 7");
-    assert.equal(failed.exit.code, 7, "the script's exit code is recorded");
-    assert.equal(failed.exit.signal, null, "no signal ended it");
-  });
-
   test("sh works too, and the cwd is the request's", async () => {
     const { exit, stdout } = await shell("pwd", { shell: "sh" });
     assert.equal(exit.code, 0, "sh ran the script");

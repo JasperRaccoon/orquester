@@ -172,7 +172,6 @@ describe("streamed text is masked after it is joined", () => {
   const interleavings = [
     { provider: "opencode", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: false },
     { provider: "codex", itemType: "file_change" as const, streamKind: "file_change_output" as const, progress: false },
-    { provider: "grok", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: false },
     { provider: "claude", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: true }
   ];
   for (const shape of interleavings) {

@@ -6,8 +6,7 @@ import { after, describe, it } from "node:test";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 import { GROK_USER_SKILL_ROOTS } from "../../agent-isolation/grok.ts";
 import { grokPreparedSectionSchema } from "../manifest/grok.ts";
-import { preparerFor } from "../preparer.ts";
-import { GROK_PREPARER_VERSION, grokPreparer } from "./grok.ts";
+import { grokPreparer } from "./grok.ts";
 import { GROK_FIXTURE_SECRETS, makeGrokProfileFixture } from "./grok.testing.ts";
 
 const roots: string[] = [];
@@ -42,10 +41,8 @@ async function prepare(settings: Parameters<typeof makeGrokProfileFixture>[1] = 
 }
 
 describe("Grok preparer", () => {
-  it("is registered, shared by every account, versioned and reads the Global config.toml", () => {
-    assert.equal(preparerFor("grok"), grokPreparer);
+  it("shares preparations across accounts and tracks the Global config.toml", () => {
     assert.equal(grokPreparer.perAccount, false);
-    assert.equal(grokPreparer.version, GROK_PREPARER_VERSION);
     const homes = { grokHome: "/h/.grok" } as Parameters<NonNullable<typeof grokPreparer.inputs>>[0]["systemHomes"];
     assert.deepEqual(grokPreparer.inputs?.({ agent: "grok", accountKey: "shared", accountHome: null, systemHomes: homes, appdir: "/a" }), [
       "/h/.grok/config.toml"

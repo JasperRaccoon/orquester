@@ -6,7 +6,6 @@ import type { ThreadMessageItem,Turn } from "@orquester/api/agent-chat";
 import type { AgentChatTimelineRow } from "./contracts";
 import {
 createEscapeSequence,
-createRewindTargetsMemo,
 deriveRewindTargets
 } from "./rewind.logic";
 
@@ -105,22 +104,5 @@ describe("createEscapeSequence", () => {
     sequence.press(1_000);
     sequence.reset();
     assert.equal(sequence.press(1_100), false);
-  });
-});
-
-describe("createRewindTargetsMemo", () => {
-  it("answers the same list by identity while the rows change but the targets do not", () => {
-    const targetsOf = createRewindTargetsMemo();
-    const turns = [turn("t1", "u1")];
-    const first = targetsOf([userRow("u1", "first", 0)], turns);
-    assert.equal(first.length, 1);
-    // A streamed delta: new rows, the same rewindable messages.
-    const rows = [userRow("u1", "first", 0), userRow("a1", "reply")];
-    assert.equal(targetsOf(rows, turns), first);
-    assert.equal(targetsOf(rows, turns), first, "the same inputs derive nothing again");
-    // A new prompt moves the list.
-    const grown = targetsOf([...rows, userRow("u2", "second", 1)], [...turns, turn("t2", "u2")]);
-    assert.notEqual(grown, first);
-    assert.deepEqual(grown.map((target) => target.messageId), ["u2", "u1"]);
   });
 });

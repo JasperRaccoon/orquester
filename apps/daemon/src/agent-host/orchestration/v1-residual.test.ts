@@ -356,7 +356,8 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
   });
 
   it("imports a long history and tells the tab how far it is", async () => {
-    const turns = Array.from({ length: 300 }, (_, index) => ({
+    // Four runtime events per turn: just over the 500-event import chunk.
+    const turns = Array.from({ length: 126 }, (_, index) => ({
       id: `long-${index}`,
       items: [
         { role: "user", text: `question ${index}` },
@@ -393,13 +394,13 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     release();
     await host.settle();
 
-    assert.equal(messages(host, threadId).length, 600, "every message landed, in order");
-    assert.equal(messages(host, threadId)[599]?.text, "answer 299");
+    assert.equal(messages(host, threadId).length, 252, "every message landed, in order");
+    assert.equal(messages(host, threadId)[251]?.text, "answer 125");
     assert.equal(progress[0]?.phase, "reading", "the screen is up before the history is read");
     const importing = progress.filter((step) => step.phase === "importing");
     assert.ok(importing.length > 1, "progress moves during the import");
-    assert.ok(importing.every((step) => step.total === 1200));
-    assert.deepEqual(progress.at(-1), { phase: "done", done: 1200, total: 1200 });
+    assert.ok(importing.every((step) => step.total === 504));
+    assert.deepEqual(progress.at(-1), { phase: "done", done: 504, total: 504 });
     await host.stop();
   });
 });

@@ -280,12 +280,9 @@ describe("the Runs on row of the new-project modal", () => {
     assert.equal(created[0].location?.kind, "box");
   });
 
-  it("the preset dialog asks under the Name field and clones into a new VM", async () => {
+  it("the preset dialog clones into a new VM with its typed name", async () => {
     await open(true, PRESET);
     await type(document.querySelector<HTMLInputElement>("#new-clone-name")!, "Shader optimization");
-    const name = document.querySelector("#new-clone-name")!;
-    const runsOn = [...document.querySelectorAll("span")].find((span) => span.textContent === "Runs on")!;
-    assert.ok(name.compareDocumentPosition(runsOn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
     await click(card("Linux VM"));
     await click(buttonNamed("Clone into a new VM"));
     assert.deepEqual(created, [

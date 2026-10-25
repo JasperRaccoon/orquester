@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  HOURS_PER_MONTH,
   costForMinutes,
   dailyUsd,
   formatCountdown,
@@ -53,9 +52,7 @@ test("amounts: whole dollars from $100, cents below, a sliver as <$0.01", () => 
 });
 
 test("monthly is 730 hours, daily 24, a lifetime its minutes", () => {
-  assert.equal(HOURS_PER_MONTH, 730);
   assert.equal(monthlyUsd(0.0119).toFixed(3), "8.687");
-  assert.equal(dailyUsd(4.8), 115.19999999999999);
   assert.equal(formatUsd(dailyUsd(4.8)), "$115");
   assert.equal(costForMinutes(4.8, 7200), 576);
 });

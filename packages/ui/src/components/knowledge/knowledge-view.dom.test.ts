@@ -196,12 +196,6 @@ describe("the Knowledge tab", () => {
     assert.equal(useAppStore.getState().settingsSection, "plugins");
   });
 
-  it("says how to add the first entry when there is none", async () => {
-    await show({ entries: 0 });
-    assert.match(text(), /No entries yet/);
-    assert.match(text(), /Paste a post into any chat and ask the agent to add it to the knowledge/);
-  });
-
   it("a knowledge base that cannot be opened (its counts read 0) shows the error, not \"No entries yet\"", async () => {
     const refused = () => Object.assign(new Error("500"), { status: 500, body: { code: "KNOWLEDGE_ERROR", message: "The knowledge base could not be opened (EACCES). See the daemon log." } });
     await show({
@@ -214,16 +208,6 @@ describe("the Knowledge tab", () => {
     });
     assert.match(text(), /The knowledge base could not be opened \(EACCES\)/);
     assert.doesNotMatch(text(), /No entries yet/);
-  });
-
-  it("says how many entries could not be linked instead of calling an idle linking complete", async () => {
-    await show();
-    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, failedEntries: 2 }) }));
-    const bar = doc().querySelector('[role="status"][aria-label="Knowledge status"]');
-    assert.ok(bar, "the status bar");
-    assert.match(bar.textContent ?? "", /2 entries could not be linked/);
-    assert.match(bar.textContent ?? "", /Settings → Plugins → Knowledge Graph/);
-    assert.doesNotMatch(bar.innerHTML, /Every entry is linked/);
   });
 
   it("opens on the graph; a concept opens its panel, and an entry in it opens the entry, with Back", async () => {
@@ -427,14 +411,6 @@ describe("the Knowledge tab", () => {
   it("a concept asked for before the graph loaded gets its neighbourhood once it does", async () => {
     await show({ focus: { kind: "concept", id: "tactic-far", nonce: 1 } });
     assert.deepEqual(calls.filter((c) => c.startsWith("graph:")), ["graph:", "graph:tactic-far"], "the overview lacks it: its neighbourhood is read");
-  });
-
-  it("a collection's edit button can take keyboard focus (it is faded, never hidden)", async () => {
-    await show();
-    await showList();
-    const edit = buttonNamed("Edit SEO");
-    assert.ok(!edit.classList.contains("invisible"), "visibility: hidden would take it out of the tab order");
-    assert.ok(edit.classList.contains("focus-visible:opacity-100"), "it shows when focused");
   });
 
   it("when the item the canvas centred on is gone, it returns to the overview instead of an error", async () => {

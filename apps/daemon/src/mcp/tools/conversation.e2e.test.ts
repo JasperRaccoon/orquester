@@ -1,19 +1,5 @@
-/**
- * The review scenario end to end (unified MCP design 2026-10-15 §8.7, §14.2 item 11): a Claude chat
- * opens a Codex chat to review its work and the two talk to each other — through the catalog tools,
- * THE executor, callers derived as the chat route derives them (`buildThreadCaller`: mode, planning,
- * the running turn's exchange), and Task 5's real services: the `ReplyRouter` (reply subscriptions,
- * persisted, CAS) and the `LineageService` delivery queue, behind the daemon's routes on a fake host.
- *
- * 1. Claude ("Implement auth", full-access) calls `create_session {agent: "codex", runtimeMode:
- *    "approval-required", title: "Codex review", prompt, reply: "notify"}` — an `opened`,
- *    `agentCreated` child; its first turn is hop 1.
- * 2. Claude ends its turn; Codex's review lands in Claude as `[Reply from thread "Codex review" …]`
- *    (hop 2).
- * 3. Claude, in that turn, sends `send_message {reply: "wait"}` (hop 3) and gets Codex's answer;
- *    meanwhile Codex asking Claude back is refused: never broader (§5.3) while Codex runs
- *    approval-required, and `WAIT_CYCLE` once the user raised its mode.
- * 4. At hop 8 the next agent-caused turn is refused `EXCHANGE_LIMIT`.
+/** Delegate result delivery through the real reply router and lineage queue.
+ * The full review/notify/wait/exchange workflow is owned by ../scenarios.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -27,8 +13,6 @@ import type { EventMessage, SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   parseThreadMessage,
-  THREAD_MESSAGE_CONTEXT_KIND,
-  THREAD_REPLY_CONTEXT_KIND,
   type CallerPrincipal,
   type CausedBy,
   type ThreadItem,
@@ -40,7 +24,6 @@ import { gateSessionCreateBody } from "../../agent-chat/lineage-routes.ts";
 import { LineageService } from "../../agent-chat/lineage.ts";
 import { REPLY_ERROR_STATUS, ReplyError, ReplyRouter } from "../../agent-chat/replies.ts";
 import { buildThreadCaller } from "../../session-tools/route.ts";
-import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import { toolByName } from "../catalog/index.ts";
 import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { executeToolCall } from "../executor.ts";
@@ -80,8 +63,6 @@ function world() {
   const receipts = new Map<string, DaemonResponse>();
   const listeners = new Set<(event: EventMessage) => void>();
   const posts: { sessionId: string; body: Record<string, any> }[] = [];
-  /** Waiters for the next accepted post to a session (a receipt, never a clock). */
-  const postWaiters = new Map<string, (() => void)[]>();
   let ids = 0;
   let router!: ReplyRouter;
 
@@ -180,7 +161,6 @@ function world() {
         if (body.ifIdle === true && active(t)) return { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "working" } } };
         posts.push({ sessionId, body });
         startTurn(sessionId, body, body.commandId);
-        for (const wake of postWaiters.get(sessionId)?.splice(0) ?? []) wake();
         const answer: DaemonResponse = { status: 200, body: { seq: t.seq } };
         receipts.set(body.commandId, answer);
         touch(sessionId);
@@ -188,10 +168,6 @@ function world() {
       }
       const subscribe = /^\/api\/sessions\/([^/]+)\/reply-subscriptions$/.exec(path);
       if (method === "POST" && subscribe) return replyRoute(() => router.subscribe(decodeURIComponent(subscribe[1]!), opts?.body, principal));
-      const wait = /^\/api\/sessions\/([^/]+)\/reply-subscriptions\/([^/]+)\/wait$/.exec(path);
-      if (method === "POST" && wait) return replyRoute(() => router.wait(decodeURIComponent(wait[1]!), decodeURIComponent(wait[2]!), opts?.body, { ...(principal ? { principal } : {}) }));
-      const release = /^\/api\/sessions\/([^/]+)\/reply-subscriptions\/([^/]+)\/release$/.exec(path);
-      if (method === "POST" && release) return replyRoute(() => router.release(decodeURIComponent(release[1]!), decodeURIComponent(release[2]!), principal));
       return { status: 404, body: { error: { code: "NOT_FOUND", message: `no route ${method} ${path}` } } };
     },
     async uploadAttachment() { return { status: 503, value: null }; },
@@ -209,21 +185,20 @@ function world() {
   const queue = new LineageService({ sessions: listing, outboxFile: join(dir, "agent-merge-outbox.json"), recheckMs: 0, newId: () => `m-${(n += 1)}`, setPendingMerges: () => undefined });
   router = new ReplyRouter({ outboxFile: join(dir, "agent-reply-outbox.json"), sessions: listing, queue, recheckMs: 0, newId: () => `id-${(n += 1)}` });
 
-  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "" });
   let calls = 0;
   /** A tool call from a chat, its caller derived as the chat route derives it. */
   const call = async (threadId: string, name: string, args: Record<string, unknown>): Promise<CallToolResult> => {
     const tab = sessions.get(threadId)!;
     const caller = await buildThreadCaller(api, threadId, { projectPath: tab.projectPath, cwd: tab.cwd, agentId: tab.refId as "claude" | "codex" }, `call-${(calls += 1)}`);
     return executeToolCall(
-      { approvals: port, lookup: (tool, audience) => toolByName(tool, audience), newId: () => "ex-1" },
+      { approvals: null, lookup: (tool, audience) => toolByName(tool, audience), newId: () => "ex-1" },
       { name, arguments: args },
       { caller, api, signal: new AbortController().signal }
     );
   };
 
   return {
-    api, sessions, threads, posts, queue, router, port, call, addTab, touch,
+    sessions, posts, call, addTab,
     async start() {
       await queue.load();
       await router.load();
@@ -246,9 +221,6 @@ function world() {
       t.seq += 1;
       touch(id);
     },
-    runningTurn: (id: string) => active(threads.get(id)!),
-    /** Resolves when the next turn is posted to `id`. */
-    nextPost: (id: string) => new Promise<void>((resolve) => { postWaiters.set(id, [...(postWaiters.get(id) ?? []), resolve]); }),
     /** Let every lane, evaluation and write settle (no clock): the queue and the router until neither has work. */
     async drain() {
       do {
@@ -263,98 +235,6 @@ function world() {
 }
 
 const out = (result: CallToolResult) => result.structuredContent as Record<string, any>;
-
-test("§8.7: Claude opens a Codex review with notify, gets the review as a Reply, re-reviews with wait; WAIT_CYCLE and the hop cap hold", async () => {
-  const w = world();
-  w.addTab("claude", { title: "Implement auth" }, "full-access");
-  await w.start();
-  try {
-    // The user asks Claude for work: a user-authored turn, no exchange yet.
-    w.userTurn("claude", "Implement auth, then get it reviewed.");
-
-    // 1. Claude opens Codex in its own project, approval-required, with a notify reply.
-    const opened = await w.call("claude", "create_session", {
-      agent: "codex", runtimeMode: "approval-required", title: "Codex review",
-      prompt: "Review the uncommitted diff in this project; list the issues.", reply: "notify"
-    });
-    assert.equal(opened.isError, undefined, JSON.stringify(out(opened)));
-    assert.equal(out(opened).willNotify, true);
-    assert.equal(w.port.cards.length, 0, "own project, Act: no card");
-    const codex = out(opened).sessionId as string;
-    const tab = w.sessions.get(codex)!;
-    assert.equal(tab.title, "Codex review");
-    assert.equal(tab.refId, "codex");
-    assert.deepEqual({ ...tab.lineage }, { parentThreadId: "claude", relation: "opened", agentCreated: true, createdAt: "t", delegationDepth: 1 }, "agentCreated survived the principal gate");
-    assert.equal(w.threads.get(codex)!.runtimeMode, "approval-required");
-    await w.drain();
-    const firstTurn = w.runningTurn(codex)!;
-    assert.deepEqual(firstTurn.causedBy, { threadId: "claude", exchangeId: "ex-1", hop: 1 });
-    const firstMessage = w.posts.find((post) => post.sessionId === codex)!.body;
-    const header = parseThreadMessage(firstMessage.input)!;
-    assert.equal(header.origin, "opened");
-    assert.equal(header.fromSessionId, "claude");
-    assert.equal(header.fromProject, "jaspersito/orquester");
-    assert.match(firstMessage.input, /goes back to it automatically/);
-    assert.equal(firstMessage.context[0].kind, THREAD_MESSAGE_CONTEXT_KIND);
-
-    // 2. Claude ends its turn; Codex's review settles and is delivered to Claude as a Reply (hop 2).
-    w.settle("claude", "I asked Codex to review.");
-    w.settle(codex, "1. Missing CSRF check. 2. Token logged. 3. No rate limit.");
-    await w.drain();
-    const delivered = w.posts.filter((post) => post.sessionId === "claude");
-    assert.equal(delivered.length, 1, "exactly one delivery");
-    const reply = parseThreadMessage(delivered[0]!.body.input)!;
-    assert.equal(reply.origin, "reply");
-    assert.equal(reply.fromTitle, "Codex review");
-    assert.equal(reply.fromSessionId, codex);
-    assert.match(reply.body, /Missing CSRF check/);
-    assert.equal(delivered[0]!.body.context[0].kind, THREAD_REPLY_CONTEXT_KIND);
-    assert.deepEqual(w.runningTurn("claude")!.causedBy, { threadId: codex, exchangeId: "ex-1", hop: 2 });
-
-    // 3. In that delivered turn Claude fixes and asks again, waiting (hop 3)…
-    const posted = w.nextPost(codex);
-    const asking = w.call("claude", "send_message", { sessionId: codex, text: "Fixed 1–3; re-review.", reply: "wait", timeoutSeconds: 60 });
-    await posted;
-    await w.drain();
-    const second = w.runningTurn(codex)!;
-    assert.deepEqual(second.causedBy, { threadId: "claude", exchangeId: "ex-1", hop: 3 });
-    // …while Codex, mid-review, asks Claude back. As opened (approval-required) it may cause no turn in
-    // the broader Claude at all — the turn policy's never-broader rule (§5.3), which §8.7 step 4 glosses.
-    const narrower = await w.call(codex, "send_message", { sessionId: "claude", text: "Which rate limit?", reply: "wait" });
-    assert.equal(out(narrower).code, "PERMISSION_DENIED");
-    assert.match(out(narrower).message, /broader/);
-    // Once the user raises Codex to Full access, the same wait would close a cycle: WAIT_CYCLE at once,
-    // nothing saved or queued for Claude.
-    w.threads.get(codex)!.runtimeMode = "full-access";
-    const cycle = await w.call(codex, "send_message", { sessionId: "claude", text: "Which rate limit?", reply: "wait" });
-    assert.equal(cycle.isError, true);
-    assert.equal(out(cycle).code, "WAIT_CYCLE");
-    assert.equal(w.queue.pending().filter((entry) => entry.parentSessionId === "claude").length, 0);
-    // Codex answers in its final reply instead; Claude's wait returns it.
-    w.settle(codex, "LGTM now.");
-    const answered = await asking;
-    assert.equal(answered.isError, undefined, JSON.stringify(out(answered)));
-    assert.equal(out(answered).outcome, "completed");
-    assert.equal(out(answered).reply, "LGTM now.");
-    assert.ok(out(answered).notice, "another agent's words are marked");
-    await w.drain();
-    assert.equal(w.posts.filter((post) => post.sessionId === "claude").length, 1, "a reply a waiter took is never also delivered");
-
-    // 4. The exchange cap: a turn at hop 8 may cause no further agent-caused turn.
-    w.settle("claude", "Done.");
-    const t = w.threads.get("claude")!;
-    t.seq += 1;
-    t.turns.push({ turnId: "late", state: "running", turnCount: t.turns.length + 1, requestedAt: "t", startedAt: "t", completedAt: null, assistantMessageId: null, causedBy: { threadId: codex, exchangeId: "ex-1", hop: 8 } });
-    w.touch("claude");
-    const before = w.posts.length;
-    const capped = await w.call("claude", "send_message", { sessionId: codex, text: "One more?", reply: "notify" });
-    assert.equal(out(capped).code, "EXCHANGE_LIMIT");
-    assert.equal(w.posts.length, before, "nothing posted");
-    assert.equal(w.router.subscriptions().filter((sub) => sub.state !== "done").length, 0, "nothing subscribed");
-  } finally {
-    await w.stop();
-  }
-});
 
 test("a delegate's final reply is its result, delivered to the parent; the delegate is refused merge-back", async () => {
   const w = world();

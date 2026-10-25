@@ -676,7 +676,7 @@ function splitLines(content: Uint8Array): string[] {
  * differing middle is small enough; otherwise an order-blind multiset count,
  * which never takes more than linear time.
  */
-export function lineDiffCounts(a: readonly string[], b: readonly string[]): { added: number; removed: number } {
+function lineDiffCounts(a: readonly string[], b: readonly string[]): { added: number; removed: number } {
   let start = 0;
   while (start < a.length && start < b.length && a[start] === b[start]) start++;
   let endA = a.length;
@@ -815,7 +815,7 @@ function isPlainValueChar(c: number): boolean {
  *   (some keep the backslash), so they are only used when the value holds a `'` or a line break
  *   AND a backslash or double quote. Inside `"…"` some tools also expand `$VAR`.
  */
-export function formatEnvValue(value: string): string {
+function formatEnvValue(value: string): string {
   let plain = true;
   for (let i = 0; i < value.length && plain; i++) plain = isPlainValueChar(value.charCodeAt(i));
   if (plain) return value;

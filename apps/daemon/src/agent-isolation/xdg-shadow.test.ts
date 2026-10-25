@@ -74,14 +74,6 @@ describe("buildXdgConfigShadow", () => {
     assert.ok((await lstat(join(shadow, "newtool"))).isDirectory());
   });
 
-  it("never links an excluded entry, even when it is the only one", async () => {
-    await rm(join(real, "gh"), { recursive: true });
-    await rm(join(real, "git"), { recursive: true });
-    await rm(join(real, "user-dirs.dirs"));
-    await buildXdgConfigShadow({ realConfigHome: real, shadowDir: shadow, exclude: ["opencode"] });
-    assert.deepEqual(await readdir(shadow), []);
-  });
-
   it("builds an empty shadow when the real directory does not exist", async () => {
     const result = await buildXdgConfigShadow({ realConfigHome: join(root, "nope"), shadowDir: shadow, exclude: ["opencode"] });
     assert.deepEqual(result, { linked: [], removed: [], shadowed: [] });

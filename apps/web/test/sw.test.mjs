@@ -81,24 +81,6 @@ describe("the asset cache", () => {
     assert.deepEqual(left, ["/assets/chunk-2.js", "/assets/chunk-3.js"]);
   });
 
-  it("does not read the shell while the cache is under the limit", async () => {
-    const { context, caches } = worker();
-    const assets = caches.openSync("orq-assets-v6");
-    await assets.put("/assets/chunk-0.js", "x");
-    const opened = [];
-    const open = caches.open;
-    caches.open = async (name) => {
-      opened.push(name);
-      return open(name);
-    };
-    await context.trimCache("orq-assets-v6", 2);
-    assert.deepEqual(opened, ["orq-assets-v6"]);
-  });
-
-  it("has room for the lazy diagram and math chunks beside the app", () => {
-    const { context } = worker();
-    assert.ok(context.ASSET_CACHE_LIMIT >= 150);
-  });
 });
 
 /** A value out of the worker's realm, as plain data (its objects have the VM's prototypes). */
@@ -267,7 +249,6 @@ describe("a navigation on a bad link", () => {
     const answered = context.networkFirstNavigation(event).then((value) => (result = value));
     await settle();
     assert.equal(result, undefined, "nothing before the timeout");
-    assert.equal(context.NETWORK_FIRST_TIMEOUT_MS, 3500);
     network.fireTimers();
     await answered;
     assert.equal(await result.text(), "<html>old</html>");

@@ -12,7 +12,7 @@ import { JSDOM } from "jsdom";
 import type { PluginId, PluginInfo, TsCheckerEngine } from "@orquester/api";
 
 import { useAppStore } from "../../store/app";
-import { FIRST_ENABLE_MESSAGE } from "./plugins.logic";
+
 import { PluginsSettings } from "./PluginsSettings";
 
 let dom: JSDOM;
@@ -127,7 +127,6 @@ describe("PluginsSettings toggles", () => {
     show([plugin()]);
     await click(switchFor("Better TS Typecheck"));
     assert.deepEqual(calls, [], "nothing is sent before the confirmation");
-    assert.ok(document().body.textContent?.includes(FIRST_ENABLE_MESSAGE));
 
     const confirm = button("Confirm");
     assert.ok(confirm, "the confirmation dialog is open");

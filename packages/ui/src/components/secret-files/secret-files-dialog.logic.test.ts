@@ -10,13 +10,11 @@ import {
   canMerge,
   canPush,
   canReset,
-  cloneName,
   defaultMergePrimary,
   defaultSourceChoice,
   defaultTicked,
   isTicked,
   keyTable,
-  listText,
   mergeCandidate,
   mergePrimaryOptions,
   needsSourceChoice,
@@ -25,10 +23,7 @@ import {
   pushableFiles,
   resettableFiles,
   secretFilesErrorText,
-  sourceFor,
-  stateLabel,
-  stateTone,
-  variantSizeText
+  sourceFor
 } from "./secret-files-dialog.logic.ts";
 
 const WS = "jaspersito";
@@ -230,39 +225,6 @@ describe("variable table", () => {
   it("has no rows for a file without keys", () => {
     assert.deepEqual(keyTable(candidate({ format: "lines", keys: undefined })), []);
   });
-
-  it("describes each copy's size", () => {
-    const env = candidate();
-    assert.equal(variantSizeText(env, env.variants[0]), "3 variables");
-    const lines = candidate({ format: "lines" });
-    assert.equal(variantSizeText(lines, { ...lines.variants[0], lineCount: 1 }), "1 line");
-    assert.equal(variantSizeText(lines, lines.variants[0]), "");
-  });
-});
-
-describe("states", () => {
-  it("labels every state in words", () => {
-    assert.equal(stateLabel("synced"), "Synced");
-    assert.equal(stateLabel("missing"), "Missing, copying");
-    assert.equal(stateLabel("missing-dir"), "Missing folder");
-    assert.equal(stateLabel("outdated"), "Out of date");
-    assert.equal(stateLabel("modified"), "Changed");
-    assert.equal(stateLabel("deleted"), "Deleted");
-    assert.equal(stateLabel("refused", "tracked"), "Not synced: tracked by git");
-    assert.equal(stateLabel("refused", "symlink"), "Not synced: symlink");
-    assert.equal(stateLabel("refused", "outside"), "Not synced: outside the project");
-    assert.equal(stateLabel("refused", "too-large"), "Not synced: too large");
-    assert.equal(stateLabel("refused", "unreadable"), "Not synced: unreadable");
-    assert.equal(stateLabel("refused"), "Not synced: can't be synced");
-  });
-
-  it("tones: synced ok, attention states flagged, the rest pending", () => {
-    assert.equal(stateTone("synced"), "ok");
-    assert.equal(stateTone("modified"), "attention");
-    assert.equal(stateTone("refused"), "attention");
-    assert.equal(stateTone("missing"), "pending");
-    assert.equal(stateTone("outdated"), "pending");
-  });
 });
 
 describe("clone actions", () => {
@@ -338,13 +300,5 @@ describe("words", () => {
     const text = "This file changed since you looked — review it again.";
     assert.equal(secretFilesErrorText({ serverMessage: "content mismatch", status: 409, body: { code: "CONTENT_CHANGED" } }), text);
     assert.equal(secretFilesErrorText({ status: 409, body: { code: "CONTENT_CHANGED" } }), text);
-  });
-
-  it("names clones and lists", () => {
-    assert.equal(cloneName([{ projectPath: A, projectName: "Mats" }], A), "Mats");
-    assert.equal(cloneName([], B), "MatsSmile2");
-    assert.equal(listText([]), "");
-    assert.equal(listText(["a"]), "a");
-    assert.equal(listText(["a", "b", "c"]), "a, b and c");
   });
 });

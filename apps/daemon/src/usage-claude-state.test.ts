@@ -117,7 +117,12 @@ test("expired or cleared credentials keep historical quotas across restarts and 
   await reloaded.load();
   const later = NOW + 10 * 24 * 60 * MIN;
   const expired = await make(later, reloaded)();
-  const expected = { session: fresh?.session, weekly: fresh?.weekly, scopedWindows: fresh?.scopedWindows, asOf: fresh?.asOf };
+  const expected = {
+    session: { percent: 37, resetsAt: "2026-09-28T17:00:00.000Z" },
+    weekly: { percent: 98, resetsAt: "2026-10-03T14:00:00.000Z" },
+    scopedWindows: [{ label: "Fable", percent: 42, resetsAt: "2026-09-29T14:00:00.000Z" }],
+    asOf: "2026-09-28T14:00:00.000Z"
+  };
   assert.deepEqual(expired?.lastKnown, expected);
   assert.equal(expired?.weekly, null, "historical quotas are not used as current limits");
   assert.equal(expired?.stale, true);

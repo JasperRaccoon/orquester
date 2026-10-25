@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, watch, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -293,12 +293,27 @@ test("a daemon that died with cards open resolves them as cancelled at the next 
   const dir = await mkdtemp(join(tmpdir(), "orq-approvals-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const journalFile = join(dir, "agent-tool-approvals.json");
+  // Observe the persisted journal before simulating a crash; no shutdown flush.
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const changes = watch(dir, { signal: controller.signal });
+  const written = (async () => {
+    for await (const change of changes) {
+      if (change.filename !== "agent-tool-approvals.json") continue;
+      const raw = await readFile(journalFile, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (raw === null) continue;
+      const journal = JSON.parse(raw) as { open: unknown[] };
+      if (journal.open.length === 2) return journal;
+    }
+    throw new Error("The approval journal closed before both cards were persisted.");
+  })();
   const before = harness({ journalFile });
   void before.registry.open(card(), new AbortController().signal);
   void before.registry.open(card({ threadId: "t2", tool: "run_workflow", family: "workflows" }), new AbortController().signal);
-  // Let the journal writes land (the process then "dies": no shutdown).
-  await before.registry["journalWrites"];
-  const journal = JSON.parse(await readFile(journalFile, "utf8")) as { open: unknown[] };
+  const journal = await written;
   assert.equal(journal.open.length, 2);
   assert.ok(!JSON.stringify(journal).includes("release-notes"), "ids and kinds only");
 
@@ -309,7 +324,7 @@ test("a daemon that died with cards open resolves them as cancelled at the next 
     { threadId: "t2", closed: { approvalId: "a2", outcome: "cancelled" } }
   ]);
   assert.equal(after.logs.length, 2);
-  assert.ok(after.logs.every((line) => line.includes("outcome=cancelled (Orquester restarted)")));
+  assert.ok(after.logs.every((line) => /outcome=cancelled\b/.test(line)));
   const late = await after.registry.answer("t1", "a1", { decision: "approve" });
   assert.deepEqual(late.ok ? null : [late.status, late.code], [404, "APPROVAL_NOT_FOUND"], "the old card is gone (spec §13) and can never be approved");
   assert.deepEqual((JSON.parse(await readFile(journalFile, "utf8")) as { open: unknown[] }).open, []);

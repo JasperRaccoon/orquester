@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DesktopSummary, DesktopWindowsPayload } from "@orquester/api";
-import { appendNodeRequireOption, desktopRuntimeDir, desktopsIndexPath, desktopsRuntimeDir } from "@orquester/config";
+import { desktopRuntimeDir, desktopsIndexPath, desktopsRuntimeDir } from "@orquester/config";
 import { setSessionNodePreload } from "../plugins/session-env.ts";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "../tmux.ts";
 import { DesktopHostProbe, resolveTool } from "./host-status.ts";
@@ -232,8 +232,10 @@ test("4b. an app gets the plugins' NODE_OPTIONS preload after its own NODE_OPTIO
   assert.equal(await nodeOptionsOf({}), daemonNodeOptions ?? "<unset>");
   setSessionNodePreload(preload);
   try {
-    assert.equal(await nodeOptionsOf({}), appendNodeRequireOption(daemonNodeOptions, preload));
-    assert.equal(await nodeOptionsOf({ NODE_OPTIONS: "--no-warnings" }), appendNodeRequireOption("--no-warnings", preload));
+    const requireOption = `--require "${preload}"`;
+    const expected = daemonNodeOptions?.trim() ? `${daemonNodeOptions.trim()} ${requireOption}` : requireOption;
+    assert.equal(await nodeOptionsOf({}), expected);
+    assert.equal(await nodeOptionsOf({ NODE_OPTIONS: "--no-warnings" }), `--no-warnings ${requireOption}`);
   } finally {
     setSessionNodePreload(null);
   }

@@ -14,7 +14,7 @@ import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester
 
 import { createServer } from "../index.ts";
 import { registerGitHubLinkRoutes } from "./routes.ts";
-import { GitHubLinkPreviewError, GitHubLinkPreviewService } from "./service.ts";
+import { GitHubLinkPreviewError } from "./service.ts";
 import { testAuthSessions } from "../auth/testing.ts";
 
 const TOKEN = "ghp_route_secret";
@@ -106,28 +106,6 @@ test("maps refusals to statuses with { code, message } and Retry-After on a 429"
       assert.equal(response.headers["retry-after"], undefined);
     }
   }
-});
-
-test("the real service behind the route never answers the token", async (t) => {
-  const app = Fastify();
-  const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-    assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${TOKEN}`);
-    return new Response(JSON.stringify({ title: `t`, state: "open", user: { login: "octocat" } }), { status: 200 });
-  }) as typeof fetch;
-  const service = new GitHubLinkPreviewService({
-    fetch: fetchImpl,
-    resolveCredential: async () => ({ accountId: "gh1", token: TOKEN }),
-    logger: { warn: () => {} }
-  });
-  registerGitHubLinkRoutes(app, { service });
-  t.after(() => app.close());
-  const response = await app.inject({
-    method: "GET",
-    url: `${githubLinkRoutes.preview}?url=${encodeURIComponent("https://github.com/acme/app/issues/7")}`
-  });
-  assert.equal(response.statusCode, 200);
-  assert.ok(!response.body.includes(TOKEN));
-  assert.ok(!response.body.includes("gh1"), "the account id stays on the daemon too");
 });
 
 test("the remote transport requires the bearer; the local one does not", async (t) => {

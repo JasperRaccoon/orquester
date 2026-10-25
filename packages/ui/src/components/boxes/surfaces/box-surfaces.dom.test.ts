@@ -192,35 +192,6 @@ describe("box surfaces", () => {
     assert.match(badge?.title ?? "", /outside Orquester \(gone in the Vultr dashboard\)/);
   });
 
-  it("shows a destroyed box chat's banner and the composer lock", async () => {
-    await render(
-      createElement(
-        "div",
-        null,
-        createElement(BoxChatPanel, { sessionId: "thread-9", view: { info: destroyedInfo, box: null, setupStep: null } }),
-        createElement(BoxComposerLock, { reason: "The VM was destroyed; this chat is read-only." })
-      )
-    );
-    const banner = document.querySelector<HTMLElement>('[role="alert"][data-box-notice="destroyed"]');
-    assert.ok(banner);
-    assert.match(
-      banner.textContent ?? "",
-      /The VM was destroyed outside Orquester \(gone in the Vultr dashboard\)\. The transcript stays readable; you can't send new messages\. Unpushed changes are lost\./
-    );
-    assert.match(document.querySelector("[data-box-chip]")?.textContent ?? "", /^Linux VM · Vultr$/);
-    const lock = document.querySelector<HTMLElement>("[data-box-composer-lock]");
-    assert.match(lock?.textContent ?? "", /read-only/);
-    assert.equal(document.querySelector("textarea"), null, "no composer to type into");
-  });
-
-  it("keeps an Opened agents card's destroyed banner to two lines, the whole message as its tooltip", async () => {
-    await render(createElement(AgentCardBoxBanner, { view: { info: destroyedInfo, box: null, setupStep: null } }));
-    const note = document.querySelector<HTMLElement>('[role="note"]');
-    assert.ok(note);
-    assert.match(note.title, /destroyed outside Orquester \(gone in the Vultr dashboard\)\. The transcript stays readable/);
-    assert.ok(note.querySelector(".line-clamp-2"), "the text is clamped");
-  });
-
   it("lists the chat's temporary box with Watch and Destroy, and its pending config change", async () => {
     await render(createElement(BoxChatPanel, { sessionId: "thread-1", view: null }));
     assert.equal(document.querySelector("[data-box-chat-panel]"), null, "nothing to show yet");

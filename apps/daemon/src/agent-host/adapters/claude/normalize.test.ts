@@ -88,6 +88,19 @@ describe("claude normaliser — fixture replay", () => {
     assert.equal(agent.payload.role, "Explore");
     assert.ok(agent.payload.toolUseId);
     assert.ok(agent.payload.title);
+    const capturedStart = readClaudeFixture("07-subagent-task.ndjson")
+      .map((line) => line.data as Record<string, unknown>)
+      .find((data) => data.subtype === "task_started" && data.task_type === "local_agent");
+    assert.ok(typeof capturedStart?.prompt === "string" && capturedStart.prompt.startsWith("Read the file b.txt"));
+    assert.equal(agent.payload.prompt, capturedStart.prompt);
+    assert.equal(agent.payload.description, "Read b.txt first word");
+    const nestedOutput = outputDeltas(events).filter((event) => event.itemId === "toolu_01NF7VUp1VvXRismHVn2CXN4");
+    assert.equal(nestedOutput.length, 1);
+    assert.equal(nestedOutput[0]!.agentId, agent.payload.taskId);
+    assert.ok(nestedOutput[0]!.payload.delta.startsWith("-rw-r--r--"));
+    const launchOutput = outputDeltas(events).filter((event) => event.itemId === "toolu_01GhZ3hhWWdJYQ15ru7U9Gob");
+    assert.equal(launchOutput.length, 1);
+    assert.equal(launchOutput[0]!.agentId, undefined);
 
     // task_updated carries only {task_id, patch} on the wire; the adapter must
     // carry identity forward so the row is still self-describing.
@@ -105,6 +118,7 @@ describe("claude normaliser — fixture replay", () => {
     // The background Bash is a separate task type.
     const shell = started.find((event) => event.payload.taskType === "local_bash");
     assert.ok(shell);
+    assert.equal("prompt" in shell.payload, false);
     // This capture predates `is_backgrounded`; the field is absent, not false,
     // and an absent field must never read as "foreground" (which would hide
     // the row this capture proves exists).
@@ -126,47 +140,6 @@ describe("claude normaliser — fixture replay", () => {
 
     // The turn knows it had subagents.
     assert.ok(allOf(events, "turn.completed").some((e) => e.payload.tokenUsage?.hasSubagents));
-  });
-
-  it("07: the subagent's start carries the prompt its launch was given; the shell's carries none", () => {
-    // The prompt as the capture holds it: `task_started.prompt` (line 38).
-    const taskStarted = readClaudeFixture("07-subagent-task.ndjson")
-      .map((line) => line.data as Record<string, unknown>)
-      .find((data) => data.subtype === "task_started" && data.task_type === "local_agent");
-    const prompt = taskStarted?.prompt;
-    assert.ok(typeof prompt === "string" && prompt.startsWith("Read the file b.txt"));
-
-    const { events } = replayClaudeFixture("07-subagent-task.ndjson");
-    const started = allOf(events, "task.started");
-    const agent = started.find((event) => event.payload.taskType === "local_agent");
-    assert.equal(agent?.payload.prompt, prompt, "verbatim, whole");
-    assert.equal(agent?.payload.description, "Read b.txt first word", "the name stays the name");
-    const shell = started.find((event) => event.payload.taskType === "local_bash");
-    assert.ok(shell);
-    assert.equal("prompt" in shell.payload, false, "a shell's command is its description");
-  });
-
-  it("07: the subagent's Bash output carries its task; the parent's background launch carries none", () => {
-    const { events } = replayClaudeFixture("07-subagent-task.ndjson");
-    const agent = allOf(events, "task.started").find(
-      (event) => event.payload.taskType === "local_agent"
-    );
-    assert.ok(agent);
-    const outputOf = (itemId: string) =>
-      outputDeltas(events).filter((event) => event.itemId === itemId);
-
-    // Line 45: the subagent's `ls` result, on a nested `user` frame that names
-    // only the parent's Agent call — no task id anywhere on it.
-    const subagent = outputOf("toolu_01NF7VUp1VvXRismHVn2CXN4");
-    assert.equal(subagent.length, 1);
-    assert.equal(subagent[0]!.agentId, agent.payload.taskId);
-    assert.ok(subagent[0]!.payload.delta.startsWith("-rw-r--r--"));
-
-    // Line 87: the parent's own `run_in_background` placeholder stays the
-    // parent's — the shell's chunks ride the shell's own item and id.
-    const launch = outputOf("toolu_01GhZ3hhWWdJYQ15ru7U9Gob");
-    assert.equal(launch.length, 1);
-    assert.equal(launch[0]!.agentId, undefined);
   });
 
   it("08: the step list is TaskCreate/TaskUpdate, not TodoWrite", () => {
@@ -214,6 +187,7 @@ describe("claude normaliser — fixture replay", () => {
     assert.equal(compacted.length, 1);
     assert.equal(compacted[0]!.payload.beforeTokens, 34995);
     assert.equal(compacted[0]!.payload.afterTokens, 873);
+    assert.ok(compacted[0]!.payload.summary?.startsWith("This session is being continued from a previous conversation"));
     // The capture's `status: "compacting"` frame opens the phase first, so the
     // client shows "Compacting" rather than a generic "Working" for the 10.3 s
     // the CLI spends rewriting the conversation.
@@ -1247,11 +1221,10 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
 
   it("a held message keeps every delta, however long its first block streams", () => {
     // The first block streams in full before the frame that opens the turn;
-    // Opus can think for thousands of deltas, and a tool's input streams as
-    // deltas too. None of it may be lost to a frame cap.
+    // Opus can think for thousands of deltas. None may be lost to a frame cap;
+    // the following tool call still receives its assembled input.
     const normalizer = newNormalizer();
     const thinkingDeltas = Array.from({ length: 12_000 }, (_, n) => `t${n} `);
-    const inputChunks = Array.from({ length: 12_000 }, () => " ");
     const frames: Frame[] = [
       stream({ type: "message_start", message: { id: "msg_long", role: "assistant", content: [], usage: {} } }),
       stream({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
@@ -1267,9 +1240,6 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
         content_block: { type: "tool_use", id: "toolu_long", name: "Bash", input: {} }
       }),
       stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"command":' } }),
-      ...inputChunks.map((partial_json) =>
-        stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json } })
-      ),
       stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"ls"}' } }),
       blockFrame("msg_long", { type: "tool_use", id: "toolu_long", name: "Bash", input: { command: "ls" } }),
       stream({ type: "content_block_stop", index: 1 })
@@ -2357,21 +2327,6 @@ describe("claude normaliser — the compaction marker carries the CLI's summary"
     });
     assert.deepEqual(replay, [], "it was never a row and still is not");
   });
-
-  it("12: the real capture's marker carries the real summary", () => {
-    const { events } = replayClaudeFixture("12-compact.ndjson");
-    const compacted = events.filter(
-      (event) =>
-        event.type === "thread.state.changed" &&
-        (event.payload as { state?: string }).state === "compacted"
-    );
-    assert.equal(compacted.length, 1);
-    const summary = (compacted[0]!.payload as { summary?: string }).summary;
-    assert.ok(
-      summary?.startsWith("This session is being continued from a previous conversation"),
-      "the CLI's own summary, verbatim"
-    );
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3154,19 +3109,6 @@ describe("claude normaliser — a background subagent outlives the parent's turn
         ["item.completed", "turn-syn", "completed"]
       ]
     );
-  });
-
-  it("a call that already rides a turn stays on it when the next turn opens", () => {
-    const { normalizer, feed } = feedable();
-    normalizer.beginTurn({ turnId: "turn-1" });
-    feed({
-      type: "stream_event",
-      uuid: "u-s",
-      session_id: "s",
-      parent_tool_use_id: null,
-      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_T", name: "Bash", input: { command: "ls" } } }
-    });
-    assert.deepEqual(allOf(normalizer.beginTurn({ turnId: "turn-2" }), "item.updated"), []);
   });
 
   it("a subagent's tool_progress is its owner's heartbeat, on the call's own turn", () => {

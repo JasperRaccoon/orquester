@@ -49,15 +49,11 @@ export const TOOLSET_IDS = [
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
-export function isToolsetId(value: unknown): value is ToolsetId {
-  return typeof value === "string" && (TOOLSET_IDS as readonly string[]).includes(value);
-}
-
 /**
  * One tool of a toolset with its tier badge: the HIGHEST tier the tool reaches for a chat caller
  * (`control_desktop` is Admin for `open`/`launch_app` and Act otherwise → `admin`; `create_workflow`
  * is Read with `dryRun` → `admin`). The catalog's own tiers (daemon `mcp/catalog`) must agree (its
- * registry test).
+ * wire catalog tests).
  */
 export interface ToolsetToolSpec {
   name: string;
@@ -192,21 +188,6 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     ]
   }
 ];
-
-/** A toolset by id. */
-export function toolsetById(id: ToolsetId): ToolsetSpec {
-  return TOOLSETS.find((toolset) => toolset.id === id)!;
-}
-
-/** The toolset a chat tool belongs to, or undefined for a name no toolset lists. */
-export function toolsetOfTool(name: string): ToolsetId | undefined {
-  return TOOLSETS.find((toolset) => toolset.tools.some((tool) => tool.name === name))?.id;
-}
-
-/** Every chat tool name, in toolset then catalog order. */
-export function chatToolNames(): string[] {
-  return TOOLSETS.flatMap((toolset) => toolset.tools.map((tool) => tool.name));
-}
 
 // ---------------------------------------------------------------------------
 // Grants (§7.6)

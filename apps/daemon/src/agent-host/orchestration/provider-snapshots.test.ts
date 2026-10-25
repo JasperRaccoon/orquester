@@ -279,6 +279,20 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
     });
   });
 
+  it("keeps each array independently, including on a machine-level probe", async () => {
+    await withRegistry(async ({ registry, probe }) => {
+      const skills = [{ name: "review", path: "/s", enabled: true }];
+      probe.next = snapshotFor("claude", { slashCommands: [{ name: "compact" }], skills });
+      await registry.refresh("claude");
+
+      // A transient skills-dir failure must not erase it or pin a healthy command list.
+      probe.next = snapshotFor("claude", { slashCommands: [{ name: "compact" }, { name: "review" }], skills: [] });
+      await registry.refresh("claude");
+      assert.deepEqual(registry.get("claude")?.skills, [{ name: "review", path: "/s", enabled: true }]);
+      assert.deepEqual(registry.get("claude")?.slashCommands, [{ name: "compact" }, { name: "review" }]);
+    });
+  });
+
   it("merges a sparse rate-limit update onto the cached snapshot by window id", async () => {
     await withRegistry(async ({ registry }) => {
       await registry.refresh("claude");

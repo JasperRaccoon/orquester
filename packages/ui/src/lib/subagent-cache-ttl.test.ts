@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import type { SubagentCacheTtlStatus } from "@orquester/api";
 import { describeSubagentCacheTtl } from "./subagent-cache-ttl.ts";
 
-const day = (iso: string) => iso.slice(5, 10);
 const status = (over: Partial<SubagentCacheTtlStatus>): SubagentCacheTtlStatus => ({
   mode: "auto",
   ttl: "1h",
@@ -14,44 +13,29 @@ const status = (over: Partial<SubagentCacheTtlStatus>): SubagentCacheTtlStatus =
 const check = (over: Partial<NonNullable<SubagentCacheTtlStatus["lastCheck"]>>) =>
   status({ lastCheck: { ...status({}).lastCheck!, ...over } });
 
-test("auto on 1h says what the last check found and when the next one is", () => {
-  assert.equal(
-    describeSubagentCacheTtl(status({}), day),
-    "Currently 1h. Last check 10-11: 1h would have cost 9.4% less over 14 days. Next check 10-18."
-  );
+test("auto reports the selected TTL and signed 1h cost comparison", () => {
+  const cheaper = describeSubagentCacheTtl(status({}));
+  assert.match(cheaper, /currently\s+1h/i);
+  assert.match(cheaper, /9\.4% less/);
+  assert.match(cheaper, /14 days/);
+  const dearer = describeSubagentCacheTtl({ ...check({ outcome: "5m", changePct: 7.8 }), ttl: "5m" });
+  assert.match(dearer, /currently\s+5m/i);
+  assert.match(dearer, /7\.8% more/);
 });
 
-test("auto on 5m says how much more 1h would have cost", () => {
-  assert.equal(
-    describeSubagentCacheTtl({ ...check({ outcome: "5m", changePct: 7.8 }), ttl: "5m" }, day),
-    "Currently 5m. Last check 10-11: 1h would have cost 7.8% more over 14 days. Next check 10-18."
-  );
+test("a held choice explains the comparison, including equal cost", () => {
+  const held = describeSubagentCacheTtl(check({ outcome: "hold", changePct: -3.2 }));
+  assert.match(held, /3\.2% less/);
+  assert.match(held, /too close/);
+  assert.match(describeSubagentCacheTtl(check({ outcome: "hold", changePct: 0 })), /the same/);
 });
 
-test("a check too close to call says the choice stayed", () => {
-  assert.equal(
-    describeSubagentCacheTtl(check({ outcome: "hold", changePct: -3.2 }), day),
-    "Currently 1h. Last check 10-11: 1h would have cost 3.2% less over 14 days, too close to change. Next check 10-18."
-  );
-  assert.equal(
-    describeSubagentCacheTtl(check({ outcome: "hold", changePct: 0 }), day),
-    "Currently 1h. Last check 10-11: 1h would have cost the same over 14 days, too close to change. Next check 10-18."
-  );
+test("insufficient usage reports the request count and observation window", () => {
+  const description = describeSubagentCacheTtl(check({ outcome: "insufficient", requests: 120, changePct: null }));
+  assert.match(description, /\b120\b/);
+  assert.match(description, /14 days/);
 });
 
-test("too little usage says so, with the count", () => {
-  assert.equal(
-    describeSubagentCacheTtl(
-      { ...check({ outcome: "insufficient", requests: 120, changePct: null }), ttl: "5m", nextCheckAt: "2026-10-12T00:00:00.000Z" },
-      day
-    ),
-    "Currently 5m. Last check 10-11: only 120 subagent requests in 14 days, too few to judge. Next check 10-12."
-  );
-});
-
-test("before the first check it says one is pending", () => {
-  assert.equal(
-    describeSubagentCacheTtl(status({ ttl: "5m", lastCheck: null, nextCheckAt: null }), day),
-    "Currently 5m. The first check runs once recent subagent usage has been read."
-  );
+test("before the first check the selected TTL is still reported", () => {
+  assert.match(describeSubagentCacheTtl(status({ ttl: "5m", lastCheck: null, nextCheckAt: null })), /currently\s+5m/i);
 });

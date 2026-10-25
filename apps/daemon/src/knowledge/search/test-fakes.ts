@@ -1,8 +1,26 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { KnowledgeCollection, KnowledgeEntry, KnowledgeEntryMeta } from "@orquester/api";
 import type { KnowledgeEntryChange } from "../ports.ts";
 import { knowledgeContentHash } from "../store/normalize.ts";
 import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
+import type { KnowledgeGraph } from "./graph.ts";
 import type { KnowledgeSearchStore } from "./search.ts";
+
+/** Supply graph fixtures through the same JSONL boundary as myKG. */
+export async function loadGraph(graph: KnowledgeGraph, nodes: readonly unknown[], edges: readonly unknown[] = []): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "kg-graph-fixture-"));
+  try {
+    await Promise.all([
+      writeFile(join(dir, "nodes.jsonl"), nodes.map((node) => JSON.stringify(node)).join("\n")),
+      writeFile(join(dir, "edges.jsonl"), edges.map((edge) => JSON.stringify(edge)).join("\n"))
+    ]);
+    await graph.load(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 /** An in-memory store for search tests (the real store is covered by its own tests). */
 export class FakeStore implements KnowledgeSearchStore {

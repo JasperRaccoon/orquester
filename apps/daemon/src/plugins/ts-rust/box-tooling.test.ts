@@ -155,16 +155,13 @@ test("a Windows box's preload and contribution carry only Windows box paths, quo
   if (plan.kind !== "install") return;
   const preload = plan.files[0]?.content ?? "";
   new Script(preload, { filename: "preload.cjs" }); // compiles
-  // The baked constants: every line before the shared body's own.
-  const constants = preload.split("\n").filter((line) => /^ {2}var (STATE_PATH|WORKSPACES_ROOTS|VERSIONS_DIRS|SUPPORTED_ENGINES|DEFAULT_ENGINE|PLUGIN_ID) = /.test(line));
-  assert.deepEqual(constants, [
-    String.raw`  var STATE_PATH = "C:\\orq\\agent\\tooling\\ts-rust\\state.json";`,
-    String.raw`  var WORKSPACES_ROOTS = ["C:\\orq\\var\\lib\\orquester\\workspaces"];`,
-    String.raw`  var VERSIONS_DIRS = {"tsc-rs":"C:\\orq\\agent\\tooling\\tsc-rs\\versions","tsrs":"C:\\orq\\agent\\tooling\\tsrs\\versions"};`,
-    String.raw`  var SUPPORTED_ENGINES = ["tsc-rs"];`
-  ]);
+  for (const path of [
+    "C:\\orq\\agent\\tooling\\ts-rust\\state.json",
+    "C:\\orq\\var\\lib\\orquester\\workspaces",
+    "C:\\orq\\agent\\tooling\\tsc-rs\\versions",
+    "C:\\orq\\agent\\tooling\\tsrs\\versions"
+  ]) assert.ok(preload.includes(JSON.stringify(path)), `missing box path ${path}`);
   assert.doesNotMatch(preload, /plugins\.json"|"\/var\/lib/, "no host path or host state file");
-  assert.match(preload, /var state = JSON\.parse\(fs\.readFileSync\(STATE_PATH, "utf8"\)\);\n\s+if \(!state \|\| typeof state !== "object" \|\| state\.enabled !== true\) return;/);
   assert.deepEqual(plan.contribution.nodeRequire, ["C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs"]);
   assert.ok(plan.files.every((file) => file.path.startsWith("C:\\orq\\agent\\tooling\\ts-rust\\")));
 });

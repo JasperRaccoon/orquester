@@ -902,25 +902,6 @@ describe("fix round 1 — review findings", () => {
     await host.stop();
   });
 
-  it("finding 6: a goal command records a changed model selection exactly as a turn does", async () => {
-    const host = codexHost();
-    const threadId = await host.createThread({ refId: "codex" });
-    await host.orchestrator.command(threadId, "turn", {
-      commandId: cmd(),
-      input: "/goal ship it",
-      modelSelection: { model: "other-model" }
-    });
-    await host.settle();
-    const read = await host.orchestrator.readThread(threadId);
-    assert.deepEqual(
-      read.kind === "snapshot" ? read.thread.head.modelSelection : null,
-      { model: "other-model" },
-      "the next turn Orquester starts runs on it"
-    );
-
-    await host.stop();
-  });
-
   it("finding 8: a live session whose head says error is not continuing", async () => {
     const host = codexHost();
     const threadId = await host.createThread({ refId: "codex" });
@@ -1712,6 +1693,8 @@ describe("final fix wave — `continuing`, the switch, Stop at a boundary, the m
       modelSelection: { model: "other-model" }
     });
     await host.settle();
+    const read = await host.orchestrator.readThread(threadId);
+    assert.deepEqual(read.kind === "snapshot" ? read.thread.head.modelSelection : null, { model: "other-model" });
     await host.orchestrator.command(threadId, "turn", {
       commandId: cmd(),
       input: "/goal",

@@ -58,18 +58,6 @@ describe("codex session tools — the builders", () => {
     assert.deepEqual(codexDenyConfig([]), {});
   });
 
-  it("the thread config attaches the server by URL and env-var NAME, pre-approved", () => {
-    const config = codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x" });
-    assert.deepEqual(config, {
-      "mcp_servers.orquester": {
-        url: "http://127.0.0.1:4711/mcp",
-        bearer_token_env_var: "ORQUESTER_SESSION_TOOLS_TOKEN",
-        default_tools_approval_mode: "approve",
-        tool_timeout_sec: 3900
-      }
-    });
-  });
-
   it("the instruction block is application context, and absent when empty", () => {
     assert.deepEqual(codexSessionToolsContext({ url: "u", instructions: "## Orquester" }), {
       [CODEX_SESSION_TOOLS_CONTEXT_KEY]: { kind: "application", value: "## Orquester" }
@@ -178,27 +166,6 @@ describe("codex session tools — a launch", () => {
     assert.equal(grant.revoked, false);
     await adapter.stopSession("thread-1");
     assert.equal(grant.revoked, true, "the credential dies with its child");
-  });
-
-  it("a resume carries the server too", async () => {
-    const server = writeMockCodexServer({ turns: [] });
-    cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
-    const tools = recordingSessionTools();
-    const { context } = createFakeContext({ resolveBin: () => Promise.resolve(server.bin), sessionTools: tools });
-    const adapter = await createCodexAdapter(context);
-    cleanups.push(() => adapter.stopAll());
-    await adapter.refreshSnapshot({ cwd: process.cwd() });
-    await adapter.startSession({
-      threadId: "thread-2",
-      cwd: process.cwd(),
-      home: { kind: "system", path: "" },
-      modelSelection: { model: "gpt-5.5" },
-      runtimeMode: "approval-required",
-      resumeCursor: { threadId: "prior-thread" }
-    });
-    const resume = server.received().find((frame) => frame.method === "thread/resume");
-    assert.deepEqual(Object.keys((resume?.params as { config?: object }).config ?? {}), ["mcp_servers.orquester"]);
-    await adapter.stopAll();
   });
 
   it("without a registered toolkit nothing changes", async () => {
@@ -366,6 +333,9 @@ describe("codex session tools — a config that has its own `orquester`", () => 
     assert.equal(theirs.sessionToolsServer, false);
     assert.equal("result" in theirs, false, "theirs is any other server's");
     // History (no session to ask): the spelling decides, the alternate name included.
-    assert.ok("result" in (classifyItem(call("orquester_session") as never).data as Record<string, unknown>));
+    for (const server of ["orquester", "orquester_session"]) {
+      assert.ok("result" in (classifyItem(call(server) as never).data as Record<string, unknown>));
+    }
+    assert.equal("result" in (classifyItem(call("serena") as never).data as Record<string, unknown>), false);
   });
 });

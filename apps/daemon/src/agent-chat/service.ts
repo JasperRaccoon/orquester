@@ -299,7 +299,7 @@ function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSession
  * The fork tab's id a `commandId` names on a parent: a UUID-shaped digest, so a repeat of the
  * same fork — even after a daemon restart forgot the first — lands on the same tab and thread.
  */
-export function forkIdFor(parentId: string, commandId: string): string {
+function forkIdFor(parentId: string, commandId: string): string {
   const hex = createHash("sha256").update(`fork\u0000${parentId}\u0000${commandId}`).digest("hex");
   // RFC 4122 layout, version nibble 5 and the variant bits, as a name-based UUID has.
   const variant = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);

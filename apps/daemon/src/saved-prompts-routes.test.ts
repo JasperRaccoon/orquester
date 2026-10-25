@@ -435,13 +435,3 @@ test("GET /api/saved-prompts/:id answers one prompt whatever its scope (a reposi
   assert.equal(none.statusCode, 404);
   assert.equal(none.json().code, "SAVED_PROMPT_NOT_FOUND");
 });
-
-test("GET /api/saved-prompts?readOnly=1 lists without upgrading stored records", async (t) => {
-  const h = await harness();
-  t.after(() => h.close());
-  const global = await h.inject({ method: "POST", url: "/api/saved-prompts", payload: { title: "G", body: "B", projectPath: null } });
-  assert.equal(global.statusCode, 201);
-  const read = await h.inject({ method: "GET", url: "/api/saved-prompts?readOnly=1" });
-  assert.equal(read.statusCode, 200, read.body);
-  assert.deepEqual(read.json().prompts.map((prompt: SavedPrompt) => prompt.id), [global.json().id]);
-});

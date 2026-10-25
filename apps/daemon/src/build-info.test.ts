@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
-import { testAuthSessions } from "./auth/testing.ts";
 import { findRepoRoot, readBuildInfo, readGitCommit, VERSION_STAMP_FILE } from "./build-info.ts";
-import { createServer } from "./index.ts";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -73,29 +69,4 @@ test("falls back to the deploy stamp when there is no .git, and to null without 
   await mkdir(join(root, ".git"), { recursive: true });
   await writeFile(join(root, ".git", "HEAD"), `${B}\n`);
   assert.deepEqual(readBuildInfo(root), { version: "1.2.3", commit: B });
-});
-
-test("GET /api/info reports the version and commit, behind auth on the remote transport", async () => {
-  type Args = Parameters<typeof createServer>;
-  const config = createDefaultDaemonConfig({ env: {} });
-  config.transports.http.username = "admin";
-  config.transports.http.passwordHash = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const { authSessions, bearer } = await testAuthSessions();
-  const dir = "/nonexistent-orquester-build-info-test";
-  const resolved = { daemonDir: dir, baseDir: dir, workspacesDir: dir, workspacesMetaFile: `${dir}/workspaces.json`, fsRoot: dir } as unknown as Args[1];
-  const services = { buildInfo: { version: "1.2.3", commit: A }, authSessions } as unknown as Args[4];
-  const app = createServer(config, resolved, createDefaultClientConfig(`${dir}/daemon.sock`), createWriteStream("/dev/null"), services, {
-    authRequired: true,
-    mode: "remote"
-  });
-  try {
-    assert.equal((await app.inject({ method: "GET", url: "/api/info" })).statusCode, 401);
-    const res = await app.inject({ method: "GET", url: "/api/info", headers: { authorization: bearer } });
-    assert.equal(res.statusCode, 200);
-    const body = res.json() as { version: string; commit: string };
-    assert.equal(body.version, "1.2.3");
-    assert.equal(body.commit, A);
-  } finally {
-    await app.close();
-  }
 });

@@ -28,13 +28,13 @@ export interface AdvertisedTool {
 }
 
 /** The chat input shape (the executor's `audienceShape`: external-only keys stripped). */
-export function chatShape(tool: AnyOrquesterTool): z.ZodRawShape {
+function chatShape(tool: AnyOrquesterTool): z.ZodRawShape {
   const stripped = new Set((tool.externalOnlyInput ?? []) as readonly string[]);
   return Object.fromEntries(Object.entries(tool.input as z.ZodRawShape).filter(([key]) => !stripped.has(key)));
 }
 
 /** The chat description (the executor's `audienceDescription`). */
-export function chatDescription(tool: AnyOrquesterTool): string {
+function chatDescription(tool: AnyOrquesterTool): string {
   return tool.chatNote ? `${tool.description} ${tool.chatNote}` : tool.description;
 }
 
@@ -72,7 +72,7 @@ export async function serializeChatTools(tools: readonly AnyOrquesterTool[]): Pr
  * sensible argument reaches). Validation is untouched: the daemon's
  * strict parse of the raw arguments (`mcp-server.ts`) still refuses unknown keys and empty strings.
  */
-export function compactToolEntry(entry: Tool): Tool {
+function compactToolEntry(entry: Tool): Tool {
   const { execution: _execution, ...rest } = entry;
   return { ...rest, inputSchema: compactSchema(entry.inputSchema) as Tool["inputSchema"] };
 }

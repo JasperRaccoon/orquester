@@ -5,9 +5,6 @@ import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, Turn } from "@o
 
 import {
   trimToWireWindow,
-  WIRE_WINDOW_BUDGET_BYTES,
-  WIRE_WINDOW_MAX_TURNS,
-  WIRE_WINDOW_MIN_TURNS,
   wireWindowCut
 } from "./wire-window.ts";
 
@@ -89,10 +86,10 @@ const everyRowBelow = (candidates: readonly ThreadItem[]): ReadonlySet<ThreadIte
 const ids = (items: readonly ThreadItem[]) => items.map((item) => item.id);
 
 describe("wire window — where the frame's window begins", () => {
-  it("keeps the newest WIRE_WINDOW_MAX_TURNS started turns, and nothing at all for a short thread", () => {
-    assert.equal(wireWindowCut(thread(WIRE_WINDOW_MIN_TURNS).turns, thread(WIRE_WINDOW_MIN_TURNS).items), null);
-    assert.equal(wireWindowCut(thread(WIRE_WINDOW_MAX_TURNS).turns, thread(WIRE_WINDOW_MAX_TURNS).items), null);
-    const long = thread(WIRE_WINDOW_MAX_TURNS + 5);
+  it("keeps the newest ten started turns, and nothing at all for a short thread", () => {
+    assert.equal(wireWindowCut(thread(2).turns, thread(2).items), null);
+    assert.equal(wireWindowCut(thread(10).turns, thread(10).items), null);
+    const long = thread(15);
     const cut = wireWindowCut(long.turns, long.items);
     assert.equal(cut?.oldestKept.turnId, "t-6");
     assert.deepEqual([...cut!.trimmable], ["t-1", "t-2", "t-3", "t-4", "t-5"]);
@@ -101,9 +98,9 @@ describe("wire window — where the frame's window begins", () => {
     assert.equal(cut!.turnOf(row("loose", null)), null);
   });
 
-  it("keeps fewer turns once their rows pass the budget, but never fewer than WIRE_WINDOW_MIN_TURNS", () => {
+  it("keeps fewer turns once their rows pass the budget, but never fewer than two", () => {
     const long = thread(12);
-    const big = "x".repeat(WIRE_WINDOW_BUDGET_BYTES);
+    const big = "x".repeat(512 * 1024);
     // Turn 11 alone is past the budget: turns 11 and 12 are kept, the minimum.
     long.items.push(row("huge-11", "t-11", "tool.completed", { detail: big }));
     assert.equal(wireWindowCut(long.turns, long.items)?.oldestKept.turnId, "t-11");

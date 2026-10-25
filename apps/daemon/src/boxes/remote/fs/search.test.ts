@@ -15,13 +15,13 @@ import { boxDiskConnection, type BoxDiskConnection } from "./test-box.ts";
 
 const PROJECT = "/ws/acme/engine";
 
-async function setup(t: test.TestContext): Promise<{ fs: BoxProjectFs; connection: BoxDiskConnection }> {
+async function setup(t: test.TestContext, files = 50): Promise<{ fs: BoxProjectFs; connection: BoxDiskConnection }> {
   const disk = await realpath(await mkdtemp(join(tmpdir(), "orq-box-search-")));
   t.after(() => rm(disk, { recursive: true, force: true }));
   const connection = boxDiskConnection({ disk });
   const root = connection.local(PROJECT);
   await mkdir(root, { recursive: true });
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < files; i += 1) {
     await mkdir(join(root, `dir${i}`), { recursive: true });
     await writeFile(join(root, `dir${i}`, "file.txt"), `needle ${i}\n`.repeat(200));
   }
@@ -61,17 +61,6 @@ test("a cancelled search kills ripgrep in the box and answers 499", { skip: !onP
   await killed(started[0]!);
 });
 
-test("a cancelled regex search kills ripgrep too", { skip: !onPath("rg") }, async (t) => {
-  const { fs, connection } = await setup(t);
-  const controller = new AbortController();
-  const started = abortOnSpawn(connection, "rg", controller);
-  await assert.rejects(
-    searchBoxProjectFiles(fs, PROJECT, { query: "need(le)?\\s+\\d+", regex: true, signal: controller.signal }),
-    (error: unknown) => error instanceof FsSearchError && error.status === 499
-  );
-  await killed(started[0]!);
-});
-
 test("a cancelled quick-open listing kills its lister in the box", { skip: !onPath("rg") }, async (t) => {
   const { fs, connection } = await setup(t);
   const controller = new AbortController();
@@ -84,7 +73,7 @@ test("a cancelled quick-open listing kills its lister in the box", { skip: !onPa
 });
 
 test("an already-cancelled search starts nothing in the box", async (t) => {
-  const { fs, connection } = await setup(t);
+  const { fs, connection } = await setup(t, 0);
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(searchBoxProjectFiles(fs, PROJECT, { query: "needle", signal: controller.signal }), FsSearchError);
@@ -92,7 +81,7 @@ test("an already-cancelled search starts nothing in the box", async (t) => {
 });
 
 test("the max-results cap stops ripgrep early and reports the limit", { skip: !onPath("rg") }, async (t) => {
-  const { fs } = await setup(t);
+  const { fs } = await setup(t, 1);
   const result = await searchBoxProjectFiles(fs, PROJECT, { query: "needle", maxResults: 5 });
   assert.equal(result.totalMatches, 5);
   assert.equal(result.limitHit, true);

@@ -23,7 +23,7 @@ import {
 
 export const OPENCODE_FORK_NO_SESSION =
   "OpenCode has no saved conversation for this thread yet, so there is nothing to fork.";
-export const OPENCODE_FORK_BOUNDARY_GONE =
+const OPENCODE_FORK_BOUNDARY_GONE =
   "opencode: the message to fork from is no longer in this conversation";
 
 /**
@@ -34,7 +34,7 @@ export const OPENCODE_FORK_BOUNDARY_GONE =
  * walked back to its prompt, as a rewind does. An id that is not there is a
  * refusal, never a guess.
  */
-export function planOpenCodeFork(
+function planOpenCodeFork(
   messages: readonly OpenCodeMessageWithParts[],
   firstRemovedMessageId: string | null
 ): { messageID?: string; expectedCount: number } {

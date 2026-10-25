@@ -266,16 +266,47 @@ test("a missing binary is refused with a message, not a hang", async () => {
 
 test("a binary that cannot be spawned settles rather than hanging", async () => {
   const r = await rig({ bin: join(dirname(MOCK), "definitely-not-here") });
-  await assert.rejects(async () => await start(r));
+  await assert.rejects(async () => await start(r), /ENOENT/);
   await r.dispose();
 });
 
-test("a handshake that never answers times out and kills the child", async () => {
-  const r = await rig({ scenario: "no-handshake" });
-  await assert.rejects(async () => await start(r), /timed out/);
-  await r.drain();
-  assert.deepEqual(lifecycleRows(r.events), [], "the timeout is the report, never a crash");
-  await r.dispose();
+test("a handshake that never answers times out and kills the child", { timeout: 30_000 }, async (t) => {
+  let initializeSent!: () => void;
+  const sent = new Promise<void>((resolve) => { initializeSent = resolve; });
+  const rawFrames: unknown[] = [];
+  const append = rawFrames.push;
+  rawFrames.push = (...entries: unknown[]) => {
+    for (const entry of entries) {
+      const frame = entry as { direction?: string; frame?: { method?: string } };
+      if (frame.direction === "send" && frame.frame?.method === "initialize") initializeSent();
+    }
+    return append.apply(rawFrames, entries);
+  };
+  const r = await rig({ scenario: "no-handshake", rawFrames });
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const opening = start(r);
+    const rejected = assert.rejects(opening, /initialize: timed out after 30000ms/);
+    await sent;
+    t.mock.timers.tick(30_000);
+    // Let the real process teardown use real timers and real exit notifications.
+    t.mock.timers.reset();
+    await rejected;
+    await r.drain();
+    assert.deepEqual(lifecycleRows(r.events), [], "the timeout is the report, never a crash");
+    assert.equal(r.adapter.hasSession("t1"), false);
+    if (process.platform === "linux") {
+      const cli = processesWith("GROK_RIG_MARK", r.mark).filter((pid) => {
+        const command = cmdlineOf(pid);
+        return command.includes("mock-grok.mjs") && !isLifelineWatcher(command);
+      });
+      assert.deepEqual(cli, [], "the timed-out real CLI is gone before start rejects");
+    }
+  } finally {
+    rawFrames.push = append;
+    t.mock.timers.reset();
+    await r.dispose();
+  }
 });
 
 /**
@@ -351,6 +382,7 @@ test("the happy path: session, turn, usage, and a settled turn", async () => {
   const r = await rig();
   await start(r);
   assert.equal(r.adapter.hasSession("t1"), true);
+  assert.deepEqual(r.adapter.listSessions().map((session) => [session.threadId, session.runtimeMode]), [["t1", "approval-required"]]);
   const threadStarted = await r.waitFor((event) => event.type === "thread.started", "thread.started");
   assert.equal(
     r.events.filter((event) => event.type === "session.started").length,
@@ -393,19 +425,6 @@ test("the happy path: session, turn, usage, and a settled turn", async () => {
   await r.dispose();
 });
 
-test("the live command catalog replaces the handshake's, minus the two filtered names", async () => {
-  const r = await rig();
-  await start(r);
-  await r.waitFor((event) => event.type === "session.state.changed", "ready");
-  const snapshot = await r.adapter.refreshSnapshot();
-  const names = snapshot.slashCommands.map((command) => command.name);
-  assert.ok(names.includes("compact"));
-  assert.ok(names.includes("loop"), "the post-session catalog is the real one");
-  assert.equal(names.includes("always-approve"), false);
-  assert.equal(names.includes("context"), false);
-  await r.dispose();
-});
-
 test("the session's own catalog: its live commands and the skills `grok inspect` lists under its env (Agent Profiles composer)", async () => {
   // A `grok` that answers `inspect` itself (skills under the env's GROK_HOME, so the test sees the
   // session's own env was used) and hands everything else to the mock ACP peer.
@@ -415,6 +434,8 @@ test("the session's own catalog: its live commands and the skills `grok inspect`
     bin,
     [
       "#!/bin/sh",
+      'if [ "$1" = --version ]; then printf "%s\\n" "grok 1.0.34"; exit 0; fi',
+      'if [ "$1" = models ]; then printf "%s\\n" "You are not authenticated."; exit 0; fi',
       'if [ "$1" = inspect ]; then',
       `  printf '{"skills":[{"name":"profile-skill","description":"Mine","source":{"type":"user","path":"%s/skills/s1/SKILL.md"}}]}' "$GROK_HOME"`,
       "  exit 0",
@@ -429,6 +450,10 @@ test("the session's own catalog: its live commands and the skills `grok inspect`
     assert.equal(await r.adapter.sessionCatalog!("t1"), null, "no session");
     await start(r);
     await r.waitFor((event) => event.type === "session.state.changed", "ready");
+    const snapshot = await r.adapter.refreshSnapshot();
+    const snapshotNames = snapshot.slashCommands.map((command) => command.name);
+    assert.ok(snapshotNames.includes("compact") && snapshotNames.includes("loop"));
+    assert.equal(snapshotNames.includes("always-approve") || snapshotNames.includes("context"), false);
     const catalog = await r.adapter.sessionCatalog!("t1");
     const names = catalog?.slashCommands.map((command) => command.name) ?? [];
     assert.ok(names.includes("loop") && names.includes("compact"), names.join(","));
@@ -468,6 +493,7 @@ test("an approval opens a request, and the decision reaches the agent", async ()
   )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
   assert.equal(completed.payload.state, "completed");
   await r.drain();
+  assert.equal(advisories(r.events), 0);
   assert.deepEqual(resolutionsOf(r.events, opened.requestId).map((event) => event.payload), [
     { requestType: "file_change_approval", decision: "accept" }
   ]);
@@ -602,6 +628,9 @@ test("a child that exits mid-turn settles the turn, closes items and then exits"
   // The CLI exits 143 with signal null, so a supervisor keying on the signal
   // would misread this.
   assert.match(exited.payload.reason ?? "", /code 143/);
+  await r.drain();
+  assert.equal(r.adapter.hasSession("t1"), false);
+  assert.deepEqual(r.adapter.listSessions(), []);
   await r.dispose();
 });
 
@@ -653,17 +682,8 @@ test("stopSession settles everything and emits a graceful exit", async () => {
   >;
   assert.equal(completed.payload.state, "interrupted");
   assert.equal(r.adapter.hasSession("t1"), false);
-  await r.dispose();
-});
-
-test("listSessions reflects active sessions", async () => {
-  const r = await rig();
-  await start(r);
   await r.drain();
-  const sessions = r.adapter.listSessions();
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].threadId, "t1");
-  assert.equal(sessions[0].runtimeMode, "approval-required");
+  assert.equal(r.events.slice(r.events.indexOf(exited)).some((event) => event.type === "runtime.error"), false);
   await r.dispose();
 });
 
@@ -799,56 +819,6 @@ test("a steer closes the call its cancel cut, on the turn it steers — the CLI 
   }
 });
 
-test("a steer settles the turn from the STEERED prompt, not the cancelled one", async () => {
-  // R4 #1 / Q1 #4 (blocker). The old guard was inverted: the cancelled first
-  // prompt matched `turn.epoch` and ended the turn, and the steered answer was
-  // discarded. The previous steering test could not see it — it asserted only
-  // the turn id and a `turn.started` count, both of which held with the bug.
-  const r = await rig({ scenario: "steer" });
-  await start(r);
-  const first = await r.adapter.sendTurn({
-    threadId: "t1",
-    input: "count to twenty",
-    attachments: [],
-    interactionMode: "default"
-  });
-  await r.waitFor(
-    (event) => event.type === "content.delta" && event.payload.delta === "one",
-    "the first prompt streaming"
-  );
-  const second = await r.adapter.sendTurn({
-    threadId: "t1",
-    input: "stop and say DONE",
-    attachments: [],
-    interactionMode: "default"
-  });
-  assert.equal(second.turnId, first.turnId, "a steer reuses the turn id");
-
-  const completed = (await r.waitFor(
-    (event) => event.type === "turn.completed",
-    "turn.completed"
-  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
-  assert.equal(completed.payload.state, "completed", "the STEERED prompt settles the turn");
-  assert.equal(completed.payload.stopReason, "end_turn");
-  assert.equal(completed.payload.tokenUsage?.usageStatus, "complete");
-  assert.equal(completed.turnId, first.turnId);
-
-  // The steered answer really reached the timeline.
-  const text = r.events
-    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
-    .filter((event) => event.payload.streamKind === "assistant_text")
-    .map((event) => event.payload.delta)
-    .join("");
-  assert.match(text, /DONE/, "the steered prompt's output is not dropped");
-  assert.equal(
-    r.events.filter((event) => event.type === "turn.completed").length,
-    1,
-    "exactly one terminal row"
-  );
-  assert.equal(r.events.filter((event) => event.type === "turn.started").length, 1);
-  await r.dispose();
-});
-
 test("a steer closes the cancelled prompt's bubble: the steered reply is a new assistant item", async () => {
   // ACP's `agent_message_chunk` names no message, so the normaliser's segment
   // is the only thing that tells two prompts' text apart. A steer re-opened
@@ -859,7 +829,7 @@ test("a steer closes the cancelled prompt's bubble: the steered reply is a new a
   // (`AcpSessionRuntime.ts:1033-1034`).
   const r = await rig({ scenario: "steer" });
   await start(r);
-  await r.adapter.sendTurn({
+  const first = await r.adapter.sendTurn({
     threadId: "t1",
     input: "count to twenty",
     attachments: [],
@@ -869,7 +839,7 @@ test("a steer closes the cancelled prompt's bubble: the steered reply is a new a
     (event) => event.type === "content.delta" && event.payload.delta === "one",
     "the first prompt streaming"
   )) as Extract<RuntimeEvent, { type: "content.delta" }>;
-  await r.adapter.sendTurn({
+  const second = await r.adapter.sendTurn({
     threadId: "t1",
     input: "stop and say DONE",
     attachments: [],
@@ -879,8 +849,15 @@ test("a steer closes the cancelled prompt's bubble: the steered reply is a new a
     (event) => event.type === "content.delta" && event.payload.delta === "DONE",
     "the steered prompt streaming"
   )) as Extract<RuntimeEvent, { type: "content.delta" }>;
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = await r.waitFor((event) => event.type === "turn.completed", "turn.completed") as Extract<RuntimeEvent, { type: "turn.completed" }>;
   await r.drain();
+  assert.equal(second.turnId, first.turnId);
+  assert.equal(completed.turnId, first.turnId);
+  assert.equal(completed.payload.state, "completed");
+  assert.equal(completed.payload.stopReason, "end_turn");
+  assert.equal(completed.payload.tokenUsage?.usageStatus, "complete");
+  assert.equal(r.events.filter((event) => event.type === "turn.started").length, 1);
+  assert.equal(r.events.filter((event) => event.type === "turn.completed").length, 1);
 
   assert.ok(before.itemId !== undefined && after.itemId !== undefined, "both deltas name their item");
   assert.notEqual(after.itemId, before.itemId, "the steered reply opens a new assistant segment");
@@ -1457,52 +1434,6 @@ for (const [scenario, runtimeMode] of [
     await r.dispose();
   });
 }
-
-test("a carded request the CLI also resolves itself raises no advisory either", async () => {
-  const r = await rig({ scenario: "permission" });
-  await start(r);
-  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
-  await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
-  await r.drain();
-  assert.equal(advisories(r.events), 0);
-  await r.dispose();
-});
-
-test("a session that dies on its own is removed from the adapter's map", async () => {
-  // Q1 #30: a stale entry keeps winning `hasSession` and is reported to the
-  // §3.3 reconcile as live.
-  const r = await rig({ scenario: "exit-mid-turn" });
-  await start(r);
-  assert.equal(r.adapter.hasSession("t1"), true);
-  void r.adapter.sendTurn({ threadId: "t1", input: "count", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "session.exited", "session.exited");
-  await r.drain();
-  assert.equal(r.adapter.hasSession("t1"), false);
-  assert.equal(r.adapter.listSessions().length, 0);
-  await r.dispose();
-});
-
-test("a host-initiated stop emits no runtime.error after session.exited", async () => {
-  // Q1 #22: the parked `session/prompt` rejects when the child is killed, and
-  // the rejection handler used to emit an error row after the exit.
-  const r = await rig({ scenario: "slow" });
-  await start(r);
-  void r.adapter.sendTurn({ threadId: "t1", input: "long", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "turn.started", "turn.started");
-  await r.adapter.stopSession("t1");
-  await r.waitFor((event) => event.type === "session.exited", "session.exited");
-  await r.drain();
-  const order = r.events.map((event) => event.type);
-  const exitedAt = order.indexOf("session.exited");
-  assert.equal(
-    order.slice(exitedAt).includes("runtime.error"),
-    false,
-    "everything is settled before session.exited"
-  );
-  await r.dispose();
-});
 
 test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => {
   const r = await rig();

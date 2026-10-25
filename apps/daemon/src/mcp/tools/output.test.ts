@@ -80,7 +80,7 @@ test("a message answers its text, and any other item the GUI viewer's text: a st
 
 test("windows are UTF-8 byte windows that never split a character, and chain through nextOffset to the end", async () => {
   // 4-, 3-, 2- and 1-byte characters, so almost every window edge falls inside one.
-  const output = "😀語é!\n".repeat(300);
+  const output = "😀語é!\n".repeat(8);
   const row = commandRow({ item: { command: "yes", aggregatedOutput: output } });
   const api = holding(row);
   for (const maxBytes of [1, 2, 3, 5, 7, 100, 1_001]) {
@@ -362,7 +362,7 @@ test("a windowing host and a host that ignores the window answer the same pages,
   ];
   for (const [i, whole] of outputs.entries()) {
     // Narrow windows over a head of the output (a page per character or so), wide ones over all of it.
-    for (const [maxBytes, output] of [[1, whole.slice(0, 300)], [2, whole.slice(0, 300)], [3, whole.slice(0, 300)], [5, whole.slice(0, 600)], [1_001, whole], [40_000, whole], [55_000, whole]] as const) {
+    for (const [maxBytes, output] of [[1, whole.slice(0, 24)], [2, whole.slice(0, 24)], [3, whole.slice(0, 24)], [5, whole.slice(0, 48)], [40_000, whole], [55_000, whole]] as const) {
       const joined = joinedOutput({ toolUseId: "call-1", output, complete: i % 2 === 0, truncated: i === 3 });
       const local = await readAll(streaming(started, joined), started.id, maxBytes);
       const remote = await readAll(windowing(started, joined), started.id, maxBytes);

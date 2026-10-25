@@ -5,12 +5,9 @@ import type { AgentAccount, KnowledgeRunSummary, KnowledgeWorkerView } from "@or
 import {
   KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL,
   knowledgeAccountOptions,
-  knowledgeRebuildMessage,
   knowledgeRunLine,
-  knowledgeSettingsForm,
   knowledgeSettingsPatch,
   knowledgeSettingsProblem,
-  knowledgeTokensText,
   knowledgeWorkersShown,
   knowledgeWorkerText,
   readKnowledgeSettings
@@ -28,10 +25,6 @@ describe("knowledge settings form", () => {
     assert.deepEqual(readKnowledgeSettings({ accountId: 3, model: "", concurrency: 99 }), SAVED);
     assert.deepEqual(readKnowledgeSettings(null), SAVED);
     assert.deepEqual(readKnowledgeSettings({ concurrency: 1.5 }), SAVED);
-  });
-
-  it("shows null model as empty and concurrency as text", () => {
-    assert.deepEqual(knowledgeSettingsForm(SAVED), { accountId: null, model: "", concurrency: "4" });
   });
 
   it("refuses concurrency outside 1..8 or not whole", () => {
@@ -105,11 +98,6 @@ describe("knowledge activity text", () => {
     ...overrides
   });
 
-  it("formats tokens compactly", () => {
-    assert.equal(knowledgeTokensText({ in: 0, out: 0 }), "None yet");
-    assert.equal(knowledgeTokensText({ in: 1_234_567, out: 34_000 }), "1.2M in · 34k out");
-  });
-
   it("describes the last run: when, how long, tasks and tokens", () => {
     assert.deepEqual(knowledgeRunLine(run(), () => "2h ago"), {
       title: "Update · finished",
@@ -149,11 +137,5 @@ describe("knowledge activity text", () => {
     assert.deepEqual(shown, ["live", "new", "old", "w4", "w5"]);
     assert.equal(knowledgeWorkerText({ state: "running", tasks: 1 }), "Running · 1 task");
     assert.equal(knowledgeWorkerText({ state: "failed", tasks: 3 }), "Failed · 3 tasks");
-  });
-
-  it("puts the estimate in the rebuild confirmation", () => {
-    assert.match(knowledgeRebuildMessage({ entries: 12, tasks: 340 }, null), /about 340 tasks \(model calls\) for 12 entries\.$/);
-    assert.match(knowledgeRebuildMessage(null, "busy"), /The estimate is unavailable: busy$/);
-    assert.match(knowledgeRebuildMessage(null, null), /Estimating…$/);
   });
 });

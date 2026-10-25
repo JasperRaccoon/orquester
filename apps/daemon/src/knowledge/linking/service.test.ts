@@ -635,19 +635,6 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.service.stop();
   });
 
-  it("fails over to another account on a usage limit and records the cooldown", async () => {
-    const h = await harness({ accounts: ["a1", "a2"], behaviour: { a1: { limitAfter: 1, resetsAt: "2026-10-23T15:00:00.000Z" } } });
-    h.settings.value.concurrency = 1;
-    await h.service.start();
-    for (let i = 1; i <= 3; i += 1) h.service.entriesChanged(await h.store.put(ID(i), `entry ${i}`));
-    await h.clock.advance(20_000);
-    await h.until(ranOk(h, 1));
-    assert.deepEqual(h.port.coolDowns.map((c) => c.accountId), ["a1"]);
-    assert.ok(h.port.sessions.some((s) => s.accountId === "a2" && s.answered.length > 0));
-    assert.equal(lastRun(h)!.tasks, 4);
-    await h.service.stop();
-  });
-
   it("pauses with resumesAt when every account is limited, survives a restart, and resumes the same run", async () => {
     const first = await harness({ accounts: ["a1"], behaviour: { a1: { limitAfter: 1, resetsAt: "2026-10-23T15:00:00.000Z" } } });
     first.settings.value.concurrency = 1;

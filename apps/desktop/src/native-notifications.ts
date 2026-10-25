@@ -22,7 +22,7 @@ const BODY_MAX = 500;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TAG = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 /** Highest count the badge shows; anything above it is still "a lot". */
-export const BADGE_MAX = 9_999;
+const BADGE_MAX = 9_999;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -102,36 +102,23 @@ export function badgeOverlayBitmap(size = 16): Buffer {
 }
 
 /** How long a shown notification is held for its click handler before it is let go. */
-export const NOTIFICATION_HOLD_MS = 30 * 60_000;
-
-export interface Timers {
-  setTimeout(callback: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-}
+const NOTIFICATION_HOLD_MS = 30 * 60_000;
 
 /**
  * Shown notifications by tag. Holding one keeps its click handler from being
  * collected; a newer one with the same tag replaces it. Electron does not
  * promise a `close` event on Linux or Windows (a toast can sit in the action
- * centre for good), so each hold also lapses after `holdMs`, and the caller
+ * centre for good), so each hold also lapses after 30 minutes, and the caller
  * releases on click, close and failure.
  */
 export class NotificationRegistry<T> {
-  private readonly held = new Map<string, { item: T; timer: unknown }>();
-
-  constructor(
-    private readonly holdMs: number = NOTIFICATION_HOLD_MS,
-    private readonly timers: Timers = {
-      setTimeout: (callback, ms) => setTimeout(callback, ms),
-      clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout)
-    }
-  ) {}
+  private readonly held = new Map<string, { item: T; timer: ReturnType<typeof setTimeout> }>();
 
   /** Hold `item` under `tag`; returns the one it replaces, for the caller to close. */
   hold(tag: string, item: T): T | undefined {
     const previous = this.held.get(tag);
-    if (previous) this.timers.clearTimeout(previous.timer);
-    const timer = this.timers.setTimeout(() => this.release(tag, item), this.holdMs);
+    if (previous) clearTimeout(previous.timer);
+    const timer = setTimeout(() => this.release(tag, item), NOTIFICATION_HOLD_MS);
     this.held.set(tag, { item, timer });
     return previous?.item;
   }
@@ -140,11 +127,7 @@ export class NotificationRegistry<T> {
   release(tag: string, item: T): void {
     const entry = this.held.get(tag);
     if (!entry || entry.item !== item) return;
-    this.timers.clearTimeout(entry.timer);
+    clearTimeout(entry.timer);
     this.held.delete(tag);
-  }
-
-  get size(): number {
-    return this.held.size;
   }
 }

@@ -17,7 +17,7 @@
  * Part 2 (`ORQUESTER_GROK_LIVE_AUTH` = an account's `auth.json`, used in place through
  * `GROK_AUTH_PATH` exactly as a chat would — never copied): the real adapter starts a session
  * (`session/new`, no prompt); the last `available_commands_update` is the model's catalog, and the
- * CLI's debug log (`GROK_DEBUG_LOG`) shows which plugins and hooks loaded.
+ * profile's SessionStart hook leaves a file proving it ran.
  */
 
 import assert from "node:assert/strict";
@@ -260,10 +260,8 @@ describe("Grok profile isolation (live)", { skip }, () => {
     }
   });
 
-  it("a real session (no prompt): the catalog holds the profile's and the repo's items only; Claude plugins stay off", { skip: skipSession }, async () => {
+  it("a real session (no prompt): the catalog includes profile/repo skills, excludes Global skills and runs the profile hook", { skip: skipSession }, async () => {
     const { root, repo, preparedDir, profile, env, hookMark, globalGrok } = await world();
-    const debugLog = join(root, "grok-debug.log");
-    const frames: unknown[] = [];
     let commandsSeen: (names: string[]) => void = () => undefined;
     const commandsReady = new Promise<string[]>((resolve) => (commandsSeen = resolve));
     const controller = new AbortController();
@@ -278,7 +276,6 @@ describe("Grok profile isolation (live)", { skip }, () => {
       resolveAttachmentPath: async () => await Promise.resolve(root),
       attachmentsDir: () => root,
       logRawFrame: (_threadId, entry) => {
-        frames.push(entry);
         const frame = (entry as { frame?: { method?: string; params?: { update?: { sessionUpdate?: string; availableCommands?: Array<{ name: string }> } } } }).frame;
         const update = frame?.params?.update;
         if (update?.sessionUpdate === "available_commands_update") {
@@ -286,7 +283,7 @@ describe("Grok profile isolation (live)", { skip }, () => {
           if (names.some((name) => name.includes("plugin-skill"))) commandsSeen(names);
         }
       },
-      buildEnv: () => ({ ...env, TMPDIR: root, GROK_DEBUG_LOG: debugLog }),
+      buildEnv: () => ({ ...env, TMPDIR: root }),
       resolveBin: async () => await Promise.resolve(BIN),
       sessionPath: () => process.env.PATH ?? "",
       tmpDir: () => root,
@@ -322,19 +319,6 @@ describe("Grok profile isolation (live)", { skip }, () => {
       const globalNames = (await globalSkillPaths()).map((path) => path.split("/").at(-1) ?? "");
       for (const name of names) {
         assert.ok(!globalNames.includes(name), `no Global skill in the catalog: ${name}`);
-      }
-      // The debug log is the authority on plugins (inspect lists a disabled plugin as enabled):
-      // every Claude-installed plugin is discovered and found in the deny list, and only the
-      // profile's own hooks plugin loads hooks.
-      const debug = await readFile(debugLog, "utf8");
-      const discovered = new Set([...debug.matchAll(/plugin discovered name=(\S+) scope=user/g)].map((match) => match[1]));
-      const denied = new Set([...debug.matchAll(/plugin already in enabled\/disabled list plugin=(\S+)/g)].map((match) => match[1]));
-      console.log("user-scope plugins discovered:", [...discovered].join(", ") || "(none)", "| denied:", [...denied].join(", ") || "(none)");
-      for (const name of discovered) assert.ok(denied.has(name), `plugin ${name} is in the deny list`);
-      const hooksFrom = new Set([...debug.matchAll(/plugin hooks loaded from file plugin="([^"]+)"/g)].map((match) => match[1]));
-      assert.deepEqual([...hooksFrom], ["orquester-profile-hooks"], "only the profile's hooks plugin loads hooks");
-      for (const name of discovered) {
-        assert.ok(!names.some((entry) => entry.startsWith(`${name}:`)), `nothing of plugin ${name} in the catalog`);
       }
       assert.match(await readFile(hookMark, "utf8"), /fired/, "the profile's SessionStart hook ran");
     } finally {

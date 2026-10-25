@@ -11,7 +11,7 @@ import { PROBE_PATH, type BoxPackageManager, type PackageChoice } from "./probe.
 
 /** Google's Linux package signing key, and the fingerprint of its primary key (stable since 2016; subkeys rotate). */
 export const GOOGLE_SIGNING_KEY_URL = "https://dl.google.com/linux/linux_signing_key.pub";
-export const GOOGLE_SIGNING_KEY_FINGERPRINT = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
+const GOOGLE_SIGNING_KEY_FINGERPRINT = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 export const GOOGLE_CHROME_DEB_REPO = "https://dl.google.com/linux/chrome/deb/";
 export const GOOGLE_CHROME_RPM_REPO = "https://dl.google.com/linux/chrome/rpm/stable/$basearch";
 const APT_KEYRING = "/etc/apt/keyrings/google-chrome.asc";

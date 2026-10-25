@@ -295,7 +295,14 @@ test("update_session gates: busy without force, idle gate for accounts, opencode
   await tool("update_session").run({ sessionId: "c1", runtimeMode: "auto", force: true }, h.ctx);
   await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: true }, h.ctx), (e: { code: string }) => e.code === "SESSION_BUSY");
   const oc = await harness([chatSummary({ refId: "opencode" })]); t.after(oc.close);
-  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, oc.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT");
+  oc.api.on("GET", "/api/registry", { status: 200, body: { ...registry, agents: [...registry.agents,
+    { id: "opencode", kind: "agent", name: "OpenCode", bin: ["opencode"], enabled: true, installState: "idle", chat: { adapter: "opencode" } }
+  ] } });
+  oc.api.on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers,
+    { ...providers.providers[0]!, id: "opencode", refIds: ["opencode"] }
+  ] } });
+  // A known agent and universally valid system identity: only OpenCode's no-account guard can refuse this.
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "system", force: false }, oc.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT");
   const idle = await harness(); t.after(idle.close);
   await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-2", force: false }, idle.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });

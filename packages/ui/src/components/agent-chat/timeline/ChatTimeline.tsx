@@ -1,7 +1,6 @@
 import React from "react";
 import { TriangleAlert, X } from "lucide-react";
 
-import { noteRender } from "../../../lib/render-probe";
 import { cn } from "../../../lib/cn";
 import type { AgentChatActions, AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
@@ -89,7 +88,6 @@ const REVEAL_TOP_MARGIN_PX = 16;
  * and a background shell's one-row projection thrown away.
  */
 export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
-  noteRender("ChatTimeline");
   const {
     sessionId,
     rows,

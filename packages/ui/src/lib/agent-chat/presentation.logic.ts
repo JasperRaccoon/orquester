@@ -488,14 +488,14 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * Readable labels for the Orquester session tools (design 2026-10-14 §1.5;
  * unified MCP 2026-10-15 §4), by bare name — the in-chat `orquester` server's
  * tools, whatever the harness calls them. Every chat tool of the unified
- * catalogue (`TOOLSETS`) has a line (a test reads the names from there), and
+ * catalogue (`TOOLSETS`) has a line, and
  * so does every legacy name an older transcript or an older agent host may
  * still show: the old in-chat tools (`thread_*`, `task_*`, `delegate_task`,
  * `agent_catalog`) and the external names the unified tools replaced. A tool
  * with none still reads "Orquester: <its name in words>", never its raw
  * arguments.
  */
-export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // --- The unified catalogue (§4, §9.1), by toolset -------------------------
   // core
   list_projects: "Listed projects",

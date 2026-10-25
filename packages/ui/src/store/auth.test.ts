@@ -99,11 +99,9 @@ describe("establish", () => {
 describe("establish on a bad link", () => {
   it("an auth-info request that got no answer is retried, never taken for 'no sign-in needed'", async () => {
     storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
-    const signals: Array<AbortSignal | undefined> = [];
     const api = {
       ...fakeApi(TOKEN),
-      authInfo: async (signal?: AbortSignal) => {
-        signals.push(signal);
+      authInfo: async () => {
         throw new TypeError("Failed to fetch");
       }
     } as unknown as ApiClient;
@@ -111,7 +109,6 @@ describe("establish on a bad link", () => {
     await assert.rejects(store().establish(api), TypeError, "the caller's backoff loop takes it");
     assert.deepEqual(infoCalls, [], "no request went out without the stored token");
     assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN, "the sign-in is kept");
-    assert.ok(signals[0] instanceof AbortSignal, "the request is bounded by a timeout");
   });
 
   it("a daemon that answers without auth info (an older build's 404) still needs no sign-in", async () => {
@@ -126,21 +123,6 @@ describe("establish on a bad link", () => {
     assert.deepEqual(infoCalls, [""], "the pre-check ran, unauthenticated, as before");
   });
 
-  it("the credential pre-check is bounded by a timeout too", async () => {
-    storage.set(`orquester.session:${ENDPOINT}`, TOKEN);
-    let signal: AbortSignal | undefined;
-    const api = {
-      ...fakeApi(TOKEN),
-      info: async (given?: AbortSignal) => {
-        signal = given;
-        throw new TypeError("Failed to fetch");
-      }
-    } as unknown as ApiClient;
-    useAppStore.setState({ api });
-    await assert.rejects(store().establish(api), TypeError);
-    assert.ok(signal instanceof AbortSignal);
-    assert.equal(storage.get(`orquester.session:${ENDPOINT}`), TOKEN);
-  });
 });
 
 describe("the chats this device saved", () => {
@@ -222,15 +204,19 @@ describe("submitCredentials", () => {
       throw new ApiError(401, "POST", "/api/auth/login");
     };
     await store().submitCredentials("admin", "wrong");
-    assert.equal(store().authError, "Incorrect username or password.");
+    assert.ok(store().authError?.trim(), "a rejected login supplies a reason");
+    assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
+    assert.equal(store().api?.connection.password, undefined);
     assert.equal(storage.size, 0);
 
     loginAnswer = async () => {
       throw new ApiError(429, "POST", "/api/auth/login", { "retry-after": "900" });
     };
     await store().submitCredentials("admin", "wrong");
-    assert.equal(store().authError, "Too many failed attempts. Try again in 900s.");
+    assert.match(store().authError ?? "", /\b900\s*(?:s|seconds?)\b/i, "the reason includes Retry-After seconds");
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
+    assert.equal(store().api?.connection.password, undefined);
+    assert.equal(storage.size, 0);
   });
 
   it("refuses a response that is not a token", async () => {

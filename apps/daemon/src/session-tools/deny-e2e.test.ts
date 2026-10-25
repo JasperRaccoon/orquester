@@ -17,7 +17,6 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import type { AgentHomes } from "../agent-profile/adapters/types.ts";
 import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "../agent-profile/daemon-mcp.ts";
-import { CODEX_DENIED_STUB_URL, codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { SessionToolsRefresher } from "./session-tools-refresh.ts";
@@ -181,8 +180,6 @@ test("Codex: a project-level server is denied in every home, trusted or not; tru
   // does not (untrusted, no entry, an unreadable trust table), the denial is a disabled stub —
   // harmless, never "invalid transport" (probed on 0.159.0).
   for (const home of ["acct-t", "acct-u", "system", "acct-x"]) assert.deepEqual(await deny(home), ["proj_orq"], home);
-  assert.deepEqual(codexDenyConfig(["proj_orq"], "", new Set(["proj_orq"])), { "mcp_servers.proj_orq.enabled": false }, "loaded: switched off");
-  assert.deepEqual(codexDenyConfig(["proj_orq"], "", new Set()), { "mcp_servers.proj_orq": { url: CODEX_DENIED_STUB_URL, enabled: false } }, "not loaded: a stub");
   // The panel still lists the server, saying which homes load it.
   const listed = (await app.inject({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers" })).json() as { servers: Array<{ name: string; loadedByHomes?: string[] }> };
   assert.deepEqual(listed.servers.find((server) => server.name === "proj_orq")?.loadedByHomes, ["acct-t"]);

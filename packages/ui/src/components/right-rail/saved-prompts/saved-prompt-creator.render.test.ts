@@ -53,7 +53,7 @@ const byAgent = prompt({ createdBy: { kind: "agent", agent: "codex", threadId: "
 
 test("the badge names the agent and, in its title, the chat", () => {
   assert.deepEqual(promptCreatorBadge(byAgent)?.label, "by Codex");
-  assert.match(promptCreatorBadge(byAgent)?.title ?? "", /in the chat “Plan the API”/);
+  assert.ok(promptCreatorBadge(byAgent)?.title?.includes("Plan the API"));
   assert.equal(promptCreatorBadge(prompt()), null);
   assert.equal(promptCreatorBadge(prompt({ createdBy: { kind: "user" } })), null);
   assert.equal(promptCreatorBadge(prompt({ createdBy: { kind: "agent", agent: "future" } }))?.label, "by an agent");

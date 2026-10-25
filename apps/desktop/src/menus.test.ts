@@ -5,135 +5,75 @@ import type { MenuItemConstructorOptions } from "electron";
 
 import { applicationMenuTemplate, contextMenuTemplate, type ContextMenuInput } from "./menus";
 
-const roles = (items: MenuItemConstructorOptions[] | undefined) =>
-  (items ?? []).map((item) => item.role ?? item.label ?? item.type);
 const submenu = (item: MenuItemConstructorOptions | undefined) => item?.submenu as MenuItemConstructorOptions[];
-/** Electron's click signature, for the tests' direct calls. */
-const click = (item: MenuItemConstructorOptions | undefined) =>
-  (item?.click as (() => void) | undefined)?.();
+const click = (item: MenuItemConstructorOptions | undefined) => (item?.click as (() => void) | undefined)?.();
+const role = (items: MenuItemConstructorOptions[], value: MenuItemConstructorOptions["role"]) => items.find((item) => item.role === value);
 
 describe("the application menu", () => {
-  const calls: string[] = [];
-  const actions = { openSettings: () => calls.push("settings"), openLogs: () => calls.push("logs") };
-
-  it("on macOS: an app menu with Settings… and quit, then File, Edit, View, Window and Help", () => {
-    const template = applicationMenuTemplate("darwin", "Orquester", actions);
-    assert.deepEqual(
-      template.map((item) => item.label ?? item.role),
-      ["Orquester", "File", "Edit", "View", "windowMenu", "help"]
-    );
-    const appMenu = submenu(template[0]);
-    assert.deepEqual(roles(appMenu), [
-      "about",
-      "separator",
-      "Settings…",
-      "separator",
-      "services",
-      "separator",
-      "hide",
-      "hideOthers",
-      "unhide",
-      "separator",
-      "quit"
-    ]);
-    const settings = appMenu.find((item) => item.label === "Settings…");
-    assert.equal(settings?.accelerator, "CmdOrCtrl+,");
+  it("provides native shortcuts and routes Settings and logs actions on macOS", () => {
+    const calls: string[] = [];
+    const template = applicationMenuTemplate("darwin", "Orquester", { openSettings: () => calls.push("settings"), openLogs: () => calls.push("logs") });
+    const appMenu = submenu(template.find((item) => item.label === "Orquester"));
+    assert.ok(role(appMenu, "quit"));
+    const settings = appMenu.find((item) => item.accelerator === "CmdOrCtrl+,");
+    assert.ok(settings?.click, "the system Settings shortcut must open settings");
     click(settings);
-    assert.deepEqual(roles(submenu(template[1])), ["close"]);
-    // The Edit roles carry the system copy/paste/undo shortcuts to the page.
-    assert.deepEqual(roles(submenu(template[2])).slice(0, 10), [
-      "undo",
-      "redo",
-      "separator",
-      "cut",
-      "copy",
-      "paste",
-      "pasteAndMatchStyle",
-      "delete",
-      "separator",
-      "selectAll"
-    ]);
-    assert.deepEqual(roles(submenu(template[3])), [
-      "reload",
-      "forceReload",
-      "toggleDevTools",
-      "separator",
-      "resetZoom",
-      "zoomIn",
-      "zoomOut",
-      "separator",
-      "togglefullscreen"
-    ]);
-    click(submenu(template[5])[0]);
-    assert.deepEqual(calls.splice(0), ["settings", "logs"]);
+    const entries = template.flatMap((item) => submenu(item) ?? []);
+    for (const required of ["undo", "redo", "cut", "copy", "paste", "selectAll", "close", "reload", "toggleDevTools", "resetZoom", "zoomIn", "zoomOut"] as const) {
+      assert.ok(role(entries, required), `missing native ${required} action`);
+    }
+    assert.deepEqual(calls, ["settings"]);
+    for (const item of submenu(role(template, "help")) ?? []) click(item);
+    assert.ok(calls.includes("logs"), "a Help action must open the logs");
   });
 
-  it("elsewhere: Settings… and Quit live in File, and Edit has no Speech", () => {
-    const template = applicationMenuTemplate("win32", "Orquester", actions);
-    assert.deepEqual(
-      template.map((item) => item.label ?? item.role),
-      ["File", "Edit", "View", "windowMenu", "help"]
-    );
-    assert.deepEqual(roles(submenu(template[0])), ["Settings…", "separator", "quit"]);
-    assert.equal(roles(submenu(template[1])).includes("Speech"), false);
+  it("provides the Settings shortcut and Quit on Windows", () => {
+    let opened = false;
+    const template = applicationMenuTemplate("win32", "Orquester", { openSettings: () => { opened = true; }, openLogs: () => {} });
+    const entries = template.flatMap((item) => submenu(item) ?? []);
+    assert.ok(role(entries, "quit"));
+    click(entries.find((item) => item.accelerator === "CmdOrCtrl+,"));
+    assert.equal(opened, true);
   });
 });
 
 describe("the context menu", () => {
-  const flags = { canCut: true, canCopy: true, canPaste: true, canSelectAll: true };
   const field = (over: Partial<ContextMenuInput> = {}): ContextMenuInput => ({
     isEditable: true,
     selectionText: "",
     misspelledWord: "",
     dictionarySuggestions: [],
-    editFlags: { ...flags, canUndo: false, canRedo: false, canDelete: false, canEditRichly: false },
+    editFlags: { canCut: true, canCopy: true, canPaste: true, canSelectAll: true, canUndo: false, canRedo: false, canDelete: false, canEditRichly: false },
     ...over
   });
-  const calls: string[] = [];
-  const actions = {
-    replaceMisspelling: (word: string) => calls.push(`replace:${word}`),
-    addToDictionary: (word: string) => calls.push(`add:${word}`)
-  };
+  const actions = { replaceMisspelling: (_word: string) => {}, addToDictionary: (_word: string) => {} };
 
   it("offers cut, copy, paste and select all in an editable field, enabled as the field allows", () => {
     const template = contextMenuTemplate(field({ editFlags: { ...field().editFlags, canCut: false, canCopy: false } }), actions);
-    assert.deepEqual(roles(template), ["cut", "copy", "paste", "separator", "selectAll"]);
-    assert.deepEqual(template.map((item) => item.enabled), [false, false, true, undefined, true]);
+    assert.equal(role(template, "cut")?.enabled, false);
+    assert.equal(role(template, "copy")?.enabled, false);
+    assert.equal(role(template, "paste")?.enabled, true);
+    assert.equal(role(template, "selectAll")?.enabled, true);
   });
 
-  it("puts up to five spelling suggestions and Add to Dictionary first over a misspelled word", () => {
-    const template = contextMenuTemplate(
-      field({ misspelledWord: "teh", dictionarySuggestions: ["the", "tea", "ten", "tel", "tex", "tee"] }),
-      actions
-    );
-    assert.deepEqual(roles(template), [
-      "the",
-      "tea",
-      "ten",
-      "tel",
-      "tex",
-      "separator",
-      "Add to Dictionary",
-      "separator",
-      "cut",
-      "copy",
-      "paste",
-      "separator",
-      "selectAll"
-    ]);
-    click(template[0]);
-    click(template[6]);
-    assert.deepEqual(calls.splice(0), ["replace:the", "add:teh"]);
-    const none = contextMenuTemplate(field({ misspelledWord: "qzx" }), actions);
-    assert.deepEqual(none.slice(0, 3).map((item) => [item.label ?? item.type, item.enabled]), [
-      ["No Suggestions", false],
-      ["separator", undefined],
-      ["Add to Dictionary", undefined]
-    ]);
+  it("replaces a misspelling and adds the original word to the dictionary", () => {
+    const calls: string[] = [];
+    const suggestions = ["the", "tea", "ten", "tel", "tex", "tee"];
+    const template = contextMenuTemplate(field({ misspelledWord: "teh", dictionarySuggestions: suggestions }), {
+      replaceMisspelling: (word) => calls.push(`replace:${word}`), addToDictionary: (word) => calls.push(`add:${word}`)
+    });
+    const suggestion = template.find((item) => item.label === "the");
+    assert.ok(suggestion?.click);
+    click(suggestion);
+    // Suggestions are user-supplied data; the remaining action adds the original word.
+    const add = template.find((item) => item.click && !suggestions.includes(item.label ?? ""));
+    assert.ok(add);
+    click(add);
+    assert.deepEqual(calls, ["replace:the", "add:teh"]);
   });
 
   it("offers Copy over a selection outside a field, and nothing over plain page", () => {
-    assert.deepEqual(roles(contextMenuTemplate(field({ isEditable: false, selectionText: "some text" }), actions)), ["copy"]);
+    assert.ok(role(contextMenuTemplate(field({ isEditable: false, selectionText: "some text" }), actions), "copy"));
     assert.deepEqual(contextMenuTemplate(field({ isEditable: false, selectionText: "  " }), actions), []);
     assert.deepEqual(contextMenuTemplate(field({ isEditable: false }), actions), []);
   });

@@ -62,7 +62,7 @@ interface ForwardEntry {
 }
 
 /** `{ scheme, port }` of a loopback URL, or null for anything else. */
-export function loopbackTarget(url: string): { scheme: "http" | "https"; port: number } | null {
+function loopbackTarget(url: string): { scheme: "http" | "https"; port: number } | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -77,7 +77,7 @@ export function loopbackTarget(url: string): { scheme: "http" | "https"; port: n
 }
 
 /** Listening ports worth offering: user-range, reachable on loopback, not a system daemon. */
-export function offerablePorts(ports: readonly BoxListeningPort[]): number[] {
+function offerablePorts(ports: readonly BoxListeningPort[]): number[] {
   const out = new Set<number>();
   for (const entry of ports) {
     if (entry.port < 1024 || !BINDABLE_ADDRESSES.has(entry.address)) continue;

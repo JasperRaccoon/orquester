@@ -110,7 +110,7 @@ export class TerminalOutputRing {
  * escape-sequence start within {@link SAFE_CUT_SCAN} of `min`, else `min` itself,
  * moved past a low surrogate so a pair is never split.
  */
-export function safeCutIndex(text: string, min: number): number {
+function safeCutIndex(text: string, min: number): number {
   const limit = Math.min(text.length, min + SAFE_CUT_SCAN);
   for (let index = min; index < limit; index += 1) {
     if (isSequenceIntroducer(text.charCodeAt(index)) || text.charCodeAt(index - 1) === 0x0a) {

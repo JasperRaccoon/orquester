@@ -37,7 +37,7 @@ export class SnapshotHistory<T> {
   }
 
   /** End the running burst: the next change is a step of its own even with the same key. */
-  seal(): void {
+  private seal(): void {
     this.lastKey = null;
   }
 

@@ -12,7 +12,6 @@ import { promisify } from "node:util";
 import { after, before, describe, test } from "node:test";
 
 import type { RegistryEntry } from "@orquester/api";
-import { appendNodeRequireOption } from "@orquester/config";
 
 import { setSessionNodePreload } from "./plugins/session-env.ts";
 import type { RegistryService } from "./registry.ts";
@@ -104,14 +103,14 @@ describe("direct node-pty sessions", () => {
   test("a preload active: appended to the daemon's, the entry's or the launcher's NODE_OPTIONS", async () => {
     setSessionNodePreload(PRELOAD);
     try {
-      assert.equal(await nodeOptionsOf(local(), recordingEntry()), appendNodeRequireOption(DAEMON_NODE_OPTIONS, PRELOAD));
+      assert.equal(await nodeOptionsOf(local(), recordingEntry()), '--no-deprecation --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
       assert.equal(
         await nodeOptionsOf(local(), recordingEntry({ NODE_OPTIONS: "--trace-warnings" })),
-        appendNodeRequireOption("--trace-warnings", PRELOAD)
+        '--trace-warnings --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
       );
       assert.equal(
         await nodeOptionsOf(local({ NODE_OPTIONS: "--no-warnings" }), recordingEntry({ NODE_OPTIONS: "--trace-warnings" })),
-        appendNodeRequireOption("--no-warnings", PRELOAD)
+        '--no-warnings --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
       );
     } finally {
       setSessionNodePreload(null);
@@ -122,7 +121,7 @@ describe("direct node-pty sessions", () => {
     delete process.env.NODE_OPTIONS;
     setSessionNodePreload(PRELOAD);
     try {
-      assert.equal(await nodeOptionsOf(local(), recordingEntry()), appendNodeRequireOption(undefined, PRELOAD));
+      assert.equal(await nodeOptionsOf(local(), recordingEntry()), '--require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
     } finally {
       setSessionNodePreload(null);
       process.env.NODE_OPTIONS = DAEMON_NODE_OPTIONS;
@@ -144,11 +143,11 @@ async function assertLauncherUnset(
   try {
     assert.equal(
       await nodeOptionsOf(backend({}, ["NODE_OPTIONS"]), recordingEntry(entryEnv)),
-      appendNodeRequireOption(undefined, PRELOAD)
+      '--require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
     );
     assert.equal(
       await nodeOptionsOf(backend({ NODE_OPTIONS: "--no-warnings" }, ["NODE_OPTIONS"]), recordingEntry(entryEnv)),
-      appendNodeRequireOption(undefined, PRELOAD)
+      '--require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
     );
   } finally {
     setSessionNodePreload(null);
@@ -191,7 +190,7 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
   test("the first session on a new server appends to the daemon's NODE_OPTIONS", async () => {
     setSessionNodePreload(PRELOAD);
     try {
-      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), appendNodeRequireOption(DAEMON_NODE_OPTIONS, PRELOAD));
+      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), '--no-deprecation --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
     } finally {
       setSessionNodePreload(null);
     }
@@ -203,7 +202,7 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
     await promisify(execFile)("tmux", ["-S", socket, "set-environment", "-g", "NODE_OPTIONS", "--trace-deprecation"]);
     setSessionNodePreload(PRELOAD);
     try {
-      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), appendNodeRequireOption("--trace-deprecation", PRELOAD));
+      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), '--trace-deprecation --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
     } finally {
       setSessionNodePreload(null);
     }
@@ -217,11 +216,11 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
     try {
       assert.equal(
         await nodeOptionsOf(tmuxed(), recordingEntry({ NODE_OPTIONS: "--trace-warnings" })),
-        appendNodeRequireOption("--trace-warnings", PRELOAD)
+        '--trace-warnings --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
       );
       assert.equal(
         await nodeOptionsOf(tmuxed({ NODE_OPTIONS: "--no-warnings" }), recordingEntry({ NODE_OPTIONS: "--trace-warnings" })),
-        appendNodeRequireOption("--no-warnings", PRELOAD)
+        '--no-warnings --require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"'
       );
     } finally {
       setSessionNodePreload(null);
@@ -237,7 +236,7 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
     assert.equal(await tmux.inheritedEnvValue("NODE_OPTIONS"), undefined);
     setSessionNodePreload(PRELOAD);
     try {
-      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), appendNodeRequireOption(undefined, PRELOAD));
+      assert.equal(await nodeOptionsOf(tmuxed(), recordingEntry()), '--require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
     } finally {
       setSessionNodePreload(null);
     }

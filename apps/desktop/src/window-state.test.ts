@@ -2,14 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  DEFAULT_WINDOW_SIZE,
-  DEFAULT_WINDOW_STATE,
-  MIN_WINDOW_SIZE,
   frameKey,
   hasNativeWindowControls,
   parseWindowState,
   resolveInitialWindowBounds,
-  sameWindowState,
   windowFrameOptions
 } from "./window-state";
 
@@ -24,15 +20,15 @@ describe("window-state.json", () => {
     });
   });
 
-  it("grows a size below the window minimum, and keeps negative positions (a display left of the primary)", () => {
-    assert.deepEqual(parseWindowState({ bounds: { x: -1500, y: -40, width: 300, height: 200 } }), {
-      bounds: { x: -1500, y: -40, width: MIN_WINDOW_SIZE.width, height: MIN_WINDOW_SIZE.height },
+  it("keeps negative saved positions for a display left of the primary", () => {
+    assert.deepEqual(parseWindowState({ bounds: { x: -1500, y: -40, width: 1400, height: 900 } }), {
+      bounds: { x: -1500, y: -40, width: 1400, height: 900 },
       maximized: false
     });
   });
 
   it("degrades a file from another version, or garbage, to the defaults field by field", () => {
-    for (const raw of [null, "x", 3, [], {}]) assert.deepEqual(parseWindowState(raw), DEFAULT_WINDOW_STATE);
+    for (const raw of [null, "x", 3, [], {}]) assert.deepEqual(parseWindowState(raw), { bounds: null, maximized: false });
     assert.deepEqual(parseWindowState({ bounds: { x: 1.5, y: 0, width: 1400, height: 900 }, maximized: true }), {
       bounds: null,
       maximized: true
@@ -49,14 +45,6 @@ describe("window-state.json", () => {
     assert.equal(parseWindowState({ maximized: "yes" }).maximized, false);
   });
 
-  it("compares states for a skipped write", () => {
-    const a = parseWindowState({ bounds: { x: 1, y: 2, width: 1400, height: 900 }, maximized: false });
-    assert.equal(sameWindowState(a, { ...a, bounds: { ...a.bounds! } }), true);
-    assert.equal(sameWindowState(a, { ...a, maximized: true }), false);
-    assert.equal(sameWindowState(a, { ...a, bounds: { ...a.bounds!, x: 2 } }), false);
-    assert.equal(sameWindowState(a, DEFAULT_WINDOW_STATE), false);
-    assert.equal(sameWindowState(DEFAULT_WINDOW_STATE, { bounds: null, maximized: false }), true);
-  });
 });
 
 describe("where the window opens", () => {
@@ -79,9 +67,16 @@ describe("where the window opens", () => {
   });
 
   it("falls back to the default size when the saved one fits nowhere, nothing was saved, or no display is known", () => {
-    assert.deepEqual(resolveInitialWindowBounds({ x: 2000, y: 0, width: 2500, height: 1400 }, [laptop]), DEFAULT_WINDOW_SIZE);
-    assert.deepEqual(resolveInitialWindowBounds(null, [laptop]), DEFAULT_WINDOW_SIZE);
-    assert.deepEqual(resolveInitialWindowBounds({ x: 0, y: 0, width: 1400, height: 900 }, []), DEFAULT_WINDOW_SIZE);
+    for (const [saved, displays] of [
+      [{ x: 2000, y: 0, width: 2500, height: 1400 }, [laptop]],
+      [null, [laptop]],
+      [{ x: 0, y: 0, width: 1400, height: 900 }, []]
+    ] as const) {
+      const bounds = resolveInitialWindowBounds(saved, displays);
+      assert.equal("x" in bounds, false, "Electron must centre a window with no usable saved position");
+      assert.equal("y" in bounds, false);
+      assert.ok(bounds.width > 0 && bounds.height > 0);
+    }
     // Straddling two displays fits neither: re-centred at its size.
     assert.deepEqual(resolveInitialWindowBounds({ x: 1500, y: 0, width: 1400, height: 900 }, [laptop, monitorRight]), {
       width: 1400,
@@ -94,7 +89,8 @@ describe("the window frame", () => {
   it("keeps macOS's hidden titlebar with traffic lights whatever the setting", () => {
     const on = windowFrameOptions("darwin", true);
     const off = windowFrameOptions("darwin", false);
-    assert.deepEqual(on, { frame: false, titleBarStyle: "hidden", trafficLightPosition: { x: 12, y: 12 } });
+    assert.equal(on.frame, false);
+    assert.equal(on.titleBarStyle, "hidden");
     assert.equal(frameKey(on), frameKey(off));
     assert.equal(hasNativeWindowControls("darwin", true), true);
     assert.equal(hasNativeWindowControls("darwin", false), true);

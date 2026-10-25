@@ -8,7 +8,7 @@
 
 import type { SessionSummary } from "@orquester/api";
 
-import { canonicalProject, classifyPath, classifyTarget, resolveProject, type CanonicalProject } from "../addressing.ts";
+import { canonicalProject, classifyPath, classifyTarget, type CanonicalProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { listSessions } from "../reads.ts";
@@ -24,7 +24,7 @@ export async function callerProject(api: Paths, caller: Pick<ThreadCaller, "proj
 }
 
 /** The caller's own children among `ids`: lineage parent = the caller AND `agentCreated` (§13 c). */
-export function ownChildren(callerId: string, sessions: readonly SessionSummary[], ids: readonly string[]): Set<string> {
+function ownChildren(callerId: string, sessions: readonly SessionSummary[], ids: readonly string[]): Set<string> {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   return new Set(
     ids.filter((id) => {
@@ -137,24 +137,4 @@ export function isWorkflowOwned(sessions: readonly SessionSummary[], threadId: s
 /** {@link isWorkflowOwned}, reading the tabs now. */
 export async function readWorkflowOwned(api: DaemonApi, threadId: string): Promise<boolean> {
   return isWorkflowOwned(await listSessions(api), threadId);
-}
-
-/**
- * A workflow's scope (§4.1, D-25): the UNION of its project, every `set_project` op's project and
- * every block's `projectOverride` (each `"<ws>/<project>"` or an absolute path; unresolvable →
- * `PROJECT_NOT_FOUND`), plus a temp project not created yet by workspace. Deduplicated, canonical.
- */
-export async function workflowProjectUnion(
-  api: Paths,
-  members: { projects: readonly string[]; pendingWorkspaces?: readonly string[] }
-): Promise<Pick<ScopeClaim, "projects" | "pendingProjects">> {
-  const projects: string[] = [];
-  for (const member of members.projects) {
-    const ref = await resolveProject(api, member);
-    const project = await canonicalProject(api, ref.path);
-    if (project === null) throw new ToolError("PROJECT_NOT_FOUND", `No project at "${clipText(member, MAX_ECHO_CHARS)}". Use list_projects.`);
-    if (!projects.includes(project.canonical)) projects.push(project.canonical);
-  }
-  const pending = [...new Set(members.pendingWorkspaces ?? [])].map((workspace) => ({ workspace }));
-  return pending.length > 0 ? { projects, pendingProjects: pending } : { projects };
 }

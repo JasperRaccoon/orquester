@@ -13,9 +13,7 @@ import {
   compareContents,
   createFrom,
   defaultGitRunner,
-  formatEnvValue,
   type GitRunner,
-  lineDiffCounts,
   mergeEnvContents,
   parseEnv,
   readCloneFile,
@@ -585,29 +583,22 @@ test("compareContents counts lines when either side isn't env", () => {
   const result = compareContents(enc("host: s3cr3t-a\nport: 1\nuser: x\n"), enc("host: s3cr3t-b\nport: 1\n"));
   assert.deepEqual(result, { format: "lines", linesAdded: 2, linesRemoved: 1 });
   assert.doesNotMatch(JSON.stringify(result), /s3cr3t/);
+  for (const [left, right, linesAdded, linesRemoved] of [
+    [["a", "b", "c"], ["a", "x", "c"], 1, 1],
+    [["a", "b", "c"], ["c", "a", "b"], 1, 1],
+    [[], ["a", "b"], 0, 2],
+    [["a", "b"], [], 2, 0],
+    [["x", "a", "b", "y"], ["a", "b"], 2, 0],
+    [["a", "b", "a", "b"], ["b", "a", "b", "a"], 1, 1]
+  ] as const) {
+    assert.deepEqual(compareContents(enc(left.join("\n")), enc(right.join("\n"))), { format: "lines", linesAdded, linesRemoved });
+  }
   assert.deepEqual(compareContents(enc("A=1\n"), enc("not env\n")), { format: "lines", linesAdded: 1, linesRemoved: 1 });
   assert.deepEqual(compareContents(new Uint8Array([0xff, 0x0a]), new Uint8Array([0xff, 0x0a])), {
     format: "lines",
     linesAdded: 0,
     linesRemoved: 0
   });
-});
-
-test("lineDiffCounts is an exact LCS diff for small inputs", () => {
-  assert.deepEqual(lineDiffCounts(["a", "b", "c"], ["a", "x", "c"]), { added: 1, removed: 1 });
-  assert.deepEqual(lineDiffCounts(["a", "b", "c"], ["c", "a", "b"]), { added: 1, removed: 1 });
-  assert.deepEqual(lineDiffCounts([], ["a", "b"]), { added: 0, removed: 2 });
-  assert.deepEqual(lineDiffCounts(["a", "b"], []), { added: 2, removed: 0 });
-  assert.deepEqual(lineDiffCounts(["x", "a", "b", "y"], ["a", "b"]), { added: 2, removed: 0 });
-  assert.deepEqual(lineDiffCounts(["a", "b", "a", "b"], ["b", "a", "b", "a"]), { added: 1, removed: 1 });
-});
-
-test("lineDiffCounts falls back to a multiset count for large inputs", () => {
-  const a = Array.from({ length: 6000 }, (_, i) => `l${i}`);
-  const b = [...a].reverse();
-  // Order-blind: the same lines in another order count as no change.
-  assert.deepEqual(lineDiffCounts(a, b), { added: 0, removed: 0 });
-  assert.deepEqual(lineDiffCounts([...a, "extra"], ["first", ...b]), { added: 1, removed: 1 });
 });
 
 test("compareContents stays fast on 1 MB adversarial input", () => {
@@ -660,20 +651,6 @@ test("mergeEnvContents returns null when any input isn't env", () => {
   assert.equal(mergeEnvContents(enc("A=1"), [enc("B=2"), enc("not env")]), null);
 });
 
-test("formatEnvValue prefers no quotes, then single quotes, and escapes only what a value needs", () => {
-  assert.equal(formatEnvValue("plain-value_1.2"), "plain-value_1.2");
-  // No `'`, no line break: single quotes — literal everywhere, no escape, no $ expansion.
-  assert.equal(formatEnvValue("has space"), "'has space'");
-  assert.equal(formatEnvValue("$HOME ${X}"), "'$HOME ${X}'");
-  assert.equal(formatEnvValue("back\\slash"), "'back\\slash'");
-  assert.equal(formatEnvValue('quote"s'), `'quote"s'`);
-  assert.equal(formatEnvValue("a#b"), "'a#b'");
-  // A `'` or a line break: double quotes, escaping only line breaks unless `\` or `"` force it.
-  assert.equal(formatEnvValue("it's"), `"it's"`);
-  assert.equal(formatEnvValue("multi\nline"), '"multi\\nline"');
-  assert.equal(formatEnvValue("it's \\ \"x\""), '"it\'s \\\\ \\"x\\""');
-});
-
 test("mergeEnvContents quotes values so they read back exactly", () => {
   const values = [
     "",
@@ -696,10 +673,27 @@ test("mergeEnvContents quotes values so they read back exactly", () => {
     "can't\nbreak \\n",
     "cr\ronly"
   ];
-  const other = values.map((value, i) => `K${i}=${formatEnvValue(value)}`).join("\n");
-  const otherEnv = parseEnv(enc(other));
-  assert.ok(otherEnv, "the formatted values parse");
-  values.forEach((value, i) => assert.equal(otherEnv.get(`K${i}`), value, `formatEnvValue(${JSON.stringify(value)})`));
+  const other = [
+    "K0=",
+    "K1=plain-value_1.2/3:4@5%6+7,8=9",
+    "K2='has space'",
+    "K3=' leading and trailing '",
+    "K4='a#b'",
+    "K5='a #b'",
+    "K6='#start'",
+    "K7='quote\"s'",
+    "K8=\"'single'\"",
+    "K9='`tick`'",
+    "K10='back\\slash'",
+    "K11='\\n literal'",
+    "K12=\"multi\\nline\\r\\nvalue\"",
+    "K13=\"tab\\there\"",
+    "K14='日本語 ✓'",
+    "K15='$HOME ${X}'",
+    "K16=\"it's \\\\ \\\"x\\\"\"",
+    "K17=\"can't\\nbreak \\\\n\"",
+    "K18=\"cr\\ronly\""
+  ].join("\n");
   const merged = mergeEnvContents(enc("BASE=1\n"), [enc(other)]);
   assert.ok(merged);
   const reparsed = parseEnv(merged);

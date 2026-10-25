@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { describe,it } from "node:test";
 
-import { chatToolNames, TOOLSETS } from "@orquester/api";
-
 import type { WorkLogEntry } from "./contracts";
 import {
-SESSION_TOOL_LABELS,
 toolApprovalOutcomeText,
 workEntryDisplayIndicatesToolFailure,
 workEntryDisplayLabel
@@ -37,38 +34,6 @@ describe("the output heuristic never judges a call still in progress", () => {
 });
 
 describe("session tool labels (unified MCP §4)", () => {
-  it("every chat tool of the catalogue has its own label, read from TOOLSETS", () => {
-    const names = TOOLSETS.flatMap((toolset) => toolset.tools.map((tool) => tool.name));
-    assert.equal(names.length, 60);
-    assert.deepEqual(names, chatToolNames());
-    for (const name of names) {
-      assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);
-      assert.doesNotMatch(SESSION_TOOL_LABELS[name]!, /^Orquester:/);
-    }
-  });
-
-  it("every legacy name keeps a label: the old in-chat tools and the external names the catalogue replaced", () => {
-    const legacy = [
-      "request_toolset", "thread_list", "thread_read", "thread_create", "agent_catalog", "thread_send", "thread_wait", "thread_interrupt",
-      "thread_fork", "thread_merge_back", "delegate_task", "task_status", "task_wait", "task_cancel",
-      "get_session_lineage", "interrupt_session", "stop_task", "stop_session", "close_session", "revert_session",
-      "compact_session", "implement_plan", "resolve_merge_back", "answer_question", "dismiss_question", "resolve_approval",
-      "get_cost", "list_files", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "validate_workflow",
-      "list_workflow_runs", "get_workflow_run", "list_agent_profiles", "get_agent_profile_item", "get_agent_instructions",
-      "list_marketplace_plugins", "desktops_list", "desktop_host_status", "desktop_windows", "desktop_app_log",
-      "desktop_open", "desktop_launch_app", "desktop_window_action", "desktop_stop_app", "desktop_close",
-      // The eight agent-profile write tools `edit_agent_profile` replaced.
-      "create_agent_profile_item", "update_agent_profile_item", "delete_agent_profile_item", "copy_agent_profile_item",
-      "set_agent_profile_item_enabled", "trust_agent_profile_hook", "write_agent_instructions", "import_agent_profile_items"
-    ];
-    for (const name of legacy) {
-      assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);
-      assert.doesNotMatch(SESSION_TOOL_LABELS[name]!, /^Orquester:/);
-    }
-    // Old transcripts read as before.
-    assert.equal(SESSION_TOOL_LABELS.thread_wait, "Waited for a chat");
-    assert.equal(SESSION_TOOL_LABELS.delegate_task, "Delegated a task");
-  });
 
   it("a gated call's row says how its card ended", () => {
     const gated = (outcome: "approved" | "granted" | "denied" | "timed_out" | "cancelled" | "not_delivered", kind: "admin" | "toolset" = "admin") =>

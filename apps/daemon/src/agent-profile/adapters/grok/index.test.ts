@@ -6,7 +6,7 @@ import test from "node:test";
 import type { ProfileItem } from "@orquester/api";
 import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config";
 import { AgentProfileError } from "../../errors.ts";
-import { ProfileBackups, ProfileStash } from "../../infra/index.ts";
+import { ProfileBackups, ProfileStash, runAgentCliOrThrow } from "../../infra/index.ts";
 import type { AgentHomes } from "../types.ts";
 import { GrokProfileAdapter } from "./index.ts";
 import { parseToml } from "./toml-patch.ts";
@@ -140,7 +140,7 @@ function inspectReport(fx: { homes: AgentHomes; demoPluginPath: string }): unkno
   };
 }
 
-async function setup(t: test.TestContext, state: FakeState = {}): Promise<Fixture> {
+async function setup(t: test.TestContext, state: FakeState = {}, options: { realInspect?: boolean } = {}): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "orquester-grok-profile-")));
   const home = join(root, "home");
   const homes: AgentHomes = {
@@ -211,7 +211,17 @@ async function setup(t: test.TestContext, state: FakeState = {}): Promise<Fixtur
       logger: { info: () => undefined, warn: () => undefined },
       now: () => new Date(clock.now)
     },
-    { backups: new ProfileBackups({ dir: agentProfileBackupsDir(appdir) }), stash }
+    {
+      backups: new ProfileBackups({ dir: agentProfileBackupsDir(appdir) }),
+      stash,
+      // File mutations reuse the arranged native inspect report.
+      // Process-boundary cases retain real CLI argv/env and failure handling.
+      runCli: options.realInspect ? undefined : async (run) => {
+        if (run.args[0] !== "inspect") return runAgentCliOrThrow(run);
+        const current: FakeState = JSON.parse(await readFile(statePath, "utf8"));
+        return { code: 0, signal: null, stdout: JSON.stringify(current.inspect), stderr: "", timedOut: false };
+      }
+    }
   );
   const fx: Fixture = { root, homes, adapter, stash, argvLog: join(binDir, "argv.log"), statePath, clock, orquesterHooks, demoPluginPath, linkedPluginTarget };
   await writeFile(statePath, JSON.stringify({ inspect: inspectReport(fx), ...state }));
@@ -250,7 +260,7 @@ async function rejects(promise: Promise<unknown>, code: string): Promise<void> {
 }
 
 test("the snapshot lists every kind from its real home, with sources, locks and no secret", async (t) => {
-  const fx = await setup(t);
+  const fx = await setup(t, {}, { realInspect: true });
   const snap = await fx.adapter.snapshot();
   const byId = new Map(snap.items.map((entry) => [entry.id, entry]));
   assert.deepEqual(snap.fileErrors, []);
@@ -699,7 +709,7 @@ test("an unreadable hook file is a file error and refuses writes to it", async (
 });
 
 test("when grok inspect fails, inherited servers come from ~/.claude.json with a warning", async (t) => {
-  const fx = await setup(t, { inspectFails: true });
+  const fx = await setup(t, { inspectFails: true }, { realInspect: true });
   const snap = await fx.adapter.snapshot();
   const claudeSrv = snap.items.find((entry) => entry.id === "mcp:claude-srv");
   assert.equal(claudeSrv?.warnings[0]?.code, "inspect-failed");

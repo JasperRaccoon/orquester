@@ -643,14 +643,8 @@ describe("goals (goals §4.3)", () => {
     assert.equal(row!.turnId, null);
     assert.equal(row!.agentId, undefined);
     assert.equal("agentId" in payloadOf(row!), false);
-
-  });
-
-  it("a cleared goal's row keeps the goal that ended, verbatim", () => {
-    const [row] = runtimeEventToActivities(
-      runtimeEvent("thread.goal.updated", { goal: null, change: "cleared", previous: goal })
-    );
     assert.deepEqual(row!.payload, { goal: null, change: "cleared", previous: goal });
+
   });
 
   it("a goal event replayed out of the provider's history produces nothing", () => {

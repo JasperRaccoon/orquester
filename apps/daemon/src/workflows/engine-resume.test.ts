@@ -20,7 +20,6 @@ import {
   workflow
 } from "./testing/fakes.ts";
 import { createHarness, scripted, type Harness } from "./testing/harness.ts";
-import { childRunIdFor } from "./engine.ts";
 
 const T = (id = "T") => node(id, "trigger.manual");
 
@@ -440,7 +439,6 @@ describe("engine: resume after a restart", () => {
     const childRuns = () => [...env.shared.runStore.runs.values()].filter((run) => run.workflowId === "c");
     assert.equal(childRuns().length, 1);
     assert.equal(childRuns()[0]!.status, "failed", "attempt 1's child failed");
-    assert.equal(childRuns()[0]!.id, childRunIdFor(runId!, "S", 1));
     assert.equal(childRuns()[0]!.parentAttempt, 1);
     await first.engine.stop();
     // Rewind the parent to "attempt 2 was marked running, then the daemon died before its launch".
@@ -458,7 +456,8 @@ describe("engine: resume after a restart", () => {
     const result = await second.engine.waitForRun(runId!);
     assert.equal(result.status, "succeeded");
     assert.deepEqual(code.seen, ["X"], "attempt 2 ran its own child");
-    assert.deepEqual(childRuns().map((run) => [run.id, run.status]).sort(), [[childRunIdFor(runId!, "S", 1), "failed"], [childRunIdFor(runId!, "S", 2), "succeeded"]].sort());
+    assert.deepEqual(childRuns().map((run) => [run.parentAttempt, run.status]).sort(), [[1, "failed"], [2, "succeeded"]]);
+    assert.notEqual(childRuns()[0]!.id, childRuns()[1]!.id, "each attempt owns a distinct child");
   });
 
   test("a child recorded by an older build (no binding) is still adopted when it was queued since the attempt started", async () => {
@@ -471,8 +470,8 @@ describe("engine: resume after a restart", () => {
     await first.engine.waitForRun(runId!);
     await first.engine.stop();
     // Re-key the child as an older build recorded it: a minted id, no parentAttempt.
-    const bound = childRunIdFor(runId!, "S", 1);
-    const child = env.shared.runStore.runs.get(bound)!;
+    const child = [...env.shared.runStore.runs.values()].find((run) => run.parentRunId === runId && run.triggerPayload?.kind === "subworkflow" && run.triggerPayload.parentNodeId === "S")!;
+    const bound = child.id;
     env.shared.runStore.runs.delete(bound);
     delete child.parentAttempt;
     child.id = "legacy-child";
@@ -555,7 +554,7 @@ describe("engine: resume after a restart", () => {
     const { runId } = await first.engine.run("p", {});
     await flush();
     await flush();
-    const c2Run = childRunIdFor(runId!, "S2", 1);
+    const c2Run = [...runStore.runs.values()].find((run) => run.parentRunId === runId && run.triggerPayload?.kind === "subworkflow" && run.triggerPayload.parentNodeId === "S2")!.id;
     assert.equal((await runStore.load(c2Run))!.status, "running", "S2's child waits on its timer");
     await first.engine.stop();
     // S1 cut off as "running, child unrecorded"; its lookup will fail.
@@ -567,7 +566,7 @@ describe("engine: resume after a restart", () => {
     delete s1.endedAt;
     delete s1.waitingOn;
     await runStore.save(saved);
-    runStore.failFor = childRunIdFor(runId!, "S1", 1);
+    runStore.failFor = [...runStore.runs.values()].find((run) => run.parentRunId === runId && run.triggerPayload?.kind === "subworkflow" && run.triggerPayload.parentNodeId === "S1")!.id;
     const second = createHarness({ ...shared, executors: { code: scripted("code") } });
     await second.engine.resume();
     assert.equal((await second.engine.waitForRun(runId!)).status, "failed");
@@ -615,8 +614,8 @@ describe("engine: resume after a restart", () => {
     const { runId } = await first.engine.run("p", {});
     await first.engine.waitForRun(runId!);
     await first.engine.stop();
-    const bound = childRunIdFor(runId!, "S", 1);
-    const child = runStore.runs.get(bound)!;
+    const child = [...runStore.runs.values()].find((run) => run.parentRunId === runId && run.triggerPayload?.kind === "subworkflow" && run.triggerPayload.parentNodeId === "S")!;
+    const bound = child.id;
     runStore.runs.delete(bound);
     delete child.parentAttempt;
     child.id = "legacy-child";
@@ -638,14 +637,6 @@ describe("engine: resume after a restart", () => {
     assert.equal((await second.engine.waitForRun(runId!)).status, "failed");
     assert.equal((await runStore.load(runId!))!.blocks.S!.error?.kind, "interrupted");
     assert.deepEqual(code.seen, [], "no second child");
-  });
-
-  test("child run ids are deterministic, UUID-shaped and hash-first (full-entropy 8-character prefixes)", () => {
-    const id = childRunIdFor("run-1", "S", 2);
-    assert.equal(id, childRunIdFor("run-1", "S", 2));
-    assert.notEqual(id, childRunIdFor("run-1", "S", 3));
-    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    assert.match(id, /^[A-Za-z0-9_-]{1,128}$/, "a valid run-store segment");
   });
 
   test("a side-effecting block running without a WaitingOn is interrupted (no retry)", async () => {

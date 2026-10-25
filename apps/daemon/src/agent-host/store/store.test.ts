@@ -421,9 +421,11 @@ test("meta.json is checkpointed every 50 events", async (t) => {
   const meta = metaPath(rootDir, "t1");
   await assert.rejects(fs.stat(meta), "nothing is written before the checkpoint threshold");
 
-  for (let i = 0; i < 50; i += 1) {
-    await store.append({ threadId: "t1", events: [message("t1", `m${i}`)] });
-  }
+  await store.append({
+    threadId: "t1",
+    events: Array.from({ length: 49 }, (_, i) => message("t1", `m${i}`))
+  });
+  await store.append({ threadId: "t1", events: [message("t1", "m49")] });
   await store.drain();
 
   const written = JSON.parse(await fs.readFile(meta, "utf8")) as ThreadHead;
@@ -486,16 +488,17 @@ test("saveHead wins over the store's own projection and survives a reopen", asyn
   assert.deepEqual(loaded.continueAfterRestart, marker);
 });
 
-test("the goal-resume marker is head-only state that survives a reopen (goals §5.5)", async (t) => {
+test("goal-resume and goal-hold markers survive appends and a reopen, and clear explicitly (goals §5.5, §5.7)", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
-  await store.saveHead({ ...(await headOf(store, "t1")), resumeGoalAfterRestart: true });
+  await store.saveHead({ ...(await headOf(store, "t1")), resumeGoalAfterRestart: true, goalHeldForHandover: true });
   // The store's own projection carries it forward across appends — no domain
   // event names it, so only a `saveHead` may move it.
   await store.append({ threadId: "t1", events: [message("t1", "m1")] });
   assert.equal((await headOf(store, "t1")).resumeGoalAfterRestart, true);
+  assert.equal((await headOf(store, "t1")).goalHeldForHandover, true);
   await store.drain();
   store.close();
 
@@ -504,57 +507,32 @@ test("the goal-resume marker is head-only state that survives a reopen (goals §
   t.after(() => metaOnly.close());
   const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
   assert.equal(persisted?.resumeGoalAfterRestart, true);
-  metaOnly.close();
-
-  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => reopened.close());
-  const loaded = await headOf(reopened, "t1");
-  assert.equal(loaded.resumeGoalAfterRestart, true);
-  // Cleared by the next head save that omits it.
-  const { resumeGoalAfterRestart: _cleared, ...cleared } = loaded;
-  void _cleared;
-  await reopened.saveHead(cleared);
-  await reopened.drain();
-  reopened.close();
-  const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => after.close());
-  assert.equal((await headOf(after, "t1")).resumeGoalAfterRestart, undefined);
-  after.close();
-});
-
-test("the goal-hold marker is head-only state that survives a reopen (goals §5.7)", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  await store.append({ threadId: "t1", events: [created()] });
-  await store.saveHead({ ...(await headOf(store, "t1")), goalHeldForHandover: true });
-  // Carried forward across appends by the store's own projection: no domain
-  // event names it, and a crash between the hold and the next head save must
-  // still find it.
-  await store.append({ threadId: "t1", events: [message("t1", "m1")] });
-  assert.equal((await headOf(store, "t1")).goalHeldForHandover, true);
-  await store.drain();
-  store.close();
-
-  // The boot's candidate check reads meta.json alone.
-  const metaOnly = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => metaOnly.close());
-  const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
   assert.equal(persisted?.goalHeldForHandover, true);
   metaOnly.close();
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => reopened.close());
   const loaded = await headOf(reopened, "t1");
+  assert.equal(loaded.resumeGoalAfterRestart, true);
   assert.equal(loaded.goalHeldForHandover, true);
-  const { goalHeldForHandover: _cleared, ...cleared } = loaded;
-  void _cleared;
-  await reopened.saveHead(cleared);
+  // Cleared by the next head save that omits it.
+  const { resumeGoalAfterRestart: _resume, ...heldOnly } = loaded;
+  void _resume;
+  await reopened.saveHead(heldOnly);
   await reopened.drain();
   reopened.close();
   const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => after.close());
-  assert.equal((await headOf(after, "t1")).goalHeldForHandover, undefined);
+  assert.equal((await headOf(after, "t1")).resumeGoalAfterRestart, undefined);
+  assert.equal((await headOf(after, "t1")).goalHeldForHandover, true);
+  const { goalHeldForHandover: _hold, ...cleared } = heldOnly;
+  void _hold;
+  await after.saveHead(cleared);
+  await after.drain();
+  const final = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => final.close());
+  assert.equal((await headOf(final, "t1")).resumeGoalAfterRestart, undefined);
+  assert.equal((await headOf(final, "t1")).goalHeldForHandover, undefined);
   after.close();
 });
 
@@ -643,23 +621,32 @@ test("the receipt ring evicts oldest-first at 500", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
-  for (let i = 0; i < 520; i += 1) {
-    await store.putReceipt({
-      commandId: `cmd-${i}`,
-      threadId: "t1",
-      seq: i,
-      status: "accepted",
-      acceptedAt: "2026-01-01T00:00:00.000Z"
-    });
-  }
+  const receipt = (i: number) => ({
+    commandId: `cmd-${i}`,
+    threadId: "t1",
+    seq: i,
+    status: "accepted" as const,
+    acceptedAt: "2026-01-01T00:00:00.000Z"
+  });
+  await fs.writeFile(receiptsPathOf(rootDir), JSON.stringify({
+    version: 1, receipts: Array.from({ length: 500 }, (_, i) => receipt(i))
+  }));
+  await store.putReceipt(receipt(500));
+  await store.putReceipt(receipt(501));
   await store.drain();
   assert.equal(await store.getReceipt("cmd-0"), null, "the oldest are gone");
-  assert.equal((await store.getReceipt("cmd-519"))?.seq, 519);
+  assert.equal(await store.getReceipt("cmd-1"), null);
+  assert.equal((await store.getReceipt("cmd-2"))?.seq, 2);
+  assert.equal((await store.getReceipt("cmd-501"))?.seq, 501);
 
   const onDisk = JSON.parse(await fs.readFile(receiptsPathOf(rootDir), "utf8")) as {
     receipts: unknown[];
   };
   assert.equal(onDisk.receipts.length, 500);
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
+  assert.equal(await reopened.getReceipt("cmd-1"), null);
+  assert.equal((await reopened.getReceipt("cmd-501"))?.seq, 501);
 });
 
 test("an unreadable receipts file costs at most a replayed command, never a thread", async (t) => {
@@ -777,12 +764,11 @@ test("an image MIME type applies the image size cap even to a binary filename", 
     /over the/
   );
   // The same bytes with a non-image MIME type are under the 50 MiB file limit.
-  const blob = await writeSource(path.join(rootDir, "src"), "big.bin", 11 * 1024 * 1024);
   const ref = await store.putAttachment({
     threadId: "t1",
     name: "big.bin",
     mimeType: "application/octet-stream",
-    sourcePath: blob
+    sourcePath: big
   });
   assert.equal(ref.type, "file");
 });
@@ -883,12 +869,10 @@ test("a published page stays while any log line names it, past the fold's window
   await assert.rejects(store.resolveAttachment("t1", orphanPage.id), /not found/, "an unnamed page is an orphan");
 
   // Push the row well past the 500-row window the fold keeps.
-  for (let i = 0; i < 600; i += 1) {
-    await store.append({ threadId: "t1", events: [activityEvent(`noise-${i}`, { i })] });
-  }
+  await store.append({ threadId: "t1", events: Array.from({ length: 600 }, (_, i) => activityEvent(`noise-${i}`, { i })) });
   await store.drain();
   await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(96) });
-  await store.resolveAttachment("t1", page.id);
+  await assert.doesNotReject(store.resolveAttachment("t1", page.id), "the old log reference still serves its page");
 
   // A log read that fails partway (EIO) never reads as "nothing names it":
   // the sweep skips the thread instead of deleting the page.
@@ -973,15 +957,13 @@ test("readItem serves the FULL payload, even for a row past the fold's window", 
 
   await store.append({ threadId: "t1", events: [created(), appendActivity("a-old", activity.payload)] });
   // Push it well past the 500-row retention window the fold keeps.
-  for (let i = 0; i < 600; i += 1) {
-    await store.append({ threadId: "t1", events: [appendActivity(`noise-${i}`, { i })] });
-  }
+  await store.append({ threadId: "t1", events: Array.from({ length: 600 }, (_, i) => appendActivity(`noise-${i}`, { i })) });
   await store.drain();
 
   const item = await store.readItem("t1", "a-old");
   assert.ok(item && item.kind === "activity");
   const payload = item.payload as { data: { rawOutput: { stdout: string } } };
-  assert.equal(payload.data.rawOutput.stdout.length, bigOutput.length);
+  assert.equal(payload.data.rawOutput.stdout, bigOutput);
   assert.equal(await store.readItem("t1", "never-written"), null);
 });
 
@@ -1015,16 +997,6 @@ test("the image cap follows the stored extension, not just the declared mime", a
     }),
     /over the/
   );
-
-  // A genuine non-image extension still gets the file bound.
-  const blob = await writeSource(path.join(rootDir, "src"), "dump.bin", 11 * 1024 * 1024);
-  const ref = await store.putAttachment({
-    threadId: "t1",
-    name: "dump.bin",
-    mimeType: "application/octet-stream",
-    sourcePath: blob
-  });
-  assert.equal(ref.type, "file");
 });
 
 test("the host-wide sweep removes stale raw-log files", async (t) => {

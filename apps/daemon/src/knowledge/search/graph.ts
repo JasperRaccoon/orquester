@@ -43,7 +43,7 @@ interface Snapshot {
 const EMPTY: Snapshot = { concepts: new Map(), edges: [], adjacency: new Map(), entryConcepts: new Map(), bm25: new Bm25Index() };
 
 /** `ke_xxx.md`, `input/ke_xxx.md`, `session_a/ke_xxx.md`, `ke_xxx.md::3` → `ke_xxx`. */
-export function entryIdOfSourceFile(sourceFile: string): string | null {
+function entryIdOfSourceFile(sourceFile: string): string | null {
   const file = basename(sourceFile.split("::")[0]!.replace(/\\/g, "/"));
   const stem = file.endsWith(".md") ? file.slice(0, -3) : file;
   return isKnowledgeEntryId(stem) ? stem : null;
@@ -150,8 +150,8 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-/** Build a snapshot from parsed records (exported for tests and synthetic graphs). */
-export function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]): { snapshot: Snapshot; skipped: number } {
+/** Build a snapshot from parsed records. */
+function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]): { snapshot: Snapshot; skipped: number } {
   let skipped = 0;
   const concepts = new Map<string, GraphConcept>();
   for (const raw of nodes) {
@@ -314,7 +314,7 @@ export interface KnowledgeConceptView {
  */
 export class KnowledgeGraph implements KnowledgeGraphPort {
   private snapshot: Snapshot = EMPTY;
-  /** Numbers loads and replaces in the order they start; `applied` is the current snapshot's. */
+  /** Numbers loads in the order they start; `applied` is the current snapshot's. */
   private generation = 0;
   private applied = 0;
   private readonly getMeta: (id: string) => KnowledgeEntryMeta | null;
@@ -336,18 +336,11 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     const { snapshot, skipped } = buildGraphSnapshot(nodes, edges);
     if (skipped > 0) this.logger.warn(`knowledge: skipped ${skipped} graph record(s) (unreadable, repeated, or an edge to an unknown concept)`);
     if (generation < this.applied) {
-      // A load (or replace) that started later has already swapped in the newer graph.
+      // A load that started later has already swapped in the newer graph.
       return { nodes: snapshot.concepts.size, edges: snapshot.edges.length };
     }
     this.snapshot = snapshot;
     this.applied = generation;
-    return this.counts();
-  }
-
-  /** Swap in records directly (tests, synthetic graphs). */
-  replace(nodes: readonly unknown[], edges: readonly unknown[]): { nodes: number; edges: number } {
-    this.applied = ++this.generation;
-    this.snapshot = buildGraphSnapshot(nodes, edges).snapshot;
     return this.counts();
   }
 

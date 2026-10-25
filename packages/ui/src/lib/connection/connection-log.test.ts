@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import { DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT } from "@orquester/api";
-
-import { useAppStore } from "../../store/app.ts";
 import {
   CONNECTION_LOG_LIMIT,
   getConnectionLog,
@@ -80,16 +77,5 @@ describe("connection log", () => {
     recordConnectionFailure({ kind: "dns", detail: "y", at: 2 });
     assert.equal(calls, 1);
     assert.notEqual(getConnectionLog(), before);
-  });
-
-  it("the store notes a daemon's stop announcement from the event stream", () => {
-    useAppStore.getState().applyEvent({
-      id: "daemon:1",
-      channel: DAEMON_EVENTS_CHANNEL,
-      type: DAEMON_STOPPING_EVENT,
-      createdAt: "2026-10-22T10:00:00.000Z",
-      payload: { reason: "shutdown" }
-    });
-    assert.ok(getConnectionLog().stoppingAt !== null);
   });
 });

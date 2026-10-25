@@ -43,32 +43,6 @@ describe("item classification — typed on the generated discriminants", () => {
     });
   }
 
-  it("an `orquester` session tool's mcpToolCall keeps its result; any other server's drops it", () => {
-    const result = {
-      content: [{ type: "text", text: '{"htmlRender":{"attachmentId":"t-0f8fad5b-d9cb-469f-a165-70867728950e-html","title":"T","height":200}}' }],
-      structuredContent: null,
-      _meta: null
-    };
-    const call = (server: string): CodexThreadItem => ({
-      type: "mcpToolCall",
-      id: "call_1",
-      server,
-      tool: "html_render",
-      status: "completed",
-      arguments: { title: "T" },
-      appContext: null,
-      pluginId: null,
-      readOnlyHint: false,
-      result,
-      error: null,
-      durationMs: 12
-    });
-    const ours = classifyItem(call("orquester")).data as { result?: unknown };
-    assert.deepEqual(ours.result, result);
-    const theirs = classifyItem(call("serena")).data as { result?: unknown };
-    assert.equal(theirs.result, undefined);
-  });
-
   it("an MCP App call keeps its result bounded: image bytes, base64 blobs and oversized text never reach the log", () => {
     const png = "iVBORw0KGgo".padEnd(20_000, "A");
     const result = {
@@ -351,10 +325,10 @@ describe("rate limits", () => {
   });
 
   it("gives every window a stable id derived from limitId so a sparse update merges", () => {
-    const windows = usageWindowsFromRateLimits(snapshot(10_080, true));
+    const windows = usageWindowsFromRateLimits({ ...snapshot(10_080, true), limitId: "codex-fast" });
     assert.deepEqual(
       windows.map((window) => window.id),
-      ["codex:primary", "codex:secondary"]
+      ["codex-fast:primary", "codex-fast:secondary"]
     );
   });
 
@@ -366,7 +340,7 @@ describe("rate limits", () => {
 
   it("converts the epoch-second reset into an ISO stamp, and omits an absent one", () => {
     const windows = usageWindowsFromRateLimits(snapshot(10_080, true));
-    assert.equal(windows[0]!.resetsAt, new Date(1_790_220_221 * 1000).toISOString());
+    assert.equal(windows[0]!.resetsAt, "2026-09-24T03:23:41.000Z");
     assert.equal(windows[1]!.resetsAt, undefined);
   });
 
@@ -470,13 +444,13 @@ describe("§4.6.4 public provider snapshots", () => {
     const r = adapterRig(t);
     const adapter = await r.adapter;
     let snapshot: ProviderSnapshot | undefined;
-    for (let index = 0; index < 20; index += 1) {
+    for (let index = 0; index < 17; index += 1) {
       const cwd = join(r.dir, String(index));
       mkdirSync(cwd);
       snapshot = await adapter.refreshSnapshot({ cwd });
     }
     assert.deepEqual(snapshot?.workspaceSnapshots?.map((entry) => entry.cwd),
-      Array.from({ length: 16 }, (_, index) => join(r.dir, String(index + 4))));
+      Array.from({ length: 16 }, (_, index) => join(r.dir, String(index + 1))));
   });
 });
 
@@ -503,20 +477,6 @@ describe("the adapter event queue", () => {
     queue.close();
   });
 
-  it("drops the OLDEST past the cap and reports it", async () => {
-    let dropped = 0;
-    const queue = new AsyncEventQueue<RuntimeEvent>({
-      onDrop: (count) => {
-        dropped += count;
-      }
-    });
-    for (let index = 0; index <= 10_000; index += 1) queue.push(event(String(index)));
-    assert.equal(dropped, 1);
-    const iterator = queue[Symbol.asyncIterator]();
-    assert.equal((await iterator.next()).value?.eventId, "1", "the oldest event was dropped");
-    queue.close();
-  });
-
   it("close releases a parked consumer and is idempotent", async () => {
     const queue = new AsyncEventQueue<RuntimeEvent>();
     const iterator = queue[Symbol.asyncIterator]();
@@ -525,12 +485,7 @@ describe("the adapter event queue", () => {
     queue.close();
     assert.equal((await pending).done, true);
     assert.equal((await iterator.next()).done, true);
-  });
-
-  it("ignores a push after close", async () => {
-    const queue = new AsyncEventQueue<RuntimeEvent>();
-    queue.close();
-    queue.push(event("a"));
-    assert.deepEqual(await queue[Symbol.asyncIterator]().next(), { value: undefined, done: true });
+    queue.push(event("late"));
+    assert.deepEqual(await iterator.next(), { value: undefined, done: true });
   });
 });

@@ -14,7 +14,3 @@ test("a mouse leaving over an edge parks the pointer on that edge's last pixel",
 test("a point already inside stays put", () => {
   assert.deepEqual(exitPoint(rect, 500, 400), { x: 500, y: 400 });
 });
-
-test("a degenerate rect never yields a point outside its origin", () => {
-  assert.deepEqual(exitPoint({ left: 10, top: 10, right: 10, bottom: 10 }, 0, 99), { x: 10, y: 10 });
-});

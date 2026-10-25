@@ -36,7 +36,7 @@ export function parseClaudeVersion(output: string): string | null {
  * segments count as 0, which is deliberate: a version that cannot be read must
  * fail a minimum rather than pass it (§10).
  */
-export function compareVersions(left: string, right: string): number {
+function compareVersions(left: string, right: string): number {
   const a = left.split(/[.+-]/);
   const b = right.split(/[.+-]/);
   const length = Math.max(a.length, b.length);

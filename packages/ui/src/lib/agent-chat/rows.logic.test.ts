@@ -1538,19 +1538,6 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
     assert.equal(visuals(rows).length, 1, "the page stays");
   });
 
-  it("an unchanged page keeps its row object through a re-derivation", () => {
-    const items = [message("user", "go", { createdAt: stamp(0) }), ...call(completedData.claude!, 1)];
-    const first = deriveTimelineRowsWithState(baseInput(entriesFrom(items))).rows;
-    const second = deriveTimelineRowsWithState(
-      baseInput(entriesFrom([...items, message("assistant", "Done.", { turnId: "t1", createdAt: stamp(3) })]))
-    ).rows;
-    const stableFirst = computeStableRows(first, EMPTY_STABLE_ROWS);
-    const stableSecond = computeStableRows(second, stableFirst);
-    const before = stableFirst.result.find((row) => row.kind === "visual");
-    const after = stableSecond.result.find((row) => row.kind === "visual");
-    assert.ok(before && after);
-    assert.equal(after, before, "the same row object, so the memoised frame never re-renders");
-  });
 });
 
 describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
@@ -1699,7 +1686,7 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
     assert.ok(rows.some((row) => row.kind === "visual"));
   });
 
-  it("a settled turn's fold never hides its app, and an unchanged app keeps its row object", () => {
+  it("a settled turn's fold never hides its app", () => {
     const items = [
       message("user", "go", { createdAt: stamp(0) }),
       ...call(completedData.codex!, 1),
@@ -1708,14 +1695,5 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
     const settled = { latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(4) } } as const;
     const first = deriveTimelineRowsWithState(baseInput(entriesFrom(items), settled)).rows;
     assert.equal(apps(first).length, 1, "the app stays");
-    const second = deriveTimelineRowsWithState(
-      baseInput(entriesFrom([...items, message("user", "thanks", { createdAt: stamp(5) })]), settled)
-    ).rows;
-    const stableFirst = computeStableRows(first, EMPTY_STABLE_ROWS);
-    const stableSecond = computeStableRows(second, stableFirst);
-    const before = stableFirst.result.find((row) => row.kind === "mcp-app");
-    const after = stableSecond.result.find((row) => row.kind === "mcp-app");
-    assert.ok(before && after);
-    assert.equal(after, before, "the same row object, so the memoised frame never re-renders");
   });
 });

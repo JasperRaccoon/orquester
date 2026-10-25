@@ -5,7 +5,6 @@ import {
   LARGE_DIFF_FILE_ROWS,
   collapsedByDefault,
   diffFileBadges,
-  diffFileEmptyLabel,
   diffFileKey,
   splitTruncationMarker
 } from "./diff-files";
@@ -36,19 +35,6 @@ describe("diffFileBadges", () => {
     assert.deepEqual(diffFileBadges(mode), [{ label: "Mode 100644 → 100755", tone: "neutral" }]);
     assert.deepEqual(diffFileBadges(binary), [{ label: "Binary", tone: "neutral" }]);
     assert.deepEqual(diffFileBadges(plain), []);
-  });
-});
-
-describe("diffFileEmptyLabel", () => {
-  it("says why a section has no rows", () => {
-    assert.equal(diffFileEmptyLabel(one("diff --git a/x.png b/x.png", "Binary files a/x.png and b/x.png differ")), "Binary file not shown");
-    assert.equal(
-      diffFileEmptyLabel(one("diff --git a/a b/b", "similarity index 100%", "rename from a", "rename to b")),
-      "Renamed without content changes"
-    );
-    assert.equal(diffFileEmptyLabel(one("diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755")), "Only the file mode changed");
-    assert.equal(diffFileEmptyLabel(one("diff --git a/e b/e", "new file mode 100644", "index 0000000..e69de29")), "Empty file added");
-    assert.equal(diffFileEmptyLabel(one("diff --git a/e b/e", "deleted file mode 100644")), "Empty file deleted");
   });
 });
 

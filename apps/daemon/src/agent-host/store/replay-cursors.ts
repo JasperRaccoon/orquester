@@ -24,7 +24,7 @@ import { AGENT_CHAT_REPLAY_MAX_EVENTS } from "@orquester/api/agent-chat";
 import type { EventPosition } from "../services.ts";
 
 /** How many of a thread's newest sequences the cursors remember. */
-export const REPLAY_CURSOR_CAPACITY = AGENT_CHAT_REPLAY_MAX_EVENTS;
+const REPLAY_CURSOR_CAPACITY = AGENT_CHAT_REPLAY_MAX_EVENTS;
 
 /** A thread with no append for this long loses its cursors. */
 export const REPLAY_CURSOR_IDLE_MS = 10 * 60_000;
@@ -39,16 +39,8 @@ export class ReplayCursorRing {
   /** When the last position was noted (epoch ms): what the idle drop reads. */
   lastNotedAtMs: number;
 
-  constructor(
-    nowMs: number,
-    private readonly capacity = REPLAY_CURSOR_CAPACITY
-  ) {
+  constructor(nowMs: number) {
     this.lastNotedAtMs = nowMs;
-  }
-
-  /** How many sequences it holds now. */
-  get size(): number {
-    return this.offsets.length;
   }
 
   /** Remember where each appended line starts. A gap in the sequences starts over from it. */
@@ -60,8 +52,8 @@ export class ReplayCursorRing {
       }
       this.offsets.push(position.byteOffset);
     }
-    const excess = this.offsets.length - this.capacity;
-    if (excess >= TRIM_SLACK || (excess > 0 && this.capacity < TRIM_SLACK)) {
+    const excess = this.offsets.length - REPLAY_CURSOR_CAPACITY;
+    if (excess >= TRIM_SLACK) {
       this.offsets.splice(0, excess);
       this.firstSeq += excess;
     }
@@ -75,7 +67,7 @@ export class ReplayCursorRing {
       return undefined;
     }
     // Beyond the newest `capacity` (a trim not due yet) it is not offered either.
-    return this.offsets.length - index > this.capacity ? undefined : this.offsets[index];
+    return this.offsets.length - index > REPLAY_CURSOR_CAPACITY ? undefined : this.offsets[index];
   }
 
   /** Forget every position: the log was rewritten under them. */

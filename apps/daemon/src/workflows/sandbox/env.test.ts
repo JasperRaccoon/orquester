@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { appendNodeRequireOption } from "@orquester/config";
-
 import { setSessionNodePreload } from "../../plugins/session-env.ts";
 import { buildSandboxEnv } from "./env.ts";
 
@@ -30,6 +28,6 @@ test("no preload active: NODE_OPTIONS is the block's own, or absent", () => {
 
 test("a preload active: required alone, or appended after the block's NODE_OPTIONS", () => {
   setSessionNodePreload(PRELOAD);
-  assert.equal(sandboxEnv().NODE_OPTIONS, appendNodeRequireOption(undefined, PRELOAD));
+  assert.equal(sandboxEnv().NODE_OPTIONS, '--require "/srv/orq/daemon/plugins/ts-rust/preload.cjs"');
   assert.equal(sandboxEnv({ NODE_OPTIONS: "--no-warnings" }).NODE_OPTIONS, `--no-warnings --require ${JSON.stringify(PRELOAD)}`);
 });

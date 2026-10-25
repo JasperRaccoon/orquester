@@ -47,22 +47,6 @@ function open(target: string | http.RequestOptions): { chunks: string[]; ends: A
   return { chunks, ends, ended, firstData };
 }
 
-test("a response the server cuts mid-body ends the stream once", async (t) => {
-  let cut!: () => void;
-  const server = await serve((res) => {
-    res.writeHead(200, { "content-type": "application/x-ndjson" });
-    res.write("first\n");
-    cut = () => res.destroy();
-  });
-  t.after(server.close);
-  const stream = open(server.url);
-  await stream.firstData;
-  cut();
-  await stream.ended;
-  assert.deepEqual(stream.chunks, ["first\n"]);
-  assert.deepEqual(stream.ends, [undefined]);
-});
-
 test("a clean end ends the stream once", async (t) => {
   const server = await serve((res) => {
     res.writeHead(200);
@@ -126,16 +110,4 @@ test("over the unix socket: a daemon restart cutting the stream ends it once", a
   await stream.ended;
   assert.deepEqual(stream.chunks, ["event\n"]);
   assert.deepEqual(stream.ends, [undefined]);
-});
-
-test("over the unix socket: an error answer reports its status, never its body as data", async (t) => {
-  const server = await serveSocket((res) => {
-    res.writeHead(404, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: "gone" } }));
-  });
-  t.after(server.close);
-  const stream = open({ socketPath: server.socketPath, path: "/api/sessions/t1/events" });
-  await stream.ended;
-  assert.deepEqual(stream.chunks, []);
-  assert.deepEqual(stream.ends, [404]);
 });

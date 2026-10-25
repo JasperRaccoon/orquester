@@ -21,7 +21,6 @@ import {
 
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
 import { LineageMark } from "./LineageMark";
-import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import { ThreadLineageBar } from "./ThreadLineageBar";
 import { TimelineRowContext, type TimelineRowContextValue } from "./timeline/context";
 import { AssistantMetaRow, UserMessageRow } from "./timeline/rows/MessageRows";
@@ -191,14 +190,6 @@ test("a merged-back message shows where it came from, and the result alone", () 
   assert.match(html, /Try B/);
   assert.match(html, /B works\./);
   assert.doesNotMatch(html, /\[Merged back from fork/);
-});
-
-test("a chat the host does not hold says so, with a close and a try-again", () => {
-  const html = renderToStaticMarkup(createElement(ThreadGoneNotice, { onClose: () => {}, onRetry: () => {} }));
-  assert.match(html, /role="alert"/);
-  assert.match(html, /This chat no longer exists/);
-  assert.match(html, /Close tab/);
-  assert.match(html, /Try again/);
 });
 
 // ---------------------------------------------------------------------------

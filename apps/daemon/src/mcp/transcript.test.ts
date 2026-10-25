@@ -736,23 +736,7 @@ test("a commentary message is an assistant row marked commentary: true; the turn
   assert.ok(!("commentary" in assistant[1]!) && !("commentary" in assistant[2]!), "no commentary field on an answer");
 });
 
-test("a turn with no answer is spared on its last commentary row, as the GUI ends such a turn: the shed keeps the narration, cut to fit, over the newer tool row", () => {
-  // The turn is still at work (or was interrupted there): narration, then a call with a long command, and no answer.
-  const narration = `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`;
-  const items = [
-    message("user", "Run the migration and report.", { turnId: "t1" }),
-    message("assistant", narration, { turnId: "t1", messageKind: "commentary" }),
-    activity("tool.started", { itemType: "command_execution", toolUseId: "m", title: "Migrate", status: "inProgress", command: `pnpm migrate ${"--table t ".repeat(150)}` }, { turnId: "t1", tone: "tool" })
-  ];
-  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000, `within the budget (${budgetSize(r)})`);
-  assert.deepEqual(r.entries.map((e) => [e.kind, e.commentary]), [["assistant", true]], "the narration stays, cut to fit; the tool row goes");
-  assert.ok(r.entries[0]!.text!.endsWith("…") && narration.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the narration");
-  // With an answer, the answer is the spared row as before.
-  const answered = transcriptEntries(snapshot({ items: [...items, message("assistant", "Migrated 12 tables.", { turnId: "t1", messageKind: "answer" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(answered.entries.some((e) => e.kind === "assistant" && e.text === "Migrated 12 tables."), "the answer stays");
-  assert.ok(!answered.entries.some((e) => e.commentary), "and the narration goes before it");
-});
+
 
 test("the spared commentary is the latest turn's LAST: an earlier one, a newer tool row and an older turn's answer all go before it", () => {
   // Turn 1 answered; turn 2, the latest, narrated twice and was interrupted in a call, never answering.
@@ -772,6 +756,9 @@ test("the spared commentary is the latest turn's LAST: an earlier one, a newer t
   assert.ok(r.truncated && budgetSize(r) <= 2_000, `trimmed within the budget (${budgetSize(r)})`);
   assert.deepEqual(r.entries.map((e) => [e.turn, e.kind, e.commentary]), [[2, "assistant", true]], "every other row goes, the newest one included");
   assert.ok(r.entries[0]!.text!.endsWith("…") && last.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the LAST narration");
+  const answered = transcriptEntries({ ...snap, items: [...items, message("assistant", "The parser keeps empty lines.", { turnId: "t2", messageKind: "answer" })] }, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(answered.entries.some((entry) => entry.kind === "assistant" && entry.text === "The parser keeps empty lines."), "an answer takes priority over the commentary");
+  assert.ok(!answered.entries.some((entry) => entry.commentary), "the commentary is shed before the answer");
 });
 
 test("compaction rows follow the shared rule: no state is settled, the legacy marker counts, a subagent's own stays out of the parent view", () => {

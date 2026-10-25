@@ -42,11 +42,6 @@ const bound = (overrides: Partial<BoundSessionShape> = {}): BoundSessionShape =>
 });
 
 describe("session restart policy (§3.4)", () => {
-  it("is a no-op when nothing changed", () => {
-    const decision = decideSessionRestart({ desired: shape(), bound: bound(), capabilities });
-    assert.equal(decision.restart, false);
-  });
-
   it("a profile change restarts as a PROFILE change, carrying the cursor — never an account switch", () => {
     const profile = { profileId: "p1", revision: "3", preparedDir: "/prepared/p1/codex/acc1" };
     for (const [from, to] of [

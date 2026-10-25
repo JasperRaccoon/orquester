@@ -6,7 +6,7 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createWriteStream, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +34,7 @@ async function harness(t: TestContext) {
     createDefaultDaemonConfig({ env: {} }),
     resolved as unknown as CreateServerArgs[1],
     createDefaultClientConfig(join(root, "daemon.sock")),
-    createWriteStream("/dev/null"),
+    { write() {} },
     { todos: manager } as unknown as CreateServerArgs[4],
     { authRequired: false, mode: "local" }
   );
@@ -81,6 +81,7 @@ test("a project list is keyed by the project path, whichever spelling of the pro
   const projectPath = join(h.workspacesDir, "acme", "api");
   const byName = await h.value("update_todos", { action: "create", project: "acme/api", name: "Bugs" });
   assert.equal((byName.todo as { scope: string }).scope, "project");
+  assert.equal("refKey" in (byName.todo as object), false, "the wire result omits its internal storage key");
   const byPath = await h.create({ project: `${projectPath}/` }, "Ideas");
   assert.deepEqual(h.manager.list("project", projectPath).map((r) => r.id), [(byName.todo as { id: string }).id, byPath]);
   const listed = (await h.value("list_todos", { project: projectPath })).todos as { id: string }[];
@@ -234,18 +235,20 @@ test("chat: another project of the workspace reads freely and acts behind a card
 test("chat: another workspace's own lists (S13 workspace target) — a read below Full access is a card, a write always cards; never grantable", async (t) => {
   const h = await harness(t);
   const id = await h.create({ workspace: "beta" }, "Beta");
+  await h.value("update_todos", { action: "update", workspace: "beta", id, body: "- [ ] review" });
   // Below Full access: a card, never a refusal (the port double approves it).
   const read = await h.value("list_todos", { workspace: "beta" }, h.chat({ runtimeMode: "auto" }));
   assert.deepEqual((read.todos as { id: string }[]).map((todo) => todo.id), [id]);
   const readCard = h.port.cards.at(-1)!;
   assert.deepEqual([readCard.kind, readCard.family, readCard.grantOptions], ["boundary", "cross-workspace-read", []]);
-  assert.match(readCard.scope.label, /workspace beta/);
+  assert.match(readCard.scope.label, /beta/);
   // Full access reads without a card.
   const before = h.port.cards.length;
   await h.value("list_todos", { workspace: "beta" }, h.chat({ runtimeMode: "full-access" }));
   assert.equal(h.port.cards.length, before);
   // A write there always cards, in Full access too, and offers no grant (no project to grant for).
-  await h.value("update_todos", { action: "toggle", workspace: "beta", id, item: 1 }, h.chat({ runtimeMode: "full-access" })).catch(() => undefined);
+  const toggled = await h.value("update_todos", { action: "toggle", workspace: "beta", id, item: 1 }, h.chat({ runtimeMode: "full-access" }));
+  assert.equal(toggled.checked, true);
   const card = h.port.cards.at(-1)!;
   assert.equal(card.family, "cross-project");
   assert.deepEqual(card.grantOptions, []);

@@ -23,13 +23,13 @@ export interface BoxAgentManifest {
   platforms: Record<string, { sha256: string; size: number }>;
 }
 
-export interface GoTarget {
+interface GoTarget {
   goos: "linux" | "darwin" | "windows";
   goarch: "amd64" | "arm64";
   exe: string;
 }
 
-export function goTargetFor(platform: string): GoTarget {
+function goTargetFor(platform: string): GoTarget {
   const [os, arch] = platform.split("-");
   const goos = os === "win32" ? "windows" : os === "darwin" ? "darwin" : os === "linux" ? "linux" : null;
   const goarch = arch === "x64" ? "amd64" : arch === "arm64" ? "arm64" : null;
@@ -107,24 +107,4 @@ export async function buildBoxAgent(options: BuildOptions): Promise<BoxAgentMani
   }
   await writeFile(join(options.outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
-}
-
-/** What the executable header says it was built for (a link-level sanity check). */
-export function executableFormat(header: Uint8Array): { format: "elf" | "macho" | "pe"; arch: "x64" | "arm64" } | null {
-  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-  if (header.length >= 20 && header[0] === 0x7f && header[1] === 0x45 && header[2] === 0x4c && header[3] === 0x46) {
-    const machine = view.getUint16(18, true);
-    return machine === 0x3e ? { format: "elf", arch: "x64" } : machine === 0xb7 ? { format: "elf", arch: "arm64" } : null;
-  }
-  if (header.length >= 8 && view.getUint32(0, true) === 0xfeedfacf) {
-    const cpu = view.getUint32(4, true);
-    return cpu === 0x01000007 ? { format: "macho", arch: "x64" } : cpu === 0x0100000c ? { format: "macho", arch: "arm64" } : null;
-  }
-  if (header.length >= 64 && header[0] === 0x4d && header[1] === 0x5a) {
-    const peOffset = view.getUint32(60, true);
-    if (peOffset + 6 > header.length || view.getUint32(peOffset, true) !== 0x00004550) return null;
-    const machine = view.getUint16(peOffset + 4, true);
-    return machine === 0x8664 ? { format: "pe", arch: "x64" } : machine === 0xaa64 ? { format: "pe", arch: "arm64" } : null;
-  }
-  return null;
 }

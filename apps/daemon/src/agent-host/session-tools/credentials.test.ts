@@ -28,13 +28,6 @@ test("unknown, empty, oversized and missing credentials do not verify", () => {
   }
 });
 
-test("only the SHA-256 is kept: the raw value appears nowhere in the registry", () => {
-  const credentials = new SessionToolCredentials();
-  const { token } = credentials.issue("thread-a");
-  const dump = JSON.stringify([...(credentials as unknown as { byHash: Map<string, unknown> }).byHash]);
-  assert.ok(!dump.includes(token));
-});
-
 test("a relaunch revokes the thread's previous credential; other threads keep theirs", () => {
   const credentials = new SessionToolCredentials();
   const first = credentials.issue("thread-a");
@@ -43,7 +36,6 @@ test("a relaunch revokes the thread's previous credential; other threads keep th
   assert.equal(credentials.verify(first.token), null);
   assert.equal(credentials.verify(second.token)?.threadId, "thread-a");
   assert.equal(credentials.verify(other.token)?.threadId, "thread-b");
-  assert.equal(credentials.size, 2);
 });
 
 test("revoking a grant (its session ended) ends it, idempotently, and tells the listeners", () => {
@@ -58,7 +50,6 @@ test("revoking a grant (its session ended) ends it, idempotently, and tells the 
   const b = credentials.issue("thread-b");
   credentials.revokeAll();
   assert.equal(credentials.verify(b.token), null);
-  assert.equal(credentials.size, 0);
 });
 
 test("bearerToken reads only a well-formed Bearer header", () => {

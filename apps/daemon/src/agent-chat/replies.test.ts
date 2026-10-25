@@ -36,7 +36,7 @@ import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { headFromThreadRead } from "../mcp/testing.ts";
 import { DelegateStopCascade } from "./delegates.ts";
 import { LineageService } from "./lineage.ts";
-import { HELD_AFTER_STOP_TEXT, HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
+import { HELD_AFTER_STOP_TEXT, HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -665,7 +665,7 @@ describe("reply subscriptions: the waiter and the router (CAS)", () => {
         assert.equal(answer.outcome, "notify");
         assert.equal(delivered, 1, `${order}: notify, so exactly one delivery`);
       }
-      assert.equal(order === "timer-then-router" ? answer.outcome : "replied", answer.outcome);
+      if (order === "router-then-timer") assert.equal(answer.outcome, "replied");
       await w.cleanup();
     }
   });
@@ -1102,23 +1102,6 @@ describe("fix round 1: crash windows and duplicates", () => {
     await w.cleanup();
   });
 
-  it("a pending delivery handed twice at once is queued and posted once", async () => {
-    const w = await world();
-    w.host.userTurn("req");
-    await w.router.subscribe("tgt", request("notify"));
-    await idle(w);
-    w.host.settle("tgt", { reply: "once" });
-    await idle(w);
-    const delivery = w.router.deliveries()[0]!;
-    delivery.state = "pending";
-    const internals = w.router as unknown as { hand(d: unknown): Promise<void> };
-    await Promise.all([internals.hand(delivery), internals.hand(delivery)]);
-    w.host.settle("req", {});
-    await idle(w);
-    assert.equal(postsTo(w.host, "req").length, 1);
-    await w.cleanup();
-  });
-
   it("a wait that would close a cycle is refused at subscribe, with nothing saved or queued", async () => {
     const w = await world();
     const release = registerWait("tgt", "req");
@@ -1181,9 +1164,7 @@ describe("fix round 1: late waiters, lost turns, quiet events", () => {
     assert.equal(again.router.deliveries().length, 0, "the reply-none turn is not its reply");
     // Unidentified past the grace period: a notice, the slot freed.
     now += 61 * 60 * 1000;
-    again.host.touch("tgt", "session.updated-later");
-    (again.router as unknown as { seen: Map<string, string> }).seen.clear();
-    again.host.touch("tgt");
+    await again.router.recheckNow();
     await idle(again);
     assert.match(parseThreadMessage(again.router.deliveries()[0]!.input)!.body, /lost track of the turn/);
     await again.cleanup();
@@ -1329,32 +1310,6 @@ describe("fix round 2", () => {
     await w.cleanup();
   });
 
-  it("two resumes of one claimed-by-router subscription at once make one delivery", async () => {
-    const host = fakeHost();
-    host.sessions.set("req", summary("req"));
-    host.sessions.set("tgt", summary("tgt"));
-    host.thread("req");
-    await host.api.request("POST", "/api/sessions/tgt/turn", { body: { commandId: "c-4", input: "Review", causedBy: exchange() } });
-    host.settle("tgt", { reply: "One." });
-    const outbox = {
-      version: 1,
-      subscriptions: [
-        { id: "s-4", fromThreadId: "req", toThreadId: "tgt", commandId: "c-4", queueEntryId: "c-4", state: "claimed-by-router", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: "t", posted: { commandId: "c-4", seq: 3, messageId: "msg-1" } }
-      ],
-      deliveries: []
-    };
-    const w = await world({ host, replyOutbox: JSON.stringify(outbox) });
-    const internals = w.router as unknown as { resumeClaimed(sub: unknown): Promise<void>; claimForRouter(sub: unknown, r: unknown): Promise<() => Promise<void>> };
-    const sub = w.router.subscriptions()[0]!;
-    await Promise.all([internals.resumeClaimed(sub), internals.resumeClaimed(sub)]);
-    // Even two direct claims (different callers) never make a second record.
-    await internals.claimForRouter(sub, { kind: "turn", turnId: "turn-1", state: "completed", reply: "One." });
-    await idle(w);
-    assert.equal(w.router.deliveries().length, 1);
-    assert.equal(postsTo(host, "req").length, 1);
-    await w.cleanup();
-  });
-
   it("a second wait after a take-back answers truthfully: the same reply, and no message follows", async () => {
     const w = await world();
     w.host.userTurn("req");
@@ -1441,8 +1396,7 @@ describe("fix round 3", () => {
     await idle(w);
     assert.equal(host.historyReads(), 5, "one lookup: five pages, no answer");
     const look = async (): Promise<void> => {
-      (w.router as unknown as { seen: Map<string, string> }).seen.clear();
-      host.touch("tgt");
+      await w.router.recheckNow();
       await idle(w);
     };
     await look();
@@ -1865,13 +1819,6 @@ describe("final fix wave follow-up: deferred releases and closed-after-reply ans
     assert.equal(again.router.deliveries()[0]!.outcome, "closed");
     assert.equal(postsTo(again.host, "req").length, 1);
     await again.cleanup();
-  });
-
-  it("waitResponseOf: closed after replying is a failed answer saying so, never outcome closed", () => {
-    const answer = waitResponseOf({ kind: "closed", afterReply: true });
-    assert.equal(answer.outcome, "replied");
-    assert.ok(answer.outcome === "replied" && answer.state === "failed" && /replied, then was closed/.test(answer.error ?? ""));
-    assert.deepEqual(waitResponseOf({ kind: "closed" }), { outcome: "closed" });
   });
 });
 

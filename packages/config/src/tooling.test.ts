@@ -14,40 +14,6 @@ import {
   toolingJoinPath
 } from "./index.ts";
 
-/**
- * Node's NODE_OPTIONS tokenizer (`ParseNodeOptionsEnvVar`, src/node_options.cc),
- * reimplemented: spaces outside double quotes split arguments, a `"` toggles
- * quoting and is dropped, and inside quotes a backslash makes the next
- * character literal. A backslash outside quotes is an ordinary character.
- */
-function parseNodeOptions(value: string): string[] {
-  const args: string[] = [];
-  let inString = false;
-  let startNew = true;
-  for (let index = 0; index < value.length; index += 1) {
-    let c = value[index] as string;
-    if (c === "\\" && inString) {
-      if (index + 1 === value.length) throw new Error("invalid value for NODE_OPTIONS (invalid escape)");
-      index += 1;
-      c = value[index] as string;
-    } else if (c === " " && !inString) {
-      startNew = true;
-      continue;
-    } else if (c === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (startNew) {
-      args.push(c);
-      startNew = false;
-    } else {
-      args[args.length - 1] += c;
-    }
-  }
-  if (inString) throw new Error("invalid value for NODE_OPTIONS (unterminated string)");
-  return args;
-}
-
 const none = { pathPrepend: [], env: {}, nodeRequire: [] };
 
 test("box tooling paths follow the target's separators", () => {
@@ -66,37 +32,19 @@ test("box tooling paths follow the target's separators", () => {
   );
 });
 
-test("a Windows preload path survives Node's NODE_OPTIONS tokenizer, backslashes, spaces and quotes included", () => {
-  const files = [
-    "C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs",
-    "C:\\Program Files\\orq\\preload.cjs",
-    'C:\\odd "quoted" dir\\preload.cjs',
-    "C:\\trailing\\"
-  ];
-  for (const file of files) {
-    const env = applyToolingContributions({ Path: "C:\\Windows" }, [{ ...none, nodeRequire: [file] }], "win32");
-    assert.deepEqual(parseNodeOptions(env.NODE_OPTIONS ?? ""), ["--require", file]);
-  }
-  const existing = applyToolingContributions(
-    { Node_Options: "--max-old-space-size=4096 --title \"a b\"" },
-    [{ ...none, nodeRequire: [files[0] as string] }],
-    "win32"
-  );
-  assert.deepEqual(Object.keys(existing), ["Node_Options"], "the existing spelling is kept on Windows");
-  assert.deepEqual(parseNodeOptions(existing.Node_Options ?? ""), ["--max-old-space-size=4096", "--title", "a b", "--require", files[0]]);
-});
-
-test("Node itself reads the quoting: a --require file whose name has backslashes and spaces loads", { skip: process.platform === "win32" ? "POSIX file names" : false }, async () => {
+test("Node loads preloads with backslashes, spaces and quotes while preserving existing options", { skip: process.platform === "win32" ? "POSIX file names" : false }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-tooling-node-options-"));
   try {
-    // On POSIX a backslash is an ordinary file-name character, so this is the
-    // Windows path's escaping exercised by the real parser.
-    const file = join(dir, "C:\\orq dir\\preload.cjs");
-    await writeFile(file, 'process.stdout.write("preloaded\\n");\n');
-    const env = applyToolingContributions({ PATH: process.env.PATH ?? "" }, [{ ...none, nodeRequire: [file] }], "linux");
-    const result = spawnSync(process.execPath, ["-e", 'process.stdout.write("main\\n")'], { env, encoding: "utf8" });
+    const files = ["C:\\orq\\preload.cjs", "C:\\Program Files\\preload.cjs", 'C:\\odd "quoted" dir\\preload.cjs', "C:\\trailing\\"].map((name) => join(dir, name));
+    await Promise.all(files.map((file, index) => writeFile(file, `process.stdout.write("preloaded ${index}\\n");\n`)));
+    const env = applyToolingContributions({ Node_Options: '--title "a b"' }, [{ ...none, nodeRequire: files }], "win32");
+    assert.deepEqual(Object.keys(env), ["Node_Options"], "Windows preserves the existing environment key spelling");
+    const result = spawnSync(process.execPath, ["-e", 'process.stdout.write(process.title + "\\n")'], {
+      env: { NODE_OPTIONS: env.Node_Options }, encoding: "utf8"
+    });
+    assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr, "");
-    assert.equal(result.stdout, "preloaded\nmain\n");
+    assert.equal(result.stdout, "preloaded 0\npreloaded 1\npreloaded 2\npreloaded 3\na b\n");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

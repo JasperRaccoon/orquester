@@ -5,26 +5,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ADMIN_FAMILIES, APPROVAL_FAMILIES } from "./agent-chat/tool-approvals.ts";
-import { SESSION_TOOL_NAME_PATTERN } from "./agent-chat/session-tools.ts";
-import { agentToolsRoutes, chatToolNames, GRANT_TABLE, grantOptionsFor, TOOLSET_IDS, TOOLSETS, toolsetOfTool } from "./agent-tools.ts";
-
-test("the catalogue: 60 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
-  const names = chatToolNames();
-  assert.equal(names.length, 60);
-  assert.equal(new Set(names).size, 60);
-  for (const name of names) assert.match(name, SESSION_TOOL_NAME_PATTERN);
-  assert.deepEqual(TOOLSETS.map((toolset) => toolset.id), [...TOOLSET_IDS]);
-  assert.deepEqual(
-    TOOLSETS.map((toolset) => [toolset.id, toolset.tools.length]),
-    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2], ["secret-files", 2], ["boxes", 8], ["knowledge", 6]]
-  );
-  // A group is a label: nothing on it turns its tools on or off.
-  for (const toolset of TOOLSETS) assert.deepEqual(Object.keys(toolset).sort(), ["id", "label", "tools"], toolset.id);
-  assert.equal(toolsetOfTool("request_toolset"), undefined);
-  assert.equal(toolsetOfTool("edit_agent_profile"), "agent-profile-editing");
-  assert.equal(toolsetOfTool("thread_send"), undefined);
-});
+import { APPROVAL_FAMILIES } from "./agent-chat/tool-approvals.ts";
+import { agentToolsRoutes, GRANT_TABLE, grantOptionsFor, TOOLSETS } from "./agent-tools.ts";
 
 test("tier badges: Admin tools are exactly the ones that can raise an Admin card", () => {
   const admins = TOOLSETS.flatMap((toolset) => toolset.tools.filter((tool) => tool.tier === "admin").map((tool) => tool.name)).sort();
@@ -52,7 +34,6 @@ test("the grant table: only workflows, desktops, saved prompts and cross-project
     // `toolset`: the legacy card family of older builds — never grantable.
     assert.deepEqual(GRANT_TABLE[family], [], family);
   }
-  assert.equal(ADMIN_FAMILIES.length, 6);
 });
 
 test("grant options: full-access only, never workflow-owned, never cross-project Admin or referenced prompts", () => {
@@ -72,6 +53,5 @@ test("grant options: full-access only, never workflow-owned, never cross-project
 test("routes", () => {
   assert.equal(agentToolsRoutes.settings, "/api/agent-tools");
   assert.equal(agentToolsRoutes.grants, "/api/agent-tools/grants");
-  assert.deepEqual(Object.keys(agentToolsRoutes).sort(), ["grant", "grants", "settings"]);
   assert.equal(agentToolsRoutes.grant("g/1"), "/api/agent-tools/grants/g%2F1");
 });

@@ -31,11 +31,11 @@ import { ok } from "../result.ts";
 export const HTML_PREVIEW_TOOL_NAME = "html_preview";
 
 /** What `html_render` tells the agent once the page is shown (design 2026-10-14 §2.1). */
-export const HTML_RENDER_SHOWN_MESSAGE =
+const HTML_RENDER_SHOWN_MESSAGE =
   "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
 
 /** The theme tokens as one line of names, the six chart hues as a range. */
-export const HTML_RENDER_TOKEN_LINE = (() => {
+const HTML_RENDER_TOKEN_LINE = (() => {
   const names: string[] = [];
   for (const token of HTML_RENDER_THEME_TOKENS) {
     if (!token.startsWith("--chart-")) names.push(token);

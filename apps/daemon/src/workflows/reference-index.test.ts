@@ -89,37 +89,6 @@ test("index: direct and transitive callers, cycles, calls each once; prompt uses
   assert.deepEqual(index.promptUses("p9").workflows, []);
 });
 
-test("index: create, update, delete and re-target of sub-workflow and prompt references keep it exact; the version moves with each", () => {
-  const index = new WorkflowReferenceIndex();
-  index.rebuild({ workflows: [stored("child"), stored("other")] });
-  const v0 = index.version;
-  index.set(stored("parent", [sub("s", "child"), ask("a", "p1")]));
-  assert.ok(index.version > v0);
-  assert.deepEqual(ids(index.callers("child")), ["parent"]);
-  assert.deepEqual(index.promptUses("p1").workflows.map((use) => use.workflowId), ["parent"]);
-  // Re-targeted: the block now runs `other`, and uses p2.
-  index.set(stored("parent", [sub("s", "other"), ask("a", "p2")], { revision: 1, name: "Renamed" }));
-  assert.deepEqual(ids(index.callers("child")), [], "the old edge is gone");
-  assert.deepEqual(index.callers("other").callers?.map((caller) => [caller.workflowId, caller.name, caller.revision]), [["parent", "Renamed", 1]]);
-  assert.deepEqual(index.promptUses("p1").workflows, []);
-  assert.deepEqual(index.promptUses("p2").workflows.map((use) => use.workflowId), ["parent"]);
-  // A renamed block keeps the reference.
-  index.set(stored("parent", [{ ...sub("s", "other"), name: "Call it" }, { ...ask("a", "p2"), name: "Ask it" }], { revision: 2 }));
-  assert.deepEqual(ids(index.callers("other")), ["parent"]);
-  assert.deepEqual(index.promptUses("p2").workflows[0]!.nodes, [{ id: "a", name: "Ask it" }]);
-  // Deleted: nothing left.
-  const v1 = index.version;
-  index.delete("parent");
-  assert.ok(index.version > v1);
-  assert.deepEqual(ids(index.callers("other")), []);
-  assert.deepEqual(index.promptUses("p2").workflows, []);
-  // The order is the store's: an updated workflow keeps its place.
-  index.set(stored("b1", [sub("s", "child")]));
-  index.set(stored("b2", [sub("s", "child")]));
-  index.set(stored("b1", [sub("s", "child")], { revision: 5 }));
-  assert.deepEqual(ids(index.callers("child")), ["b1", "b2"]);
-});
-
 test("index fails closed: before a rebuild, while the file is unreadable, and for any id an unreadable record mentions", () => {
   const index = new WorkflowReferenceIndex();
   assert.equal(index.callers("x").callers, null, "not loaded: unknown, never none");
@@ -215,6 +184,8 @@ test("the store keeps the index through create, patch, replace, duplicate and de
   });
   assert.deepEqual(ids(store.references.callers(other.id)), []);
   assert.deepEqual(store.references.promptUses("p1").workflows.map((use) => use.workflowId), [parent.id]);
+  await store.patch(parent.id, { revision: store.require(parent.id).revision, ops: [{ op: "rename_node", node: "Ask", to: "AskRenamed" }] });
+  assert.deepEqual(store.references.promptUses("p1").workflows[0]!.nodes, [{ id: "a", name: "AskRenamed" }], "the prompt use keeps its current block name");
   // Duplicated: the copy uses it too.
   const copy = (await store.duplicate(parent.id)).workflow;
   assert.deepEqual(store.references.promptUses("p1").workflows.map((use) => use.workflowId), [parent.id, copy.id]);

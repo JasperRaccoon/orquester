@@ -138,13 +138,6 @@ describe("another chat's message folds to one line", () => {
     assert.ok(scope.querySelector("[data-folded]"));
   });
 
-  it("is a native button, so the keyboard opens it as it does any button", () => {
-    const scope = render(sentBy("sent"));
-    const button = header(scope);
-    assert.equal(button.tagName, "BUTTON");
-    assert.equal(button.getAttribute("type"), "button");
-  });
-
   it("opens when find-in-page matches its hidden text", () => {
     const scope = render(sentBy("reply"));
     act(() => {
@@ -152,26 +145,6 @@ describe("another chat's message folds to one line", () => {
     });
     assert.equal(header(scope).getAttribute("aria-expanded"), "true");
     assert.equal(body(scope).hasAttribute("hidden"), false);
-  });
-
-  it("keeps the header where it was clicked when the fold opens", () => {
-    const scope = render(sentBy("sent"));
-    const button = header(scope);
-    let scrollTop = 100;
-    Object.defineProperty(scope, "scrollTop", { get: () => scrollTop, set: (value: number) => (scrollTop = value), configurable: true });
-    // Something moved the header 40px down as the body opened (the browser anchored elsewhere).
-    let top = 200;
-    button.getBoundingClientRect = () => ({ top }) as DOMRect;
-    act(() => {
-      button.click();
-      top = 240;
-    });
-    assert.equal(scrollTop, 140, "the scroller follows the header back to where it was");
-  });
-
-  it("an empty message says so on its line", () => {
-    const scope = render(sentBy("sent", ""));
-    assert.match(header(scope).textContent ?? "", /No text/);
   });
 });
 

@@ -6,8 +6,7 @@
  * (`../executor.ts`) is the only caller of a tool's `run`.
  *
  * The agent host loads this module statically: everything reachable from it must be pure (types,
- * zod, `@orquester/*` contracts, the `DaemonApi`-only tool helpers) — `registry.test.ts` walks the
- * import graph against an allow-list.
+ * zod, `@orquester/*` contracts, the `DaemonApi`-only tool helpers).
  */
 
 import { agentProfileFamily } from "../tools/agent-profile.ts";
@@ -37,10 +36,10 @@ import { workflowsFamily } from "../tools/workflows.ts";
 import type { AnyOrquesterTool, Audience } from "./contract.ts";
 
 /** `^[a-z][a-z0-9_]{0,47}$` (spec §4.3). */
-export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
 
-/** Build the ordered catalog; throws on a bad or duplicate name (a registry test runs it too). */
-export function buildCatalog(families: readonly (readonly AnyOrquesterTool[])[]): readonly AnyOrquesterTool[] {
+/** Build the ordered catalog; throws on a bad or duplicate name. */
+function buildCatalog(families: readonly (readonly AnyOrquesterTool[])[]): readonly AnyOrquesterTool[] {
   const seen = new Set<string>();
   const tools: AnyOrquesterTool[] = [];
   for (const family of families) {

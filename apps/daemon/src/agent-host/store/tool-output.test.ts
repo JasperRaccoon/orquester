@@ -316,7 +316,7 @@ test("concurrent windows of one call never join a chunk twice", async (t) => {
   const { store } = await tempStore(t);
   await store.append({ threadId: "t1", events: [created("t1"), appendable("t1", "start", "tool.started", SHELL, { itemType: "command_execution" })] });
   const lines = Array.from({ length: 30 }, (_, i) => `line ${i}\n`);
-  for (const [i, line] of lines.entries()) await store.append({ threadId: "t1", events: [streamed("t1", `o${i}`, SHELL, line), noise("t1", `n${i}`)] });
+  await store.append({ threadId: "t1", events: lines.flatMap((line, i) => [streamed("t1", `o${i}`, SHELL, line), noise("t1", `n${i}`)]) });
   const windows = await Promise.all(Array.from({ length: 6 }, (_, i) => store.readToolOutputWindow("t1", "start", { offset: i * 7, maxBytes: 1_000 })));
   const whole = Buffer.from(lines.join(""), "utf8");
   for (const [i, window] of windows.entries()) {

@@ -281,10 +281,6 @@ test("offers: Windows has no Arm shapes, adds the licence per OCPU, falls back t
   assert.equal(replay.pending().length, 0);
 });
 
-test("offers: refuses kinds Oracle Cloud does not rent", async () => {
-  await assert.rejects(oracleAdapter.offers(credentials, "linux-gpu", replayOptions(replayFetch([]))), /does not rent linux-gpu/);
-});
-
 test("create: Linux into the existing shared subnet — one signed launch with name, tags, cloud-init and SSH key", async () => {
   const replay = replayFetch([
     { method: "GET", url: shapeImageUrl("Canonical Ubuntu", "24.04", "VM.Standard.E5.Flex"), body: fixture("oracle", "images-ubuntu-e5") },

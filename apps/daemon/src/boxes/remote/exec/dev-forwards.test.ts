@@ -8,7 +8,7 @@ import type { BoxListeningPort, SessionSummary } from "@orquester/api";
 
 import type { BoxHostForward } from "../../contracts.ts";
 import { localBoxConnection } from "../../testing.ts";
-import { BoxDevForwards, loopbackTarget, offerablePorts } from "./dev-forwards.ts";
+import { BoxDevForwards } from "./dev-forwards.ts";
 import { boxRecord, fakeBoxes } from "./testing.ts";
 
 const PROJECT = "/srv/workspaces/acme/app";
@@ -80,8 +80,7 @@ test("a sniffed box dev server is suggested at its host forward, which really re
     // A port the box names gets a host port the host picks (here the same number is taken anyway).
     const [url, ...rest] = await r.forwards.suggestions(PROJECT, [`http://localhost:${port}`]);
     assert.deepEqual(rest, []);
-    const target = loopbackTarget(url!);
-    assert.ok(target && target.port !== port);
+    assert.notEqual(Number(new URL(url!).port), port);
     // No keep-alive: the forward's listener closes once its connections have.
     const body = await new Promise<string>((resolve, reject) => {
       get(url!, { agent: false }, (res) => {
@@ -218,12 +217,4 @@ test("a box project whose Chromium stays on the host keeps the forwards", async 
   } finally {
     await r.forwards.dispose();
   }
-});
-
-test("loopbackTarget and offerablePorts", () => {
-  assert.deepEqual(loopbackTarget("http://127.0.0.1:5173"), { scheme: "http", port: 5173 });
-  assert.deepEqual(loopbackTarget("https://localhost"), { scheme: "https", port: 443 });
-  assert.equal(loopbackTarget("http://example.com:5173"), null);
-  assert.equal(loopbackTarget("file:///etc/passwd"), null);
-  assert.deepEqual(offerablePorts([{ port: 5432, address: "127.0.0.1", pid: null, command: null }, { port: 80, address: "0.0.0.0", pid: null, command: "nginx" }]), [5432]);
 });

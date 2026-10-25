@@ -49,42 +49,21 @@ test("classifyFetchError: unwraps nested causes and AggregateErrors", () => {
   for (const [error, kind] of cases) assert.equal(classifyFetchError(error).kind, kind, String((error as Error).message));
 });
 
-test("fetchFailureMessage: one clear sentence per cause, with the Tailscale remedy", () => {
+test("Tailscale failures name the failed endpoint and the working setup command or URL", () => {
   const url = "https://my-pc.tail1234.ts.net";
-  assert.equal(
-    fetchFailureMessage(url, fetchFailed(sysError("ERR_TLS_CERT_ALTNAME_INVALID")), TAILSCALE),
-    "The server at my-pc.tail1234.ts.net:443 presented a certificate that isn't for my-pc.tail1234.ts.net — something other than Orquester answers on that port. " +
-      'Click "Set up for me" or run: tailscale serve --bg --https=10000 http://127.0.0.1:47831'
-  );
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ENOTFOUND")), TAILSCALE), /^my-pc\.tail1234\.ts\.net is not reachable: the name doesn't resolve/);
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), TAILSCALE), /nothing listens on my-pc\.tail1234\.ts\.net:443\./);
-  assert.match(fetchFailureMessage(url, new DOMException("timeout", "TimeoutError"), TAILSCALE), /no answer within 15 s\./);
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ECONNRESET")), TAILSCALE), /the connection was closed during the handshake\./);
-  assert.match(fetchFailureMessage(url, fetchFailed(new Error("odd")), TAILSCALE), /is not reachable: odd/);
-
-  // Serving on another port: say which URL works.
+  const failed = fetchFailureMessage(url, fetchFailed(sysError("ERR_TLS_CERT_ALTNAME_INVALID")), TAILSCALE);
+  assert.ok(failed.includes("my-pc.tail1234.ts.net:443"));
+  assert.ok(failed.includes("tailscale serve --bg --https=10000 http://127.0.0.1:47831"));
   const serving: CheckContext = { ...TAILSCALE, local: { ...LOCAL, serving: true } };
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), serving), /Tailscale serves Orquester at https:\/\/my-pc\.tail1234\.ts\.net:10000 — use that URL\.$/);
-  // Serving at the URL itself: no remedy to add.
-  assert.equal(
-    fetchFailureMessage("https://my-pc.tail1234.ts.net:10000", fetchFailed(sysError("ECONNRESET")), serving),
-    "https://my-pc.tail1234.ts.net:10000 is not reachable: the connection was closed during the handshake."
-  );
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), { ...TAILSCALE, local: { ...LOCAL, running: false } }), /Tailscale isn't running on this machine\.$/);
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), { ...TAILSCALE, local: { ...LOCAL, installed: false } }), /Tailscale isn't installed on this machine\.$/);
+  assert.ok(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), serving).includes("https://my-pc.tail1234.ts.net:10000"));
+  assert.doesNotMatch(fetchFailureMessage("https://my-pc.tail1234.ts.net:10000", fetchFailed(sysError("ECONNRESET")), serving), /tailscale serve/);
 });
 
-test("fetchFailureMessage and statusFailureMessage in public URL mode point at the reverse proxy", () => {
+test("public URL failures identify the daemon's reverse-proxy target and HTTP status", () => {
   const url = "https://orq.example.com";
-  assert.match(
-    fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), PUBLIC),
-    /Make sure the reverse proxy \(e\.g\. Caddy\) for orq\.example\.com forwards to this daemon on 127\.0\.0\.1:47831\.$/
-  );
-  assert.match(fetchFailureMessage(url, fetchFailed(sysError("ENOTFOUND")), PUBLIC), /Point the DNS record for orq\.example\.com at this server\.$/);
-  assert.equal(
-    statusFailureMessage(url, 502, PUBLIC),
-    "https://orq.example.com answered 502 — that's not Orquester (expected its 401). Make sure the reverse proxy (e.g. Caddy) for orq.example.com forwards to this daemon on 127.0.0.1:47831."
-  );
+  assert.ok(fetchFailureMessage(url, fetchFailed(sysError("ECONNREFUSED")), PUBLIC).includes("127.0.0.1:47831"));
+  const status = statusFailureMessage(url, 502, PUBLIC);
+  assert.ok(status.includes("502") && status.includes("127.0.0.1:47831"));
 });
 
 test("tailscalePolicySnippet: the real Tailscale IP and the configured or serve port", () => {

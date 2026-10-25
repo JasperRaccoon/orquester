@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { after, describe, it } from "node:test";
 import { claudePreparedSectionSchema } from "../manifest/claude.ts";
-import { preparerFor } from "../preparer.ts";
-import { CLAUDE_PREPARER_VERSION, claudeLocalPluginName, claudePreparer } from "./claude.ts";
+import { claudePreparer } from "./claude.ts";
 import { FIXTURE_SECRETS, makeClaudeProfileFixture } from "./claude.testing.ts";
 
 const roots: string[] = [];
@@ -38,28 +37,31 @@ async function prepare(settings: Parameters<typeof makeClaudeProfileFixture>[1] 
 }
 
 describe("Claude preparer", () => {
-  it("is registered, shared by every account, versioned and reads no Global file", () => {
-    assert.equal(preparerFor("claude"), claudePreparer);
+  it("shares preparations across accounts without copying Global files", () => {
     assert.equal(claudePreparer.perAccount, false);
-    assert.equal(claudePreparer.version, CLAUDE_PREPARER_VERSION);
-    assert.equal(claudePreparer.inputs, undefined);
+    const homes = { claudeDir: "/h/.claude" } as Parameters<NonNullable<typeof claudePreparer.inputs>>[0]["systemHomes"];
+    assert.deepEqual(claudePreparer.inputs?.({ agent: "claude", accountKey: "shared", accountHome: null, systemHomes: homes, appdir: "/a" }) ?? [], []);
   });
 
   it("names a copied plugin as the CLI loads it: its manifest name, else its directory (the item id)", async () => {
-    for (const [manifest, name, allowed] of [
-      [{ version: "1" }, "pl1", ["pl1:fmt", "pl1:lint"]],
-      [{ name: "tool.box" }, "tool.box", ["tool.box:fmt", "tool.box:lint"]],
-      [{ name: "bad name" }, "pl1", []]
+    for (const [manifest, name, allowed, profileName, localName] of [
+      [{ version: "1" }, "pl1", ["pl1:fmt", "pl1:lint"], "Dev Kit", "dev-kit"],
+      [{ name: "tool.box" }, "tool.box", ["tool.box:fmt", "tool.box:lint"], "Tool.Box", null],
+      [{ name: "bad name" }, "pl1", [], "🎬", "profile"]
     ] as const) {
       const root = await mkdtemp(join(tmpdir(), "orq-claude-preparer-"));
       roots.push(root);
       const fixture = await makeClaudeProfileFixture(root);
+      fixture.resolved.name = profileName;
       await writeFile(join(root, "profile", "plugins", "pl1", ".claude-plugin", "plugin.json"), JSON.stringify(manifest));
       const stagingDir = join(root, "staging");
       await mkdir(stagingDir, { mode: 0o700 });
       const section = await claudePreparer.prepare(fixture.context({ stagingDir, preparedDir: "/appdir/prepared/v-1" }));
       assert.deepEqual(section.plugins, [{ itemId: "pl1", name, path: "plugins/pl1" }]);
-      assert.deepEqual(section.skills?.filter((id) => !id.startsWith("dev-kit:") && id !== "workflow-authoring").sort(), [...allowed]);
+      assert.ok(section.localPlugin);
+      if (localName !== null) assert.equal(section.localPlugin.name, localName);
+      assert.notEqual(section.localPlugin.name, name, "generated and copied plugins have distinct namespaces");
+      assert.deepEqual(section.skills?.filter((id) => !id.startsWith(`${section.localPlugin!.name}:`) && id !== "workflow-authoring").sort(), [...allowed]);
     }
   });
 
@@ -175,14 +177,5 @@ describe("Claude preparer", () => {
     const section = await claudePreparer.prepare(fixture.context({ stagingDir, preparedDir: "/x/v-2" }));
     assert.deepEqual(section, { plugins: [], mcpServerNames: [], hooks: {}, skills: ["workflow-authoring"], disableWorkflows: false });
     assert.deepEqual(await tree(stagingDir), []);
-  });
-});
-
-describe("claudeLocalPluginName", () => {
-  it("slugs the profile name, falls back to `profile`, and avoids the profile's plugin names", () => {
-    assert.equal(claudeLocalPluginName("Dev Kit", new Set()), "dev-kit");
-    assert.equal(claudeLocalPluginName("Édition / vidéo", new Set()), "dition-vid-o");
-    assert.equal(claudeLocalPluginName("🎬", new Set()), "profile");
-    assert.equal(claudeLocalPluginName("Tools", new Set(["tools", "tools-2"])), "tools-3");
   });
 });

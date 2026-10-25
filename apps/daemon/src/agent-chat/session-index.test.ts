@@ -94,6 +94,7 @@ test("reattach routes chat records to their contributor and never attaches a PTY
   assert.equal(h.chat.lastSeq("chat-1"), 7, "the render cursor survives a daemon restart");
   assert.equal(h.manager.get("chat-1"), undefined, "the PTY manager never holds a chat tab");
   assert.equal(h.manager.get("bash-1")?.id, "bash-1");
+  assert.equal(h.manager.get("bash-1")?.legacyAgentTerminal, undefined);
   h.manager.closeAll();
   await h.cleanup();
 });
@@ -142,14 +143,6 @@ test("§5.2 migration: a legacy `agent` record with NO live pane is forgotten", 
   const h = await harness([terminalRecord("legacy-1", "agent", 0)], []);
   await h.manager.reattach();
   assert.equal(h.manager.get("legacy-1"), undefined);
-  h.manager.closeAll();
-  await h.cleanup();
-});
-
-test("a shell record carries no legacy flag", async () => {
-  const h = await harness([terminalRecord("bash-1", "shell", 0)], ["bash-1"]);
-  await h.manager.reattach();
-  assert.equal(h.manager.get("bash-1")?.legacyAgentTerminal, undefined);
   h.manager.closeAll();
   await h.cleanup();
 });

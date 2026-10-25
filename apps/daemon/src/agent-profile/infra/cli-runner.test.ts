@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { watch } from "node:fs";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -107,8 +109,19 @@ test("a deadline kills the child and says so", async (t) => {
 });
 
 test("a child that ignores SIGTERM is SIGKILLed after the grace period", async (t) => {
-  const bin = await fakeCli(t, `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`);
-  const result = await runAgentCli({ bin, args: [], timeoutMs: 1500, killGraceMs: 100 });
+  const bin = await fakeCli(t, `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(args[0], "ready"); setInterval(() => {}, 1000);`);
+  const watcher = watch(join(bin, ".."));
+  const ready = once(watcher, "change", { signal: AbortSignal.timeout(10_000) });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = runAgentCli({ bin, args: [join(bin, "..", "ready")], timeoutMs: 30_000, killGraceMs: 100 });
+  try {
+    await ready; // SIGTERM is ignored before the deadline can fire, even on a loaded host.
+  } finally {
+    watcher.close();
+    t.mock.timers.tick(30_000);
+    t.mock.timers.tick(100);
+  }
+  const result = await pending;
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, "SIGKILL");
 });
@@ -116,13 +129,14 @@ test("a child that ignores SIGTERM is SIGKILLed after the grace period", async (
 test("output is capped per stream with a marker, and the child is still drained to its exit", async (t) => {
   const bin = await fakeCli(
     t,
-    `process.stdout.write("x".repeat(100000)); process.stderr.write("y".repeat(50)); process.exitCode = 0;`
+    `process.stdout.write("x".repeat(4 * 1024 * 1024 + 1)); process.stderr.write("y".repeat(50)); process.exitCode = 0;`
   );
-  const result = await runAgentCli({ bin, args: [], timeoutMs: 10_000, maxOutputBytes: 1000 });
+  const result = await runAgentCli({ bin, args: [], timeoutMs: 10_000 });
+  const cap = 4 * 1024 * 1024;
   assert.equal(result.code, 0);
-  assert.ok(result.stdout.startsWith("x".repeat(1000)));
-  assert.match(result.stdout, /\n\[output truncated at 1000 bytes\]$/);
-  assert.equal(result.stdout.replace(/\n\[output truncated.*$/, "").length, 1000);
+  assert.ok(result.stdout.startsWith("x".repeat(cap)));
+  assert.match(result.stdout, /\n\[output truncated at 4194304 bytes\]$/);
+  assert.equal(result.stdout.replace(/\n\[output truncated.*$/, "").length, cap);
   assert.equal(result.stderr, "y".repeat(50));
 });
 

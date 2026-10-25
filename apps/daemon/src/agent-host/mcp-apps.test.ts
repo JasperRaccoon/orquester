@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import type { McpAppReference, ThreadItem } from "@orquester/api/agent-chat";
 
 import { McpAppSessionUnavailableError, type AdapterMcpApps, type AgentAdapter } from "./adapter.ts";
-import { isMcpAppOperation, runMcpAppRequest, type McpAppRequestDeps } from "./mcp-apps.ts";
+import { runMcpAppRequest, type McpAppRequestDeps } from "./mcp-apps.ts";
 import { AgentChatCommandError } from "./orchestration/errors.ts";
 
 const reference: McpAppReference = {
@@ -80,11 +80,6 @@ async function refusal(work: Promise<unknown>): Promise<{ code: string; message:
 }
 
 describe("runMcpAppRequest", () => {
-  it("knows its four operations", () => {
-    assert.ok(isMcpAppOperation("call-tool"));
-    assert.equal(isMcpAppOperation("delete"), false);
-  });
-
   it("a row with no app, another server's app, or not a completed row is ITEM_NOT_FOUND", async () => {
     for (const item of [
       null,

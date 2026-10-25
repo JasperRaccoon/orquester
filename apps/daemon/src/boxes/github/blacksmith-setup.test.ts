@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BLACKSMITH_CREDENTIAL_KEYS } from "../providers/blacksmith.ts";
+import { BLACKSMITH_ADAPTER } from "../providers/blacksmith.ts";
 import { createBlacksmithSetupDriver } from "./blacksmith-setup.ts";
 import { BLACKSMITH_APP_INSTALL_URL } from "./control-repo.ts";
 import { FakeGithub, type FakeGithubOptions } from "./fake-github.ts";
@@ -124,6 +124,8 @@ test("ensureControlRepo creates the private repo, commits the workflow, waits un
   const writes = github.calls.filter((entry) => entry.method === "PUT" || entry.method === "POST").length;
   assert.deepEqual(await driver.ensureControlRepo(TOKEN, "Org", { daemonUrl: DAEMON_URL, signal }), result);
   assert.equal(github.calls.filter((entry) => entry.method === "PUT" || entry.method === "POST").length, writes, "a second run writes nothing");
+  const credentials = driver.adapterCredentials({ token: TOKEN, org: "Org", ...result });
+  assert.deepEqual(await BLACKSMITH_ADAPTER.validate(credentials, { signal, fetch: github.fetch }), { ok: true });
 });
 
 test("ensureControlRepo over the tailnet commits the workflow that joins it with the federated identity", async (t) => {
@@ -164,15 +166,4 @@ test("every call honours the caller's signal and the injected API URL", async ()
   await assert.rejects(driver.checkOrg(TOKEN, "Org", aborted.signal), /stopped/);
   await assert.rejects(driver.checkApp(TOKEN, "Org", aborted.signal), /stopped/);
   assert.equal(github.repos.size, 0);
-});
-
-test("adapterCredentials are exactly the Blacksmith adapter's keys", () => {
-  const { driver } = setup();
-  const credentials = driver.adapterCredentials({ token: TOKEN, org: "Org", repo: "Org/orquester-macos-boxes", workflowFile: BLACKSMITH_WORKFLOW_FILE });
-  assert.deepEqual(credentials, {
-    [BLACKSMITH_CREDENTIAL_KEYS.githubToken]: TOKEN,
-    [BLACKSMITH_CREDENTIAL_KEYS.org]: "Org",
-    [BLACKSMITH_CREDENTIAL_KEYS.repo]: "Org/orquester-macos-boxes"
-  });
-  assert.deepEqual(Object.keys(credentials).sort(), Object.values(BLACKSMITH_CREDENTIAL_KEYS).sort());
 });

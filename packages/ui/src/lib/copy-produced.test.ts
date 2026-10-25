@@ -130,7 +130,7 @@ test("a write refused without reading its item leaves nothing unhandled when the
 });
 
 test("with no async clipboard at all (an insecure origin) nothing is copied, and a failing read is still observed", async () => {
-  await assert.rejects(copyProduced("fix the tests", undefined, FakeClipboardItem));
+  await assert.rejects(copyProduced("fix the tests", undefined, FakeClipboardItem), /clipboard.*not available/i);
   // Left unobserved, this read's failure would be an unhandled rejection.
   const failed = Promise.reject(new Error("The full plan could not be loaded."));
   await assert.rejects(copyProduced(failed, undefined, FakeClipboardItem), /could not be loaded/);

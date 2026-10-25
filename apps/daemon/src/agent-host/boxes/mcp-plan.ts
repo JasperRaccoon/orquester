@@ -88,10 +88,9 @@ export function mcpBridgeArgv(sys: Pick<BoxSysInfo, "agentPath">, serverId: stri
  */
 export function planMcpBridges(
   servers: readonly McpServerSpec[],
-  input: { runInBox: ReadonlySet<string>; sys: Pick<BoxSysInfo, "agentPath">; newServerId?: () => string }
+  input: { runInBox: ReadonlySet<string>; sys: Pick<BoxSysInfo, "agentPath"> }
 ): McpBridgePlan {
   const plan: McpBridgePlan = { bridged: [], inBox: [], direct: [] };
-  const mint = input.newServerId ?? newMcpBridgeServerId;
   for (const server of servers) {
     if (input.runInBox.has(server.name)) {
       plan.inBox.push(server);
@@ -118,7 +117,7 @@ export function planMcpBridges(
       plan.direct.push(server);
       continue;
     }
-    const serverId = mint();
+    const serverId = newMcpBridgeServerId();
     const argv = mcpBridgeArgv(input.sys, serverId);
     plan.bridged.push({ name: server.name, serverId, target, command: argv.command, args: argv.args });
   }

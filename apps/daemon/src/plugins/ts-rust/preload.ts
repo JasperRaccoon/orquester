@@ -275,7 +275,7 @@ const PRELOAD_BODY = `${PRELOAD_HEAD}${HOST_STATE}${PRELOAD_TAIL}`;
 const BOX_PRELOAD_BODY = `${PRELOAD_HEAD}${BOX_STATE}${PRELOAD_TAIL}`;
 
 /** The host's preload.cjs source with `options` baked in. */
-export function renderTsRustPreload(options: TsRustPreloadOptions): string {
+function renderTsRustPreload(options: TsRustPreloadOptions): string {
   const roots = [resolve(options.workspacesRoot)];
   if (options.configuredWorkspacesRoot !== undefined && !roots.includes(resolve(options.configuredWorkspacesRoot))) {
     roots.push(resolve(options.configuredWorkspacesRoot));

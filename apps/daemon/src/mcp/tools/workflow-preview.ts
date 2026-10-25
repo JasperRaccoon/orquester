@@ -366,7 +366,7 @@ const ANY_TEMPLATE = /\{\{/g;
  * does not count). Textual, so best-effort for Code (its process receives every secret); over-matching
  * only costs a card.
  */
-export function blockUsesSecrets(node: Pick<WorkflowNode, "type" | "config">): boolean {
+function blockUsesSecrets(node: Pick<WorkflowNode, "type" | "config">): boolean {
   if (node.type === "code") {
     const config: unknown = node.config;
     const source = isRecord(config) && typeof config.source === "string" ? config.source : JSON.stringify(config ?? {});
@@ -389,12 +389,11 @@ function interpolatesOtherData(node: Pick<WorkflowNode, "type" | "config">): boo
  * user approves every such call (`ungrantable`): an edit that adds or changes a block that reads a
  * secret, or makes one newly reachable (`touched`, the graph diff's set), or changes a block
  * upstream of one that also interpolates other blocks' data (that can retarget it: an HTTP URL
- * built from an earlier block's output). With no `before` (a whole definition), any such block.
+ * built from an earlier block's output).
  */
-export function changesSecretUse(before: Pick<Workflow, "nodes" | "edges"> | null, after: Pick<Workflow, "nodes" | "edges">, touched: ReadonlySet<string> | null): boolean {
+export function changesSecretUse(after: Pick<Workflow, "nodes" | "edges">, touched: ReadonlySet<string>): boolean {
   const users = after.nodes.filter(blockUsesSecrets);
   if (users.length === 0) return false;
-  if (before === null || touched === null) return true;
   for (const node of users) {
     if (touched.has(node.id)) return true;
     if (!interpolatesOtherData(node)) continue;
@@ -872,7 +871,7 @@ function changedFields(before: WorkflowNode, after: WorkflowNode): string[] {
  * A minimal unified diff of two texts: the common head and tail kept as context, the middle as
  * one hunk. Exact (applying it gives `after`), linear, and never cut.
  */
-export function unifiedDiff(before: string, after: string, context = 3): string {
+function unifiedDiff(before: string, after: string, context = 3): string {
   const a = before.split("\n");
   const b = after.split("\n");
   let head = 0;

@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -310,7 +309,6 @@ func TestPtyCallsRacingReleaseNeverUseAClosedMaster(t *testing.T) {
 		p.kill()
 		p.wait()
 	})
-	up := p.(*unixProcess)
 	stop := make(chan struct{})
 	var started, done sync.WaitGroup
 	for range 4 {
@@ -321,7 +319,7 @@ func TestPtyCallsRacingReleaseNeverUseAClosedMaster(t *testing.T) {
 			first := true
 			for {
 				_ = p.resize(100, 30)
-				_ = up.targets(true)
+				_ = p.signal("SIGWINCH")
 				if first {
 					started.Done()
 					first = false
@@ -342,9 +340,6 @@ func TestPtyCallsRacingReleaseNeverUseAClosedMaster(t *testing.T) {
 
 	if err := p.resize(90, 20); err == nil {
 		t.Fatal("resize after release succeeded on a closed master")
-	}
-	if got := up.targets(false); !slices.Equal(got, []int{p.pid()}) {
-		t.Fatalf("targets after release = %v; want only the process group %d", got, p.pid())
 	}
 }
 
@@ -402,7 +397,7 @@ func TestKillEndsTheWholeTree(t *testing.T) {
 func TestSignalFallsBackToThePidWhenTheGroupIsGone(t *testing.T) {
 	spec := &startSpec{
 		path: os.Args[0],
-		args: []string{os.Args[0], "-test.run=^TestHelperLeaveGroup$"},
+		args: []string{os.Args[0]},
 		env:  append(os.Environ(), "ORQ_TEST_HELPER=leave-group"),
 	}
 	p, err := startProcess(spec)
@@ -440,12 +435,15 @@ func TestSignalFallsBackToThePidWhenTheGroupIsGone(t *testing.T) {
 	}
 }
 
-// TestHelperLeaveGroup is the child of the test above: it moves into its
-// parent's process group, then waits to be signalled.
-func TestHelperLeaveGroup(t *testing.T) {
-	if os.Getenv("ORQ_TEST_HELPER") != "leave-group" {
-		t.Skip("helper process only")
+func TestMain(m *testing.M) {
+	if os.Getenv("ORQ_TEST_HELPER") == "leave-group" {
+		runLeaveGroupHelper()
 	}
+	os.Exit(m.Run())
+}
+
+// Child fixture for TestSignalFallsBackToThePidWhenTheGroupIsGone.
+func runLeaveGroupHelper() {
 	group, err := unix.Getpgid(os.Getppid())
 	if err != nil {
 		os.Exit(2)

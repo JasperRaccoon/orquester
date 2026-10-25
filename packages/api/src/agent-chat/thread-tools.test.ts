@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sessionToolMarkedData, SESSION_TOOL_REFERENCE_KEYS } from "./session-tools.ts";
+import { sessionToolMarkedData } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
 import { buildMergeBackMessage, parseThreadLineage } from "./lineage.ts";
 import {
@@ -26,10 +26,8 @@ import {
   stripThreadProvenance,
   threadMessageContext,
   TOOLSET_CONTINUE_CONTEXT_KIND,
-  UNTRUSTED_NOTICE,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   readThreadToolReference,
-  THREAD_TOOL_REFERENCE_KEY,
   threadToolReference,
   threadToolReferenceOfActivityData
 } from "./thread-tools.ts";
@@ -37,10 +35,6 @@ import {
 const ref = { threadId: "c7", title: "Task: audit", relation: "delegate" };
 /** A long result, as delegate_task's can be once it quotes a reply: slimming summarises it. */
 const resultText = JSON.stringify({ notice: "data", taskId: "c7", result: "x".repeat(20_000), threadRef: ref });
-
-test("the reference key is a session-tool reference key", () => {
-  assert.ok(SESSION_TOOL_REFERENCE_KEYS.includes(THREAD_TOOL_REFERENCE_KEY));
-});
 
 test("every provider's row keeps the link through slimming, twice", () => {
   const rows = [
@@ -245,10 +239,6 @@ test("exchanges: a user turn starts hop 1, a caused turn adds one, the ninth is 
   for (const bad of [null, "x", { threadId: "", exchangeId: "x", hop: 1 }, { threadId: "a", exchangeId: "x", hop: 0 }, { threadId: "a", exchangeId: "x", hop: 1.5 }]) {
     assert.equal(parseCausedBy(bad), undefined, JSON.stringify(bad));
   }
-});
-
-test("the untrusted notice names another agent chat", () => {
-  assert.match(UNTRUSTED_NOTICE, /another agent chat/);
 });
 
 test("reply \"none\" from a sender the receiver may not message: the header says so and never advises send_message; it parses", () => {

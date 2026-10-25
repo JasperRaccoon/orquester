@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KnowledgeGraph, entryIdOfSourceFile } from "./graph.ts";
-import { FakeStore, edge, node, silentLogger } from "./test-fakes.ts";
+import { promisify } from "node:util";
+import { KnowledgeGraph } from "./graph.ts";
+import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { knowledgeScope } from "./visibility.ts";
 
 // Collections: A (visible to the profile), B (hidden from it). Entries:
@@ -29,7 +31,7 @@ const eU = "ke_uuuuuuuuuuuu";
 const A = "kc_aaaaaaaaaa";
 const B = "kc_bbbbbbbbbb";
 
-function fixture() {
+async function fixture() {
   const store = new FakeStore();
   store.collection(A, "SEO");
   store.collection(B, "SaaS");
@@ -38,7 +40,8 @@ function fixture() {
   store.put(eAB, "both", [A, B], {}, true);
   store.put(eU, "unfiled note", [], {}, true);
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
-  graph.replace(
+  await loadGraph(
+    graph,
     [
       node("tactic-alt", "Alternatives pages", [`${eA}.md`, `${eB}.md`], { aliases: ["vs pages"] }),
       node("tool-hidden", "Stripe", [`${eB}.md`]),
@@ -65,14 +68,8 @@ function fixture() {
   };
 }
 
-test("source files map to entry ids", () => {
-  assert.equal(entryIdOfSourceFile("ke_aaaaaaaaaaaa.md"), "ke_aaaaaaaaaaaa");
-  assert.equal(entryIdOfSourceFile("session_a/input/ke_aaaaaaaaaaaa.md::3"), "ke_aaaaaaaaaaaa");
-  assert.equal(entryIdOfSourceFile("team.md"), null);
-});
-
-test("the whole graph for a profile holds only visible concepts and edges, counted on the visible subgraph", () => {
-  const { graph, profile, all } = fixture();
+test("the whole graph for a profile holds only visible concepts and edges, counted on the visible subgraph", async () => {
+  const { graph, profile, all } = await fixture();
   const result = graph.graph(profile)!;
   assert.deepEqual(result.nodes.map((n) => n.id).sort(), ["person-om", "tactic-alt", "tool-shared"]);
   assert.deepEqual(result.edges.map((e) => e.id).sort(), ["e1", "e5"]);
@@ -92,8 +89,8 @@ test("the whole graph for a profile holds only visible concepts and edges, count
   assert.equal(graph.counts().edges, 6, "an edge to an unknown concept is dropped");
 });
 
-test("a path through a hidden concept is not a path", () => {
-  const { graph, profile, all } = fixture();
+test("a path through a hidden concept is not a path", async () => {
+  const { graph, profile, all } = await fixture();
   // From person-om at depth 3: om—alt (e1) and om—shared (e5); never tool-hidden, never via e3/e4.
   const result = graph.graph(profile, { focus: "person-om", depth: 3 })!;
   assert.deepEqual(result.nodes.map((n) => n.id).sort(), ["person-om", "tactic-alt", "tool-shared"]);
@@ -104,16 +101,16 @@ test("a path through a hidden concept is not a path", () => {
   assert.ok(graph.graph(all, { focus: "tool-hidden", depth: 1 })!.nodes.some((n) => n.id === "tactic-alt"));
 });
 
-test("focus on an entry starts from its concepts; depth bounds the hops", () => {
-  const { graph, all } = fixture();
+test("focus on an entry starts from its concepts; depth bounds the hops", async () => {
+  const { graph, all } = await fixture();
   const one = graph.graph(all, { focus: eA, depth: 1 })!;
   assert.deepEqual(one.nodes.map((n) => n.id).sort(), ["person-om", "tactic-alt"]);
   const two = graph.graph(all, { focus: eA, depth: 2 })!;
   assert.deepEqual(two.nodes.map((n) => n.id).sort(), ["metric-unf", "person-om", "tactic-alt", "tool-hidden", "tool-shared"]);
 });
 
-test("concept detail, entries, related entries and concept search are all visibility-scoped", () => {
-  const { graph, profile, all } = fixture();
+test("concept detail, entries, related entries and concept search are all visibility-scoped", async () => {
+  const { graph, profile, all } = await fixture();
   const alt = graph.concept("tactic-alt", profile)!;
   assert.deepEqual(alt.entryIds, [eA]);
   assert.deepEqual(alt.collections, [A]);
@@ -133,14 +130,14 @@ test("concept detail, entries, related entries and concept search are all visibi
   assert.deepEqual(graph.visibleEntriesOf("tactic-alt", profile), [eA]);
 });
 
-test("deleted entries stop making concepts visible before the graph is rebuilt", () => {
-  const { store, graph, all } = fixture();
+test("deleted entries stop making concepts visible before the graph is rebuilt", async () => {
+  const { store, graph, all } = await fixture();
   store.entries.delete(eU);
   assert.equal(graph.concept("metric-unf", all), null);
   assert.ok(!graph.graph(all)!.edges.some((e) => e.id === "e6"));
 });
 
-test("truncation keeps the most connected nodes and says so", () => {
+test("truncation keeps the most connected nodes and says so", async () => {
   const store = new FakeStore();
   store.collection(A, "SEO");
   const nodes = [];
@@ -153,7 +150,7 @@ test("truncation keeps the most connected nodes and says so", () => {
     if (i > 1) edges.push(edge(`pair-${i}`, "c-1", `c-${i}`, null));
   }
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
-  graph.replace(nodes, edges);
+  await loadGraph(graph, nodes, edges);
   const result = graph.graph(knowledgeScope({ kind: "all" }, [A]), { limit: 2 })!;
   assert.equal(result.truncated, true);
   assert.deepEqual(result.nodes.map((n) => n.id), ["c-0", "c-1"]);
@@ -176,7 +173,7 @@ test("load reads myKG's jsonl from a session output dir, tolerating bad lines an
         founding_year: { value: "2015", confidence: 1.0 },
         description: { value: "Makes anvils", confidence: 0.8 }
       },
-      source_files: [`${eA}.md`, "team.md"]
+      source_files: [`session_a/input/${eA}.md::3`, "team.md"]
     }),
     "{not json",
     JSON.stringify({ id: "person-alice", type: "Person", confidence: "0.5", attributes: {}, source_files: [`${eA}.md`], aliases: ["Al"] })
@@ -204,9 +201,10 @@ test("load reads myKG's jsonl from a session output dir, tolerating bad lines an
   assert.deepEqual(graph.counts(), { nodes: 2, edges: 1 }, "a failed load keeps the old graph");
 });
 
-test("an edge whose source_files list is empty has no visible support", () => {
-  const { graph, profile } = fixture();
-  graph.replace(
+test("an edge whose source_files list is empty has no visible support", async () => {
+  const { graph, profile } = await fixture();
+  await loadGraph(
+    graph,
     [node("tactic-alt", "Alternatives pages", [`${eA}.md`, `${eB}.md`]), node("tool-shared", "Ahrefs", [`${eAB}.md`])],
     [{ ...edge("e-empty", "tactic-alt", "tool-shared", null), source_files: [] }]
   );
@@ -224,21 +222,38 @@ test("overlapping loads: the graph ends up as the one loaded last, never an olde
   const small = join(dir, "small");
   await mkdir(big);
   await mkdir(small);
-  const lines = Array.from({ length: 40_000 }, (_, i) => JSON.stringify(node(`tool-n${i}`, `Tool ${i}`, [`${eA}.md`])));
-  await writeFile(join(big, "nodes.jsonl"), `${lines.join("\n")}\n`);
   await writeFile(join(small, "nodes.jsonl"), `${JSON.stringify(node("tool-latest", "Latest", [`${eA}.md`]))}\n`);
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
-  const older = graph.load(big);
-  const newer = graph.load(small);
-  await Promise.all([older, newer]);
+  if (process.platform === "win32") {
+    // Windows has no POSIX FIFO; retain the regular-file race there.
+    const lines = Array.from({ length: 40_000 }, (_, i) => JSON.stringify(node(`tool-n${i}`, `Tool ${i}`, [`${eA}.md`])));
+    await writeFile(join(big, "nodes.jsonl"), `${lines.join("\n")}\n`);
+    await Promise.all([graph.load(big), graph.load(small)]);
+  } else {
+    const output = join(big, "output");
+    await mkdir(output);
+    const pipe = join(output, "nodes.jsonl");
+    await promisify(execFile)("mkfifo", [pipe]);
+    const older = graph.load(big);
+    // Opening the writer waits until the older reader opens its end. Keep it open without
+    // bytes so the newer load necessarily publishes first, even on a busy host.
+    const writer = await open(pipe, "w");
+    try {
+      await graph.load(small);
+      await writer.writeFile(`${JSON.stringify(node("tool-older", "Older", [`${eA}.md`]))}\n`);
+    } finally {
+      await writer.close();
+    }
+    await older;
+  }
   assert.deepEqual(graph.counts(), { nodes: 1, edges: 0 });
-  assert.ok(graph.hasConcept("tool-latest"));
+  assert.ok(graph.hasConcept("tool-latest"), "a late older load must not overwrite the newest graph");
 });
 
-test("conceptTypes counts the concepts of each type in the whole graph", () => {
-  const { graph } = fixture();
+test("conceptTypes counts the concepts of each type in the whole graph", async () => {
+  const { graph } = await fixture();
   // tactic, tool ×2, person, metric
   assert.deepEqual(Object.fromEntries(graph.conceptTypes()), { tactic: 1, tool: 2, person: 1, metric: 1 });
-  graph.replace([], []);
+  await loadGraph(graph, [], []);
   assert.equal(graph.conceptTypes().size, 0);
 });

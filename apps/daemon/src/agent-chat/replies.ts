@@ -2259,7 +2259,7 @@ export function resultOf(snap: ThreadSnapshotPayload, turn: Turn): ReplyResult {
 }
 
 /** What a waiter answers for a result (§13 d: an empty reply is `emptyReply`, no `reply`). */
-export function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
+function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
   // It replied, then closed: never `closed` (read as "closed before replying"); a failed answer
   // with the reason, which every reader of this response already shows.
   if (result.kind === "closed" && result.afterReply) {

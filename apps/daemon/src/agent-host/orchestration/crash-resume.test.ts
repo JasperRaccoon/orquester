@@ -106,6 +106,8 @@ describe("crash-safe resume (§3.3)", () => {
     await next.settle();
     assert.equal(resumesOf(next, threadId).length, 0);
     assert.equal(headOf(store, threadId).session.status, "error");
+    assert.equal(headOf(store, threadId).session.activeTurnId, null);
+    assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
     assert.equal(headOf(store, threadId).session.lastError, CONTINUATION_FAILED_MESSAGE);
     assert.deepEqual(crashNotes(store, threadId), []);
     await next.stop();

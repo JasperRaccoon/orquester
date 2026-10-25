@@ -9,10 +9,8 @@ import {
   MAX_COMPOSER_QUOTE_CHARS,
   MAX_COMPOSER_QUOTES,
   mergeQuotes,
-  newQuoteId,
   normalizeQuoteText,
   quoteExcerpt,
-  quotesEqual,
   quotesFromText,
   splitLeadingQuotes,
   type ComposerQuote
@@ -82,7 +80,7 @@ describe("a user message split into its quotes and its body", () => {
   it("reads back what a quoted send composed", () => {
     const quotes = [q("1", "para one\n\npara two"), q("2", "```ts\nconst a = 1;\n\nconst b = 2;\n```"), q("3", "> nested")];
     const text = "my comment\n\nover two paragraphs";
-    const split = splitLeadingQuotes(composeQuotedPrompt(quotes, text));
+    const split = splitLeadingQuotes("> para one\n>\n> para two\n\n> ```ts\n> const a = 1;\n>\n> const b = 2;\n> ```\n\n> > nested\n\nmy comment\n\nover two paragraphs");
     assert.deepEqual(split.quotes, quotes.map((quote) => quote.text));
     assert.equal(split.body, text);
   });
@@ -106,7 +104,7 @@ describe("a user message split into its quotes and its body", () => {
 
 describe("a message coming back into a draft", () => {
   it("returns as it was composed: its quotes as quotes, its words as the text", () => {
-    const back = quotesFromText(composeQuotedPrompt([q("1", "one"), q("2", "two")], "why?"));
+    const back = quotesFromText("> one\n\n> two\n\nwhy?");
     assert.deepEqual(back.quotes.map((quote) => quote.text), ["one", "two"]);
     assert.equal(back.text, "why?");
     assert.notEqual(back.quotes[0]!.id, back.quotes[1]!.id);
@@ -163,17 +161,5 @@ describe("the draft's list of quotes", () => {
       mergeQuotes([q("a", "sent"), q("b", "sent too")], [q("c", "meanwhile"), q("a", "sent")]),
       [q("a", "sent"), q("b", "sent too"), q("c", "meanwhile")]
     );
-  });
-
-  it("compares lists by value, absent as empty", () => {
-    assert.equal(quotesEqual(undefined, []), true);
-    assert.equal(quotesEqual([q("a", "x")], [q("a", "x")]), true);
-    assert.equal(quotesEqual([q("a", "x")], [q("a", "y")]), false);
-    assert.equal(quotesEqual([q("a", "x"), q("b", "y")], [q("b", "y"), q("a", "x")]), false);
-  });
-
-  it("mints ids that do not repeat", () => {
-    const ids = new Set(Array.from({ length: 200 }, () => newQuoteId()));
-    assert.equal(ids.size, 200);
   });
 });

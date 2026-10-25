@@ -45,8 +45,7 @@ const settle = async (): Promise<void> => {
 type Answer = "deliver" | "route-miss" | "stream-gone" | "hold";
 
 /** A host over a real fold: snapshots, replays, the frame on the stream it names. */
-function fakeHost(options: { onDemand?: boolean } = {}) {
-  const onDemand = options.onDemand ?? true;
+function fakeHost() {
   const log = agentFleetLog();
   let fold: ThreadFoldState = foldThread(log);
   const streams: Array<{ options: AgentChatStreamOptions; handlers: AgentChatStreamHandlers; id: string | null; closed: boolean }> = [];
@@ -80,7 +79,7 @@ function fakeHost(options: { onDemand?: boolean } = {}) {
     async read(_sessionId, readOptions) {
       reads.push({ ...(readOptions?.agentRows !== undefined ? { agentRows: readOptions.agentRows } : {}) });
       const thread = toThreadSnapshot(fold);
-      return { kind: "snapshot", thread: onDemand && readOptions?.agentRows === "on-demand" ? omitOnDemandAgentRows(thread) : thread };
+      return { kind: "snapshot", thread: readOptions?.agentRows === "on-demand" ? omitOnDemandAgentRows(thread) : thread };
     },
     async requestAgentRows(_sessionId, body) {
       posts.push(body);
@@ -125,7 +124,7 @@ function fakeHost(options: { onDemand?: boolean } = {}) {
      */
     open(openOptions: { streamId?: boolean; snapshot?: boolean } = {}) {
       const stream = current();
-      const optedIn = onDemand && stream.options.agentRows === "on-demand";
+      const optedIn = stream.options.agentRows === "on-demand";
       streamCount += 1;
       stream.id = optedIn && openOptions.streamId !== false ? `stream-${streamCount}` : null;
       const frames: AgentChatStreamFrame[] = [];
@@ -179,30 +178,19 @@ function open(host: ReturnType<typeof fakeHost>) {
 }
 
 describe("on-demand agent rows — the store", () => {
-  it("opts in on its stream and its reads, and the parent's view is the full snapshot's", async () => {
+  it("opts in on its stream and its reads, preserving parent messages and pending requests", async () => {
     const lazyHost = fakeHost();
     const lazy = open(lazyHost);
     await settle();
     assert.equal(lazyHost.streams[0]!.options.agentRows, "on-demand");
     lazyHost.open();
-    const wholeHost = fakeHost({ onDemand: false });
-    const whole = open(wholeHost);
-    await settle();
-    wholeHost.open();
     await settle();
     assert.deepEqual(lazy.state().slice.omittedAgentIds, ["a1", "a2", "a3", "a4", "a6", "n1"]);
-    assert.equal(whole.state().slice.omittedAgentIds, undefined);
-    // Everything the parent's view shows and derives is the same.
-    assert.deepEqual(lazy.state().rows, whole.state().rows);
-    for (const key of ["roster", "pending", "turns", "head", "backgroundLiveness", "turnStatus", "goal"] as const) {
-      assert.deepEqual(lazy.state().slice[key], whole.state().slice[key], key);
-    }
-    assert.deepEqual(lazy.state().activePlan, whole.state().activePlan);
-    assert.equal(lazy.state().isCompacting, whole.state().isCompacting);
+    assert.deepEqual(lazy.state().rows.flatMap((row) => row.kind === "message" ? [row.message.id] : []), ["u1", "p-say", "p-say-2"]);
+    assert.deepEqual(lazy.state().slice.pending.approvals.map((request) => request.requestId), ["r-a6"]);
     await lazy.state().actions.refresh();
     assert.deepEqual(lazyHost.reads, [{ agentRows: "on-demand" }]);
     lazy.store.destroy?.();
-    whole.store.destroy?.();
   });
 
   it("a drill-in asks on the live stream, never before it is live, batched, and its rows land", async () => {

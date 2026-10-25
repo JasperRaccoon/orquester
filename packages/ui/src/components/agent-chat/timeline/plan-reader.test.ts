@@ -7,5 +7,6 @@ test("with no thread store, a truncated plan rejects rather than returning parti
     id: "plan-cut",
     planMarkdown: "# Ship it\n\nstep 1…",
     truncated: true
-  }));
+  }), /full plan could not be loaded/i);
+  assert.equal(await readPlanWithoutStore({ id: "plan-whole", planMarkdown: "# Complete plan" }), "# Complete plan");
 });

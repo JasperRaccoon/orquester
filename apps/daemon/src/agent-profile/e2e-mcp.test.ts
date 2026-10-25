@@ -19,7 +19,7 @@ import type { AgentHomes } from "./adapters/types.ts";
 import { OpenCodeProfileAdapter } from "./adapters/opencode/index.ts";
 import { createProfileConverter } from "./convert.ts";
 import { ProfileImportStore } from "./import.ts";
-import { ProfileBackups, ProfileStash } from "./infra/index.ts";
+import { ProfileBackups, ProfileStash, parseMarkdownDocument } from "./infra/index.ts";
 import { registerAgentProfileRoutes } from "./routes.ts";
 import { AgentProfileService } from "./service.ts";
 
@@ -223,6 +223,8 @@ test("chat: one batch writing the same name twice — two picks, two creates —
   const claudeDir = join(home, ".claude");
   await mkdir(join(claudeDir, "skills", "alpha"), { recursive: true });
   await writeFile(join(claudeDir, "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: Mine\n---\nmine\n");
+  await mkdir(join(claudeDir, "commands"), { recursive: true });
+  await writeFile(join(claudeDir, "commands", "deploy.md"), "Deploy the existing version.\n");
   const homes: AgentHomes = {
     home, claudeDir, claudeJson: join(home, ".claude.json"), codexHome: join(home, ".codex"), grokHome: join(home, ".grok"),
     opencodeDir: join(home, ".config", "opencode"), agentsSkillsDir: join(home, ".agents", "skills")
@@ -240,6 +242,11 @@ test("chat: one batch writing the same name twice — two picks, two creates —
         await mkdir(join(dest, folder, "alpha"), { recursive: true });
         await writeFile(join(dest, folder, "alpha", "SKILL.md"), `---\nname: alpha\ndescription: From ${folder}\n---\n${folder} body\n`);
       }
+      // Claude refuses creating this reserved skill; an unpicked candidate must not be named.
+      await mkdir(join(dest, "skills", "synced"), { recursive: true });
+      await writeFile(join(dest, "skills", "synced", "SKILL.md"), "---\nname: synced\ndescription: Unpicked\n---\nunused\n");
+      await mkdir(join(dest, "commands"), { recursive: true });
+      await writeFile(join(dest, "commands", "deploy.md"), "---\ndescription: Deploy\n---\nship it\n");
     }
   });
   service = new AgentProfileService({
@@ -262,18 +269,32 @@ test("chat: one batch writing the same name twice — two picks, two creates —
   const shownSkillFiles = (port: FakeApprovalPort) =>
     port.cards[0]!.sections.flatMap((section) => (section.kind === "code" && section.title.endsWith("/SKILL.md") ? [[section.title, section.text] as const] : []));
 
-  // Two picks named "alpha" (one already on disk): alpha-2, then alpha-3.
+  // A create claims alpha-2 before the two reversed picks: the imports must use alpha-3 and alpha-4.
   const scan = await service.scanGit("claude", "https://git.example/acme/skills.git");
-  const refs = scan.candidates.map((candidate) => candidate.ref);
-  assert.equal(refs.length, 2);
+  assert.ok(scan.candidates.some((candidate) => candidate.name === "synced"));
+  const refs = ["From two", "From one"].map((description) => {
+    const candidate = scan.candidates.find((entry) => entry.description === description);
+    assert.ok(candidate);
+    return candidate.ref;
+  });
   const picks = new FakeApprovalPort();
-  const picked = await run(picks, [{ action: "import_pick", importId: scan.importId, picks: refs, onConflict: "keep-both" }]);
+  const command = scan.candidates.find((candidate) => candidate.kind === "command")!;
+  const picked = await run(picks, [
+    { action: "create", onConflict: "keep-both", skill: { name: "alpha", frontmatter: { description: "Earlier in the batch" }, body: "earlier\n" } },
+    { action: "import_pick", importId: scan.importId, picks: [...refs, command.ref], onConflict: "keep-both" }
+  ]);
   assert.notEqual(picked.isError, true, JSON.stringify(picked.structuredContent));
+  await assert.rejects(readFile(join(claudeDir, "skills", "synced", "SKILL.md")), { code: "ENOENT" });
   const shown = shownSkillFiles(picks);
-  assert.deepEqual(shown.map(([title]) => title), ["alpha-2/SKILL.md", "alpha-3/SKILL.md"]);
+  assert.deepEqual(new Set(shown.map(([title]) => title)), new Set(["alpha-2/SKILL.md", "alpha-3/SKILL.md", "alpha-4/SKILL.md"]));
   for (const [title, text] of shown) {
     assert.equal(await readFile(join(claudeDir, "skills", title), "utf8"), text, `${title}: the card showed exactly what was written`);
   }
+  assert.equal(parseMarkdownDocument(await readFile(join(claudeDir, "skills", "alpha-3", "SKILL.md"), "utf8")).body, "two body\n");
+  assert.equal(parseMarkdownDocument(await readFile(join(claudeDir, "skills", "alpha-4", "SKILL.md"), "utf8")).body, "one body\n");
+  const commandShown = picks.cards[0]!.sections.find((section) => section.kind === "code" && section.title === "deploy-2.md");
+  assert.ok(commandShown?.kind === "code");
+  assert.equal(await readFile(join(claudeDir, "commands", "deploy-2.md"), "utf8"), commandShown.text);
 
   // Two creates of one name in one call: notes, then notes-2 — shown, then written.
   const creates = new FakeApprovalPort();

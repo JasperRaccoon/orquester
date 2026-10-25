@@ -9,7 +9,6 @@ import type {
 } from "@orquester/api/agent-chat";
 import { modelPickerHint, RUNTIME_MODE_LABELS, RUNTIME_MODE_SHORT_HINTS as RUNTIME_MODE_HINTS, RUNTIME_MODES } from "@orquester/api/agent-chat";
 
-import { noteRender } from "../../../lib/render-probe";
 import { cn } from "../../../lib/cn";
 import { forgeLinksInText } from "../../../lib/github-links/text-links";
 import { useUsageNow } from "../../../hooks/use-usage-display";
@@ -96,7 +95,6 @@ export function ModelChip({
   onChange,
   returnFocusTo
 }: ModelChipProps): React.ReactElement {
-  noteRender("ModelChip");
   const booleans = optionDescriptors(selectedModel).filter(
     (descriptor) => descriptor.type === "boolean"
   );
@@ -288,7 +286,6 @@ export function RuntimeModeChip({
   onChange,
   returnFocusTo
 }: RuntimeModeChipProps): React.ReactElement {
-  noteRender("RuntimeModeChip");
   const combo = shortcutLabelFor("mode");
   return (
     <ComposerPopover

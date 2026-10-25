@@ -79,17 +79,6 @@ function useDismissed(current: BarDismissal | null): boolean {
   return match !== undefined;
 }
 
-/** Tests: forget every dismissal. */
-export function resetSecretFilesBarDismissals(): void {
-  dismissals = [];
-  try {
-    if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(DISMISS_STORAGE_KEY);
-  } catch {
-    /* ignore */
-  }
-  for (const listener of dismissListeners) listener();
-}
-
 const errorText = (err: unknown, fallback: string): string => {
   if (isContentChangedError(err)) return CONTENT_CHANGED_TEXT;
   if (err instanceof ApiError) return err.serverMessage ?? fallback;

@@ -138,13 +138,13 @@ test("GET lists the built-in plugins", async (t) => {
   assert.equal(res.statusCode, 200);
   const body = res.json() as PluginsResponse;
   assert.deepEqual(
-    body.plugins.map((plugin) => [plugin.id, plugin.name, plugin.scope, plugin.updates, plugin.platform, plugin.job]),
+    body.plugins.map((plugin) => [plugin.id, plugin.scope, plugin.updates, plugin.platform, plugin.job]),
     [
-      [ID, "Better TS Typecheck", "global", true, "supported", "idle"],
-      [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"],
-      [SECRET_FILES_PLUGIN_ID, "Secret files", "global", false, "supported", "idle"],
-      [EPHEMERAL_VMS_PLUGIN_ID, "Ephemeral AI VMs", "global", false, "supported", "idle"],
-      [KNOWLEDGE_GRAPH_PLUGIN_ID, "Knowledge Graph", "global", true, "supported", "idle"]
+      [ID, "global", true, "supported", "idle"],
+      [EXCALIDRAW_PLUGIN_ID, "global", false, "supported", "idle"],
+      [SECRET_FILES_PLUGIN_ID, "global", false, "supported", "idle"],
+      [EPHEMERAL_VMS_PLUGIN_ID, "global", false, "supported", "idle"],
+      [KNOWLEDGE_GRAPH_PLUGIN_ID, "global", true, "supported", "idle"]
     ]
   );
   assert.equal(body.plugins[0]?.enabled, false);
@@ -307,6 +307,8 @@ test("creating, renaming and deleting workspaces leaves an enabled plugin on", a
   await h.plugins.settled();
   const preload = h.sessionPreload.at(-1);
   assert.equal(typeof preload, "string");
+  const pluginEvents = () => h.published.filter((event) => event.channel === PLUGINS_CHANNEL).length;
+  const before = pluginEvents();
   const lastEnabled = () => (h.published.at(-1)?.payload as PluginsResponse).plugins[0]?.enabled;
 
   assert.equal((await h.inject({ method: "DELETE", url: "/api/workspaces/acme" })).statusCode, 204);
@@ -324,6 +326,7 @@ test("creating, renaming and deleting workspaces leaves an enabled plugin on", a
   await h.plugins.settled();
   assert.equal(h.sessionPreload.at(-1), preload);
   assert.equal(lastEnabled(), true);
+  assert.equal(pluginEvents(), before, "workspace changes do not announce a plugin change");
 });
 
 test("PUT chooses the engine: it answers the plugin on the new engine, persists it, and installs it while on", async (t) => {

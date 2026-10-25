@@ -13,7 +13,6 @@ import type {
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
-import { noteRender } from "../../../lib/render-probe";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { useAppStore } from "../../../store/app";
@@ -293,7 +292,6 @@ function ChatComposerView({
   profileChip,
   readRecallItems
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
-  noteRender("ChatComposer");
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null

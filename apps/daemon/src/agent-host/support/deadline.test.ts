@@ -19,9 +19,10 @@ test("propagates the underlying rejection unchanged", async () => {
   );
 });
 
-test("expiry rejects with DeadlineExceededError and runs onTimeout", async () => {
+test("expiry rejects with DeadlineExceededError and runs onTimeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let killed = false;
-  await assert.rejects(
+  const rejected = assert.rejects(
     withDeadline(new Promise<never>(() => {}), {
       label: "handshake",
       timeoutMs: 5,
@@ -36,22 +37,28 @@ test("expiry rejects with DeadlineExceededError and runs onTimeout", async () =>
       return true;
     }
   );
+  t.mock.timers.tick(5);
+  await rejected;
   assert.equal(killed, true, "the child is killed rather than left starting forever");
 });
 
-test("a late rejection after expiry does not become an unhandled rejection", async () => {
+test("a late rejection after expiry does not become an unhandled rejection", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let reject!: (error: unknown) => void;
   const work = new Promise<never>((_resolve, r) => {
     reject = r;
   });
-  await assert.rejects(withDeadline(work, { label: "cancel", timeoutMs: 5 }));
+  const rejected = assert.rejects(withDeadline(work, { label: "cancel", timeoutMs: 5 }), DeadlineExceededError);
+  t.mock.timers.tick(5);
+  await rejected;
   reject(new Error("too late"));
   // If this were unhandled the test run itself would fail.
   await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
-test("a failing onTimeout never replaces the deadline error", async () => {
-  await assert.rejects(
+test("a failing onTimeout never replaces the deadline error", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const rejected = assert.rejects(
     withDeadline(new Promise<never>(() => {}), {
       label: "interrupt",
       timeoutMs: 5,
@@ -61,6 +68,8 @@ test("a failing onTimeout never replaces the deadline error", async () => {
     }),
     DeadlineExceededError
   );
+  t.mock.timers.tick(5);
+  await rejected;
 });
 
 test("an abort signal wins, before and during the wait", async () => {

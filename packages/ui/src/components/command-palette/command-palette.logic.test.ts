@@ -11,10 +11,7 @@ import type { ProjectSummary, SessionSummary } from "../../types";
 import {
   createRecencySnapshot,
   matchRanges,
-  normalizeSearchText,
   paletteResults,
-  rankField,
-  rankFields,
   sessionRecency,
   type PaletteSession
 } from "./command-palette.logic";
@@ -39,38 +36,6 @@ function results(query: string, sessions: PaletteSession[], projects: ProjectSum
     projectRecency: (p) => recency[p.name] ?? 0
   });
 }
-
-describe("matching a field", () => {
-  it("ranks whole, start, word-start and mid-word matches", () => {
-    const rank = (field: string, query: string) => rankField(field, normalizeSearchText(query), normalizeSearchText(query).split(" "));
-    assert.equal(rank("Fix", "fix"), 3);
-    assert.equal(rank("Fix the login", "fix"), 2);
-    assert.equal(rank("Quick fix", "fix"), 1);
-    assert.equal(rank("prefix tree", "fix"), 0);
-    assert.equal(rank("Login page", "nothing"), null);
-    assert.equal(rank("Refactor auth-flow", "auth flow"), 1, "every word starts a word");
-  });
-
-  it("ignores case and accents", () => {
-    assert.equal(normalizeSearchText("  Café  Crème "), "cafe creme");
-    assert.ok(rankFields(["Café review"], "cafe") !== null);
-  });
-
-  it("finds words spread over fields, ranked below a match within one", () => {
-    const across = rankFields(["Auth chat", "app", "main"], "auth main");
-    const within = rankFields(["Auth main chat", "app", "main"], "auth main");
-    assert.ok(across !== null && within !== null);
-    assert.ok(within > across);
-    assert.equal(rankFields(["Auth chat", "app", "main"], "auth other"), null);
-  });
-
-  it("a word-start match in any field beats a mid-word match; then the earlier field wins", () => {
-    // "app" starts the project name but is mid-word in the title "Mapper".
-    assert.ok(rankFields(["Mapper", "app"], "app")! > rankFields(["Mapper", "other"], "app")!);
-    // A title prefix beats an exact project-name match.
-    assert.ok(rankFields(["App setup", "x"], "app")! > rankFields(["Other", "app"], "app")!);
-  });
-});
 
 describe("palette results", () => {
   const app = project("app");
@@ -97,6 +62,17 @@ describe("palette results", () => {
     assert.deepEqual(titles(results("tools", rows).sessions), ["Docs"]);
     assert.deepEqual(titles(results("app", rows).sessions), ["Rename helper"]);
     assert.deepEqual(results("tools", rows, [app, api]).projects, [api]);
+    assert.deepEqual(titles(results("CAFE", [session("Café review", app)]).sessions), ["Café review"]);
+
+    const acrossFields = [session("Auth chat", app), session("Auth main chat", api)];
+    assert.deepEqual(titles(results("auth main", acrossFields).sessions), ["Auth main chat", "Auth chat"]);
+    assert.deepEqual(titles(results("auth other", acrossFields).sessions), []);
+
+    // A word-start match in a project beats a mid-word title match.
+    const mapper = [session("Mapper", api), session("Mapper", app)];
+    assert.deepEqual(results("app", mapper).sessions.map((row) => row.project.name), ["app", "api"]);
+    // With equally strong matches, the title wins over the project field.
+    assert.deepEqual(titles(results("app", [session("Other", app), session("App setup", api)]).sessions), ["App setup", "Other"]);
   });
 
   it("lists delegated and forked chats like any other tab", () => {
@@ -173,17 +149,5 @@ describe("the recency snapshot", () => {
     assert.deepEqual(rank(), ["Fix B", "Fix A"], "nothing moves under the highlight");
     const reopened = createRecencySnapshot();
     assert.equal(reopened.get(rows[0]!.session.id, () => live["Fix A"]!), 99, "the next opening sees it");
-  });
-
-  it("asks for a key's live stamp once", () => {
-    const snapshot = createRecencySnapshot();
-    let asked = 0;
-    const live = () => {
-      asked += 1;
-      return asked;
-    };
-    assert.equal(snapshot.get("k", live), 1);
-    assert.equal(snapshot.get("k", live), 1);
-    assert.equal(asked, 1);
   });
 });

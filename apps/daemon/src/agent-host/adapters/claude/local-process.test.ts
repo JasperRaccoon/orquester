@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import type { SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 
 import { LIFELINE_SUPPORTED } from "../../support/lifeline.ts";
-import { claudeLifelineSpawner, EXIT_AFTER_STDERR_MS } from "./local-process.ts";
+import { claudeLifelineSpawner } from "./local-process.ts";
 
 function start(script: string): { process: SpawnedProcess; stderr: () => string } {
   let captured = "";
@@ -46,7 +46,7 @@ describe("the local Claude spawner", { skip: !LIFELINE_SUPPORTED }, () => {
     const exitedAt = Date.now();
     const [code] = (await once(child as unknown as NodeJS.EventEmitter, "exit")) as [number | null];
     assert.equal(code, 0);
-    assert.ok(Date.now() - exitedAt < EXIT_AFTER_STDERR_MS + 2_000, "reported at the cap, not when stderr closes");
+    assert.ok(Date.now() - exitedAt < 2_000, "exit is bounded independently of the still-open stderr");
     process.kill(-(child as unknown as { pid: number }).pid, "SIGKILL");
   });
 

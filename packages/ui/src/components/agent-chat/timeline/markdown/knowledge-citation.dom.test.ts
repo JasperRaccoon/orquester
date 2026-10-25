@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { defaultUrlTransform } from "react-markdown";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
@@ -120,9 +119,17 @@ describe("the chat's URL filter", () => {
     ];
     for (const url of refused) assert.equal(t(url), "", JSON.stringify(url.slice(0, 80)));
     // Every other scheme keeps react-markdown's own filter.
-    for (const url of ["https://a.example/x", "mailto:a@b.c", "#frag", "./rel", "data:text/html,x", "vbscript:x", "file:///etc/passwd"]) {
-      assert.equal(t(url), defaultUrlTransform(url), url);
-      assert.equal(t(url, "src"), defaultUrlTransform(url), url);
+    for (const [url, expected] of [
+      ["https://a.example/x", "https://a.example/x"],
+      ["mailto:a@b.c", "mailto:a@b.c"],
+      ["#frag", "#frag"],
+      ["./rel", "./rel"],
+      ["data:text/html,x", ""],
+      ["vbscript:x", ""],
+      ["file:///etc/passwd", ""]
+    ] as const) {
+      assert.equal(t(url), expected, url);
+      assert.equal(t(url, "src"), expected, url);
     }
   });
 
@@ -213,7 +220,6 @@ describe("knowledge citations in a message", () => {
     assert.equal(chip.getAttribute("type"), "button");
     assert.equal(chip.closest("a"), null, "not inside a link");
     assert.equal(chip.textContent, "Alternatives pages · @hridoyreh");
-    assert.ok(chip.querySelector("svg"), "the knowledge icon");
     assert.equal(chips(LIVE).length, 2);
     assert.equal(doc().querySelectorAll('a[href^="orquester-knowledge:"]').length, 0, "no anchor carries the scheme");
     assert.ok(doc().querySelector('a[href="https://example.com/docs"]'), "other links are unchanged");

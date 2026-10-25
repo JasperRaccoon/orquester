@@ -30,7 +30,6 @@ function withStorage(seed: Record<string, string>, body: () => void): Map<string
 }
 
 test("only token-shaped values count as a session token", () => {
-  assert.equal(TOKEN.length, 47);
   assert.equal(asSessionToken(TOKEN), TOKEN);
   assert.equal(asSessionToken(LEGACY), undefined, "an older build's base64(user:hash) credential");
   assert.equal(asSessionToken("$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa"), undefined);

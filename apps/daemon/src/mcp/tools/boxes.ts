@@ -61,7 +61,7 @@ export const BOX_EXEC_COMMAND_MAX_CHARS = 64 * 1024;
 export const BOX_OUTPUT_MAX_WAIT_SECONDS = 600;
 
 /** How long `create_box` waits for a box to become ready, per kind (Windows images and GPU marketplaces are slow). */
-export const BOX_READY_TIMEOUT_MS: Readonly<Record<BoxKind, number>> = {
+const BOX_READY_TIMEOUT_MS: Readonly<Record<BoxKind, number>> = {
   linux: 15 * 60_000,
   "linux-gpu": 25 * 60_000,
   windows: 25 * 60_000,
@@ -128,7 +128,7 @@ function money(usd: number): string {
 }
 
 /** Minutes as the card says them: "45 min", "2 h", "1 h 30 min", "3 d 4 h". */
-export function durationLabel(minutes: number): string {
+function durationLabel(minutes: number): string {
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
   const mins = minutes % 60;

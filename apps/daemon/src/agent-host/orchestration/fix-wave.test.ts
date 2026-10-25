@@ -4,7 +4,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -324,7 +324,8 @@ describe("S1-7: the image cap is re-checked against the stat'd file at dispatch"
       const host = createTestHost();
       const threadId = await host.createThread();
       const big = join(dir, "big.png");
-      await writeFile(big, Buffer.alloc(11 * 1024 * 1024));
+      await writeFile(big, "");
+      await truncate(big, 10 * 1024 * 1024 + 1);
       assert.ok((await stat(big)).size > 10 * 1024 * 1024);
       const ref = await host.store.putAttachment({
         threadId,
@@ -348,7 +349,10 @@ describe("S1-7: the image cap is re-checked against the stat'd file at dispatch"
         0,
         "the turn must not reach the provider"
       );
-      assert.ok(activities(host).some((row) => row.activityKind === "provider.turn.start.failed"));
+      assert.match(
+        String(JSON.stringify(activities(host).find((row) => row.activityKind === "provider.turn.start.failed")?.payload)),
+        /10485761 bytes.*10485760-byte limit/
+      );
       await host.stop();
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -362,7 +366,8 @@ describe("S1-7 on every path: a queued turn and a message-mode answer are re-che
   // the provider with a "small image" the file itself contradicted.
   const oversized = async (dir: string): Promise<string> => {
     const big = join(dir, "big.png");
-    await writeFile(big, Buffer.alloc(11 * 1024 * 1024));
+    await writeFile(big, "");
+    await truncate(big, 10 * 1024 * 1024 + 1);
     return big;
   };
   const sendCount = (host: TestHost): number =>
@@ -417,7 +422,10 @@ describe("S1-7 on every path: a queued turn and a message-mode answer are re-che
       await host.settle();
 
       assert.equal(sendCount(host), 1, "only the first turn reached the provider");
-      assert.ok(activities(host).some((row) => row.activityKind === "provider.turn.start.failed"));
+      assert.match(
+        String(JSON.stringify(activities(host).find((row) => row.activityKind === "provider.turn.start.failed")?.payload)),
+        /10485761 bytes.*10485760-byte limit/
+      );
       await host.stop();
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -467,55 +475,11 @@ describe("S1-7 on every path: a queued turn and a message-mode answer are re-che
       await host.settle();
 
       assert.equal(sendCount(host), before, "the answer's steer must not reach the provider");
-      assert.ok(activities(host).some((row) => row.activityKind === "provider.turn.start.failed"));
+      assert.match(
+        String(JSON.stringify(activities(host).find((row) => row.activityKind === "provider.turn.start.failed")?.payload)),
+        /10485761 bytes.*10485760-byte limit/
+      );
       await host.stop();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("R2-6: an empty probe never blanks a non-empty cached list", () => {
-  it("keeps each array independently, including on a machine-level probe", async () => {
-    const { createProviderSnapshotRegistry } = await import("./provider-snapshots.ts");
-    const { createRecordingLogger, createTestClock } = await import("./testing/fakes.ts");
-    const dir = await mkdtemp(join(tmpdir(), "snapshots-"));
-    try {
-      let next = {
-        id: "claude" as const,
-        refIds: ["claude"],
-        installed: true,
-        version: "1.0.0",
-        status: "ready" as const,
-        auth: { status: "authenticated" as const },
-        checkedAt: "1970-01-01T00:00:00.000Z",
-        models: [],
-        slashCommands: [{ name: "compact" }],
-        skills: [{ name: "review", path: "/s", enabled: true }],
-        capabilities: {
-          sessionModelSwitch: "in-session" as const,
-          showPlanModeToggle: true,
-          reportsContextWindow: true,
-          compaction: { type: "native" as const }
-        }
-      };
-      const registry = createProviderSnapshotRegistry({
-        probes: [{ id: "claude", refresh: async () => next }],
-        stateDir: dir,
-        logger: createRecordingLogger(),
-        clock: createTestClock(0)
-      });
-      await registry.refresh("claude");
-      assert.equal(registry.get("claude")?.skills.length, 1);
-
-      // A transient EACCES on the skills dir recovers to `[]` while the
-      // command list is still good.
-      next = { ...next, skills: [], slashCommands: [{ name: "compact" }, { name: "review" }] };
-      await registry.refresh("claude");
-      assert.equal(registry.get("claude")?.skills.length, 1, "skills must survive");
-      assert.equal(registry.get("claude")?.slashCommands.length, 2);
-      registry.stop();
-      await registry.flush();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

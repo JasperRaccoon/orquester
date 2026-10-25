@@ -54,7 +54,6 @@ test("the panel flags only the row whose server reaches this Orquester, from the
   const plain = rows.find((row) => row.startsWith("mcp:jira"))!;
   assert.match(flagged, /data-daemon-pointing="bearer"/);
   assert.match(flagged, /Disabled inside Orquester chats/);
-  assert.match(flagged, /this Orquester&#x27;s own credential/);
   assert.doesNotMatch(plain, /data-daemon-pointing/);
 });
 

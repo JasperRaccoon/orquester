@@ -22,7 +22,7 @@
 import type { ProjectSummary, SessionSummary } from "../../types";
 
 /** Lower case, accents dropped, whitespace collapsed. */
-export function normalizeSearchText(value: string): string {
+function normalizeSearchText(value: string): string {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
@@ -37,7 +37,7 @@ function startsWord(field: string, token: string): boolean {
 }
 
 /** How a query matches one field: 3 whole, 2 its start, 1 every word starts a word, 0 mid-word; null no match. */
-export function rankField(field: string, normalizedQuery: string, tokens: readonly string[]): number | null {
+function rankField(field: string, normalizedQuery: string, tokens: readonly string[]): number | null {
   const normalized = normalizeSearchText(field);
   if (normalized.length === 0 || !tokens.every((token) => normalized.includes(token))) return null;
   if (normalized === normalizedQuery) return 3;
@@ -52,7 +52,7 @@ export function rankField(field: string, normalizedQuery: string, tokens: readon
  * anything.
  */
 // Adapted from T3 Code (MIT): apps/web/src/components/CommandPalette.logic.ts
-export function rankFields(fields: readonly string[], query: string): number | null {
+function rankFields(fields: readonly string[], query: string): number | null {
   const normalizedQuery = normalizeSearchText(query);
   if (normalizedQuery.length === 0) return 0;
   const tokens = normalizedQuery.split(" ");

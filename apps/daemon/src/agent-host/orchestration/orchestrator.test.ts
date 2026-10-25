@@ -3496,12 +3496,17 @@ describe("orchestrator — the box turn-start hook (boxes spec 2026-10-19 §8.3)
     await host.stop();
   });
 
-  it("a hook that throws is logged, and the turn goes on", async () => {
+  it("a failing turn-start hook does not stop turn completion", async () => {
     const host = createTestHost({
       onTurnStarted: () => {
         throw new Error("hook broke");
       }
     });
+    Object.assign(host.ingestion, createIngestion({
+      sink: host.orchestrator.ingestionSink,
+      liveness: createLivenessRegistry({ clock: host.clock }),
+      clock: host.clock
+    }));
     const threadId = await host.createThread();
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
     await host.settle();
@@ -3510,12 +3515,11 @@ describe("orchestrator — the box turn-start hook (boxes spec 2026-10-19 §8.3)
     const consumed = host.orchestrator.consume(host.adapter);
     host.adapter.emit(turnBoundary(host, "turn.started", turnId, threadId));
     host.adapter.emit(turnBoundary(host, "turn.completed", turnId, threadId));
-    await until(() => host.checkpoints.turnEndRequests.some((request) => request.turnId === turnId));
-    await host.settle();
-
-    assert.ok(host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("turn-start hook failed")));
     host.adapter.close();
     await consumed;
+    await host.settle();
+
+    assert.equal((await snapshotRead(host, threadId)).turns.at(-1)?.state, "completed");
     await host.stop();
   });
 });

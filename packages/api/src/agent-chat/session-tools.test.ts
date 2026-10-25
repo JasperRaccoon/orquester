@@ -18,7 +18,6 @@ import {
   sessionToolNameFromProviderData,
   sessionToolNameOfData,
   sessionToolReferences,
-  SESSION_TOOL_REFERENCE_KEYS,
   SESSION_TOOL_REFERENCE_MAX_BYTES
 } from "./session-tools.ts";
 import { stripSecretRequestValues } from "./secret-requests.ts";
@@ -181,29 +180,7 @@ test("a row slimmed before keeps its references: the summary its result became i
   assert.equal(projectSessionToolData({ ...slimmedOnce, sessionTool: { name: "html_render", references: { other: 1 } } })?.references, undefined);
 });
 
-test("htmlRender is a kept reference key and survives a double slim through the unified path", () => {
-  assert.ok(SESSION_TOOL_REFERENCE_KEYS.includes("htmlRender"));
-  const ref = { attachmentId: "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 400 };
-  const payload = {
-    itemType: "mcp_tool_call",
-    status: "completed",
-    data: sessionToolMarkedData(
-      {
-        toolName: "mcp__orquester__html_render",
-        input: { html: "<p>hi</p>" },
-        result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ htmlRender: ref, message: "Shown." }) }] }
-      },
-      new Set(["html_render"])
-    )
-  };
-  const once = slimActivityPayload(payload) as { data: Record<string, unknown> };
-  const twice = slimActivityPayload(once) as { data: Record<string, unknown> };
-  assert.deepEqual(once.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
-  assert.deepEqual(twice.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
-});
-
 test("secretRequest is a kept reference key beside htmlRender: the record survives a double slim, the value never", () => {
-  assert.deepEqual([...SESSION_TOOL_REFERENCE_KEYS], ["htmlRender", "secretRequest", "threadRef", "toolApproval"]);
   const record = { name: "DEPLOY_KEY", purpose: "Push the release", outcome: "provided" };
   const value = "correct-horse-battery-staple-4711";
   // As ingestion stores it: the value stripped by shape first, then marked.
@@ -340,25 +317,6 @@ test("a string blob is cut at the cap; arguments, small values and untouched dat
   assert.match(wide.result, /^é+… \[\d+ bytes omitted\]$/);
   const small = { toolName: "mcp__orquester__echo", result: { content: [{ type: "text", text: "{}" }] }, sessionTool: { name: "echo" } };
   assert.equal(boundSessionToolData(small), small);
-});
-
-test("an html_render result keeps its reference through bounding and both slims", () => {
-  const ref = { attachmentId: "thread_1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
-  const text = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
-  const data = {
-    server: "orquester",
-    tool: "html_render",
-    arguments: { html: "<p>" + "x".repeat(200_000) + "</p>", title: "Chart", height: 420 },
-    result: { content: [{ type: "text", text }], structuredContent: JSON.parse(text) },
-    sessionTool: { name: "html_render" }
-  };
-  const bounded = boundSessionToolData(data) as Record<string, unknown>;
-  assert.equal(bounded, data, "nothing in an html_render result is a blob");
-  assert.deepEqual(sessionToolReferences(bounded), { htmlRender: ref });
-  const slim = slimActivityPayload(slimActivityPayload({ itemType: "mcp_tool_call", status: "completed", data: bounded })) as {
-    data: Record<string, unknown>;
-  };
-  assert.deepEqual(slim.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
 });
 
 test("a base64 run spelled into text is dropped whole, and the text around it stays", () => {

@@ -53,7 +53,7 @@ function without(doc: Doc, drop: ReadonlySet<string>): Doc {
  * (`strictKnownMarketplaces`, `blockedMarketplaces`, …) and the hook URL/env
  * policies (`allowedHttpHookUrls`, `httpHookAllowedEnvVars`).
  */
-export const CLAUDE_DROPPED_SETTINGS: Readonly<Record<string, string>> = {
+const CLAUDE_DROPPED_SETTINGS: Readonly<Record<string, string>> = {
   hooks: "user hooks are items; the profile brings its own",
   disableAllHooks: "a global kill switch would silence the profile's own hooks",
   enabledPlugins: "turns the user's installed plugins on or off",
@@ -111,7 +111,7 @@ export function claudeRuntimeSettings(settings: Readonly<Doc>): Doc {
  * overrides some), `tools`, `tui`, `history`, `shell_environment_policy`,
  * `project_doc_*`, `otel`, …
  */
-export const CODEX_DROPPED_CONFIG: Readonly<Record<string, string>> = {
+const CODEX_DROPPED_CONFIG: Readonly<Record<string, string>> = {
   mcp_servers: "MCP servers",
   plugins: "enabled plugins",
   marketplaces: "plugin marketplaces",
@@ -168,7 +168,7 @@ export function codexRuntimeConfig(config: Readonly<Doc>): Doc {
  * official marketplace into the profile home; what it discovers is disabled
  * by name through `[plugins] disabled`).
  */
-export const GROK_DROPPED_CONFIG: Readonly<Record<string, string>> = {
+const GROK_DROPPED_CONFIG: Readonly<Record<string, string>> = {
   mcp_servers: "MCP servers",
   disabled_mcp_servers: "on/off state of the user's inherited MCP servers",
   plugins: "plugin on/off lists (the recipe writes `[plugins] disabled`)",
@@ -193,7 +193,7 @@ export function grokRuntimeConfig(config: Readonly<Doc>): Doc {
  * `disabled_providers`, `permission`, `tools`, `share`, `autoupdate`, `lsp`,
  * `formatter`, `keybinds`, `theme`, `tui`, `experimental`, `enterprise`, …
  */
-export const OPENCODE_DROPPED_CONFIG: Readonly<Record<string, string>> = {
+const OPENCODE_DROPPED_CONFIG: Readonly<Record<string, string>> = {
   mcp: "MCP servers",
   plugin: "plugins",
   instructions: "instruction files",

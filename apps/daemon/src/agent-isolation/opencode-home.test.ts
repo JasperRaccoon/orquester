@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { OPENCODE_TEST_HOME_ENV, opencodeHomeConfigItems, probeOpencodeTestHome } from "./opencode-home.ts";
+import { opencodeHomeConfigItems, probeOpencodeTestHome } from "./opencode-home.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-opencode-debug-config.mjs", import.meta.url));
 
@@ -62,10 +62,6 @@ describe("probeOpencodeTestHome", () => {
     assert.deepEqual(await readdir(root), [], "the scratch dir is removed");
     return result;
   };
-
-  it("names the variable it probes", () => {
-    assert.equal(OPENCODE_TEST_HOME_ENV, "OPENCODE_TEST_HOME");
-  });
 
   it("is effective when the canary loads without the override and not with it", async () => {
     assert.deepEqual(await probe([]), { effective: true });

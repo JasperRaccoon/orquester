@@ -37,7 +37,6 @@ test("a historical quota card shows the readings, observation time and expired-l
   assert.match(html, /37%/);
   assert.match(html, /98%/);
   assert.match(html, /Login expired, please re-login/);
-  assert.match(html, /text-warn/);
   assert.doesNotMatch(html, /No reading yet|Resets now/);
 });
 

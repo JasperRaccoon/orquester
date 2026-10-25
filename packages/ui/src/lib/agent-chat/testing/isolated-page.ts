@@ -3,40 +3,54 @@ import { createRequire } from "node:module";
 import { register } from "tsx/cjs/api";
 
 const require = createRequire(import.meta.url);
+const freeNamespaces: string[] = [];
 
 /** A browser reload replaces module memory while preserving tab storage. */
 export function isolatedPage() {
-  const existing = new Set(Object.keys(require.cache));
-  const loader = register({ namespace: randomUUID() });
+  // tsx's process-local transform cache includes the namespace in its key.
+  // Recycle a disposed page's namespace, but never its module instances, so
+  // reloads can reuse compiled code without sharing page state. Live pages
+  // always have different namespaces.
+  const namespace = freeNamespaces.pop() ?? randomUUID();
+  const loader = register({ namespace });
+  let disposed = false;
+  const load = (path: string) => {
+    if (disposed) throw new Error("The isolated page has been disposed");
+    return loader.require(path, import.meta.url);
+  };
   return {
     get store(): typeof import("../store") {
-      return loader.require("../store.ts", import.meta.url);
+      return load("../store.ts");
     },
     get providers(): typeof import("../providers") {
-      return loader.require("../providers.ts", import.meta.url);
+      return load("../providers.ts");
     },
     get transport(): typeof import("../transport") {
-      return loader.require("../transport.ts", import.meta.url);
+      return load("../transport.ts");
     },
     get persistentCache(): typeof import("../persistent-cache") {
-      return loader.require("../persistent-cache.ts", import.meta.url);
+      return load("../persistent-cache.ts");
     },
     get sends(): typeof import("../../../components/agent-chat/composer/composer-sends") {
-      return loader.require("../../../components/agent-chat/composer/composer-sends.ts", import.meta.url);
+      return load("../../../components/agent-chat/composer/composer-sends.ts");
     },
     get outbox(): typeof import("../../../components/agent-chat/composer/composer-outbox") {
-      return loader.require("../../../components/agent-chat/composer/composer-outbox.ts", import.meta.url);
+      return load("../../../components/agent-chat/composer/composer-outbox.ts");
     },
     get bridge(): typeof import("../../../components/agent-chat/composer/composer-bridge") {
-      return loader.require("../../../components/agent-chat/composer/composer-bridge.ts", import.meta.url);
+      return load("../../../components/agent-chat/composer/composer-bridge.ts");
     },
     dispose(): void {
+      if (disposed) return;
+      disposed = true;
       loader.unregister();
-      // Unregistering a compiler does not evict modules it loaded. Clear only
-      // this page's additions so the next page cannot reuse its singleton state.
+      // tsx keys JS/TS modules by namespace; JSON and native modules are
+      // unnamespaced dependencies. Leave other live pages' modules intact.
+      const suffix = `?namespace=${namespace}`;
       for (const key of Object.keys(require.cache)) {
-        if (!existing.has(key)) delete require.cache[key];
+        if (key.endsWith(suffix)) delete require.cache[key];
       }
+      freeNamespaces.push(namespace);
     }
   };
 }

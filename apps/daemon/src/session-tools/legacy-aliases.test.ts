@@ -11,11 +11,11 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ThreadCaller } from "../mcp/catalog/contract.ts";
-import { audienceShape, executeToolCall } from "../mcp/executor.ts";
+import { executeToolCall } from "../mcp/executor.ts";
 import { toolByName } from "../mcp/catalog/index.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { LEGACY_SESSION_TOOL_DEFINITIONS } from "../agent-host/session-tools/legacy-definitions.ts";
-import { chatToolByName, LEGACY_CHAT_TOOL_ALIASES, LEGACY_CHAT_TOOL_NAMES } from "./legacy-aliases.ts";
+import { chatToolByName } from "./legacy-aliases.ts";
 
 const caller: ThreadCaller = {
   kind: "thread", threadId: "me", title: "Old host chat", projectPath: "", workspace: "", cwd: "/tmp", agentId: "claude", callId: "c1",
@@ -62,36 +62,11 @@ async function call(name: string, args: Record<string, unknown>, rig = targets()
   return { result, runs: rig.runs };
 }
 
-test("every legacy name has an alias onto spec §14.1's tool", () => {
-  assert.deepEqual([...LEGACY_CHAT_TOOL_NAMES].sort(), [
-    "agent_catalog", "delegate_task", "task_cancel", "task_status", "task_wait", "thread_create", "thread_fork", "thread_interrupt",
-    "thread_list", "thread_merge_back", "thread_read", "thread_send", "thread_wait"
-  ]);
-  assert.equal(LEGACY_CHAT_TOOL_ALIASES.thread_send!.target, "send_message");
-  assert.equal(LEGACY_CHAT_TOOL_ALIASES.delegate_task!.target, "create_session");
-});
-
 test("an old host on this daemon: every name of the old server (the frozen definitions) is the catalog's own tool or an alias", () => {
   for (const { name } of LEGACY_SESSION_TOOL_DEFINITIONS) {
-    const own = toolByName(name, "chat");
-    const alias = Object.prototype.hasOwnProperty.call(LEGACY_CHAT_TOOL_ALIASES, name);
-    assert.ok(own !== undefined || alias, `${name} is no longer served to chats`);
-    assert.ok(!(own !== undefined && alias), `${name}: the catalog serves it, so it must not be aliased too`);
     assert.ok(chatToolByName(name), name);
   }
   assert.deepEqual(LEGACY_SESSION_TOOL_DEFINITIONS.map(({ name }) => name).filter((name) => toolByName(name, "chat")), ["html_preview", "html_render", "request_secret"]);
-});
-
-test("against the production catalog every legacy name resolves; agent_catalog is Task 9's list_agents, and its old fields fit the target's chat schema", () => {
-  for (const name of LEGACY_CHAT_TOOL_NAMES) assert.ok(chatToolByName(name), `${name} resolves`);
-  assert.equal(toolByName("agent_catalog", "chat"), undefined, "the catalog itself no longer serves the old name");
-  const target = toolByName("list_agents", "chat");
-  assert.ok(target, "list_agents is served to chats");
-  const alias = chatToolByName("agent_catalog")!;
-  assert.equal(alias.toolset, target.toolset);
-  assert.equal(alias.tier, target.tier);
-  const targetKeys = new Set(Object.keys(audienceShape(target, "chat")));
-  for (const key of ["agent", "model"]) assert.ok(targetKeys.has(key), key);
 });
 
 test("thread_send without wait steers as before (reply none); with wait it waits WITHOUT the notify conversion", async () => {

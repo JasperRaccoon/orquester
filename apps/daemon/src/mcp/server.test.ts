@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createWriteStream } from "node:fs";
 import Fastify,{ type FastifyInstance,type FastifyRequest } from "fastify";
 import { createDefaultClientConfig,createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.ts";
@@ -325,7 +324,7 @@ function daemonApp(mode: "local" | "remote", services: Record<string, unknown>):
   config.transports.http.passwordHash = PASSWORD_HASH;
   const root = "/nonexistent-orquester-mcp-test";
   const resolved = { daemonDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root } as unknown as CreateServerArgs[1];
-  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
+  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), { write() {} }, { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
   app.addHook("preHandler", markConsumed);
   return app;
 }

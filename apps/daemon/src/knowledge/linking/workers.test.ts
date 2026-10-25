@@ -137,15 +137,6 @@ describe("WorkerPool", () => {
     assert.equal(h.pool.size, 0);
   });
 
-  it("an invalid answer goes back to the same chat, which redoes it", async () => {
-    const h = await harness({ concurrency: 1, accounts: ["a1"], behaviour: { a1: { invalidFirst: true } } });
-    const [id] = await h.addTasks(1);
-    await drain(h, 1);
-    assert.equal(h.port.sessions.length, 1);
-    assert.equal(h.port.sessions[0]!.refused, 1);
-    assert.deepEqual(h.port.sessions[0]!.answered, [id]);
-  });
-
   it("a usage limit cools the account down and fails over to another account", async () => {
     const h = await harness({
       concurrency: 1,

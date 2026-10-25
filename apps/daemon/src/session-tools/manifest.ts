@@ -76,7 +76,7 @@ export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next
 export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get"];
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
-export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
+function alwaysAdmin(tool: AnyOrquesterTool): boolean {
   return tool.tier === "admin";
 }
 
@@ -87,7 +87,7 @@ export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
  * is on, without `knowledge_search`/`knowledge_get` for a chat that sees no collection, and never
  * the worker tools; a worker session gets ONLY the worker tools.
  */
-export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false, knowledge?: ManifestKnowledge): string[] {
+function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false, knowledge?: ManifestKnowledge): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
     if (KNOWLEDGE_WORKER_TOOLS.includes(tool.name)) return false;

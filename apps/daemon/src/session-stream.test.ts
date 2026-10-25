@@ -385,10 +385,12 @@ describe("backpressure", () => {
   test("a closed socket stops everything", async () => {
     const { socket, sessions, message, stream } = rig();
     await message({ t: "sub", id: "s" });
+    socket.take();
     stream.onClose();
     sessions.out("late");
-    socket.take();
-    assert.equal(sessions.emitter.listenerCount("output"), 0);
+    sessions.emitter.emit("exit", 0);
+    await message({ t: "ping" });
+    assert.deepEqual(socket.take(), []);
   });
 });
 

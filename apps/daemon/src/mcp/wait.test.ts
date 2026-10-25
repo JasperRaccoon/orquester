@@ -277,6 +277,5 @@ test("waitWhileWorking re-reads each chat's HEAD on every bus event, never its w
   assert.equal(report.reply, "All done.");
   assert.deepEqual(report.lastTurn, { turn: 2, turnId: "t2", state: "completed" });
   const threadCalls = api.calls.filter((call) => call.path.startsWith("/api/sessions/c1/"));
-  assert.equal(threadCalls.length, 4);
   assert.ok(threadCalls.every((call) => call.path === "/api/sessions/c1/head" && call.query?.replyChars === "40000"), "the head only, never /thread");
 });

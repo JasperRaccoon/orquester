@@ -148,28 +148,6 @@ test("turn end diffs against the baseline and reports the changed files", async 
   assert.deepEqual(removed, { path: "untracked.txt", additions: 0, deletions: 1 });
 });
 
-test("a missing baseline keeps the post ref and records an empty file list", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-
-  // No captureBaseline: git was "initialised during the turn".
-  const summary = await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-
-  assert.ok(summary);
-  assert.equal(summary.turnCount, 1);
-  assert.equal(summary.status, "ready");
-  assert.deepEqual(summary.files, []);
-  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [
-    checkpointRefForThreadTurn(THREAD, 1)
-  ]);
-});
-
 test("a placeholder checkpoint is reused at its own turn count", async (t) => {
   const repo = await seededRepo();
   t.after(() => repo.cleanup());
@@ -336,23 +314,6 @@ test("readTurnDiff carries a binary file as git's one-line marker beside the tex
   assert.ok(diff.length < 1_000, `${diff.length} bytes`);
 });
 
-test("readTurnDiff refuses a turn above the thread's highest checkpoint", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-
-  await assert.rejects(
-    service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 0, toTurnCount: 4 }),
-    (error: unknown) => {
-      assert.ok(error instanceof CheckpointTurnRangeError);
-      assert.equal(error.requestedTurnCount, 4);
-      assert.equal(error.availableTurnCount, 0);
-      return true;
-    }
-  );
-});
-
 test("captures prune to the 200-ref cap, oldest first", async (t) => {
   const repo = await seededRepo();
   t.after(() => repo.cleanup());
@@ -387,12 +348,12 @@ test("pruneAbove deletes every ref above the target and nothing else", async (t)
   t.after(() => repo.cleanup());
   const service = serviceFor(repo);
 
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  for (const turnId of ["turn-1", "turn-2", "turn-3"]) {
-    await repo.write("tracked.txt", `${turnId}\n`);
-    await service.captureTurnEnd({ threadId: THREAD, cwd: repo.dir, turnId, assistantMessageId: null });
-  }
-  await service.captureBaseline({ threadId: "other-thread", cwd: repo.dir });
+  const head = (await repo.gitReadOnly("rev-parse", "HEAD")).trim();
+  await repo.gitStdin(
+    [...[0, 1, 2, 3].map((count) => checkpointRefForThreadTurn(THREAD, count)), checkpointRefForThreadTurn("other-thread", 0)]
+      .map((ref) => `create ${ref}\0${head}\0`).join(""),
+    "update-ref", "-z", "--stdin"
+  );
 
   await service.pruneAbove({ threadId: THREAD, cwd: repo.dir, targetTurnCount: 1 });
 
@@ -411,18 +372,13 @@ test("deleteThreadRefs removes every ref under the thread's prefix and nothing e
   t.after(() => repo.cleanup());
   const service = serviceFor(repo);
 
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  await repo.write("tracked.txt", "second\n");
-  await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-  await service.captureBaseline({ threadId: "other-thread", cwd: repo.dir });
-  // A stray ref of ours that is not a `turn/<n>` — still under the prefix.
   const head = (await repo.gitReadOnly("rev-parse", "HEAD")).trim();
-  await repo.git("update-ref", `${checkpointRefNamespace(THREAD)}/stray`, head);
+  await repo.gitStdin(
+    [checkpointRefForThreadTurn(THREAD, 0), checkpointRefForThreadTurn(THREAD, 1),
+      checkpointRefForThreadTurn("other-thread", 0), `${checkpointRefNamespace(THREAD)}/stray`]
+      .map((ref) => `create ${ref}\0${head}\0`).join(""),
+    "update-ref", "-z", "--stdin"
+  );
 
   await service.deleteThreadRefs({ threadId: THREAD, cwd: repo.dir });
 
@@ -599,6 +555,9 @@ test("R5 #10: a turn whose baseline is missing diffs against HEAD, not 404", asy
   });
   assert.ok(summary);
   assert.equal(summary.turnCount, 1);
+  assert.equal(summary.status, "ready");
+  assert.deepEqual(summary.files, []);
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [checkpointRefForThreadTurn(THREAD, 1)]);
 
   const diff = await service.readTurnDiff({
     threadId: THREAD,
@@ -613,7 +572,12 @@ test("R5 #10: a turn whose baseline is missing diffs against HEAD, not 404", asy
   // the spec reserves it for.
   await assert.rejects(
     service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 1, toTurnCount: 2 }),
-    CheckpointTurnRangeError
+    (error: unknown) => {
+      assert.ok(error instanceof CheckpointTurnRangeError);
+      assert.equal(error.requestedTurnCount, 2);
+      assert.equal(error.availableTurnCount, 1);
+      return true;
+    }
   );
 });
 

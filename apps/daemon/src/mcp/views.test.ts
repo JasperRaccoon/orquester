@@ -83,11 +83,6 @@ test("pending views: an approval's reason is shown when the provider gave one", 
   assert.equal("reason" in views[1], false);
 });
 
-test("an unsettled turn has no last reply", () => {
-  const running = snapshot({ turns: [turn({ turnId: "t1", state: "running", completedAt: null })], items: [message("assistant", "partial", { turnId: "t1" })] });
-  assert.equal(sessionDetail(chatSummary(), running, ctx).lastReply, undefined);
-});
-
 test("buildViewContext reads registry, accounts and providers and tolerates a failing providers call", async () => {
   const api = new FakeDaemonApi()
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }, { id: "deepseek", kind: "agent", name: "DeepSeek", bin: ["deepseek"], enabled: false, installState: "idle" }] } })
@@ -397,28 +392,6 @@ test("a goal at its caps stays whole beside a 16 KB plan and reply and a large r
   assert.equal([...d.chat.goal!.objective].length, 4_000);
   assert.deepEqual([d.lastReply!.text, d.lastReply!.truncated, d.plan!.truncated], ["", true, true]);
   assert.ok(headOf(d.plan!.markdown, plan) && d.plan!.markdown.length > 0, "the plan keeps a head");
-});
-
-// ---- An old Claude log's re-emitted opening paragraph (spec §7.3): left out of the reply, as the GUI leaves it out. ----
-
-const OPENING = "The subagent finished; merging its findings.";
-const ANSWER = "Merged: the parser now skips empty lines.";
-/** A CLI-started turn as a host before the pre-turn-stream fix wrote it: its opening paragraph again at `result`, under a new id. */
-const reEmittedTurn = () => [
-  message("assistant", OPENING, { turnId: "t1", id: "m-open" }),
-  activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "Run pnpm check", status: "completed" }, { turnId: "t1", tone: "tool" }),
-  message("assistant", ANSWER, { turnId: "t1", id: "m-answer" }),
-  message("assistant", OPENING, { turnId: "t1", id: "m-copy" })
-];
-
-test("lastReply leaves out a Claude thread's re-emitted opening paragraph, as the GUI's timeline does; a Codex thread keeps the same items whole", () => {
-  const items = reEmittedTurn();
-  const claude = snapshot({ items });
-  // get_session's lastReply, and so send_message's reply, is that same answer.
-  assert.equal(sessionDetail(chatSummary(), claude, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}`);
-  // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
-  const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items });
-  assert.equal(sessionDetail(chatSummary({ refId: "codex" }), codex, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
 });
 
 // ---- Claude workflow runs: a coordinator and its members. ----

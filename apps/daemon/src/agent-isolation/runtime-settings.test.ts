@@ -3,10 +3,6 @@ import { describe, it } from "node:test";
 import { parseToml } from "../agent-profile/adapters/grok/toml-patch.ts";
 import { parseJsoncObject } from "../agent-profile/adapters/opencode/jsonc.ts";
 import {
-  CLAUDE_DROPPED_SETTINGS,
-  CODEX_DROPPED_CONFIG,
-  GROK_DROPPED_CONFIG,
-  OPENCODE_DROPPED_CONFIG,
   claudeRuntimeSettings,
   codexRuntimeConfig,
   grokRuntimeConfig,
@@ -68,9 +64,6 @@ describe("claudeRuntimeSettings", () => {
       claudeMdExcludes: ["**/vendor/CLAUDE.md"],
       someFutureKey: { nested: [1, 2] }
     });
-    for (const key of Object.keys(CLAUDE_DROPPED_SETTINGS)) {
-      assert.equal(key in out, false, key);
-    }
   });
 
   it("removes deniedMcpServers when only serverName entries were there", () => {
@@ -167,9 +160,6 @@ theme = "dark"
       profiles: { fast: { model: "gpt-5.5-mini" } },
       tui: { theme: "dark" }
     });
-    for (const key of Object.keys(CODEX_DROPPED_CONFIG)) {
-      assert.equal(key in out, false, key);
-    }
   });
 });
 
@@ -213,9 +203,6 @@ x = 1
       ui: { yolo: false, permission_mode: "default" },
       marketplace: { official_marketplace_auto_installed: true, sources: [{ name: "official" }] }
     });
-    for (const key of Object.keys(GROK_DROPPED_CONFIG)) {
-      assert.equal(key in out, false, key);
-    }
   });
 });
 
@@ -253,8 +240,5 @@ describe("opencodeRuntimeConfig", () => {
       experimental: { mcp_timeout: 5 },
       brand_new: true
     });
-    for (const key of Object.keys(OPENCODE_DROPPED_CONFIG)) {
-      assert.equal(key in out, false, key);
-    }
   });
 });

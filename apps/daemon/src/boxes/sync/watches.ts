@@ -59,11 +59,6 @@ export class BoxConfigWatches {
     for (const boxId of [...this.held.keys()]) this.release(boxId);
   }
 
-  /** How many scopes of a box are watched (tests, diagnostics). */
-  watched(boxId: string): number {
-    return this.held.get(boxId)?.size ?? 0;
-  }
-
   /** `sync` with every successful `ensureSynced` also keeping its scope watched. */
   syncing(sync: BoxConfigSync): BoxConfigSync {
     const wrapped: BoxConfigSync = {

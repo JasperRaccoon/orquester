@@ -83,8 +83,8 @@ describe("seedCodexHome", () => {
   });
 
   it("does nothing when the home is already seeded and linked", async () => {
-    await seedCodexHome(options());
-    await unlink(logFile);
+    await writeFile(join(codexHome, CODEX_STATE_DB_FILE), "");
+    await symlink(sessionsTarget, join(codexHome, "sessions"));
     assert.deepEqual(await seedCodexHome(options()), { action: "none" });
     assert.deepEqual(await events(), []);
     await assertLinked();

@@ -91,7 +91,7 @@ import type { ResolvedMcpServer } from "../resolve.ts";
  * Bump the leading number when the prepared output changes for the same inputs. The suffix follows
  * the status plugin's source, so a new plugin re-prepares every OpenCode profile.
  */
-export const OPENCODE_PREPARER_VERSION = `3.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
+const OPENCODE_PREPARER_VERSION = `3.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
 
 /** OpenCode's one built-in skill (1.18.34); denied when the profile hides built-ins. */
 export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;

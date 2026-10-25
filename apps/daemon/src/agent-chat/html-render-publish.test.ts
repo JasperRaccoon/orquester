@@ -5,17 +5,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { htmlRenderReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-
 import {
   HTML_RENDER_MAX_IMAGE_BYTES,
   HtmlRenderPublishError,
-  isImageBytes,
   openInsideRoot,
   publishHtmlRender,
   type HtmlRenderPublishDeps
@@ -58,42 +55,14 @@ test("publish stores the page with the bootstrap and answers the reference", asy
     threadId: "t1",
     html: "<h1>Hi</h1>",
     title: "  Quarterly chart  ",
-    height: 5000
+    height: 5000,
+    heights: [[320, 400], [728, 280]]
   });
-  assert.deepEqual(reference, { attachmentId: PAGE_ID, title: "Quarterly chart", height: 2000 });
+  assert.deepEqual(reference, { attachmentId: PAGE_ID, title: "Quarterly chart", height: 2000, heights: [[320, 400], [728, 280]] });
   assert.equal(stored.length, 1);
   assert.equal(stored[0]!.fileName, "Quarterly chart.html");
   assert.ok(stored[0]!.html.includes('<style id="orq-theme">'));
   assert.ok(stored[0]!.html.endsWith("<h1>Hi</h1>"));
-});
-
-test("the reference the publisher answers is what every client reads back from the tool row", async (t) => {
-  const { deps } = await fixture(t);
-  const reference = await publishHtmlRender(deps, {
-    threadId: "t1",
-    html: "<p>x</p>",
-    title: "T",
-    height: 300,
-    heights: [
-      [728, 280],
-      [320, 400]
-    ]
-  });
-  // As the host's ingestion persists it: the session-tool provenance marker stamped.
-  const row = {
-    itemType: "mcp_tool_call",
-    status: "completed",
-    data: {
-      toolName: "mcp__orquester__html_render",
-      sessionTool: { name: "html_render" },
-      result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ htmlRender: reference, message: "m" }) }] }
-    }
-  };
-  assert.deepEqual(htmlRenderReferenceOfActivityPayload(row), reference);
-  assert.deepEqual(reference.heights, [
-    [320, 400],
-    [728, 280]
-  ]);
 });
 
 test("measure runs on the prepared page when no heights were given; a throw publishes without", async (t) => {
@@ -196,7 +165,8 @@ test("a missing image, or a file that is not an image whatever its name, is refu
 test("an image over 10 MiB is refused", async (t) => {
   const { project, deps } = await fixture(t);
   const big = join(project, "big.png");
-  await writeFile(big, Buffer.concat([PNG, Buffer.alloc(HTML_RENDER_MAX_IMAGE_BYTES)]));
+  await writeFile(big, PNG);
+  await truncate(big, HTML_RENDER_MAX_IMAGE_BYTES + 1);
   await assert.rejects(
     publishHtmlRender(deps, { threadId: "t1", html: `<img src="${big}">`, title: "T", height: 200 }),
     (error) => errorCode(error) === "image-too-large"
@@ -208,7 +178,8 @@ test("a page over 25 MiB once its images are inlined is refused", async (t) => {
   const images = await Promise.all(
     [1, 2, 3].map(async (index) => {
       const file = join(project, `i${index}.png`);
-      await writeFile(file, Buffer.concat([PNG, Buffer.alloc(7 * 1024 * 1024)]));
+      await writeFile(file, PNG);
+      await truncate(file, 7 * 1024 * 1024);
       return file;
     })
   );
@@ -249,12 +220,22 @@ test("an empty or oversized page, or a store failure, is refused with a code", a
   );
 });
 
-test("image sniffing reads magic bytes and SVG roots, not names", () => {
-  assert.ok(isImageBytes(PNG));
-  assert.ok(isImageBytes(Buffer.from("GIF89a")));
-  assert.ok(isImageBytes(Buffer.from('<?xml version="1.0"?><!-- c --><svg xmlns="x"></svg>')));
-  assert.ok(!isImageBytes(Buffer.from("<html><svg></svg></html>")));
-  assert.ok(!isImageBytes(Buffer.from("plain text")));
+test("image sniffing reads magic bytes and SVG roots, not names", async (t) => {
+  const { project, stored, deps } = await fixture(t);
+  const file = join(project, "renamed.svg");
+  for (const bytes of [Buffer.from("GIF89a"), Buffer.from('<?xml version="1.0"?><!-- c --><svg xmlns="x"></svg>')]) {
+    await writeFile(file, bytes);
+    await publishHtmlRender(deps, { threadId: "t1", html: `<img src="${file}">`, title: "T", height: 200 });
+  }
+  assert.equal(stored.length, 2);
+  for (const bytes of ["<html><svg></svg></html>", "plain text"]) {
+    await writeFile(file, bytes);
+    await assert.rejects(
+      publishHtmlRender(deps, { threadId: "t1", html: `<img src="${file}">`, title: "T", height: 200 }),
+      (error) => errorCode(error) === "images-not-found"
+    );
+  }
+  assert.equal(stored.length, 2, "renamed nonimages never reach the store");
 });
 
 test("an image path swapped for a symlink after its realpath was checked cannot be read", async (t) => {

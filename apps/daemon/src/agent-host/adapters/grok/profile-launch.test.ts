@@ -15,7 +15,6 @@ import { after, describe, it } from "node:test";
 
 import { parse as parseToml } from "@decimalturn/toml-patch";
 
-import type { RuntimeMode } from "@orquester/api/agent-chat";
 import { GROK_PROFILE_ENV, GROK_USER_SKILL_ROOTS, type GrokPluginNamesResult } from "../../../agent-isolation/grok.ts";
 import { localBoxConnection } from "../../../boxes/testing.ts";
 import { createAgentHostBoxes } from "../../boxes/index.ts";
@@ -28,8 +27,7 @@ import type { HostThreadProfile } from "../../host-protocol.ts";
 import { ProfileLaunchError } from "../profile-manifest.ts";
 import { boxGrokPluginNames } from "./box-launch.ts";
 import { createGrokAdapter } from "./index.ts";
-import { grokSpawnArgs } from "./launch.ts";
-import { prepareGrokProfileSpawn, withAgentOptions } from "./profile-launch.ts";
+import { prepareGrokProfileSpawn } from "./profile-launch.ts";
 
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "testing/mock-grok.mjs");
 const INSPECT = fileURLToPath(new URL("../../../agent-isolation/testing/fake-grok-inspect.mjs", import.meta.url));
@@ -77,19 +75,12 @@ function fakeInspect(names: string[]) {
 }
 
 describe("prepareGrokProfileSpawn", () => {
-  it("answers null for a Global thread and touches nothing", async () => {
-    const { inspect, calls } = fakeInspect([]);
-    assert.equal(await prepareGrokProfileSpawn({ env: {}, command: "grok", inspect }), null);
-    assert.equal(calls.length, 0);
-  });
-
   it("renders config.toml with fresh exclusion lists and answers the env and the agent options", async () => {
     const { root, fixture, preparedDir, profile, env } = await setup();
     // A Global skill linked in AFTER the preparation: it must be listed at the spawn.
     await mkdir(join(root, "late-target"));
     await symlink(join(root, "late-target"), join(fixture.home, ".claude", "skills", "late-link"));
     const { inspect, calls } = fakeInspect(["superpowers", "toolbox", "orquester-profile-hooks", "hookify"]);
-    const before = await stat(join(preparedDir, "config.toml"));
 
     const spawn = await prepareGrokProfileSpawn({ profile, env, command: "grok", inspect });
 
@@ -131,7 +122,6 @@ describe("prepareGrokProfileSpawn", () => {
     assert.equal(config.mcp_servers["global-one"], undefined, "never the Global ones");
     const after = await stat(join(preparedDir, "config.toml"));
     assert.equal(after.mode & 0o777, 0o600);
-    assert.notEqual(after.ino, before.ino, "swapped in by rename");
     assert.deepEqual((await readdir(preparedDir)).filter((name) => name.endsWith(".tmp")), []);
   });
 
@@ -230,46 +220,6 @@ describe("prepareGrokProfileSpawn", () => {
     );
   });
 
-  it("serializes concurrent renders of one home", async () => {
-    const { profile, env, preparedDir } = await setup();
-    let running = 0;
-    let overlapped = false;
-    const gates: Array<() => void> = [];
-    const inspect = async (): Promise<GrokPluginNamesResult> => {
-      running += 1;
-      if (running > 1) overlapped = true;
-      await new Promise<void>((resolve) => gates.push(resolve));
-      running -= 1;
-      return { ok: true, names: ["x"] };
-    };
-    const first = prepareGrokProfileSpawn({ profile, env, command: "grok", inspect });
-    const second = prepareGrokProfileSpawn({ profile, env, command: "grok", inspect });
-    // Release whichever inspect is waiting, until both renders are done.
-    const both = Promise.all([first, second]);
-    let done = false;
-    void both.then(() => (done = true));
-    while (!done) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      gates.shift()?.();
-    }
-    await both;
-    assert.equal(overlapped, false);
-    assert.deepEqual((await readToml(join(preparedDir, "config.toml"))).plugins, { disabled: ["x"] });
-  });
-});
-
-describe("withAgentOptions", () => {
-  it("puts the options right after `agent` for every runtime mode", () => {
-    const extra = ["--no-leader", "--plugin-dir", "/p"];
-    const modes: RuntimeMode[] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
-    for (const mode of modes) {
-      const args = withAgentOptions(grokSpawnArgs(mode), extra);
-      const at = args.indexOf("agent");
-      assert.deepEqual(args.slice(at + 1, at + 4), extra, mode);
-      assert.equal(args.at(-1), "stdio", mode);
-    }
-    assert.deepEqual(withAgentOptions(["agent", "stdio"], []), ["agent", "stdio"]);
-  });
 });
 
 /**

@@ -37,7 +37,7 @@ import { ToolError } from "../errors.ts";
 const WAIT = `${SECRET_REQUEST_TIMEOUT_MS / 60_000} minutes`;
 
 /** What the agent is told once the user answered (or did not). */
-export const SECRET_REQUEST_NOTES = {
+const SECRET_REQUEST_NOTES = {
   provided:
     "The user provided the value. Use it only where it is needed (an env var for one command, the config file the user asked for); never print, echo, log or commit it, and never repeat it in chat.",
   declined: "The user declined; nothing was received. Do not ask again unless the user asks you to; continue without it or explain what is blocked.",

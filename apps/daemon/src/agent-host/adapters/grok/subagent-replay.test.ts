@@ -82,6 +82,7 @@ test("15 foreground: the call starts the agent, subagent_finished ends it once w
   assert.equal(started?.payload.toolUseId, FG_CALL);
   assert.equal(started?.payload.title, "echo check");
   assert.equal(started?.payload.role, "general-purpose");
+  assert.equal(only(rows, "task.started")[0]?.payload.prompt, "Run the shell command `echo sub-ok` and reply with its output only.");
   assert.equal(started?.turnId, "turn-1");
 
   const ends = only(rows, "task.completed");
@@ -177,6 +178,7 @@ test("16 background: a running poll re-arms, subagent_finished ends it, the late
   const rows = taskRows(run.events, BG_CALL);
   assert.equal(rows[0]?.type, "task.started");
   assert.equal(rows[0]?.payload.isBackgrounded, true);
+  assert.equal(only(rows, "task.started")[0]?.payload.prompt, "Run the shell command `sleep 20 && echo bg-done` and reply with its output only.");
   const ends = only(rows, "task.completed");
   assert.equal(ends.length, 1, "once: the poll after the end is no second end");
   assert.equal(ends[0]!.payload.status, "completed");
@@ -199,6 +201,7 @@ test("16 background: the child's own auto-backgrounded shell is the agent's, and
   for (const row of shell) {
     assert.equal(row.payload.agentId, BG_CALL, "owned by the subagent whose session started it");
     assert.equal(row.payload.taskType, "shell");
+    assert.equal((row.payload as { prompt?: string }).prompt, undefined);
   }
   const end = shell[1] as Extract<RuntimeEvent, { type: "task.completed" }>;
   assert.equal(end.payload.status, "completed");
@@ -224,6 +227,10 @@ test("17 resume_from: the same roster task runs again under the new call and the
     [FIRST_CALL, RESUME_CALL],
     "the relaunch contract: a NEW launch id reopens the row"
   );
+  assert.deepEqual(starts.map((row) => row.payload.prompt), [
+    "Run the shell command `echo first-run` and reply with its output only.",
+    "Now run the shell command `echo resumed-ok` and reply with its output only."
+  ]);
   const ends = only(rows, "task.completed");
   assert.deepEqual(
     ends.map((row) => [row.payload.status, row.payload.summary, row.payload.toolUseId]),
@@ -295,6 +302,7 @@ test("20 monitor: one monitor task, its events as progress, its end by task_comp
   const started = only(rows, "task.started");
   assert.equal(started.length, 1, "task_backgrounded, the snapshot and the Monitor answer are one start");
   assert.equal(started[0]!.payload.taskType, "monitor");
+  assert.equal(started[0]!.payload.prompt, undefined);
   assert.equal(started[0]!.payload.title, "tick watch");
   assert.equal(started[0]!.payload.toolUseId, MONITOR_CALL);
   assert.deepEqual(
@@ -378,75 +386,4 @@ test("23 cut: the Stop closes the spawn call it cut — the CLI never answers it
   const turnEnd = run.events.findIndex((event) => event.type === "turn.completed" && event.turnId === "turn-1");
   assert.ok(run.events.indexOf(closed[0]!) < turnEnd, "on the turn it cut, before that turn settles");
   assert.equal(rows.at(-1), closed[0], "and nothing of the call after it");
-});
-
-// ---------------------------------------------------------------------------
-// The launch prompt (§7.6, "its prompt at the top")
-// ---------------------------------------------------------------------------
-
-/**
- * Every `spawn_subagent` call of a capture, by call id → the `prompt` its
- * first frame carries — the model's own arguments (observation 37).
- */
-function spawnPromptsOf(file: string): Map<string, string> {
-  const prompts = new Map<string, string>();
-  for (const frame of agentFrames(readCapture(file))) {
-    const update = (frame.params as { update?: Record<string, unknown> } | undefined)?.update;
-    if (update?.sessionUpdate !== "tool_call") continue;
-    const tool = (update._meta as Record<string, { name?: unknown }> | undefined)?.["x.ai/tool"];
-    const input = update.rawInput as { prompt?: unknown } | undefined;
-    if (tool?.name === "spawn_subagent" && typeof input?.prompt === "string") {
-      prompts.set(String(update.toolCallId), input.prompt);
-    }
-  }
-  return prompts;
-}
-
-const SPAWNING_CAPTURES = [
-  "15-subagent-foreground.ndjson",
-  "16-subagent-background-poll.ndjson",
-  "17-subagent-resume-from.ndjson",
-  "19-subagent-background-unpolled.ndjson",
-  "22-subagent-await-budget.ndjson",
-  "23-stop-cuts-foreground-subagent.ndjson",
-  "25-subagent-child-approval.ndjson",
-  "26-subagent-child-write-rejected.ndjson",
-  "28-subagent-max-turns.ndjson"
-];
-
-test("15–28: every spawn's start carries the prompt its call gave it, verbatim", () => {
-  for (const file of SPAWNING_CAPTURES) {
-    const prompts = spawnPromptsOf(file);
-    assert.ok(prompts.size > 0, `${file} spawns`);
-    const starts = only(driveCapture(file).events, "task.started").filter((row) =>
-      prompts.has(String(row.payload.toolUseId))
-    );
-    assert.deepEqual(
-      starts.map((row) => [row.payload.toolUseId, row.payload.prompt]),
-      [...prompts].filter(([call]) => starts.some((row) => row.payload.toolUseId === call)),
-      file
-    );
-    assert.equal(new Set(starts.map((row) => row.payload.toolUseId)).size, prompts.size, `${file}: a start per spawn`);
-  }
-});
-
-test("no shell, monitor, loop or CLI-spawned agent start (a loop's fire, a goal's planner) carries a prompt", () => {
-  for (const file of [
-    "16-subagent-background-poll.ndjson",
-    "18-subagent-kill.ndjson",
-    "20-monitor.ndjson",
-    "21-stop-with-background-work.ndjson",
-    "24-background-shell-outlives-cli.ndjson",
-    "29-loop-scheduled-task.ndjson",
-    "30-goal.ndjson"
-  ]) {
-    const spawns = spawnPromptsOf(file);
-    const others = only(driveCapture(file).events, "task.started").filter(
-      (row) => !spawns.has(String(row.payload.toolUseId))
-    );
-    assert.ok(others.length > 0, `${file} starts work no spawn call launched`);
-    for (const row of others) {
-      assert.equal("prompt" in row.payload, false, `${file}: ${row.payload.taskType} ${row.payload.taskId}`);
-    }
-  }
 });

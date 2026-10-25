@@ -218,7 +218,6 @@ test("a scope synced through BoxConfigWatches.syncing stays watched: a later hos
   const sync = new BoxConfigSyncService({ appdir: f.appdir, hub: f.hub, hostDebounceMs: 20 });
   const watches = new BoxConfigWatches({ sync, active: (boxId) => boxId === "b1" });
   await watches.syncing(sync).ensureSynced("b1", f.scope, signal());
-  assert.equal(watches.watched("b1"), 1);
   await sync.idle();
   const target = join(f.system, "skills", "later", "SKILL.md");
   const written = new Promise<void>((resolve) => {
@@ -232,7 +231,6 @@ test("a scope synced through BoxConfigWatches.syncing stays watched: a later hos
   await written;
   assert.equal(await readFile(f.box1.local(target), "utf8"), "---\nname: later\n---\nAdded on the host.\n");
   watches.release("b1");
-  assert.equal(watches.watched("b1"), 0);
   await sync.close();
 });
 

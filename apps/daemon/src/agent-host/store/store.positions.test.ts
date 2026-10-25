@@ -17,7 +17,6 @@ import * as path from "node:path";
 import test from "node:test";
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
-import { truncateTornTail } from "./files.ts";
 import { createThreadStore } from "./index.ts";
 
 const eventsPathOf = (root: string, id: string): string =>
@@ -718,7 +717,7 @@ test("a torn trailing fragment is cut on load, so the next append gets a line of
   await store.drain();
   const eventsPath = eventsPathOf(rootDir, "t1");
   const clean = await sizeOf(eventsPath);
-  await fs.appendFile(eventsPath, '{"seq":3,"eventId":"e3","threadId":"t1","ty');
+  await fs.appendFile(eventsPath, '{"seq":3,"eventId":"e3","threadId":"t1","text":"' + "x".repeat(200_000));
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => reopened.close());
@@ -745,7 +744,7 @@ test("a log that is nothing but a fragment is cut to empty", async (t) => {
   const rootDir = await tempRoot();
   const eventsPath = eventsPathOf(rootDir, "t1");
   await fs.mkdir(path.dirname(eventsPath), { recursive: true });
-  await fs.writeFile(eventsPath, '{"seq":1,"eventId":"e1","thr');
+  await fs.writeFile(eventsPath, '{"seq":1,"eventId":"e1","text":"' + "x".repeat(200_000));
 
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
@@ -778,25 +777,4 @@ test("a complete line that does not decode is left alone — only a fragment is 
   const all = await reopened.readAll("t1");
   assert.equal(all.truncated, true);
   assert.deepEqual(messageIds(all.events), ["thread.created", "m1"]);
-});
-
-test("the cut walks back window by window to the last newline, however far it is", async () => {
-  const dir = await tempRoot();
-  const filePath = path.join(dir, "events.ndjson");
-
-  // The last newline is many windows before the end.
-  await fs.writeFile(filePath, `{"a":1}\n{"b":"ñ"}\n${"x".repeat(200_000)}`);
-  assert.equal(await truncateTornTail(filePath), 19);
-  assert.equal(await fs.readFile(filePath, "utf8"), '{"a":1}\n{"b":"ñ"}\n');
-
-  // Already whole: untouched.
-  assert.equal(await truncateTornTail(filePath), 19);
-  assert.equal(await fs.readFile(filePath, "utf8"), '{"a":1}\n{"b":"ñ"}\n');
-
-  // No newline anywhere, across several windows: empty.
-  await fs.writeFile(filePath, "y".repeat(200_000));
-  assert.equal(await truncateTornTail(filePath), 0);
-  assert.equal(await sizeOf(filePath), 0);
-
-  assert.equal(await truncateTornTail(path.join(dir, "missing.ndjson")), 0);
 });

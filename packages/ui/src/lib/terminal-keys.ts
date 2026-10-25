@@ -28,12 +28,12 @@ export interface Modifiers {
 }
 
 /** The window in which a second tap locks an armed modifier instead of releasing it. */
-export const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_MS = 350;
 
-export const LATCH_OFF: ModifierLatch = { state: "off", armedAt: null };
+const LATCH_OFF: ModifierLatch = { state: "off", armedAt: null };
 
 /** off → armed; armed → locked on a quick second tap, else off; locked → off. */
-export function tapLatch(latch: ModifierLatch, now: number): ModifierLatch {
+function tapLatch(latch: ModifierLatch, now: number): ModifierLatch {
   if (latch.state === "off") return { state: "armed", armedAt: now };
   if (latch.state === "armed" && latch.armedAt !== null && now - latch.armedAt <= DOUBLE_TAP_MS) {
     return { state: "locked", armedAt: null };
@@ -42,7 +42,7 @@ export function tapLatch(latch: ModifierLatch, now: number): ModifierLatch {
 }
 
 /** After a key went out: a one-shot (armed) modifier is spent, a locked one stays. */
-export function consumeLatch(latch: ModifierLatch): ModifierLatch {
+function consumeLatch(latch: ModifierLatch): ModifierLatch {
   return latch.state === "armed" ? LATCH_OFF : latch;
 }
 

@@ -17,7 +17,6 @@ import { after, before, describe, it } from "node:test";
 import { HTML_RENDER_COLUMN_WIDTH, htmlRenderStockTheme } from "@orquester/api/agent-chat";
 
 import {
-  Gate,
   HtmlPreviewBrowser,
   HtmlPreviewError,
   killWindowsTree,
@@ -451,44 +450,6 @@ describe("html preview without a browser", () => {
   });
 });
 
-describe("the browser gate", () => {
-  it("lets two in, hands a freed slot to the next waiter, and drops a waiter whose call was cancelled", { timeout: TEST_TIMEOUT_MS }, async () => {
-    const gate = new Gate(2);
-    const live = new AbortController().signal;
-    const first = await gate.enter(live);
-    const second = await gate.enter(live);
-    const order: string[] = [];
-    const cancelled = new AbortController();
-    const third = gate.enter(cancelled.signal).then(
-      () => order.push("third"),
-      () => order.push("third cancelled")
-    );
-    const fourth = gate.enter(live).then((release) => {
-      order.push("fourth");
-      return release;
-    });
-    cancelled.abort();
-    await third;
-    first();
-    first(); // a second release is a no-op
-    const releaseFourth = await fourth;
-    assert.deepEqual(order, ["third cancelled", "fourth"]);
-    // Still full: second and fourth hold the two slots.
-    let fifthIn = false;
-    const fifth = gate.enter(live).then((release) => {
-      fifthIn = true;
-      return release;
-    });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(fifthIn, false);
-    second();
-    (await fifth)();
-    releaseFourth();
-    // Both slots free again.
-    (await gate.enter(live))();
-  });
-});
-
 interface FakeChromium {
   executable: string;
   /** The pids of the first `count` to reach their mark, once they have. */
@@ -593,6 +554,19 @@ describe("html preview browser: slots, queue and cancellation", () => {
     const one = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: first.signal });
     const two = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: second.signal });
     const [pidOne, pidTwo] = await fake.started(2);
+    // Cancellation applies while queued too: the page source is never evaluated.
+    const waiting = new AbortController();
+    let made = false;
+    const queued = browser.capture({
+      html: async () => { made = true; return FIXED(1); },
+      width: 320,
+      urlFragment: "",
+      signal: waiting.signal
+    });
+    const refused = assert.rejects(queued, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    waiting.abort();
+    await refused;
+    assert.equal(made, false);
     // Both outcomes are taken at once: neither rejection may go unhandled while the other is awaited.
     const outcomes = Promise.allSettled([one, two]);
     first.abort();
@@ -603,17 +577,22 @@ describe("html preview browser: slots, queue and cancellation", () => {
       assert.ok(error instanceof HtmlPreviewError && error.code === "cancelled", String(error));
     }
     // Each call took down its own bounds as it ended: its queue bound once in a slot, its deadline after.
-    assert.equal(timers.started.length, 4);
     assert.ok(timers.started.every((timer) => timer.cancelled && !timer.fired));
     // Each call ended only once its Chromium had exited.
     assert.ok(notRunning(pidOne!) && notRunning(pidTwo!));
-    // Both slots are free again: a third launch starts at once.
+    // Both slots are free again: a cancelled waiter must not leak either one.
     const third = new AbortController();
+    const fourth = new AbortController();
     const three = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: third.signal });
-    three.catch(() => undefined);
-    assert.equal((await fake.started(3)).length, 3);
+    const four = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: fourth.signal });
+    const cancelled = Promise.all([
+      assert.rejects(three, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled"),
+      assert.rejects(four, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled")
+    ]);
+    assert.equal((await fake.started(4)).length, 4);
     third.abort();
-    await assert.rejects(three);
+    fourth.abort();
+    await cancelled;
     assert.deepEqual(await readdir(scratch), []);
   });
 
@@ -724,11 +703,13 @@ describe("html preview browser: slots, queue and cancellation", () => {
   it("a call waiting for a slot is told previews are busy — at its own bound, or at once past the waiting cap", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
+    const timers = manualTimers();
     const browser = new HtmlPreviewBrowser({
       resolveChromium: () => fake.executable,
       tmpDir: scratch,
       captureTimeoutMs: 60_000,
-      queueTimeoutMs: 500
+      queueTimeoutMs: 500,
+      startTimer: timers.startTimer
     });
     const holders = [new AbortController(), new AbortController()];
     const held = holders.map((holder) => browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: holder.signal }));
@@ -740,13 +721,18 @@ describe("html preview browser: slots, queue and cancellation", () => {
       return FIXED(1);
     };
     // Waits its bound, never starts its source, and says why.
-    await assert.rejects(
-      browser.capture({ html: source, width: 320, urlFragment: "" }),
+    const waitingCapture = browser.capture({ html: source, width: 320, urlFragment: "" });
+    const busy = assert.rejects(
+      waitingCapture,
       (error: unknown) => error instanceof HtmlPreviewError && error.code === "busy" && error.message === PREVIEWS_BUSY_MESSAGE
     );
+    timers.started.find((timer) => timer.ms === 500 && !timer.cancelled)!.fire();
+    await busy;
     assert.equal(made, 0, "a waiting call made no page");
     // A measurement behind them publishes without heights.
-    assert.equal(await browser.measure({ html: FIXED(1), widths: [320], urlFragment: "" }), undefined);
+    const measuring = browser.measure({ html: FIXED(1), widths: [320], urlFragment: "" });
+    timers.started.find((timer) => timer.ms === 500 && !timer.cancelled)!.fire();
+    assert.equal(await measuring, undefined);
     // Past the waiting cap: refused at once.
     const patient = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: 60_000 });
     const patientHolders = Array.from({ length: 2 + MAX_WAITING_CALLS }, () => new AbortController());

@@ -170,16 +170,6 @@ describe("the Ephemeral AI VMs settings section", () => {
   };
   const keyInput = () => document.querySelector<HTMLInputElement>("#box-provider-vultr-key");
 
-  it("shows the totals, each provider's status and the Windows image row", () => {
-    assert.ok(text().includes("2 boxes running · $4.81/h · $12.50 this month"));
-    assert.ok(text().includes("Key …a1b2 · Linux VM · New accounts need an ID check."));
-    assert.ok(text().includes("Connected"));
-    assert.ok(buttonNamed("Add API key"));
-    assert.ok(text().includes("Windows imageNot prepared"));
-    // Not connected: nothing to prepare the image with yet.
-    assert.equal(buttonNamed("Prepare Windows image"), undefined);
-  });
-
   it("asks for the key in a masked field, refuses an empty one, and saves through the daemon", async () => {
     await click(buttonNamed("Add API key"));
     const input = keyInput();

@@ -49,23 +49,6 @@ function makePool(
 }
 
 
-test("a healthy peer is adopted, and the URL comes off stdout", async () => {
-  const peer = makePeer();
-  const controller = new AbortController();
-  const pool = makePool(peer, { MOCK_MODE: "noisy", MOCK_VERSION: "1.18.5" }, controller);
-  try {
-    const handle = await pool.acquire(peer.dir);
-    assert.match(handle.url, /^http:\/\/127\.0\.0\.1:\d+$/);
-    assert.equal(handle.version, "1.18.5");
-    assert.ok(handle.pid !== undefined);
-    handle.release();
-  } finally {
-    await pool.stopAll();
-    controller.abort();
-    peer.cleanup();
-  }
-});
-
 test("recycle (agent profile §4.8) stops only an unheld server, and the next start waits for the old child to be gone", async () => {
   const peer = makePeer();
   const controller = new AbortController();
@@ -96,9 +79,12 @@ test("`/global/health` is reached WITH the credential, as the real server demand
   const peer = makePeer();
   const controller = new AbortController();
   // The peer 401s anything whose Authorization is not the exact Basic form.
-  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
+  const pool = makePool(peer, { MOCK_MODE: "noisy", MOCK_VERSION: "1.18.5" }, controller);
   try {
     const handle = await pool.acquire(peer.dir);
+    assert.match(handle.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(handle.version, "1.18.5");
+    assert.ok(handle.pid !== undefined);
     const unauthenticated = await fetch(`${handle.url}/global/health`);
     assert.equal(unauthenticated.status, 401);
     await unauthenticated.arrayBuffer();

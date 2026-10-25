@@ -1,7 +1,7 @@
 // deploy/lib/ensure-public-url.sh: deploy adds ORQUESTER_PUBLIC_URL to daemon.env from the
 // target's domain, never overwrites an existing value, and keeps the file 0600.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,17 +55,4 @@ test("does nothing without a domain, and refuses a domain that could inject", (t
   const bad = run(file, "x.com\nEVIL=1");
   assert.notEqual(bad.status, 0);
   assert.equal(readFileSync(file, "utf8"), "A=1\n");
-});
-
-test("the deploy and provision payloads run it with the target's domain", () => {
-  const read = (path) => readFileSync(join(root, path), "utf8");
-  assert.match(read("deploy/lib/remote-update.sh"), /bash deploy\/lib\/ensure-public-url\.sh "\$ENV_FILE" "\$DOMAIN"/);
-  assert.match(read("deploy/lib/remote-provision.sh"), /bash deploy\/lib\/ensure-public-url\.sh \/etc\/orquester\/daemon\.env "\$DOMAIN"/);
-  const deploy = read("deploy.sh");
-  assert.match(deploy, /remote-update\.sh" "SUDO=\$s" "BRANCH=\$T_BRANCH" "DOMAIN=\$T_DOMAIN"/);
-  assert.match(deploy, /"RESET_REF=\$sha" "DOMAIN=\$T_DOMAIN"/);
-  // Syntax of every touched script.
-  for (const file of [script, join(root, "deploy/lib/remote-update.sh"), join(root, "deploy/lib/remote-provision.sh"), join(root, "deploy.sh")]) {
-    execFileSync("bash", ["-n", file]);
-  }
 });

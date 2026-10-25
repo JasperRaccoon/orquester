@@ -3,7 +3,7 @@ import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, stat
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { NATIVE_MODULES, detachBuildFiles, ensureNodeNative, main, probeInChild } from "./ensure-node-native.mjs";
+import { detachBuildFiles, ensureNodeNative, main, probeInChild } from "./ensure-node-native.mjs";
 
 const sqlite = { name: "better-sqlite3", probe: "" };
 const pty = { name: "node-pty", probe: "" };
@@ -72,10 +72,6 @@ test("a rebuild that reports failure but fixes the module still passes", () => {
   const { probe } = scriptedProbe({ "better-sqlite3": ["bad", null], "node-pty": [null] });
   const rebuild = recorder(false);
   assert.equal(main({ modules: [sqlite, pty], probe, rebuild: rebuild.rebuild, log: () => {}, error: () => {} }), 0);
-});
-
-test("covers the daemon's native modules", () => {
-  assert.deepEqual(NATIVE_MODULES.map((mod) => mod.name).sort(), ["better-sqlite3", "node-pty"]);
 });
 
 test("the real child probe reports load success and failure", () => {

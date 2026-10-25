@@ -211,7 +211,7 @@ function hasSvgRoot(text: string): boolean {
  * Whether file bytes are an image, whatever the file is named, so a symlink
  * or a renamed file cannot carry other data — a secret — into a page.
  */
-export function isImageBytes(bytes: Uint8Array): boolean {
+function isImageBytes(bytes: Uint8Array): boolean {
   const head = latin1(bytes, 0, 12);
   if (
     head.startsWith("\x89PNG") ||

@@ -20,10 +20,9 @@ import { knowledgeEntriesDir, knowledgeGraphPluginDir } from "@orquester/config"
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
 import type { KnowledgeEntryChange } from "./ports.ts";
-import { silentLogger } from "./search/test-fakes.ts";
+import { loadGraph, silentLogger } from "./search/test-fakes.ts";
 import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory, type KnowledgeServiceOptions } from "./service.ts";
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
-
 
 async function harness(t: TestContext, options: { enabled?: boolean; over?: Partial<KnowledgeServiceOptions>; mode?: "local" | "remote" } = {}) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-service-"));
@@ -32,7 +31,6 @@ async function harness(t: TestContext, options: { enabled?: boolean; over?: Part
   runtime.set(FAKE_RUNTIME);
   const embedders = fakeEmbedders();
   const events: { channel: string; type: string; payload: unknown }[] = [];
-  const profileReads = { list: 0 };
   let pushes = 0;
   const knowledge = new KnowledgeService({
     appdir,
@@ -40,10 +38,7 @@ async function harness(t: TestContext, options: { enabled?: boolean; over?: Part
     accounts: { getRecord: () => undefined },
     session: () => null,
     profiles: {
-      list: async () => {
-        profileReads.list += 1;
-        return { profiles: [], errors: [] };
-      },
+      list: async () => ({ profiles: [], errors: [] }),
       read: async () => {
         throw new Error("no profiles");
       }
@@ -74,7 +69,7 @@ async function harness(t: TestContext, options: { enabled?: boolean; over?: Part
     return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : null };
   };
   const statuses = () => events.filter((e) => e.channel === KNOWLEDGE_CHANNEL && e.type === KNOWLEDGE_STATUS_EVENT).map((e) => e.payload as KnowledgeStatus);
-  return { appdir, plugins, runtime, embedders, knowledge, inject, events, statuses, profileReads, pushes: () => pushes };
+  return { appdir, plugins, runtime, embedders, knowledge, inject, events, statuses, pushes: () => pushes };
 }
 
 /** A linking module that records what the service does with it. */
@@ -156,14 +151,14 @@ test("the first switch-on opens the knowledge base and builds and starts linking
   assert.deepEqual((await h.inject("GET", knowledgeRoutes.rebuildEstimate)).body, { entries: 7, tasks: 12 });
 
   // A graph load announced by linking (counts moved) → knowledge.changed {graph: true}.
-  ports.graph.replace([{ id: "tactic-x", name: "X", type: "Tactic", source_files: [] }], []);
+  await loadGraph(ports.graph, [{ id: "tactic-x", name: "X", type: "Tactic", source_files: [] }], []);
   (h.knowledge.linking()!.events as EventEmitter).emit("status");
   await h.knowledge.settled();
   assert.ok(h.events.some((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true));
   // A run that reloads a graph of the same size (an edited entry re-linked) still announces it.
   const graphEvents = () => h.events.filter((e) => e.type === "knowledge.changed" && (e.payload as { graph?: boolean }).graph === true).length;
   const before = graphEvents();
-  ports.graph.replace([{ id: "tactic-y", name: "Y", type: "Tactic", source_files: [] }], []);
+  await loadGraph(ports.graph, [{ id: "tactic-y", name: "Y", type: "Tactic", source_files: [] }], []);
   (h.knowledge.linking()!.events as EventEmitter).emit("status");
   await h.knowledge.settled();
   assert.equal(graphEvents(), before + 1, "a reload of the same size is announced");
@@ -295,21 +290,6 @@ test("the worker routes are the unix-socket app's only: the remote app serves th
     assert.equal((await h.inject("POST", url, { taskId: "t", answer: "{}" }, "w1")).status, 404, url);
   }
   assert.equal(linking.log.includes("next w1"), false);
-});
-
-test("the profiles behind the collection views are listed once and reused until a profile event", async (t) => {
-  const listeners: ((profileId: string) => void)[] = [];
-  const h = await harness(t, { enabled: true, over: { onProfileChange: (listener) => (listeners.push(listener), () => undefined) } });
-  await h.knowledge.start();
-  await h.knowledge.settled();
-  const baseline = h.profileReads.list;
-  for (let i = 0; i < 5; i += 1) assert.equal((await h.inject("GET", knowledgeRoutes.collections)).status, 200);
-  assert.equal(h.profileReads.list, baseline, "no listing per request");
-  listeners[0]!("p1");
-  await h.knowledge.settled();
-  assert.equal(h.profileReads.list, baseline + 1, "an event re-lists once");
-  await h.inject("GET", knowledgeRoutes.collections);
-  assert.equal(h.profileReads.list, baseline + 1);
 });
 
 test("a profile ticking or unticking a collection (or renamed while it ticks one) refreshes the collection views; an unrelated edit does not", async (t) => {

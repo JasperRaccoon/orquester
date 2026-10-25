@@ -247,17 +247,6 @@ describe("ToolApprovalCard", () => {
     assert.deepEqual(answers, [{ decision: "deny", reason: "Not on this machine" }]);
   });
 
-  it("View all on a cut summary fetches the whole preview and shows it", async () => {
-    full = card({ sections: [{ kind: "text", text: "the whole text" }, { kind: "file", path: "x.bin", size: 1, sha256: "aa", flag: "binary" }] });
-    render(card({ fullPreview: true, sections: [{ kind: "text", text: "the who", partial: true }] }));
-    act(() => q<HTMLButtonElement>("[data-view-all]").click());
-    await flush();
-    await flush();
-    assert.equal(loads, 1);
-    assert.match(mount.innerHTML, /the whole text/);
-    assert.match(mount.innerHTML, /data-file-flag="binary"/);
-  });
-
   it("the grant menu approves with exactly the grant it offers", async () => {
     render(card({ grantOptions: ["project"] }));
     act(() => q<HTMLButtonElement>("[data-grant-menu]").click());
@@ -271,11 +260,13 @@ describe("ToolApprovalCard", () => {
 
   it("a cut preview keeps Approve disabled until View all loaded the whole preview", async () => {
     clock = START + 60_000;
-    full = card({ sections: [{ kind: "text", text: "the whole text" }] });
-    render(card({ fullPreview: true, sections: [{ kind: "text", text: "the who", partial: true }] }));
+    full = card({ sections: [{ kind: "text", text: "the whole text" }, { kind: "file", path: "x.bin", size: 1, sha256: "aa", flag: "binary" }] });
+    render(card({ fullPreview: true, grantOptions: ["project"], sections: [{ kind: "text", text: "the who", partial: true }] }));
     const approve = q<HTMLButtonElement>("[data-approve]");
     assert.equal(approve.disabled, true);
+    assert.equal(q<HTMLButtonElement>("[data-grant-menu]").disabled, true);
     assert.match(approve.title, /View all/);
+    clock += TOOL_APPROVAL_KEYBOARD_GUARD_MS;
     key(q('[data-tool-approval="ap-1"]'), { key: "Enter", ctrlKey: true });
     await flush();
     assert.equal(answers.length, 0, "the keyboard chord cannot bypass it");
@@ -283,6 +274,10 @@ describe("ToolApprovalCard", () => {
     await flush();
     await flush();
     assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, false);
+    assert.equal(q<HTMLButtonElement>("[data-grant-menu]").disabled, false);
+    assert.equal(loads, 1);
+    assert.match(mount.textContent ?? "", /the whole text/);
+    assert.ok(mount.querySelector('[data-file-flag="binary"]'));
   });
 
   it("on a phone, opening the review sheet loads the cut preview and only then enables Approve", async () => {

@@ -74,7 +74,7 @@ async function isFile(path: string, fs: ClaudeNamesFs): Promise<boolean> {
  * The most bytes read from one file here. These are config files (`.mcp.json`, `SKILL.md`,
  * `~/.claude.json`), far below it; a larger one is treated as unreadable.
  */
-export const MAX_CLAUDE_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_CLAUDE_FILE_BYTES = 64 * 1024 * 1024;
 
 async function readText(file: string, fs: ClaudeNamesFs): Promise<string> {
   const bytes = await fs.read(file, { length: MAX_CLAUDE_FILE_BYTES + 1 });

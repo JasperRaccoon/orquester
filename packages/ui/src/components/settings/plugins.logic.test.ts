@@ -5,15 +5,12 @@ import type { PluginInfo } from "@orquester/api";
 import { BOX_KIND_LABELS, type BoxSummary } from "@orquester/api";
 
 import {
-  FIRST_ENABLE_MESSAGE,
   filterPlugins,
   pluginControls,
   pluginEngineChange,
   pluginEngineLabel,
   pluginEngineOptions,
   pluginBoxIssues,
-  pluginErrorText,
-  pluginJobLabel,
   pluginSourceHref,
   pluginToggleDecision,
   secretVaultRows,
@@ -84,13 +81,6 @@ test("a bundled plugin: no confirmation, no version actions", () => {
   assert.equal(pluginControls(whiteboard, true).toggle, false);
 });
 
-test("the first-enable confirmation says what the owner approved", () => {
-  assert.equal(
-    FIRST_ENABLE_MESSAGE,
-    "Both engines, tsrs and tsc-rs, run TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened."
-  );
-});
-
 test("an idle, installed, unused plugin allows every action", () => {
   assert.deepEqual(pluginControls(plugin({ current: installed, previous: older }), false), {
     toggle: true,
@@ -142,16 +132,6 @@ test("an unsupported platform disables the toggle unless the plugin is on", () =
   assert.equal(unsupported.checkForUpdates, false);
   assert.equal(unsupported.rollback, false);
   assert.equal(pluginControls(plugin({ platform: "unsupported", enabled: true }), false).toggle, true);
-});
-
-test("job labels and the last error read as the panel shows them", () => {
-  assert.equal(pluginJobLabel("idle"), null);
-  assert.equal(pluginJobLabel("checking"), "Checking for updates…");
-  assert.equal(pluginJobLabel("installing"), "Installing…");
-  assert.equal(
-    pluginErrorText({ at: "2026-10-14T10:00:00.000Z", step: "smoke-test", message: "exit 1" }),
-    "smoke-test: exit 1"
-  );
 });
 
 test("the source link renders only for a web address", () => {

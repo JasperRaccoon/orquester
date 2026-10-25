@@ -12,7 +12,6 @@
 import {
   HTML_RENDER_DEFAULT_FONTS,
   htmlRenderThemeFromPalette,
-  type HtmlRenderPaletteVariable,
   type HtmlRenderTheme
 } from "@orquester/api/agent-chat";
 
@@ -114,14 +113,11 @@ function baseSurfaceTriple(root: HTMLElement): string | null {
  * agent-published page styles against — T3's names, as hex — mapped from
  * this scheme's `--n-*` and the mode's `--sem-*` / `--lane-*` triples (the
  * mapping is `@orquester/api`'s, which the daemon's bootstrap shares for its
- * stock fallback). `read` defaults to the document root's computed style, so
- * it answers what `applyTheme` painted; a test hands it each stylesheet block.
+ * stock fallback). Read the document root's computed style, so it answers what
+ * `applyTheme` painted.
  */
-export function htmlRenderThemeTokens(
-  mode: ResolvedMode,
-  read: (variable: HtmlRenderPaletteVariable) => string | undefined = readRootVariable
-): HtmlRenderTheme {
-  return htmlRenderThemeFromPalette(read, mode, HTML_RENDER_DEFAULT_FONTS);
+export function htmlRenderThemeTokens(mode: ResolvedMode): HtmlRenderTheme {
+  return htmlRenderThemeFromPalette(readRootVariable, mode, HTML_RENDER_DEFAULT_FONTS);
 }
 
 function readRootVariable(variable: string): string | undefined {

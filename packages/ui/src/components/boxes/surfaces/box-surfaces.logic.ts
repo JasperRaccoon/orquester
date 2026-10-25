@@ -565,7 +565,7 @@ export function boxPanelSummary(temporary: readonly Pick<BoxSummary, "state">[],
 }
 
 /** The smallest height the box panel's list is dragged to: about one card. */
-export const BOX_PANEL_MIN_HEIGHT_PX = 48;
+const BOX_PANEL_MIN_HEIGHT_PX = 48;
 
 /** A dragged or stored list height, kept between one card and 70% of the view. */
 export function clampBoxPanelHeight(px: number, viewportHeight: number): number {

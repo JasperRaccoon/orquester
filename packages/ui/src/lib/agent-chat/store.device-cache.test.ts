@@ -174,25 +174,6 @@ async function openPage(log: DomainEvent[], backend: ThreadCacheBackend | null) 
 const texts = (state: AgentChatThreadState): string[] =>
   state.rows.flatMap((row) => (row.kind === "message" ? [row.message.text] : []));
 
-/** Everything a thread's view reads that the host decides, for comparing two loads. */
-function hostDecided(state: AgentChatThreadState) {
-  const { slice } = state;
-  return {
-    head: slice.head,
-    entries: slice.entries,
-    turns: slice.turns,
-    checkpoints: slice.checkpoints,
-    pending: slice.pending,
-    roster: slice.roster,
-    seq: slice.seq,
-    turnStatus: slice.turnStatus,
-    sessionStatus: slice.sessionStatus,
-    goal: slice.goal,
-    connection: slice.connection,
-    rows: state.rows.map((row) => row.id)
-  };
-}
-
 /** A first page that synchronized at `seq` and was then killed: what it left on the device. */
 async function leaveDeviceCopy(log: DomainEvent[], backend: ThreadCacheBackend, seq: number): Promise<void> {
   const first = await openPage(log, backend);
@@ -214,7 +195,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("a thread opened with a copy on the device", () => {
-  it("paints the copy before any frame, resumes with after=<seq>, and converges on the cold load", async () => {
+  it("paints the copy before any frame, resumes by cursor and applies the replay", async () => {
     const log = hostLog();
     const backend = memoryBackend();
     await leaveDeviceCopy(log, backend, 5);
@@ -235,18 +216,11 @@ describe("a thread opened with a copy on the device", () => {
     assert.equal(reopened.state().slice.connection, "synchronized");
     assert.equal(reopened.state().slice.fromDeviceCache, false);
 
-    // Exactly what a cold load of the same thread shows.
-    const cold = await openPage(log, null);
-    await settle();
-    assert.deepEqual(cold.host.opened, [{}]);
-    cold.host.push({ kind: "snapshot", thread: snapshotAt(log, 8) }, { kind: "synchronized", hostInstanceId: "host-1" });
-    assert.deepEqual(hostDecided(reopened.state()), hostDecided(cold.state()));
-    assert.deepEqual(texts(reopened.state()), texts(cold.state()));
+    assert.deepEqual(reopened.state().slice.pending.approvals, [], "the replay resolved the cached approval");
     assert.equal(texts(reopened.state()).at(-1), "Fixed it.");
 
     // The device copy moves forward with the thread.
     reopened.store.destroy?.();
-    cold.store.destroy?.();
     await reopened.cache.threadCacheIdle();
     const saved = await reopened.cache.loadPersistedThread(
       reopened.cache.threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" }),

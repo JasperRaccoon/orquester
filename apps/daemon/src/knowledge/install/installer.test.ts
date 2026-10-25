@@ -324,17 +324,50 @@ test("a myKG that rejects the generated config fails the install at the smoke te
   assert.deepEqual(await list(knowledgeStagingDir(h.runtimeDir)), []);
 });
 
-test("the config check runs offline: an encoding the install did not fetch fails it", async (t) => {
-  const h = await harness(t);
-  // The installer is given no encodings; the (played) myKG still loads cl100k_base.
-  const install = installKnowledgeRuntime(h.runtimeDir, PINNED, h.host.deps, {
-    uv: h.uv.build,
-    env: DAEMON_ENV,
-    signal: new AbortController().signal,
-    model: h.model.spec,
-    encodings: []
+test("the config check refuses a tokenizer download before its downloader runs", async (t) => {
+  const exec = promisify(execFile);
+  // These dependency shims leave the downloader enabled. The shipped script must replace it.
+  const dependencies = `
+import sys, types
+
+def module(name):
+    value = types.ModuleType(name)
+    sys.modules[name] = value
+    return value
+
+tiktoken = module("tiktoken")
+tiktoken.load = module("tiktoken.load")
+def download(path):
+    print("DOWNLOADER_USED", flush=True)
+    return b"downloaded"
+tiktoken.load.read_file = download
+class Encoding:
+    name = "fixture"
+    def encode(self, text):
+        print("ENCODING_REQUESTED", flush=True)
+        tiktoken.load.read_file("https://fixture.invalid/encoding")
+tiktoken.get_encoding = lambda name: Encoding()
+mykg = module("mykg")
+mykg.config = module("mykg.config")
+mykg.config.RAW = {"profile": "fixture", "provider": "agent"}
+mykg.config.CONFIG_PATH = "mykg_config.yaml"
+mykg.config.CHUNK_TIKTOKEN_ENCODING = "fixture"
+module("mykg.pipeline")
+module("mykg.llm")
+module("mykg.llm.config").load_adapter = lambda **kwargs: object()
+sys.argv = ["check", "fixture", "/unused"]
+`;
+  await assert.rejects(exec("python3", ["-I", "-c", `${dependencies}\nexec(${JSON.stringify(MYKG_CONFIG_CHECK)})`]), (error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      t.skip("python3 is not installed; the runtime ships its own Python");
+      return true;
+    }
+    const { stdout = "", stderr = "" } = error as { stdout?: string; stderr?: string };
+    assert.match(stdout, /ENCODING_REQUESTED/, "the check reached the tokenizer");
+    assert.doesNotMatch(stdout, /DOWNLOADER_USED/, "the script must refuse before the network loader runs");
+    assert.match(stderr, /https:\/\/fixture\.invalid\/encoding/, "the failure identifies the missing encoding");
+    return true;
   });
-  await failsAt(install, "smoke-test", /rejected the generated config .*tiktoken tried to download/);
 });
 
 test("the pinned encodings are the one the generated config loads, under tiktoken's cache names", () => {
@@ -350,7 +383,6 @@ test("the pinned encodings are the one the generated config loads, under tiktoke
   assert.equal(cl100k?.sha256, "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7");
   assert.equal(tiktokenCacheKey(cl100k?.url ?? ""), "9b5ad71b2ce5302211f9c61530b329a4922fc6a4");
   assert.equal(MYKG_CONFIG_FILE, "mykg_config.yaml");
-  assert.match(MYKG_CONFIG_CHECK, /tiktoken\.load\.read_file = offline/);
 });
 
 test("a leftover dir of the same version is replaced; a cancelled install leaves nothing", async (t) => {
@@ -462,5 +494,4 @@ test("the shipped lock pins the pinned myKG by its wheel hash and every dependen
   assert.ok(versions.every((line) => /^[A-Za-z0-9._-]+==\S+/.test(line)));
   assert.ok(versions.some((line) => line.startsWith("pywin32==312 ;")), "markers are kept");
   assert.deepEqual(parseLockVersions("# c\nfoo==1.0 \\\n    --hash=sha256:ab\nbar==2 ; x \\\n"), ["foo==1.0", "bar==2 ; x"]);
-  assert.equal(sha256("x").length, 64);
 });

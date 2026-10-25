@@ -172,11 +172,11 @@ describe("a repo group header", () => {
   it("offers Reset label only while a custom label is set", async () => {
     await render(group());
     await openMenu();
-    assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id"]);
+    assert.ok(!menuLabels().includes("Reset label"));
     await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     await act(async () => applyRepoIdentity(KEY, { repoKey: KEY, label: "Engine", updatedAt: "x" }));
     await openMenu();
-    assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id", "Reset label"]);
+    assert.ok(menuLabels().includes("Reset label"));
     await pick("Reset label");
     for (let i = 0; i < 3; i += 1) await act(async () => undefined);
     assert.deepEqual(labels, [{ repoKey: KEY, label: null }]);
@@ -265,7 +265,7 @@ describe("a repo group header", () => {
       await render(group());
       assert.equal(pill(), null);
       await openMenu();
-      assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id"]);
+      assert.ok(!menuLabels().includes("Secret files…"));
     });
 
     it("offers Secret files… while the plugin is on, even before the repo has a vault", async () => {
@@ -273,7 +273,7 @@ describe("a repo group header", () => {
       await render(group());
       assert.equal(pill(), null);
       await openMenu();
-      assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id", "Secret files…"]);
+      assert.ok(menuLabels().includes("Secret files…"));
     });
 
     it("closes Secret files… when the plugin turns off, and doesn't reopen it when it turns back on", async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { createFileLaunchConfigStore, launchConfigFromRequest, parseHostThreadProfile } from "./launch-config.ts";
+import { createFileLaunchConfigStore, parseHostThreadProfile } from "./launch-config.ts";
 
 describe("thread launch config (§3.1, §6.1)", () => {
   it("keeps only well-formed persisted fields and drops the empty ones", async (t) => {
@@ -105,14 +105,6 @@ describe("thread launch config — the keyed provider server", () => {
       assert.deepEqual(await store.load("t1"), { homePath: "/h" }, JSON.stringify(malformed));
     }
   });
-
-  it("is picked off a create request with the other launch fields", () => {
-    assert.deepEqual(
-      launchConfigFromRequest({ launchEnv: { A: "1" }, serverPool: { key: "k", env: { B: "2" } } }),
-      { launchEnv: { A: "1" }, serverPool: { key: "k", env: { B: "2" } } }
-    );
-    assert.deepEqual(launchConfigFromRequest({}), {});
-  });
 });
 
 describe("thread launch config — the Agent Profile", () => {
@@ -155,11 +147,6 @@ describe("thread launch config — the Agent Profile", () => {
     assert.deepEqual(await store.load("t1"), { homePath: "/h" }, "an explicit null is Global");
     await writeFile(file, JSON.stringify({ profile: { ...profile, extra: true } }));
     assert.deepEqual(await store.load("t1"), { profile }, "extra fields are dropped");
-  });
-
-  it("is taken as the caller resolved it, beside the request's launch fields", () => {
-    assert.deepEqual(launchConfigFromRequest({ homePath: "/h" }, profile), { homePath: "/h", profile });
-    assert.deepEqual(launchConfigFromRequest({ homePath: "/h" }), { homePath: "/h" });
   });
 
   it("parseHostThreadProfile accepts exactly a profile id, a revision and an absolute directory", () => {

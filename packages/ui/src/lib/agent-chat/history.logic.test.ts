@@ -789,10 +789,10 @@ describe("historyAfterAgentRows — an agent-rows frame replaced rows in the win
     const history = { ...EMPTY_HISTORY, windowCut: 3 };
     const after = [parent("p1"), owned("a1"), owned("a2"), parent("p2"), parent("p3"), parent("p4")];
     assert.equal(historyAfterAgentRows(history, before, after).windowCut, 4);
-    // Nothing before the cut moved: the same history.
+    // Rows inserted after the cut leave its position unchanged.
     const unmoved = [parent("p1"), owned("a-old"), parent("p2"), owned("a9"), parent("p3"), parent("p4")];
-    assert.equal(historyAfterAgentRows(history, before, unmoved), history);
+    assert.equal(historyAfterAgentRows(history, before, unmoved).windowCut, 3);
     // No cut: nothing to recount.
-    assert.equal(historyAfterAgentRows(EMPTY_HISTORY, before, after), EMPTY_HISTORY);
+    assert.equal(historyAfterAgentRows(EMPTY_HISTORY, before, after).windowCut, 0);
   });
 });

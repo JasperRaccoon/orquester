@@ -17,7 +17,6 @@ import {
   runsOnReady,
   runsOnReducer,
   runsOnSummary,
-  sizeOptionLabel,
   sizeOptions,
   type RunsOnAction,
   type RunsOnState
@@ -56,10 +55,10 @@ test("choosing a kind picks its cheapest provider and asks for its offers", () =
 });
 
 test("an unavailable kind cannot be chosen", () => {
-  assert.equal(run({ type: "kind", availability: kind({ providers: [] }) }), RUNS_ON_INITIAL);
+  assert.equal(run({ type: "kind", availability: kind({ providers: [] }) }).choice, "host");
   assert.equal(
-    run({ type: "kind", availability: kind({ unavailableReason: "Tailscale is not set up on this desktop" }) }),
-    RUNS_ON_INITIAL
+    run({ type: "kind", availability: kind({ unavailableReason: "Tailscale is not set up on this desktop" }) }).choice,
+    "host"
   );
 });
 
@@ -77,15 +76,16 @@ test("offers fill in the cheapest size, its first region, the first image", () =
 
 test("an answer for a provider or kind no longer asked for is ignored", () => {
   const asked = run({ type: "kind", availability: kind() }, { type: "provider", provider: "vultr" });
-  assert.equal(runsOnReducer(asked, { type: "offers-loaded", offers: offers() }), asked);
-  assert.equal(
-    runsOnReducer(asked, { type: "offers-failed", provider: "hetzner", kind: "linux", message: "boom" }),
-    asked
-  );
+  const stale = runsOnReducer(asked, { type: "offers-loaded", offers: offers() });
+  assert.deepEqual(offersRequest(stale), { provider: "vultr", kind: "linux" });
+  assert.equal(stale.size, null);
+  const failed = runsOnReducer(asked, { type: "offers-failed", provider: "hetzner", kind: "linux", message: "boom" });
+  assert.deepEqual(offersRequest(failed), { provider: "vultr", kind: "linux" });
+
   const ready = runsOnReducer(asked, { type: "offers-loaded", offers: offers({ provider: "vultr" }) });
-  assert.equal(ready.offers.status, "ready");
-  // A late answer after the offers are in changes nothing.
-  assert.equal(runsOnReducer(ready, { type: "offers-loaded", offers: offers({ provider: "vultr" }) }), ready);
+  const duplicate = runsOnReducer(ready, { type: "offers-loaded", offers: offers({ provider: "vultr", sizes: [] }) });
+  assert.equal(duplicate.offers.status, "ready");
+  assert.equal(duplicate.size, "cx22", "a later duplicate cannot clear the chosen size");
 });
 
 test("a failed offers read can be retried", () => {
@@ -116,7 +116,6 @@ test("a size keeps the region when it is rented there, else takes its first", ()
   assert.equal(runsOnReducer(ready, { type: "size", id: "cx32" }).region, "fsn1");
   const ccx = runsOnReducer(ready, { type: "size", id: "ccx13" });
   assert.equal(ccx.region, "ash");
-  assert.equal(runsOnReducer(ready, { type: "size", id: "nope" }), ready);
 });
 
 test("a region the size is not rented in switches to the cheapest size that is", () => {
@@ -125,7 +124,6 @@ test("a region the size is not rented in switches to the cheapest size that is",
   assert.equal(ash.region, "ash");
   // cx32 (all regions, $0.0238) and ccx13 ($0.0238, ash) tie: the sort is stable, cx32 first.
   assert.equal(ash.size, "cx32");
-  assert.equal(runsOnReducer(ready, { type: "region", id: "mars" }), ready);
   assert.equal(runsOnReducer(ready, { type: "region", id: "nbg1" }).size, "cx22");
 });
 
@@ -145,7 +143,6 @@ test("macOS shows the OS version instead of a single region, with its lifetime",
   });
   const older = runsOnReducer(state, { type: "image", id: "macos-14" });
   assert.equal(runsOnLocation(older)?.image, "macos-14");
-  assert.equal(runsOnReducer(state, { type: "image", id: "macos-9" }), state);
 });
 
 test("regions and images both show when both are a choice; neither images → region only", () => {
@@ -163,13 +160,12 @@ test("the lifetime is clamped to the provider maximum and offered in steps", () 
   assert.equal(runsOnReducer(state, { type: "lifetime", minutes: 99_999 }).lifetimeMinutes, 7200);
   assert.equal(runsOnReducer(state, { type: "lifetime", minutes: 5 }).lifetimeMinutes, 60);
   assert.equal(runsOnReducer(state, { type: "lifetime", minutes: 1440 }).lifetimeMinutes, 1440);
-  assert.equal(runsOnReducer(state, { type: "lifetime", minutes: Number.NaN }), state);
   assert.deepEqual(lifetimeOptions(7200), [60, 240, 720, 1440, 2880, 4320, 5760, 7200]);
   assert.deepEqual(lifetimeOptions(300), [60, 240, 300]);
   assert.deepEqual(lifetimeOptions(null), []);
   // A kind without a maximum has no lifetime to choose.
   const linux = run({ type: "kind", availability: kind() }, { type: "offers-loaded", offers: offers() });
-  assert.equal(runsOnReducer(linux, { type: "lifetime", minutes: 600 }), linux);
+  assert.equal(runsOnLocation(runsOnReducer(linux, { type: "lifetime", minutes: 600 }))?.lifetimeMinutes, undefined);
 });
 
 test("the summary states the price, the monthly cost and what the box does", () => {
@@ -195,19 +191,23 @@ test("the summary states the price, the monthly cost and what the box does", () 
 
 test("a kind that goes away sends the choice back to this host; a removed provider to the next", () => {
   const ready = run({ type: "kind", availability: kind() }, { type: "offers-loaded", offers: offers() });
-  assert.equal(runsOnReducer(ready, { type: "kinds", kinds: [] }), RUNS_ON_INITIAL);
-  assert.equal(runsOnReducer(ready, { type: "kinds", kinds: [kind({ providers: [] })] }), RUNS_ON_INITIAL);
+  assert.equal(runsOnReducer(ready, { type: "kinds", kinds: [] }).choice, "host");
+  assert.equal(runsOnReducer(ready, { type: "kinds", kinds: [kind({ providers: [] })] }).choice, "host");
   const same = runsOnReducer(ready, { type: "kinds", kinds: [kind()] });
   assert.equal(same.offers.status, "ready");
   const moved = runsOnReducer(ready, { type: "kinds", kinds: [kind({ providers: ["vultr"] })] });
   assert.deepEqual(offersRequest(moved), { provider: "vultr", kind: "linux" });
-  assert.equal(runsOnReducer(RUNS_ON_INITIAL, { type: "kinds", kinds: [] }), RUNS_ON_INITIAL);
 });
 
 test("host and reset start over", () => {
-  const ready = run({ type: "kind", availability: kind() }, { type: "offers-loaded", offers: offers() });
-  assert.equal(runsOnReducer(ready, { type: "host" }), RUNS_ON_INITIAL);
-  assert.equal(runsOnReducer(ready, { type: "reset" }), RUNS_ON_INITIAL);
+  for (const type of ["host", "reset"] as const) {
+    const ready = run({ type: "kind", availability: kind() }, { type: "offers-loaded", offers: offers() });
+    const reset = runsOnReducer(ready, { type });
+    assert.equal(reset.choice, "host");
+    assert.equal(runsInBox(reset), false);
+    assert.equal(runsOnLocation(reset), null);
+    assert.equal(runsOnReady(reset), true);
+  }
 });
 
 test("a location is only built once the choice is complete", () => {
@@ -241,9 +241,4 @@ test("cards: one per kind with a provider or a reason, priced, with the reason a
     { kind: "macos", label: "macOS", providers: "Blacksmith", price: "$4.80/h · max 5 days", disabled: false, reason: null }
   ]);
   assert.deepEqual(kindCards(null, null), []);
-});
-
-test("size options read label and price", () => {
-  assert.equal(sizeOptionLabel(offers().sizes[1]), "CX22 · $0.0119/h");
-  assert.equal(sizeOptionLabel({ ...offers().sizes[1], hourlyUsd: null }), "CX22");
 });

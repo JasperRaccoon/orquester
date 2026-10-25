@@ -23,7 +23,8 @@ describe("wait", () => {
     const block = (await h.runStore.load(runId!))!.blocks.W!;
     assert.equal(block.status, "waiting");
     assert.deepEqual(block.waitingOn, { kind: "timer", until: "2026-09-29T07:00:00.000Z", purpose: "wait" });
-    await h.clock.advance(21 * 60 * 60_000 - 1);
+    h.clock.jump(21 * 60 * 60_000 - 1);
+    await h.clock.advance(0);
     assert.equal((await h.runStore.load(runId!))!.status, "running");
     await h.clock.advance(1);
     const result = await h.engine.waitForRun(runId!);

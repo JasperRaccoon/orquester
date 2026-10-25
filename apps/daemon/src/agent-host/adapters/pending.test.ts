@@ -32,10 +32,9 @@ describe("§3.2 layer one: every adapter's pendingSnapshot()", () => {
         assert.equal(snapshot.version, null);
       });
 
-      it("claims no verdict: status unknown, auth unknown, the T3 message", () => {
+      it("claims no verdict and is recognized as a pending seed", () => {
         assert.equal(snapshot.status, "unknown");
         assert.equal(snapshot.auth.status, "unknown");
-        assert.match(snapshot.message ?? "", /has not been checked in this session yet\.$/);
         assert.ok(isPendingSnapshot(snapshot));
       });
 

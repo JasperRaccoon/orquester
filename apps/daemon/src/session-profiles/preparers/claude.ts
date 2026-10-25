@@ -42,7 +42,7 @@ import type { SessionProfilePrepareContext, SessionProfilePreparer } from "../pr
 import type { ResolvedAgentProfile, ResolvedHook, ResolvedMcpServer } from "../resolve.ts";
 
 /** Bump when the prepared output changes for the same inputs. */
-export const CLAUDE_PREPARER_VERSION = "2";
+const CLAUDE_PREPARER_VERSION = "2";
 
 /** The bundled skill the Workflow tool points at; omitting it makes Claude inline the guide (spec §6.1). */
 export const CLAUDE_WORKFLOW_AUTHORING_SKILL = "workflow-authoring";
@@ -60,7 +60,7 @@ const PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * (`developer:review`): the profile name as a slug, `profile` when nothing is left of it, and never
  * the name of one of the profile's own plugins.
  */
-export function claudeLocalPluginName(profileName: string, taken: ReadonlySet<string>): string {
+function claudeLocalPluginName(profileName: string, taken: ReadonlySet<string>): string {
   const slug = profileName
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")

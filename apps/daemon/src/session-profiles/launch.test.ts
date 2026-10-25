@@ -7,14 +7,10 @@ import { after, describe, it } from "node:test";
 
 import type { SessionProfileAgentId } from "@orquester/api";
 
-import { codexProfileLaunchContribution } from "./contributions/codex.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import {
   applyProfileContribution,
   createProfileLaunchResolver,
-  deletedProfileNotice,
-  profileLaunchContribution,
-  profileLaunchContributors,
   type ProfileLaunchContext,
   type ProfileLaunchContributors,
   SessionProfileNames
@@ -64,15 +60,6 @@ const contributors = (codex: ProfileLaunchContributors["codex"]): ProfileLaunchC
 });
 
 describe("the per-agent launch contributions", () => {
-  it("are read from the registry; Claude contributes nothing (Codex, Grok and OpenCode have their own tests)", async () => {
-    for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
-      assert.equal(profileLaunchContribution(agent), profileLaunchContributors[agent]);
-    }
-    assert.equal(profileLaunchContributors.codex, codexProfileLaunchContribution);
-    assert.notDeepEqual(await profileLaunchContribution("grok")({ profile: { preparedDir: "/p/v-1" }, accountHome: "/a" } as ProfileLaunchContext<"grok">), {});
-    assert.deepEqual(await profileLaunchContribution("claude")({} as ProfileLaunchContext<"claude">), {});
-  });
-
   it("apply over the account's launch: env wins, unset merges, home follows the home variable, serverPool replaces", () => {
     const base = {
       launchEnv: { CODEX_HOME: "/homes/acc-1", A: "1", KEEP: "k" },
@@ -223,12 +210,5 @@ describe("SessionProfileNames", () => {
     const names = new SessionProfileNames();
     await names.track({ list: () => Promise.reject(new Error("EACCES")), get: async () => ({ name: "x" }), events: new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>() });
     assert.equal(names.liveIds(), undefined);
-  });
-});
-
-describe("deletedProfileNotice", () => {
-  it("names the profile when its name is known", () => {
-    assert.equal(deletedProfileNotice("Developer"), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
-    assert.equal(deletedProfileNotice(undefined), "This chat's Agent Profile was deleted; it now uses Global.");
   });
 });

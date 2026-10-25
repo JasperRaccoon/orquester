@@ -50,13 +50,14 @@ test("mergeClaudeRefreshedCreds converts expires_in to an absolute expiresAt (ms
 
 test("refreshClaudeToken maps a 200 body", async (t) => {
   const fake: typeof fetch = async () =>
-    new Response(JSON.stringify({ access_token: "A", refresh_token: "R", expires_at: 9 }), { status: 200 });
+    new Response(JSON.stringify({ access_token: "A", refresh_token: "R", expires_in: 3600 }), { status: 200 });
   t.mock.method(globalThis, "fetch", fake);
   const out = await refreshClaudeToken("r");
   assert.equal(out.ok, true);
   if (out.ok) {
     assert.equal(out.access_token, "A");
     assert.equal(out.refresh_token, "R");
+    assert.equal(out.expires_in, 3600);
   }
 });
 
@@ -67,15 +68,6 @@ test("refreshClaudeToken flags invalid_grant", async (t) => {
   const out = await refreshClaudeToken("r");
   assert.equal(out.ok, false);
   if (!out.ok) assert.equal(out.invalidGrant, true);
-});
-
-test("refreshClaudeToken parses expires_in", async (t) => {
-  const fake: typeof fetch = async () =>
-    new Response(JSON.stringify({ access_token: "A", refresh_token: "R", expires_in: 3600 }), { status: 200 });
-  t.mock.method(globalThis, "fetch", fake);
-  const out = await refreshClaudeToken("r");
-  assert.equal(out.ok, true);
-  if (out.ok) assert.equal(out.expires_in, 3600);
 });
 
 test("refreshCodexToken flags invalid_grant", async (t) => {

@@ -6,8 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { createWriteStream } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,13 +36,14 @@ interface Harness {
   store: AuthSessionStore;
   remote: ReturnType<typeof createServer>;
   local: ReturnType<typeof createServer>;
+  close: () => Promise<void>;
   /** Resolves once the event stream has registered its sink. */
   sinkAdded: Promise<void>;
   sinkRemoved: Promise<void>;
 }
 
 async function harness(
-  logStream: NodeJS.WritableStream = createWriteStream("/dev/null"),
+  logStream: NodeJS.WritableStream = new Writable({ write: (_chunk, _encoding, done) => done() }),
   extraServices: Record<string, unknown> = {}
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orquester-auth-routes-"));
@@ -80,7 +80,16 @@ async function harness(
       authRequired: mode === "remote",
       mode
     });
-  return { config, store, remote: build("remote"), local: build("local"), sinkAdded, sinkRemoved };
+  const remote = build("remote");
+  let local: ReturnType<typeof createServer> | undefined;
+  return {
+    config, store, remote, sinkAdded, sinkRemoved,
+    get local() { return local ??= build("local"); },
+    close: async () => {
+      await Promise.all([remote.close(), local?.close()]);
+      await rm(root, { recursive: true, force: true });
+    }
+  };
 }
 
 async function login(h: Harness, password = PASSWORD, ip = "203.0.113.1", username = USERNAME) {
@@ -97,7 +106,7 @@ const info = (h: Harness, token: string) => h.remote.inject({ method: "GET", url
 
 test("auth info discloses no salt; login mints a working token and the stored hash is no bearer", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
 
   const authInfo = (await h.remote.inject({ method: "GET", url: authRoutes.info })).json();
   assert.deepEqual(authInfo, { authRequired: true, requiresUsername: true });
@@ -117,7 +126,7 @@ test("auth info discloses no salt; login mints a working token and the stored ha
 
 test("a wrong password or username is refused, and repeated guesses lock the IP out", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
 
   const wrongUser = await login(h, PASSWORD, "203.0.113.9", "someone");
   assert.equal(wrongUser.statusCode, 401);
@@ -135,7 +144,7 @@ test("a wrong password or username is refused, and repeated guesses lock the IP 
 
 test("the download's ?token= and /mcp accept a session token and refuse the legacy credential", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token } = (await login(h)).json() as AuthIssuedTokenResponse;
 
   const download = (credential: string) => h.remote.inject({ method: "GET", url: `/api/fs/download?p=Lw&token=${encodeURIComponent(credential)}` });
@@ -156,7 +165,7 @@ test("the download's ?token= and /mcp accept a session token and refuse the lega
 
 test("/ws accepts a session token, refuses the legacy credential, and closes when the session is revoked", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -177,7 +186,7 @@ test("/ws accepts a session token, refuses the legacy credential, and closes whe
 
 test("revoking a session ends its open event stream", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -237,7 +246,7 @@ test("revoking a session ends its terminal output stream", async (t) => {
   const terminal = fakeSessions();
   terminal.state.release();
   const h = await harness(undefined, { sessions: terminal.sessions });
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -253,7 +262,7 @@ test("revoking a session ends its terminal output stream", async (t) => {
 test("a stream that opens after its session was revoked is cut as it opens", async (t) => {
   const terminal = fakeSessions();
   const h = await harness(undefined, { sessions: terminal.sessions });
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -292,7 +301,7 @@ test("revoking a session ends its agent-chat event stream and the host subscript
     chat: { has: () => true, get: () => undefined }
   };
   const h = await harness(undefined, { agentChat });
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -307,7 +316,7 @@ test("revoking a session ends its agent-chat event stream and the host subscript
 
 test("a login whose password changed while it was checked mints nothing", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   // The change already reached the sessions (they are bound to the new hash) while this login
   // checked the old one.
   await h.store.syncPassword(bcrypt.hashSync("the new password", 4));
@@ -319,7 +328,7 @@ test("a login whose password changed while it was checked mints nothing", async 
 
 test("logout, list, revoke one and revoke-others", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const a = (await login(h, PASSWORD, "203.0.113.5")).json() as AuthIssuedTokenResponse;
   const b = (await login(h, PASSWORD, "203.0.113.6")).json() as AuthIssuedTokenResponse;
   const c = (await login(h, PASSWORD, "203.0.113.7")).json() as AuthIssuedTokenResponse;
@@ -347,7 +356,7 @@ test("logout, list, revoke one and revoke-others", async (t) => {
 
 test("the password retype check answers ok/false without failing the session", async (t) => {
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token } = (await login(h)).json() as AuthIssuedTokenResponse;
   const verify = (password: string) =>
     h.remote.inject({ method: "POST", url: authRoutes.verifyPassword, headers: { authorization: `Bearer ${token}` }, payload: { password } });
@@ -359,8 +368,11 @@ test("the password retype check answers ok/false without failing the session", a
 });
 
 test("changing the password signs every device out and keeps API tokens", async (t) => {
+  // This case verifies password/session lifecycle with real bcrypt, without repeating its cost-12 work.
+  const salt = bcrypt.genSaltSync(4);
+  t.mock.method(bcrypt, "genSaltSync", () => salt);
   const h = await harness();
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const device = (await login(h)).json() as AuthIssuedTokenResponse;
   const api = (await h.local.inject({ method: "POST", url: authRoutes.tokens, payload: { label: "ci" } })).json() as AuthIssuedTokenResponse;
   assert.equal((await info(h, api.token)).statusCode, 200);
@@ -386,7 +398,7 @@ test("neither the password nor a token reaches the request log", async (t) => {
     }
   });
   const h = await harness(log);
-  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  t.after(h.close);
   const { token } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.inject({ method: "GET", url: `/api/fs/download?p=Lw&token=${encodeURIComponent(token)}` });
   await info(h, token);

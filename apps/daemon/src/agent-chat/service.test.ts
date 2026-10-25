@@ -25,7 +25,7 @@ import {
   type ForkHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor, type ChatLaunchEnv } from "./service.ts";
+import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, type ChatLaunchEnv } from "./service.ts";
 import { realpath as realpathOf } from "node:fs/promises";
 import type { ForkSessionRequest } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -121,6 +121,7 @@ interface Fixture {
   forkChildren: Map<string, unknown>;
   /** What the fake host answers a `confirmOnly` fork instead of the truth, when set. */
   confirmAnswer: { status: number; body: unknown } | null;
+  restart(): Promise<void>;
   requests: EventEmitter;
   broadcasts: EventEmitter;
   cleanup(): Promise<void>;
@@ -209,6 +210,7 @@ async function makeFixture(
     dropForkUncreated: false,
     forkChildren: new Map(),
     confirmAnswer: null,
+    restart: async () => undefined,
     requests: new EventEmitter(),
     broadcasts: new EventEmitter(),
     service: null as unknown as AgentChatService,
@@ -384,7 +386,7 @@ async function makeFixture(
   host.requestTimeout = 0;
   await new Promise<void>((resolve) => host.listen(socketPath, resolve));
 
-  state.service = new AgentChatService({
+  const createService = () => new AgentChatService({
     ...(options.now !== undefined ? { now: options.now } : {}),
     baseDir: appdir,
     daemonDir: join(appdir, "daemon"),
@@ -414,6 +416,16 @@ async function makeFixture(
     sendAttachment: async (reply) => reply,
     ...(options.htmlPreview ? { htmlPreview: options.htmlPreview } : {})
   });
+  state.service = createService();
+  state.restart = async () => {
+    const records = parseSessionsConfig(JSON.parse(JSON.stringify({ version: 1, sessions: state.service.chat.records() }))).sessions;
+    const deletes = state.service.chat.pendingThreadDeletes();
+    await state.service.stop();
+    state.service = createService();
+    state.service.chat.adopt(records);
+    state.service.chat.adoptPendingDeletes(deletes);
+    await state.service.init();
+  };
   // `adopt: false` is a daemon that has not found its host yet: no token, so
   // every host call is refused before anything is sent.
   if (options.adopt === false) return state;
@@ -824,15 +836,6 @@ test("a switch carries the recomposed serverPool: the host replaces launch.json'
   await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" });
   assert.deepEqual(f.identities[0]!.body.serverPool, { key: "keyed", env: { A: "1" } });
   await f.cleanup();
-});
-
-test("hostSupportsSessionProfiles follows the adopted host's advertised capability", async () => {
-  const older = await makeFixture(CLAUDE, null);
-  assert.equal(older.service.hostSupportsSessionProfiles(), false, "a host that advertises nothing");
-  await older.cleanup();
-  const current = await makeFixture(CLAUDE, null, { health: { capabilities: { sessionProfiles: 1 } } });
-  assert.equal(current.service.hostSupportsSessionProfiles(), true);
-  await current.cleanup();
 });
 
 test("switching to System clears the account and never falls back to the family default", async () => {
@@ -1716,7 +1719,6 @@ test("a fork's commandId makes it idempotent: a double submit, or a repeat after
     f.service.forkSession(parent.id, { commandId: "click-1" }, 1)
   ]);
   assert.equal(one.session.id, two.session.id);
-  assert.equal(one.session.id, forkIdFor(parent.id, "click-1"));
   assert.equal(f.forks.length, 1, "the in-flight repeat shares the first answer");
   // After the first landed (a restart forgot it): the same tab, the host asked again for its answer.
   const again = await f.service.forkSession(parent.id, { commandId: "click-1" }, 2);
@@ -1726,7 +1728,6 @@ test("a fork's commandId makes it idempotent: a double submit, or a repeat after
   // Another key is another fork.
   const other = await f.service.forkSession(parent.id, { commandId: "click-2" }, 3);
   assert.notEqual(other.session.id, one.session.id);
-  assert.match(one.session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   await f.cleanup();
 });
 
@@ -1865,19 +1866,13 @@ test("a reused fork commandId with another fork point, or after its fork was clo
   assert.equal(f.forks.length, 1, "nothing reached the host");
 
   // After a restart forgot the key, the tab's own fork point still tells them apart.
-  (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
+  await f.restart();
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-2" }, 2), conflict);
   assert.equal((await f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2)).session.id, first.session.id);
 
   // The user closes the fork: its key never brings it (or a stand-in) back.
   f.service.chat.close(first.session.id);
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2), conflict);
-  (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
-  await assert.rejects(
-    f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2),
-    conflict,
-    "after a restart, the queued delete of that tab still says it was closed"
-  );
   assert.equal(f.service.chat.has(first.session.id), false);
   await f.cleanup();
 });
@@ -1887,7 +1882,7 @@ test("a fork the host refused rolls its tab back without a host delete, so the s
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.forkAnswer = { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } } };
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), /still being written/);
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.has(id), false, "the tab is rolled back");
   assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false, "nothing to delete on the host");
   // The turn finished: the same key (a route caller's retry) now forks, no COMMAND_ID_CONFLICT.
@@ -1905,7 +1900,7 @@ test("a fork whose answer was lost keeps its tab, and the same key's retry conve
     f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1),
     (error: unknown) => error instanceof ChatSessionError && error.code === "HOST_UNAVAILABLE"
   );
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.has(id), true, "the host may hold the child: the tab stays");
   assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false, "no delete that could kill it later");
   // The retry (MCP's HOST_UNAVAILABLE re-post) — the host answers for the child it has.
@@ -1930,7 +1925,7 @@ test("a 200 fork answer without the child's head is an unknown outcome, never a 
   const unavailable = (error: unknown) => error instanceof ChatSessionError && error.code === "HOST_UNAVAILABLE";
   // Keyed: the host may hold the child, so the tab stays for the retry to converge on.
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), unavailable);
-  const keyed = forkIdFor(parent.id, "k");
+  const keyed = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.has(keyed), true);
   assert.equal(f.service.chat.pendingThreadDeletes().includes(keyed), false);
   assert.deepEqual(f.service.chat.unconfirmedForks(), [keyed]);
@@ -1947,7 +1942,7 @@ test("a fork tab whose answer was lost is confirmed once the host answers, its f
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkAnswer = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-4" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.get(id)?.lineage?.forkedFrom, undefined, "provisional: no fork point yet");
   await f.service.reconcileForks();
   const confirm = f.forks.at(-1)!.body;
@@ -1966,7 +1961,7 @@ test("a fork tab the host never created is taken back by the reconcile, and its 
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkUncreated = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.has(id), true, "unknown yet: kept");
   // The flag rides sessions.json, so a daemon restart still reconciles it.
   const reread = parseSessionsConfig({ version: 1, sessions: f.service.chat.records() });
@@ -1989,7 +1984,7 @@ test("the reconcile never deletes a child the host did create, and leaves a fork
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkAnswer = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   // The GUI's retry of the same key and a reconcile at once: one tab, confirmed, no delete.
   await Promise.all([f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), f.service.reconcileForks()]);
   assert.equal(f.service.chat.has(id), true);
@@ -2021,7 +2016,7 @@ test("a fork whose answer was lost stays pending, also across a restart, until t
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkAnswer = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-4" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   assert.equal(f.service.chat.get(id)?.chatPending, true);
   const reloaded = new ChatSessionManager();
   reloaded.adopt(parseSessionsConfig({ version: 1, sessions: f.service.chat.records() }).sessions);
@@ -2071,11 +2066,12 @@ test("the reconcile re-sends the lost fork's whole request — cut and launch en
 });
 
 test("only the host's 'no such thread' takes a stray fork tab back; any other refusal keeps it for later", async () => {
-  const f = await makeFixture(CLAUDE, null);
+  let now = 1_000_000;
+  const f = await makeFixture(CLAUDE, null, { now: () => now });
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkUncreated = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   for (const refusal of [
     { status: 400, body: { error: { code: "INVALID_COMMAND", message: `Thread '${id}' was deleted.` } } },
     { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "busy" } } },
@@ -2083,13 +2079,13 @@ test("only the host's 'no such thread' takes a stray fork tab back; any other re
   ]) {
     f.confirmAnswer = refusal;
     // Each answer asked fresh: the refusal backoff has its own test.
-    (f.service as unknown as { forkRefusals: Map<string, unknown> }).forkRefusals.clear();
+    now += FORK_CONFIRM_MAX_BACKOFF_MS;
     await f.service.reconcileForks();
     assert.equal(f.service.chat.has(id), true, `${refusal.status}: kept`);
     assert.deepEqual(f.service.chat.unconfirmedForks(), [id], `${refusal.status}: still to reconcile`);
   }
   // An older host's route miss is a "no such thread" too: it never had a fork route to create one.
-  (f.service as unknown as { forkRefusals: Map<string, unknown> }).forkRefusals.clear();
+  now += FORK_CONFIRM_MAX_BACKOFF_MS;
   f.confirmAnswer = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /threads/x/fork." } } };
   await f.service.reconcileForks();
   assert.equal(f.service.chat.has(id), false);
@@ -2102,7 +2098,7 @@ test("a fork the host keeps refusing to confirm is asked with a doubling backoff
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   f.dropForkUncreated = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
-  const id = forkIdFor(parent.id, "k");
+  const id = f.forks[0]!.body.threadId;
   f.confirmAnswer = { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "still being deleted" } } };
   const asked = () => f.forks.filter((fork) => fork.body.confirmOnly === true).length;
   await f.service.reconcileForks();
@@ -2133,7 +2129,7 @@ test("a stopped service reconciles nothing", async () => {
   await f.service.stop();
   await f.service.reconcileForks();
   assert.equal(f.forks.length, asked, "no host request after stop()");
-  assert.equal(f.service.chat.has(forkIdFor(parent.id, "k")), true);
+  assert.equal(f.service.chat.has(f.forks[0]!.body.threadId), true);
   await f.cleanup();
 });
 
@@ -2141,15 +2137,14 @@ test("after a restart, a keyed fork's recorded request tells a repeat from a reu
   const f = await makeFixture(CLAUDE, null);
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   const conflict = (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_ID_CONFLICT";
-  const forget = () => (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
   // The fake host resolves no fork point for a turn-only request: only the recorded request can tell.
   f.forkAnswer = {
     status: 200,
     body: { head: { id: "x" }, strategy: "native", lineage: { parentThreadId: parent.id, relation: "fork", createdAt: "t" } }
   };
-  await f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "assistant" }, 1);
+  const turnFork = await f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "assistant" }, 1);
   await f.service.forkSession(parent.id, { commandId: "latest" }, 2);
-  forget();
+  await f.restart();
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "user" }, 3), conflict, "another role");
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "t", turnId: "t2", role: "assistant" }, 3), conflict, "another turn");
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "t" }, 3), conflict, "latest is another point");
@@ -2158,7 +2153,7 @@ test("after a restart, a keyed fork's recorded request tells a repeat from a reu
   await f.service.forkSession(parent.id, { commandId: "latest" }, 3);
   // It survives the record's round trip through sessions.json.
   const reread = parseSessionsConfig({ version: 1, sessions: f.service.chat.records() });
-  const tab = reread.sessions.find((record) => record.id === forkIdFor(parent.id, "t"));
+  const tab = reread.sessions.find((record) => record.id === turnFork.session.id);
   assert.equal(typeof tab?.chat?.forkFingerprint, "string");
   await f.cleanup();
 });

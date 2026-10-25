@@ -13,11 +13,13 @@ test("rows for the named thread always win", () => {
     held
   });
   assert.deepEqual(out, { rows: ["b1"], paintOnly: false, displaySessionId: "b" });
+  assert.deepEqual(threadSwitchDisplay({ sessionId: "b", hasRows: true, loading: true, held }), { paintOnly: false, displaySessionId: "b" });
 });
 
 test("a reconnect on the same thread repaints its own rows, still interactive", () => {
   const out = resolveThreadSwitchTimeline({ sessionId: "a", rows: [], loading: true, held });
   assert.deepEqual(out, { rows: held.rows, paintOnly: false, displaySessionId: "a" });
+  assert.deepEqual(threadSwitchDisplay({ sessionId: "a", hasRows: false, loading: true, held }), { paintOnly: false, displaySessionId: "a" });
 });
 
 test("switching to a thread with no snapshot holds the previous one, inert", () => {
@@ -25,23 +27,11 @@ test("switching to a thread with no snapshot holds the previous one, inert", () 
   assert.equal(out.paintOnly, true);
   assert.equal(out.displaySessionId, "a");
   assert.deepEqual(out.rows, held.rows);
+  assert.deepEqual(threadSwitchDisplay({ sessionId: "b", hasRows: false, loading: true, held }), { paintOnly: true, displaySessionId: "a" });
 });
 
 test("a settled empty thread renders empty rather than someone else's rows", () => {
   const out = resolveThreadSwitchTimeline({ sessionId: "b", rows: [], loading: false, held });
   assert.deepEqual(out, { rows: [], paintOnly: false, displaySessionId: "b" });
-});
-
-test("the view's rows-free flags agree with the full hold in every case", () => {
-  for (const sessionId of ["a", "b"]) {
-    for (const rows of [[], ["x1"]]) {
-      for (const loading of [true, false]) {
-        for (const heldNow of [null, held, { sessionId: "a", rows: [] }]) {
-          const full = resolveThreadSwitchTimeline({ sessionId, rows, loading, held: heldNow });
-          const flags = threadSwitchDisplay({ sessionId, hasRows: rows.length > 0, loading, held: heldNow });
-          assert.deepEqual(flags, { paintOnly: full.paintOnly, displaySessionId: full.displaySessionId });
-        }
-      }
-    }
-  }
+  assert.deepEqual(threadSwitchDisplay({ sessionId: "b", hasRows: false, loading: false, held }), { paintOnly: false, displaySessionId: "b" });
 });

@@ -50,13 +50,6 @@ beforeEach(() => {
 });
 
 describe("the app store routes workflow events", () => {
-  it("an upsert and a delete on the workflows channel reach the module store", () => {
-    app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.upserted", { workflow: summary({ id: "a" }) }));
-    assert.equal(workflowsStore.getState().summaries.get("a")?.name, "Workflow a");
-    app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.deleted", { id: "a" }));
-    assert.equal(workflowsStore.getState().summaries.has("a"), false);
-  });
-
   it("the same message on another channel does not reach workflows", () => {
     app().applyEvent(event("elsewhere", "workflow.upserted", { workflow: summary({ id: "a" }) }));
     assert.equal(workflowsStore.getState().summaries.size, 0);
@@ -66,6 +59,7 @@ describe("the app store routes workflow events", () => {
 describe("the workflow tab kind", () => {
   it("opens one tab per workflow per project, reusing it and updating its run", () => {
     app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.upserted", { workflow: summary({ id: "a", name: "Nightly" }) }));
+    assert.equal(workflowsStore.getState().summaries.get("a")?.name, "Nightly");
     app().openWorkflowTab(P, "a");
     const [tab] = app().workflowTabsByProject[P] ?? [];
     assert.ok(tab);
@@ -107,6 +101,7 @@ describe("the workflow tab kind", () => {
     const bTab = app().workflowTabsByProject[P]?.[1]?.id;
     useAppStore.setState({ activeTabByProject: { ...app().activeTabByProject, [P]: aTab ?? null } });
     app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.deleted", { id: "a" }));
+    assert.equal(workflowsStore.getState().summaries.has("a"), false);
     assert.deepEqual(app().workflowTabsByProject[P]?.map((t) => t.workflowId), ["b"]);
     assert.deepEqual(app().workflowTabsByProject[Q], []);
     assert.equal(app().activeTabByProject[P], bTab, "the focus moves to the next tab");

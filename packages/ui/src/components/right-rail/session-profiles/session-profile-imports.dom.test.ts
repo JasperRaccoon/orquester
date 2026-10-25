@@ -254,23 +254,11 @@ describe("Agent Profiles — filling a profile", () => {
     });
   };
 
-  it("shows the quick actions, and the Plugins tab's Add plugin", async () => {
-    await openDeveloper();
-    const group = document.querySelector("[data-profile-import-actions]");
-    assert.ok(group, "the quick actions row is drawn");
-    assert.deepEqual(
-      [...group!.querySelectorAll("button")].map((button) => button.textContent?.trim()),
-      ["Import from Global", "Git", ".zip", "Copy from profile"]
-    );
-    await click(document.querySelector('[data-kind-cell="plugin"]'));
-    assert.ok(buttonByText("Add plugin"));
-  });
-
   it("Import from Global: unavailable rows are disabled, an existing pick asks first, the revision is sent", async () => {
     await openDeveloper();
     await click(buttonByText("Import from Global"));
     assert.ok(dialog(), "the dialog opened");
-    assert.deepEqual(calls("globalSource")[0]!.args, ["p1", "claude", calls("globalSource")[0]!.args[2]]);
+    assert.deepEqual(calls("globalSource")[0]!.args.slice(0, 2), ["p1", "claude"]);
     const plugin = dialog()!.querySelector<HTMLInputElement>('[data-pick="skill:p:brainstorm"]')!;
     assert.equal(plugin.disabled, true);
     await click(dialog()!.querySelector('[data-pick="skill:review"]'));

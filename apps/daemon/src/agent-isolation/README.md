@@ -13,7 +13,7 @@ codex-cli 0.159.0, Grok 1.0.46 and OpenCode 1.18.
 copy without the item keys: instructions, skills, MCP servers, plugins, hooks,
 commands, agents and memory, plus anything that switches the user's own items on
 or off. Every other key is kept, including unknown ones. Each dropped key and
-the reason for dropping it is in the exported `*_DROPPED_*` maps. Claude also
+the reason for dropping it is in the `*_DROPPED_*` maps. Claude also
 loses the `{serverName}` entries of `deniedMcpServers`, because that is how the
 Agent config editor disables a global server. Codex keeps `projects.*` trust
 entries and filters each `[profiles.<name>]` the same way. Codex also drops

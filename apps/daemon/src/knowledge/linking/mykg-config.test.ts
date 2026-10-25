@@ -7,7 +7,7 @@ import { after, describe, it } from "node:test";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { MAX_TASK_TOKENS } from "./inbox.ts";
-import { MYKG_NORMALIZE_MAX_NAMES, MYKG_PROFILE, buildMykgConfig, mykgMaxWorkers, renderMykgConfig, writeMykgConfig } from "./mykg-config.ts";
+import { MYKG_PROFILE, buildMykgConfig, renderMykgConfig, writeMykgConfig } from "./mykg-config.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -98,25 +98,17 @@ describe("mykg_config.yaml", () => {
     // type's names), and a type's name list capped so its task fits a tool result.
     assert.equal(pipeline.normalize_names.enabled, true, "never off: every run rebuilds names from raw extractions");
     assert.equal(pipeline.normalize_names.batch_token_target, 1);
-    assert.equal(pipeline.normalize_names.max_names_per_type, MYKG_NORMALIZE_MAX_NAMES);
-    assert.ok(MYKG_NORMALIZE_MAX_NAMES * 24 / 4 < MAX_TASK_TOKENS, "a capped type of ~20-character names stays under a task's size");
+    const namesPerType = pipeline.normalize_names.max_names_per_type;
+    assert.ok(Number.isInteger(namesPerType) && namesPerType > 0 && namesPerType * 24 / 4 < MAX_TASK_TOKENS, "a nonempty capped type of ~20-character names stays under a task's size");
     assert.equal(pipeline.pass1.max_schema_proposals, 12);
     assert.equal(pipeline.pass1.max_workers, 12);
     assert.equal(pipeline.pass2.max_workers, 12);
     for (let concurrency = 1; concurrency <= 8; concurrency += 1) {
-      assert.ok(mykgMaxWorkers(concurrency) >= concurrency * 3 || mykgMaxWorkers(concurrency) === 24, `≥ concurrency×2 waiting at ${concurrency}`);
-      assert.ok(mykgMaxWorkers(concurrency) - concurrency >= concurrency * 2);
+      const workers = profileOf(buildMykgConfig({ concurrency })).pipeline.pass2.max_workers;
+      assert.ok(workers - concurrency >= concurrency * 2, `≥ concurrency×2 waiting at ${concurrency}`);
     }
-    assert.equal(mykgMaxWorkers(1), 4);
-    assert.equal(mykgMaxWorkers(8), 24);
-  });
-
-  it("is YAML that reads back to the same document, strings quoted", () => {
-    const text = renderMykgConfig({ concurrency: 3, model: "sonnet" });
-    assert.match(text, /^# Written by Orquester/);
-    assert.deepEqual(parse(text), buildMykgConfig({ concurrency: 3, model: "sonnet" }));
-    assert.match(text, /edge_dedup_separator: "\|"/);
-    assert.match(text, /model: "sonnet"/);
+    assert.equal(profileOf(buildMykgConfig({ concurrency: 1 })).pipeline.pass2.max_workers, 4);
+    assert.equal(profileOf(buildMykgConfig({ concurrency: 8 })).pipeline.pass2.max_workers, 24);
   });
 
   it("is written atomically, private, in the myKG dir", async () => {

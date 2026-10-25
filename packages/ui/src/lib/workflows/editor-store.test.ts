@@ -142,18 +142,11 @@ describe("editor-store: autosave", () => {
     assert.equal(api.puts.length, 1);
     assert.equal(api.puts[0]!.revision, 1);
     assert.equal(api.puts[0]!.workflow.name, "Two");
+    const body = api.puts[0]!.workflow as Record<string, unknown>;
+    for (const key of ["id", "revision", "createdAt", "updatedAt"]) assert.equal(key in body, false, key);
     assert.equal(editor.state.revision, 2);
     assert.equal(editor.state.dirty, false);
     assert.equal(editor.state.saveState, "saved");
-  });
-
-  it("the body leaves out the daemon's own fields", async () => {
-    const { api, timers, editor } = await setup();
-    editor.change(rename("X"));
-    timers.advance(600);
-    await settle();
-    const body = api.puts[0]!.workflow as Record<string, unknown>;
-    for (const key of ["id", "revision", "createdAt", "updatedAt"]) assert.equal(key in body, false, key);
   });
 
   it("serializes saves: a change during a save is saved right after it, on the new revision", async () => {

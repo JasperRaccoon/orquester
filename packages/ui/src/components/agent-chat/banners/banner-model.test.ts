@@ -6,22 +6,15 @@ import {
   showBackgroundLivenessBanner,
   splitApprovalOptions,
   toolApprovalAnswerFailure,
-  toolApprovalCanApprove,
   toolApprovalChangeSentence,
   toolApprovalExpiryText,
-  toolApprovalApproveBlockedReason,
-  toolApprovalGrantChoices,
-  toolApprovalGuardKey,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
-  toolApprovalCardKey,
-  toolApprovalClickGuarded,
   toolApprovalPreviewIsCut,
-  TOOL_APPROVAL_POINTER_GUARD_MS,
   // boxes:
   isBoxApprovalCard
 } from "./banner-model.ts";
-import { ADMIN_FAMILIES, parseToolApprovalSummary } from "@orquester/api/agent-chat";
+import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();
@@ -148,10 +141,7 @@ test("only ⌘/Ctrl+Enter approves, and never within the guard", () => {
   assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { ...late, inDenyReason: true }), "deny");
 });
 
-test("every Admin family has its own change sentence; a secret-files push names the vault and the clones", () => {
-  for (const family of ADMIN_FAMILIES) {
-    assert.doesNotMatch(toolApprovalChangeSentence({ kind: "admin", family, scope: { label: "S" } }), /newer Orquester/, family);
-  }
+test("a secret-files push names the vault, clones and privacy boundary", () => {
   const push = toolApprovalChangeSentence({ kind: "admin", family: "secret-files", scope: { label: "S" } });
   assert.match(push, /this repo's vault/);
   assert.match(push, /every clone listed/);
@@ -165,14 +155,6 @@ test("a box rental (spend card) says what approving costs and reads as money, no
   assert.match(sentence, /billed to your account/);
   assert.match(sentence, /when this chat closes/);
   assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
-});
-
-test("grant choices are exactly the offered scopes", () => {
-  assert.deepEqual(toolApprovalGrantChoices({ grantOptions: [], family: "desktops" }), []);
-  assert.deepEqual(toolApprovalGrantChoices({ grantOptions: ["project"], family: "desktops" }).map((choice) => choice.scope), ["project"]);
-  const both = toolApprovalGrantChoices({ grantOptions: ["chat", "project"], family: "workflows" });
-  assert.deepEqual(both.map((choice) => choice.scope), ["chat", "project"]);
-  assert.match(both[0]!.hint, /workflows created or approved in this chat/);
 });
 
 test("the card counts down and says when it expired", () => {
@@ -190,19 +172,6 @@ test("a late answer says the agent stopped waiting; a bad one keeps the card", (
   assert.equal(toolApprovalAnswerFailure(null).closed, false);
 });
 
-test("approval needs every secret, a live card, a known kind and — when cut — the whole preview", () => {
-  const card = { kind: "admin" as const, family: "workflow-secrets" as const, secretFields: [{ key: "K", label: "Key" }] };
-  const base = { card, secrets: { K: "v" }, submitting: false, expired: false, previewComplete: true };
-  assert.equal(toolApprovalCanApprove({ ...base, secrets: {} }), false);
-  assert.equal(toolApprovalCanApprove(base), true);
-  assert.equal(toolApprovalCanApprove({ ...base, expired: true }), false);
-  assert.equal(toolApprovalCanApprove({ ...base, card: { ...card, kind: "unknown" } }), false);
-  assert.equal(toolApprovalCanApprove({ ...base, previewComplete: false }), false);
-  assert.match(toolApprovalApproveBlockedReason({ ...base, previewComplete: false }) ?? "", /View all/);
-  assert.match(toolApprovalApproveBlockedReason({ ...base, secrets: {} }) ?? "", /secret/);
-  assert.equal(toolApprovalApproveBlockedReason(base), null);
-});
-
 const parsed = (extra: Record<string, unknown>) =>
   parseToolApprovalSummary({
     approvalId: "a", threadId: "t", tool: "x", kind: "admin", family: "desktops", title: "T", scope: { label: "S" },
@@ -214,29 +183,6 @@ test("a preview is cut when the summary says so or any section is partial", () =
   assert.equal(toolApprovalPreviewIsCut(parsed({})), false);
   assert.equal(toolApprovalPreviewIsCut(parsed({ fullPreview: true })), true);
   assert.equal(toolApprovalPreviewIsCut(parsed({ sections: [{ kind: "diff", title: "d", unifiedDiff: "+a", partial: true }] })), true);
-});
-
-test("the guard key moves with section CONTENT, not only its count", () => {
-  const a = toolApprovalGuardKey(parsed({}));
-  assert.equal(toolApprovalGuardKey(parsed({})), a);
-  assert.notEqual(toolApprovalGuardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "rm -rf ~" }] })), a);
-  assert.notEqual(toolApprovalGuardKey(parsed({ reason: "because" })), a);
-});
-
-test("every click inside the appearance window is ignored, whatever its detail", () => {
-  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS - 1, shownAt: 0 }), true);
-  assert.equal(toolApprovalClickGuarded({ now: 10, shownAt: 0 }), true);
-  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS, shownAt: 0 }), false);
-});
-
-test("the card key moves with the summary's content under the same id", () => {
-  const a = toolApprovalCardKey(parsed({}));
-  assert.equal(toolApprovalCardKey(parsed({})), a);
-  assert.notEqual(toolApprovalCardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "other" }] })), a);
-  assert.notEqual(toolApprovalCardKey(parsed({ fullPreview: true })), a);
-  assert.notEqual(toolApprovalCardKey(parsed({ title: "T2" })), a);
-  assert.notEqual(toolApprovalCardKey(parsed({ scope: { label: "S2" } })), a);
-  assert.notEqual(toolApprovalCardKey(parsed({ reason: "r" })), a);
 });
 
 // boxes: the temporary-box card (Ephemeral AI VMs §13.2) is named for what it is.

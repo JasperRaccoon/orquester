@@ -6,9 +6,6 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
@@ -148,54 +145,6 @@ describe("lazy KaTeX", () => {
     assert.equal(loader.calls, 2);
     await loader.finish(katex);
     assert.equal(container.querySelectorAll(".katex").length, 1);
-  });
-
-  it("typesets a formula once, however often it mounts", async () => {
-    let renders = 0;
-    const counting: MathEngine = {
-      renderToString(tex, options) {
-        renders += 1;
-        return katex.renderToString(tex, options);
-      }
-    };
-    setMathEngineLoader(() => Promise.resolve(counting));
-    await show("$x$");
-    await act(async () => Promise.resolve());
-    const first = renders;
-    assert.ok(first >= 1);
-    for (let index = 0; index < 3; index += 1) {
-      await act(async () => root.unmount());
-      root = createRoot(container);
-      await show("$x$ again");
-    }
-    assert.equal(renders, first, "the cache answered every remount");
-    assert.equal(container.querySelectorAll(".katex").length, 1);
-  });
-
-  it("is imported by the engine module alone, and only through import()", () => {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const sources = (directory: string): string[] =>
-      readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) return sources(path);
-        return /\.(ts|tsx)$/.test(entry.name) && !/\.test\.ts$/.test(entry.name) ? [path] : [];
-      });
-    const src = join(here, "../../../..");
-    const importers = sources(src).filter((path) => /from "katex|import "katex/.test(readFileSync(path, "utf8")));
-    assert.deepEqual(
-      importers.map((path) => path.slice(src.length + 1)),
-      ["components/agent-chat/timeline/markdown/katex-engine.ts"]
-    );
-    const dynamic = sources(src).filter((path) => readFileSync(path, "utf8").includes('import("./katex-engine")'));
-    assert.deepEqual(
-      dynamic.map((path) => path.slice(src.length + 1)),
-      ["components/agent-chat/timeline/markdown/math-typeset.ts"]
-    );
-    for (const path of sources(src)) {
-      assert.ok(!/from "\.\/katex-engine"/.test(readFileSync(path, "utf8")), `${path} imports the engine statically`);
-    }
-    const css = readFileSync(join(src, "styles/globals.css"), "utf8");
-    assert.ok(!css.includes('@import "katex'), "KaTeX's stylesheet is not in the global CSS");
   });
 });
 

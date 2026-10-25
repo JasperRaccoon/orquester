@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { TerminalOutputRing, safeCutIndex, sanitizeTerminalReplayChunk } from "./terminal-history.ts";
+import { TerminalOutputRing, sanitizeTerminalReplayChunk } from "./terminal-history.ts";
 
 const ESC = "\u001b";
 
@@ -93,20 +93,6 @@ describe("TerminalOutputRing", () => {
     assert.equal(ring.length, 0);
     ring.append("d");
     assert.equal(ring.value(), "d");
-  });
-});
-
-describe("safeCutIndex", () => {
-  test("prefers the next line start", () => {
-    assert.equal(safeCutIndex("abc\ndef", 1), 4);
-  });
-
-  test("prefers the next sequence start", () => {
-    assert.equal(safeCutIndex(`ab${ESC}[1m`, 1), 2);
-  });
-
-  test("falls back to the minimum when no boundary is near", () => {
-    assert.equal(safeCutIndex("x".repeat(5000), 3), 3);
   });
 });
 

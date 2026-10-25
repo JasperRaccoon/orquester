@@ -32,11 +32,9 @@ import { isAgentChatCommandError } from "./errors.ts";
 import {
   buildContinuationTranscript,
   buildForkTranscript,
-  continuationDetail,
   parseForkContinuation,
   createFileForkHandoffStore,
   FORK_TRANSCRIPT_MAX_BYTES,
-  clipForkMessage,
   ForkRefusal,
   resolveForkCut,
   stripForkHandoff,
@@ -213,11 +211,13 @@ describe("the transcript handoff", () => {
     assert.match(transcript, /\[User\]\nfirst/);
     assert.match(transcript, /cut in the middle to fit/);
     assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(transcript), "no half pair");
-    for (const max of [100, 101, 102, 103]) {
-      const clipped = clipForkMessage("a😀".repeat(200), max);
-      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(clipped), `max ${max}`);
-      assert.match(clipped, /\n\[… \d+ characters omitted …\]\n/);
-    }
+    const clipped = buildForkTranscript({
+      items: [message("u1", "user", "t1", "a😀".repeat(4_000) + "a")],
+      retained: [turn("t1", "completed", "u1")] as never,
+      parentTitle: "P"
+    })!;
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(clipped), "clipping preserves Unicode");
+    assert.match(clipped, /\n\[… \d+ characters omitted …\]\n/);
   });
 
   it("says how many kept exchanges the window no longer holds a word of", () => {
@@ -990,7 +990,7 @@ describe("the continuation handoff", () => {
       targetLabel: "Codex",
       gitStatus: " M src/login.ts"
     })!;
-    assert.deepEqual(built.summary, { carried: 4, total: 4, bytes: built.summary.bytes });
+    assert.deepEqual([built.summary.carried, built.summary.total], [4, 4]);
     assert.match(built.transcript, /^<forked-conversation>\n/);
     assert.match(built.transcript, /ran on Claude Opus 4\.1 \(Orquester session parent-1\)/);
     assert.match(built.transcript, /read_transcript/);
@@ -1012,7 +1012,7 @@ describe("the continuation handoff", () => {
       targetLabel: "Codex",
       budgetBytes: 3 * (48 + 15) + 64
     })!;
-    assert.deepEqual(built.summary, { carried: 3, total: 4, bytes: built.summary.bytes, firstRequest: true });
+    assert.deepEqual([built.summary.carried, built.summary.total, built.summary.firstRequest], [3, 4, true]);
     assert.match(built.transcript, /This carries 3 of 4 messages \(≈1 KB\): the original request and the newest history/);
     assert.ok(built.transcript.includes("first question"), "the original request is kept");
     assert.ok(!built.transcript.includes("first answer"));
@@ -1026,22 +1026,12 @@ describe("the continuation handoff", () => {
     );
   });
 
-  it("reads the request's continuation tolerantly, and words the child's row", () => {
+  it("reads the request's continuation tolerantly", () => {
     assert.equal(parseForkContinuation(undefined), undefined);
     assert.equal(parseForkContinuation("yes"), undefined);
     assert.deepEqual(parseForkContinuation({}), {});
     assert.deepEqual(parseForkContinuation({ gitStatus: 3 }), {});
     assert.deepEqual(parseForkContinuation({ gitStatus: "?? a" }), { gitStatus: "?? a" });
-    assert.equal(
-      continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024, firstRequest: true }, "Codex"),
-      "23 of 41 messages (≈58 KB) — the original request and the newest history — are handed to Codex with your first message; the rest stays readable in the original chat."
-    );
-    assert.match(continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024, clipped: true }, "Codex"), /^23 of 41 messages \(≈58 KB\) — the newest history, the longest cut in the middle to fit — are/);
-    assert.match(continuationDetail("transcript", { carried: 4, total: 4, bytes: 900 }, "Codex"), /^The whole conversation \(4 messages, ≈1 KB\)/);
-    assert.match(continuationDetail("transcript", { carried: 2, total: 2, bytes: 60_000, clipped: true }, "Codex"), /^All 2 messages \(≈59 KB\), the longest cut in the middle to fit, are handed/);
-    assert.match(continuationDetail("transcript", { carried: 0, total: 5, bytes: 0 }, "Codex"), /^None of the 5 messages fits Codex's context window/);
-    assert.match(continuationDetail("empty", undefined, "Codex"), /Codex starts fresh/);
-    assert.match(continuationDetail("unavailable", undefined, "Codex"), /could not be carried over/);
   });
 });
 
@@ -1085,7 +1075,7 @@ describe("forkThread: continue in another agent", () => {
     assert.equal(result.lineage.sourceAgent, "claude");
     assert.equal(result.lineage.sourceModel, "test-model");
     assert.deepEqual(result.lineage.forkedFrom, { messageId: second.replyId, turnId: second.turnId });
-    assert.deepEqual(result.handoff, { carried: 4, total: 4, bytes: result.handoff!.bytes });
+    assert.deepEqual([result.handoff?.carried, result.handoff?.total], [4, 4]);
 
     const row = activitiesOf(host, "child").find((activity) => activity.activityKind === "thread.forked");
     assert.match(row?.summary ?? "", /^Continued from "Test thread" \(Claude · test-model\)$/);
@@ -1170,7 +1160,7 @@ describe("forkThread: continue in another agent", () => {
       modelSelection: { model: "gpt-5-codex" },
       continuation: {}
     });
-    assert.deepEqual(wide.handoff, { carried: 62, total: 62, bytes: wide.handoff!.bytes });
+    assert.deepEqual([wide.handoff?.carried, wide.handoff?.total], [62, 62]);
     await host.stop();
   });
 

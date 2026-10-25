@@ -291,7 +291,6 @@ describe("request_secret — the value reaches the call and nothing the host kee
         // Delivered: the call that asked gets the value, once.
         assert.equal((result.structuredContent as { value?: string }).value, VALUE);
         assert.ok(resultText(result).includes(VALUE));
-        assert.equal(redactor.holds(threadId), live);
 
         const events = await eventsOf(threadId, result);
         const completed = events.find((event) => event.type === "item.completed");
@@ -441,7 +440,6 @@ describe("secrets × the other agent-visuals tasks", () => {
     } as unknown as RuntimeEvent);
     await ingestion.drain();
     await host.settle();
-    assert.equal(redactor.holds(child), false);
     const snapshot = await host.orchestrator.readThread(child);
     assert.ok(!JSON.stringify(snapshot).includes(VALUE));
     for (const file of await filesUnder(join(root, "threads"))) {
@@ -539,7 +537,6 @@ describe("the redactor", () => {
     for (const threadId of ["child", "grandchild"]) {
       const replayed = event(threadId, "agent_message", { text: `the key is ${VALUE}` });
       assert.ok(!JSON.stringify(redactor.redactEvent(replayed)).includes(VALUE), threadId);
-      assert.equal(redactor.holds(threadId), false, `${threadId} holds nothing of its own`);
     }
     // A sibling, and a link onto itself, change nothing.
     const sibling = event("other", "agent_message", { text: VALUE });
@@ -578,8 +575,9 @@ describe("the redactor", () => {
   it("forgets a released thread's values", async (t) => {
     const { redactor, ingestion } = await pipeline(t);
     redactor.remember("gone", [VALUE]);
+    assert.equal(redactor.maskText("gone", VALUE), SECRET_REDACTED_TEXT);
     await ingestion.forget("gone");
-    assert.equal(redactor.holds("gone"), false);
+    assert.equal(redactor.maskText("gone", VALUE), VALUE);
   });
 });
 

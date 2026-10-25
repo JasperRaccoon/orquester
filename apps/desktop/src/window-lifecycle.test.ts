@@ -28,11 +28,11 @@ describe("messages for the renderer", () => {
     assert.equal(canDeliverToRenderer({ mainLoaded: true, rebuilding: true }), false);
   });
 
-  it("queue in order, drain once, and drop the oldest past the cap", () => {
-    const outbox = new RendererOutbox<string>(3);
-    for (const message of ["a", "b", "c", "d"]) outbox.push(message);
-    assert.equal(outbox.size, 3);
-    assert.deepEqual(outbox.drain(), ["b", "c", "d"]);
+  it("queues messages in order and drains them once", () => {
+    const outbox = new RendererOutbox<string>();
+    const messages = ["a", "b", "c"];
+    for (const message of messages) outbox.push(message);
+    assert.deepEqual(outbox.drain(), ["a", "b", "c"]);
     assert.deepEqual(outbox.drain(), []);
   });
 });

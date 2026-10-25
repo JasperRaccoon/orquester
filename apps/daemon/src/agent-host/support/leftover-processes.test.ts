@@ -8,7 +8,6 @@ import {
   AGENT_LAUNCH_ENV_VAR,
   findLaunchRoot,
   findLeftoverProcesses,
-  isSharedDaemon,
   recordChildSessions,
   recordHelperProcesses,
   recordOwnGroup,
@@ -164,13 +163,6 @@ test("recordChildSessions: the CLI's lifeline watcher, in the CLI's own session,
 
 const BROWSER_DAEMON = `${MARKED}AGENT_BROWSER_DAEMON=1\0`;
 
-test("isSharedDaemon: agent-browser's daemon (and what inherits its env) and a tmux server", () => {
-  assert.equal(isSharedDaemon(BROWSER_DAEMON, "agent-browser-l"), true);
-  assert.equal(isSharedDaemon(MARKED, "tmux: server"), true);
-  assert.equal(isSharedDaemon(MARKED, "agent-browser-l"), false, "agent-browser's per-chat MCP server is no daemon");
-  assert.equal(isSharedDaemon(`X_AGENT_BROWSER_DAEMON=1\0`, "node"), false);
-});
-
 test("a group scope takes this launch's marked members, and spares shared daemons, strangers and the setsid'd", async (t) => {
   const proc = mockProc(t, {
     800: { environ: MARKED, starttime: 80, sid: 800, pgid: 800 },
@@ -239,7 +231,7 @@ test("recordHelperProcesses: the CLI's children and what stays in their session;
     // A helper's child that daemonized away.
     853: { environ: MARKED, starttime: 53, sid: 853, pgid: 853, ppid: 851 },
     // agent-browser's MCP server, its daemon (same session: a build that stopped detaching) and Chromium.
-    854: { environ: MARKED, starttime: 54, sid: 1, pgid: 1, ppid: 850, comm: "agent-browser-l" },
+    854: { environ: `${MARKED}X_AGENT_BROWSER_DAEMON=1\0`, starttime: 54, sid: 1, pgid: 1, ppid: 850, comm: "agent-browser-l" },
     855: { environ: BROWSER_DAEMON, starttime: 55, sid: 1, pgid: 1, ppid: 854, comm: "agent-browser-l" },
     856: { environ: BROWSER_DAEMON, starttime: 56, sid: 1, pgid: 1, ppid: 855, comm: "chrome" }
   });

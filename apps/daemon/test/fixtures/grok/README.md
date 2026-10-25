@@ -190,10 +190,15 @@ removed. Nothing else is altered.
    holds it verbatim. This is almost entirely `available_commands_update`, which is ~33 KiB and
    repeats 2–4 times per run; every *distinct* payload survives verbatim exactly once across the
    set. Without it files 01–14 were 3.3 MiB; with it they are 1.4 MiB. The 2026-09-25 files
-   (15–23) add 1.9 MiB with it applied and the 2026-09-26 files (24–31) 1.8 MiB, so the set is
+   (15–23) added 1.9 MiB with it applied and the 2026-09-26 files (24–31) 1.8 MiB, so the original set was
    5.0 MiB of NDJSON (plus the inspect JSON and this README).
 
 ## The files
+
+Captures `21-stop-with-background-work.ndjson` and `24-background-shell-outlives-cli.ndjson`
+are archived in Git at commit `bff9af493890f24d07a71901ae23ff561d2ac00b` under this directory.
+Their contract observations and provenance remain below. Elision notes in later captures that
+name either archived file refer to that Git version; no replay test loads those archived bytes.
 
 Every run begins `initialize` → `authenticate {methodId:"cached_token"}` → `session/new {cwd,
 mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
@@ -224,10 +229,10 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `18-subagent-kill.ndjson` | (2026-09-25 argv) | a background shell and a background subagent, polled, both killed, polled again | The captured `KillTask` answer, a killed subagent's `subagent_finished`, a killed shell's `task_completed` and listing (observation 42). |
 | `19-subagent-background-unpolled.ndjson` | (2026-09-25 argv) | a background spawn nobody polls, watched past its end | Its end reported with no poll, and the woken parent's turn (observations 37, 40). |
 | `20-monitor.ndjson` | (2026-09-25 argv) | the model's `monitor` tool on a two-line loop, watched through its end | The monitor's start, `_x.ai/monitor_event`, its end, and three wakes — the first announced before the prompt's own RPC result (observations 40, 41). |
-| `21-stop-with-background-work.ndjson` | (2026-09-25 argv) | a background shell and subagent; `session/cancel` with no prompt in flight; a poll of both | What a session-scoped Stop does to each (observation 44). |
+| Archived: `21-stop-with-background-work.ndjson` | (2026-09-25 argv) | a background shell and subagent; `session/cancel` with no prompt in flight; a poll of both | What a session-scoped Stop does to each (observation 44). |
 | `22-subagent-await-budget.ndjson` | (2026-09-25 argv), `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` | a foreground spawn of a 12 s command | A foreground run moved to the background, and its later end and wake (observation 45). |
 | `23-stop-cuts-foreground-subagent.ndjson` | (2026-09-25 argv) | a foreground spawn; `session/cancel` mid-turn | A Stop cutting a foreground call cancels its child (observation 44). |
-| `24-background-shell-outlives-cli.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | one background `sleep 45`; the processes carrying the launch marker listed while the CLI runs, the CLI stopped the adapter's way, listed again, swept | Every child of the CLI's own lives in a session of its own and inherits its environment: the shell and two MCP servers outlived a clean SIGTERM, reparented to init (observation 48; the `/proc` facts are the harness's `note` frames). |
+| Archived: `24-background-shell-outlives-cli.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | one background `sleep 45`; the processes carrying the launch marker listed while the CLI runs, the CLI stopped the adapter's way, listed again, swept | Every child of the CLI's own lives in a session of its own and inherits its environment: the shell and two MCP servers outlived a clean SIGTERM, reparented to init (observation 48; the `/proc` facts are the harness's `note` frames). |
 | `25-subagent-child-approval.ndjson` | `--reasoning-effort low --permission-mode default agent stdio` (supervised), the 2026-09-26 launch | turn 1: a foreground spawn whose child writes a file — the spawn's approval and the child's write both answered allow-once; turn 2: a second spawn, its own approval answered reject-once | The spawn itself asks when supervised; a subagent's own tool asks on the PARENT's session; a declined spawn fails its call (observation 49). |
 | `26-subagent-child-write-rejected.ndjson` | the same supervised argv | a foreground spawn allowed, its child's write answered reject-once | The child's turn ends `cancelled`; `subagent_finished {cancelled, error}`; the spawn call fails `tool_execution_failed` (observations 49, 50). |
 | `27-kill-already-exited.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | a background shell and a background subagent, waited on until both finished, then both killed | `KillTask {outcome: "already_exited"}` for a shell and for a subagent (observation 51). |

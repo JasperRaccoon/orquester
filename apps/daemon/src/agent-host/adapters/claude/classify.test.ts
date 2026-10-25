@@ -20,6 +20,7 @@ describe("classifyToolItemType", () => {
     assert.equal(classifyToolItemType("Write"), "file_change");
     assert.equal(classifyToolItemType("Edit"), "file_change");
     assert.equal(classifyToolItemType("Agent"), "collab_agent_tool_call");
+    assert.equal(classifyToolItemType("Workflow"), "collab_agent_tool_call");
     assert.equal(classifyToolItemType("TaskCreate"), "dynamic_tool_call");
     // The task tools CLAUDE_CODE_ENABLE_TODO_TOOLS turns on are to-do bookkeeping, never edits.
     for (const tool of ["TaskUpdate", "TaskList", "TaskGet", "TodoWrite"]) {

@@ -14,7 +14,6 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { JsonlFileTail } from "../../support/tail-file.ts";
-import { classifyToolItemType } from "./classify.ts";
 import { CLAUDE_FIXTURES_DIR, countingIds, fixedClock, readClaudeFixture, replayClaudeFixture } from "./fixtures.ts";
 import { ClaudeNormalizer } from "./normalize.ts";
 import { projectClaudeHistory } from "./project-history.ts";
@@ -97,14 +96,6 @@ describe("workflow_progress parsing", () => {
     };
     assert.equal(workflowAgentPromptOf(record), "Line one\n  indented\nLine three");
     assert.equal(workflowAgentPromptOf({ type: "user", message: { content: "plain" } }), undefined);
-  });
-});
-
-describe("the Workflow tool call", () => {
-  it("classifies Workflow as a collaboration tool call", () => {
-    const script =
-      "export const meta = {\n  name: 'capture-demo',\n  description: 'Two-phase capture demo',\n  phases: [{ title: 'Gather' }],\n}\nphase('Gather')";
-    assert.equal(classifyToolItemType("Workflow", { script }), "collab_agent_tool_call");
   });
 });
 
@@ -259,10 +250,8 @@ describe("a resumed session's workflow runs", () => {
 
   it("falls back to the journal when the run left no snapshot", async () => {
     const source = sessionDir("17-workflow", "97167e25-8c30-431f-b9f7-1cc1b48bd80b");
-    const copy = await fs.mkdtemp(nodePath.join(tmpdir(), "wf-history-"));
-    await fs.cp(nodePath.join(source, "subagents"), nodePath.join(copy, "subagents"), { recursive: true });
     const { toolUseId, launch } = launchText("17-workflow.ndjson");
-    const run = await readWorkflowHistoryRun({ projectsDir: nodePath.dirname(copy), sessionDir: copy, toolUseId, launch });
+    const run = await readWorkflowHistoryRun({ projectsDir: projectsDir("17-workflow"), sessionDir: source, toolUseId, launch });
     assert.equal(run.status, "stopped");
     assert.deepEqual(run.phases, [
       { index: 1, title: "Gather" },
@@ -276,7 +265,6 @@ describe("a resumed session's workflow runs", () => {
         [3, "combine", "completed", "alpha beta done"]
       ]
     );
-    await fs.rm(copy, { recursive: true, force: true });
   });
 
   it("projects the run's roster and each agent's conversation, owned by its member", async () => {

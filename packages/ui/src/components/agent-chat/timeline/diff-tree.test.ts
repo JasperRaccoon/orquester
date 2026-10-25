@@ -94,7 +94,9 @@ test("a truncated patch still yields the file it started", () => {
   const diff = ["diff --git a/src/a.ts b/src/a.ts", "--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1,9 +1,9 @@", "+a"].join(
     "\n"
   );
-  assert.equal(splitUnifiedDiff(diff).length, 1);
+  const files = splitUnifiedDiff(diff);
+  assert.equal(files[0]?.path, "src/a.ts");
+  assert.ok(files[0]?.patch.includes("+a"));
 });
 
 test("countDiffLines ignores the file headers", () => {

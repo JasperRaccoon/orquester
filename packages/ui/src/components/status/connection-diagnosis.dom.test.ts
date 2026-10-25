@@ -36,7 +36,7 @@ class ClosingSocket {
   onerror: (() => void) | null = null;
   constructor(url: string) {
     sockets.push(url);
-    setTimeout(() => this.onclose?.({ code: 1006 }), 0);
+    queueMicrotask(() => this.onclose?.({ code: 1006 }));
   }
   close(): void {}
 }
@@ -95,14 +95,6 @@ const click = async (element: HTMLElement) => {
     element.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
 };
-/** Let probes, timers and promises settle. */
-const settle = async () => {
-  for (let i = 0; i < 5; i += 1) {
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    });
-  }
-};
 
 function render(api: Partial<ApiClient> & Record<string, unknown>, node: ReactNode) {
   const client = { transportKind: "http", connection: { id: "vps", password: CREDENTIAL }, ...api } as unknown as ApiClient;
@@ -135,7 +127,6 @@ describe("ConnectionStatusToast", () => {
     assert.equal(connects, 1);
 
     await click(button("Details")!);
-    await settle();
     assert.match(text(), /Nothing listens on that port/);
     assert.match(text(), /HTTP:.*GET \/health failed/);
     assert.match(text(), /WebSocket:.*closed before opening \(code 1006\)/);

@@ -1,26 +1,17 @@
 /**
- * The picker's model logic (unified MCP design 2026-10-15 §4.1, D-20, D-23) and picker parity:
- * one fixture snapshot → the view `list_agents` reports equals what the composer derives with the
- * same functions.
+ * The picker's model/default contracts (unified MCP design 2026-10-15 §4.1, D-20, D-23).
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ProviderModel, ProviderSnapshot } from "./adapter-types.ts";
-import { RUNTIME_MODES } from "./adapter-types.ts";
 import {
-  currentOptionValue,
   defaultOptionValues,
-  modelChipLabel,
   modelPickerHint,
-  optionDescriptors,
   providerPickerView,
   resolveLaunchModel,
-  resolveSelectedModel,
-  RUNTIME_MODE_HINTS,
-  RUNTIME_MODE_LABELS,
-  RUNTIME_MODE_SHORT_HINTS
+  resolveSelectedModel
 } from "./model-selection.ts";
 
 const OPUS: ProviderModel = {
@@ -48,27 +39,6 @@ const OLD: ProviderModel = { slug: "claude-3", name: "Claude 3", isLegacy: true,
 
 /** The fixture snapshot both views are derived from. */
 const SNAPSHOT: Pick<ProviderSnapshot, "status" | "models"> = { status: "ready", models: [OLD, HAIKU, OPUS] };
-
-test("picker parity: the reported view is what the composer derives from the same snapshot", () => {
-  const view = providerPickerView(SNAPSHOT, { includeLegacy: true });
-  // The composer: a launch naming no model, the chip label, the menu hint, each option's value.
-  assert.equal(view.defaultModel, resolveSelectedModel(SNAPSHOT.models, null)?.slug);
-  for (const model of SNAPSHOT.models) {
-    const row = view.models.find((entry) => entry.slug === model.slug);
-    assert.ok(row, model.slug);
-    assert.equal(row.shortName, modelChipLabel(model, null));
-    assert.equal(row.hint, model.subProvider ?? (model.isLegacy ? "legacy" : undefined), "ComposerChips' hint");
-    assert.equal(row.isDefault, model.slug === resolveSelectedModel(SNAPSHOT.models, null)?.slug);
-    for (const descriptor of optionDescriptors(model)) {
-      assert.deepEqual(row.options.find((option) => option.id === descriptor.id)?.default, currentOptionValue(null, descriptor));
-    }
-  }
-  // The launcher (NewTabMenu) lists non-legacy models only: so does the default view.
-  assert.deepEqual(
-    providerPickerView(SNAPSHOT).models.map((model) => model.slug),
-    SNAPSHOT.models.filter((model) => !model.isLegacy).map((model) => model.slug)
-  );
-});
 
 test("the fixture's picker view, exactly", () => {
   assert.deepEqual(providerPickerView(SNAPSHOT, { includeLegacy: true }), {
@@ -121,15 +91,9 @@ test("an empty catalogue from a ready provider reads as still loading", () => {
   assert.equal(providerPickerView({ status: "ready", models: [] }).defaultModel, null);
 });
 
-test("every permission mode has a label and both hints", () => {
-  for (const mode of RUNTIME_MODES) {
-    assert.ok(RUNTIME_MODE_LABELS[mode] && RUNTIME_MODE_HINTS[mode] && RUNTIME_MODE_SHORT_HINTS[mode], mode);
-  }
-});
-
 test("resolveLaunchModel: the one choice both the launch and the reported default use", () => {
   const models = SNAPSHOT.models;
-  assert.equal(resolveLaunchModel(models)?.slug, providerPickerView(SNAPSHOT).defaultModel);
+  assert.equal(resolveLaunchModel(models)?.slug, "claude-opus-5");
   assert.equal(resolveLaunchModel(models, "")?.slug, "claude-opus-5");
   assert.equal(resolveLaunchModel(models, "claude-3")?.isLegacy, true, "a legacy model named explicitly");
   assert.equal(resolveLaunchModel(models, "nope"), null);

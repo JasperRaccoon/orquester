@@ -30,7 +30,7 @@ export const DEFAULT_KILL_GRACE_MS = 2_000;
  * 2026-10-07: a load of ~180 on 12 CPUs starved the host past its health
  * probes and it was restarted under every live turn).
  */
-export const PROVIDER_CHILD_NICENESS = 10;
+const PROVIDER_CHILD_NICENESS = 10;
 
 /**
  * `nice(1)`, where the platform has one. It sets the value before it execs the

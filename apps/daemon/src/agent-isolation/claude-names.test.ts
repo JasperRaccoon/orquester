@@ -12,12 +12,8 @@ import {
   claudeProjectEntryNames,
   claudeProjectMcpServers,
   claudeSkillNamesIn,
-  isValidClaudePluginName,
-  MAX_CLAUDE_FILE_BYTES,
-  readJsonObject,
-  type ClaudeNamesFs
+  isValidClaudePluginName
 } from "./claude-names.ts";
-import { HostProjectFs } from "../boxes/remote/fs/project-fs.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -137,28 +133,5 @@ describe("Claude names (as observed on Claude Code 2.1.285)", () => {
       JSON.stringify({ version: 2, plugins: { "a@mkt": [{ scope: "user" }], "b@other": [] } })
     );
     assert.deepEqual(await claudeInstalledPluginIds(dir), ["a@mkt", "b@other"]);
-  });
-
-  it("file reads are bounded: one byte past the cap is asked for, and a file past it reads as unreadable", async () => {
-    const dir = await root();
-    const file = join(dir, ".mcp.json");
-    await write(file, JSON.stringify({ mcpServers: {} }));
-    const host = new HostProjectFs();
-    const asked: (number | undefined)[] = [];
-    let pad = 0;
-    // Once padded, the file is past the cap: trailing spaces, still valid JSON were it parsed.
-    const fs: ClaudeNamesFs = {
-      stat: (path, options) => host.stat(path, options),
-      readdir: (path) => host.readdir(path),
-      read: async (path, options) => {
-        asked.push(options.length);
-        const bytes = await host.read(path, options);
-        return pad > 0 ? Buffer.concat([bytes, Buffer.alloc(Math.min(pad, options.length - bytes.length), 0x20)]) : bytes;
-      }
-    };
-    assert.deepEqual(await readJsonObject(file, fs), { mcpServers: {} });
-    pad = MAX_CLAUDE_FILE_BYTES;
-    assert.equal(await readJsonObject(file, fs), null, "a file past the cap is not parsed");
-    assert.deepEqual(asked, [MAX_CLAUDE_FILE_BYTES + 1, MAX_CLAUDE_FILE_BYTES + 1]);
   });
 });

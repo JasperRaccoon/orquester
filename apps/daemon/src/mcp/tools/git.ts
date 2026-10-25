@@ -9,13 +9,13 @@ import { expectOk, ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 
 /** Rows a list view keeps before it says `truncated` (each a short record). */
-export const MAX_GIT_FILES = 300;
-export const MAX_GIT_BRANCHES = 200;
-export const MAX_GIT_UNTRACKED = 200;
+const MAX_GIT_FILES = 300;
+const MAX_GIT_BRANCHES = 200;
+const MAX_GIT_UNTRACKED = 200;
 /** A commit body's most characters in `log`. */
-export const MAX_COMMIT_BODY_CHARS = 1_000;
-export const DEFAULT_GIT_LOG = 20;
-export const MAX_GIT_LOG = 100;
+const MAX_COMMIT_BODY_CHARS = 1_000;
+const DEFAULT_GIT_LOG = 20;
+const MAX_GIT_LOG = 100;
 
 const VIEWS = ["status", "branches", "log", "diff"] as const;
 

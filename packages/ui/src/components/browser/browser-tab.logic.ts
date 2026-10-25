@@ -8,7 +8,7 @@
 import type { BoxKind, BrowserSummary } from "@orquester/api";
 
 /** Whether a project box of this kind runs its Browser tab's Chromium itself (the daemon's rule). */
-export function boxKindRunsBrowser(kind: BoxKind | null | undefined): boolean {
+function boxKindRunsBrowser(kind: BoxKind | null | undefined): boolean {
   return kind === "linux" || kind === "linux-gpu";
 }
 

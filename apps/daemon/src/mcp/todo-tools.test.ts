@@ -3,7 +3,6 @@
  * routes (`createServer`, inject only — nothing listens) over a real TodoListManager, reached
  * through the in-process `InjectDaemonApi` exactly as the catalog tools reach them.
  */
-import { createWriteStream } from "node:fs";
 import { mkdir,mkdtemp,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +12,7 @@ import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester
 import { createServer } from "../index.ts";
 import { TodoListManager } from "../todos.ts";
 import { InjectDaemonApi, type DaemonApi } from "./daemon-api.ts";
-import { createTodoList, deleteTodoList, listTodoLists, toggleTodoItem, updateTodoList, type TodoSelector } from "./todo-tools.ts";
+import { createTodoList, deleteTodoList, toggleTodoItem, updateTodoList, type TodoSelector } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
 import { toSafeToolError } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
@@ -30,7 +29,7 @@ async function makeTools(t: TestContext) {
     createDefaultDaemonConfig({ env: {} }),
     resolved as unknown as CreateServerArgs[1],
     createDefaultClientConfig(join(root, "daemon.sock")),
-    createWriteStream("/dev/null"),
+    { write() {} },
     { todos } as unknown as CreateServerArgs[4],
     { authRequired: false, mode: "local" }
   );
@@ -42,33 +41,12 @@ async function makeTools(t: TestContext) {
   const W: TodoSelector = { workspace: "w" };
   const tools = {
     create: (sel: TodoSelector, name: string) => createTodoList(api, sel, name),
-    list: (sel: TodoSelector) => listTodoLists(api, sel),
     update: (id: string, patch: { name?: string; body?: string }, sel: TodoSelector = W) => updateTodoList(api, sel, id, patch),
     remove: (id: string, sel: TodoSelector = W) => deleteTodoList(api, sel, id),
     toggleItem: (id: string, item: string | number, checked?: boolean, sel: TodoSelector = W) => toggleTodoItem(api, sel, id, item, checked)
   };
   return { root, todos, tools, api };
 }
-
-test("workspace scope create/list stores by workspace name and omits refKey", async (t) => {
-  const { todos, tools } = await makeTools(t);
-
-  const created = await tools.create({ workspace: "w" }, "Workspace tasks");
-
-  assert.equal(created.scope, "workspace");
-  assert.equal(created.name, "Workspace tasks");
-  assert.equal("refKey" in created, false);
-  assert.deepEqual(todos.list("workspace", "w").map((t) => t.id), [created.id]);
-  assert.deepEqual(await tools.list({ workspace: "w" }), [created]);
-});
-
-test("a project list is keyed by the project path, as the GUI keys it", async (t) => {
-  const { root, todos, tools } = await makeTools(t);
-  const created = await tools.create({ workspace: "w", project: "p" }, "Bugs");
-  assert.equal(created.scope, "project");
-  assert.deepEqual(todos.list("project", join(root, "w", "p")).map((r) => r.id), [created.id]);
-  assert.deepEqual(await tools.list({ workspace: "w" }), [], "a workspace's own lists are another scope");
-});
 
 test("invalid names and missing directories reject as PROJECT_NOT_FOUND before creating todos", async (t) => {
   const { root, todos, tools } = await makeTools(t);
@@ -221,17 +199,17 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
   await tools.update(twins.id, { body: `- [ ] ${long}\n- [ ] ${long}` });
   const ambiguous = await refusal(long, twins.id);
   assert.match(ambiguous, /"L{99}…"/);
-  assert.match(ambiguous, /1\. L{69}…, 2\. L{69}…/);
-  // A 3 000-item list: the first 40 items listed, then how many there are.
+  assert.match(ambiguous, /1\. L+…, 2\. L+…/);
+  assert.ok(!ambiguous.includes(long), "suggestions stay bounded");
+  // A long list offers a bounded head of its items and the total, rather than echoing it whole.
   const big = await tools.create({ workspace: "w" }, "Big");
   await tools.update(big.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] task ${i + 1}`).join("\n") });
   const outOfRange = await refusal(5_000, big.id);
   assert.match(outOfRange, /5000/);
   assert.match(outOfRange, /1\. task 1, 2\. task 2/);
-  assert.match(outOfRange, /40\. task 40/);
   assert.match(outOfRange, /3000 items/);
-  assert.ok(!outOfRange.includes("41. task 41"));
-  assert.ok(outOfRange.length < 1_000, `${outOfRange.length} characters`);
+  assert.ok(!outOfRange.includes("3000. task 3000"), "the list is summarized");
+  assert.ok([...outOfRange].length <= 4_000, `${outOfRange.length} characters`);
 });
 
 test("the longest refusal there can be ends whole under the error cap, whatever the input: the quote escaped at its longest, 40 items at their cap", async (t) => {

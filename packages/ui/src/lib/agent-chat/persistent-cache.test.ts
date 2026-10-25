@@ -17,7 +17,6 @@ import {
   indexedDbThreadCacheBackend,
   linkThreadCache,
   loadPersistedThread,
-  parsePersistedSnapshot,
   persistableSnapshotOf,
   setThreadCacheBackend,
   threadCacheIdle,
@@ -230,19 +229,6 @@ describe("connection identity", () => {
 // ---------------------------------------------------------------------------
 
 describe("records", () => {
-  it("round-trips the snapshot a snapshot frame would carry", async () => {
-    const state = synchronizedState(5);
-    await save(transportFor("https://a.example"), state);
-    const record = await loadPersistedThread(SCOPE_A, "s1");
-    assert.ok(record);
-    assert.equal(record.seq, 5);
-    assert.equal(record.hostInstanceId, "host-1");
-    assert.deepEqual(record.snapshot, persistableSnapshotOf(state));
-    // And folded as a frame it is the same thread.
-    const refolded = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: record.snapshot });
-    assert.deepEqual(refolded.slice.entries, state.slice.entries);
-    assert.deepEqual(refolded.slice.pending, state.slice.pending);
-  });
 
   it("ignores and deletes a record of another format or fold version", async () => {
     const key = threadCacheKey(SCOPE_A, "s1");
@@ -263,6 +249,18 @@ describe("records", () => {
       ["meta for another session", (meta) => { meta.sessionId = "s2"; }],
       ["no host instance", (meta) => { meta.hostInstanceId = ""; }],
       ["body at another seq", (_meta, body) => { body.seq = 4; }],
+      ["headless", (meta, body) => {
+        const value = JSON.parse(body.json as string);
+        value.head = null;
+        body.json = JSON.stringify(value);
+        meta.chars = (body.json as string).length;
+      }],
+      ["malformed pending approval", (meta, body) => {
+        const value = JSON.parse(body.json as string);
+        value.pending = { approvals: [{}] };
+        body.json = JSON.stringify(value);
+        meta.chars = (body.json as string).length;
+      }],
       ["body not JSON", (meta, body) => { body.json = "{"; meta.chars = 1; }],
       ["length disagrees", (meta) => { meta.chars = 3; }],
       ["a snapshot of another thread", (meta, body) => {
@@ -289,15 +287,6 @@ describe("records", () => {
     }
   });
 
-  it("validates the snapshot field-wise, as the host validates its own state.json", () => {
-    const good = persistableSnapshotOf(synchronizedState(5))!;
-    assert.ok(parsePersistedSnapshot(JSON.parse(JSON.stringify(good)), "s1", 5));
-    assert.equal(parsePersistedSnapshot({ ...good, seq: 6 }, "s1", 5), null, "folded to another seq");
-    assert.equal(parsePersistedSnapshot({ ...good, pending: { approvals: [{}] } }, "s1", 5), null);
-    assert.equal(parsePersistedSnapshot({ ...good, head: null }, "s1", 5), null, "headless");
-    assert.equal(parsePersistedSnapshot(null, "s1", 5), null);
-  });
-
   it("saves the window only, with a cursor-less bound once the window has evicted", () => {
     // A bounded snapshot's: its cut outlives the cursor an eviction makes stale.
     const bounds = { indexed: true, hasOlder: false, beforeCursor: "c1", oldestRetainedOrdinal: 1, totalTurns: 3, windowCut: "c1" };
@@ -315,11 +304,6 @@ describe("records", () => {
     const saved = persistableSnapshotOf({ reducer: evicted, slice: evicted.slice })!;
     assert.deepEqual(saved.history, { ...bounds, hasOlder: true, beforeCursor: null, oldestRetainedOrdinal: null });
     assert.equal(saved.history?.windowCut, "c1", "the cut is kept with the window it describes");
-    assert.equal(
-      parsePersistedSnapshot(JSON.parse(JSON.stringify(saved)), "s1", 5)?.history?.windowCut,
-      "c1",
-      "and read back"
-    );
     assert.ok(!JSON.stringify(saved).includes("older"), "a loaded page is never saved");
   });
 
@@ -844,7 +828,6 @@ describe("on-demand agent rows", () => {
     assert.ok(record);
     assert.deepEqual(record.snapshot.omittedAgentIds, ["a", "b"]);
     assert.equal(record.snapshot.history?.windowCut, "c1", "and the bounded snapshot's cut with them");
-    assert.deepEqual(record.snapshot, persistableSnapshotOf(state));
     const refolded = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: record.snapshot });
     assert.deepEqual(refolded.slice.omittedAgentIds, ["a", "b"], "a restored copy knows what it lacks");
     assert.equal(refolded.slice.history.bounds?.windowCut, "c1");

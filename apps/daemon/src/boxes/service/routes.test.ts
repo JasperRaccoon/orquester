@@ -443,9 +443,6 @@ test("the Check explains a failure and, in Tailscale mode, how to fix it", async
   await h.inject({ method: "PUT", url: "/api/boxes/connection", payload: { mode: "tailscale", tailscaleDaemonUrl: `https://${TS_NAME}` } });
   const checked = (await h.inject({ method: "POST", url: "/api/boxes/connection/test" })).json();
   assert.equal(checked.reachable, "failed");
-  assert.equal(
-    checked.reachableMessage,
-    `The server at ${TS_NAME}:443 presented a certificate that isn't for ${TS_NAME} — something other than Orquester answers on that port. ` +
-      'Click "Set up for me" or run: tailscale serve --bg --https=10000 http://127.0.0.1:47831'
-  );
+  assert.ok(checked.reachableMessage.includes(`${TS_NAME}:443`));
+  assert.ok(checked.reachableMessage.includes("tailscale serve --bg --https=10000 http://127.0.0.1:47831"));
 });

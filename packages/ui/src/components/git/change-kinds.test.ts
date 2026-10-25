@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { changeKindRows, changeKindTitle, shouldShowChangeKindSplit } from "./change-kinds";
+import { changeKindRows, shouldShowChangeKindSplit } from "./change-kinds";
 
 describe("changeKindRows", () => {
   it("lists only the kinds a change touches, in display order", () => {
@@ -28,10 +28,6 @@ describe("changeKindRows", () => {
       ]
     );
   });
-
-  it("is empty for no files", () => {
-    assert.deepEqual(changeKindRows([]), []);
-  });
 });
 
 describe("shouldShowChangeKindSplit", () => {
@@ -43,21 +39,5 @@ describe("shouldShowChangeKindSplit", () => {
   it("shows a mix, or a change that is all one non-code kind", () => {
     assert.equal(shouldShowChangeKindSplit(changeKindRows([{ path: "a.ts" }, { path: "a.test.ts" }])), true);
     assert.equal(shouldShowChangeKindSplit(changeKindRows([{ path: "docs/a.md" }])), true);
-  });
-});
-
-describe("changeKindTitle", () => {
-  const rows = changeKindRows([
-    { path: "a.ts", additions: 3, deletions: 1 },
-    { path: "logo.png", additions: 0, deletions: 0 },
-    { path: "a.test.ts", additions: 4, deletions: 0 }
-  ]);
-
-  it("describes each kind with its lines", () => {
-    assert.equal(changeKindTitle(rows, true), "Code: 2 files, +3 −1\nTests: 1 file, +4 −0");
-  });
-
-  it("describes files only when asked", () => {
-    assert.equal(changeKindTitle(rows, false), "Code: 2 files\nTests: 1 file");
   });
 });

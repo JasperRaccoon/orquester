@@ -254,7 +254,7 @@ export interface GrokProfileConfigInput {
  * the compat cells, `[skills] ignore`, `[plugins] disabled` and
  * `[mcp_servers]` — the recipe's keys win.
  */
-export function grokProfileConfig(input: GrokProfileConfigInput): Doc {
+function grokProfileConfig(input: GrokProfileConfigInput): Doc {
   const doc = grokRuntimeConfig(input.carriedOver);
   const cli = typeof doc.cli === "object" && doc.cli !== null && !Array.isArray(doc.cli) ? (doc.cli as Doc) : {};
   doc.cli = { ...cli, auto_update: false, use_leader: false };

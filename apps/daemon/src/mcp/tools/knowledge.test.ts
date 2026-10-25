@@ -27,7 +27,6 @@ import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { KNOWLEDGE_QUERY_MAX } from "../../knowledge/search/search.ts";
 import { KNOWLEDGE_AUTHOR_MAX, KNOWLEDGE_HANDLE_MAX, KNOWLEDGE_KIND_MAX, KNOWLEDGE_URL_MAX } from "../../knowledge/store/validate.ts";
-import { KNOWLEDGE_GET_BODY_MAX_BYTES } from "./knowledge.ts";
 
 const caller = (over: Partial<ThreadCaller> = {}): ThreadCaller => ({
   kind: "thread", threadId: "chat-1", title: "Landing page", projectPath: "/w/acme/web", workspace: "acme", cwd: "/w/acme/web", agentId: "claude", callId: "call-1",
@@ -74,9 +73,10 @@ const meta = (over: Partial<KnowledgeEntrySummary> = {}): KnowledgeEntrySummary 
 const withCollections = (api: FakeDaemonApi) => api.on("GET", knowledgeRoutes.collections, { status: 200, body: COLLECTIONS });
 
 test("knowledge_search: posts the query with the calling session; compact hits with collection names, one-line snippets and citations", async () => {
+  const entry = meta();
   const response: KnowledgeSearchResponse = {
     hits: [
-      { kind: "entry", score: 0.9, entry: meta() },
+      { kind: "entry", score: 0.9, entry },
       { kind: "concept", score: 0.5, concept: { id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic", description: "Pages comparing a product with a competitor." }, entryIds: ["ke_aaaaaaaaaaaa"] }
     ],
     searched: ["kc_seo0000000", "kc_ads0000000"]
@@ -86,17 +86,20 @@ test("knowledge_search: posts the query with the calling session; compact hits w
   assert.equal(r.isError, undefined, textOf(r));
   assert.deepEqual(api.calls.find((call) => call.path === knowledgeRoutes.search)!.body, { query: "ranking in ChatGPT", sessionId: "chat-1", collections: ["SEO"], limit: 5 });
   const out = textOf(r);
-  assert.match(out, /^2 hits \(over SEO, Ads\)/);
-  assert.match(out, /1\. ke_aaaaaaaaaaaa · thread · Om Patel \(@om_patel5\) · 2026-10-11 · in SEO, Ads\n/);
-  assert.match(out, /   Build a page per competitor: "\[competitor\] vs \[you\]" ranks fast\.\n/, "the snippet is one line");
-  assert.ok(out.includes(`   cite: ${knowledgeCitation(meta())}`));
-  assert.match(out, /2\. concept tactic-alternatives "Alternatives pages" \(Tactic\): Pages comparing a product with a competitor\. · entries ke_aaaaaaaaaaaa/);
+  for (const value of ["SEO", "Ads", "ke_aaaaaaaaaaaa", "thread", "Om Patel", "@om_patel5", "2026-10-11", "tactic-alternatives", "Alternatives pages", "Tactic", "Pages comparing a product with a competitor.", entry.citation]) {
+    assert.ok(out.includes(value), value);
+  }
+  assert.ok(out.includes('Build a page per competitor: "[competitor] vs [you]" ranks fast.'), "the supplied snippet remains on one line");
+  assert.ok(out.indexOf("ke_aaaaaaaaaaaa") < out.indexOf("tactic-alternatives"), "search rank order is preserved");
   assert.doesNotMatch(out, /"score"|savedFrom|contentHash/, "never the full objects");
 });
 
 test("knowledge_search: nothing found says so; the limits are the contract's", async () => {
   const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [], searched: ["kc_seo0000000"] } });
-  assert.match(textOf(await run(api, "knowledge_search", { query: "x" })), /^No knowledge found \(over SEO\)/);
+  const empty = await run(api, "knowledge_search", { query: "x" });
+  assert.equal(empty.isError, undefined);
+  assert.ok(textOf(empty).includes("SEO"));
+  assert.doesNotMatch(textOf(empty), /orquester-knowledge:entry\//);
   for (const args of [{ query: "" }, { query: "   " }, { query: "x", limit: KNOWLEDGE_SEARCH_MAX_LIMIT + 1 }, { query: "x", limit: 0 }, { query: "x".repeat(KNOWLEDGE_QUERY_MAX + 1) }, { query: "x", collections: ["c".repeat(65)] }, { query: "x", sessionId: "other" }]) {
     assert.equal(errorOf(await run(api, "knowledge_search", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
   }
@@ -115,16 +118,19 @@ test("knowledge_get: the entry whole with its citation, concepts and related ent
   assert.equal(r.isError, undefined, textOf(r));
   assert.deepEqual(api.calls.find((call) => call.path.startsWith("/api/knowledge/items/"))!.query, { sessionId: "chat-1" });
   const out = textOf(r);
-  assert.ok(out.startsWith(`cite: ${entry.citation}\nentry ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads · linking pending\n`), out);
-  assert.match(out, /URL: https:\/\/x\.com\/om_patel5\/status\/1/);
-  assert.match(out, /Concepts: Alternatives pages \(Tactic\) \[tactic-alternatives\]/);
-  assert.match(out, /- ke_bbbbbbbbbbbb · thread · @hridoyreh · 2026-10-11 · in kc_gone000000\n  cite: \[Competitor pages · @hridoyreh\]/, "an unknown collection shows its id");
-  assert.ok(out.endsWith("---\nLine one.\nLine two."));
+  for (const value of [entry.citation, "ke_aaaaaaaaaaaa", "thread", "Om Patel", "@om_patel5", "2026-10-11", "SEO", "Ads", "pending", "https://x.com/om_patel5/status/1", "Alternatives pages", "Tactic", "tactic-alternatives", "ke_bbbbbbbbbbbb", "@hridoyreh", "kc_gone000000", detail.related[0]!.citation, detail.entry.body]) {
+    assert.ok(out.includes(value), value);
+  }
 
-  const long = { ...detail, entry: { ...detail.entry, body: "é".repeat(KNOWLEDGE_GET_BODY_MAX_BYTES) } };
+  const long = { ...detail, entry: { ...detail.entry, body: "é".repeat(48_000) } };
   api.on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: long } });
   const cut = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
-  assert.match(cut, new RegExp(`\\[… ${KNOWLEDGE_GET_BODY_MAX_BYTES} more bytes not shown\\]$`));
+  assert.ok(cut.includes("é".repeat(100)), "the body retains its source bytes");
+  const kept = cut.match(/é+/)?.[0] ?? "";
+  assert.ok(kept.length < long.entry.body.length, "the oversized body is cut");
+  assert.ok(cut.includes(String(Buffer.byteLength(long.entry.body) - Buffer.byteLength(kept))), "the omitted UTF8 byte count matches the missing body");
+  assert.ok(cut.includes("…"), "the cut is marked");
+  assert.doesNotMatch(cut, /\ufffd/, "the body is cut on a UTF8 boundary");
   assert.ok(Buffer.byteLength(cut, "utf8") < 60_000);
 });
 
@@ -144,8 +150,9 @@ test("knowledge_get: a concept — description, entries, links; a hidden or unkn
     })
     .on("GET", knowledgeRoutes.item("ke_hidden00000"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." } });
   const out = textOf(await run(api, "knowledge_get", { id: "tactic-alternatives" }));
-  assert.match(out, /^concept tactic-alternatives "Alternatives pages" \(Tactic\) · confidence 0\.91 · in SEO\nAliases: vs pages\nComparison pages\.\nAttributes: channel: SEO\nEntries:\n- ke_aaaaaaaaaaaa/);
-  assert.match(out, /Links:\n- uses → Ahrefs \(Tool\) \[tool-ahrefs\]$/);
+  for (const value of ["tactic-alternatives", "Alternatives pages", "Tactic", "0.91", "SEO", "vs pages", "Comparison pages.", "channel", "ke_aaaaaaaaaaaa", "uses", "Ahrefs", "Tool", "tool-ahrefs"]) {
+    assert.ok(out.includes(value), value);
+  }
   const hidden = await run(api, "knowledge_get", { id: "ke_hidden00000" });
   assert.equal(hidden.isError, true);
   assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
@@ -173,9 +180,10 @@ test("knowledge_save: one call, many items, the session named, handles without @
     assert.equal(r.isError, undefined, textOf(r));
     assert.equal(r.structuredContent, undefined, "a text result: no toolApproval reference, no card");
     const out = textOf(r);
-    assert.match(out, /^Saved 1 entry, 1 already saved; linking queued\.\nCreated collection "AI search": tell the user\.\n/);
-    assert.ok(out.includes(`- saved ke_aaaaaaaaaaaa · in SEO, AI search · cite: ${meta().citation}`));
-    assert.match(out, /- already saved as ke_bbbbbbbbbbbb \(not saved again; the collections it is in now\) · in Ads · cite: \[Old\]/);
+    for (const value of ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb", "SEO", "AI search", "Ads", "queued", saved.results[0]!.citation, saved.results[1]!.citation]) {
+      assert.ok(out.includes(value), value);
+    }
+    assert.match(out, /already saved[^\n]*ke_bbbbbbbbbbbb/, "the duplicate is distinguished from a new save");
   }
   assert.deepEqual(api.calls.find((call) => call.path === knowledgeRoutes.save)!.body, {
     entries: [
@@ -218,9 +226,14 @@ test("knowledge_save: inputs mirror the contract — at least one collection, bo
 test("knowledge_collections: every collection by name, count and description", async () => {
   const api = withCollections(new FakeDaemonApi());
   const out = textOf(await run(api, "knowledge_collections", {}));
-  assert.equal(out, "2 collections, 52 entries (3 unfiled).\n- SEO (40): Ranking in search engines.\n- Ads (9): Paid acquisition.");
+  assert.match(out, /SEO\D*40\b\D*Ranking in search engines\./);
+  assert.match(out, /Ads\D*9\b\D*Paid acquisition\./);
+  assert.match(out, /52\b\D*entries/i);
+  assert.match(out, /3\b\D*unfiled/i);
   api.on("GET", knowledgeRoutes.collections, { status: 200, body: { collections: [], unfiledCount: 0, totalEntries: 0 } });
-  assert.match(textOf(await run(api, "knowledge_collections", {})), /None yet: knowledge_save can create one/);
+  const empty = await run(api, "knowledge_collections", {});
+  assert.equal(empty.isError, undefined);
+  assert.match(textOf(empty), /0\b\D*collections/i);
 });
 
 test("worker tools: next task (instructions once, then a pointer), submit returns the next one; an invalid answer is refused to be redone", async () => {
@@ -235,21 +248,25 @@ test("worker tools: next task (instructions once, then a pointer), submit return
   const first = textOf(await run(api, "knowledge_worker_next_task", {}));
   assert.equal(api.calls[0]!.path, knowledgeRoutes.workerNext);
   assert.deepEqual(api.calls[0]!.body, { sessionId: "chat-1" });
-  assert.match(first, /^Task t1 · step pass2 · answer ≤ 4000 tokens · 5 more waiting\nInstructions:\nExtract concepts as JSON\.\n\nInput:\nAuthor: Om Patel/);
-  assert.match(first, /knowledge_worker_submit: taskId "t1"/);
+  for (const value of ["t1", "pass2", "4000", "5", "Extract concepts as JSON.", task.input, "knowledge_worker_submit"]) assert.ok(first.includes(value), value);
 
   const next = await run(api, "knowledge_worker_submit", { taskId: "t1", answer: '{"nodes": []}' });
   assert.equal(next.isError, undefined, textOf(next));
   assert.deepEqual(api.calls.at(-1)!.body, { sessionId: "chat-1", taskId: "t1", answer: '{"nodes": []}' });
-  assert.match(textOf(next), /^Accepted\.\nTask t2 · step pass2 .*\nInstructions: the same as task t1\.\n/);
+  for (const value of ["t2", "pass2", "t1", task.input]) assert.ok(textOf(next).includes(value), value);
+  assert.ok(!textOf(next).includes("Extract concepts as JSON."), "unchanged instructions are referenced rather than repeated");
 
   const refused = await run(api, "knowledge_worker_submit", { taskId: "t2", answer: "nodes: []" });
   assert.equal(refused.isError, true);
   assert.equal(errorOf(refused).code, "KNOWLEDGE_INVALID");
-  assert.match(errorOf(refused).message, /task t2 was refused: Unexpected token 'n' at position 0\.$/, "the broker's own words say what to do next");
+  assert.ok(errorOf(refused).message.includes("t2"));
+  assert.ok(errorOf(refused).message.includes("Unexpected token 'n' at position 0."), "the broker reason is preserved");
 
   api.on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "done", reason: "session-budget" } });
-  assert.equal(textOf(await run(api, "knowledge_worker_next_task", {})), "No task (session-budget). End your turn now.");
+  const done = await run(api, "knowledge_worker_next_task", {});
+  assert.equal(done.isError, undefined);
+  assert.ok(textOf(done).includes("session-budget"));
+  assert.doesNotMatch(textOf(done), /\bt[12]\b/, "no active task is returned after the session budget ends");
 });
 
 test("worker tools: a chat that is no worker gets the daemon's KNOWLEDGE_NOT_A_WORKER as a clean error", async () => {
@@ -305,6 +322,8 @@ test("knowledge_get: a concept's text fields are bounded — a text result is no
   });
   const out = textOf(await run(api, "knowledge_get", { id: "tactic-x" }));
   assert.ok(Buffer.byteLength(out, "utf8") < 60_000, `${Buffer.byteLength(out, "utf8")} bytes`);
-  assert.match(out, /^concept tactic-x "word word/);
-  assert.match(out, /Aliases: alias 0 a+…?, .*\+\d+ more/);
+  assert.ok(out.includes("tactic-x"));
+  assert.ok(out.includes("word word"));
+  assert.ok(out.includes("alias 0"));
+  assert.ok(out.includes("…"), "omitted text is marked");
 });

@@ -9,7 +9,7 @@
  *   file (`foo.ts` → `foo.test.ts`, `foo.<anything>.test.ts`). The import graph is not
  *   followed: it reaches most of a package. Each package's files run with that
  *   package's own `test` script runner (its `node --import … --test` preamble and
- *   concurrency), one package at a time; root `scripts/` and `deploy/` tests run
+ *   timeout/concurrency), one package at a time; root `scripts/` and `deploy/` tests run
  *   with `node --test`.
  *
  * Changed files are those differing from the merge base with `main` (committed,
@@ -84,7 +84,7 @@ export function selectTests(files, fs) {
 
 /**
  * The runner of a package's `test` script: the shell words before its first `--test` run's
- * file list (env assignments, `node`, its `--import`s, `--test` and `--test-concurrency=…`),
+ * file list (env assignments, `node`, its `--import`s and `--test` flags),
  * and the same without the `--test` flags for `*.check.*` scripts. Null without a node runner.
  * Setup steps the script runs first (`node ../../scripts/ensure-node-native.mjs && …`) stay in
  * front of both, so a focused run gets the same preparation as the package's own.
@@ -92,7 +92,7 @@ export function selectTests(files, fs) {
 export function runnerOf(testScript) {
   if (typeof testScript !== "string") return null;
   const segments = testScript.split("&&");
-  const pattern = /^\s*((?:\w+=\S+\s+)*node\b(?:\s+--import\s+\S+)*\s+--test\b(?:\s+--test-concurrency=\S+)?)/;
+  const pattern = /^\s*((?:\w+=\S+\s+)*node\b(?:\s+--import\s+\S+)*\s+--test\b(?:\s+--test-(?:concurrency|timeout)=\S+)*)/;
   for (let index = 0; index < segments.length; index += 1) {
     const match = pattern.exec(segments[index]);
     if (!match) continue;
@@ -103,7 +103,7 @@ export function runnerOf(testScript) {
       .map((segment) => `${segment} && `)
       .join("");
     const run = match[1].trim();
-    const check = run.replace(/\s+--test-concurrency=\S+/, "").replace(/\s+--test\b/, "");
+    const check = run.replace(/\s+--test-(?:concurrency|timeout)=\S+/g, "").replace(/\s+--test\b/, "");
     return { test: `${setup}${run}`, check: `${setup}${check}` };
   }
   return null;

@@ -16,7 +16,6 @@ import {
   isThreadGoneStreamError,
   THREAD_HEAD_LOOKUP_MAX,
   THREAD_HISTORY_DEFAULT_TURNS,
-  threadHeadOf,
   threadHeadQueryParams,
   type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
@@ -1574,22 +1573,26 @@ describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6
 });
 
 describe("agent host server — the thread's head (follow-up: head reads)", () => {
-  it("answers the head the daemon would derive from the snapshot at the same seq, with its reply and lookups", async () => {
+  it("serves the current head and matches its opening message through the URL query", async () => {
     const h = await harness();
     const threadId = await h.host.createThread();
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-head-1", input: "hello" });
     await h.host.settle();
     const read = await h.call("GET", agentHostRoutes.read(threadId));
     const snap = (read.body as { thread: ThreadSnapshotPayload }).thread;
-    const messageId = snap.turns.at(-1)?.userMessageId ?? "none";
+    const messageId = snap.turns.at(-1)?.userMessageId;
+    assert.ok(messageId, "the sent message opened the turn");
     const query = { replyChars: 50, turnIds: ["nope"], messageIds: [messageId] };
     const params = new URLSearchParams(threadHeadQueryParams(query)).toString();
     const head = await h.call("GET", `${agentHostRoutes.head(threadId)}?${params}`);
     assert.equal(head.status, 200);
-    assert.deepEqual(head.body, JSON.parse(JSON.stringify(threadHeadOf(snap, query))));
     const body = head.body as ThreadHeadResponse;
     assert.equal(body.seq, snap.seq);
-    assert.equal(body.matchedTurns?.length, snap.turns.some((t) => t.userMessageId === messageId) ? 1 : 0);
+    assert.equal(body.head.id, threadId);
+    assert.equal(body.startedTurnCount, 1);
+    assert.equal(body.runningTurn?.turnId, "turn-1");
+    assert.equal(body.lastReply, null);
+    assert.deepEqual(body.matchedTurns?.map((turn) => [turn.turnId, turn.userMessageId, turn.state]), [["turn-1", messageId, "running"]]);
     await h.stop();
   });
 

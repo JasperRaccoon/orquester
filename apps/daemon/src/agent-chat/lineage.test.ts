@@ -526,26 +526,12 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("a COMMAND_REJECTED (the thread's own state) fails a queued merge at once, its reason shown", async () => {
-    const { world, service, published, cleanup } = await setup({ parentBusy: true });
-    await service.mergeBack("child", { commandId: "m9" });
-    world.sessions.set("parent", summary("parent", { title: "Parent" }));
-    world.threads.set("parent", snapshot());
-    world.setTurnStatus(409, "COMMAND_REJECTED");
-    world.touch("parent");
-    await service.whenIdle();
-    const [merge] = service.pending();
-    assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, "refused: COMMAND_REJECTED"]);
-    assert.equal(published.get("child")?.[0]?.error, "refused: COMMAND_REJECTED");
-    await cleanup();
-  });
-
   it("only the deadline is a refusal of the moment: any other COMMAND_REJECTED, or COMPACTION_UNAVAILABLE, fails at once", async () => {
     for (const [code, message] of [
       ["COMMAND_REJECTED", "This thread's session is in an error state. Stop the session or rewind to continue."],
       ["COMPACTION_UNAVAILABLE", "refused: COMPACTION_UNAVAILABLE"]
     ] as const) {
-      const { world, service, cleanup } = await setup({ parentBusy: true });
+      const { world, service, published, cleanup } = await setup({ parentBusy: true });
       await service.mergeBack("child", { commandId: "m8" });
       world.sessions.set("parent", summary("parent", { title: "Parent" }));
       world.threads.set("parent", snapshot());
@@ -554,6 +540,7 @@ describe("merge back", () => {
       await service.whenIdle();
       const [merge] = service.pending();
       assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, message], code);
+      assert.equal(published.get("child")?.[0]?.error, message);
       await cleanup();
     }
   });
@@ -567,9 +554,8 @@ describe("merge back", () => {
       );
     }
     assert.equal(world.turns.length, 0);
-    // A merge sent at once is never queued, so nothing remembers it.
     await service.mergeBack("child", { commandId: "x".repeat(180) });
-    assert.equal((service as unknown as { delivered: Map<string, number> }).delivered.size, 0);
+    assert.equal(world.turns[0]!.body.commandId, "x".repeat(180));
     await cleanup();
   });
 

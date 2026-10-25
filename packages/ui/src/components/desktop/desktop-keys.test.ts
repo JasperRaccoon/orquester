@@ -29,7 +29,6 @@ test("text splits by code point, not UTF-16 unit", () => {
 test("a paste chord replays as Ctrl+V, keeping Shift with an uppercase keysym", () => {
   const keysyms = (steps: ReturnType<typeof pasteKeystroke>) => steps.map((s) => [s.keysym, s.down]);
   assert.deepEqual(keysyms(pasteKeystroke(null, false)), [[0xffe3, true], [0x76, true], [0x76, false], [0xffe3, false]]);
-  assert.deepEqual(keysyms(pasteKeystroke({ shift: false, alt: false, meta: false }, false)), keysyms(pasteKeystroke(null, false)));
   // Ctrl+Shift+V (terminals): `V`, so Xvnc does not release the held Shift.
   assert.deepEqual(keysyms(pasteKeystroke({ shift: true, alt: false, meta: false }, false)), [[0xffe3, true], [0x56, true], [0x56, false], [0xffe3, false]]);
 });

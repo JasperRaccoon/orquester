@@ -354,11 +354,6 @@ export class WorkflowEditor {
     return refusal;
   }
 
-  /** End a typing burst / drag: the next change is its own undo step. */
-  sealHistory(): void {
-    this.history.seal();
-  }
-
   undo(): void {
     const draft = this.state.draft;
     if (draft === null) return;

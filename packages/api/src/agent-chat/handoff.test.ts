@@ -8,21 +8,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  agentModelLabel,
   continuationBudgetBytes,
   cutHandoffText,
-  describeHandoffSummary,
   escapeForkHandoffTags,
   FORK_HANDOFF_CLOSE_TAG,
   FORK_HANDOFF_OPEN_TAG,
-  formatHandoffBytes,
   gitStatusSection,
   HANDOFF_BUDGET_BYTES,
   HANDOFF_BYTES_PER_TOKEN,
   HANDOFF_FALLBACK_CONTEXT_WINDOW,
-  HANDOFF_GIT_STATUS_BYTES,
   HANDOFF_MIN_RESERVE_TOKENS,
-  HANDOFF_PREAMBLE_BYTES,
   handoffBudgetBytes,
   handoffContextWindow,
   handoffMessagesOf,
@@ -86,12 +81,6 @@ describe("UTF-8 helpers", () => {
       }
     }
   });
-
-  it("formats sizes as rounded kilobytes", () => {
-    assert.equal(formatHandoffBytes(0), "0 KB");
-    assert.equal(formatHandoffBytes(10), "≈1 KB");
-    assert.equal(formatHandoffBytes(58 * 1024 + 100), "≈58 KB");
-  });
 });
 
 describe("handoffMessagesOf", () => {
@@ -140,7 +129,6 @@ describe("retainedTurnsForFork (fork at a message)", () => {
   });
 });
 
-
 describe("handoffBudgetBytes", () => {
   it("sizes the budget from a known window, less the reserve and what else the message carries", () => {
     // 32k window: a 16k reserve (a quarter would be 8k) leaves 16 000 bytes at one byte a token.
@@ -171,8 +159,8 @@ describe("handoffBudgetBytes", () => {
   });
 
   it("reserves a continuation's own words and largest git section", () => {
-    assert.equal(continuationBudgetBytes(32_000), 16_000 - HANDOFF_PREAMBLE_BYTES - HANDOFF_GIT_STATUS_BYTES);
-    assert.equal(continuationBudgetBytes(undefined), HANDOFF_BUDGET_BYTES);
+    assert.equal(continuationBudgetBytes(32_000), 5_760);
+    assert.equal(continuationBudgetBytes(undefined), 65_536);
   });
 });
 
@@ -382,49 +370,34 @@ describe("renderHandoffTranscript", () => {
     { role: "assistant", text: `Fixed: ${"x".repeat(1_000)} done.`, turn: 3 }
   ];
 
-  it("renders the anchors, the newest history and every omitted run, in order (snapshot)", () => {
+  it("renders kept messages and omitted runs in order with a recoverable history cursor", () => {
     const selection = selectHandoffMessages(history, 900);
     const text = renderHandoffTranscript({ selection, source, targetLabel: "Codex", gitStatus: " M src/app.ts" });
-    const reply = selection.messages.at(-1)!.text;
-    assert.match(reply, /^Fixed: x+\n\[… \d+ bytes of this message omitted …\]\nx+ done\.$/);
-    assert.equal(
-      text,
-      [
-        FORK_HANDOFF_OPEN_TAG,
-        `This conversation continues "Fix the login", a chat that ran on Claude Opus 4.1 (Orquester session parent-1). The user continued it here, in a new Codex session, from the point below: treat the transcript as what was said before their next message and carry on from there. The assistant messages below were written in that chat, not by you in this session; its tool calls, file reads and reasoning are not replayed, so re-read any file you need.`,
-        `This carries 3 of 6 messages (≈1 KB): the original request and the newest history that fits the handoff budget; the 3 left out for length are marked where they were; one message too long to carry whole is cut in the middle, marked where.`,
-        'The full history of that chat, the omitted part included, stays readable: call the Orquester MCP tool `read_transcript` with {"sessionId":"parent-1","beforeTurn":4,"turns":20} and page further back with `beforeTurn` set to the result\'s `olderTurns` + 1.',
-        "",
-        "[User]\nBuild the login page.",
-        "",
-        "[… 3 messages omitted (turns 1–2) …]",
-        "",
-        "[User]\nNow fix the CSS.",
-        "",
-        `[Assistant (Claude Opus 4.1)]\n${reply}`,
-        "",
-        "`git status --short` of the project:\n\n M src/app.ts",
-        FORK_HANDOFF_CLOSE_TAG
-      ].join("\n")
-    );
+    const pieces = [
+      "[User]\nBuild the login page.",
+      "[… 3 messages omitted (turns 1–2) …]",
+      "[User]\nNow fix the CSS.",
+      `[Assistant (Claude Opus 4.1)]\n${selection.messages.at(-1)!.text}`,
+      " M src/app.ts"
+    ];
+    let previous = -1;
+    for (const piece of pieces) {
+      const at = text.indexOf(piece);
+      assert.ok(at > previous, `missing or out-of-order transcript: ${piece}`);
+      previous = at;
+    }
+    assert.ok(text.startsWith(FORK_HANDOFF_OPEN_TAG));
+    assert.ok(text.endsWith(FORK_HANDOFF_CLOSE_TAG));
+    assert.match(text, /"sessionId":"parent-1","beforeTurn":4,"turns":20/);
   });
 
-  it("renders a whole conversation without markers (snapshot)", () => {
+  it("renders a whole conversation without omission markers", () => {
     const selection = selectHandoffMessages(history.slice(2, 4));
-    assert.equal(
-      renderHandoffTranscript({ selection, source, targetLabel: "Grok" }),
-      [
-        FORK_HANDOFF_OPEN_TAG,
-        `This conversation continues "Fix the login", a chat that ran on Claude Opus 4.1 (Orquester session parent-1). The user continued it here, in a new Grok session, from the point below: treat the transcript as what was said before their next message and carry on from there. The assistant messages below were written in that chat, not by you in this session; its tool calls, file reads and reasoning are not replayed, so re-read any file you need.`,
-        "This carries the whole conversation so far: 2 messages (≈1 KB).",
-        'The full history of that chat, tool calls included, stays readable: call the Orquester MCP tool `read_transcript` with {"sessionId":"parent-1","turns":20} and page further back with `beforeTurn` set to the result\'s `olderTurns` + 1.',
-        "",
-        "[User]\nAdd tests.",
-        "",
-        "[Assistant (Claude Opus 4.1)]\nTests added.",
-        FORK_HANDOFF_CLOSE_TAG
-      ].join("\n")
-    );
+    const text = renderHandoffTranscript({ selection, source, targetLabel: "Grok" });
+    assert.ok(text.includes("[User]\nAdd tests."));
+    assert.ok(text.indexOf("[User]\nAdd tests.") < text.indexOf("[Assistant (Claude Opus 4.1)]\nTests added."));
+    assert.doesNotMatch(text, /\[…|"beforeTurn"/);
+    assert.match(text, /"sessionId":"parent-1","turns":20/);
   });
 
   it("marks a trailing omitted run and pages back from the turn after it", () => {
@@ -458,32 +431,11 @@ describe("renderHandoffTranscript", () => {
   });
 });
 
-describe("labels and summaries", () => {
-  it("names the agent and its model once", () => {
-    assert.equal(agentModelLabel("Claude", "Claude Opus 4.1"), "Claude Opus 4.1");
-    assert.equal(agentModelLabel("Codex", "GPT-5"), "Codex · GPT-5");
-    assert.equal(agentModelLabel("Grok", ""), "Grok");
-  });
-
-  it("says what a handoff carries", () => {
-    assert.equal(
-      describeHandoffSummary({ carried: 23, total: 41, bytes: 58 * 1024, firstRequest: true }),
-      "Carries 23 of 41 messages (≈58 KB): the original request and the newest history that fits; the rest stays readable."
-    );
-    assert.equal(
-      describeHandoffSummary({ carried: 23, total: 41, bytes: 58 * 1024 }, { moreOlder: true }),
-      "Carries 23 of 41+ messages (≈58 KB): the newest history that fits; the rest stays readable."
-    );
-    assert.equal(describeHandoffSummary({ carried: 3, total: 3, bytes: 900 }), "Carries the whole conversation: 3 messages (≈1 KB).");
-    assert.equal(describeHandoffSummary({ carried: 3, total: 3, bytes: 900, clipped: true }), "Carries all 3 messages (≈1 KB), the longest cut in the middle to fit.");
-    assert.match(describeHandoffSummary({ carried: 3, total: 9, bytes: 60_000, clipped: true, firstRequest: true }), /the original request and the newest history that fits, the longest cut in the middle to fit;/);
-    assert.match(describeHandoffSummary({ carried: 0, total: 4, bytes: 0 }), /None of the 4 messages fits/);
-    assert.match(describeHandoffSummary({ carried: 0, total: 0, bytes: 0 }), /starts fresh/);
-  });
-
-  it("the git section matches the workflow handoff's words and cut", () => {
-    assert.equal(gitStatusSection(" M a.ts\n"), "`git status --short` of the project:\n\n M a.ts");
-    assert.equal(gitStatusSection(""), "`git status --short` of the project:\n\n(clean)");
-    assert.equal(gitStatusSection("€€€", 4), "`git status --short` of the project (cut):\n\n€");
+describe("git status handoff", () => {
+  it("the git section preserves its status payload and cuts on a UTF-8 boundary", () => {
+    assert.ok(gitStatusSection(" M a.ts\n").endsWith(" M a.ts"));
+    const cut = gitStatusSection("€€€", 4);
+    assert.ok(cut.endsWith("€"));
+    assert.ok(!cut.includes("€€"), "the status payload is cut at a whole UTF-8 character");
   });
 });

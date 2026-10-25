@@ -49,7 +49,8 @@ test("a 429 pauses the host for its Retry-After; background and interactive requ
   });
   await assert.rejects(gate.run("interactive", request), (error: unknown) => {
     assert.ok(error instanceof GitRemoteError);
-    assert.equal(error.message, "Bitbucket is rate limiting this account; try again in 20 s.");
+    assert.equal(error.kind, "rate_limited");
+    assert.equal(error.retryAfterMs, 20_000);
     return true;
   });
   assert.equal(sent, 0, "nothing reached the host while it was paused");
@@ -116,10 +117,18 @@ test("at most `slots` requests are in flight; the rest queue, and a pause starte
 
 test("gates are per host and per account, and an unlimited gate never queues", async () => {
   const one = rateGateFor("bitbucket.org", "Bitbucket", { token: "t1", email: "a@x" });
-  assert.equal(rateGateFor("BITBUCKET.org", "Bitbucket", { token: "t1", email: "a@x" }), one);
-  assert.notEqual(rateGateFor("bitbucket.org", "Bitbucket", { token: "t2", email: "a@x" }), one);
-  assert.notEqual(rateGateFor("bitbucket.org", "Bitbucket", null), one);
-  assert.notEqual(rateGateFor("bb.corp.example", "Bitbucket Server", { token: "t1", email: "a@x" }), one);
+  one.pause(30_000);
+  await assert.rejects(
+    rateGateFor("BITBUCKET.org", "Bitbucket", { token: "t1", email: "a@x" }).run("background", async () => assert.fail("a paused account must not send")),
+    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited"
+  );
+  for (const independent of [
+    rateGateFor("bitbucket.org", "Bitbucket", { token: "t2", email: "a@x" }),
+    rateGateFor("bitbucket.org", "Bitbucket", null),
+    rateGateFor("bb.corp.example", "Bitbucket Server", { token: "t1", email: "a@x" })
+  ]) {
+    assert.equal(await independent.run("background", async () => "ok"), "ok");
+  }
 
   const open = new HostRateGate("GitHub", { slots: Infinity });
   const held = Array.from({ length: 10 }, () => deferred());

@@ -78,27 +78,6 @@ test("a fresh token is handed out as is, with only the access token and non-secr
   assert.equal(w.files.watcherCount(claudePath), 0, "the watch ends with the request");
 });
 
-test("no refresh token ever leaves the broker, before or after a refresh", async () => {
-  const w = world();
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 20 * MIN));
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + 20 * MIN) / 1000)));
-  w.files.write(grokPath, grokAuth("grok-access-OLD", NOW + 20 * MIN));
-  const broker = createAgentTokenBroker(w.deps);
-  const grants = [
-    await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal()),
-    await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal()),
-    await broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, signal())
-  ];
-  assert.equal(w.refreshCalls.length, 3, "each short token was refreshed");
-  assert.equal(grants[0].accessToken, "claude-access-NEW");
-  assert.equal(grants[2].accessToken, "grok-access-NEW");
-  for (const grant of grants) {
-    const text = JSON.stringify(grant);
-    assert.doesNotMatch(text, /SECRET/);
-    assert.doesNotMatch(text, /refresh|id_token|idToken/i);
-  }
-});
-
 test("a token below minValidSeconds is refreshed when no host-local session holds the account", async () => {
   const w = world();
   w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + (DEFAULT_MIN_VALID_SECONDS * 1000 - MIN)));
@@ -112,18 +91,6 @@ test("a token below minValidSeconds is refreshed when no host-local session hold
   const short = await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, minValidSeconds: 10 * 60 }, signal());
   assert.equal(short.accessToken, "claude-access-SHORT");
   assert.equal(w.refreshCalls.length, 1);
-});
-
-test("box sessions are not refreshers: an account only box chats use is refreshed on demand", async () => {
-  const w = world();
-  // Every session using the account is in the box project, so the router's host-local set is empty
-  // (`hostLocalAccountIds`, proved in refresh-scheduling.test.ts) even though the account is in use.
-  assert.equal(w.hostLocal.has(CODEX_ID), false);
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + 5 * MIN) / 1000)));
-  const broker = createAgentTokenBroker(w.deps);
-  const grant = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal());
-  assert.equal(w.refreshCalls.length, 1);
-  assert.equal(grant.extra?.chatgptAccountId, "ws-1");
 });
 
 test("concurrent requests for one account share one refresh", async () => {

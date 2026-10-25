@@ -186,7 +186,7 @@ export function quotesFromText(text: string): { text: string; quotes: ComposerQu
 let quoteSequence = 0;
 
 /** A fresh quote id; unique within the page, which is all a draft's list needs. */
-export function newQuoteId(): string {
+function newQuoteId(): string {
   quoteSequence += 1;
   const random = Math.random().toString(36).slice(2, 8);
   return `quote-${Date.now().toString(36)}-${quoteSequence.toString(36)}-${random}`;

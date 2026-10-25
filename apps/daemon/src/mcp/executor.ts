@@ -71,9 +71,6 @@ import { readThreadHead } from "./reads.ts";
 import { argumentProblems, clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
 import type { SessionSecretRequests } from "../session-tools/contract.ts";
 
-/** Re-exported for daemon-side callers; tool modules import it from `./gate/turn-policy.ts`. */
-export { NEW_SESSION };
-
 /**
  * Production wiring, set by the daemon's `index.ts` blocks (Task 3 sets `approvals`): read at call
  * time, so the order the blocks run in does not matter. Tests pass their own through

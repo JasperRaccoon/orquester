@@ -234,7 +234,7 @@ export function useAgentChatThreadChrome(
  * moves (`seq`, `updatedAt`): every other field compared by identity.
  */
 // Adapted from T3 Code (MIT): packages/client-runtime/src/state/threadShell.ts
-export function quietHead(previous: ThreadHead | null, next: ThreadHead | null): ThreadHead | null {
+function quietHead(previous: ThreadHead | null, next: ThreadHead | null): ThreadHead | null {
   if (previous === next || previous === null || next === null) return next;
   const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
   for (const key of keys) {

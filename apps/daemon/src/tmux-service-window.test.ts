@@ -55,13 +55,13 @@ test("service windows: named first window, extra windows, pane pids", async (t) 
   assert.deepEqual(await tmux.listServiceWindows("orqsvc-desktop-missing"), []);
 });
 
-test("service window helpers keep the orqsvc- guard", async (t) => {
-  const tmux = await makeTestTmux(t);
-  if (!tmux) return t.skip("no tmux");
-  await assert.rejects(() => tmux.listServiceSessions("orq-"));
-  await assert.rejects(() => tmux.listServiceWindows("orq-abc"));
+test("service window helpers keep the orqsvc- guard", async () => {
+  const tmux = new Tmux(join(tmpdir(), "orquester-guard-must-not-be-created", "tmux.sock"));
+  await assert.rejects(() => tmux.listServiceSessions("orq-"), /orqsvc-/);
+  await assert.rejects(() => tmux.listServiceWindows("orq-abc"), /orqsvc-/);
   await assert.rejects(() =>
-    tmux.newServiceWindow({ session: "orq-abc", name: "x", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] })
+    tmux.newServiceWindow({ session: "orq-abc", name: "x", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] }),
+    /orqsvc-/
   );
 });
 

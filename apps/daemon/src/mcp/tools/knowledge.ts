@@ -56,7 +56,7 @@ import { capText, clipText } from "../result.ts";
 // ---------------------------------------------------------------------------
 
 /** A snippet is shown on one line, at most this many characters. */
-export const KNOWLEDGE_SNIPPET_CHARS = 280;
+const KNOWLEDGE_SNIPPET_CHARS = 280;
 /** A concept description in a search hit or a list. */
 const DESCRIPTION_CHARS = 200;
 /** A concept's own description in `knowledge_get` (myKG merges descriptions: they can grow). */
@@ -64,20 +64,20 @@ const CONCEPT_DESCRIPTION_CHARS = 2_000;
 /** A concept, type, edge or attribute name, or an alias, wherever it is shown (myKG's, unbounded). */
 const NAME_CHARS = 120;
 /** `knowledge_get` shows an entry body up to this many UTF-8 bytes (results stay under the 60 000-byte cap). */
-export const KNOWLEDGE_GET_BODY_MAX_BYTES = 48_000;
+const KNOWLEDGE_GET_BODY_MAX_BYTES = 48_000;
 /** Lists inside one `knowledge_get` answer. */
 const GET_LIST_MAX = 12;
 /** A query, in characters (the search's own `KNOWLEDGE_QUERY_MAX`). */
-export const KNOWLEDGE_QUERY_MAX_CHARS = 1_000;
+const KNOWLEDGE_QUERY_MAX_CHARS = 1_000;
 /** A save item's metadata, in characters: the store's limits (`knowledge/store/validate.ts`), which refuse the whole batch. */
 const KIND_MAX_CHARS = 40;
 const AUTHOR_MAX_CHARS = 120;
 const HANDLE_MAX_CHARS = 64;
 const URL_MAX_CHARS = 2_048;
 /** Collections an agent may create in one save. */
-export const KNOWLEDGE_NEW_COLLECTIONS_MAX = 10;
+const KNOWLEDGE_NEW_COLLECTIONS_MAX = 10;
 /** A worker answer, in characters. */
-export const KNOWLEDGE_WORKER_ANSWER_MAX_CHARS = 2_000_000;
+const KNOWLEDGE_WORKER_ANSWER_MAX_CHARS = 2_000_000;
 /** A collection reference: a name (≤ 60) or an id. */
 const COLLECTION_REF_MAX = 64;
 
@@ -119,7 +119,7 @@ const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
 const label = (value: string): string => clipText(oneLine(value), NAME_CHARS);
 
 /** "Om Patel (@om_patel5)", "@om_patel5", "Om Patel" or "". */
-export function authorLabel(meta: Pick<KnowledgeEntryMeta, "author" | "handle">): string {
+function authorLabel(meta: Pick<KnowledgeEntryMeta, "author" | "handle">): string {
   const author = meta.author ? oneLine(meta.author) : "";
   const handle = meta.handle ? `@${oneLine(meta.handle).replace(/^@+/, "")}` : "";
   if (author && handle) return `${author} (${handle})`;
@@ -132,7 +132,7 @@ function inCollections(ids: readonly string[], names: ReadonlyMap<string, string
 }
 
 /** An entry's head line: id · kind · author · date · collections (· linking state when not linked). */
-export function entryHead(meta: KnowledgeEntryMeta, names: ReadonlyMap<string, string>): string {
+function entryHead(meta: KnowledgeEntryMeta, names: ReadonlyMap<string, string>): string {
   const parts = [meta.id, oneLine(meta.kind) || "note"];
   const who = authorLabel(meta);
   if (who) parts.push(who);
@@ -143,7 +143,7 @@ export function entryHead(meta: KnowledgeEntryMeta, names: ReadonlyMap<string, s
 }
 
 /** An entry summary in three short lines: head, snippet, citation. */
-export function entryBlock(entry: KnowledgeEntrySummary, names: ReadonlyMap<string, string>, indent = "   "): string[] {
+function entryBlock(entry: KnowledgeEntrySummary, names: ReadonlyMap<string, string>, indent = "   "): string[] {
   const lines = [entryHead(entry, names)];
   const snippet = clipText(oneLine(entry.snippet ?? ""), KNOWLEDGE_SNIPPET_CHARS);
   if (snippet) lines.push(`${indent}${snippet}`);
@@ -164,7 +164,7 @@ function hitLines(hit: KnowledgeSearchHit, index: number, names: ReadonlyMap<str
 }
 
 /** The search answer as the agent reads it. */
-export function renderSearch(response: KnowledgeSearchResponse, names: ReadonlyMap<string, string>): string {
+function renderSearch(response: KnowledgeSearchResponse, names: ReadonlyMap<string, string>): string {
   const searched = response.searched.map((id) => names.get(id) ?? id);
   const over = searched.length > 0 ? `over ${searched.join(", ")}` : "over no collection";
   if (response.hits.length === 0) return `No knowledge found (${over}). Don't answer as if it came from the knowledge base.`;

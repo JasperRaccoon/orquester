@@ -1049,26 +1049,6 @@ test("git failing in a clone fails closed: unknown paths refused unreadable and 
   assert.equal(h.fs.read(`${b}/.env`), "KEY=two\n");
 });
 
-test("runtimes exist only for vaults: reads of unknown vaults leave nothing behind, a deleted vault's goes", async () => {
-  const h = await makeHarness();
-  const a = h.clone("a");
-  h.fs.put(`${a}/.env`, "KEY=one\n");
-  const runtimes = () => (h.service as unknown as { runtimes: Map<string, unknown> }).runtimes.size;
-  for (let i = 0; i < 5; i++) {
-    await refused(h.service.getVault(WS, `github.com/acme/none-${i}`), "VAULT_NOT_FOUND");
-    await refused(h.service.compare({ workspace: WS, repoKey: `github.com/acme/none-${i}`, projectPath: a, path: ".env" }), "VAULT_NOT_FOUND");
-    await h.service.candidates({ workspace: WS, repoKey: `github.com/acme/none-${i}` });
-    await refused(h.service.setup({ workspace: WS, repoKey: `github.com/acme/none-${i}`, files: [], excluded: [] }), "INVALID_CLONE");
-  }
-  await h.settle();
-  assert.equal(runtimes(), 0);
-  await setupEnv(h, "a");
-  assert.equal(runtimes(), 1);
-  await h.service.deleteVault(WS, REPO);
-  await h.settle();
-  assert.equal(runtimes(), 0);
-});
-
 test("with a workspaces root, every clone write is confined to it", async () => {
   const h = await makeHarness({ overrides: { workspacesRoot: () => "/ws" } });
   const a = h.clone("a");

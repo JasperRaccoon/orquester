@@ -661,15 +661,18 @@ test("upload: the default caps are 5000 entries and 100 MB", async (t) => {
   await assert.rejects(store.scanUpload("claude", "many.zip", many), (error: unknown) => {
     assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
+    assert.match(error.message, /more than 5000 entries/);
     return true;
   });
-  const tenMb = Buffer.alloc(10 * 1024 * 1024);
-  const huge: ZipEntrySpec[] = [skill];
-  for (let i = 0; i < 11; i += 1) huge.push({ name: `blob${i}`, data: tenMb, deflate: true });
-  const bomb = await writeUpload(root, "bomb.zip", makeZip(huge));
+  // The extractor checks declared sizes before inflating. A tiny payload with a
+  // large declared size proves the default limit without compressing 110 MiB.
+  const bomb = await writeUpload(root, "bomb.zip", makeZip([skill, {
+    name: "blob", data: "x", deflate: true, declaredSize: 100 * 1024 * 1024 + 1
+  }]));
   await assert.rejects(store.scanUpload("claude", "bomb.zip", bomb), (error: unknown) => {
     assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
+    assert.match(error.message, /more than 104857600 bytes uncompressed/);
     return true;
   });
 });

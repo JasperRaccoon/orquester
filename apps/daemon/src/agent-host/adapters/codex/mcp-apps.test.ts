@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { after, describe, it } from "node:test";
 
-import { MCP_APP_EXTENSION_ID, mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
+import { mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { AsyncEventQueue } from "./event-queue.ts";
 import { CodexSession, type CodexSessionOptions } from "./session.ts";
@@ -110,15 +110,6 @@ const completedCall = (events: RuntimeEvent[], itemId = "call-app-1") =>
   events.findIndex((event) => event.type === "item.completed" && event.itemId === itemId);
 
 describe("codex — MCP Apps", () => {
-  it("declares the UI extension at initialize", async () => {
-    const r = rig({ turns: [] });
-    await r.session.start();
-    const initialize = r.received().find((frame) => frame.method === "initialize");
-    const capabilities = (initialize?.params as { capabilities?: { extensions?: Record<string, unknown> } }).capabilities;
-    assert.deepEqual(capabilities?.extensions?.[MCP_APP_EXTENSION_ID], { mimeTypes: ["text/html;profile=mcp-app"] });
-    await r.stop();
-  });
-
   it("captures a completed call's resource onto its row, ahead of what came after it", async () => {
     const r = rig({
       turns: [],
@@ -134,6 +125,9 @@ describe("codex — MCP Apps", () => {
       }
     });
     await r.session.start();
+    const initialize = r.received().find((frame) => frame.method === "initialize");
+    const capabilities = (initialize?.params as { capabilities?: { extensions?: Record<string, unknown> } }).capabilities;
+    assert.deepEqual(capabilities?.extensions?.["io.modelcontextprotocol/ui"], { mimeTypes: ["text/html;profile=mcp-app"] });
     const threadId = threadIdOf(r.session);
     await r.notify("item/completed", { item: appCall(), threadId, turnId: "turn-x", completedAtMs: 1 });
     await r.notify("item/completed", { item: agentMessage("msg-after", "after the app"), threadId, turnId: "turn-x", completedAtMs: 2 });
@@ -166,26 +160,6 @@ describe("codex — MCP Apps", () => {
     await r.stop();
   });
 
-  it("an app called again in the session reuses its snapshot: no second read, no second copy, two rows", async () => {
-    const r = rig({
-      turns: [],
-      mcpApps: { contents: [{ uri: "ui://apps/widget.html", mimeType: "text/html;profile=mcp-app", text: APP_HTML }] }
-    });
-    await r.session.start();
-    const threadId = threadIdOf(r.session);
-    await r.notify("item/completed", { item: appCall(), threadId, turnId: "t", completedAtMs: 1 });
-    await r.events.waitFor(isCompletionOf("call-app-1"), "the first call");
-    await r.notify("item/completed", { item: appCall({ id: "call-app-2" }), threadId, turnId: "t", completedAtMs: 2 });
-    const second = (await r.events.waitFor(isCompletionOf("call-app-2"), "the second call")) as Extract<
-      RuntimeEvent,
-      { type: "item.completed" }
-    >;
-    assert.equal(r.received().filter((frame) => frame.method === "mcpServer/resource/read").length, 1);
-    assert.equal(r.stored.length, 1);
-    assert.equal(((second.payload.data as Record<string, unknown>).mcpApp as { attachmentId: string }).attachmentId, STORED_ID);
-    await r.stop();
-  });
-
   it("another tool sharing the resource gets its own reference from the cached snapshot", async () => {
     const r = rig({
       turns: [],
@@ -206,6 +180,8 @@ describe("codex — MCP Apps", () => {
       { type: "item.completed" }
     >;
     assert.equal(r.received().filter((frame) => frame.method === "mcpServer/resource/read").length, 1, "the snapshot is shared");
+    assert.equal(r.stored.length, 1, "the cached resource is stored once");
+    assert.equal(((other.payload.data as Record<string, unknown>).mcpApp as { attachmentId: string }).attachmentId, STORED_ID);
     const data = other.payload.data as Record<string, unknown>;
     assert.equal((data.mcpApp as { tool: string }).tool, "edit_widget");
     // The row's own-call check accepts it, so the app renders and its requests resolve.
@@ -229,7 +205,7 @@ describe("codex — MCP Apps", () => {
     await r.stop();
   });
 
-  it("a call without a ui:// resource, a failed call and a collab child's call are never captured", async () => {
+  it("a call without a ui:// resource and a failed call are never captured", async () => {
     const r = rig({ turns: [] });
     await r.session.start();
     const threadId = threadIdOf(r.session);

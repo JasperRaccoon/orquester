@@ -4,6 +4,7 @@ import { mkdir,mkdtemp,realpath,rm,symlink,writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { FsSandboxError } from "@orquester/config/fs";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
 import { executeToolCall } from "../executor.ts";
@@ -151,20 +152,6 @@ test("read_file for a chat: a path inside its project reads (relative to its dir
   }
 });
 
-test("read_file of <ws>/notes.txt (a file beside the projects): the tool only claims the path; the gate's classifyPath denies it", async (t) => {
-  const { sandbox, ctx } = await harness(t);
-  await mkdir(join(sandbox, "acme", "api"), { recursive: true });
-  const notes = join(sandbox, "acme", "notes.txt");
-  await writeFile(notes, "beside the projects");
-  const caller = chatCaller(sandbox);
-  // No check of its own (D9-7 removed): the scope names the path for the gate to classify.
-  const scope = await readFile.scope({ path: notes, offset: 0, maxBytes: DEFAULT_READ_BYTES }, { api: ctx.api, signal: new AbortController().signal, now: Date.now, caller });
-  assert.deepEqual(scope.paths, [notes]);
-  const denied = await chatRead(ctx.api, caller, { path: notes });
-  assert.equal(answer(denied).code, "PERMISSION_DENIED");
-  assert.match(answer(denied).message, /is not inside a project/);
-});
-
 test("read_file for a chat: another project's content follows the gate (same workspace under auto: allowed; another workspace: a card, refused without a port)", async (t) => {
   const { sandbox, ctx } = await harness(t);
   await mkdir(join(sandbox, "acme", "web"), { recursive: true });
@@ -186,7 +173,7 @@ test("read_file for an external caller keeps the sandbox rule only: relative to 
   const { sandbox, ctx } = await harness(t);
   await writeFile(join(sandbox, "root.txt"), "at the sandbox root");
   assert.equal((await call(ctx, { path: "root.txt" })).text, "at the sandbox root");
-  await assert.rejects(call(ctx, { path: "../escape.txt" }));
+  await assert.rejects(call(ctx, { path: "../escape.txt" }), FsSandboxError);
   // Without the DaemonApi file reads (a bare double) the tool says so instead of reaching for the disk itself.
   await assert.rejects(readFile.run({ path: "root.txt", offset: 0, maxBytes: 10 }, { api: new FakeDaemonApi(), signal: new AbortController().signal, now: () => 0, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_o, t2) => t2 } }), (e: { code: string }) => e.code === "UNAVAILABLE");
 });

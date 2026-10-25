@@ -854,3 +854,13 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     }
   });
 });
+
+it("a streamed answer that ends as a copy of its turn's opening one leaves the streamed-text path", () => {
+  const opening = message("assistant", "Done.", { id: "m1", turnId: "t1", createdAt: stamp(1) });
+  const copy = (text: string, streaming: boolean) => message("assistant", text, { id: "m2", turnId: "t1", createdAt: stamp(2), streaming });
+  const options = { dropRepeatedAssistantMessages: true };
+  let warm = deriveTimelineEntriesFromItems([opening, copy("Do", true)], null, options);
+  warm = deriveTimelineEntriesFromItems([opening, copy("Done.", true)], warm, options);
+  warm = deriveTimelineEntriesFromItems([opening, copy("Done.", false)], warm, options);
+  assert.deepEqual(warm.messages.map((row) => row.id), ["m1"], "the finished copy is dropped");
+});

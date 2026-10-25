@@ -48,7 +48,7 @@ async function readSettings(deps: BoxMcpRunInBoxDeps): Promise<unknown> {
   }
 }
 
-export function parseSetRunInBox(body: unknown): SetBoxMcpRunInBoxRequest | null {
+function parseSetRunInBox(body: unknown): SetBoxMcpRunInBoxRequest | null {
   if (typeof body !== "object" || body === null) return null;
   const { agent, name, runInBox } = body as Record<string, unknown>;
   if (typeof agent !== "string" || !(BOX_MCP_AGENTS as readonly string[]).includes(agent)) return null;

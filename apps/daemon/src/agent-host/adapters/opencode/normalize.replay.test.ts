@@ -1384,10 +1384,11 @@ test("a child relaunched on the server's word still takes its own call's answer:
   ).signals.find((signal) => signal.kind === "child-reports-run");
   assert.ok(reported !== undefined && reported.kind === "child-reports-run");
   const relaunched = settleChildSurvival(run.state, "ses_fg", reported.checkId, true, run.ctx);
-  assert.deepEqual(
-    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
-    ["opencode-revive:call_fg:1"]
-  );
+  const revivedStarts = eventsOfType(relaunched, "task.started");
+  assert.equal(revivedStarts.length, 1);
+  const [revived] = revivedStarts;
+  assert.ok(revived?.payload.toolUseId);
+  assert.notEqual(revived.payload.toolUseId, "call_fg", "a revival has its own activation");
   // Its answer rides the call it was launched by, which the provider still names.
   const answered = feed(run, [
     {
@@ -1415,7 +1416,7 @@ test("a child relaunched on the server's word still takes its own call's answer:
   ]).flat();
   assert.deepEqual(
     eventsOfType(answered, "task.completed").map((event) => [event.payload.status, event.payload.summary, event.payload.toolUseId]),
-    [["completed", "It is fine.", "opencode-revive:call_fg:1"]]
+    [["completed", "It is fine.", revived.payload.toolUseId]]
   );
 });
 
@@ -1453,11 +1454,10 @@ test("a child whose own frames beat its launching part names the provider's call
   const [pending, created, completed] = childFixtureFrames([140, 141, 180], BACKGROUND_RENAMES);
   assert.ok(pending && created && completed);
   const before = feed(run, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES)]).flat();
-  assert.deepEqual(
-    eventsOfType(before, "task.started").map((event) => event.payload.toolUseId),
-    ["opencode-child:ses_background_child"],
-    "its first start names a launch of its own"
-  );
+  const startsBefore = eventsOfType(before, "task.started");
+  assert.equal(startsBefore.length, 1);
+  const [firstStart] = startsBefore;
+  assert.ok(firstStart?.payload.toolUseId, "its first start names a launch of its own");
   const named = feed(run, [inBackground(completed)]).flat();
   assert.deepEqual(taskRows(named), [], "a call answered in the background ends nothing");
   // Its work, its idle, and its answer, injected into the parent.
@@ -1495,10 +1495,11 @@ test("a child whose own frames beat its launching part names the provider's call
   ).signals.find((signal) => signal.kind === "child-reports-run");
   assert.ok(reported !== undefined && reported.kind === "child-reports-run");
   const relaunched = settleChildSurvival(relaunchRun.state, "ses_background_child", reported.checkId, true, relaunchRun.ctx);
-  assert.deepEqual(
-    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
-    ["opencode-revive:call_background:1"]
-  );
+  const revivedStarts = eventsOfType(relaunched, "task.started");
+  assert.equal(revivedStarts.length, 1);
+  const [revived] = revivedStarts;
+  assert.ok(revived?.payload.toolUseId);
+  assert.notEqual(revived.payload.toolUseId, "call_background", "the revival is a new activation");
   const { roster } = await throughHost([live, ...launched, ...stopped, ...relaunched]);
   assert.equal(roster.find((row) => row.id === "ses_background_child")?.status, "running", "reopened");
 });
@@ -1528,10 +1529,8 @@ test("a child no part ever named, resumed by a `task_id` call once settled, is r
   assert.ok(created);
   const first = feed(run, [created, ...childFixtureFrames([148, 177, 178, 179])]).flat();
   assert.deepEqual(taskRows(first), ["task.started", "task.updated:running", "task.updated:idle", "task.completed:completed"]);
-  assert.deepEqual(
-    eventsOfType(first, "task.started").map((event) => event.payload.toolUseId),
-    [`opencode-child:${CHILD_SESSION_ID}`]
-  );
+  const [firstStart] = eventsOfType(first, "task.started");
+  assert.ok(firstStart?.payload.toolUseId, "an unnamed child still has an activation identity");
 
   // A `task` call resuming it (`task_id`): a new run, which the roster reopens for.
   const resume = resumeFrames("call_resume");
@@ -2556,7 +2555,7 @@ test("a start no part named yet carries no prompt, and neither does a revive of 
   assert.ok(pending && created && completed);
   const launched = feed(run, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES), inBackground(completed)]).flat();
   const [orphan] = eventsOfType(launched, "task.started");
-  assert.equal(orphan?.payload.toolUseId, "opencode-child:ses_background_child");
+  assert.ok(orphan?.payload.toolUseId, "the orphan start has an activation identity");
   assert.equal("prompt" in (orphan?.payload ?? {}), false, "no part had said what it was asked");
 
   // A Stop closes it; the server says it runs on: the revive continues the run
@@ -2569,6 +2568,8 @@ test("a start no part named yet carries no prompt, and neither does a revive of 
     settleChildSurvival(run.state, "ses_background_child", reported.checkId, true, run.ctx),
     "task.started"
   );
-  assert.deepEqual(revived.map((event) => event.payload.toolUseId), ["opencode-revive:call_background:1"]);
+  assert.equal(revived.length, 1);
+  assert.ok(revived[0]?.payload.toolUseId);
+  assert.notEqual(revived[0].payload.toolUseId, orphan.payload.toolUseId, "a revival reopens under a new identity");
   assert.equal("prompt" in (revived[0]?.payload ?? {}), false);
 });

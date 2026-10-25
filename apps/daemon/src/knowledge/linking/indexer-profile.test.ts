@@ -7,10 +7,7 @@ import { resolveForAgent } from "../../session-profiles/resolve.ts";
 import { SessionProfileService } from "../../session-profiles/service.ts";
 import { SessionProfileStore } from "../../session-profiles/store.ts";
 import {
-  KNOWLEDGE_INDEXER_INSTRUCTIONS,
   KNOWLEDGE_INDEXER_PROFILE_ID,
-  KNOWLEDGE_WORKER_NEXT_TOOL,
-  KNOWLEDGE_WORKER_SUBMIT_TOOL,
   ensureKnowledgeIndexerProfile
 } from "./indexer-profile.ts";
 
@@ -38,16 +35,7 @@ describe("the Knowledge indexer profile", () => {
     const claude = resolveForAgent(source, "claude");
     assert.deepEqual(claude.settings, { hideBuiltinSkills: true, claudeWorkflowTool: false, claudeBuiltinTools: false });
     assert.deepEqual([claude.skills, claude.commands, claude.mcpServers, claude.hooks, claude.plugins], [[], [], [], [], []]);
-    assert.equal(claude.instructions.trim(), KNOWLEDGE_INDEXER_INSTRUCTIONS.trim());
     for (const agent of ["codex", "grok", "opencode"] as const) assert.equal(resolveForAgent(source, agent).settings.hideBuiltinSkills, true);
   });
 
-  it("tells the chat to work only through the two worker tools and to answer JSON only", () => {
-    assert.match(KNOWLEDGE_INDEXER_INSTRUCTIONS, new RegExp(KNOWLEDGE_WORKER_NEXT_TOOL));
-    assert.match(KNOWLEDGE_INDEXER_INSTRUCTIONS, new RegExp(KNOWLEDGE_WORKER_SUBMIT_TOOL));
-    assert.match(KNOWLEDGE_INDEXER_INSTRUCTIONS, /ONLY the JSON/);
-    assert.match(KNOWLEDGE_INDEXER_INSTRUCTIONS, /sameInstructionsAs/);
-    assert.match(KNOWLEDGE_INDEXER_INSTRUCTIONS, /Never use any other tool/);
-    assert.ok(Buffer.byteLength(KNOWLEDGE_INDEXER_INSTRUCTIONS) < 1200, "short: it rides every worker chat's system prompt");
-  });
 });

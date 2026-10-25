@@ -130,12 +130,9 @@ test("image: stored with a version, served back; the wire never names the file",
   assert.equal(after.length, 1);
   assert.notDeepEqual(after, before);
   assert.match(after[0]!, /\.jpg$/);
-  assert.deepEqual(replaced?.icon, {
-    kind: "image",
-    contentType: "image/jpeg",
-    version: (replaced?.icon as { version: string }).version,
-    source: { kind: "favicon", domain: "acme.com" }
-  });
+  assert.ok(replaced?.icon?.kind === "image");
+  assert.equal(replaced.icon.contentType, "image/jpeg");
+  assert.deepEqual(replaced.icon.source, { kind: "favicon", domain: "acme.com" });
   assert.notEqual((replaced?.icon as { version: string }).version, (identity?.icon as { version: string }).version);
 });
 

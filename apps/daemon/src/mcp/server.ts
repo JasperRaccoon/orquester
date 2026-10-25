@@ -30,7 +30,7 @@ export const SERVER_VERSION = "3.0.0";
 /**
  * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
  * search on), so every load-bearing rule is also in the description of the tool it governs. Every
- * tool it names is an external catalog tool (`catalog/names.test.ts`).
+ * tool it names is an external catalog tool (`catalog/registry.test.ts`).
  */
 export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chats (Claude Code, Codex, OpenCode, Grok) like its GUI. A session is a tab: an agent chat, or a terminal (listed and closable only). Address sessions by sessionId (list_sessions) and projects by absolute path or "workspace/project" (list_projects). list_agents gives the valid agents, models, options, permission modes and accounts for create_session and update_session.
 create_session opens a chat (or resumes one from list_conversations), optionally with a first prompt. send_message talks to a chat: reply "wait" (default) returns the reply of the turn it causes, queued behind a working chat; reply "none" returns at once, steering a working chat. get_session shows status, pending requests, plan, lineage and context; read_transcript what was said and done; read_tool_output a tool row's whole output; get_turn_diff a turn's diff; search_sessions searches chats. respond_to_request answers (or dismisses) a question or decides a tool approval. control_session interrupts, stops, compacts, rewinds or closes. fork_session branches a chat; merge_back_session sends a fork's result back. wait_for_session blocks until a session needs you: pass its cursor back as \`after\`; never poll. Attachments are inline ({path} in the sandbox or {name, base64}).
@@ -41,11 +41,6 @@ Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a m
 /** Every external tool, in tools/list order: the catalog's `external` audience (unified MCP design 2026-10-15 §3.1). */
 function externalTools(): readonly AnyOrquesterTool[] {
   return catalogFor("external");
-}
-
-/** Every tool name this server serves, in tools/list order. */
-export function externalMcpToolNames(): string[] {
-  return externalTools().map((tool) => tool.name);
 }
 
 /** A tool's highest chat tier, as `_meta` reports it (a per-call tier reports its widest: Admin). */

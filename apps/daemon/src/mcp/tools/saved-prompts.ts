@@ -664,7 +664,7 @@ function lineOps(a: readonly string[], b: readonly string[]): Op[] {
 }
 
 /** `before` → `after` as a unified diff with 3 lines of context, labelled `name`. */
-export function unifiedDiff(before: string, after: string, name: string): string {
+function unifiedDiff(before: string, after: string, name: string): string {
   const ops = lineOps(before.split("\n"), after.split("\n"));
   const out = [`--- a/${name}`, `+++ b/${name}`];
   let index = 0;

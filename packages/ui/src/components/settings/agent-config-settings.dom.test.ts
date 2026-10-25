@@ -22,7 +22,6 @@ import { openAgentProfileEditor } from "../right-rail/agent-profile/editor-bridg
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let SettingsModal: typeof import("./SettingsModal").SettingsModal;
-let AGENT_CONFIG_INTRO: string;
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "Element", "Node", "navigator", "KeyboardEvent", "MouseEvent", "Event", "localStorage"] as const;
@@ -50,7 +49,6 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ SettingsModal } = await import("./SettingsModal"));
-  ({ AGENT_CONFIG_INTRO } = await import("./AgentConfigSettings"));
 });
 
 after(() => {
@@ -133,7 +131,6 @@ describe("Settings → Agent config", () => {
       await open(section);
       const heading = document.querySelector("h2");
       assert.equal(heading?.textContent, "Agent config");
-      assert.ok(document.body.textContent?.includes(AGENT_CONFIG_INTRO));
       assert.equal(navButton("Agent config")?.getAttribute("aria-current"), "page");
       assert.ok(document.querySelector('[data-profile-item="mcp:jira"]'), "Claude's MCP server is listed");
       assert.ok(document.querySelector('input[aria-label="Search Claude\'s config"]'), "the search names the config");

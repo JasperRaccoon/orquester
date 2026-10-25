@@ -8,12 +8,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import childProcess, { type SpawnOptions } from "node:child_process";
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { syncBuiltinESMExports } from "node:module";
-import { MessageChannel } from "node:worker_threads";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { loadInventoryFromCli } from "./cli-inventory.ts";
 
@@ -118,7 +116,7 @@ test("agent list yields name, mode and the hidden flag the CLI omits", async (t)
 test("agent list tolerates an empty body and trailing whitespace", async (t) => {
   const h = await harness(t, "ok", { agents: "plan (primary)\n" });
   assert.deepEqual((await loadInventoryFromCli(h.input)).agents.map((agent) => agent.name), ["plan"]);
-  await writeFile(join(h.input.cwd, "agents.json"), "");
+  h.output.agents = "";
   assert.deepEqual((await loadInventoryFromCli(h.input)).agents, []);
 });
 
@@ -172,7 +170,7 @@ test("a TRUNCATED skill array still yields every skill that arrived whole", asyn
 test("malformed skill output degrades to an empty list", async (t) => {
   const h = await harness(t);
   for (const output of ["not json", "{}", ""]) {
-    await writeFile(join(h.input.cwd, "skills.json"), output);
+    h.output.skills = output;
     assert.deepEqual((await loadInventoryFromCli(h.input)).skills, []);
   }
 });
@@ -181,47 +179,55 @@ test("malformed skill output degrades to an empty list", async (t) => {
 // loadInventoryFromCli
 // ---------------------------------------------------------------------------
 
-async function harness(t: test.TestContext, mode = "ok", output: { models?: string; agents?: string; skills?: string } = {}) {
-  // The daemon supplies other active handles while its retry timer is unref'd.
-  // Keep that lifecycle condition here without wall-clock sleeps or a server.
-  const lifetime = new MessageChannel();
-  lifetime.port1.on("message", () => undefined);
-  t.after(() => { lifetime.port1.close(); lifetime.port2.close(); });
-  const dir = await mkdtemp(join(tmpdir(), "opencode-inventory-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(join(dir, "models.json"), output.models ?? MODELS_OUTPUT);
-  await writeFile(join(dir, "agents.json"), output.agents ?? AGENTS_OUTPUT);
-  await writeFile(join(dir, "skills.json"), output.skills ?? "[]");
-  const bin = join(dir, "opencode-fixture");
-  await writeFile(bin, `#!${process.execPath}
-const fs = require("node:fs");
-const command = process.argv[2];
-const mode = process.env.FIXTURE_MODE;
-if (command === "models" && mode === "unavailable") process.exit(127);
-if (command === "models" && mode === "retry" && !fs.existsSync("first-attempt")) {
-  fs.writeFileSync("first-attempt", "failed");
-  process.exit(1);
-}
-if (command !== "models" && mode === "optional-failure") process.exit(2);
-process.stdout.write(command === "models" ? fs.readFileSync("models.json") : command === "agent" ? fs.readFileSync("agents.json") : fs.readFileSync("skills.json"));
-`, { mode: 0o755 });
-  const spawn = childProcess.spawn;
+function harness(t: test.TestContext, mode = "ok", supplied: { models?: string; agents?: string; skills?: string } = {}) {
+  // The CLI is external: supply its raw stdout and exit status, leaving the
+  // real stream reader, parser and retry policy under test. Actual CLI spawn
+  // plumbing is exercised by snapshot-budget.test.ts's cwd-less refresh.
+  const output = { models: MODELS_OUTPUT, agents: AGENTS_OUTPUT, skills: "[]", ...supplied };
   let live = 0;
   let peak = 0;
   let modelsStarted = 0;
-  const mocked = t.mock.method(childProcess, "spawn", (command: string, args: readonly string[], options: SpawnOptions) => {
-    const child = spawn(command, args, options);
+  let skillsStarted = 0;
+  if (mode !== "ok") t.mock.timers.enable({ apis: ["setTimeout"] });
+  const mocked = t.mock.method(childProcess, "spawn", (_command: string, args: readonly string[]) => {
+    const command = args[0];
+    const model = command === "models";
+    if (model) modelsStarted += 1;
+    if (command === "debug") skillsStarted += 1;
+    const code = model && mode === "unavailable" ? 127
+      : model && mode === "retry" && modelsStarted === 1 ? 1
+      : !model && mode === "optional-failure" ? 2 : 0;
+    const child = Object.assign(new EventEmitter(), {
+      pid: undefined,
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), stdio: []
+    });
     live += 1;
     peak = Math.max(peak, live);
-    // `includes`, not `args[0]`: the binary may run under a launcher (`nice`).
-    if (args.includes("models")) modelsStarted += 1;
-    child.once("close", () => { live -= 1; });
+    setImmediate(() => {
+      child.stdout.end(code === 0 ? model ? output.models : command === "agent" ? output.agents : output.skills : "");
+      child.stderr.end();
+      child.stdin.end();
+      // EOF is not process exit: keep this child live for another turn so
+      // starting the next SQLite probe on stdout end would fail the peak check.
+      setImmediate(() => {
+        live -= 1;
+        child.emit("close", code, null);
+        // The last initial probe has closed. Its continuation schedules the
+        // retry pause before this next loop turn advances virtual time.
+        if (mode !== "ok" && command === "debug" && skillsStarted === 1) {
+          setImmediate(() => t.mock.timers.runAll());
+        }
+      });
+    });
     return child;
   });
   syncBuiltinESMExports();
   t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
   return {
-    input: { bin, cwd: dir, env: { FIXTURE_MODE: mode } },
+    // An absent executable prevents the optional nice/lifeline wrappers from
+    // changing these CLI arguments; no fixture file or process is needed.
+    input: { bin: "/__orquester_test__/opencode-fixture", cwd: process.cwd(), env: {} },
+    output,
     maxInFlight: () => peak,
     modelAttempts: () => modelsStarted
   };
@@ -253,6 +259,6 @@ test("agents and skills may each degrade to an empty list", async (t) => {
 
 test("a models failure rejects — that one IS the catalogue", async (t) => {
   const h = await harness(t, "unavailable");
-  await assert.rejects(loadInventoryFromCli(h.input));
+  await assert.rejects(loadInventoryFromCli(h.input), /models --verbose.*exited with code 127/);
   assert.equal(h.modelAttempts(), 2, "a permanent failure stops after one retry");
 });

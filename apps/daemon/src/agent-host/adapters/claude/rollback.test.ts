@@ -454,20 +454,6 @@ describe("claude rollback — by turn id", () => {
 describe("claude resume cursor — a bad cursor means no resume, never an error", () => {
   const sessionId = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
 
-  it("round-trips", () => {
-    const cursor = buildClaudeResumeCursor({
-      threadId: "thread-1",
-      sessionId,
-      turnStartMessageIds: ["t1", "t2"]
-    });
-    assert.deepEqual(readClaudeResumeCursor(cursor), {
-      threadId: "thread-1",
-      resume: sessionId,
-      turnCount: 2,
-      turnStartMessageIds: ["t1", "t2"]
-    });
-  });
-
   it("accepts the minimal {threadId, resume} the §6.1 resume picker builds", () => {
     // The host builds this shape in `orchestration/resume.ts`; a uuid-only
     // rule here would silently degrade a real resume into a fresh session.

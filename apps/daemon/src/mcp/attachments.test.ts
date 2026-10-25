@@ -39,8 +39,10 @@ test("refuses more than 8, a path outside the sandbox (incl. a symlink escape), 
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: join(s.ws, "acme", "api", "link.txt") }]), (e: { code: string }) => e.code === "PATH_NOT_ALLOWED");
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: join(s.ws, "acme", "api", "missing.txt") }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ name: "x.txt", base64: "not base64!!" }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
-  const bigImage = { name: "big.png", base64: Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64") };
-  await assert.rejects(uploadInlineAttachments(s.api, "c1", [bigImage]), (e: { message: string }) => /10 MiB/.test(e.message));
+  const bigImage = join(s.ws, "acme", "api", "big.png");
+  await writeFile(bigImage, "");
+  await truncate(bigImage, 10 * 1024 * 1024 + 1);
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: bigImage }]), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /10 MiB/.test(e.message));
   assert.equal(s.api.uploads.length, 0, "nothing is uploaded when validation fails");
 });
 

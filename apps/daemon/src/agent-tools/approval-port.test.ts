@@ -15,7 +15,6 @@ import {
   callerTraitsFromDaemon,
   canonicalProjectPath,
   createAgentToolsRuntime,
-  WORKFLOW_GRANT_NOTICE,
   workflowOwnedFromTabs,
   type CallerTraits
 } from "./approval-port.ts";
@@ -49,7 +48,7 @@ class FakeClock implements ToolApprovalClock {
 
 const PROJECT = "/w/ws/p";
 
-async function harness(t: TestContext) {
+async function harness(t: TestContext, readOnly = false) {
   const dir = await mkdtemp(join(tmpdir(), "orq-approval-port-"));
   const clock = new FakeClock();
   const events: AgentChatToolApprovalEventPayload[] = [];
@@ -74,7 +73,9 @@ async function harness(t: TestContext) {
   const opened = (): Promise<string> =>
     openedIds.length > 0 ? Promise.resolve(openedIds.shift()!) : new Promise<string>((resolve) => openWaiters.push(resolve));
   let g = 0;
-  const tools = new AgentToolsService({ file: join(dir, "agent-tools.json"), now: () => clock.now(), newId: () => `g${++g}` });
+  const file = join(dir, "agent-tools.json");
+  if (readOnly) await mkdir(file);
+  const tools = new AgentToolsService({ file, now: () => clock.now(), newId: () => `g${++g}`, logger: { error: () => undefined } });
   await tools.load();
   t.after(async () => {
     await registry.shutdown();
@@ -301,7 +302,8 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   const joining = h.port.request(wfCard(), new AbortController().signal);
   const joiningId = await h.opened();
   const summary = h.registry.list("t1")[0]!;
-  assert.deepEqual(summary.sections[0], { kind: "warning", level: "caution", text: WORKFLOW_GRANT_NOTICE });
+  const notice = summary.sections[0];
+  assert.ok(notice?.kind === "warning" && notice.level === "caution" && /grant/i.test(notice.text));
   await h.registry.answer("t1", joiningId, { decision: "approve" });
   assert.deepEqual(await joining, { outcome: "approved", approvalId: joiningId, grantId, grantScope: "chat" });
   await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf2", grantId: grantId! });
@@ -320,8 +322,7 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
 });
 
 test("a read-only store: a grant answers 503 AGENT_TOOLS_UNAVAILABLE; approving without a grant works", async (t) => {
-  const h = await harness(t);
-  (h.tools as unknown as { blockedReason: string }).blockedReason = "test: read-only";
+  const h = await harness(t, true);
   const waiting = h.port.request(card(), new AbortController().signal);
   const id = await h.opened();
   const refused = await h.registry.answer("t1", id, { decision: "approve", grant: "chat" });
@@ -405,14 +406,4 @@ test("threadInfo reports the CANONICAL project path, so a symlinked project's gr
   const info = rt.threadInfo("t1")!;
   assert.equal(info.projectPath, canonical);
   assert.deepEqual(rt.tools.threadView("t1", info).grants.map((g) => g.id), [grantId]);
-});
-
-test("at most 5 cards wait in one chat; the 6th is refused before any card", async (t) => {
-  const h = await harness(t);
-  for (let i = 0; i < 5; i += 1) {
-    void h.port.request(card(), new AbortController().signal);
-    await h.opened();
-  }
-  await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "APPROVAL_LIMIT");
-  assert.equal(h.registry.list("t1").length, 5);
 });

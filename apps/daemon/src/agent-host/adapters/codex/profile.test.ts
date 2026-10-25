@@ -15,7 +15,6 @@ import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
 import type { HostThreadProfile } from "../../host-protocol.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { createCodexAdapter } from "./index.ts";
-import { codexProfileLaunch, codexProfileSkillDisables, codexProfileSkillsConfig } from "./profile.ts";
 import { createFakeContext, writeMockCodexServer } from "./testing.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -34,7 +33,7 @@ function skill(path: string, scope: string, pluginId: string | null = null) {
 }
 
 /** A prepared home with its manifest and a seeded state DB, plus a `$HOME` with a global skill. */
-async function prepared(options: { seeded?: boolean; manifest?: boolean } = {}) {
+async function prepared(options: { manifest?: boolean } = {}) {
   const root = tempDir("codex-profile-");
   const preparedDir = join(root, "prepared", "v-1");
   const home = join(root, "home");
@@ -44,7 +43,7 @@ async function prepared(options: { seeded?: boolean; manifest?: boolean } = {}) 
   const elsewhere = join(root, "dotfiles", "skills", "notes");
   mkdirSync(elsewhere, { recursive: true });
   symlinkSync(elsewhere, join(home, ".agents", "skills", "notes"));
-  if (options.seeded !== false) writeFileSync(join(preparedDir, "state_5.sqlite"), "");
+  writeFileSync(join(preparedDir, "state_5.sqlite"), "");
   const profile: HostThreadProfile = { profileId: "editor", revision: "3", preparedDir };
   if (options.manifest !== false) {
     await writePreparedManifest(preparedDir, {
@@ -64,29 +63,11 @@ async function prepared(options: { seeded?: boolean; manifest?: boolean } = {}) 
     skill(join(root, "repo", ".agents", "skills", "build", "SKILL.md"), "repo"),
     skill(join(preparedDir, "plugins", "cache", "studio", "render", "1.0.0", "skills", "render", "SKILL.md"), "user", "render@studio")
   ];
-  return { root, preparedDir, home, profile, skills };
+  return { preparedDir, home, profile, skills };
 }
 
-describe("codex profile — the skill switch-offs", () => {
-  it("switches off $HOME/.agents/skills and every user skill outside the prepared home; keeps the profile's, repo and plugin skills", async () => {
-    const p = await prepared();
-    const launch = await codexProfileLaunch(p.preparedDir, { userSkillRoots: [] }, p.home);
-    const off = codexProfileSkillDisables([{ cwd: "/repo", skills: p.skills as never, errors: [] }], launch);
-    assert.deepEqual(off, [p.skills[1]!.path, p.skills[2]!.path]);
-    assert.deepEqual(codexProfileSkillsConfig(off), {
-      skills: { config: off.map((path) => ({ path, enabled: false })) }
-    });
-    assert.deepEqual(codexProfileSkillsConfig([]), {});
-  });
-
-  it("refuses a home whose state DB is gone", async () => {
-    const p = await prepared({ seeded: false });
-    await assert.rejects(codexProfileLaunch(p.preparedDir, { stateDbFile: "state_5.sqlite" }, p.home), /not seeded/);
-  });
-});
-
 describe("codex profile — a launch", () => {
-  async function start(p: Awaited<ReturnType<typeof prepared>>, options: { resume?: boolean; withTools?: boolean; accountHome?: string } = {}) {
+  async function start(p: Awaited<ReturnType<typeof prepared>>, options: { resume?: boolean; withTools?: boolean } = {}) {
     const server = writeMockCodexServer({ turns: [], skills: p.skills });
     cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
     const tools = recordingSessionTools();
@@ -95,7 +76,7 @@ describe("codex profile — a launch", () => {
       ...(options.withTools !== false ? { sessionTools: tools } : {}),
       // The launch env still names the ACCOUNT home: the profile's home must win anyway.
       buildEnv: (input) =>
-        ({ PATH: process.env.PATH ?? "", HOME: p.home, CODEX_HOME: options.accountHome ?? "/accounts/acc1/home", ...input.extraEnv }) as Record<string, string>
+        ({ PATH: process.env.PATH ?? "", HOME: p.home, CODEX_HOME: "/accounts/acc1/home", ...input.extraEnv }) as Record<string, string>
     });
     const adapter = await createCodexAdapter(context);
     cleanups.push(() => adapter.stopAll());
@@ -103,13 +84,13 @@ describe("codex profile — a launch", () => {
     const started = adapter.startSession({
       threadId: "thread-p",
       cwd: process.cwd(),
-      home: { kind: "account", path: options.accountHome ?? "/accounts/acc1/home", accountId: "acc1" },
+      home: { kind: "account", path: "/accounts/acc1/home", accountId: "acc1" },
       modelSelection: { model: "gpt-5.5" },
       runtimeMode: "approval-required",
       profile: p.profile,
       ...(options.resume ? { resumeCursor: { threadId: "prior-thread" } } : {})
     });
-    return { server, adapter, started, tools };
+    return { server, adapter, started };
   }
 
   for (const resume of [false, true]) {

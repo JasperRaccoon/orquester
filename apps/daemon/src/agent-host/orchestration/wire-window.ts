@@ -71,15 +71,15 @@ import {
 } from "@orquester/api/agent-chat";
 
 /** At most this many started turns are sent whole; older ones are a "load older" away. */
-export const WIRE_WINDOW_MAX_TURNS = 10;
+const WIRE_WINDOW_MAX_TURNS = 10;
 /** At least this many, whatever their size: the turn the user is on and the one before it. */
-export const WIRE_WINDOW_MIN_TURNS = 2;
+const WIRE_WINDOW_MIN_TURNS = 2;
 /**
  * Past this many bytes of the kept turns' trimmable rows (slimmed, as JSON), no
  * older turn is added. Measured per turn, so the turn that crosses it is still
  * kept whole; a turn is never split.
  */
-export const WIRE_WINDOW_BUDGET_BYTES = 512 * 1024;
+const WIRE_WINDOW_BUDGET_BYTES = 512 * 1024;
 
 /** Where the frame's window begins ({@link wireWindowCut}). */
 export interface WireWindowCut {

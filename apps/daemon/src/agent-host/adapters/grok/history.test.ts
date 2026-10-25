@@ -115,28 +115,11 @@ test("each replayed turn projects started / items / completed, in order", () => 
     items.every((event) => event.payload.status === "completed"),
     true
   );
-});
-
-test("a projected turn never claims token usage it cannot account for", () => {
-  // The replayed `turn_completed` DOES carry a full usage block, but it covers
-  // the whole original turn while replay returned a handful of rows (README
-  // 10: 39 events produced, 5 replayed).
-  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  const completed = projectGrokHistory(snapshot, { threadId: "t1", ...stamps() }).find(
-    (event): event is Extract<RuntimeEvent, { type: "turn.completed" }> => event.type === "turn.completed"
-  );
-  assert.equal(completed?.payload.state, "completed");
-  assert.equal(completed?.payload.stopReason, null);
-  assert.equal(completed?.payload.tokenUsage?.usageStatus, "unavailable");
-  assert.equal(completed?.payload.totalCostUsd, undefined);
-});
-
-test("every projected event is stamped as replayed history, not live traffic", () => {
-  // The shared marker is what a consumer keys on: a historical event never
-  // raises attention, never fires a push and never moves a live turn.
-  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  const events = projectGrokHistory(snapshot, { threadId: "t1", ...stamps() });
-  assert.ok(events.length > 0);
+  const completed = events.find((event) => event.type === "turn.completed")!;
+  assert.equal(completed.payload.state, "completed");
+  assert.equal(completed.payload.stopReason, null);
+  assert.equal(completed.payload.tokenUsage?.usageStatus, "unavailable");
+  assert.equal(completed.payload.totalCostUsd, undefined);
   for (const event of events) {
     assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
     assert.deepEqual(event.raw?.payload, { turnId: "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299" });
@@ -146,12 +129,6 @@ test("every projected event is stamped as replayed history, not live traffic", (
 test("a LIVE event never carries the historical marker", () => {
   // The two must stay distinguishable: everything the normaliser emits from a
   // real frame keeps its own ACP/vendor source.
-  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  const historical = new Set(
-    projectGrokHistory(snapshot, { threadId: "t1", ...stamps() }).map((event) => event.raw?.source)
-  );
-  assert.deepEqual([...historical], [HISTORICAL_RAW_SOURCE]);
-
   const normalizer = new GrokNormalizer(
     {
       threadId: "t1",

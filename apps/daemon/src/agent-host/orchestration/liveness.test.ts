@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { createLivenessRegistry, UNCHECKED_BACKGROUND_TTL_MS } from "./liveness.ts";
+import { createLivenessRegistry } from "./liveness.ts";
 import { createTestClock } from "./testing/fakes.ts";
 
 const base = { eventId: "e", threadId: "t1", createdAt: "1970-01-01T00:00:00.000Z" };
@@ -127,9 +127,9 @@ describe("a silent background shell stays live (2026-10-23)", () => {
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock, probe: () => undefined });
     registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
-    clock.set(UNCHECKED_BACKGROUND_TTL_MS - 1);
+    clock.set(6 * 60 * 60_000 - 1);
     assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(UNCHECKED_BACKGROUND_TTL_MS);
+    clock.set(6 * 60 * 60_000);
     assert.equal(registry.liveness("t1"), null, "the guard against a provider that never reports an end");
   });
 
@@ -164,16 +164,6 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     );
     assert.equal(registry.liveness("t1"), "monitoring");
     assert.equal(registry.liveAgentCount("t1"), 0, "a shell is not an agent");
-  });
-
-  it("…and leaves on its own terminal row", () => {
-    const registry = createLivenessRegistry();
-    registry.observe(task("task.started", { taskId: "bg-1", taskType: "shell", agentId: "bg-1" }));
-    assert.equal(registry.liveness("t1"), "monitoring");
-    registry.observe(
-      task("task.completed", { taskId: "bg-1", taskType: "shell", agentId: "bg-1", status: "stopped" })
-    );
-    assert.equal(registry.liveness("t1"), null);
   });
 
   it("Claude's shapes are unchanged: an agent's shell is its owner's, the parent's monitors", () => {

@@ -364,14 +364,7 @@ describe("html_render lands as a visual row on every provider", () => {
     assertVisual(await ingest(grokEvents("html_render", RENDER_ARGS, render), GROK_CALL));
   });
 
-  it("Grok: the row is the session tool's MCP call from its first frame, whatever the reader finds", async () => {
-    const { render } = await toolResults();
-    const rows = await ingest(grokEvents("html_render", RENDER_ARGS, render), GROK_CALL);
-    for (const row of rows.rows) {
-      assert.equal((row.payload as { itemType?: unknown }).itemType, "mcp_tool_call", row.activityKind);
-      assert.equal(sessionToolNameOfData((row.payload as { data?: unknown }).data), "html_render", row.activityKind);
-    }
-  });
+
 });
 
 describe("html_preview's screenshot never reaches events.ndjson", () => {

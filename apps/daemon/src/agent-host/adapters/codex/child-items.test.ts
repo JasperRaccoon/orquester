@@ -487,7 +487,7 @@ describe("a child's call through ingestion and the fold (Task 3)", () => {
     assert.equal(roster.find((agent) => agent.id === CHILD)?.title, "explorer");
   });
 
-  it("a child's end is ONE row, with its answer as the result, whichever order Codex sends it in", async () => {
+  it("paired child end records around its turn completion produce one end with its answer as the result", async () => {
     // Observed on 0.155.1 (fixtures README observation 24): the end record
     // comes twice, as item/started and item/completed, with the child's own
     // turn/completed between the two. That wrote two ends and an `idle`

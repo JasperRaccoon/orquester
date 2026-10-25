@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { providerPickerView } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
 import { findAgent,loadAgents,resolveModelSelection,validateAccountId,type AgentView } from "./agents.ts";
@@ -179,8 +178,6 @@ test("the launch default is the picker's (resolveLaunchModel): a default-flagged
   ] }] };
   const daemon = api().on("GET", "/api/agent/providers", { status: 200, body: legacyFirst });
   const claude = findAgent(await loadAgents(daemon), "claude");
-  const view = providerPickerView({ status: "ready", models: legacyFirst.providers[0]!.models as never });
-  assert.equal(claude.defaultModel, view.defaultModel);
   assert.equal(claude.defaultModel, "opus");
   assert.deepEqual(claude.models.map((m) => [m.slug, m.isDefault, m.shortName]), [["opus", true, "Opus 5"], ["haiku", false, undefined]]);
   assert.equal(resolveModelSelection(claude, {}).model, "opus");

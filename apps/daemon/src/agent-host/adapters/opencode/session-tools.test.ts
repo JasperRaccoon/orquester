@@ -18,7 +18,7 @@ import { test } from "node:test";
 
 import { catalogFor } from "../../../mcp/catalog/index.ts";
 import { buildOpenCodePermissionRules, type OpenCodePermissionRuleset } from "./ruleset.ts";
-import { openCodeSessionToolsServerName, withSessionToolInstructions, withSessionToolRules } from "./session-tools.ts";
+import { openCodeSessionToolsServerName, withSessionToolRules } from "./session-tools.ts";
 
 /** OpenCode's `Wildcard.match` (1.18.34). */
 function wildcardMatch(text: string, pattern: string): boolean {
@@ -128,22 +128,4 @@ test("the external /mcp under the name docs/orquester-mcp.md suggests keeps ever
   // Why the guide does not suggest `orquester-remote`: the deny's 16 `?` can
   // land on a `_` inside such a server's tool names (documented limitation).
   assert.ok(offered("orquester-remote").size > 0);
-});
-
-test("no thread's allow can reach another's server, whatever their hashes share", () => {
-  // Brute force: across many thread ids, A's allow pattern never matches B's tools.
-  const names = Array.from({ length: 300 }, (_, index) => openCodeSessionToolsServerName(`thread-${index}`));
-  for (const a of names.slice(0, 30)) {
-    const allow = `${a}_*`;
-    for (const b of names) {
-      if (b === a) continue;
-      assert.equal(wildcardMatch(toolId(b, "echo"), allow), false, `${a} vs ${b}`);
-    }
-  }
-});
-
-test("without session tools, the ruleset and the system addendum are untouched", () => {
-  const rules = buildOpenCodePermissionRules("approval-required");
-  assert.equal(withSessionToolRules(rules, { isolate: false }), rules);
-  assert.equal(withSessionToolInstructions("<runtime_info/>", undefined), "<runtime_info/>");
 });

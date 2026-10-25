@@ -12,10 +12,7 @@ import { parseInterruptCause, type InterruptCause } from "@orquester/api/agent-c
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import {
-  cascadeCommandId,
-  delegateDescendants,
   DelegateStopCascade,
-  delegateUnfinished,
   REPEAT_INTERRUPT_WINDOW_MS
 } from "./delegates.ts";
 
@@ -167,16 +164,6 @@ describe("the delegate stop cascade", () => {
     assert.deepEqual(w.interrupted(), ["a", "a1", "b1"]);
   });
 
-  it("walks delegate links only, every depth, each chat once", () => {
-    assert.deepEqual(
-      delegateDescendants(tree(), "root").map((s) => s.id),
-      ["a", "b", "a1", "b1"]
-    );
-    // A lineage cycle (no build writes one) cannot loop.
-    const cycle = [tab("x", { parentThreadId: "y" }), tab("y", { parentThreadId: "x" })];
-    assert.deepEqual(delegateDescendants(cycle, "x").map((s) => s.id), ["y"]);
-  });
-
   it("interrupting a parent interrupts its unfinished delegates, recursively — never forks, opened chats or finished ones", async () => {
     const w = world(tree());
     w.cascade.commandAccepted("root", "interrupt", { commandId: "stop-1" });
@@ -187,7 +174,6 @@ describe("the delegate stop cascade", () => {
     assert.equal(a.body.turnId, "active-a", "the running turn is named, from the child's head");
     assert.deepEqual(a.body.cause, { kind: "parent-stopped", parentSessionId: "root", parentTitle: "Chat root", action: "interrupted" });
     assert.ok(parseInterruptCause(a.body.cause), "the cause reads back");
-    assert.equal(a.body.commandId, cascadeCommandId("root\u0000interrupt\u0000stop-1", "a"));
     const b1 = w.interrupts.find((entry) => entry.sessionId === "b1")!;
     assert.equal(b1.body.turnId, undefined, "a chat with no running turn is interrupted without one");
   });
@@ -205,9 +191,6 @@ describe("the delegate stop cascade", () => {
     w.cascade.commandAccepted("a", "interrupt", w.interrupts.find((entry) => entry.sessionId === "a")!.body);
     await w.cascade.whenIdle();
     assert.equal(w.interrupts.length, first, "nothing is posted again for the same turns");
-    // The same command id is derived for the same stop and child, whatever the order.
-    assert.equal(cascadeCommandId("k", "a"), cascadeCommandId("k", "a"));
-    assert.notEqual(cascadeCommandId("k", "a"), cascadeCommandId("k", "b"));
     // Past the window, a turn that kept running is a new attempt.
     w.advance(REPEAT_INTERRUPT_WINDOW_MS + 1);
     w.cascade.commandAccepted("root", "interrupt", { commandId: "stop-3" });
@@ -232,9 +215,14 @@ describe("the delegate stop cascade", () => {
     w.cascade.commandAccepted("solo", "interrupt", { commandId: "s" });
     await w.cascade.whenIdle();
     assert.equal(w.interrupts.length, 0);
-    assert.equal(delegateUnfinished(tab("x", null, DONE)), false);
-    assert.equal(delegateUnfinished(tab("x", null, { chatPending: true, chatSessionStatus: "starting" })), false);
-    assert.equal(delegateUnfinished(tab("x", null, { goal: { objective: "o", status: "active", continuing: true } })), true);
+    const pending = world([tab("root", null, RUNNING), tab("pending", { parentThreadId: "root" }, { chatPending: true, chatSessionStatus: "starting" })]);
+    pending.cascade.commandAccepted("root", "interrupt", { commandId: "s" });
+    await pending.cascade.whenIdle();
+    assert.deepEqual(pending.interrupted(), []);
+    const continuing = world([tab("root", null, RUNNING), tab("goal", { parentThreadId: "root" }, { goal: { objective: "o", status: "active", continuing: true } })]);
+    continuing.cascade.commandAccepted("root", "interrupt", { commandId: "s" });
+    await continuing.cascade.whenIdle();
+    assert.deepEqual(continuing.interrupted(), ["goal"]);
   });
 
   it("stopping a child (control_session) cascades to that child's delegates only", async () => {

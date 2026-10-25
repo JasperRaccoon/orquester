@@ -809,8 +809,14 @@ describe("Agent Profiles end to end (daemon → host → adapter launch inputs)"
       assert.equal(fallback.profile, undefined, "the interactive chat runs Global");
       assert.deepEqual(launchConfig(m, interactive.id).launchEnv, { GROK_HOME: m.world.accountHome.grok });
       assert.equal(m.daemon.chat.chat.get(interactive.id)?.profileId, null, "the tab mirrors Global");
-      const log = JSON.stringify(eventsOf(m, interactive.id));
-      assert.ok(log.includes('Agent Profile \\"Editor\\" was deleted; this chat now uses Global.'), "the notice names the profile");
+      const notice = eventsOf(m, interactive.id)
+        .filter((event) => event.type === "thread.activity-appended")
+        .map((event) => (event.payload as { activity: { activityKind: string; summary: string; payload?: Record<string, unknown> } }).activity)
+        .find((activity) => activity.activityKind === "runtime.warning" && activity.payload?.reason === "profile-deleted");
+      assert.ok(notice, "a deleted-profile fallback is announced");
+      assert.deepEqual(notice.payload, { profileId: null, previousProfileId: editor, reason: "profile-deleted" });
+      assert.match(notice.summary, /Editor/);
+      assert.match(notice.summary, /Global/);
 
       assert.equal(starts(m, unattended.id).length, 0, "the unattended chat never starts Global");
       assert.match(m.host.test.store.heads.get(unattended.id)?.session.lastError ?? "", /unattended chat never falls back to Global/);

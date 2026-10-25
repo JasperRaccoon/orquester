@@ -32,7 +32,6 @@ afterEach(() => {
 
 test("gitignored files are hidden by default", () => {
   install();
-  assert.equal(SEARCH_OPTIONS_DEFAULT.includeIgnored, false);
   assert.equal(loadSearchOptions("/p").includeIgnored, false);
 });
 

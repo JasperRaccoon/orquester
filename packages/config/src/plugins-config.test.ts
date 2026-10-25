@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  appendNodeRequireOption,
   createDefaultPluginsConfig,
   parsePluginsConfig,
   pluginStateOf,
@@ -113,24 +112,6 @@ test("a known plugin's malformed record is rejected where it is read", () => {
   const emptyVersion = parsePluginsConfig({ plugins: { "ts-rust": { current: { version: "" } } } });
   assert.throws(() => pluginStateOf(emptyVersion, "ts-rust"));
   assert.throws(() => pluginStateOf(parsePluginsConfig({ plugins: { "ts-rust": "on" } }), "ts-rust"));
-});
-
-test("the preload is appended to NODE_OPTIONS without replacing it", () => {
-  assert.equal(appendNodeRequireOption(undefined, "/a/preload.cjs"), '--require "/a/preload.cjs"');
-  assert.equal(appendNodeRequireOption("", "/a/preload.cjs"), '--require "/a/preload.cjs"');
-  assert.equal(
-    appendNodeRequireOption("--max-old-space-size=8192", "/a/preload.cjs"),
-    '--max-old-space-size=8192 --require "/a/preload.cjs"'
-  );
-});
-
-test("appending the preload twice leaves NODE_OPTIONS unchanged", () => {
-  const once = appendNodeRequireOption("--enable-source-maps", "/a/preload.cjs");
-  assert.equal(appendNodeRequireOption(once, "/a/preload.cjs"), once);
-});
-
-test("a preload path with spaces is quoted", () => {
-  assert.equal(appendNodeRequireOption(undefined, "/My Apps/preload.cjs"), '--require "/My Apps/preload.cjs"');
 });
 
 test("knowledge-graph settings read field by field; a bad value never makes the record unreadable", () => {

@@ -7,35 +7,31 @@
  */
 
 import assert from "node:assert/strict";
-import { createWriteStream } from "node:fs";
 import test from "node:test";
 
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
-import { PRINCIPAL_TOKEN_HEADER, PRINCIPAL_TOKEN_INVALID, PRINCIPAL_TOKEN_MIN_BYTES, PRINCIPAL_TOKEN_TTL_MS, type CallerPrincipal } from "@orquester/api/agent-chat";
+import { PRINCIPAL_TOKEN_HEADER, PRINCIPAL_TOKEN_INVALID, type CallerPrincipal } from "@orquester/api/agent-chat";
 
 import { createServer } from "../index.ts";
 import { InjectDaemonApi } from "./daemon-api.ts";
 import { chatSummary } from "./fixtures.ts";
 import {
   externalCredentialId,
-  livePrincipalTokenCount,
   mintPrincipalToken,
   registerPrincipalHook,
-  registerRemoteFieldStripping,
-  resolvePrincipalToken,
-  setPrincipalClockForTests
+  resolvePrincipalToken
 } from "./principal.ts";
 import { testAuthSessions } from "../auth/testing.ts";
 
 const AGENT: CallerPrincipal = { kind: "agent", threadId: "t1", projectPath: "/w/acme/api", agent: "claude", title: "T" };
 
-test("tokens: ≥ 128 bits of base64url, distinct, single use, released by the minter, expired after the TTL", () => {
+test("tokens: ≥ 128 bits of base64url, distinct, single use, released by the minter, expired after the TTL", (t) => {
   const a = mintPrincipalToken(AGENT);
   const b = mintPrincipalToken(AGENT);
   assert.notEqual(a.token, b.token);
   assert.match(a.token, /^[A-Za-z0-9_-]+$/);
-  assert.ok(Buffer.from(a.token, "base64url").length >= PRINCIPAL_TOKEN_MIN_BYTES);
+  assert.ok(Buffer.from(a.token, "base64url").length >= 16);
   assert.deepEqual(resolvePrincipalToken(a.token), AGENT);
   assert.equal(resolvePrincipalToken(a.token), null, "consumed on its first resolve");
   b.release();
@@ -44,16 +40,11 @@ test("tokens: ≥ 128 bits of base64url, distinct, single use, released by the m
   assert.equal(resolvePrincipalToken("not-a-token"), null);
 
   let now = 1_000_000;
-  setPrincipalClockForTests(() => now);
-  try {
-    const late = mintPrincipalToken(AGENT);
-    now += PRINCIPAL_TOKEN_TTL_MS;
-    assert.equal(resolvePrincipalToken(late.token), null, "expired");
-    late.release();
-  } finally {
-    setPrincipalClockForTests(null);
-  }
-  assert.equal(livePrincipalTokenCount(), 0);
+  t.mock.method(Date, "now", () => now);
+  const late = mintPrincipalToken(AGENT);
+  now += 30_000;
+  assert.equal(resolvePrincipalToken(late.token), null, "expired");
+  late.release();
 });
 
 test("a minted principal is a copy: changing the minter's object changes nothing a route reads", () => {
@@ -98,17 +89,14 @@ test("the hook: no header is the user; a live token is its principal and the hea
   }
 });
 
-test("InjectDaemonApi mints one nonce per request and releases it, resolved or refused", async () => {
+test("InjectDaemonApi forwards agent and external principals without changing plain user calls", async () => {
   const { app, seen } = hookedApp();
   const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: { add() {}, remove() {} } as never, fsRoot: "/", workspacesDir: "/" });
   try {
     assert.equal((await api.request("GET", "/api/who", { principal: AGENT })).status, 200);
     assert.equal((await api.request("GET", "/api/who", { principal: { kind: "external", credentialId: "cred_x" } })).status, 200);
     assert.equal((await api.request("GET", "/api/who")).status, 200);
-    // A route that does not exist still never leaves a token behind.
-    assert.equal((await api.request("GET", "/api/nowhere", { principal: AGENT })).status, 404);
     assert.deepEqual(seen.map((entry) => entry.principal), [AGENT, { kind: "external", credentialId: "cred_x" }, { kind: "user" }]);
-    assert.equal(livePrincipalTokenCount(), 0);
   } finally {
     await app.close();
   }
@@ -120,29 +108,6 @@ test("the external credential id names the identity, never the secret, and is st
   assert.notEqual(id, externalCredentialId("other"));
   assert.match(id, /^cred_[0-9a-f]{24}$/);
   assert.doesNotMatch(id, /admin/);
-});
-
-test("the remote transport strips causedBy from turn and merge-back bodies and an interrupt's cause; other fields and clean bodies are untouched", async () => {
-  const app = Fastify();
-  registerRemoteFieldStripping(app);
-  const bodies: unknown[] = [];
-  for (const url of ["/api/sessions/:id/turn", "/api/sessions/:id/merge-back", "/api/sessions/:id/interrupt"]) {
-    app.post(url, async (request: FastifyRequest) => {
-      bodies.push(request.body);
-      return {};
-    });
-  }
-  const causedBy = { threadId: "a", exchangeId: "x", hop: 1 };
-  try {
-    await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: { commandId: "c", input: "hi", causedBy } });
-    await app.inject({ method: "POST", url: "/api/sessions/s1/merge-back", payload: { text: "r", causedBy } });
-    const cause = { kind: "parent-stopped", parentSessionId: "p", parentTitle: "P", action: "interrupted" };
-    await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", payload: { commandId: "c", causedBy, cause, cascade: false } });
-    await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: ["not", "an", "object"] });
-    assert.deepEqual(bodies, [{ commandId: "c", input: "hi" }, { text: "r" }, { commandId: "c", causedBy }, ["not", "an", "object"]]);
-  } finally {
-    await app.close();
-  }
 });
 
 // --- Both apps, through the daemon's own createServer (inject only: nothing listens) ---
@@ -158,7 +123,7 @@ function daemonApp(mode: "local" | "remote", services: Record<string, unknown>):
   config.transports.http.passwordHash = PASSWORD_HASH;
   const root = "/nonexistent-orquester-principal-test";
   const resolved = { daemonDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root } as unknown as CreateServerArgs[1];
-  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), createWriteStream("/dev/null"), { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
+  const app = createServer(config, resolved, createDefaultClientConfig(`${root}/daemon.sock`), { write() {} }, { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4], { authRequired: mode === "remote", mode });
   const principals: { url: string; principal: CallerPrincipal }[] = [];
   app.addHook("preHandler", async (request) => {
     principals.push({ url: request.url, principal: request.principal });
@@ -215,14 +180,14 @@ test("the external /mcp acts as external {credentialId} on every daemon call; th
     const inner = principals.slice(1, -1);
     assert.ok(inner.length > 0 && inner.every((entry) => JSON.stringify(entry.principal) === JSON.stringify(external)), JSON.stringify(inner));
     assert.deepEqual(principals.at(-1)!.principal, { kind: "user" }, "a direct REST call with the bearer is the user");
-    assert.equal(livePrincipalTokenCount(), 0);
   } finally {
     await app.close();
   }
 });
 
-test("through createServer's real routes: the remote app strips causedBy from a turn and a merge-back; the socket app keeps it", async () => {
+test("through createServer's real routes: the remote app strips trusted turn, merge-back and interrupt fields; the socket app keeps them", async () => {
   const causedBy = { threadId: "a", exchangeId: "x", hop: 1 };
+  const cause = { kind: "parent-stopped", parentSessionId: "p", parentTitle: "P", action: "interrupted" };
   for (const mode of ["remote", "local"] as const) {
     const forwarded: unknown[] = [];
     const merged: unknown[] = [];
@@ -247,11 +212,13 @@ test("through createServer's real routes: the remote app strips causedBy from a 
       assert.equal(turn.statusCode, 200, `${mode} turn: ${turn.body}`);
       const merge = await app.inject({ method: "POST", url: "/api/sessions/s1/merge-back", headers: auth, payload: { text: "r", causedBy } });
       assert.equal(merge.statusCode, 200, `${mode} merge-back: ${merge.body}`);
+      const interrupt = await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", headers: auth, payload: { commandId: "i", cause, cascade: false } });
+      assert.equal(interrupt.statusCode, 200, `${mode} interrupt: ${interrupt.body}`);
       if (mode === "remote") {
-        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi" }]);
+        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi" }, { commandId: "i" }]);
         assert.deepEqual(merged, [{ text: "r" }]);
       } else {
-        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi", causedBy }], "socket-trusted on the socket app");
+        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi", causedBy }, { commandId: "i", cause, cascade: false }], "socket-trusted on the socket app");
         assert.deepEqual(merged, [{ text: "r", causedBy }]);
       }
     } finally {

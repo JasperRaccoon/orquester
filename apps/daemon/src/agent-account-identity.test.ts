@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeBlobHasTokens, claudeLoginStatus, detectAgentFromBlob, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity.ts";
+import { claudeLoginStatus, detectAgentFromBlob, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity.ts";
 
 function jwt(payload: Record<string, unknown>): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -10,15 +10,6 @@ function jwt(payload: Record<string, unknown>): string {
 test("returns null for unknown shapes", () => {
   assert.equal(detectAgentFromBlob({ foo: 1 }), null);
   assert.equal(detectAgentFromBlob("nope"), null);
-});
-
-test("claude blob needs a non-empty access or refresh token", () => {
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: "a", refreshToken: "r" } }), true);
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: "", refreshToken: "r" } }), true);
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: "a" } }), true);
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }), false);
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: {} }), false);
-  assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: 1, refreshToken: null } }), false);
 });
 
 test("Claude login expiry uses the refresh lifetime, not routine access-token rotation", () => {

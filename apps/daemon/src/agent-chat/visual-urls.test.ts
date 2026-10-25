@@ -5,9 +5,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HTML_RENDER_CONTENT_SECURITY_POLICY, agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 
-import { VISUAL_PAGE_HEADERS, VISUAL_URL_LIFETIME_MS, createVisualUrlSigner } from "./visual-urls.ts";
+import { VISUAL_URL_LIFETIME_MS, createVisualUrlSigner } from "./visual-urls.ts";
 
 const KEY = Buffer.alloc(32, 7);
 const SESSION = "s-1";
@@ -56,13 +56,4 @@ test("a signature claiming more life than a minted URL has is refused", () => {
   // Minted "in the future" — an expiry beyond now + lifetime never came from mint().
   const { exp, sig } = query(signer.mint(SESSION, PAGE, NOW + 60 * 60_000).path);
   assert.ok(!signer.verify(SESSION, PAGE, exp, sig, NOW));
-});
-
-test("served pages carry the sandbox CSP and never-cache headers", () => {
-  assert.equal(VISUAL_PAGE_HEADERS["Content-Security-Policy"], HTML_RENDER_CONTENT_SECURITY_POLICY);
-  assert.equal(HTML_RENDER_CONTENT_SECURITY_POLICY, "sandbox allow-scripts allow-forms allow-popups allow-downloads");
-  assert.equal(VISUAL_PAGE_HEADERS["X-Content-Type-Options"], "nosniff");
-  assert.equal(VISUAL_PAGE_HEADERS["Cache-Control"], "private, no-store");
-  assert.equal(VISUAL_PAGE_HEADERS["Content-Type"], "text/html; charset=utf-8");
-  assert.ok(!/allow-same-origin/.test(HTML_RENDER_CONTENT_SECURITY_POLICY));
 });

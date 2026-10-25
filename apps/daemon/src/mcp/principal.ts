@@ -53,9 +53,6 @@ interface Entry {
 /** The registry. Process-wide on purpose: both apps resolve against the same nonces. */
 const live = new Map<string, Entry>();
 
-/** The clock; tests swap it ({@link setPrincipalClockForTests}). */
-let clock: () => number = Date.now;
-
 /** Drop every expired entry (cheap: the registry holds only in-flight requests). */
 function sweep(now: number): void {
   for (const [token, entry] of live) {
@@ -68,7 +65,7 @@ function sweep(now: number): void {
  * and MUST call `release()` in a `finally` once its request settled, resolved or not.
  */
 export function mintPrincipalToken(principal: CallerPrincipal): { token: string; release(): void } {
-  const now = clock();
+  const now = Date.now();
   sweep(now);
   const token = randomBytes(PRINCIPAL_TOKEN_MIN_BYTES).toString("base64url");
   // A copy: the minter's object can never change what a route reads.
@@ -81,18 +78,8 @@ export function resolvePrincipalToken(token: string): CallerPrincipal | null {
   const entry = live.get(token);
   if (entry === undefined) return null;
   live.delete(token);
-  if (entry.expiresAt <= clock()) return null;
+  if (entry.expiresAt <= Date.now()) return null;
   return entry.principal;
-}
-
-/** How many tokens are outstanding (tests: every minter releases its token). */
-export function livePrincipalTokenCount(): number {
-  return live.size;
-}
-
-/** Tests only: a fake clock for expiry. */
-export function setPrincipalClockForTests(now: (() => number) | null): void {
-  clock = now ?? Date.now;
 }
 
 /**

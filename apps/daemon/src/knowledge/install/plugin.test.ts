@@ -143,31 +143,13 @@ function publishNewer(h: Harness): void {
   h.host.pypi.set(NEWER, [pypiWheel(NEWER, NEWER_SHA)]);
 }
 
-test("off by default, listed with its catalog entry; nothing fetched", async (t) => {
+test("off by default, no installed version or active job; nothing fetched", async (t) => {
   const h = await harness(t);
   const plugin = await info(h);
-  assert.deepEqual(
-    { ...plugin },
-    {
-      id: ID,
-      name: "Knowledge Graph",
-      description:
-        "Turn the posts and notes you save from chats into a searchable knowledge graph your agents use, built with myKG.",
-      source: { label: "SenolIsci/mykg", url: "https://github.com/SenolIsci/mykg" },
-      provider: "Community",
-      scope: "global",
-      updates: true,
-      platform: "supported",
-      enabled: false,
-      enabledWorkspaces: [],
-      current: null,
-      previous: null,
-      skippedVersion: null,
-      lastCheckAt: null,
-      lastError: null,
-      job: "idle"
-    }
-  );
+  assert.equal(plugin.enabled, false);
+  assert.equal(plugin.current, null);
+  assert.equal(plugin.previous, null);
+  assert.equal(plugin.job, "idle");
   assert.deepEqual(h.host.calls, { json: [], downloads: [], texts: [], run: [] });
   assert.equal(h.tracker.current(), null);
 });

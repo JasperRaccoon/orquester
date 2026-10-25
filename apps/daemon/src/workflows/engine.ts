@@ -225,7 +225,7 @@ const SAFE_TO_RERUN: ReadonlySet<WorkflowNodeType> = new Set<WorkflowNodeType>([
  * The id of the child run one attempt of a Run workflow block starts: derived from (parent run,
  * block, attempt), so the binding is exact and durable — asking again finds that run, never another.
  */
-export function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): string {
+function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): string {
   // UUID-shaped, hash first (as minted ids are): the 8-character prefixes temp-project names and
   // the UI's short labels take keep their full entropy.
   const h = createHash("sha256").update(`${parentRunId}\u0000${nodeId}\u0000${attempt}`).digest("hex");

@@ -12,7 +12,6 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import { quoteToolbarPosition } from "./quote-selection";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -220,62 +219,6 @@ describe("the markdown a selection is quoted as", () => {
   it("joins a paragraph and the code after it as two blocks", () => {
     const markdown = quoteOf(select(lastText("p1"), 0, text("l1"), 12), viewport);
     assert.equal(markdown, ".\n\n## A heading\n\n- one\n- two *em*\n\n```ts\nconst a = 1;\n```");
-  });
-});
-
-describe("where the toolbar goes", () => {
-  const bounds = { left: 0, top: 0, right: 800, bottom: 600 };
-  const window = { width: 800, height: 700 };
-  const toolbar = { width: 140, height: 32 };
-  const line = (top: number, left = 100, right = 400) => ({ left, top, right, bottom: top + 20 });
-
-  it("above a mouse or keyboard selection, at its start", () => {
-    const at = quoteToolbarPosition({ first: line(200), last: line(260), toolbar, bounds, window, pointer: "mouse" });
-    assert.deepEqual(at, { left: 100, top: 160, placement: "above" });
-  });
-
-  it("below it when there is no room above", () => {
-    const at = quoteToolbarPosition({ first: line(10), last: line(30), toolbar, bounds, window, pointer: "keyboard" });
-    assert.equal(at.placement, "below");
-    assert.equal(at.top, 58);
-  });
-
-  it("below a touch selection, past its handles, where the native callout is not", () => {
-    const at = quoteToolbarPosition({ first: line(200), last: line(260), toolbar, bounds, window, pointer: "touch" });
-    assert.deepEqual(at, { left: 260, top: 310, placement: "below" });
-  });
-
-  it("above a touch selection, past its handle, when the composer leaves no room below", () => {
-    const at = quoteToolbarPosition({
-      first: line(500),
-      last: line(560),
-      toolbar,
-      bounds: { ...bounds, bottom: 590 },
-      window,
-      pointer: "touch"
-    });
-    assert.deepEqual(at, { left: 100, top: 430, placement: "above" });
-  });
-
-  it("inside the visible area and the window, however narrow", () => {
-    const at = quoteToolbarPosition({
-      first: line(200, 5, 50),
-      last: line(200, 5, 50),
-      toolbar,
-      bounds: { left: 0, top: 0, right: 120, bottom: 600 },
-      window: { width: 120, height: 700 },
-      pointer: "mouse"
-    });
-    assert.equal(at.left, 8);
-    const right = quoteToolbarPosition({
-      first: line(200, 700, 799),
-      last: line(200, 700, 799),
-      toolbar,
-      bounds,
-      window,
-      pointer: "touch"
-    });
-    assert.equal(right.left, 800 - 8 - 140);
   });
 });
 

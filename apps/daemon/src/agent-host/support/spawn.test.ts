@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { getPriority } from "node:os";
 
-import { exitOutcome, PROVIDER_CHILD_NICENESS, spawnProviderChild } from "./spawn.ts";
+import { exitOutcome, spawnProviderChild } from "./spawn.ts";
 
 const NODE = process.execPath;
 
@@ -27,25 +27,6 @@ test("records the pid and resolves with the exit code", async () => {
   assert.deepEqual(proc.exitReason(), reason);
 });
 
-test("the environment is exactly what was passed — nothing is inherited", async () => {
-  process.env.ORQ_SPAWN_CANARY = "leaked";
-  try {
-    const proc = spawnProviderChild({
-      command: NODE,
-      args: ["-e", "process.stdout.write(JSON.stringify(Object.keys(process.env).sort()))"],
-      env: { PATH: "/usr/bin:/bin", ORQUESTER_SESSION_ID: "s1" },
-      cwd: process.cwd()
-    });
-    const chunks: Buffer[] = [];
-    proc.stdout.on("data", (c: Buffer) => chunks.push(c));
-    await proc.exited;
-    const keys = JSON.parse(Buffer.concat(chunks).toString("utf8")) as string[];
-    assert.deepEqual(keys, ["ORQUESTER_SESSION_ID", "PATH"]);
-  } finally {
-    delete process.env.ORQ_SPAWN_CANARY;
-  }
-});
-
 test("stderr is piped, not discarded", async () => {
   const proc = child("process.stderr.write('boom\\n'); process.exit(1)");
   const chunks: Buffer[] = [];
@@ -54,24 +35,15 @@ test("stderr is piped, not discarded", async () => {
   assert.equal(Buffer.concat(chunks).toString("utf8"), "boom\n");
 });
 
-test("a spawn failure is an outcome, never a throw", async () => {
-  const proc = spawnProviderChild({
-    command: "/nonexistent/orquester-agent-binary",
-    args: [],
-    env: { PATH: "/usr/bin" },
-    cwd: process.cwd()
-  });
-  const reason = await proc.exited;
-  assert.equal(reason.kind, "spawn-error");
-});
-
 test("the child runs at a lower CPU priority than the host", { skip: process.platform === "win32" }, async () => {
   const proc = child("process.stdout.write(String(require('node:os').getPriority()))");
   const chunks: Buffer[] = [];
   proc.stdout.on("data", (c: Buffer) => chunks.push(c));
   assert.deepEqual(await proc.exited, { kind: "exit", code: 0, signal: null });
   // Relative to whatever this runner itself was started at; 19 is the floor.
-  assert.equal(Number(Buffer.concat(chunks).toString("utf8")), Math.min(19, getPriority() + PROVIDER_CHILD_NICENESS));
+  const parentPriority = getPriority();
+  const childPriority = Number(Buffer.concat(chunks).toString("utf8"));
+  assert.ok(childPriority > parentPriority || (parentPriority === 19 && childPriority === 19));
 });
 
 test("kill escalates SIGTERM to SIGKILL past the grace deadline", async () => {

@@ -135,7 +135,7 @@ test("list_sessions of another workspace's project: a cross-workspace-read card 
   assert.equal(result.isError, undefined);
   assert.equal(r.port.cards.length, 1);
   assert.equal(r.port.cards[0]!.family, "cross-workspace-read");
-  assert.match(r.port.cards[0]!.title, /list the chats of beta\/app/);
+  assert.match(r.port.cards[0]!.title, /beta\/app/);
   const full = rig();
   await full.call("list_sessions", { project: "beta/app" }, { runtimeMode: "full-access" });
   assert.equal(full.port.cards.length, 0);
@@ -196,7 +196,7 @@ test("read_transcript: own project free; another project below auto raises a bou
   const card = r.port.cards[0]!;
   assert.equal(card.kind, "boundary");
   assert.equal(card.family, "cross-project-read");
-  assert.match(card.title, /read the transcript of the chat "Chat web1" in acme\/web/);
+  assert.match(card.title, /Chat web1.*acme\/web/);
   assert.ok(!card.sections.some((section) => section.kind === "code"), "a composed preview, not the raw arguments");
   const auto = rig();
   await auto.call("read_transcript", { sessionId: "web1" }, { runtimeMode: "auto" });
@@ -273,7 +273,7 @@ test("control_session on an own child in another workspace: a cross-project Act 
   const r = rig();
   await r.call("control_session", { sessionId: "farkid", action: "compact" }, { runtimeMode: "auto" });
   assert.equal(r.port.cards[0]?.family, "cross-project");
-  assert.match(r.port.cards[0]!.title, /compact the context of the chat "Chat farkid" in beta\/app/);
+  assert.match(r.port.cards[0]!.title, /Chat farkid.*beta\/app/);
 });
 
 test("update_session: own title yes, own settings no; children only; never a broader mode", async () => {

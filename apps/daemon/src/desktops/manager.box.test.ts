@@ -66,7 +66,7 @@ interface FakeBox {
   slowHost: boolean;
   /** Runs right after a host session starts. */
   onHostStarted: (() => void) | null;
-  onSignal: ((signal: { pgid: number; signal: string; owner?: DesktopGroupOwner }) => void) | null;
+  onSignal: ((signal: { pgid: number; signal: string; owner?: DesktopGroupOwner }) => void | Promise<void>) | null;
   /** Runs before the box tmux is listed (a slow listing). */
   beforeList: (() => Promise<void>) | null;
 }
@@ -126,7 +126,7 @@ function fakeBox(appdir: string): FakeBox {
     signalGroup: async (pgid, signal, owner) => {
       const entry = { pgid, signal, ...(owner ? { owner } : {}) };
       fake.signals.push(entry);
-      fake.onSignal?.(entry);
+      await fake.onSignal?.(entry);
     },
     // Whatever ran there before is not ours any more (a reboot reuses pids).
     leaderBelongsTo: async () => false,
@@ -451,7 +451,11 @@ test("a host that came up after its start timed out on a dropped link is killed 
   // It came up after all.
   await atomicWrite(join(appdir, "box-home", ".orquester", "desktops", desktop.id, "ready"), "42\n");
   // The cleanup's last step: the host's group, only while it is still the desktop's.
-  const hostSignalled = new Promise<void>((resolve) => (box.onSignal = (s) => s.pgid === 4242 && resolve()));
+  const hostSignalled = new Promise<void>((resolve) => {
+    box.onSignal = (signal) => {
+      if (signal.pgid === 4242) resolve();
+    };
+  });
   box.setConnected(true);
   await hostSignalled;
   assert.ok(box.killed.includes(session));
@@ -464,8 +468,15 @@ test("every signal into a VM carries the owner check: app stops, teardown, the h
   const { appdir, box, manager } = await setup(t);
   const desktop = await manager.create({ projectPath: "/ws/p", projectRealPath: "/ws/p", boxId: "b1" });
   const appId = await runningApp(appdir, manager, desktop.id, 901);
+  const appIds = new Map([[901, appId]]);
+  // The app wrapper records its exit after a signal, just as it does in the VM.
+  box.onSignal = async ({ pgid }) => {
+    const id = appIds.get(pgid);
+    if (id) await atomicWrite(join(appdir, "box-home", ".orquester", "desktops", desktop.id, "apps", `${id}.exit`), "137\n");
+  };
   manager.stopApp(desktop.id, appId, true);
-  await runningApp(appdir, manager, desktop.id, 902);
+  await until(manager, desktop.id, (summary) => summary.apps.some((app) => app.id === appId && app.status === "exited"));
+  appIds.set(902, await runningApp(appdir, manager, desktop.id, 902));
   await manager.close(desktop.id);
   assert.ok(box.signals.length >= 3);
   for (const signal of box.signals) assert.ok(signal.owner, JSON.stringify(signal));

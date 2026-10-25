@@ -36,11 +36,9 @@ export function canDeliverToRenderer(state: { mainLoaded: boolean; rebuilding: b
 export class RendererOutbox<T> {
   private readonly queue: T[] = [];
 
-  constructor(private readonly max = 20) {}
-
   push(message: T): void {
     this.queue.push(message);
-    if (this.queue.length > this.max) this.queue.splice(0, this.queue.length - this.max);
+    if (this.queue.length > 20) this.queue.splice(0, this.queue.length - 20);
   }
 
   /** Take every waiting message. */
@@ -48,7 +46,4 @@ export class RendererOutbox<T> {
     return this.queue.splice(0);
   }
 
-  get size(): number {
-    return this.queue.length;
-  }
 }

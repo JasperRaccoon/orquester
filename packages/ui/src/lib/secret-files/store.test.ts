@@ -367,13 +367,6 @@ describe("applying vaults and events", () => {
     assert.equal(getSecretVault(WS, KEY)?.revision?.boot, "b2");
   });
 
-  it("keeps the same map when the same vault arrives again", () => {
-    applySecretVault(WS, KEY, vault());
-    const before = held();
-    applySecretVault(WS, KEY, vault());
-    assert.equal(held(), before);
-  });
-
   it("routes changed and deleted events, ignoring malformed or foreign ones", () => {
     applySecretFilesEvent(event({ vault: vault() }));
     assert.ok(getSecretVault(WS, KEY));
@@ -673,7 +666,7 @@ describe("mutations", () => {
 
     const reset = resetCloneSecretFiles(api, { ...req, expect: { ".env": null } });
     mutations[1].answer.reject(Object.assign(new Error("nothing"), { status: 409, body: { code: "NOTHING_TO_PUSH" } }));
-    await assert.rejects(reset);
+    await assert.rejects(reset, { status: 409, body: { code: "NOTHING_TO_PUSH" } });
     await flush();
     assert.equal(details.length, 1);
   });

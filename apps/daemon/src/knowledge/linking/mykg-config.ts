@@ -91,13 +91,13 @@ export const MYKG_BATCH_TOKENS = 12000;
  * normalized — only ever a concern for a type with thousands of distinct names.
  */
 export const MYKG_NORMALIZE_BATCH_TOKENS = 1;
-export const MYKG_NORMALIZE_MAX_NAMES = 6000;
+const MYKG_NORMALIZE_MAX_NAMES = 6000;
 
 /** Seconds a task waits for its `.done` (myKG `llm.timeout`). */
 export const MYKG_TASK_TIMEOUT_SECONDS = 48 * 60 * 60;
 
 /** myKG's concurrent LLM calls for `concurrency` worker chats: 3 × concurrency, 4..24. */
-export function mykgMaxWorkers(concurrency: number): number {
+function mykgMaxWorkers(concurrency: number): number {
   const c = Math.min(KNOWLEDGE_CONCURRENCY_MAX, Math.max(KNOWLEDGE_CONCURRENCY_MIN, Math.round(concurrency)));
   return Math.min(24, Math.max(4, c * 3));
 }

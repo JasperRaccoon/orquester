@@ -46,7 +46,7 @@ import type { SessionProfilePrepareContext, SessionProfilePrepareInputsContext, 
 import type { ResolvedHook, ResolvedMcpServer } from "../resolve.ts";
 
 /** Bump when the prepared output changes for the same inputs. */
-export const GROK_PREPARER_VERSION = "1";
+const GROK_PREPARER_VERSION = "1";
 
 export const GROK_CONFIG_BASE_FILE = "profile/config.base.toml";
 const PLUGINS_DIR = "profile/plugins";

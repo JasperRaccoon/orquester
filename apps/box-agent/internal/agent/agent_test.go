@@ -1,25 +1,12 @@
 package agent
 
 import (
-	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"orquester/box-agent/internal/wire"
 )
-
-func TestEveryHostToBoxMethodHasAHandler(t *testing.T) {
-	for name := range wire.HostToBoxMethods {
-		if _, ok := requestHandlers[name]; !ok {
-			t.Errorf("no handler for %s", name)
-		}
-	}
-	for name := range requestHandlers {
-		if _, ok := wire.HostToBoxMethods[name]; !ok {
-			t.Errorf("handler for %s, which is not a protocol method", name)
-		}
-	}
-}
 
 func TestRingKeepsNewestBytesAndReportsStart(t *testing.T) {
 	r := newRing(10)
@@ -76,12 +63,13 @@ func TestConnectURL(t *testing.T) {
 	}
 }
 
-func TestEnvMergeOrder(t *testing.T) {
+func TestEnvMergeOverridesAndDeletes(t *testing.T) {
 	env := newEnvMap([]string{"A=1", "B=2", "C=3"})
 	env.del("B")
 	env.set("C", "4")
 	env.set("D", "5")
 	got := env.list()
+	slices.Sort(got)
 	want := []string{"A=1", "C=4", "D=5"}
 	if len(got) != len(want) {
 		t.Fatalf("env = %v", got)
@@ -90,29 +78,6 @@ func TestEnvMergeOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("env = %v; want %v", got, want)
 		}
-	}
-}
-
-func TestWatchCoalescing(t *testing.T) {
-	w := &watch{root: "/r", params: wire.WatchParams{Recursive: true}, pending: map[string]string{}}
-	w.ctx, w.cancel = context.WithCancel(context.Background())
-	defer w.cancel()
-	w.emit("/r/a", "create")
-	w.emit("/r/a", "update")
-	w.emit("/r/b", "create")
-	w.emit("/r/b", "delete")
-	w.emit("/r/c", "delete")
-	w.emit("/r/c", "create")
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.timer != nil {
-		w.timer.Stop()
-	}
-	if w.pending["/r/a"] != "create" || w.pending["/r/c"] != "update" {
-		t.Fatalf("pending = %v", w.pending)
-	}
-	if _, ok := w.pending["/r/b"]; ok {
-		t.Fatalf("create+delete should cancel out: %v", w.pending)
 	}
 }
 

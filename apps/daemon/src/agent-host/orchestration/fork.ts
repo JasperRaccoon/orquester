@@ -151,7 +151,7 @@ export function resolveForkCut(
  */
 export const FORK_TRANSCRIPT_MAX_BYTES = 120_000;
 /** The most one message contributes; a longer one keeps its head and tail. */
-export const FORK_TRANSCRIPT_MESSAGE_MAX_CHARS = 8_000;
+const FORK_TRANSCRIPT_MESSAGE_MAX_CHARS = 8_000;
 
 // The delimiters and their escaping are shared with the continuation's budgeted transcript
 // (`@orquester/api` `handoff.ts`), so {@link stripForkHandoff} strips either kind of handoff.
@@ -160,7 +160,7 @@ const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xd
 const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
 
 /** `text` within `max` characters: its head and tail around a marker, never half a surrogate pair. */
-export function clipForkMessage(text: string, max: number): string {
+function clipForkMessage(text: string, max: number): string {
   if (text.length <= max) return text;
   const half = Math.floor((max - 40) / 2);
   const head = isHighSurrogate(text.charCodeAt(half - 1)) ? half - 1 : half;

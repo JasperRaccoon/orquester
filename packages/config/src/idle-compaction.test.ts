@@ -1,21 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { agentPrefsSchema, applyAppConfigUpdate, IDLE_COMPACTION_MODES, parseAppConfig, resolveIdleCompaction } from "./index.ts";
+import { agentPrefsSchema, applyAppConfigUpdate, parseAppConfig, resolveIdleCompaction } from "./index.ts";
 
 test("idle compaction defaults to T3 Code's 'when you return', also for an app.json without it", () => {
   assert.equal(agentPrefsSchema.parse({}).claudeIdleCompaction, "onReturn");
   assert.deepEqual(agentPrefsSchema.parse({}).claudeIdleCompactionByAccount, {});
   const config = parseAppConfig({ agents: { autoResumeLimitedChats: false } });
   assert.equal(config.agents.claudeIdleCompaction, "onReturn");
-  assert.deepEqual(
-    IDLE_COMPACTION_MODES.map((mode) => [mode.value, mode.label]),
-    [
-      ["onReturn", "When you return"],
-      ["beforeCacheExpires", "Before the cache expires (beta)"],
-      ["off", "Never"]
-    ]
-  );
+
 });
 
 test("a mode another version wrote reads as the default instead of failing the whole file", () => {

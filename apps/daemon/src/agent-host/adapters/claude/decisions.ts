@@ -50,7 +50,7 @@ const ACCEPT_ALWAYS_UNSUPPORTED_MESSAGE =
  * tools — fall back to a whole-tool session allow rule so the decision still
  * sticks instead of silently degrading into a one-shot accept.
  */
-export function toSessionPermissionUpdates(
+function toSessionPermissionUpdates(
   toolName: string,
   suggestions: readonly PermissionUpdate[] | undefined
 ): PermissionUpdate[] {

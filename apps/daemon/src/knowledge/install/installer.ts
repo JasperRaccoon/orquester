@@ -67,7 +67,7 @@ const EXTRACT_TIMEOUT_MS = 2 * 60_000;
 const PYTHON_TIMEOUT_MS = 10 * 60_000;
 const VENV_TIMEOUT_MS = 2 * 60_000;
 const PACKAGES_TIMEOUT_MS = 20 * 60_000;
-export const KNOWLEDGE_SMOKE_TEST_TIMEOUT_MS = 60_000;
+const KNOWLEDGE_SMOKE_TEST_TIMEOUT_MS = 60_000;
 
 /** `./locks/`: the hashed lock of each shipped myKG version. */
 export const MYKG_LOCKS_DIR = fileURLToPath(new URL("./locks/", import.meta.url));
@@ -146,7 +146,7 @@ export interface KnowledgeRuntimeManifest {
   installedAt: string;
 }
 
-export const MANIFEST_FILE = "runtime.json";
+const MANIFEST_FILE = "runtime.json";
 
 // ---- paths ---------------------------------------------------------------------------------------
 
@@ -273,7 +273,7 @@ export function knowledgeChildEnv(runtimeDir: string, daemonEnv: NodeJS.ProcessE
 }
 
 /** {@link knowledgeChildEnv} plus everything uv keeps inside the runtime dir. */
-export function uvEnv(runtimeDir: string, staging: string, daemonEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function uvEnv(runtimeDir: string, staging: string, daemonEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const home = knowledgeHomeDir(runtimeDir);
   return {
     ...knowledgeChildEnv(runtimeDir, daemonEnv),
@@ -304,7 +304,7 @@ const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 /** Whether `version` is a plain release of the pinned minor line at or past the pinned one. */
-export function inMykgLine(version: string): boolean {
+function inMykgLine(version: string): boolean {
   const match = VERSION_PATTERN.exec(version);
   const pinned = VERSION_PATTERN.exec(MYKG_PINNED_VERSION);
   if (!match || !pinned) return false;
@@ -628,7 +628,7 @@ async function writeRequirements(staging: string, release: MykgRelease, locksDir
 }
 
 /** A hashed lock without `name`'s entry (its requirement line and the continuation lines under it) and comments. */
-export function lockWithout(lock: string, name: string): string {
+function lockWithout(lock: string, name: string): string {
   const out: string[] = [];
   let dropping = false;
   for (const line of lock.split(/\r?\n/)) {

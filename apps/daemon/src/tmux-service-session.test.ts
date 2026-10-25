@@ -40,13 +40,14 @@ test("service session lives outside orq- namespace and survives listSessions/rea
   assert.equal(await tmux.hasServiceSession("orqsvc-test"), false);
 });
 
-test("newServiceSession rejects non-orqsvc names", async (t) => {
-  const tmux = await makeTestTmux(t);
-  if (!tmux) return t.skip("no tmux");
+test("newServiceSession rejects non-orqsvc names", async () => {
+  const tmux = new Tmux(join(tmpdir(), "orquester-guard-must-not-be-created", "tmux.sock"));
   await assert.rejects(() =>
-    tmux.newServiceSession({ name: "orq-evil", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] })
+    tmux.newServiceSession({ name: "orq-evil", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] }),
+    /orqsvc-/
   );
   await assert.rejects(() =>
-    tmux.newServiceSession({ name: "random", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] })
+    tmux.newServiceSession({ name: "random", cwd: "/tmp", env: {}, bin: "sleep", args: ["1"] }),
+    /orqsvc-/
   );
 });

@@ -131,7 +131,7 @@ function containsUrlScheme(consumed: readonly number[]): boolean {
  * character from the opening `$` through the closing `$`; `next` is the
  * character after the match.
  */
-export function isPlausibleSingleDollarMath(consumed: readonly number[], next: Code): boolean {
+function isPlausibleSingleDollarMath(consumed: readonly number[], next: Code): boolean {
   let opening = 0;
   while (consumed[opening] === DOLLAR) opening += 1;
   // A code span or a URL inside the run belongs to the markdown, not to TeX.
@@ -151,7 +151,7 @@ export function isPlausibleSingleDollarMath(consumed: readonly number[], next: C
 }
 
 /** Wraps `micromark-extension-math`'s text construct with `isPlausibleSingleDollarMath`. */
-export function guardSingleDollarMath(construct: ConstructLike): ConstructLike {
+function guardSingleDollarMath(construct: ConstructLike): ConstructLike {
   return {
     ...construct,
     tokenize(effects, ok, nok) {
@@ -179,7 +179,7 @@ export function guardSingleDollarMath(construct: ConstructLike): ConstructLike {
  * and every opener is then a binary search: a message of thousands of `$$`
  * or `\[` lines must not rescan the rest of itself per line.
  */
-export function createClosingLineIndex(source: string): (offset: number) => boolean {
+function createClosingLineIndex(source: string): (offset: number) => boolean {
   let index: { starts: number[]; dollars: number[]; brackets: number[] } | null = null;
   const build = (): NonNullable<typeof index> => {
     // Per closing line, in order: where it starts, the longest `$$` run
@@ -231,11 +231,6 @@ export function createClosingLineIndex(source: string): (offset: number) => bool
   };
 }
 
-/** {@link createClosingLineIndex} for one question. */
-export function hasClosingLine(source: string, offset: number): boolean {
-  return createClosingLineIndex(source)(offset);
-}
-
 /**
  * Wraps a math block construct (the library's `$$`, or `\[`) so only a
  * closed block is one. The library ends an unclosed `$$` block at the end of
@@ -249,7 +244,7 @@ export function hasClosingLine(source: string, offset: number): boolean {
  * paragraph text. A block the lookahead admits must still exit two fences
  * (opening and closing), or it is declined after all.
  */
-export function guardClosedMathBlock(
+function guardClosedMathBlock(
   construct: ConstructLike,
   closedAhead: (offset: number) => boolean
 ): ConstructLike {

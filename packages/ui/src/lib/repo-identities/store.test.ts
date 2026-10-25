@@ -144,13 +144,6 @@ describe("events", () => {
     assert.equal(getRepoIdentity(KEY)?.label, "Again");
   });
 
-  it("the same record keeps the map unchanged (no re-render)", () => {
-    applyRepoIdentityEvent(event({ identity: identity() }));
-    const before = held();
-    applyRepoIdentityEvent(event({ identity: identity() }));
-    assert.equal(held(), before);
-  });
-
   it("applyRepoIdentity ignores an identity for another repo", () => {
     applyRepoIdentity(OTHER, identity());
     assert.equal(held().size, 0);
@@ -173,7 +166,7 @@ describe("loads", () => {
     applyRepoIdentityEvent(event({ identity: identity() }));
     const load = loadRepoIdentities(api);
     lists[0].resolve({ nope: true } as unknown as RepoIdentitiesResponse);
-    await assert.rejects(load);
+    await assert.rejects(load, /unexpected shape/);
     assert.equal(getRepoIdentity(KEY)?.label, "Engine");
   });
 

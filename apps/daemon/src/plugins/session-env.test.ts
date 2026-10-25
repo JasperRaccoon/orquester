@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { TS_RUST_PLUGIN_ID } from "@orquester/api";
-import { appendNodeRequireOption } from "@orquester/config";
 
 import {
   clearBoxToolingContributions,
@@ -29,8 +28,8 @@ test("the host: no preload leaves NODE_OPTIONS as it is; one is appended once, a
   setSessionNodePreload(HOST_PRELOAD);
   try {
     assert.equal(sessionNodePreload(), HOST_PRELOAD);
-    assert.equal(sessionNodeOptions(undefined), appendNodeRequireOption(undefined, HOST_PRELOAD));
-    assert.equal(sessionNodeOptions("--no-warnings"), appendNodeRequireOption("--no-warnings", HOST_PRELOAD));
+    assert.equal(sessionNodeOptions(undefined), '--require "/appdir/daemon/plugins/ts-rust/preload.cjs"');
+    assert.equal(sessionNodeOptions("--no-warnings"), '--no-warnings --require "/appdir/daemon/plugins/ts-rust/preload.cjs"');
     assert.deepEqual(sessionToolingContributions("host"), [{ pathPrepend: [], env: {}, nodeRequire: [HOST_PRELOAD] }]);
   } finally {
     setSessionNodePreload(null);
@@ -42,7 +41,7 @@ test("a box's contribution stays with that box", () => {
   setSessionNodePreload(HOST_PRELOAD);
   setSessionToolingContribution({ boxId: "win" }, TS_RUST_PLUGIN_ID, { pathPrepend: [], env: {}, nodeRequire: [BOX_PRELOAD] });
   try {
-    assert.equal(sessionNodeOptions(undefined), appendNodeRequireOption(undefined, HOST_PRELOAD), "host sessions never see a box path");
+    assert.equal(sessionNodeOptions(undefined), '--require "/appdir/daemon/plugins/ts-rust/preload.cjs"', "host sessions never see a box path");
     assert.deepEqual(sessionToolingContributions({ boxId: "win" }), [{ pathPrepend: [], env: {}, nodeRequire: [BOX_PRELOAD] }]);
     assert.deepEqual(sessionToolingContributions({ boxId: "other" }), []);
 

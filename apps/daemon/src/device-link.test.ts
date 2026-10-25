@@ -125,7 +125,7 @@ test("a failed import is reported as the link's error", async (t) => {
   t.mock.method(console, "error", () => undefined);
   assert.equal((await h.service.start()).ok, true);
   await pollToCompletion(t, h.service);
-  assert.ok(h.service.status().lastError);
+  assert.match(h.service.status().lastError ?? "", /\b(?:ENOTDIR|EEXIST)\b/, "the granted link failed specifically while creating its account home");
   assert.deepEqual(h.accounts.list().accounts, []);
 });
 

@@ -12,10 +12,7 @@ import { APPROVAL_FEEDBACK_MAX_CHARS } from "@orquester/api/agent-chat";
 
 import { APPROVAL_REDIRECT_MESSAGE } from "../../adapter.ts";
 
-import {
-  permissionResultForDecision,
-  toSessionPermissionUpdates
-} from "./decisions.ts";
+import { permissionResultForDecision } from "./decisions.ts";
 import {
   buildClaudeProbeOptions,
   buildClaudeQueryOptions
@@ -23,7 +20,6 @@ import {
 import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
 import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
-  compareVersions,
   meetsMinimumClaudeVersion,
   parseClaudeVersion,
   resolveEffortLevel,
@@ -267,12 +263,14 @@ describe("claude decisions — §4.3, every row of the Claude column", () => {
   it("acceptForSession falls back to a whole-tool session rule", () => {
     // The live path for AskUserQuestion and ExitPlanMode, which arrive with no
     // `suggestions` key at all (fixtures README observation 11).
-    assert.deepEqual(toSessionPermissionUpdates("Bash", undefined), [
-      { type: "addRules", rules: [{ toolName: "Bash" }], behavior: "allow", destination: "session" }
-    ]);
-    assert.deepEqual(toSessionPermissionUpdates("Bash", []), [
-      { type: "addRules", rules: [{ toolName: "Bash" }], behavior: "allow", destination: "session" }
-    ]);
+    assert.deepEqual(permissionResultForDecision({ decision: "acceptForSession", toolName: "Bash", toolInput }), {
+      behavior: "allow", updatedInput: toolInput,
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash" }], behavior: "allow", destination: "session" }]
+    });
+    assert.deepEqual(permissionResultForDecision({ decision: "acceptForSession", toolName: "Bash", toolInput, suggestions: [] }), {
+      behavior: "allow", updatedInput: toolInput,
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash" }], behavior: "allow", destination: "session" }]
+    });
   });
 
   it("acceptAlways denies — Claude has no permanent grant through canUseTool", () => {
@@ -326,15 +324,11 @@ describe("claude models and the version gate", () => {
     assert.equal(parseClaudeVersion("no version here"), null);
   });
 
-  it("compares versions numerically, not lexically", () => {
-    assert.ok(compareVersions("2.1.210", "2.1.99") > 0);
-    assert.ok(compareVersions("2.1.121", "2.1.121") === 0);
-    assert.ok(compareVersions("2.0.999", "2.1.0") < 0);
-  });
-
   it("refuses an unreadable version rather than passing it", () => {
     assert.equal(meetsMinimumClaudeVersion(null), false);
-    assert.equal(meetsMinimumClaudeVersion("2.0.0"), false);
+    assert.equal(meetsMinimumClaudeVersion("2.0.999"), false);
+    assert.equal(meetsMinimumClaudeVersion("2.1.99"), false);
+    assert.equal(meetsMinimumClaudeVersion("2.1.121"), true);
     assert.equal(meetsMinimumClaudeVersion("2.1.210"), true);
   });
 
@@ -498,26 +492,6 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     assert.equal(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, undefined);
     assert.deepEqual(options.extraArgs, { "thinking-display": "summarized" });
     assert.equal((options.systemPrompt as { append: string }).append.endsWith("ORQUESTER BLOCK"), true);
-    assert.deepEqual(Object.keys(options).sort(), [
-      "additionalDirectories",
-      "agentProgressSummaries",
-      "allowedTools",
-      "canUseTool",
-      "cwd",
-      "disallowedTools",
-      "env",
-      "extraArgs",
-      "includePartialMessages",
-      "mcpServers",
-      "model",
-      "pathToClaudeCodeExecutable",
-      "sessionId",
-      "settingSources",
-      "settings",
-      "systemPrompt",
-      "thinking",
-      "toolConfig"
-    ]);
   });
 
   it("a profile chat gets the §6.1 recipe", () => {

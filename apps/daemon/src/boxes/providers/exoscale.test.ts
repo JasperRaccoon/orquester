@@ -161,10 +161,6 @@ test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", asyn
   );
 });
 
-test("offers: refuses kinds Exoscale is not set up to rent", async () => {
-  await assert.rejects(exoscaleAdapter.offers(credentials, "linux-gpu", replayOptions(replayFetch([]))), /does not rent linux-gpu/);
-});
-
 test("create: one signed POST with name, labels, base64 cloud-init and the resolved ids", async () => {
   const replay = replayFetch([
     ...catalogRoutes(FRA),

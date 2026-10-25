@@ -33,9 +33,3 @@ test("agent block profileId: a blank or non-string id fails the block, so the re
   const node = file.workflows[0]!.nodes[0]!;
   assert.equal(node.type === "agent" ? node.config.profileId : null, "prof-1");
 });
-
-test("agent block profileId round-trips through workflows.json (parse → JSON → parse)", () => {
-  const first = parseWorkflowsFile({ version: 1, workflows: [record([agentNode({ ...BASE, profileId: "prof-1" })])] });
-  const again = parseWorkflowsFile(JSON.parse(JSON.stringify({ version: 1, workflows: first.workflows })));
-  assert.deepEqual(again.workflows, first.workflows);
-});

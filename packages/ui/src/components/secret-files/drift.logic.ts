@@ -375,7 +375,7 @@ export function findBarDismissal(
 }
 
 /** Dismissals kept per tab session; the oldest go first past this. */
-export const MAX_BAR_DISMISSALS = 200;
+const MAX_BAR_DISMISSALS = 200;
 
 const isBarDismissal = (value: unknown): value is BarDismissal => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;

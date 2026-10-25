@@ -31,14 +31,14 @@ import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sd
 import { lifelineLaunch, releaseLifeline } from "../../support/lifeline.ts";
 
 /** How long `exit` may wait for stderr to close — the SDK's own spawner's cap (0.3.278). */
-export const EXIT_AFTER_STDERR_MS = 200;
+const EXIT_AFTER_STDERR_MS = 200;
 
 /**
  * A `SpawnedProcess` over the lifeline-wrapped CLI: `ChildProcess` read through, except that
  * `exit` is emitted once stderr has closed (or {@link EXIT_AFTER_STDERR_MS} after the exit).
  * `exitCode` / `signalCode` read the child's own, as the SDK's spawner does.
  */
-export class ClaudeLocalProcess extends EventEmitter implements SpawnedProcess {
+class ClaudeLocalProcess extends EventEmitter implements SpawnedProcess {
   readonly stdin: SpawnedProcess["stdin"];
   readonly stdout: SpawnedProcess["stdout"];
 

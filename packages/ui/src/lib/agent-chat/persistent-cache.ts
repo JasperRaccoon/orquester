@@ -385,7 +385,7 @@ function parseMeta(value: unknown): ThreadCacheMeta | null {
  * `toThreadSnapshot` so it holds exactly the declared fields. `null` for
  * anything that is not a snapshot of `sessionId` folded to `seq`.
  */
-export function parsePersistedSnapshot(
+function parsePersistedSnapshot(
   value: unknown,
   sessionId: string,
   seq: number

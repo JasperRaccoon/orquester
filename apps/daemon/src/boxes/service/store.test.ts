@@ -142,9 +142,18 @@ test("writes are fsynced: the file before the rename, its directory after", asyn
   const probe = await open(boxesStorePath(base), "r");
   const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
   await probe.close();
-  const sync = t.mock.method(proto, "sync");
+  const phases: { directory: boolean; persisted: string }[] = [];
+  const original = proto.sync;
+  t.mock.method(proto, "sync", async function (this: Awaited<ReturnType<typeof open>>) {
+    phases.push({
+      directory: (await this.stat()).isDirectory(),
+      persisted: JSON.parse(await readFile(boxesStorePath(base), "utf8")).boxes.aaaaaaaaaaaa.state
+    });
+    await original.call(this);
+  });
   await store.update("aaaaaaaaaaaa", (next) => void (next.state = "destroyed"));
-  assert.ok(sync.mock.callCount() >= 2, `synced ${sync.mock.callCount()} times`);
+  assert.ok(phases.some((phase) => !phase.directory && phase.persisted === "ready"), "the new file is synced before replacing the old record");
+  assert.ok(phases.some((phase) => phase.directory && phase.persisted === "destroyed"), "the directory is synced after the new record lands");
 });
 
 test("a boxes.json that cannot be read blocks every change", async (t) => {

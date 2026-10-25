@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -86,8 +86,9 @@ function entry(appdir: string, overrides: Partial<McpBridgeEntry>): McpBridgeEnt
   };
 }
 
-test("a bridged stdio server runs on the host with its own env, piped to the box, and dies with the channel", async () => {
+test("a bridged stdio server runs on the host with its own env, piped to the box, and dies with the channel", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const server = join(appdir, "fake-mcp.mjs");
   // A stand-in stdio MCP server: answers each request with its method and the secret it sees.
   await writeFile(
@@ -116,6 +117,7 @@ test("a bridged stdio server runs on the host with its own env, piped to the box
     }
   });
   const link = channel();
+  t.after(() => link.stream.destroy());
   capture.handler()(context("box-1"), { kind: "mcp-bridge", serverId: "server-id-aaaaaaaaaaaaaaaaaaaaaaaa" }, link.stream);
   const replies = lines(link.fromHost);
   link.toHost.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
@@ -129,19 +131,27 @@ test("a bridged stdio server runs on the host with its own env, piped to the box
   assert.equal(detail?.server, "fake");
 });
 
-test("an id the box's directory does not hold is refused: the channel closes, nothing runs", async () => {
+test("an id the box's directory does not hold is refused: the channel closes, nothing runs", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-1" }));
   const capture = hubCapture();
-  registerMcpBridge(capture.hub, { appdir });
+  let starts = 0;
+  registerMcpBridge(capture.hub, { appdir, spawn: () => { starts++; throw new Error("test spawn"); } });
   const link = channel();
   // Another box naming box-1's server id.
   capture.handler()(context("box-2"), { kind: "mcp-bridge", serverId: "server-id-aaaaaaaaaaaaaaaaaaaaaaaa" }, link.stream);
   await link.closed;
+  assert.equal(starts, 0, "another box cannot start the host server");
+  const own = channel();
+  capture.handler()(context("box-1"), { kind: "mcp-bridge", serverId: "server-id-aaaaaaaaaaaaaaaaaaaaaaaa" }, own.stream);
+  await own.closed;
+  assert.equal(starts, 1, "the stored entry is usable by its own box");
 });
 
-test("a bridged HTTP server is reached from the host with its headers; the box never sees them", async () => {
+test("a bridged HTTP server is reached from the host with its headers; the box never sees them", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const seen: { authorization: string | undefined; body: unknown }[] = [];
   const http = createServer((request: IncomingMessage, response) => {
     let body = "";
@@ -191,8 +201,9 @@ test("a bridged HTTP server is reached from the host with its headers; the box n
   }
 });
 
-test("a box holds at most maxChannelsPerBox open bridges: more are refused until one ends; other boxes are not affected", async () => {
+test("a box holds at most maxChannelsPerBox open bridges: more are refused until one ends; other boxes are not affected", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const serverId = "server-id-aaaaaaaaaaaaaaaaaaaaaaaa";
   // A stdio server that runs until its stdin ends (the channel closing).
   const target = {
@@ -204,6 +215,14 @@ test("a box holds at most maxChannelsPerBox open bridges: more are refused until
   await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-1", serverId, target }));
   await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-2", serverId, target }));
   const children: ChildProcess[] = [];
+  t.after(async () => {
+    await Promise.all(children.map(async (child) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGKILL");
+      await exited;
+    }));
+  });
   const spawned: (() => void)[] = [];
   const capture = hubCapture();
   registerMcpBridge(capture.hub, {

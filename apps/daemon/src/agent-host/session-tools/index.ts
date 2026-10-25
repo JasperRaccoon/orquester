@@ -187,7 +187,6 @@ export interface CreateSessionToolsHostOptions {
   definitions?: Promise<ChatToolDefinitions>;
   /** Every name a call may name (default: the static catalog's chat names + the legacy ones). */
   knownNames?: ReadonlySet<string>;
-  credentials?: SessionToolCredentials;
   logger?: { warn(message: string, detail?: unknown): void };
   /**
    * A thread's session starts degraded (no manifest: the last denials known for its launch key):
@@ -284,7 +283,7 @@ interface LaunchMailbox {
 }
 
 export function createSessionToolsHost(options: CreateSessionToolsHostOptions): SessionToolsHost {
-  const credentials = options.credentials ?? new SessionToolCredentials();
+  const credentials = new SessionToolCredentials();
   const definitions = options.definitions ?? buildChatToolDefinitions();
   // Never an unhandled rejection: a failed build answers every prepare with no tools.
   definitions.catch((error: unknown) => options.logger?.warn("session tools: the catalog could not be serialised", { error: String(error) }));
@@ -867,5 +866,4 @@ export async function issueSessionToolsGrant(
   }
 }
 
-export { SessionToolCredentials } from "./credentials.ts";
 export { createDaemonForwarder, createDaemonManifestClient } from "./forwarder.ts";

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { AgentAccount, EventMessage, UsageResponse } from "@orquester/api";
 import { USAGE_LIMIT_CONTINUE_MESSAGE, USAGE_LIMIT_RESUME_MARGIN_MS, type ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
-import { agentPrefsSchema, type AccountCooldown } from "@orquester/config";
+import type { AccountCooldown } from "@orquester/config";
 
 import type { DaemonApi, DaemonMethod, DaemonRequestOptions, DaemonResponse } from "../mcp/daemon-api.ts";
 import type { Clock, CooldownStore } from "../workflows/contracts.ts";
@@ -195,12 +195,6 @@ async function advance(h: Harness, ms: number): Promise<void> {
   h.clock.advance(ms);
   await h.recovery.idle();
 }
-
-test("settings: automatic resume is on and account failover is off by default", () => {
-  const prefs = agentPrefsSchema.parse({});
-  assert.equal(prefs.autoResumeLimitedChats, true);
-  assert.equal(prefs.switchAccountOnUsageLimit, false);
-});
 
 test("a limit with a provider reset is recorded, armed and cools the account down", async () => {
   const h = harness();

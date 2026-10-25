@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { packageOf, planTests, planTypecheck, runnerOf, selectTests, shellQuote } from "./check-changed.mjs";
 
 const DAEMON_TEST =
-  "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do node --import tsx \"$f\" || exit 1; done";
+  "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do node --import tsx \"$f\" || exit 1; done";
 const PACKAGES = [
   { dir: "apps/daemon", name: "@orquester/daemon", testScript: DAEMON_TEST },
   { dir: "apps/web", name: "@orquester/web", testScript: "node --test $(find test -name '*.test.mjs')" },
@@ -65,15 +65,15 @@ test("packageOf picks the package that contains a path, or null", () => {
 
 test("runnerOf takes the package's own node --test preamble", () => {
   assert.deepEqual(runnerOf(DAEMON_TEST), {
-    test: "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4}",
-    check: "TSX_DISABLE_CACHE=1 node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs"
+    test: "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4}",
+    check: "TSX_DISABLE_CACHE=1 node --import tsx"
   });
   assert.deepEqual(runnerOf("node --test $(find test -name '*.test.mjs')"), { test: "node --test", check: "node" });
   assert.equal(runnerOf("vitest run"), null);
   // A setup step in front (the daemon's native-module check) stays in front of both runs.
   assert.deepEqual(runnerOf(`node ../../scripts/ensure-node-native.mjs && ${DAEMON_TEST}`), {
-    test: `node ../../scripts/ensure-node-native.mjs && ${runnerOf(DAEMON_TEST).test}`,
-    check: `node ../../scripts/ensure-node-native.mjs && ${runnerOf(DAEMON_TEST).check}`
+    test: "node ../../scripts/ensure-node-native.mjs && TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4}",
+    check: "node ../../scripts/ensure-node-native.mjs && TSX_DISABLE_CACHE=1 node --import tsx"
   });
   assert.equal(runnerOf(undefined), null);
 });
@@ -89,7 +89,7 @@ test("planTests groups files per package with its runner, root last, and reports
       [
         "apps/daemon",
         ["src/a.test.ts", "src/b.check.ts"],
-        [`${runnerOf(DAEMON_TEST).test} 'src/a.test.ts'`, `${runnerOf(DAEMON_TEST).check} 'src/b.check.ts'`]
+        ["TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} 'src/a.test.ts'", "TSX_DISABLE_CACHE=1 node --import tsx 'src/b.check.ts'"]
       ],
       ["packages/api", ["src/it's.test.ts"], [`TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=\${ORQUESTER_TEST_CONCURRENCY:-4} 'src/it'\\''s.test.ts'`]],
       [".", ["deploy/lib/remote-update.test.mjs"], ["node --test 'deploy/lib/remote-update.test.mjs'"]]

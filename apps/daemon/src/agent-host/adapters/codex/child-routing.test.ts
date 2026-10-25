@@ -59,28 +59,6 @@ const usageNotification = (threadId: string, turnId: string, total: number): unk
 });
 
 describe("a collab child never hijacks the parent's turn", () => {
-  it("a child's turn/started does not become the parent's active turn", () => {
-    const { normaliser } = make();
-    normaliser.notification("turn/started" as never, {
-      threadId: PARENT,
-      turn: turn("parent-turn", "inProgress")
-    });
-
-    const events = normaliser.notification("turn/started" as never, {
-      threadId: CHILD,
-      turn: turn("child-turn", "inProgress")
-    });
-
-    // A child this session never saw launched (a resume after a host restart)
-    // starts on its own turn, so the roster can reopen it
-    // (`collab-relaunch.test.ts`).
-    assert.deepEqual(
-      events.map((event) => event.type),
-      ["task.started", "task.progress"],
-      "a child's turn is a roster row, never a turn row"
-    );
-  });
-
   it("a child's turn/completed does not settle the parent's live turn", () => {
     const { normaliser } = make();
     normaliser.notification("turn/started" as never, {
@@ -200,28 +178,18 @@ describe("in-progress items are closed when a turn settles (R3 finding 1)", () =
     startedAtMs: 0
   });
 
-  it("a completed turn closes its dangling items as completed", () => {
-    const { normaliser } = make();
-    normaliser.notification("turn/started" as never, {
-      threadId: PARENT,
-      turn: turn("t1", "inProgress")
-    });
-    normaliser.notification("item/started" as never, startItem(PARENT, "t1", "call_1"));
-    const events = normaliser.notification("turn/completed" as never, {
-      threadId: PARENT,
-      turn: turn("t1", "completed")
-    });
-    assert.equal((events[0]!.payload as { status: string }).status, "completed");
-  });
-
   it("a settling turn does not reap a DIFFERENT turn's items", () => {
     const { normaliser } = make();
     normaliser.notification("item/started" as never, startItem(PARENT, "t1", "call_1"));
     normaliser.notification("item/started" as never, startItem(PARENT, "t2", "call_2"));
-    normaliser.notification("turn/completed" as never, {
+    const first = normaliser.notification("turn/completed" as never, {
       threadId: PARENT,
       turn: turn("t1", "completed")
     });
+    assert.deepEqual(
+      first.filter((event) => event.type === "item.completed").map((event) => [event.itemId, (event.payload as { status?: string }).status]),
+      [["call_1", "completed"]]
+    );
     const second = normaliser.notification("turn/completed" as never, {
       threadId: PARENT,
       turn: turn("t2", "completed")

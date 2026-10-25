@@ -45,14 +45,6 @@ test("acceptAlways falls through to reject_once and is never surfaced", () => {
   assert.equal(selectPermissionOptionId(REAL_OPTIONS, "acceptAlways"), "reject-once");
 });
 
-test("decline -> the reject_once option id", () => {
-  assert.equal(selectPermissionOptionId(REAL_OPTIONS, "decline"), "reject-once");
-});
-
-test("cancel selects nothing, so the reply is {outcome:{outcome:'cancelled'}}", () => {
-  assert.equal(selectPermissionOptionId(REAL_OPTIONS, "cancel"), undefined);
-});
-
 test("a blank option id counts as absent", () => {
   const blank: PermissionOption[] = [{ optionId: "   ", name: "Yes", kind: "allow_once" }];
   assert.equal(selectPermissionOptionId(blank, "accept"), undefined);

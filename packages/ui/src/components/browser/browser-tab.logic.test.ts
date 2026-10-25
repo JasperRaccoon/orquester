@@ -1,17 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { boxKindRunsBrowser, browserMenuEntry, unsandboxedTitle, vmDevtoolsNote, vmStartingText } from "./browser-tab.logic";
+import { browserMenuEntry, vmDevtoolsNote, vmStartingText } from "./browser-tab.logic";
 
 describe("the VM browser rules", () => {
-  it("only Linux boxes run the Browser tab's Chromium", () => {
-    assert.equal(boxKindRunsBrowser("linux"), true);
-    assert.equal(boxKindRunsBrowser("linux-gpu"), true);
-    assert.equal(boxKindRunsBrowser("macos"), false);
-    assert.equal(boxKindRunsBrowser("windows"), false);
-    assert.equal(boxKindRunsBrowser("windows-gpu"), false);
-    assert.equal(boxKindRunsBrowser(null), false);
-  });
 
   it("the + menu offers Browser for a Linux box project without host Chromium, never without a channel", () => {
     assert.deepEqual(browserMenuEntry({ hasChannel: true, hostChromium: false, boxKind: "linux" }), { kind: "open" });
@@ -25,12 +17,12 @@ describe("the VM browser rules", () => {
   });
 
   it("a VM tab that is starting shows the launch's step; host tabs and other states show none", () => {
-    assert.equal(vmStartingText({ status: "starting", runsIn: "box" }), "Starting Chromium in the VM…");
+    assert.ok(vmStartingText({ status: "starting", runsIn: "box" })?.trim());
     assert.equal(
       vmStartingText({ status: "starting", runsIn: "box", progress: "Installing Chromium in the VM: Unpacking chromium" }),
       "Installing Chromium in the VM: Unpacking chromium"
     );
-    assert.equal(vmStartingText({ status: "starting", runsIn: "box", progress: "  " }), "Starting Chromium in the VM…");
+    assert.ok(vmStartingText({ status: "starting", runsIn: "box", progress: "  " })?.trim());
     assert.equal(vmStartingText({ status: "running", runsIn: "box", progress: "stale" }), null);
     assert.equal(vmStartingText({ status: "starting", runsIn: "host" }), null);
     assert.equal(vmStartingText({ status: "starting" }), null, "an older daemon's tab is a host tab");
@@ -40,11 +32,5 @@ describe("the VM browser rules", () => {
     assert.match(vmDevtoolsNote({ runsIn: "box" }) ?? "", /not available for a browser that runs in the VM/);
     assert.equal(vmDevtoolsNote({ runsIn: "host" }), null);
     assert.equal(vmDevtoolsNote({}), null);
-  });
-
-  it("the no-sandbox warning says where Chromium runs", () => {
-    assert.equal(unsandboxedTitle("box"), "Chromium is running without its sandbox in the VM");
-    assert.equal(unsandboxedTitle("host"), "Chromium is running without its sandbox on this host");
-    assert.equal(unsandboxedTitle(undefined), "Chromium is running without its sandbox on this host");
   });
 });

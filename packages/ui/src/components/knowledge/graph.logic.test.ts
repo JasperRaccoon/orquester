@@ -5,16 +5,10 @@ import type { KnowledgeColor } from "@orquester/api";
 
 import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
-  MAX_LABELS,
-  NODE_MAX_SIZE,
-  NODE_MIN_SIZE,
-  canvasNodes,
   focusFor,
   graphQueryOf,
   graphScopeKey,
-  labelledNodes,
   nodeColors,
-  nodeSize,
   searchSummary,
   truncationNote
 } from "./graph.logic.ts";
@@ -70,28 +64,6 @@ describe("concept colours, sizes and labels", () => {
     assert.deepEqual(nodeColors(node({ collections: ["kc_ads", "kc_seo", "kc_saas"] }), colorOf, []), ["chart-2", "chart-1"]);
     assert.deepEqual(nodeColors(node({ collections: ["kc_ads", "kc_seo"] }), colorOf, ["kc_seo"]), ["chart-1"]);
     assert.deepEqual(nodeColors(node({ collections: ["kc_unknown"] }), colorOf, []), [], "unknown or Unfiled: neutral");
-  });
-
-  it("sizes by degree within the bounds", () => {
-    assert.equal(nodeSize(0, 0), NODE_MIN_SIZE);
-    assert.equal(nodeSize(0, 10), NODE_MIN_SIZE);
-    assert.equal(nodeSize(10, 10), NODE_MAX_SIZE);
-    assert.ok(nodeSize(1, 100) < nodeSize(25, 100));
-  });
-
-  it("labels every concept of a small graph and the most connected of a big one", () => {
-    const small = [node({ id: "a" }), node({ id: "b" })];
-    assert.deepEqual([...labelledNodes(small)].sort(), ["a", "b"]);
-    const big = Array.from({ length: 300 }, (_, i) => node({ id: `n${i}`, name: `n${i}`, degree: i }));
-    const labelled = labelledNodes(big);
-    assert.equal(labelled.size, MAX_LABELS);
-    assert.ok(labelled.has("n299"));
-    assert.ok(!labelled.has("n0"));
-  });
-
-  it("builds the canvas nodes", () => {
-    const [built] = canvasNodes({ nodes: [node({ id: "a", name: "Alternatives pages", degree: 2, collections: ["kc_seo", "kc_ads"] })] }, colorOf, []);
-    assert.deepEqual(built, { id: "a", label: "Alternatives pages", labelled: true, size: NODE_MAX_SIZE, colors: ["chart-1", "chart-2"] });
   });
 });
 

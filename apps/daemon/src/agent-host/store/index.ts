@@ -220,11 +220,6 @@ export interface ThreadStoreOptions {
    * own logger.
    */
   logger?: { warn(message: string, detail?: unknown): void };
-  /**
-   * Told the bytes of `events.ndjson` each whole read ({@link ThreadStore.readAll}'s, a replay's
-   * fallback) and each cursor read (`readEventsFrom`) took. Diagnostics: what a reconnect costs.
-   */
-  onLogRead?: (read: { threadId: string; kind: "whole" | "from-cursor"; bytes: number }) => void;
 }
 
 /** Default cadence for the background sweep. */
@@ -606,7 +601,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return stale;
     }
     const window = await readFileWindow(threadEventsPath(rootDir, threadId), byteOffset);
-    if (window !== null) options.onLogRead?.({ threadId, kind: "from-cursor", bytes: window.bytes.length });
     if ((window?.size ?? 0) < byteOffset) {
       return stale;
     }
@@ -692,7 +686,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
-    options.onLogRead?.({ threadId, kind: "whole", bytes: Buffer.byteLength(contents, "utf8") });
     const events: DomainEvent[] = [];
     const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;

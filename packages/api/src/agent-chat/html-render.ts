@@ -297,7 +297,7 @@ export const HTML_RENDER_THEME_TOKENS = [
  * `--n-*` neutral scale (scheme × mode), `--sem-*` status colours and
  * `--lane-*` categorical hues (mode only), each an `"r g b"` triple.
  */
-export const HTML_RENDER_PALETTE_VARIABLES = [
+const HTML_RENDER_PALETTE_VARIABLES = [
   "--n-100",
   "--n-200",
   "--n-400",
@@ -332,10 +332,9 @@ export type HtmlRenderPalette = Readonly<Record<HtmlRenderPaletteVariable, strin
 /**
  * The stock ("mono") palette per mode, as `styles/globals.css` defines it.
  * A published page falls back to it when no client theme reaches it (a
- * direct download, a headless preview). The UI's theme test keeps it equal to
- * the stylesheet.
+ * direct download, a headless preview).
  */
-export const HTML_RENDER_STOCK_PALETTES: Readonly<Record<HtmlRenderAppearance, HtmlRenderPalette>> = {
+const HTML_RENDER_STOCK_PALETTES: Readonly<Record<HtmlRenderAppearance, HtmlRenderPalette>> = {
   dark: {
     "--n-100": "245 245 245",
     "--n-200": "229 229 229",

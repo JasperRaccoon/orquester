@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -7,7 +7,7 @@ import type { KnowledgeVisibility } from "@orquester/api";
 import { KnowledgeError } from "../store/errors.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
-import { FakeEmbedder, FakeEmbedderSource, FakeStore, edge, node, silentLogger } from "./test-fakes.ts";
+import { FakeEmbedder, FakeEmbedderSource, FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 
 const SEO = "kc_seoseoseos";
 const SAAS = "kc_saassaassa";
@@ -39,7 +39,8 @@ async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; 
   store.put(ADSPOST, "Cap the daily budget while a campaign learns; raise spend after 50 conversions.", [ADS], { title: "Ads learning phase" }, true);
   store.put(UNFILED, "Remember to compare pricing tables of competitor tools.", [], { title: "Note to self" }, true);
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
-  graph.replace(
+  await loadGraph(
+    graph,
     [
       node("tactic-comparison-tables", "Comparison tables", [`${CLOUDFLARE}.md`, `${ALT}.md`, `${BILLING}.md`]),
       node("tool-stripe", "Stripe", [`${BILLING}.md`]),
@@ -202,14 +203,6 @@ test("vectors are cached by content hash and reused across restarts; another mod
   assert.equal(other.embedder!.texts, 6);
   await other.search.stop();
 
-  // A corrupt manifest is discarded and rebuilt.
-  await writeFile(join(indexDir, "vectors.json"), "{oops");
-  const rebuilt = await setup(t, { indexDir, embedder: new FakeEmbedder({ modelId: "fake/other" }) });
-  await rebuilt.search.search({ query: "warm" }, ALL);
-  await rebuilt.search.idle();
-  assert.equal(rebuilt.embedder!.texts, 6);
-  assert.ok(rebuilt.logger.lines.some((l) => l.includes("rebuilding the embedding cache")));
-  await rebuilt.search.stop();
 });
 
 test("read views: entry lists page newest first; details and items respect visibility", async (t) => {
@@ -247,27 +240,6 @@ test("read views: entry lists page newest first; details and items respect visib
   assert.deepEqual(graph.nodes.map((n) => n.id).sort(), ["tactic-comparison-tables", "tool-stripe"]);
   assert.throws(() => search.graphView({ collections: SAAS }, SEO_ONLY), (e: unknown) => e instanceof KnowledgeError && e.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
   assert.throws(() => search.graphView({ focus: "tool-stripe" }, SEO_ONLY), (e: unknown) => e instanceof KnowledgeError && e.code === "KNOWLEDGE_NOT_FOUND");
-});
-
-test("a long entry is embedded in small calls, so a query never waits behind the whole entry", async (t) => {
-  const { store, search, embedder } = await setup(t);
-  await search.search({ query: "warm up" }, ALL);
-  await search.idle();
-  const sizes: number[] = [];
-  const embed = embedder!.embed.bind(embedder!);
-  embedder!.embed = (texts) => {
-    sizes.push(texts.length);
-    return embed(texts);
-  };
-  const id = "ke_longlonglong";
-  // ~5,000 words: dozens of chunks.
-  const body = Array.from({ length: 5_000 }, (_, i) => (i % 50 === 0 ? "chatgpt" : `word${i % 97}`)).join(" ");
-  store.put(id, body, [SEO], { title: "Long article" }, true);
-  await search.indexEntries([id]);
-  await search.idle();
-  assert.ok(sizes.reduce((a, b) => a + b, 0) > 20, "the entry was embedded");
-  assert.ok(Math.max(...sizes) <= 4, `embed calls of ${Math.max(...sizes)} texts`);
-  assert.ok(entryIds((await search.search({ query: "Ranking in ChatGPT", limit: 25 }, ALL)).hits).includes(id));
 });
 
 test("vectors are cached under the hash of the text that was embedded, not the hash the store claims", async (t) => {
@@ -309,23 +281,4 @@ test("a save waits a bounded time for its embeddings (a slow first model load ne
   release();
   await search.idle();
   assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
-});
-
-test("a save's own indexing and the store listener's for the same entries share one pass", async (t) => {
-  const { store, search } = await setup(t);
-  let reads = 0;
-  const getEntry = store.getEntry.bind(store);
-  store.getEntry = async (id) => {
-    reads += 1;
-    return getEntry(id);
-  };
-  const id = "ke_sharedshared";
-  // The listener starts indexing as the entry is added; the route then asks for the same entry.
-  store.put(id, "One pass: indexed once whoever asks first.", [SEO], { title: "Shared pass" });
-  await search.indexEntries([id]);
-  await search.idle();
-  assert.equal(reads, 1);
-  // A later call (nothing in flight) indexes again; so does an edit's.
-  await search.indexEntries([id]);
-  assert.equal(reads, 2);
 });

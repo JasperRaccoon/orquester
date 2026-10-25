@@ -61,7 +61,7 @@ export interface DelegateStopCascadeOptions {
  * provider keeps going, or live background agents. A chat whose thread the host has not created
  * yet (`chatPending`) has nothing to interrupt.
  */
-export function delegateUnfinished(session: SessionSummary): boolean {
+function delegateUnfinished(session: SessionSummary): boolean {
   if (session.chatPending === true) return false;
   if (session.hasPendingApprovals || session.hasPendingUserInput) return true;
   if (session.chatSessionStatus === "running" || session.chatSessionStatus === "starting") return true;
@@ -74,7 +74,7 @@ export function delegateUnfinished(session: SessionSummary): boolean {
  * Every chat `rootId` delegated a task to, and theirs, breadth first — delegate links only, each
  * chat once (a lineage cycle, which no build writes, cannot loop).
  */
-export function delegateDescendants(sessions: readonly SessionSummary[], rootId: string): SessionSummary[] {
+function delegateDescendants(sessions: readonly SessionSummary[], rootId: string): SessionSummary[] {
   const byParent = new Map<string, SessionSummary[]>();
   for (const session of sessions) {
     const lineage = session.lineage;
@@ -98,7 +98,7 @@ export function delegateDescendants(sessions: readonly SessionSummary[], rootId:
 }
 
 /** The interrupt command id a cascade posts to `childId` for the stop `rootKey`: stable, within the id cap. */
-export function cascadeCommandId(rootKey: string, childId: string): string {
+function cascadeCommandId(rootKey: string, childId: string): string {
   return `delegate-stop-${createHash("sha256").update(`${rootKey}\u0000${childId}`).digest("hex").slice(0, 40)}`;
 }
 

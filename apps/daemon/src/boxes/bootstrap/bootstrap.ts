@@ -382,8 +382,8 @@ exec "$B" run
 };
 
 /** The second stage's variants (`boxRoutes.bootstrapScript(variant)`): VMs, and containers (no service manager). */
-export const BOOTSTRAP_STAGE2_VARIANTS = ["posix", "container"] as const;
-export type BootstrapStage2Variant = (typeof BOOTSTRAP_STAGE2_VARIANTS)[number];
+const BOOTSTRAP_STAGE2_VARIANTS = ["posix", "container"] as const;
+type BootstrapStage2Variant = (typeof BOOTSTRAP_STAGE2_VARIANTS)[number];
 
 function posixScript(options: PosixOptions): string {
   return [

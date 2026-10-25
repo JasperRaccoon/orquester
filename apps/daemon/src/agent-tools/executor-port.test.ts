@@ -274,7 +274,6 @@ test("shutdown: disconnected first — no card, no grant (non-Admin tools still 
 
   // What `index.ts` does at stop, in order: disconnect, then stop the runtime.
   r.disconnect();
-  assert.equal(executorPorts.approvals, null);
   assert.equal(errorCode(await r.call("control_desktop")), "PERMISSION_DENIED", "the grant is not honoured once disconnected");
   assert.equal(r.opened.length, 0, "no card opened");
   assert.equal(r.runs.length, runsBefore);
@@ -295,7 +294,11 @@ test("a disconnect clears only the ports that are still its own", async (t) => {
   const other = await rig(t);
   // `other` connected last: `r`'s disconnect leaves its port alone.
   r.disconnect();
-  assert.equal(executorPorts.approvals, other.runtime.port);
+  const pending = other.call("control_desktop");
+  const id = await other.nextCard();
+  assert.ok((await other.runtime.approvals.answer("me", id, { decision: "approve" })).ok);
+  assert.deepEqual(payload(await pending), { opened: true });
+  assert.equal(other.runs.length, 1, "the new runtime still serves calls");
   other.disconnect();
-  assert.equal(executorPorts.approvals, null);
+  assert.equal(errorCode(await other.call("control_desktop")), "PERMISSION_DENIED");
 });

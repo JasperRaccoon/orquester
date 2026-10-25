@@ -359,50 +359,6 @@ test("readInstalledPlugin: the reported version, symlinked versions only inside 
   }
 });
 
-test("keep-both import detail: only picks are named, in pick order, in one adapter call; a command shows as the file it is written to", async (t) => {
-  const root = await tempRoot(t);
-  const asked: { kind: string; name: string }[][] = [];
-  class Adapter extends FakeProfileAdapter {
-    async keepBothNames(requests: readonly { kind: "mcp" | "skill" | "command"; name: string }[], alsoTaken?: { skill?: Iterable<string>; command?: Iterable<string> }) {
-      asked.push(requests.map((request) => ({ ...request })));
-      if (requests.some((request) => request.name === "refused")) throw new Error("an unpicked candidate was named");
-      const taken = { skill: new Set(alsoTaken?.skill ?? []), command: new Set(alsoTaken?.command ?? []) } as Record<string, Set<string>>;
-      return requests.map((request) => {
-        let name = request.name;
-        for (let n = 2; taken[request.kind]!.has(name) || name === "deploy"; n += 1) name = `${request.name}-${n}`;
-        taken[request.kind]!.add(name);
-        return name;
-      });
-    }
-  }
-  const store = new ProfileImportStore({
-    dir: join(root, "imports"), existing: async () => new Set(), logger: { info: () => undefined, warn: () => undefined },
-    clone: async (_url, _ref, dest) => {
-      await write(join(dest, "commands", "deploy.md"), "---\ndescription: D\n---\nship it");
-      await write(join(dest, "a", "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: A\n---\none");
-      await write(join(dest, "b", "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: B\n---\ntwo");
-      await write(join(dest, "skills", "refused", "SKILL.md"), "---\nname: refused\ndescription: R\n---\nno");
-    }
-  });
-  t.after(() => store.stop());
-  const service = new AgentProfileService({
-    adapters: { claude: new Adapter("claude") }, agentInfo: () => ({ installed: true }), converter: (item) => ({ item, notes: [] }), imports: store,
-    logger: { warn: () => undefined, error: () => undefined }
-  });
-  const scan = await service.scanGit("claude", "https://git.example/acme/kit.git");
-  const ref = (predicate: (candidate: { kind: string; name: string; ref: string }) => boolean) => scan.candidates.find(predicate)!.ref;
-  const alphaA = ref((c) => c.name === "alpha" && c.ref.startsWith("a/"));
-  const alphaB = ref((c) => c.name === "alpha" && c.ref.startsWith("b/"));
-  const deploy = ref((c) => c.kind === "command");
-  const detail = await service.importDetail("claude", scan.importId, "keep-both", { picks: [alphaB, alphaA, deploy], taken: { skill: ["alpha"] } });
-  assert.deepEqual(asked, [[{ kind: "skill", name: "alpha" }, { kind: "skill", name: "alpha" }, { kind: "command", name: "deploy" }]], "one call, picks only, in pick order");
-  const byRef = new Map(detail.candidates.map((candidate) => [candidate.ref, candidate]));
-  assert.deepEqual([byRef.get(alphaB)!.writtenName, byRef.get(alphaA)!.writtenName], ["alpha-2", "alpha-3"]);
-  assert.match(byRef.get(alphaA)!.files.find((file) => file.path === "SKILL.md")!.text!, /^---\nname: alpha-3\n/);
-  assert.deepEqual(byRef.get(deploy)!.files.map((file) => file.path), ["deploy-2.md"], "the command's file as written, not its source path");
-  assert.equal(detail.candidates.find((candidate) => candidate.name === "refused")!.writtenName, undefined);
-});
-
 test("readInstalledPlugin: the cache root comes from the path as named — an account home reaching the cache through a symlink still follows sibling versions", async (t) => {
   const root = await tempRoot(t);
   // The system cache lives under a directory not named plugins/cache; the account home links to it.

@@ -36,7 +36,7 @@ import { argumentProblems } from "../mcp/result.ts";
 type Args = Record<string, unknown>;
 
 /** One legacy name: the tool that replaced it, its old input fields, and the mapping. */
-export interface LegacyChatToolAlias {
+interface LegacyChatToolAlias {
   /** The catalog tool that replaced it. */
   target: string;
   /** The old tool's input fields (loose: the target's schema validates the mapped call). */
@@ -67,7 +67,7 @@ const pick = (args: Args, keys: readonly string[]): Args => defined(Object.fromE
 const SETTINGS_KEYS = ["agent", "model", "options", "accountId", "runtimeMode", "title"] as const;
 
 /** Spec §14.1's table. */
-export const LEGACY_CHAT_TOOL_ALIASES: Readonly<Record<string, LegacyChatToolAlias>> = {
+const LEGACY_CHAT_TOOL_ALIASES: Readonly<Record<string, LegacyChatToolAlias>> = {
   thread_list: {
     target: "list_sessions",
     input: { limit: z.number().optional() },
@@ -136,15 +136,12 @@ export const LEGACY_CHAT_TOOL_ALIASES: Readonly<Record<string, LegacyChatToolAli
   }
 };
 
-/** The legacy names the daemon aliases. */
-export const LEGACY_CHAT_TOOL_NAMES: readonly string[] = Object.keys(LEGACY_CHAT_TOOL_ALIASES);
-
 /**
  * The legacy name as a catalog tool running `target` with the mapped arguments: tier, family,
  * scope, preview and run are the target's — so the gate, cards and turn policy judge
  * the call exactly as they judge the target.
  */
-export function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyOrquesterTool): AnyOrquesterTool {
+function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyOrquesterTool): AnyOrquesterTool {
   const schema = audienceSchema(target, "chat");
   // The same arguments always map to the same call; computed once per arguments object.
   const memo = new WeakMap<object, Args>();

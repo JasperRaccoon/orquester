@@ -10,7 +10,6 @@ import { describe, it } from "node:test";
 import type { SecretFileCloneState, SecretFilesClone, SecretVaultDetail } from "@orquester/api";
 
 import {
-  MAX_BAR_DISMISSALS,
   addBarDismissal,
   compareSummaryText,
   compareTargets,
@@ -26,7 +25,6 @@ import {
   pushConfirmText,
   repoSecretCount,
   resetConfirmText,
-  secretFileStateText,
   type BarDismissal
 } from "./drift.logic";
 
@@ -59,17 +57,6 @@ const vault = (clones: SecretFilesClone[], versions: Record<string, string> = {}
   excluded: [],
   candidates: [],
   clones
-});
-
-describe("secretFileStateText", () => {
-  it("labels every state, and a refused file with its reason", () => {
-    assert.equal(secretFileStateText({ state: "modified" }), "changed here");
-    assert.equal(secretFileStateText({ state: "deleted" }), "deleted here");
-    assert.equal(secretFileStateText({ state: "missing-dir" }), "its folder is missing here");
-    assert.equal(secretFileStateText({ state: "synced" }), "in sync");
-    assert.equal(secretFileStateText({ state: "refused", refusal: "tracked" }), "can't be synced here: git tracks it here");
-    assert.equal(secretFileStateText({ state: "refused" }), "can't be synced here");
-  });
 });
 
 describe("projectSecretBadge", () => {
@@ -121,11 +108,6 @@ describe("repoSecretCount", () => {
       both?.title,
       '1 clone has secret files that need attention; 3 new secret files were found and can be added. Open "Secret files…" to review.'
     );
-  });
-
-  it("ignores a negative or fractional count from a bad payload", () => {
-    assert.equal(repoSecretCount(true, { clonesNeedingAttention: -3, newCandidates: 0 }), null);
-    assert.equal(repoSecretCount(true, { clonesNeedingAttention: 1.7, newCandidates: 0 })?.count, 1);
   });
 });
 
@@ -348,7 +330,7 @@ describe("bar dismissal", () => {
     );
   });
 
-  it("parses stored dismissals tolerantly and keeps them bounded", () => {
+  it("parses stored dismissals tolerantly and refreshes matching entries", () => {
     const d = (key: string): BarDismissal => ({ key, tokens: "", boot: null });
     assert.deepEqual(parseBarDismissals(null), []);
     assert.deepEqual(parseBarDismissals("not json"), []);
@@ -360,11 +342,6 @@ describe("bar dismissal", () => {
       ),
       [{ key: "k", tokens: "t", boot: "b1" }, d("k3")]
     );
-    let list: BarDismissal[] = [];
-    for (let i = 0; i < MAX_BAR_DISMISSALS + 5; i += 1) list = addBarDismissal(list, d(`k${i}`));
-    assert.equal(list.length, MAX_BAR_DISMISSALS);
-    assert.equal(list[0]?.key, "k5");
     assert.deepEqual(addBarDismissal([d("a"), d("b")], { key: "a", tokens: "t", boot: "b1" }), [d("b"), { key: "a", tokens: "t", boot: "b1" }]);
-    assert.equal(parseBarDismissals(JSON.stringify(list.concat([d("x")]))).length, MAX_BAR_DISMISSALS);
   });
 });

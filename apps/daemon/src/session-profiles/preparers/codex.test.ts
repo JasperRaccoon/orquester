@@ -15,7 +15,7 @@ import { codexProfileLaunchContribution } from "../contributions/codex.ts";
 import { codexPreparedSectionSchema } from "../manifest/codex.ts";
 import type { SessionProfilePrepareContext } from "../preparer.ts";
 import type { ResolvedAgentProfile } from "../resolve.ts";
-import { CODEX_PREPARER_VERSION, codexGlobalConfigPath, codexPreparer } from "./codex.ts";
+import { codexPreparer } from "./codex.ts";
 
 const FAKE = fileURLToPath(new URL("../../agent-isolation/testing/fake-codex-seed.mjs", import.meta.url));
 const SECRET = "ghp_PROFILE_SECRET_VALUE";
@@ -154,12 +154,10 @@ async function seedEvents(): Promise<Array<{ event: string; sessions?: string; a
 }
 
 describe("codexPreparer", () => {
-  it("is per account, versioned, and names the Global config.toml as its input", () => {
+  it("prepares per account and tracks the Global config.toml", () => {
     assert.equal(codexPreparer.perAccount, true);
-    assert.equal(codexPreparer.version, CODEX_PREPARER_VERSION);
     const inputs = codexPreparer.inputs?.({ agent: "codex", accountKey: "acc1", accountHome: fx.accountHome, systemHomes: fx.homes, appdir: fx.appdir });
     assert.deepEqual(inputs, [join(fx.homes.codexHome, "config.toml")]);
-    assert.equal(codexGlobalConfigPath({ systemHomes: fx.homes }), join(fx.homes.codexHome, "config.toml"));
   });
 
   it("builds the isolated home: config, instructions, skills, commands as skills, hooks with trust, plugins, links, seeded DB", async () => {

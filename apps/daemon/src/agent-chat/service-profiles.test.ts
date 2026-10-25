@@ -29,6 +29,7 @@ import {
   type ProfileLaunchRequest
 } from "../session-profiles/launch.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
+import { AgentHostSupervisor, type AgentHostStatus } from "./supervisor.ts";
 import { registerThreadLaunchProfileRoute } from "./profile-launch-route.ts";
 import { AgentChatService, type ChatLaunchEnv } from "./service.ts";
 
@@ -530,21 +531,32 @@ test("the refresh realigns the tab with the account the host's thread names (an 
   assert.equal(f.resolves.at(-1)?.accountId, "acc-2");
 });
 
-test("onHostHealthy fires when a host becomes healthy (the leases are knowable again), not on every health tick", async () => {
+test("onHostHealthy fires when a host becomes healthy (the leases are knowable again), not on every health tick", async (t) => {
   const f = await makeFixture();
+  // The supervisor owns probing; this service boundary turns status events into
+  // availability edges for prepared-directory GC.
+  const listeners = new Set<(status: AgentHostStatus) => void>();
+  t.mock.method(AgentHostSupervisor.prototype, "onChange", (listener: (status: AgentHostStatus) => void) => {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  });
+  const emit = (hostInstanceId: string) => {
+    const status: AgentHostStatus = {
+      state: "healthy", hostInstanceId, protocolVersion: 1,
+      pendingVersionRestart: false, pid: 111, reason: null
+    };
+    for (const listener of listeners) listener(status);
+  };
   let fired = 0;
   const unsubscribe = f.service.onHostHealthy(() => void (fired += 1));
-  const supervisor = (f.service as unknown as { supervisor: { checkHealth(): Promise<void> } }).supervisor;
-  await supervisor.checkHealth();
+  emit("host-1");
   assert.equal(fired, 0, "the same healthy host: no edge");
-  f.hostInstanceId = "host-2";
-  await supervisor.checkHealth();
+  emit("host-2");
   assert.equal(fired, 1, "another host took over");
-  await supervisor.checkHealth();
+  emit("host-2");
   assert.equal(fired, 1);
   unsubscribe();
-  f.hostInstanceId = "host-3";
-  await supervisor.checkHealth();
+  emit("host-3");
   assert.equal(fired, 1, "unsubscribed");
   await f.cleanup();
 });

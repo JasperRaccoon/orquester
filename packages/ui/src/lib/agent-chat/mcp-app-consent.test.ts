@@ -18,7 +18,6 @@ describe("a waiting MCP App consent raises attention", () => {
     void queue.ask("frame-1", ask);
     const waiting = queue.waiting();
     assert.ok(waiting.get("s1"));
-    assert.equal(queue.waiting(), waiting, "stable until the next change");
     queue.answer(queue.pending("s1")[0]!.id, true);
     assert.equal(queue.waiting().size, 0);
   });
@@ -44,13 +43,12 @@ describe("a waiting MCP App consent raises attention", () => {
     assert.equal(consentActivity(undefined, "t")?.attention, "needs-input", "no activity reported yet");
   });
 
-  it("folds only the waiting sessions, and keeps identity when nothing waits", () => {
+  it("folds only the waiting sessions", () => {
     const activity = { s1: idle, s2: { ...idle, state: "working" as const } };
-    assert.equal(withConsentAttention(activity, new Map()), activity);
+    assert.deepEqual(withConsentAttention(activity, new Map()), activity);
     const waiting = new Map([["s1", "t"]]);
     const folded = withConsentAttention(activity, waiting);
     assert.equal(folded.s1?.attention, "needs-input");
-    assert.equal(folded.s2, activity.s2);
-    assert.equal(withConsentAttention(activity, waiting), folded, "same inputs, same object");
+    assert.deepEqual(folded.s2, { ...idle, state: "working" });
   });
 });

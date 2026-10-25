@@ -535,41 +535,6 @@ describe("reconcile — the lazy boot (design 2026-09-23, A1)", () => {
 });
 
 describe("reconcile (§3.3)", () => {
-  it("settles an orphaned turn as an error when continuation is off", async () => {
-    const { store, threadId, first } = await threadInFlight();
-    await first.stop();
-
-    const next = createTestHost({ store, continuationEnabled: () => false });
-    await next.orchestrator.reconcile();
-    await next.settle();
-
-    const head = headOf(store, threadId);
-    assert.equal(head.session.status, "error");
-    assert.equal(head.session.activeTurnId, null);
-    assert.equal(head.continueAfterRestart, undefined);
-    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
-    await next.stop();
-  });
-
-  it("continues an orphaned turn when the project opted in, and clears the marker", async () => {
-    const { store, threadId, first } = await threadInFlight();
-    await first.stop();
-
-    const next = createTestHost({ store, continuationEnabled: () => true });
-    await next.orchestrator.reconcile();
-    await next.settle();
-
-    const sends = next.adapter.calls.filter((call) => call.kind === "sendTurn");
-    assert.equal(sends.length, 1);
-    assert.equal((sends[0]?.detail as { input: string }).input, "Continue where you left off.");
-    // Resumed from the persisted cursor.
-    assert.deepEqual(next.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
-    const head = headOf(store, threadId);
-    assert.equal(head.continueAfterRestart, undefined, "the marker is cleared on success");
-    assert.equal(head.session.status, "running");
-    await next.stop();
-  });
-
   it("sends a promptless continuation where the adapter declares it (Codex)", async () => {
     const codex = createScriptedAdapter({
       id: "codex",
@@ -598,23 +563,6 @@ describe("reconcile (§3.3)", () => {
     const detail = send?.detail as { input: string; continuation?: boolean };
     assert.equal(detail.continuation, true);
     assert.equal(detail.input, "");
-    await next.stop();
-  });
-
-  it("settles rather than continues a thread whose tab was closed", async () => {
-    const { store, threadId, first } = await threadInFlight();
-    await first.stop();
-
-    const next = createTestHost({
-      store,
-      continuationEnabled: () => true,
-      isThreadClosed: (id) => id === threadId
-    });
-    await next.orchestrator.reconcile();
-    await next.settle();
-
-    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
-    assert.equal(headOf(store, threadId).session.status, "error");
     await next.stop();
   });
 

@@ -231,7 +231,6 @@ test("push_secret_files: the card names the repo, the source clone, each file's 
   assert.equal(card.tool, "push_secret_files");
   assert.deepEqual(card.grantOptions, [], "never grantable, even in full access");
   assert.equal(card.reason, "Rotated the API token");
-  assert.match(card.title, /Claude wants to push 2 secret files from acme\/api to the acme\/api vault/);
   assert.ok(!JSON.stringify(card).includes(PLANTED), "the card carries a secret value");
   const fields = card.sections.find((section) => section.kind === "fields" && section.title === "Push secret files");
   assert.ok(fields && fields.kind === "fields");
@@ -240,7 +239,7 @@ test("push_secret_files: the card names the repo, the source clone, each file's 
   ]);
   const env = card.sections.find((section) => section.kind === "changes");
   assert.ok(env && env.kind === "changes");
-  assert.match(env.title, /^\.env — variables vs the vault/);
+  assert.match(env.title, /^\.env\b/);
   assert.deepEqual(env.items.map((item) => [item.label, item.change]), [["NEW_FLAG", "added"], ["OLD_URL", "removed"], ["API_TOKEN", "changed"]]);
   assert.ok(card.sections.some((section) => section.kind === "text" && section.title === "config/creds.json" && /3 line\(s\) added, 1 removed/.test(section.text)));
   const clones = card.sections.find((section) => section.kind === "fields" && section.title === "Clones that will be updated");

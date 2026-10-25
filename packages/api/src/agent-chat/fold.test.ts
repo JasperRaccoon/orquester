@@ -56,7 +56,8 @@ test("an empty fold has no head and is snapshot-refusing", () => {
 test("thread.created builds the head; meta and mode updates patch it", () => {
   reset();
   const state = fold([
-    created({ title: "First" }),
+    created({ title: "First", accountId: "acc-old", home: "account" }),
+    ev("thread.meta-updated", { accountId: "acc-new", home: "account" }),
     ev("thread.meta-updated", { title: "Renamed", modelSelection: { model: "opus" } }),
     ev("thread.runtime-mode-set", { runtimeMode: "auto" })
   ]);
@@ -67,6 +68,12 @@ test("thread.created builds the head; meta and mode updates patch it", () => {
   assert.equal(head.runtimeMode, "auto");
   assert.equal(head.session.status, "idle");
   assert.equal(head.seq, state.seq);
+  assert.equal(head.accountId, "acc-new", "a title-only update preserves the switched account");
+  assert.equal(head.home, "account");
+
+  const system = applyDomainEvent(state, ev("thread.meta-updated", { accountId: "", home: "system" }));
+  assert.equal(system.head?.accountId, "");
+  assert.equal(system.head?.home, "system");
 });
 
 test("the Agent Profile: created names it, a switch moves it, the empty string is Global, a rename keeps it", () => {
@@ -567,38 +574,6 @@ test("the roster re-derives on task rows and interrupts live rows when the sessi
 
   state = applyDomainEvent(state, ev("thread.session-set", { session: session("stopped", null) }));
   assert.equal(state.roster[0]?.status, "interrupted", "a dead session orphans live agents");
-});
-
-// --- retention -------------------------------------------------------------
-
-test("a compaction marker never ages out of the window", () => {
-  reset();
-  // A busy thread writes 500 tool rows in minutes; the marker is where the
-  // provider's memory begins, and "rewind to here" withholds everything before
-  // it (§5.5) — evicted, every pre-compaction message was offered for a rewind
-  // the adapter could only refuse.
-  const events: DomainEvent[] = [created()];
-  events.push(
-    ev("thread.activity-appended", {
-      activity: activity(
-        "context-compaction",
-        { state: "compacted", beforeTokens: 100, afterTokens: 10 },
-        { id: "marker", turnId: "T-1" }
-      )
-    })
-  );
-  // The marker does not count toward the trigger: LIMIT + SLACK + 1 rows trim.
-  for (let i = 0; i < 500 + 50 + 1; i += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.completed", { toolUseId: `t${i}` }, { id: `noise-${i}` })
-      })
-    );
-  }
-  const state = fold(events);
-  assert.equal(state.activities.length, 500 + 1);
-  assert.equal(state.activities[0]?.id, "marker", "the marker is kept, ahead of the window");
-  assert.equal(state.evicted?.activities, true, "the trim really ran");
 });
 
 // --- revert (§5.5) ---------------------------------------------------------

@@ -15,6 +15,8 @@ import {
   runTimeline
 } from "./run-view.ts";
 
+import { pickBlockId, pickRunId } from "./runs-mode.ts";
+
 // Local time, Mon 28 Sep 2026 14:30 — every clock below is built in local time too.
 const NOW = new Date(2026, 8, 28, 14, 30, 0).getTime();
 const at = (hours: number, minutes: number, seconds = 0, day = 28): string =>
@@ -106,6 +108,8 @@ describe("the timeline", () => {
     assert.equal(byId("Notify").notReached, true);
     assert.equal(byId("Notify").status, "skipped");
     assert.equal(defaultSelectedStep(items), "Alert");
+    assert.equal(pickBlockId(items, "Deploy"), "Deploy", "keep a picked skipped block");
+    assert.equal(pickBlockId(items, "gone"), "Alert", "otherwise select the failed block");
   });
 
   it("shows a working agent's account, hops and activity", () => {
@@ -267,5 +271,19 @@ describe("the runs list", () => {
         ["old", "succeeded"]
       ]
     );
+  });
+});
+
+describe("runs mode", () => {
+  it("shows the run asked for, else the newest live one, else the newest", () => {
+    const runs = [
+      { id: "r3", status: "succeeded" as const },
+      { id: "r2", status: "running" as const },
+      { id: "r1", status: "failed" as const }
+    ];
+    assert.equal(pickRunId("old", runs), "old", "an older run than the page holds");
+    assert.equal(pickRunId(null, runs), "r2");
+    assert.equal(pickRunId(null, [runs[0]!, runs[2]!]), "r3");
+    assert.equal(pickRunId(undefined, []), null);
   });
 });

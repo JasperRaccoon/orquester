@@ -149,13 +149,13 @@ type LeftoverProcess = RecordedProcess;
  * `AGENT_BROWSER_DAEMON`: agent-browser's daemon (0.39 reads it at start-up
  * to run as the daemon), inherited by the Chromium it launches.
  */
-export const SHARED_DAEMON_ENV_VARS: readonly string[] = ["AGENT_BROWSER_DAEMON"];
+const SHARED_DAEMON_ENV_VARS: readonly string[] = ["AGENT_BROWSER_DAEMON"];
 
 /** Executable names (`comm`) of host-wide daemons: a tmux server is the user's terminal. */
 const SHARED_DAEMON_COMM = /^tmux/;
 
 /** Whether a process is a shared daemon a sweep never takes: by its environment, or by its name. */
-export function isSharedDaemon(environ: string, comm: string): boolean {
+function isSharedDaemon(environ: string, comm: string): boolean {
   if (SHARED_DAEMON_COMM.test(comm)) return true;
   return environ.split("\0").some((entry) => SHARED_DAEMON_ENV_VARS.some((name) => entry.startsWith(`${name}=`)));
 }

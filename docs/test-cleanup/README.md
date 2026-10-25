@@ -1,6 +1,6 @@
 # Test cleanup record
 
-The [current strict cleanup index](strict/README.md) records the new 5,896-case review, completed scope changes, incoming audit and pending final verification. The records below remain historical.
+The [current cleanup index](2026-10/README.md) records the repository-wide behavioral audit, implementation, performance measurements and integration status. The [previous strict audit](strict/README.md) and records below remain historical.
 
 This directory archives earlier cleanup decisions, including the incoming `7f3516cd` cleanup and older linked reports. [The slop audit](../slop-audit.md) records the final merged decisions and verification; it supersedes historical dispositions here when review retained an assertion or production interface.
 

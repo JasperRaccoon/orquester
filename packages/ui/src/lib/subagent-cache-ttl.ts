@@ -6,10 +6,7 @@ const shortDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, {
  * The line under the "Subagent cache lifetime" picker in auto mode: what
  * Claude launches get now, what the last check found, and when it looks again.
  */
-export function describeSubagentCacheTtl(
-  status: SubagentCacheTtlStatus,
-  formatDate: (iso: string) => string = shortDate
-): string {
+export function describeSubagentCacheTtl(status: SubagentCacheTtlStatus): string {
   const current = `Currently ${status.ttl}.`;
   const check = status.lastCheck;
   if (!check) return `${current} The first check runs once recent subagent usage has been read.`;
@@ -22,6 +19,6 @@ export function describeSubagentCacheTtl(
     const cost = pct === 0 ? "the same" : `${pct}% ${check.changePct < 0 ? "less" : "more"}`;
     found = `1h would have cost ${cost} over ${window}${check.outcome === "hold" ? ", too close to change" : ""}`;
   }
-  const next = status.nextCheckAt ? ` Next check ${formatDate(status.nextCheckAt)}.` : "";
-  return `${current} Last check ${formatDate(check.at)}: ${found}.${next}`;
+  const next = status.nextCheckAt ? ` Next check ${shortDate(status.nextCheckAt)}.` : "";
+  return `${current} Last check ${shortDate(check.at)}: ${found}.${next}`;
 }

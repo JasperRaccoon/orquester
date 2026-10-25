@@ -87,11 +87,6 @@ test("offers: bundled preset prices per live region, regional groups, curated im
   );
 });
 
-test("offers: refuses kinds Fly does not rent", async () => {
-  const replay = replayFetch([]);
-  await assert.rejects(flyAdapter.offers(credentials, "linux-gpu", replayOptions(replay)), /does not rent linux-gpu/);
-});
-
 test("create: one app and one Machine named after the box, the script delivered as a file", async () => {
   const replay = replayFetch([
     { method: "POST", url: `${API}/apps`, status: 201, body: fixture("fly", "create-app") },

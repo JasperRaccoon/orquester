@@ -14,10 +14,9 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { secretValuesOf } from "../../agent-host/session-tools/index.ts";
 import type { SessionSecretRequestResult, SessionSecretRequests } from "../../session-tools/contract.ts";
 import type { ThreadCaller, ToolCaller } from "../catalog/contract.ts";
-import { toolByName } from "../catalog/index.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { executeToolCall } from "../executor.ts";
-import { SECRET_REQUEST_NOTES, secretsFamily } from "./secrets.ts";
+import { secretsFamily } from "./secrets.ts";
 
 const VALUE = "tok_live_0123456789";
 const tool = secretsFamily.find((entry) => entry.name === "request_secret")!;
@@ -54,16 +53,6 @@ const call = (
 const json = (result: CallToolResult): Record<string, unknown> => JSON.parse((result.content[0] as { text: string }).text) as Record<string, unknown>;
 
 describe("request_secret", () => {
-  it("is the catalog's chat-only core Act tool, plan-safe, naming its secret result key", () => {
-    assert.equal(toolByName("request_secret", "chat"), tool);
-    assert.equal(toolByName("request_secret", "external"), undefined);
-    assert.deepEqual([tool.audiences, tool.toolset, tool.tier, tool.planSafe], [["chat"], "core", "act", true]);
-    assert.deepEqual(tool.secretResultKeys, ["value"]);
-    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
-    for (const fragment of ["private card", "10 minutes", "never print, echo, log or commit it", "`declined`", "`timed_out`", "Never ask for a secret in chat"]) {
-      assert.ok(tool.description.includes(fragment), fragment);
-    }
-  });
 
   it("asks as the calling chat and returns the value to this call", async () => {
     const { requests, asked } = port({ outcome: "provided", value: VALUE });
@@ -81,8 +70,6 @@ describe("request_secret", () => {
     assert.deepEqual(body.secretRequest, { name: "API_KEY", purpose: "Deploy", outcome: "provided" });
     assert.equal(body.value, VALUE);
     assert.equal((result.structuredContent as { value?: unknown }).value, VALUE);
-    assert.equal(body.note, SECRET_REQUEST_NOTES.provided);
-    assert.match(String(body.note), /never print/);
     // The host learns which field is the secret from the definition.
     assert.deepEqual(secretValuesOf(tool, result), [VALUE]);
   });
@@ -94,7 +81,6 @@ describe("request_secret", () => {
       const body = json(result);
       assert.deepEqual(body.secretRequest, { name: "K", outcome });
       assert.equal("value" in body, false);
-      assert.equal(body.note, SECRET_REQUEST_NOTES[outcome]);
       assert.deepEqual(secretValuesOf(tool, result), []);
     }
   });

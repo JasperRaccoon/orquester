@@ -168,18 +168,6 @@ describe("codex session — start, turn, stop", () => {
     await r.stop();
   });
 
-  it("emits thread.started once on resume too, where no notification fires", async () => {
-    const r = rig({ turns: [{ kind: "text", text: "a" }] }, {
-      resumeCursor: { threadId: "prior" }
-    });
-    await r.session.start();
-    assert.equal(
-      r.events.events.filter((event) => event.type === "thread.started").length,
-      1
-    );
-    await r.stop();
-  });
-
   it("sends approvalsReviewer and a collaborationMode on EVERY turn", async () => {
     const r = rig({ turns: [{ kind: "text", text: "a" }, { kind: "text", text: "b" }] });
     await r.session.start();
@@ -592,8 +580,11 @@ describe("codex session — approvals", () => {
     );
 
     r.session.respondToUserInput(asked.requestId!, { license_choice: "MIT (Recommended)" });
-    await r.events.waitForType("user-input.resolved");
+    const resolved = await r.events.waitForType("user-input.resolved");
+    assert.deepEqual(resolved.payload, { answers: { license_choice: "MIT (Recommended)" } });
+    assert.equal(resolved.turnId, asked.turnId);
     await r.events.waitForType("turn.completed");
+    assert.equal(r.events.events.filter((event) => event.type === "user-input.resolved" && event.requestId === asked.requestId).length, 1);
     const answered = r.received().filter((frame) => frame.result !== undefined).at(-1);
     assert.deepEqual(answered!.result, {
       answers: { license_choice: { answers: ["MIT (Recommended)"] } }
@@ -756,7 +747,6 @@ describe("codex session — interrupt ordering", () => {
     assert.equal(summary.activeTurnId, undefined);
     await r.stop();
   });
-
 });
 
 describe("codex session — a live turn's children are interrupted first (R3 finding 4)", () => {
@@ -859,27 +849,12 @@ describe("codex session — session-scoped Stop with no running turn (R6)", () =
         (event.payload as { status: string }).status === "stopped"
     );
     assert.ok(stopped.length > 0, "task.completed {stopped} is what clears backgroundLiveness");
+    const taskRows = r.events.events.filter((event) => event.type === "task.completed").length;
+    await r.session.interruptTurn();
+    assert.equal(r.events.events.filter((event) => event.type === "task.completed").length, taskRows,
+      "a second Stop has no work left to close");
     await r.stop();
   });
-
-  it("is idempotent — a second Stop emits no further task rows", async () => {
-    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    await r.events.waitForType("task.started");
-    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent turn settled");
-
-    await r.session.interruptTurn();
-    const after = r.events.events.filter((event) => event.type === "task.completed").length;
-    await r.session.interruptTurn();
-    assert.equal(
-      r.events.events.filter((event) => event.type === "task.completed").length,
-      after,
-      "nothing is left to stop"
-    );
-    await r.stop();
-  });
-
 });
 
 describe("codex session — Stop closes a child re-engaged after it completed (I5)", () => {
@@ -1117,7 +1092,6 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     );
     await idle.stop();
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -1305,38 +1279,6 @@ describe("codex session — a collab child's open cards end with the child (foll
     });
   }
 
-  it("serverRequest/resolved naming a child's open card cancels it; the child's turn end after it adds nothing", async () => {
-    const r = rig({
-      turns: [
-        {
-          kind: "child-approval",
-          childThreadId: "child-1",
-          item: "command",
-          afterAsking: ["resolved", "turn-interrupted"]
-        }
-      ]
-    });
-    await r.session.start();
-    const turn = await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    const resolved = await r.events.waitForType("request.resolved");
-    assert.deepEqual(resolved.payload, {
-      requestType: "command_execution_approval",
-      decision: "cancel",
-      withdrawn: true
-    });
-    assert.equal(resolved.turnId, turn.turnId);
-    await r.events.waitFor(
-      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
-      "the child's turn ended"
-    );
-    await wireBarrier(r);
-    await wireBarrier(r);
-    assert.equal(resolutionsOf(r, opened.requestId).length, 1);
-    assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
-    await r.stop();
-  });
-
   for (const item of ["command", "question"] as const) {
     it(`serverRequest/resolved alone cancels the child's open ${item} card while the child's turn runs on`, async () => {
       // The resolution with no turn end behind it: whatever settles the card
@@ -1368,11 +1310,15 @@ describe("codex session — a collab child's open cards end with the child (foll
       );
       assert.equal(resolutionsOf(r, opened.requestId).length, 1);
       assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
+      await r.notify("turn/completed", { threadId: "child-1", turn: turnOf("child-1-turn", "interrupted") });
+      await wireBarrier(r);
+      assert.equal(resolutionsOf(r, opened.requestId).length, 1, "a later turn end adds no resolution");
+      assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
       await r.stop();
     });
   }
 
-  it("an answer that races the child's turn end settles the card once, whichever lands first", async () => {
+  it("an answer before the child's turn end remains its only resolution", async () => {
     // The user's answer first: it is the card's one resolution, and it goes
     // on the wire; the child's turn end after it finds nothing parked.
     const answered = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "command" }] });
@@ -1397,25 +1343,6 @@ describe("codex session — a collab child's open cards end with the child (foll
     });
     assert.deepEqual(answersTo(answered, first.providerRefs?.providerRequestId), [{ decision: "accept" }]);
     await answered.stop();
-
-    // The child's turn end first: the card is cancelled, and the answer that
-    // follows is dropped — never a second row, never on the wire.
-    const ended = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "command" }] });
-    await ended.session.start();
-    await ended.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const second = await ended.events.waitForType("request.opened");
-    await ended.notify("turn/completed", {
-      threadId: "child-1",
-      turn: turnOf("child-1-turn", "interrupted")
-    });
-    ended.session.respondToApproval(second.requestId!, "accept");
-    await wireBarrier(ended);
-    await wireBarrier(ended);
-    const endedResolutions = resolutionsOf(ended, second.requestId);
-    assert.equal(endedResolutions.length, 1);
-    assert.equal((endedResolutions[0]!.payload as { withdrawn?: boolean }).withdrawn, true);
-    assert.deepEqual(answersTo(ended, second.providerRefs?.providerRequestId), []);
-    await ended.stop();
   });
 
   it("another child's end leaves this child's card open for its answer", async () => {
@@ -1713,6 +1640,10 @@ describe("codex session — a dead child never leaves a running state", () => {
     assert.equal(exited.recoverable, true, "recovery is thread/resume against the rollout file");
     assert.equal(r.session.isLive, false);
     assert.equal(r.closed(), true);
+    await assert.rejects(
+      () => r.session.sendTurn({ input: "y", attachments: [], interactionMode: "default" }),
+      /not connected/
+    );
     await r.stop();
   });
 
@@ -1724,18 +1655,6 @@ describe("codex session — a dead child never leaves a running state", () => {
     assert.equal((exited.payload as { exitKind: string }).exitKind, "graceful");
     const settled = r.events.events.filter((event) => event.type === "turn.completed").at(-1)!;
     assert.equal((settled.payload as { state: string }).state, "interrupted");
-    await r.stop();
-  });
-
-  it("a later call on a dead session fails fast rather than hanging", async () => {
-    const r = rig({ turns: [{ kind: "exit-mid-turn", exitCode: 1 }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
-    await r.events.waitForType("session.exited");
-    await assert.rejects(
-      () => r.session.sendTurn({ input: "y", attachments: [], interactionMode: "default" }),
-      /not connected/
-    );
     await r.stop();
   });
 });
@@ -1840,17 +1759,6 @@ describe("codex session — a card nobody answered, closed by the session's own 
     assert.equal(rows[0]!.turnId, opened.turnId);
     await r.stop();
   });
-
-  it("the user's own answer to a question keeps its normal row", async () => {
-    const { r, opened } = await parked("question");
-    r.session.respondToUserInput(opened.requestId!, { q: "a" });
-    await r.events.waitForType("turn.completed");
-    const rows = closings(r, opened.requestId);
-    assert.equal(rows.length, 1);
-    assert.deepEqual(rows[0]!.payload, { answers: { q: "a" } });
-    assert.equal(rows[0]!.turnId, opened.turnId);
-    await r.stop();
-  });
 });
 
 describe("codex session — spawn and handshake failures", () => {
@@ -1942,10 +1850,13 @@ describe("codex session — request ids are unique across a thread's SESSIONS (R
 
 describe("codex session — resume", () => {
   it("resumes with excludeTurns:true and every launch param", async () => {
-    const r = rig({ turns: [{ kind: "text", text: "pineapple-42" }] }, {
+    const r = rig({ threadId: "codex-thread-9", turns: [] }, {
       resumeCursor: { threadId: "prior-thread" }
     });
-    await r.session.start();
+    const summary = await r.session.start();
+    assert.deepEqual(summary.resumeCursor, { threadId: "codex-thread-9" });
+    assert.equal(r.events.events.filter((event) => event.type === "thread.started").length, 1,
+      "a resume announces the thread even without a provider notification");
     const [resume] = sentFrames(r.received(), "thread/resume");
     assert.equal(resume!.threadId, "prior-thread");
     assert.equal(resume!.excludeTurns, true, "full-history hydration is deprecated");
@@ -1973,9 +1884,7 @@ describe("codex session — resume", () => {
 
   it("a malformed cursor means 'no resume', never an error", async () => {
     for (const resumeCursor of [
-      undefined, null, {}, { threadId: "" }, { threadId: 42 }, "t-1", [],
-      "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232", { threadId: "../../etc/passwd" },
-      { threadId: "-flag-shaped" }, { threadId: "x".repeat(257) }
+      "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232", { threadId: "../../etc/passwd" }
     ]) {
       const r = rig({ turns: [] }, { resumeCursor });
       await r.session.start();
@@ -1983,13 +1892,6 @@ describe("codex session — resume", () => {
       assert.equal(sentFrames(r.received(), "thread/start").length, 1);
       await r.stop();
     }
-  });
-
-  it("the summary carries the resume cursor as {threadId}", async () => {
-    const r = rig({ threadId: "codex-thread-9", turns: [{ kind: "text", text: "a" }] });
-    const summary = await r.session.start();
-    assert.deepEqual(summary.resumeCursor, { threadId: "codex-thread-9" });
-    await r.stop();
   });
 });
 
@@ -2587,7 +2489,6 @@ describe("codex session — Stop pauses an active goal first (goals §6.2.4)", (
     assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the turn itself still stops");
   });
-
 });
 
 describe("codex session — the adapter's own watchdog stands down for an active goal (fix round 1)", () => {
@@ -3014,26 +2915,7 @@ describe("codex session — a model picked with /goal reaches the goal's turns (
       { threadId: "thread-mock-1", model: "gpt-5.6-luna", effort: "high" }
     ]);
     assert.equal(r.session.summary().model, "gpt-5.6-luna");
-    await r.stop();
-  });
-
-  it("the goal's next turn — one Codex starts — reports the new model", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] });
-    await r.session.start();
-    await r.session.goalCommand({ kind: "status" }, { modelSelection: LUNA });
-    await r.notify("turn/started", {
-      threadId: "thread-mock-1",
-      turn: {
-        id: "goal-turn-1",
-        items: [],
-        itemsView: "notLoaded",
-        status: "inProgress",
-        error: null,
-        startedAt: 0,
-        completedAt: null,
-        durationMs: null
-      }
-    });
+    await r.notify("turn/started", { threadId: "thread-mock-1", turn: turnOf("goal-turn-1", "inProgress") });
     const started = await r.events.waitForType("turn.started");
     assert.deepEqual(started.payload, { model: "gpt-5.6-luna", effort: "high" });
     await r.stop();

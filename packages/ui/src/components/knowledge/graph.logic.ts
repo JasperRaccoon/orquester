@@ -69,24 +69,24 @@ export function nodeColors(
   return out;
 }
 
-export const NODE_MIN_SIZE = 10;
-export const NODE_MAX_SIZE = 44;
+const NODE_MIN_SIZE = 10;
+const NODE_MAX_SIZE = 44;
 
 /** Diameter by degree: square-root scaled so hubs stand out without swallowing the rest. */
-export function nodeSize(degree: number, maxDegree: number): number {
+function nodeSize(degree: number, maxDegree: number): number {
   if (maxDegree <= 0) return NODE_MIN_SIZE;
   const t = Math.sqrt(Math.max(0, degree) / maxDegree);
   return Math.round(NODE_MIN_SIZE + (NODE_MAX_SIZE - NODE_MIN_SIZE) * Math.min(1, t));
 }
 
 /** How many labels the canvas draws at most at rest (the rest show on hover and selection). */
-export const MAX_LABELS = 60;
+const MAX_LABELS = 60;
 
 /**
  * The concepts that carry a label: every one in a small graph, else the
  * `max` most connected (ties by entry count, then name), so labels stay legible.
  */
-export function labelledNodes(nodes: readonly KnowledgeGraphNode[], max = MAX_LABELS): Set<string> {
+function labelledNodes(nodes: readonly KnowledgeGraphNode[], max = MAX_LABELS): Set<string> {
   if (nodes.length <= max) return new Set(nodes.map((n) => n.id));
   const ranked = [...nodes].sort((a, b) => b.degree - a.degree || b.entryCount - a.entryCount || a.name.localeCompare(b.name));
   return new Set(ranked.slice(0, max).map((n) => n.id));

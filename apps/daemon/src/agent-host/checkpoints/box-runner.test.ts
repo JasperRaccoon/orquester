@@ -8,7 +8,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { BoxExecOptions } from "../../boxes/contracts.ts";
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { createBoxGitRunner } from "./box-git.ts";
 import { checkpointRefNamespace } from "./refs.ts";
@@ -23,14 +22,7 @@ test("a box project's checkpoints are captured and diffed by git in the box", as
     await repo.git("commit", "-q", "-m", "initial");
 
     const base = localBoxConnection();
-    const commands: string[] = [];
-    const connection = Object.assign(Object.create(base) as typeof base, {
-      exec(options: BoxExecOptions) {
-        commands.push(options.command);
-        return base.exec(options);
-      }
-    });
-    const boxRunner = createBoxGitRunner({ connection, path: repo.gitEnv.PATH ?? "/usr/bin:/bin" });
+    const boxRunner = createBoxGitRunner({ connection: base, path: repo.gitEnv.PATH ?? "/usr/bin:/bin" });
     const service = createCheckpointService({
       // Nothing may run here: this PATH has no git.
       gitEnv: { PATH: "/nonexistent", HOME: repo.gitEnv.HOME ?? "/nonexistent" },
@@ -49,8 +41,6 @@ test("a box project's checkpoints are captured and diffed by git in the box", as
     ]);
     const diff = await service.readTurnDiff({ threadId: "t1", cwd: repo.dir, fromTurnCount: 0, toTurnCount: 1 });
     assert.match(diff, /\+bravo/);
-    assert.ok(commands.length > 0);
-    assert.ok(commands.every((command) => command === "git"));
     // The capture's temp index lived in the box's git dir and is gone.
     const leftovers = (await repo.gitReadOnly("rev-parse", "--git-common-dir")).trim();
     const listed = await base.request("fs.readdir", { path: `${repo.dir}/${leftovers}` });

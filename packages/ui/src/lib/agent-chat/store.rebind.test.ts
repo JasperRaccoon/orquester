@@ -67,8 +67,7 @@ describe("a thread store and its transport", () => {
     cursor.lastSeq = 7;
     cursor.hostInstanceId = "h1";
 
-    const same = ensureThreadStore("A", { transport: after.transport });
-    assert.equal(same, store, "the slice (its rows, its draft, its queue) is kept");
+    ensureThreadStore("A", { transport: after.transport });
     assert.equal(before.streams[0]!.closed, true, "the stream on the revoked token is closed");
     assert.equal(after.streams.length, 1);
     assert.deepEqual(after.streams[0]!.options, { after: 7, hostInstanceId: "h1" }, "resumed by cursor");

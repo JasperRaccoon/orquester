@@ -1,16 +1,17 @@
 /** The on-demand agent rows loader (`agent-rows.logic.ts`) on its own: what it asks for, when, and how it reads answers. */
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { AGENT_ROWS_MAX_AGENTS, type AgentRowsRequest } from "@orquester/api/agent-chat";
 
 import { AgentRowsLoader, type AgentRowsView } from "./agent-rows.logic";
 
+beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+afterEach(() => mock.timers.reset());
+
 function harness(answer: (body: AgentRowsRequest) => Promise<unknown> = async () => ({ ok: true })) {
   const posts: AgentRowsRequest[] = [];
-  const deferred: Array<() => void> = [];
-  const timers: Array<{ run: () => void; delayMs: number; cancelled: boolean }> = [];
   const events = { unsupported: 0, noStream: 0 };
   const loader = new AgentRowsLoader({
     request: (body) => {
@@ -22,21 +23,12 @@ function harness(answer: (body: AgentRowsRequest) => Promise<unknown> = async ()
     },
     onNoStream: () => {
       events.noStream += 1;
-    },
-    defer: (run) => deferred.push(run),
-    schedule: (run, delayMs) => {
-      const timer = { run, delayMs, cancelled: false };
-      timers.push(timer);
-      return () => {
-        timer.cancelled = true;
-      };
     }
   });
   const flush = async (): Promise<void> => {
-    for (const run of deferred.splice(0)) run();
     await new Promise((resolve) => setImmediate(resolve));
   };
-  return { loader, posts, timers, events, flush };
+  return { loader, posts, events, flush };
 }
 
 const view = (overrides: Partial<AgentRowsView> = {}): AgentRowsView => ({
@@ -65,7 +57,9 @@ describe("on-demand agent rows — the loader", () => {
     await h.flush();
     assert.deepEqual(h.posts.at(-1), { streamId: "s-2", agentIds: ["a", "b", "c"] });
     release();
-    assert.equal(h.loader.isWanted("a"), false);
+    h.loader.sync(view({ streamId: "s-3", activeAgentIds: new Set(["c"]) }));
+    await h.flush();
+    assert.deepEqual(h.posts.at(-1), { streamId: "s-3", agentIds: ["b", "c"] }, "the closed drill-in is no longer requested");
   });
 
   it("asks nothing before the stream is live, and nothing for an agent no longer omitted", async () => {
@@ -97,10 +91,8 @@ describe("on-demand agent rows — the loader", () => {
     h.loader.sync(view());
     await h.flush();
     assert.equal(h.posts.length, 1);
-    assert.equal(h.timers.length, 1, "a retry is scheduled");
-    assert.ok(h.timers[0]!.delayMs <= 1_000);
     failWith = Object.assign(new Error("gone"), { status: 404, code: "STREAM_NOT_FOUND" });
-    h.timers[0]!.run();
+    mock.timers.tick(1_000);
     await h.flush();
     assert.equal(h.posts.length, 2, "retried");
     h.loader.sync(view());
@@ -165,7 +157,9 @@ describe("on-demand agent rows — the loader reads each refusal for what it is"
       await h.flush();
       assert.equal(h.events.unsupported, 0, String(status));
       assert.equal(h.loader.enabled, true, String(status));
-      assert.equal(h.timers.length, 1, `${status}: a retry is scheduled`);
+      mock.timers.tick(1_000);
+      await h.flush();
+      assert.equal(h.posts.length, 2, `${status}: the request was retried`);
     }
   });
 
@@ -178,7 +172,9 @@ describe("on-demand agent rows — the loader reads each refusal for what it is"
     await h.flush();
     assert.equal(h.posts.length, 1);
     assert.equal(h.events.unsupported, 0);
-    assert.equal(h.timers.length, 0);
+    mock.timers.tick(60_000);
+    await h.flush();
+    assert.equal(h.posts.length, 1, "an authorization refusal never retries on that stream");
     h.loader.sync(view({ streamId: "s-2" }));
     await h.flush();
     assert.equal(h.posts.length, 2, "asked on the next stream");

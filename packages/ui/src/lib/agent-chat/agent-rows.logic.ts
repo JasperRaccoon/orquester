@@ -74,16 +74,12 @@ export interface AgentRowsLoaderDeps {
    * store re-reads the thread. Called once per loader.
    */
   onNoStream(): void;
-  /** Defaults to `setTimeout`; for tests. */
-  schedule?(run: () => void, delayMs: number): () => void;
-  /** Defaults to a microtask; for tests. */
-  defer?(run: () => void): void;
 }
 
 const RETRY_POLICY = { baseMs: 1_000, maxMs: 15_000 };
 
 /** Streams in a row an agent's request may be lost on before the whole thread is read instead. */
-export const MAX_LOST_REQUESTS = 3;
+const MAX_LOST_REQUESTS = 3;
 
 export class AgentRowsLoader {
   private readonly wanted = new Map<string, number>();
@@ -123,11 +119,6 @@ export class AgentRowsLoader {
       if (count > 0) this.wanted.set(agentId, count);
       else this.wanted.delete(agentId);
     };
-  }
-
-  /** Whether a drill-in of `agentId` is open. */
-  isWanted(agentId: string): boolean {
-    return this.wanted.has(agentId);
   }
 
   /** Live events of these agents arrived (only the omitted ones matter). */
@@ -173,7 +164,7 @@ export class AgentRowsLoader {
     }
     if (this.due().length > 0 && !this.flushQueued) {
       this.flushQueued = true;
-      (this.deps.defer ?? queueMicrotask)(() => {
+      queueMicrotask(() => {
         this.flushQueued = false;
         this.flush();
       });
@@ -258,15 +249,10 @@ export class AgentRowsLoader {
     const delay = backoffDelayMs(this.retryAttempt, RETRY_POLICY);
     this.retryAttempt = Math.min(this.retryAttempt + 1, 16);
     this.cancelRetry?.();
-    const schedule =
-      this.deps.schedule ??
-      ((run: () => void, ms: number) => {
-        const timer = setTimeout(run, ms);
-        return () => clearTimeout(timer);
-      });
-    this.cancelRetry = schedule(() => {
+    const timer = setTimeout(() => {
       this.cancelRetry = null;
       this.resync();
     }, delay);
+    this.cancelRetry = () => clearTimeout(timer);
   }
 }

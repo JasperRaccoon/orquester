@@ -5,6 +5,8 @@ import { agentChatCommandPath, agentChatRoutes, classifyTaskAgentKind, isThreadI
 
 test("route builders produce the §6 paths and encode their segments", () => {
   assert.equal(agentChatRoutes.turn("s1"), "/api/sessions/s1/turn");
+  assert.equal(agentChatRoutes.account("a/b"), "/api/sessions/a%2Fb/account");
+  assert.equal(agentChatRoutes.profile("a/b"), "/api/sessions/a%2Fb/profile");
   assert.equal(agentChatRoutes.sessionStop("s1"), "/api/sessions/s1/session/stop");
   assert.equal(agentChatRoutes.events("s1"), "/api/sessions/s1/events");
   assert.equal(agentChatRoutes.turnDiff("s1", 7), "/api/sessions/s1/turns/7/diff");

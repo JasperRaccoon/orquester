@@ -345,42 +345,21 @@ test("a state built before the tombstone stamps existed keeps closedRequestAt ab
   assert.equal(restored !== null && "closedRequestAt" in restored, false);
 });
 
-test("a head carrying the §3.3 continuation marker round-trips", () => {
+test("a cached head preserves restart continuation and both goal markers, and older heads omit them", () => {
   const state = foldThread(richLog());
+  const continuation = { turnId: "T-2", prepared: true as const, markedAt: "2026-09-27T08:00:00.000Z" };
   const marked: ThreadFoldState = {
     ...state,
-    head: {
-      ...state.head!,
-      continueAfterRestart: { turnId: "T-2", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" }
-    }
+    head: { ...state.head!, continueAfterRestart: continuation, resumeGoalAfterRestart: true, goalHeldForHandover: true }
   };
-  assert.deepEqual(throughDisk(marked), marked);
-});
-
-test("a head carrying the goals §5.5 resume marker round-trips", () => {
-  const state = foldThread(richLog());
-  const marked: ThreadFoldState = {
-    ...state,
-    head: { ...state.head!, resumeGoalAfterRestart: true }
-  };
-  assert.deepEqual(throughDisk(marked), marked);
-  // A head without one — every head an older build wrote — still restores.
-  assert.equal(throughDisk(state)?.head?.resumeGoalAfterRestart, undefined);
-});
-
-test("a head carrying the goals §5.7 hold marker round-trips", () => {
-  const state = foldThread(richLog());
-  const held: ThreadFoldState = {
-    ...state,
-    head: { ...state.head!, goalHeldForHandover: true }
-  };
-  assert.deepEqual(throughDisk(held), held);
-  const both: ThreadFoldState = {
-    ...state,
-    head: { ...state.head!, resumeGoalAfterRestart: true, goalHeldForHandover: true }
-  };
-  assert.deepEqual(throughDisk(both), both);
-  assert.equal(throughDisk(state)?.head?.goalHeldForHandover, undefined);
+  const restored = throughDisk(marked);
+  assert.deepEqual(restored.head?.continueAfterRestart, continuation);
+  assert.equal(restored.head?.resumeGoalAfterRestart, true);
+  assert.equal(restored.head?.goalHeldForHandover, true);
+  const older = throughDisk(state);
+  assert.equal(older.head?.continueAfterRestart, undefined);
+  assert.equal(older.head?.resumeGoalAfterRestart, undefined);
+  assert.equal(older.head?.goalHeldForHandover, undefined);
 });
 
 // --- continued folding after restore ---------------------------------------

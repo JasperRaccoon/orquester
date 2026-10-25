@@ -7,7 +7,7 @@ import { useActiveChatTarget } from "../right-rail/chat-target";
 import { SettingsPage } from "./primitives";
 
 /** The page's one-line intro: what this edits, and which chats load it. */
-export const AGENT_CONFIG_INTRO =
+const AGENT_CONFIG_INTRO =
   "Each agent's own global setup — its instruction file, MCP servers, skills, plugins, hooks and commands. Chats with no profile (\"Global\") load it.";
 
 /**

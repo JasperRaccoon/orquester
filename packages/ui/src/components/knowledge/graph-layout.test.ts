@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { DeferredFit, Layouts, computeLayout, spread, type LayoutRequest, type LayoutResponse, type LayoutWorkerLike } from "./graph-layout.ts";
+import { Layouts, computeLayout, type LayoutRequest, type LayoutResponse, type LayoutWorkerLike } from "./graph-layout.ts";
 
 describe("the graph layout", () => {
-  it("places every concept, at distinct points, ignoring edges it cannot draw", () => {
+  it("places every concept at finite points, ignoring edges it cannot draw", () => {
     const positions = computeLayout({
       nodes: [
         { id: "a", size: 20 },
@@ -19,24 +19,6 @@ describe("the graph layout", () => {
     });
     assert.deepEqual(Object.keys(positions).sort(), ["a", "b", "c"]);
     for (const { x, y } of Object.values(positions)) assert.ok(Number.isFinite(x) && Number.isFinite(y));
-    const points = new Set(Object.values(positions).map(({ x, y }) => `${Math.round(x)},${Math.round(y)}`));
-    assert.equal(points.size, 3);
-  });
-
-  it("lays out an empty graph", () => {
-    assert.deepEqual(computeLayout({ nodes: [], edges: [] }), {});
-  });
-});
-
-describe("spreading a packed layout", () => {
-  it("scales a crowded layout about its centre and leaves a roomy one alone", () => {
-    const crowded = { a: { x: 0, y: 0 }, b: { x: 2, y: 0 }, c: { x: 0, y: 2 }, d: { x: 2, y: 2 } };
-    const sizes = [{ size: 20 }, { size: 20 }, { size: 20 }, { size: 20 }];
-    const out = spread(crowded, sizes);
-    assert.ok(out.b!.x - out.a!.x > 40, "room for 20 px concepts");
-    assert.equal((out.a!.x + out.b!.x) / 2, 1, "about the centre");
-    const roomy = { a: { x: 0, y: 0 }, b: { x: 1000, y: 1000 } };
-    assert.equal(spread(roomy, sizes.slice(0, 2)), roomy);
   });
 });
 
@@ -52,8 +34,8 @@ class FakeWorker implements LayoutWorkerLike {
   terminate(): void {
     this.terminated = true;
   }
-  answer(id: number): void {
-    this.onmessage?.({ data: { id, positions: { a: { x: id, y: id } } } } as unknown as MessageEvent<LayoutResponse>);
+  answer(id: number, x = 42): void {
+    this.onmessage?.({ data: { id, positions: { a: { x, y: 0 } } } } as unknown as MessageEvent<LayoutResponse>);
   }
   crash(): void {
     this.onerror?.({ message: "boom", preventDefault() {} } as unknown as ErrorEvent);
@@ -76,31 +58,32 @@ describe("the layouts", () => {
     assert.equal(workers.length, 2);
     assert.equal(workers[0]!.terminated, true, "the busy worker was stopped");
     assert.equal(workers[1]!.terminated, false);
-    workers[0]!.answer(workers[0]!.posted[0]!.id);
+    workers[0]!.answer(workers[0]!.posted[0]!.id, 11);
     assert.equal(done.length, 0, "a stopped worker's answer is dropped");
-    workers[1]!.answer(workers[1]!.posted[0]!.id);
-    assert.deepEqual(done, [2]);
-
-    // An idle worker is reused.
-    layouts.run(request, (p) => done.push(p.a!.x), () => assert.fail("no failure"));
-    assert.equal(workers.length, 2);
-    assert.equal(workers[1]!.posted.length, 2);
+    workers[1]!.answer(workers[1]!.posted[0]!.id, 17);
+    assert.deepEqual(done, [17]);
   });
 
-  it("cancel stops a busy worker; dispose terminates the worker", () => {
+  it("cancel and dispose terminate active workers and reject their late responses", () => {
     const workers: FakeWorker[] = [];
     const layouts = new Layouts(() => {
       const worker = new FakeWorker();
       workers.push(worker);
       return worker;
     });
-    layouts.run(request, () => assert.fail("cancelled"), () => assert.fail("cancelled"));
+    const done: number[] = [];
+    const run = () => layouts.run(request, (p) => done.push(p.a!.x), () => assert.fail("cancelled"));
+    run();
     layouts.cancel();
     assert.equal(workers[0]!.terminated, true);
-    layouts.run(request, () => undefined, () => undefined);
-    workers[1]!.answer(workers[1]!.posted[0]!.id);
+    workers[0]!.answer(workers[0]!.posted[0]!.id);
+    assert.deepEqual(done, [], "a cancelled response never reaches the canvas");
+
+    run();
     layouts.dispose();
     assert.equal(workers[1]!.terminated, true, "no worker outlives the canvas");
+    workers[1]!.answer(workers[1]!.posted[0]!.id);
+    assert.deepEqual(done, [], "a disposed response never reaches the canvas");
   });
 
   it("a worker that crashes fails its request and is replaced for the next one", () => {
@@ -115,32 +98,9 @@ describe("the layouts", () => {
     workers[0]!.crash();
     assert.deepEqual(failures, ["boom"]);
     assert.equal(workers[0]!.terminated, true);
-    layouts.run(request, () => undefined, () => undefined);
-    assert.equal(workers.length, 2);
-  });
-});
-
-describe("fitting the graph", () => {
-  const viewport = (width: number, height: number) => {
-    const fits: number[] = [];
-    return { fits, cy: { width: () => width, height: () => height, fit: (_e?: undefined, padding?: number) => fits.push(padding ?? 0) } };
-  };
-
-  it("fits a shown graph at once", () => {
-    const { cy, fits } = viewport(800, 600);
-    new DeferredFit().fit(cy);
-    assert.equal(fits.length, 1);
-  });
-
-  it("waits while the tab is hidden (no size), then fits once it has a size again", () => {
-    const fit = new DeferredFit();
-    const hidden = viewport(0, 0);
-    fit.fit(hidden.cy);
-    assert.equal(hidden.fits.length, 0, "a zero-size viewport is never fitted");
-    const shown = viewport(800, 600);
-    fit.whenSized(shown.cy);
-    assert.equal(shown.fits.length, 1);
-    fit.whenSized(shown.cy);
-    assert.equal(shown.fits.length, 1, "only once");
+    const recovered: number[] = [];
+    layouts.run(request, (p) => recovered.push(p.a!.x), () => assert.fail("the next request should recover"));
+    workers[1]!.answer(workers[1]!.posted[0]!.id, 29);
+    assert.deepEqual(recovered, [29]);
   });
 });

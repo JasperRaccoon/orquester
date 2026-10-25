@@ -53,7 +53,7 @@ import type { SessionProfilePrepareContext, SessionProfilePreparer } from "../pr
 import type { ResolvedHook, ResolvedMcpServer } from "../resolve.ts";
 
 /** Bump when the prepared home changes for the same inputs. */
-export const CODEX_PREPARER_VERSION = "1";
+const CODEX_PREPARER_VERSION = "1";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -66,7 +66,7 @@ type Doc = Record<string, unknown>;
 type CodexPrepareContext = SessionProfilePrepareContext<"codex">;
 
 /** The Global `config.toml` every prepared home carries over from (§6.0); `inputs()` names it. */
-export function codexGlobalConfigPath(ctx: Pick<CodexPrepareContext, "systemHomes">): string {
+function codexGlobalConfigPath(ctx: Pick<CodexPrepareContext, "systemHomes">): string {
   return join(ctx.systemHomes.codexHome, "config.toml");
 }
 

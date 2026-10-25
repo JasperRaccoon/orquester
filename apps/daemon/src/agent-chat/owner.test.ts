@@ -7,7 +7,6 @@ import test from "node:test";
 import type { SessionSummary } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.js";
-import { parseSessionOwner } from "./owner.ts";
 import type { CreateAgentChatRequest } from "./service.ts";
 
 // workflows spec §5.10: `owner` on `POST /api/sessions`. Route-level, with the inject-only harness
@@ -75,38 +74,20 @@ async function harness(): Promise<{
   };
 }
 
-test("parseSessionOwner accepts the four fields, strips anything else, refuses the rest", () => {
-  assert.deepEqual(parseSessionOwner(undefined), { ok: true, owner: undefined });
-  assert.deepEqual(parseSessionOwner({ ...OWNER, extra: "dropped" }), { ok: true, owner: OWNER });
-  assert.equal(parseSessionOwner({ ...OWNER, workflowId: "w".repeat(200) }).ok, true);
-  for (const bad of [
-    null,
-    "workflow",
-    {},
-    { ...OWNER, kind: "schedule" },
-    { ...OWNER, workflowId: "" },
-    { ...OWNER, runId: "  " },
-    { ...OWNER, nodeId: 7 },
-    { ...OWNER, workflowId: "w".repeat(201) }
-  ]) {
-    const parsed = parseSessionOwner(bad);
-    assert.equal(parsed.ok, false, JSON.stringify(bad));
-    if (!parsed.ok) assert.equal(parsed.code, "INVALID_OWNER");
-  }
-});
-
 test("POST /api/sessions hands a valid owner to the chat create and returns it on the summary", async (t) => {
   const h = await harness();
   t.after(() => h.close());
-  const res = await h.inject({
-    method: "POST",
-    url: "/api/sessions",
-    payload: { kind: "agent-chat", refId: "claude", projectPath: "/w/p", owner: { ...OWNER, stray: 1 } }
-  });
-  assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(res.json().owner, OWNER);
-  assert.equal(h.created.length, 1);
-  assert.deepEqual(h.created[0]!.owner, OWNER, "only the four documented fields reach the service");
+  for (const owner of [OWNER, { ...OWNER, workflowId: "w".repeat(200) }]) {
+    const res = await h.inject({
+      method: "POST",
+      url: "/api/sessions",
+      payload: { kind: "agent-chat", refId: "claude", projectPath: "/w/p", owner: { ...owner, stray: 1 } }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(res.json().owner, owner);
+    assert.deepEqual(h.created.at(-1)!.owner, owner, "only the documented fields reach the service");
+  }
+  assert.equal(h.created.length, 2);
 });
 
 test("POST /api/sessions refuses a malformed owner with 400 INVALID_OWNER before anything is created", async (t) => {
@@ -138,20 +119,13 @@ test("POST /api/sessions refuses an owner on a terminal tab", async (t) => {
 
 const KNOWLEDGE_OWNER = { kind: "knowledge-indexer", runId: "kr_1" } as const;
 
-test("parseSessionOwner accepts a knowledge-indexer owner (runId only) and refuses a malformed one", () => {
-  assert.deepEqual(parseSessionOwner({ ...KNOWLEDGE_OWNER, nodeId: "dropped" }), { ok: true, owner: KNOWLEDGE_OWNER });
-  for (const bad of [{ kind: "knowledge-indexer" }, { kind: "knowledge-indexer", runId: " " }, { kind: "knowledge-indexer", runId: "r".repeat(201) }]) {
-    assert.equal(parseSessionOwner(bad).ok, false, JSON.stringify(bad));
-  }
-});
-
 test("POST /api/sessions keeps a knowledge-indexer owner on the chat it creates", async (t) => {
   const h = await harness();
   t.after(() => h.close());
   const res = await h.inject({
     method: "POST",
     url: "/api/sessions",
-    payload: { kind: "agent-chat", refId: "claude", projectPath: "/plugin/workers/w1", owner: KNOWLEDGE_OWNER }
+    payload: { kind: "agent-chat", refId: "claude", projectPath: "/plugin/workers/w1", owner: { ...KNOWLEDGE_OWNER, nodeId: "dropped" } }
   });
   assert.equal(res.statusCode, 200, res.body);
   assert.deepEqual(res.json().owner, KNOWLEDGE_OWNER);

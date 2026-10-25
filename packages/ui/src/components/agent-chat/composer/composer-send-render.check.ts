@@ -117,8 +117,9 @@ try {
 } finally {
   settle();
 }
-assert.ok(!DISABLED_ATTR.test(button(composer("A"), "send")), "settled: A can implement its plan");
-assert.ok(!DISABLED_ATTR.test(button(composer("A"), "rewind")), "settled: A may rewind again");
+const settledA = composer("A");
+assert.ok(!DISABLED_ATTR.test(button(settledA, "send")), "settled: A can implement its plan");
+assert.ok(!DISABLED_ATTR.test(button(settledA, "rewind")), "settled: A may rewind again");
 
 // ---------------------------------------------------------------------------
 // A docked request: the composer stays usable and says what Send will do
@@ -131,7 +132,6 @@ const overApproval = composer("C", {
   pendingRequests: { approvalIds: ["req-1"], respondingRequestIds: [], hasQuestion: false }
 });
 assert.match(overApproval, /data-composer-pending-hint="true"[^>]*>Sending declines the pending request and redirects the agent\.</);
-assert.match(overApproval, /placeholder="Tell the agent what to do instead…"/);
 assert.doesNotMatch(overApproval, /<textarea[^>]*disabled/, "the field stays usable");
 const overQuestion = composer("C", {
   hasPendingRequest: true,

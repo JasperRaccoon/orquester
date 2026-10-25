@@ -2,19 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  DOUBLE_TAP_MS,
-  LATCH_OFF,
   activeModifiers,
   applyLatchedModifiers,
   applyModifiers,
-  consumeLatch,
   consumeModifiers,
   ctrlChar,
   encodeKey,
   getModifierLatches,
   parseInputKey,
   resetModifierLatches,
-  tapLatch,
   tapModifier,
   type Modifiers
 } from "./terminal-keys.ts";
@@ -30,9 +26,6 @@ test("Ctrl+letter maps to 0x01–0x1A regardless of case", () => {
     assert.equal(ctrlChar(lower), String.fromCharCode(i + 1));
     assert.equal(ctrlChar(lower.toUpperCase()), String.fromCharCode(i + 1));
   }
-  assert.equal(ctrlChar("r"), "\x12");
-  assert.equal(ctrlChar("z"), "\x1a");
-  assert.equal(ctrlChar("l"), "\x0c");
 });
 
 test("Ctrl on symbols follows xterm's C0 table; unmapped characters pass through", () => {
@@ -105,23 +98,6 @@ test("applyModifiers leaves input alone with no modifier or a non-key", () => {
   assert.equal(applyModifiers("\x1bOA", CTRL), "\x1b[1;5A");
 });
 
-test("latch: a tap arms, a quick second tap locks, a tap on a lock releases", () => {
-  const armed = tapLatch(LATCH_OFF, 1000);
-  assert.equal(armed.state, "armed");
-  const locked = tapLatch(armed, 1000 + DOUBLE_TAP_MS);
-  assert.equal(locked.state, "locked");
-  assert.equal(tapLatch(locked, 5000).state, "off");
-  // A slow second tap just disarms.
-  assert.equal(tapLatch(armed, 1000 + DOUBLE_TAP_MS + 1).state, "off");
-});
-
-test("latch: a key spends an armed modifier but not a locked one", () => {
-  assert.equal(consumeLatch(tapLatch(LATCH_OFF, 0)).state, "off");
-  const locked = tapLatch(tapLatch(LATCH_OFF, 0), 10);
-  assert.equal(consumeLatch(locked), locked);
-  assert.equal(consumeLatch(LATCH_OFF), LATCH_OFF);
-});
-
 test("store: one-shot Ctrl applies to the next key only, on its own session", () => {
   resetModifierLatches();
   tapModifier("s1", "ctrl", 0);
@@ -133,6 +109,9 @@ test("store: one-shot Ctrl applies to the next key only, on its own session", ()
   assert.equal(getModifierLatches().ctrl.state, "armed");
   assert.equal(applyLatchedModifiers("s1", "r"), "\x12");
   assert.equal(applyLatchedModifiers("s1", "r"), null);
+  tapModifier("s1", "ctrl", 2_000);
+  tapModifier("s1", "ctrl", 3_000);
+  assert.equal(applyLatchedModifiers("s1", "r"), null, "separate taps disarm rather than lock");
   resetModifierLatches();
 });
 

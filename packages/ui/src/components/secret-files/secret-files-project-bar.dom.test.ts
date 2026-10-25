@@ -29,7 +29,6 @@ import { applySecretVault, resetSecretFiles } from "../../lib/secret-files/store
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let SecretFilesProjectBar: typeof import("./SecretFilesProjectBar").SecretFilesProjectBar;
-let resetSecretFilesBarDismissals: typeof import("./SecretFilesProjectBar").resetSecretFilesBarDismissals;
 let useAppStore: typeof import("../../store/app").useAppStore;
 
 let dom: JSDOM;
@@ -62,7 +61,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ SecretFilesProjectBar, resetSecretFilesBarDismissals } = await import("./SecretFilesProjectBar"));
+  ({ SecretFilesProjectBar } = await import("./SecretFilesProjectBar"));
   ({ useAppStore } = await import("../../store/app"));
   initialApp = { ...useAppStore.getState() };
 });
@@ -77,7 +76,8 @@ after(() => {
 });
 
 const KEY = "github.com/o/matssmile";
-const MINE = "/w/ws/MatsSmile";
+let projectCase = 0;
+let MINE: string;
 
 const plugin = (enabled: boolean): PluginInfo => ({
   id: SECRET_FILES_PLUGIN_ID,
@@ -213,7 +213,7 @@ describe("the secret-files project bar", () => {
     comparedToken = undefined;
     changedTo = null;
     resetSecretFiles();
-    resetSecretFilesBarDismissals();
+    MINE = `/w/ws/MatsSmile-${++projectCase}`;
     useAppStore.setState(
       {
         ...initialApp,

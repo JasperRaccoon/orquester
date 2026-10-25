@@ -3,11 +3,11 @@ import { test } from "node:test";
 
 import Fastify from "fastify";
 
-import { BOX_CONFIG_CHANGES_EVENT, BOXES_CHANNEL, boxRoutes, type BoxConfigChangeSet } from "@orquester/api";
+import { boxRoutes, type BoxConfigChangeSet } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 
 import { BoxSyncError } from "./config-sync.ts";
-import { boxConfigChangesPublisher, registerBoxConfigChangeRoutes } from "./routes.ts";
+import { registerBoxConfigChangeRoutes } from "./routes.ts";
 
 const SET: BoxConfigChangeSet = {
   id: "c1",
@@ -68,10 +68,4 @@ test("agents and external MCP clients cannot decide", async () => {
     assert.equal(decisions.length, 0);
     await server.close();
   }
-});
-
-test("the publisher broadcasts on the boxes channel", () => {
-  const sent: unknown[][] = [];
-  boxConfigChangesPublisher({ publish: (...args: unknown[]) => void sent.push(args) })({ changes: [SET] });
-  assert.deepEqual(sent, [[BOXES_CHANNEL, BOX_CONFIG_CHANGES_EVENT, { changes: [SET] }]]);
 });

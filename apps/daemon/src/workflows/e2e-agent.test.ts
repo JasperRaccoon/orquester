@@ -80,7 +80,7 @@ describe("e2e: agent blocks through the engine", () => {
         project: { kind: "existing", projectPath: setupResult.projectPath },
         nodes: [
           { id: "start", type: "trigger.manual", name: "Start" },
-          { id: "work", type: "agent", name: "Work", config: agentConfig([{ agent: "claude", model: "opus", accounts: { ...FIXED, accounts: ["a1"] } }], "Do the long thing.") }
+          { id: "work", type: "agent", name: "Work", config: { ...agentConfig([{ agent: "claude", model: "opus", accounts: { ...FIXED, accounts: ["a1"] } }], "Run {{ workflow.name }} ({{ workflow.id }})."), session: { kind: "new", title: "{{ workflow.name }} · chat" } } }
         ],
         edges: [{ source: "Start", target: "Work" }]
       });
@@ -102,6 +102,9 @@ describe("e2e: agent blocks through the engine", () => {
       assert.equal((run.blocks.work!.output as AgentBlockOutput).text, "working on it\n\nall done", "the turn's whole answer");
       assert.equal(run.blocks.work!.attempt, 1, "resumed, not retried");
       assert.equal(host.commandCount("turn"), 1, "the turn was sent once");
+      assert.deepEqual(run.blocks.work!.warnings ?? [], [], "workflow expressions resolve without missing-data warnings");
+      assert.ok(host.turnLog[0]!.input.startsWith(`Run Long agent (${workflowId}).`), host.turnLog[0]!.input);
+      assert.equal(host.sessionsOwnedBy("work")[0]!.title, "Long agent · chat");
       assert.equal(host.sessionsOwnedBy("work").length, 1, "one session");
       await retainWorkflowArtifact(t, { runId, status: run.status, attempt: run.blocks.work!.attempt, output: run.blocks.work!.output });
     } finally {
@@ -109,39 +112,4 @@ describe("e2e: agent blocks through the engine", () => {
     }
   });
 
-  test("an agent prompt and its chat title read {{ workflow.… }} as every other block does", async (t) => {
-    const clock = new FakeClock("2026-09-28T12:00:00.000Z");
-    const host = new FakeChatHost({ clock, accounts: ACCOUNTS, behaviour: () => [{ kind: "say", text: "done" }] });
-    const { h, projectPath } = await setup(host, clock, t);
-    try {
-      const created = await json<WorkflowWriteResponse>(h, "POST", "/api/workflows", {
-        name: "Nightly review",
-        project: { kind: "existing", projectPath },
-        nodes: [
-          { id: "start", type: "trigger.manual", name: "Start" },
-          {
-            id: "work",
-            type: "agent",
-            name: "Work",
-            config: {
-              ...agentConfig([{ agent: "claude", model: "opus", accounts: { ...FIXED, accounts: ["a1"] } }], "Run {{ workflow.name }} ({{ workflow.id }})."),
-              session: { kind: "new", title: "{{ workflow.name }} · chat" }
-            }
-          }
-        ],
-        edges: [{ source: "Start", target: "Work" }]
-      });
-      const workflowId = created.body.workflow.id;
-      const runId = (await json<RunWorkflowResponse>(h, "POST", `/api/workflows/${workflowId}/run`, {})).body.runId!;
-      await driveUntil(h, clock, finishedIn(h, runId), "the run");
-      const run = (await json<GetWorkflowRunResponse>(h, "GET", `/api/workflow-runs/${runId}`)).body.run as WorkflowRun;
-      assert.equal(run.status, "succeeded", JSON.stringify(run.blocks.work, null, 2));
-      assert.deepEqual(run.blocks.work!.warnings ?? [], [], "nothing read missing");
-      assert.ok(host.turnLog[0]!.input.startsWith(`Run Nightly review (${workflowId}).`), host.turnLog[0]!.input);
-      assert.equal(host.sessionsOwnedBy("work")[0]!.title, "Nightly review · chat");
-      await retainWorkflowArtifact(t, { runId, status: run.status, warnings: run.blocks.work!.warnings ?? [], title: host.sessionsOwnedBy("work")[0]!.title });
-    } finally {
-      await h.close();
-    }
-  });
 });

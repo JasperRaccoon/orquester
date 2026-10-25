@@ -6,8 +6,6 @@ import { grokSessionMcpServers } from "../adapters/grok/session-tools.ts";
 import { claudeMcpSpec, isLoopbackUrl, openCodeMcpSpec, planMcpBridges, tomlMcpSpec } from "./mcp-plan.ts";
 
 const sys = { agentPath: "/opt/orq-agent" };
-let seq = 0;
-const newServerId = (): string => `server-${String(++seq).padStart(8, "0")}`;
 
 test("each CLI's config shape reads into one spec; disabled and in-process entries are not servers", () => {
   assert.deepEqual(claudeMcpSpec("gh", { command: "gh-mcp", args: ["--stdio"], env: { T: "x" } }), {
@@ -56,7 +54,7 @@ test("the plan: stdio, loopback and secret-header servers are bridged; internet 
       { name: "public", transport: "http", url: "https://mcp.example.com/mcp", headers: {} },
       { name: "linter", transport: "stdio", command: "lint-mcp" }
     ],
-    { runInBox: new Set(["linter"]), sys, newServerId }
+    { runInBox: new Set(["linter"]), sys }
   );
   assert.deepEqual(plan.bridged.map((s) => [s.name, s.target.transport]), [["stdio", "stdio"], ["loop", "http"], ["secret", "sse"]]);
   assert.deepEqual(plan.bridged[0]?.args, ["mcp-bridge", plan.bridged[0]?.serverId]);
@@ -74,12 +72,12 @@ test("Codex box overrides: a stdio server keeps its name, its env blanked; an HT
     overrides
   );
   // Ours rides the bridge: no URL and no bearer variable reach the box.
-  assert.deepEqual(config["mcp_servers.orquester"], {
-    command: "/opt/orq-agent",
-    args: ["mcp-bridge", "id0"],
-    default_tools_approval_mode: "approve",
-    tool_timeout_sec: (config["mcp_servers.orquester"] as { tool_timeout_sec: number }).tool_timeout_sec
-  });
+  const own = config["mcp_servers.orquester"] as Record<string, unknown>;
+  assert.equal(own.command, "/opt/orq-agent");
+  assert.deepEqual(own.args, ["mcp-bridge", "id0"]);
+  assert.equal(own.default_tools_approval_mode, "approve");
+  assert.equal(own.url, undefined);
+  assert.equal(own.bearer_token_env_var, undefined);
   assert.deepEqual(config["mcp_servers.gh"], { command: "/opt/orq-agent", args: ["mcp-bridge", "id1"], env: { GH_TOKEN: "" }, env_vars: [] });
   assert.equal(config["mcp_servers.local.enabled"], false);
   assert.deepEqual(config["mcp_servers.local_host"], { command: "/opt/orq-agent", args: ["mcp-bridge", "id2"] });

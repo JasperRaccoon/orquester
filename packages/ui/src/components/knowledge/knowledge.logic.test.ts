@@ -6,14 +6,9 @@ import { KNOWLEDGE_COLORS } from "@orquester/api";
 import { entry } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
   collectionFormError,
-  deleteCollectionMessage,
-  entryByline,
   entryFormOf,
   entryFormPatch,
   entryPostUrl,
-  formatKnowledgeDate,
-  knowledgeColorCss,
-  knowledgeCountsText,
   knowledgeErrorCode,
   knowledgeErrorText,
   linkingView,
@@ -22,9 +17,6 @@ import {
 } from "./knowledge.logic.ts";
 
 describe("knowledge colours", () => {
-  it("map palette keys to the theme's lane colours", () => {
-    assert.equal(knowledgeColorCss("chart-3"), "rgb(var(--lane-3))");
-  });
 
   it("give a new collection the first unused colour, then go round", () => {
     assert.equal(nextKnowledgeColor([{ color: "chart-1" }, { color: "chart-3" }], KNOWLEDGE_COLORS), "chart-2");
@@ -47,9 +39,6 @@ describe("knowledge errors", () => {
 });
 
 describe("the status bar text", () => {
-  it("counts with singular and plural", () => {
-    assert.equal(knowledgeCountsText({ entries: 1, concepts: 1200, collections: 0 }), "1 entry · 1,200 concepts · 0 collections");
-  });
 
   it("describes each linking state", () => {
     assert.equal(linkingView({ state: "idle" }).label, "Linking idle");
@@ -106,21 +95,9 @@ describe("the collection form", () => {
     assert.equal(collectionFormError({ name: "SEO", description: "renamed nothing" }, existing, "kc_seo"), null, "its own name is fine");
     assert.equal(collectionFormError({ name: "Mobile apps", description: "" }, existing, null), null);
   });
-
-  it("explains what deleting does to the entries", () => {
-    assert.match(deleteCollectionMessage({ name: "SEO", entryCount: 3 }), /Its 3 entries lose the label; an entry with no other collection becomes Unfiled/);
-    assert.match(deleteCollectionMessage({ name: "SEO", entryCount: 0 }), /It has no entries\. No entry is deleted\./);
-  });
 });
 
 describe("entry display", () => {
-  it("shows who and when", () => {
-    assert.equal(entryByline({ author: "Om Patel", handle: "om_patel5" }), "Om Patel · @om_patel5");
-    assert.equal(entryByline({ author: null, handle: null }), null);
-    assert.equal(formatKnowledgeDate("2026-10-11"), "Oct 11, 2026");
-    assert.equal(formatKnowledgeDate("last week"), "last week");
-    assert.equal(formatKnowledgeDate(null), null);
-  });
 
   it("offers only http(s) links as the original post", () => {
     assert.equal(entryPostUrl({ url: "https://x.com/a/status/1" }), "https://x.com/a/status/1");

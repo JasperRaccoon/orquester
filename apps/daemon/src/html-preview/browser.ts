@@ -329,7 +329,7 @@ export const PREVIEWS_BUSY_MESSAGE = "Previews are busy right now; try again in 
  * waits honour an abort signal, and at most `maxWaiting` wait — past that a
  * call is refused as busy at once.
  */
-export class Gate {
+class Gate {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 

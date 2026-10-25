@@ -9,13 +9,11 @@ import { AgentHooks, OPENCODE_STATUS_PLUGIN_FILE, openCodeStatusPluginSource } f
 import type { AgentHomes } from "../../agent-profile/adapters/types.ts";
 import { OPENCODE_GLOBAL_POOL_KEY, OpenCodeServerPool, type OpenCodeServerHandle } from "../../agent-host/adapters/opencode/server.ts";
 import { makePeer } from "../../agent-host/adapters/opencode/testing/peer.ts";
-import { createProfileLaunchResolver, profileLaunchContribution, type ProfileLaunchContext } from "../launch.ts";
+import { createProfileLaunchResolver, type ProfileLaunchContext } from "../launch.ts";
 import { writePreparedManifest } from "../manifest.ts";
 import { opencodePreparedSectionSchema } from "../manifest/opencode.ts";
-import { preparerFor } from "../preparer.ts";
 import type { ResolvedAgentProfile } from "../resolve.ts";
 import {
-  OPENCODE_PREPARER_VERSION,
   opencodeLaunchContribution,
   opencodePreparer,
   opencodeProfilePoolKey,
@@ -218,11 +216,8 @@ function contributionContext(f: Awaited<ReturnType<typeof fixture>>, launchEnv: 
 }
 
 describe("OpenCode preparer", () => {
-  it("is registered, shared by every account, versioned, and reads the Global config files", () => {
-    assert.equal(preparerFor("opencode"), opencodePreparer);
+  it("shares preparations across accounts and tracks every Global config file", () => {
     assert.equal(opencodePreparer.perAccount, false);
-    assert.equal(opencodePreparer.version, OPENCODE_PREPARER_VERSION);
-    assert.match(OPENCODE_PREPARER_VERSION, /^3\.[0-9a-f]{8}$/);
     const homes = { opencodeDir: "/h/.config/opencode" } as AgentHomes;
     assert.deepEqual(opencodePreparer.inputs?.({ agent: "opencode", accountKey: "shared", accountHome: null, systemHomes: homes, appdir: "/a" }), [
       "/h/.config/opencode/config.json",
@@ -371,9 +366,8 @@ describe("OpenCode preparer", () => {
 });
 
 describe("OpenCode launch contribution", () => {
-  it("is the registered contribution and names the version's keyed server with the profile env", async () => {
+  it("names the version's keyed server with the profile env", async () => {
     const f = await fixture();
-    assert.equal(profileLaunchContribution("opencode"), opencodeLaunchContribution);
     const contribution = await opencodeLaunchContribution(contributionContext(f));
     assert.equal(contribution.env, undefined, "nothing goes into the thread's own launch env");
     assert.equal(contribution.homePath, undefined);

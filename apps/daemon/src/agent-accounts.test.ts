@@ -62,10 +62,16 @@ test("import claude rejects a blob with empty OAuth tokens", async () => {
       rateLimitTier: "default_claude_max_20x"
     }
   });
-  await assert.rejects(
-    () => svc.importAccount({ content: blob, label: "Work" }),
-    (e: Error) => e.name === "AgentAccountError" && /contains no OAuth tokens/.test(e.message)
-  );
+  for (const content of [
+    blob,
+    JSON.stringify({ claudeAiOauth: {} }),
+    JSON.stringify({ claudeAiOauth: { accessToken: 1, refreshToken: null } })
+  ]) {
+    await assert.rejects(
+      () => svc.importAccount({ content, label: "Work" }),
+      (e: Error) => e.name === "AgentAccountError" && /contains no OAuth tokens/.test(e.message)
+    );
+  }
   assert.equal(svc.list().accounts.filter((a) => a.agent === "claude").length, 0);
 });
 
@@ -90,15 +96,6 @@ test("resolveLaunchEnv selects Claude/Codex homes and unsets competing API crede
   assert.deepEqual(xEnv?.unset, ["OPENAI_API_KEY"]);
 });
 
-test("resolveLaunchEnv falls back to the default account, then System(null)", async () => {
-  const { svc } = await makeService();
-  const claude = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
-  const dflt = await svc.resolveLaunchEnv("claude"); // no id → default
-  assert.equal(dflt?.env.CLAUDE_CONFIG_DIR, svc.homePath("claude", claude.id));
-  const none = await svc.resolveLaunchEnv("gemini"); // no accounts for agent → System
-  assert.equal(none, null);
-});
-
 test("resolveLaunchEnv returns the EFFECTIVE account id (explicit and default)", async () => {
   const { svc } = await makeService();
   const a = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "A" });
@@ -109,7 +106,9 @@ test("resolveLaunchEnv returns the EFFECTIVE account id (explicit and default)",
   // session is recorded under the account it actually uses — liveAccountIds()
   // then sees it and the refresher won't rotate its live token.
   assert.equal(svc.list().defaults.claude, a.id);
-  assert.equal((await svc.resolveLaunchEnv("claude"))?.accountId, a.id);
+  const defaultLaunch = await svc.resolveLaunchEnv("claude");
+  assert.equal(defaultLaunch?.accountId, a.id);
+  assert.equal(defaultLaunch?.env.CLAUDE_CONFIG_DIR, svc.homePath("claude", a.id));
 });
 
 test("resolveLaunchEnv honors the SYSTEM_ACCOUNT_ID sentinel over a default", async () => {
@@ -117,6 +116,7 @@ test("resolveLaunchEnv honors the SYSTEM_ACCOUNT_ID sentinel over a default", as
   await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
   // A default exists, but an explicit System launch must bypass it (null → $HOME).
   assert.equal(await svc.resolveLaunchEnv("claude", "system"), null);
+  assert.equal(await svc.resolveLaunchEnv("gemini"), null, "an agent without managed accounts uses System");
 });
 
 test("remove deletes the home and clears it from defaults", async () => {
@@ -326,23 +326,6 @@ test("Claude re-sync refreshes mcpServers but preserves the account's own identi
   assert.equal(cj2.oauthAccount.emailAddress, "acct@x");
 });
 
-test("resolveLaunchEnv seeds a Codex home: symlinked config.toml + migration markers", async () => {
-  delete process.env.CODEX_HOME;
-  const base = await mkdtemp(join(tmpdir(), "orq-seedc-"));
-  await mkdir(join(base, ".codex"), { recursive: true });
-  await writeFile(join(base, ".codex", "config.toml"), "model='x'\n[mcp_servers.foo]\n");
-  await writeFile(join(base, ".codex", ".personality_migration"), "1");
-  await writeFile(join(base, ".codex", ".sandbox_migration"), "2");
-  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
-  await svc.init();
-  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z" }) } }) });
-  await svc.resolveLaunchEnv("codex", acct.id);
-  const home = svc.homePath("codex", acct.id);
-  assert.equal((await lstat(join(home, "config.toml"))).isSymbolicLink(), true);
-  assert.equal(await readFile(join(home, ".personality_migration"), "utf8"), "1");
-  assert.equal(await readFile(join(home, ".sandbox_migration"), "utf8"), "2");
-});
-
 test("resolveLaunchEnv shares Claude settings.json (symlink, replaces a stale real file)", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
   const base = await mkdtemp(join(tmpdir(), "orq-set-"));
@@ -365,6 +348,8 @@ test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale rea
   const base = await mkdtemp(join(tmpdir(), "orq-chooks-"));
   await mkdir(join(base, ".codex"), { recursive: true });
   await writeFile(join(base, ".codex", "config.toml"), "model='sys'\n[mcp_servers.foo]\n");
+  await writeFile(join(base, ".codex", ".personality_migration"), "1");
+  await writeFile(join(base, ".codex", ".sandbox_migration"), "2");
   await writeFile(join(base, ".codex", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ user: 1 }] } }));
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
   await svc.init();
@@ -375,23 +360,8 @@ test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale rea
   assert.equal((await lstat(join(home, "config.toml"))).isSymbolicLink(), true);
   assert.match(await readFile(join(home, "config.toml"), "utf8"), /mcp_servers\.foo/);
   assert.equal((await lstat(join(home, "hooks.json"))).isSymbolicLink(), true);
-});
-
-test("resolveLaunchEnv shares chat history: symlinks projects/ (Claude), merging a non-empty home in", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const base = await mkdtemp(join(tmpdir(), "orq-hist-"));
-  await mkdir(join(base, ".claude", "projects", "p1"), { recursive: true });
-  await writeFile(join(base, ".claude", "projects", "p1", "sys.jsonl"), "sys");
-  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
-  await svc.init();
-  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
-  const home = svc.homePath("claude", acct.id);
-  await mkdir(join(home, "projects", "p2"), { recursive: true }); // account's own local conversation
-  await writeFile(join(home, "projects", "p2", "acct.jsonl"), "acct");
-  await svc.resolveLaunchEnv("claude", acct.id);
-  assert.equal((await lstat(join(home, "projects"))).isSymbolicLink(), true);
-  assert.equal(await readFile(join(base, ".claude", "projects", "p2", "acct.jsonl"), "utf8"), "acct"); // merged into shared store
-  assert.equal(await readFile(join(home, "projects", "p1", "sys.jsonl"), "utf8"), "sys"); // system history now visible via the link
+  assert.equal(await readFile(join(home, ".personality_migration"), "utf8"), "1");
+  assert.equal(await readFile(join(home, ".sandbox_migration"), "utf8"), "2");
 });
 
 test("resolveLaunchEnv symlinks an empty/absent Codex sessions/ to the shared store", async () => {
@@ -418,10 +388,14 @@ test("shared history recursively merges a COLLIDING project dir, then symlinks",
   const home = svc.homePath("claude", acct.id);
   await mkdir(join(home, "projects", "P"), { recursive: true }); // SAME project name (collides)
   await writeFile(join(home, "projects", "P", "s2.jsonl"), "acct"); // but a different session file
+  await mkdir(join(home, "projects", "Q"), { recursive: true });
+  await writeFile(join(home, "projects", "Q", "s3.jsonl"), "other project");
   await svc.resolveLaunchEnv("claude", acct.id);
   assert.equal((await lstat(join(home, "projects"))).isSymbolicLink(), true); // merged fully → symlinked
   assert.equal(await readFile(join(base, ".claude", "projects", "P", "s1.jsonl"), "utf8"), "sys"); // system's kept
   assert.equal(await readFile(join(base, ".claude", "projects", "P", "s2.jsonl"), "utf8"), "acct"); // account's merged in
+  assert.equal(await readFile(join(home, "projects", "P", "s1.jsonl"), "utf8"), "sys");
+  assert.equal(await readFile(join(base, ".claude", "projects", "Q", "s3.jsonl"), "utf8"), "other project");
 });
 
 const GROK_BLOB = JSON.stringify({
@@ -698,9 +672,13 @@ test("Claude: two accounts launched at once both keep their own command and CLAU
   }
 });
 
-test("Claude: overlapping launches of one account never drop the owner's shared commands", async () => {
+test("Claude: overlapping launches of one account never drop the owner's shared commands", async (t) => {
+  const f = await linkingFixture("claude");
+  t.after(() => rm(f.base, { recursive: true, force: true }));
   for (let lag = 0; lag < 40; lag += 1) {
-    const f = await linkingFixture("claude");
+    // The previous launch linked home/commands; remove that link before resetting the shared dir.
+    await rm(join(f.home, "commands"), { recursive: true, force: true });
+    await rm(join(f.system, "commands"), { recursive: true, force: true });
     await mkdir(join(f.system, "commands"), { recursive: true });
     await writeFile(join(f.system, "commands", "owner.md"), "owner");
     await mkdir(join(f.home, "commands"), { recursive: true });

@@ -5,13 +5,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 
 import type { AgentToolGrant, ThreadAgentToolsResponse } from "@orquester/api";
 
 import { deriveToolsChip } from "./tools-chip";
-import { ToolsChipView } from "./ToolsChip";
 
 const grant = (id: string): AgentToolGrant => ({ id, family: "desktops", scope: "chat", threadId: "t1", projectPath: "/w/acme/api", createdAt: "2026-10-15T10:00:00.000Z" });
 
@@ -37,13 +34,4 @@ test("grants are counted; a workflow-owned chat says it has no Admin tools", () 
   assert.match(model.ariaLabel, /2 grants/);
   assert.match(model.note ?? "", /no Admin tools/);
   assert.equal(deriveToolsChip(data({ grants: [grant("a")] })).label, "Tools · 1");
-});
-
-test("the chip renders its label and never its panel until clicked; no toolset switch anywhere", () => {
-  const html = renderToStaticMarkup(createElement(ToolsChipView, { sessionId: "t1", data: data({ grants: [grant("a")] }) }));
-  assert.match(html, /data-tools-chip="t1"/);
-  assert.match(html, /Tools · 1/);
-  assert.doesNotMatch(html, /data-tools-panel/);
-  assert.doesNotMatch(html, /data-toolset|Default \(|toolset/i);
-  assert.doesNotMatch(html, /autofocus/i);
 });

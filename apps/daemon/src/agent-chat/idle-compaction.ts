@@ -68,7 +68,7 @@ export interface IdleCompactionOptions {
 }
 
 /** The command id of a chat's idle compaction after `turnId`: one per turn, whoever sends it. */
-export function idleCompactionCommandId(sessionId: string, turnId: string): string {
+function idleCompactionCommandId(sessionId: string, turnId: string): string {
   return limitCommandId(IDLE_COMPACTION_COMMAND_PREFIX, sessionId, turnId);
 }
 

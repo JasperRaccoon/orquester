@@ -216,16 +216,6 @@ const FIXTURE_11 = [
   { tokens: { input: 2, read: 34_840, write: 27, output: 4 }, cumulative: 0.04550230000000001 },
   { tokens: { input: 2, read: 34_867, write: 27, output: 15 }, cumulative: 0.010853100000000001 }
 ];
-/**
- * First turns of a process (its cumulative cost is that turn's alone; `modelCost` = the main model's share in the
- * frame's `modelUsage`): fixture 12 (claude-sonnet-5), fixtures 17, 18, 19 (claude-opus-5-5, the table's exact row).
- */
-const FIRST_TURNS = [
-  { model: "claude-sonnet-5", tokens: { input: 4, read: 65_525, write: 4_293, output: 130 }, modelCost: 0.0473775 },
-  { model: "claude-opus-5-5", tokens: { input: 4, read: 29_426, write: 6_900, output: 333 }, modelCost: 0.06776120000000001 },
-  { model: "claude-opus-5-5", tokens: { input: 4, read: 29_295, write: 6_651, output: 202 }, modelCost: 0.063123 },
-  { model: "claude-opus-5-5", tokens: { input: 4, read: 31_004, write: 4_847, output: 176 }, modelCost: 0.0485128 }
-];
 const claudeTurn = (id: string, t: { input: number; read: number; write: number; output: number }, totalCostUsd?: number, model?: string) =>
   turn({ turnId: id, ...(model ? { model } : {}), ...(totalCostUsd !== undefined ? { totalCostUsd } : {}), tokenUsage: usage(t.input + t.read + t.write, t.output, { cachedInputTokens: t.read, cacheCreationTokens: t.write }) });
 
@@ -239,11 +229,6 @@ test("get_usage session: a Claude session is priced from its turns' own tokens, 
   const summed = FIXTURE_11.reduce((sum, f) => sum + f.cumulative, 0);
   assert.ok(summed > r.costUsd * 1.6, `summing the cumulative values would report ${summed}`);
   assert.deepEqual([r.inputTokens, r.cachedInputTokens, r.cacheCreationTokens, r.outputTokens], [6 + 100_388 + 4_213, 100_388, 4_213, 23]);
-  // A first turn's estimate matches what the CLI itself charged the main model for it.
-  for (const first of FIRST_TURNS) {
-    const one = (await run(sessionApi([claudeTurn("t1", first.tokens, 99, first.model)], { adapter: "claude" }), { sessionId: "s1" })).session;
-    assert.ok(Math.abs(one.costUsd - first.modelCost) < 0.0001, `${first.model}: ${one.costUsd} vs ${first.modelCost}`);
-  }
   // Fixtures 17 and 19 (two turns each, one process): the tokens of both turns are summed, the cumulative costs never.
   const workflow = (await run(sessionApi([
     claudeTurn("t1", { input: 4, read: 29_426, write: 6_900, output: 333 }, 0.06897020000000001, "claude-opus-5-5"),

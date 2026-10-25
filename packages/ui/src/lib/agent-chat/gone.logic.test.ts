@@ -34,20 +34,18 @@ function mount(record: { chatPending?: boolean }, slice: object = {}, watches = 
 }
 
 describe("a chat being created, mounted at once (grid view)", () => {
-  for (const kind of ["a plain create", "a fork"]) {
-    it(`${kind}: THREAD_NOT_FOUND while pending is "starting"; the confirming update reconnects it`, () => {
-      const created = { chatPending: true };
-      const view = mount(created);
-      assert.equal(view.render("connecting", created), "live");
-      assert.equal(view.render("gone", created), "starting", "never gone while the host creates it");
-      assert.equal(view.retries(), 0, "waits for the record, no reconnect loop");
-      const confirmed = { chatPending: false };
-      assert.equal(view.render("gone", confirmed), "starting");
-      assert.equal(view.retries(), 1, "the update connects it again");
-      assert.equal(view.render("connecting", confirmed), "live");
-      assert.equal(view.render("synchronized", confirmed), "live");
-    });
-  }
+  it('THREAD_NOT_FOUND while pending is "starting"; the confirming update reconnects it', () => {
+    const created = { chatPending: true };
+    const view = mount(created);
+    assert.equal(view.render("connecting", created), "live");
+    assert.equal(view.render("gone", created), "starting", "never gone while the host creates it");
+    assert.equal(view.retries(), 0, "waits for the record, no reconnect loop");
+    const confirmed = { chatPending: false };
+    assert.equal(view.render("gone", confirmed), "starting");
+    assert.equal(view.retries(), 1, "the update connects it again");
+    assert.equal(view.render("connecting", confirmed), "live");
+    assert.equal(view.render("synchronized", confirmed), "live");
+  });
 
   it("the host confirmed before the stream met the miss: one retry, no gone notice", () => {
     const created = { chatPending: true };

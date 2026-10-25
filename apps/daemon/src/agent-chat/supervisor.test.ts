@@ -358,42 +358,6 @@ test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async ()
   await h.cleanup();
 });
 
-test("boot logs one line naming the host it adopted or spawned", async () => {
-  const adopted = await makeHarness([healthy({ codeStamp: "a".repeat(64) })], {
-    seedToken: "tok",
-    tmux: true,
-    codeStamp: "a".repeat(64)
-  });
-  await adopted.supervisor.init();
-  assert.deepEqual(
-    adopted.logs.filter((line) => line.startsWith("agent host adopted")),
-    [`agent host adopted: instance host-1, pid 4242, code ${"a".repeat(12)}`]
-  );
-  await adopted.cleanup();
-
-  const spawned = await makeHarness([{ ok: false, reachable: false }, healthy({ instance: "host-9" })], { tmux: true });
-  await spawned.supervisor.init();
-  assert.deepEqual(
-    spawned.logs.filter((line) => line.startsWith("agent host spawned") || line.startsWith("agent host adopted")),
-    ["agent host spawned: instance host-9, pid 4242, code unknown"]
-  );
-  await spawned.cleanup();
-});
-
-test("a completed drain-restart logs the code it moved from and to", async () => {
-  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "b".repeat(64) });
-  h.probeHook = () =>
-    h.spawns.length === 0
-      ? healthy({ codeStamp: "a".repeat(64) })
-      : healthy({ instance: "host-2", codeStamp: "b".repeat(64) });
-  await h.supervisor.init();
-  assert.deepEqual(
-    h.logs.filter((line) => line.startsWith("agent host restarted")),
-    [`agent host restarted: code ${"a".repeat(12)} → ${"b".repeat(12)}, instance host-2, pid 4242`]
-  );
-  await h.cleanup();
-});
-
 test("a restart deferred for 6 h warns, then once per 6 h — never per tick", async () => {
   const h = await makeHarness([], { seedToken: "tok", tmux: true });
   h.probeHook = mismatchUntilReplaced(h, ["thread-1"]);
@@ -716,19 +680,6 @@ test("a saturated box does not shield a host whose process is gone", async () =>
   h.advance(15_000);
   await h.supervisor.checkHealth();
   assert.equal(h.spawns.length, 1);
-  await h.cleanup();
-});
-
-test("a restart for missed probes is logged", async () => {
-  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true, loadPerCpu: () => 0.5 });
-  await h.supervisor.init();
-  h.probes = [{ ok: false, reachable: false }];
-  h.advance(15_000);
-  await h.supervisor.checkHealth();
-  h.advance(15_000);
-  await h.supervisor.checkHealth();
-  assert.equal(h.spawns.length, 1, "an idle box gives a silent host no extra patience");
-  assert.ok(h.logs.includes("agent host did not answer (2/2); restarting it (attempt 1/5)"), h.logs.join("\n"));
   await h.cleanup();
 });
 

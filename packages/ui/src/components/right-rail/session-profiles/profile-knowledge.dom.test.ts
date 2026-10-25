@@ -77,12 +77,6 @@ function profile(knowledgeCollections?: string[]): SessionProfileDetail {
 }
 
 describe("profile knowledge collections (pure)", () => {
-  it("ticks and unticks, keeping the ids of deleted collections", () => {
-    const known = ["kc_seo", "kc_ads"];
-    assert.deepEqual(dialog.toggleKnowledgeCollection(["kc_gone", "kc_seo"], "kc_ads", true, known), ["kc_gone", "kc_seo", "kc_ads"]);
-    assert.deepEqual(dialog.toggleKnowledgeCollection(["kc_gone", "kc_seo"], "kc_seo", false, known), ["kc_gone"]);
-    assert.deepEqual(dialog.toggleKnowledgeCollection(["kc_seo"], "kc_seo", true, known), ["kc_seo"], "no duplicates");
-  });
 
   it("drops deleted ids first when the list would pass its cap", () => {
     const live = Array.from({ length: 99 }, (_, i) => `kc_${i}`);

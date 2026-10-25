@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ACP_ERROR_CODES, AcpRpcError, AcpTransportClosedError } from "./errors.ts";
+import { AcpRpcError, AcpTransportClosedError } from "./errors.ts";
 import { AcpPeer } from "./peer.ts";
 
 interface Harness {
@@ -150,7 +150,7 @@ test("a handler that throws answers -32603 rather than dying", async () => {
   });
   h.recv({ jsonrpc: "2.0", id: 4, method: "boom" });
   await tick();
-  assert.deepEqual(h.sent[0]["error"], { code: ACP_ERROR_CODES.internalError, message: "nope" });
+  assert.deepEqual(h.sent[0]["error"], { code: -32603, message: "nope" });
 });
 
 // ---------------------------------------------------------- unknown methods
@@ -239,21 +239,20 @@ test("an error response becomes a typed AcpRpcError carrying data", async () => 
   assert.match(error.message, /unknown model id/);
 });
 
-test("a request deadline rejects and sends nothing to the peer", async () => {
+test("a request deadline rejects and sends nothing to the peer", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = harness();
   const before = h.sent.length;
-  const error = await h.peer.request("session/load", {}, { timeoutMs: 1 }).then(
+  const pending = h.peer.request("session/load", {}, { timeoutMs: 30_000 });
+  const rejected = pending.then(
     () => null,
     (reason: unknown) => reason
   );
+  t.mock.timers.tick(30_000);
+  const error = await rejected;
   assert.ok(error instanceof AcpRpcError);
-  assert.match(error.message, /timed out/);
+  assert.match(error.message, /timed out after 30000ms/);
   assert.equal(h.sent.length, before + 1, "no cancel frame is invented for a timeout");
-});
-
-test("a reply after the deadline is a warning, not a crash", async () => {
-  const h = harness();
-  await h.peer.request("session/load", {}, { timeoutMs: 1 }).catch(() => undefined);
   h.reply({ late: true });
   assert.ok(h.warnings.some((warning) => /unknown request id/.test(warning.message)));
 });

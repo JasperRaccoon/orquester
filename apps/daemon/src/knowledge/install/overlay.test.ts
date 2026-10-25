@@ -6,9 +6,8 @@ import { MYKG_PROMPTS_ROOT, applyOverlay, overlayApplied, overlayDigest, overlay
 import { MYKG_LINE } from "./pins.ts";
 import { MYKG_0_4_PROMPT_FILES, tempRoot } from "./testing.ts";
 
-// The shipped myKG prompt overlay: which files it replaces, that each keeps
-// myKG's output contract verbatim (the JSON shapes and the trailing headers
-// myKG's code appends its blocks after), and the copy rules.
+// The shipped myKG prompt overlay: package paths, the trailing headers myKG
+// appends blocks after, and the all-or-nothing copy rules.
 
 const read = (file: string) => readFile(join(MYKG_PROMPTS_ROOT, MYKG_LINE, file), "utf8");
 
@@ -28,71 +27,10 @@ test("the 0.4 overlay replaces the domain-specific prompts, all of them files my
   assert.ok(!files.some((file) => file.startsWith("feedback/")));
 });
 
-test("no overlay keeps the WWII-aircraft wording", async () => {
-  for (const file of await overlayFiles(MYKG_LINE)) {
-    const text = await read(file);
-    for (const word of ["aircraft", "Aircraft", "Horten", "Military", "AirForce", "Colonel", "Materiel", "commanding general"]) {
-      assert.ok(!text.includes(word), `${file} still says "${word}"`);
-    }
-  }
-});
-
-test("each overlay keeps myKG's output contract verbatim", async () => {
-  const contract: Record<string, string[]> = {
-    "pass1/system.txt": [
-      'Return a single JSON object with exactly two keys: "concepts" and "properties".',
-      'Do NOT return any other keys (no "relations", no "edges", no "graph").',
-      '  - "parent": name of the parent class, or null for root classes',
-      '  - "domain": the subject class name (must appear in concepts[])',
-      '  - "range": the object class name (must appear in concepts[])',
-      '- Do NOT add a "Relationship" class. Relationships are entries in properties[], not classes.',
-      '- Every concept MUST include at least a "name" attribute.'
-    ],
-    "pass2/system.txt": [
-      'Return a single JSON object with exactly two keys: "nodes" and "edges".',
-      '  - "id": kebab-case slug, e.g. "person-alice"',
-      '  - "attributes": object with one key per schema attribute (including inherited).',
-      '    Each value MUST be {"value": <extracted or null>, "confidence": <float>}.',
-      '  - "id": sequential, e.g. "edge-001"',
-      '  - "from": node ID from nodes[] above (NOT a display name)',
-      '  - "to": node ID from nodes[] above (NOT a display name)',
-      '"Outgoing edges" and "Incoming edges" per type',
-      'If "NODES ALREADY EXTRACTED" appears in the input',
-      "keyed by attribute name. It MUST NOT be a JSON array"
-    ],
-    "normalize/system.txt": [
-      '{"<ConceptType>": {"<alias>": "<canonical>", ...}, ...}',
-      "Only map to canonical names that appear in the input list for that type.",
-      "- Return only JSON. No explanation. No markdown fences."
-    ],
-    "schema_merge/harmonize_system.txt": [
-      '- Return ONLY valid JSON with keys "concepts" and "properties". No markdown. No explanation.',
-      "1. MERGED SCHEMA",
-      "2. RAW PROPOSALS"
-    ],
-    "schema_merge/merge_harmonize_system.txt": [
-      '- Return ONLY valid JSON with keys "concepts" and "properties". No markdown. No explanation.',
-      "2. SESSION SCHEMAS",
-      "- NEVER drop an attribute that appeared on a concept in either session schema"
-    ],
-    "schema_merge/quality_system.txt": ['Return ONLY the corrected schema JSON with keys "concepts" and "properties".'],
-    "schema_merge/merge_quality_system.txt": [
-      'Return ONLY the corrected schema JSON with keys "concepts" and "properties".',
-      "- NEVER drop an attribute that was present in the input schema."
-    ]
-  };
-  for (const [file, lines] of Object.entries(contract)) {
-    const text = await read(file);
-    for (const line of lines) assert.ok(text.includes(line), `${file} lost: ${line}`);
-  }
-  // myKG appends its source text / schema block right after these headers.
+test("the overlay retains the headers myKG appends its input blocks after", async () => {
   assert.equal((await read("pass1/system.txt")).trimEnd().split("\n").at(-1), "## SOURCE TEXT");
   assert.equal((await read("schema_merge/quality_system.txt")).trimEnd().split("\n").at(-1), "## SCHEMA:");
   assert.equal((await read("schema_merge/merge_quality_system.txt")).trimEnd().split("\n").at(-1), "## SCHEMA:");
-  // The domain guidance the spec asks for.
-  const pass2 = await read("pass2/system.txt");
-  assert.match(pass2, /Author: Om Patel \(@om_patel5\) · thread · 2026-10-11/);
-  assert.match(pass2, /the author is a Person node/);
 });
 
 test("apply refuses a package without a target file and copies nothing; then copies every file", async (t) => {

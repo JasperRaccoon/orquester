@@ -29,7 +29,7 @@ export function orquesterInstructionsCap(hasKnowledgeLine: boolean): number {
  * The fixed part: spec §10, revised with T3 Code's orchestration wording — tools a harness loads on
  * demand, which chat to open for delegated work, and when to show a visual instead of offering one.
  */
-export const ORQUESTER_INSTRUCTIONS_FIXED = `## Orquester
+const ORQUESTER_INSTRUCTIONS_FIXED = `## Orquester
 
 You are running inside Orquester, which hosts many agent chats (Claude, Codex, Grok, OpenCode) across projects. The \`orquester\` MCP server's tools act through Orquester; a harness may prefix their names (\`mcp__orquester__x\`, \`orquester__x\`, \`orquester-<id>_x\`) or load them on demand: search for an unlisted one before concluding it's missing. Each tool's description has its full rules.
 
@@ -43,7 +43,7 @@ Secrets: never ask for one in chat or invent one; call request_secret and never 
 Changes outside your sandbox (workflows, agent profiles, desktops, other projects) wait for the user's approval card; batch related changes into one call. If denied, don't retry: ask the user.`;
 
 /** Spec §10's workflow-owned line. */
-export const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: changes that need approval are not available.";
+const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: changes that need approval are not available.";
 
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";
 const KNOWLEDGE_LINE_SUFFIX = ". Search it (knowledge_search) before deciding on these topics.";
@@ -57,7 +57,7 @@ const utf8Bytes = (text: string): number => Buffer.byteLength(text, "utf8");
  * blank ones skipped), or null for none. At most {@link KNOWLEDGE_LINE_MAX_BYTES}: the names that
  * do not fit become "… (+N more)" — the chat finds them with knowledge_collections.
  */
-export function knowledgeLine(names: readonly string[]): string | null {
+function knowledgeLine(names: readonly string[]): string | null {
   const clean = names
     .map((name) => [...name.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim()])
     .filter((chars) => chars.length > 0)

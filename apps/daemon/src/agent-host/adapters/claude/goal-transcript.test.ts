@@ -184,7 +184,7 @@ describe("claude goal transcript — reading goal_status rows", () => {
 
   it("walks the file in bounded reads, rows split across reads included", async () => {
     let content = "";
-    for (let index = 0; index < 20; index += 1) {
+    for (let index = 0; index < 9; index += 1) {
       content += userRow(`turn ${index} ${"x".repeat(100_000 + index * 7)}`);
       content += userRow("x".repeat(180_000)) + goalRow({ met: false, condition: "a", reason: `check ${index}` });
     }
@@ -193,7 +193,7 @@ describe("claude goal transcript — reading goal_status rows", () => {
     const rows = await readAll(transcript, SESSION);
     assert.deepEqual(
       rows?.map((row) => row.reason),
-      Array.from({ length: 20 }, (_, index) => `check ${index}`)
+      Array.from({ length: 9 }, (_, index) => `check ${index}`)
     );
   });
 

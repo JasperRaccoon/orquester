@@ -18,10 +18,7 @@ import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefres
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { chatSummary } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { MANIFEST_TIMEOUT_MS } from "../agent-host/session-tools/forwarder.ts";
 import {
-  DAEMON_POINTING_READ_TIMEOUT_MS,
-  MANIFEST_SESSIONS_READ_TIMEOUT_MS,
   MAX_POINTING_SCOPES,
   isFastifyRouteMiss,
   REFRESH_CONCURRENCY,
@@ -76,11 +73,6 @@ const manifestOf = async (r: ReturnType<typeof rig>, threadId: string): Promise<
   const manifest = await r.refresher.manifest(threadId);
   assert.ok(manifest !== null && manifest !== "unavailable", "a manifest");
   return manifest as SessionToolsManifest;
-};
-
-/** Let queued promise continuations run (no timers). */
-const settle = async (): Promise<void> => {
-  for (let index = 0; index < 10; index += 1) await Promise.resolve();
 };
 
 test("the manifest: every chat tool, for any agent with nothing configured; its block and denials; no Admin tool for a workflow-owned chat", async () => {
@@ -367,7 +359,7 @@ test("a refused chat stays remembered until a push actually reached the host", a
   const nextPush = async (): Promise<void> => {
     await next;
     next = new Promise<void>((resolve) => (pushed = resolve));
-    await settle();
+    await new Promise<void>((resolve) => setImmediate(resolve));
   };
   const r = rig({
     pushToHost: async (threadId) => {
@@ -376,23 +368,21 @@ test("a refused chat stays remembered until a push actually reached the host", a
       return delivered ? { applied: "unchanged" } : null;
     }
   });
-  const owed = (): boolean => (r.refresher as unknown as { refused: Map<string, number> }).refused.has("codex-1");
   r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
   assert.equal(await r.refresher.manifest("codex-1"), "unavailable");
-  assert.equal(owed(), true);
   // A read lands, but the push reaches no host (it timed out, or restarts): still remembered.
   r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
   assert.deepEqual(await r.refresher.daemonPointing(), []);
   await nextPush();
   assert.deepEqual(pushes, ["codex-1"]);
-  assert.equal(owed(), true);
   // The chat's own later launch manifest (one the host may have given up on) pushes again; this one lands.
   delivered = true;
   assert.notEqual(await r.refresher.manifest("codex-1"), "unavailable");
   await nextPush();
   assert.deepEqual(pushes, ["codex-1", "codex-1"]);
   // Delivered: nothing more is owed to it.
-  assert.equal(owed(), false);
+  assert.notEqual(await r.refresher.manifest("codex-1"), "unavailable");
+  assert.deepEqual(pushes, ["codex-1", "codex-1"], "a delivered manifest is not pushed again");
 });
 
 test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-projects read always stays)", async () => {
@@ -407,10 +397,6 @@ test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-p
   assert.equal(reads(), count, "the newest scopes and the all-projects read are cached");
   await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: "/w/acme/api/d0" });
   assert.equal(reads(), count + 1, "the oldest scope was evicted");
-});
-
-test("a manifest's own bounds stay below the host's bound on asking for it", () => {
-  assert.ok(DAEMON_POINTING_READ_TIMEOUT_MS + MANIFEST_SESSIONS_READ_TIMEOUT_MS + 2_000 <= MANIFEST_TIMEOUT_MS);
 });
 
 test("Knowledge Graph: the chat's knowledge view is read fresh for every manifest; failing or unanswered it counts as off", async () => {

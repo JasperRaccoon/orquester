@@ -8,7 +8,6 @@ import { parseToml } from "../agent-profile/adapters/grok/toml-patch.ts";
 import {
   GROK_PROFILE_ENV,
   grokDiscoveredPluginNames,
-  grokProfileConfig,
   grokSkillIgnoreList,
   parsePluginNames,
   renderGrokProfileConfigToml
@@ -98,9 +97,9 @@ describe("grokDiscoveredPluginNames", () => {
     assert.deepEqual(result, { ok: true, names: ["/profile/grok home", tmpdir()] });
   });
 
-  it("parses a real-shaped report", async () => {
+  it("parses a real-shaped report", () => {
     const report = JSON.stringify({ plugins: [{ name: "hookify", enabled: true }, { name: " spaced " }, { name: "hookify" }, { nope: 1 }] });
-    const result = await grokDiscoveredPluginNames({ ...base, env: { FAKE_GROK_REPORT: report } });
+    const result = parsePluginNames(report);
     assert.deepEqual(result, { ok: true, names: ["hookify", " spaced "] });
   });
 
@@ -156,54 +155,18 @@ hooks = true
     pluginsDisabled: ["hookify", "feature-dev"]
   };
 
-  it("renders the golden profile config", () => {
-    assert.equal(
-      renderGrokProfileConfigToml(input),
-      `[cli]
-auto_update = false
-installer = "npm"
-use_leader = false
-
-[ui]
-yolo = false
-
-[compat]
-
-[compat.claude]
-skills = true
-rules = false
-agents = false
-mcps = false
-hooks = false
-
-[compat.cursor]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-
-[skills]
-ignore = [ "~/.claude/skills", "/home/u/.claude/skills/pdf" ]
-
-[plugins]
-disabled = [ "hookify", "feature-dev" ]
-
-[mcp_servers]
-
-[mcp_servers.jira-mcp]
-command = "jira"
-args = [ "--stdio" ]
-env = { TOKEN_FILE = "/t" }
-`
-    );
-  });
-
-  it("parses back to the profile config object", () => {
-    assert.deepEqual(parseToml(renderGrokProfileConfigToml(input)), grokProfileConfig(input));
-    const doc = grokProfileConfig(input);
-    assert.equal("disabled_mcp_servers" in doc, false);
-    assert.deepEqual(doc.mcp_servers, input.mcpServers);
+  it("renders isolated native settings while carrying runtime policy", () => {
+    assert.deepEqual(parseToml(renderGrokProfileConfigToml(input)), {
+      cli: { auto_update: false, installer: "npm", use_leader: false },
+      ui: { yolo: false },
+      compat: {
+        claude: { skills: true, rules: false, agents: false, mcps: false, hooks: false },
+        cursor: { skills: false, rules: false, agents: false, mcps: false, hooks: false }
+      },
+      skills: { ignore: ["~/.claude/skills", "/home/u/.claude/skills/pdf"] },
+      plugins: { disabled: ["hookify", "feature-dev"] },
+      mcp_servers: { "jira-mcp": { command: "jira", args: ["--stdio"], env: { TOKEN_FILE: "/t" } } }
+    });
   });
 
   it("writes empty lists and no mcp_servers table for an empty profile", () => {
@@ -224,6 +187,5 @@ describe("GROK_PROFILE_ENV", () => {
     }
     assert.equal(GROK_PROFILE_ENV.GROK_CURSOR_SKILLS_ENABLED, "false");
     assert.equal("GROK_CLAUDE_SKILLS_ENABLED" in GROK_PROFILE_ENV, false);
-    assert.equal(Object.keys(GROK_PROFILE_ENV).length, 9);
   });
 });

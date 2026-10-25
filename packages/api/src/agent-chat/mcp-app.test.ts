@@ -94,7 +94,7 @@ test("the CSP meta goes right after a doctype, escaped", () => {
   assert.equal(without.endsWith("<p>hi</p>"), true);
 });
 
-test("a resource's document is prepared with its policy first, then the bootstraps", () => {
+test("a resource's document is selected with its policy before scripts", () => {
   const document = readMcpAppDocument(
     [
       { uri: "ui://other", mimeType: "text/html;profile=mcp-app", text: "<p>wrong uri</p>" },
@@ -119,15 +119,9 @@ test("a resource's document is prepared with its policy first, then the bootstra
   assert.deepEqual(document.csp, { connectDomains: ["https://api.example.com"] });
   assert.deepEqual(document.permissions, { clipboardWrite: {} });
   assert.equal(document.prefersBorder, true);
-  const metaAt = document.html.indexOf('<meta http-equiv="Content-Security-Policy"');
-  const firstScript = document.html.indexOf("<script>");
-  assert.equal(document.html.startsWith("<!doctype html><meta"), true);
-  assert.ok(metaAt < firstScript, "the policy precedes every script");
-  assert.ok(document.html.indexOf("document.cookie") < document.html.indexOf("app()"));
-  assert.ok(document.html.indexOf("colorScheme") < document.html.indexOf("app()"));
-  // The document reports its own unload, from a listener installed before the app's.
-  assert.ok(document.html.indexOf('"pagehide"') < document.html.indexOf("app()"));
-  assert.match(document.html, /orq\/notifications\/document-unloaded/);
+  const metaAt = document.html.search(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?Content-Security-Policy\b/i);
+  const firstScript = document.html.search(/<script\b/i);
+  assert.ok(metaAt >= 0 && metaAt < firstScript, "the policy precedes every script");
   assert.equal(isMcpAppUnloadNotice({ jsonrpc: "2.0", method: "orq/notifications/document-unloaded" }), true);
   assert.equal(isMcpAppUnloadNotice({ jsonrpc: "2.0", method: "ui/notifications/size-changed" }), false);
 });
@@ -343,25 +337,35 @@ test("an app whose domains reach Orquester's own origin is recognised", () => {
   assert.equal(mcpAppCspReachesOrigin(csp, "not a url"), false);
 });
 
-test("the unload notice goes to the parent seen at install, and not for a page kept in the back-forward cache", () => {
-  const html = readMcpAppDocument([{ mimeType: "text/html;profile=mcp-app", text: "<p>app</p>" }], "ui://x");
+test("the prepared scripts handle opaque cookies, host theme and unload after the parent changes", () => {
+  const html = readMcpAppDocument([{ mimeType: "text/html;profile=mcp-app", text: "<script>document.cookie;window.parent=window.impostor;</script><p>app</p>" }], "ui://x");
   assert.equal(html.kind, "document");
   if (html.kind !== "document") return;
-  const bootstrap = /<script>(\(function\(\)\{var P=window\.parent;[\s\S]*?)<\/script>/.exec(html.html)?.[1];
-  assert.ok(bootstrap, "the theme bootstrap");
   const posted: Array<{ to: string; message: unknown }> = [];
   const parent = { postMessage: (message: unknown) => posted.push({ to: "parent", message }) };
-  const listeners = new Map<string, (event: unknown) => void>();
+  const listeners = new Map<string, Array<(event: unknown) => void>>();
   const fakeWindow: Record<string, unknown> = {
     parent,
-    addEventListener: (type: string, listener: (event: unknown) => void) => listeners.set(type, listener)
+    impostor: { postMessage: (message: unknown) => posted.push({ to: "impostor", message }) },
+    addEventListener: (type: string, listener: (event: unknown) => void) =>
+      listeners.set(type, [...(listeners.get(type) ?? []), listener])
   };
-  new Function("window", "document", bootstrap)(fakeWindow, { documentElement: { style: {} } });
-  // An app script shadowing `window.parent` after the bootstrap ran changes nothing.
-  fakeWindow.parent = { postMessage: (message: unknown) => posted.push({ to: "impostor", message }) };
-  listeners.get("pagehide")!({ persisted: true });
+  const pageDocument = { documentElement: { style: {} as { colorScheme?: string } } };
+  Object.defineProperty(pageDocument, "cookie", {
+    configurable: true,
+    get: () => { throw Object.assign(new Error("opaque origin"), { name: "SecurityError" }); }
+  });
+  for (const script of html.html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    new Function("window", "document", script[1]!)(fakeWindow, pageDocument);
+  }
+  assert.equal(Reflect.get(pageDocument, "cookie"), "");
+  for (const listener of listeners.get("message") ?? []) {
+    listener({ source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: { theme: "light" } } });
+  }
+  assert.equal(pageDocument.documentElement.style.colorScheme, "light");
+  for (const listener of listeners.get("pagehide") ?? []) listener({ persisted: true });
   assert.deepEqual(posted, [], "a page kept in the back-forward cache says nothing");
-  listeners.get("pagehide")!({ persisted: false });
+  for (const listener of listeners.get("pagehide") ?? []) listener({ persisted: false });
   assert.deepEqual(posted, [{ to: "parent", message: { jsonrpc: "2.0", method: "orq/notifications/document-unloaded" } }]);
 });
 
@@ -384,7 +388,7 @@ function bootstrapWindow() {
       if (index >= 0) listeners.splice(index, 1);
     }
   };
-  const script = /<script>([\s\S]*?)<\/script>/.exec(injectMcpAppThemeBootstrap("<!doctype html><p>app</p>"))![1]!;
+  const script = /<script\b[^>]*>([\s\S]*?)<\/script>/i.exec(injectMcpAppThemeBootstrap("<!doctype html><p>app</p>"))![1]!;
   vm.runInNewContext(script, {
     window,
     document: { documentElement: { style: {} } },

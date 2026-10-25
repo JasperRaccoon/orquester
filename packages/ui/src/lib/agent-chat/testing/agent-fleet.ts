@@ -15,8 +15,7 @@ import type { DomainEvent, ThreadActivityItem } from "@orquester/api/agent-chat"
 const THREAD_ID = "s1";
 
 /** One log, built in order. */
-export function agentFleetLog(options: { callsPerAgent?: number } = {}): DomainEvent[] {
-  const calls = options.callsPerAgent ?? 6;
+export function agentFleetLog(): DomainEvent[] {
   const events: DomainEvent[] = [];
   let seq = 0;
   const at = (n: number): string => new Date(Date.UTC(2026, 3, 1, 9, 0, 0) + n * 1000).toISOString();
@@ -138,7 +137,7 @@ export function agentFleetLog(options: { callsPerAgent?: number } = {}): DomainE
   command(undefined, "p-call-1", "git status");
 
   // Interleaved work: every agent a few commands and words, round after round.
-  for (let round = 0; round < calls; round += 1) {
+  for (let round = 0; round < 3; round += 1) {
     for (const agentId of ["a1", "a2", "a3", "a4", "a5", "a6"]) {
       command(agentId, `${agentId}-c${round}`, `${agentId} step ${round}`);
       if (round % 2 === 0) words(`${agentId}-think-${round}`, "reasoning", [`${agentId} thinks `, `about ${round}.`], agentId);

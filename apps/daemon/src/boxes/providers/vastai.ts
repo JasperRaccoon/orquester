@@ -45,9 +45,9 @@ const PROVIDER = "vast.ai";
 const API = "https://console.vast.ai/api";
 export const VAST_ANY_REGION = "any";
 /** Disk of every box (GB): toolchains, a checkout and build output. */
-export const VAST_DISK_GB = 64;
+const VAST_DISK_GB = 64;
 /** vast.ai rejects longer `onstart` scripts. */
-export const VAST_ONSTART_MAX = 4048;
+const VAST_ONSTART_MAX = 4048;
 const MIN_RELIABILITY = 0.98;
 const RENT_CANDIDATES = 3;
 
@@ -57,7 +57,7 @@ const VAST_IMAGES: ReadonlyArray<BoxImageOffer & { minCuda: number }> = [
   { id: "vastai/base-image:cuda-12.4.1-auto", label: "Ubuntu + CUDA 12.4 (older drivers)", minCuda: 12.4 },
   { id: "vastai/pytorch:cuda-12.8.1-auto", label: "PyTorch + CUDA 12.8", minCuda: 12.8 }
 ];
-export const VAST_DEFAULT_IMAGE = VAST_IMAGES[0]!.id;
+const VAST_DEFAULT_IMAGE = VAST_IMAGES[0]!.id;
 const LOWEST_CUDA = Math.min(...VAST_IMAGES.map((image) => image.minCuda));
 
 interface VastOffer {
@@ -97,19 +97,19 @@ function vastRequest<T>(request: ProviderRequest, options: ProviderCallOptions):
 }
 
 /** The bootstrap env without its secrets: `onstart` writes them to 0600 files, so they need not sit in every process's environment. */
-export function vastEnv(env: Record<string, string>): Record<string, string> {
+function vastEnv(env: Record<string, string>): Record<string, string> {
   const secrets: readonly string[] = [ORQ_AGENT_ENV.bootstrapToken, ORQ_AGENT_ENV.tailscaleAuthKey];
   return Object.fromEntries(Object.entries(env).filter(([name]) => !secrets.includes(name)));
 }
 
 /** `"Oregon, US"` → `US`. */
-export function vastCountry(geolocation: string | null | undefined): string | null {
+function vastCountry(geolocation: string | null | undefined): string | null {
   const match = /(?:^|,\s*)([A-Z]{2})\s*$/.exec(geolocation ?? "");
   return match ? match[1]! : null;
 }
 
 /** The search body every offer read and every rent uses (vast.ai's filter language; the object is the body). */
-export function vastSearchBody(filters: { gpuName?: string; country?: string; minCuda: number; limit: number }): Record<string, unknown> {
+function vastSearchBody(filters: { gpuName?: string; country?: string; minCuda: number; limit: number }): Record<string, unknown> {
   return {
     verified: { eq: true },
     external: { eq: false },

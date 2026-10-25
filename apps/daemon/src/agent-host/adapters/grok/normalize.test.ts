@@ -1355,24 +1355,6 @@ function htmlRenderThroughUseTool(okayOutput: string): SessionNotification[] {
   });
 }
 
-test("fixture 32: an MCP call through use_tool, as the CLI sends it, is no session tool's", () => {
-  const grok = normalizer();
-  const frames = capturedCall("32-mcp-use-tool-call.ndjson", USE_TOOL_CALL);
-  assert.equal(frames.length, 3, "tool_call, the retitling update, the end");
-  const events = frames.flatMap((params) => grok.handleSessionUpdate(params));
-  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === USE_TOOL_CALL);
-  assert.ok(lifecycle.length >= 2);
-  for (const event of lifecycle) {
-    assert.notEqual((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
-    // The end has no vendor block; the row still names the meta-tool.
-    assert.equal((event.payload as { data?: { vendorTool?: string } }).data?.vendorTool, "use_tool", event.type);
-  }
-  const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
-  const data = completed.payload.data as { rawOutput?: { output?: { OkayOutput?: string } }; content?: unknown };
-  assert.equal(data.rawOutput?.output?.OkayOutput, "widget shown\n{\"n\":1}", "text blocks and structuredContent, one per line");
-  assert.equal(data.content, undefined, "no ACP content on the end");
-});
-
 test("a session tool reached through use_tool is an MCP call from its first frame, marked and rendered at ingestion", () => {
   const ref = { attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
   const json = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
@@ -1457,6 +1439,15 @@ test("fixture 32: a third-party app reached through use_tool is captured by rawO
   assert.equal((frames[0]!.update as { rawInput?: { tool_name?: string } }).rawInput?.tool_name, "apps__show_widget");
   const events = frames.flatMap((params) => grok.handleSessionUpdate(params)).map(withGrokMcpApp(USE_TOOL_CALL, WIDGET_APP));
   const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
+  const output = completed.payload.data as { rawOutput?: { output?: { OkayOutput?: string } }; content?: unknown };
+  assert.equal(output.rawOutput?.output?.OkayOutput, 'widget shown\n{"n":1}');
+  assert.equal(output.content, undefined);
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === USE_TOOL_CALL);
+  assert.ok(lifecycle.length >= 2);
+  for (const event of lifecycle) {
+    assert.notEqual((event.payload as { itemType?: string }).itemType, "mcp_tool_call");
+    assert.equal((event.payload as { data?: { vendorTool?: string } }).data?.vendorTool, "use_tool");
+  }
   // A host with session tools registered marks nothing on a foreign server's call.
   const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["html_render", "show_widget"]) });
   const data = (row!.payload as { data: { sessionTool?: unknown; vendorTool?: string } }).data;

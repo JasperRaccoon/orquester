@@ -749,7 +749,8 @@ test("expression preview: a starting block of a workflow with no trigger reads t
 
 test("expression preview: rendering stops at the byte cap and parse errors are deduplicated and capped", async () => {
   const { preview } = await previewHarness();
-  const template = "{{ nodes | json }}".repeat(50_000);
+  // The recorded node data already expands past 256 KiB at this size.
+  const template = "{{ nodes | json }}".repeat(1_024);
   const res = await preview({ node: "Final", templates: [template], mode: "text" });
   assert.equal(res.status, 200);
   const [result] = res.body.results;

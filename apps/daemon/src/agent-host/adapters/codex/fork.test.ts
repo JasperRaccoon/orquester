@@ -5,6 +5,7 @@
  */
 
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
 
@@ -12,8 +13,9 @@ import { codexThreadIdOf, forkCodexThread } from "./fork.ts";
 import { createFakeContext, writeMockCodexServer } from "./testing.ts";
 
 describe("forkCodexThread", () => {
-  it("asks for thread/fork through the last kept turn and answers the new thread", async () => {
+  it("asks for thread/fork through the last kept turn and answers the new thread", async (t) => {
     const mock = writeMockCodexServer({ forkThreadId: "forked-1" });
+    t.after(() => rmSync(mock.dir, { recursive: true, force: true }));
     const { context } = createFakeContext();
     const id = await forkCodexThread({
       bin: mock.bin,
@@ -39,8 +41,9 @@ describe("forkCodexThread", () => {
     );
   });
 
-  it("starts no MCP server in its short-lived process: every server the config defines is switched off", async () => {
+  it("starts no MCP server in its short-lived process: every server the config defines is switched off", async (t) => {
     const mock = writeMockCodexServer({ forkThreadId: "forked-2", mcpServers: { orquester_remote: { url: "http://127.0.0.1:47831/mcp" }, "dot.ted": { command: "x" } } });
+    t.after(() => rmSync(mock.dir, { recursive: true, force: true }));
     const { context } = createFakeContext();
     await forkCodexThread({
       bin: mock.bin,
@@ -54,8 +57,9 @@ describe("forkCodexThread", () => {
     assert.deepEqual(fork.config, { mcp_servers: { orquester_remote: { enabled: false }, "dot.ted": { enabled: false } } });
   });
 
-  it("rejects with the provider's refusal", async () => {
+  it("rejects with the provider's refusal", async (t) => {
     const mock = writeMockCodexServer({ failFork: true });
+    t.after(() => rmSync(mock.dir, { recursive: true, force: true }));
     const { context } = createFakeContext();
     await assert.rejects(
       forkCodexThread({
@@ -72,8 +76,9 @@ describe("forkCodexThread", () => {
 
   it("reads the source thread off a cursor, or nothing", () => {
     assert.equal(codexThreadIdOf({ threadId: "abc-1" }), "abc-1");
-    assert.equal(codexThreadIdOf({ threadId: "-flag" }), null);
-    assert.equal(codexThreadIdOf(null), null);
-    assert.equal(codexThreadIdOf("abc"), null);
+    for (const cursor of [undefined, null, {}, { threadId: "" }, { threadId: 42 }, "abc", [],
+      { threadId: "../../etc/passwd" }, { threadId: "-flag" }, { threadId: "x".repeat(257) }]) {
+      assert.equal(codexThreadIdOf(cursor), null);
+    }
   });
 });

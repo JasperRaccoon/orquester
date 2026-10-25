@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -198,17 +200,18 @@ func TestProcessesGetHomeAndUserWhenOrqAgentHasNone(t *testing.T) {
 	t.Setenv("USER", "")
 	t.Setenv("LOGNAME", "")
 	d := newTestDaemon(t)
-	// As `Run` does at start: the box user comes from the account database, not the env.
-	info := d.agent.refreshSysInfo()
-	if info.Home == "" || info.User == "" {
-		t.Skip("this machine's account has no home or name to fall back to")
+	account, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || account.HomeDir == "" || account.Username == "" {
+		t.Skip("the host account database is unavailable")
 	}
+	// Refresh the agent as Run does, but use the OS account as the independent oracle.
+	d.agent.refreshSysInfo()
 	d.openExec(1, shellSpec(`echo "home=${HOME:-none} user=${USER:-none}"`, false))
 	var out strings.Builder
 	for !strings.Contains(out.String(), "\n") {
 		out.Write(d.nextData(1))
 	}
-	if want := "home=" + info.Home + " user=" + info.User + "\n"; out.String() != want {
+	if want := "home=" + account.HomeDir + " user=" + account.Username + "\n"; out.String() != want {
 		t.Fatalf("output = %q, want %q", out.String(), want)
 	}
 }
@@ -225,18 +228,17 @@ func TestDaemonClientNeverFollowsRedirects(t *testing.T) {
 		http.Redirect(w, r, target.URL+"/steal", http.StatusFound)
 	}))
 	t.Cleanup(redirecting.Close)
-	req, _ := http.NewRequest(http.MethodGet, redirecting.URL+"/api/boxes/agent/linux-x64", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	res, err := daemonClient(Config{}).Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = res.Body.Close()
-	if res.StatusCode != http.StatusFound {
-		t.Fatalf("status = %d; want the 302 itself", res.StatusCode)
-	}
-	if daemonClient(Config{Proxy: "http://127.0.0.1:1055"}).CheckRedirect == nil {
-		t.Fatal("the proxied client must refuse redirects too")
+	for _, cfg := range []Config{{}, {Proxy: redirecting.URL}} {
+		req, _ := http.NewRequest(http.MethodGet, redirecting.URL+"/api/boxes/agent/linux-x64", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		res, err := daemonClient(cfg).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusFound {
+			t.Fatalf("status = %d; want the 302 itself", res.StatusCode)
+		}
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("the redirect target was requested %d times", hits.Load())
@@ -276,8 +278,18 @@ func TestUnixChannelBridgesASocketInTheBox(t *testing.T) {
 
 func TestUnixChannelRefusesARelativePathAndAMissingSocket(t *testing.T) {
 	d := newTestDaemon(t)
-	for ch, path := range map[int]string{5: "vnc.sock", 7: filepath.Join(t.TempDir(), "none.sock")} {
-		d.send(map[string]any{"t": "open", "ch": ch, "spec": map[string]any{"kind": "unix", "path": path}})
-		d.expect("open-failed", isMsg("open-failed", ch))
+	for _, tc := range []struct {
+		ch         int
+		path, code string
+	}{
+		{5, "vnc.sock", "BAD_REQUEST"},
+		{7, filepath.Join(t.TempDir(), "none.sock"), "ENOENT"},
+	} {
+		d.send(map[string]any{"t": "open", "ch": tc.ch, "spec": map[string]any{"kind": "unix", "path": tc.path}})
+		failed := d.expect("open-failed", isMsg("open-failed", tc.ch))
+		info, _ := failed["error"].(map[string]any)
+		if info["code"] != tc.code {
+			t.Fatalf("open %q failed for the wrong reason: %v", tc.path, failed)
+		}
 	}
 }

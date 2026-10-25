@@ -149,11 +149,13 @@ describe("DST", () => {
 
 describe("scheduleIntervalProblem", () => {
   it("accepts exactly the divisors of 60 (minutes) and 24 (hours)", () => {
+    const minutes = new Set([1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30]);
+    const hours = new Set([1, 2, 3, 4, 6, 8, 12]);
     for (let every = 1; every <= 59; every += 1) {
-      assert.equal(scheduleIntervalProblem({ kind: "minutes", every }) === null, 60 % every === 0 && every < 60, `minutes ${every}`);
+      assert.equal(scheduleIntervalProblem({ kind: "minutes", every }) === null, minutes.has(every), `minutes ${every}`);
     }
     for (let every = 1; every <= 23; every += 1) {
-      assert.equal(scheduleIntervalProblem({ kind: "hours", every, atMinute: 0 }) === null, 24 % every === 0, `hours ${every}`);
+      assert.equal(scheduleIntervalProblem({ kind: "hours", every, atMinute: 0 }) === null, hours.has(every), `hours ${every}`);
     }
     assert.equal(scheduleIntervalProblem({ kind: "daily", time: "09:00" }), null);
   });

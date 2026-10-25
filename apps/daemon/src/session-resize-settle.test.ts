@@ -14,7 +14,7 @@ import { after, before, describe, test } from "node:test";
 import type { RegistryEntry } from "@orquester/api";
 
 import type { RegistryService } from "./registry.ts";
-import { drainSessionIndexWrites, LocalSessionManager, SessionManager, type ISessionManager } from "./sessions.ts";
+import { drainSessionIndexWrites, SessionManager } from "./sessions.ts";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux.ts";
 
 const run = promisify(execFile);
@@ -81,9 +81,4 @@ describe("settleResize on the tmux backend", { skip: tmuxAvailable() && tmuxVers
     manager.resize(session.id, 90, 20);
     await manager.settleResize(session.id, abort.signal);
   });
-});
-
-test("the direct backend applies a resize synchronously, so it has nothing to settle", () => {
-  const local: ISessionManager = new LocalSessionManager(registry);
-  assert.equal(local.settleResize, undefined);
 });

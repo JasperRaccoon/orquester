@@ -4,10 +4,6 @@
  */
 
 export {
-  CLAUDE_DROPPED_SETTINGS,
-  CODEX_DROPPED_CONFIG,
-  GROK_DROPPED_CONFIG,
-  OPENCODE_DROPPED_CONFIG,
   claudeRuntimeSettings,
   codexRuntimeConfig,
   grokRuntimeConfig,
@@ -27,7 +23,6 @@ export {
   type GrokPluginNamesResult,
   type GrokProfileConfigInput,
   grokDiscoveredPluginNames,
-  grokProfileConfig,
   grokSkillIgnoreList,
   parsePluginNames,
   renderGrokProfileConfigToml

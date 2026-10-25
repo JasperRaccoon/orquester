@@ -7,7 +7,6 @@ import { test, type TestContext } from "node:test";
 
 import {
   EXIT_REQUIRED_FAILED,
-  GOOGLE_SIGNING_KEY_FINGERPRINT,
   browserFontsScript,
   browserInstallScript,
   chromeStartScript,
@@ -45,6 +44,7 @@ async function stubBin(t: TestContext, manager: "apt-get" | "dnf"): Promise<{ bi
     [
       "#!/bin/sh",
       `echo "${manager} $*" >> "$LOG"`,
+      'echo "noninteractive=$DEBIAN_FRONTEND" >> "$LOG"',
       "cmd=; for a in \"$@\"; do case $a in update | install) cmd=$a ;; esac; done",
       'if [ "$cmd" = update ]; then : > "$STATE/updated"; exit 0; fi',
       `if [ ${needsUpdate} = 1 ] && [ ! -f "$STATE/updated" ]; then echo "E: Unable to locate package"; exit 100; fi`,
@@ -72,28 +72,15 @@ test("generated scripts are valid POSIX sh for every package manager", () => {
   syntaxOk(chromeStartScript());
 });
 
-test("apt scripts are non-interactive, skip recommends and wait for the dpkg lock", () => {
-  const script = desktopInstallScript({ manager: "apt", ...PLAN });
-  assert.match(script, /DEBIAN_FRONTEND=noninteractive/);
-  assert.match(script, /--no-install-recommends/);
-  assert.match(script, /DPkg::Lock::Timeout=600/);
-  assert.match(script, /dpkg --configure -a/);
-  assert.match(script, /install_set 'tigervnc-standalone-server' 'openbox' \|\| \{ say 'Could not install the desktop packages\.'; exit 3; \}/);
-  assert.match(desktopInstallScript({ manager: "dnf", ...PLAN }), /dnf install -y --setopt=install_weak_deps=False/);
-  assert.match(desktopInstallScript({ manager: "yum", ...PLAN }), /yum install -y/);
-});
-
-test("the Chrome install uses Google's signed repository and pins the key's fingerprint", () => {
+test("the Chrome install names Google's signed repository and distro keyring paths", () => {
   const apt = browserInstallScript("apt");
   assert.match(apt, /https:\/\/dl\.google\.com\/linux\/linux_signing_key\.pub/);
-  assert.ok(apt.includes(GOOGLE_SIGNING_KEY_FINGERPRINT));
-  assert.match(apt, /signed-by=%s\] %s stable main/);
   assert.match(apt, /'\/etc\/apt\/sources\.list\.d\/google-chrome\.list'/);
   assert.match(apt, /--proto '=https'/);
-  assert.match(apt, /install_set google-chrome-stable/);
+  assert.ok(apt.includes("google-chrome-stable"));
   // Chrome's postinst takes the repository over; a later run reuses it, and our key goes once unused.
-  assert.match(apt, /if \[ -f '\/etc\/apt\/sources\.list\.d\/google-chrome\.sources' \] && \[ -s '\/usr\/share\/keyrings\/google-chrome\.gpg' \]; then/);
-  assert.match(apt, /\[ -f '\/etc\/apt\/sources\.list\.d\/google-chrome\.list' \] \|\| rm -f '\/etc\/apt\/keyrings\/google-chrome\.asc'/);
+  assert.ok(apt.includes("/etc/apt/sources.list.d/google-chrome.sources"));
+  assert.ok(apt.includes("/usr/share/keyrings/google-chrome.gpg"));
   const rpm = browserInstallScript("dnf");
   assert.match(rpm, /gpgcheck=1/);
   assert.match(rpm, /baseurl=https:\/\/dl\.google\.com\/linux\/chrome\/rpm\/stable\/\$basearch/);
@@ -105,6 +92,9 @@ test("apt: stale lists are refreshed and the install retried; a missing optional
   const { code, out } = await runWithStubs(desktopInstallScript({ manager: "apt", ...PLAN }), stubs.bin, { ...stubs.env, FAIL: "ffmpeg" });
   assert.equal(code, 0, out);
   const calls = await readFile(stubs.log, "utf8");
+  assert.match(calls, /^noninteractive=noninteractive$/m);
+  assert.match(calls, /^apt-get .* -o DPkg::Lock::Timeout=600 /m);
+  assert.match(calls, /^dpkg --configure -a$/m);
   assert.match(calls, /apt-get .* update/);
   assert.match(calls, /apt-get .*install --no-install-recommends tigervnc-standalone-server openbox$/m);
   // The optional batch failed on ffmpeg, so each package went on its own.

@@ -7,7 +7,6 @@ import { FakeDaemonApi } from "../testing.ts";
 import { chatSummary,head,shellSummary,snapshot,stamp } from "../fixtures.ts";
 import { ok } from "../result.ts";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
-import { providerPickerView } from "@orquester/api/agent-chat";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import { executeToolCall } from "../executor.ts";
 import { catalogFamily } from "./catalog.ts";
@@ -421,15 +420,7 @@ test("list_agents is the composer picker's view: the launch default (never a leg
   const codex = (r: Record<string, any>) => (r.agents as ListedAgent[]).find((a) => a.id === "codex")! as ListedAgent & { defaultModel: string | null; catalogueLoading: boolean };
   const listed = await tool("list_agents").run({}, ctx(pickerApi()));
   const view = codex(listed);
-  // The picker's own view over the same snapshot (`providerPickerView`, the composer's source), shortName listed only where it differs.
-  const picker = providerPickerView({ status: "ready", models: [
-    { slug: "gpt-5.5", name: "GPT-5.5", isDefault: true, isLegacy: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "high", label: "High", isDefault: true }] }] } },
-    { slug: "gpt-6-sol", name: "GPT-6 Sol", shortName: "Sol", capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "high", label: "High", isDefault: true }] }, { id: "fastMode", label: "Fast", type: "boolean", currentValue: false }] } },
-    { slug: "openai/gpt-6-luna", name: "GPT-6 Luna", subProvider: "OpenRouter", capabilities: { optionDescriptors: [] } }
-  ] });
-  assert.deepEqual(view.models, picker.models.map(({ shortName, ...m }) => (shortName !== m.name ? { ...m, shortName } : m)));
   assert.equal(view.defaultModel, "gpt-6-sol", "the default flag sits on a legacy model: the launch default is the first non-legacy one");
-  assert.equal(view.defaultModel, picker.defaultModel);
   assert.deepEqual(view.models.map((m) => [m.slug, m.isDefault]), [["gpt-6-sol", true], ["openai/gpt-6-luna", false]]);
   const sol = view.models[0] as unknown as { shortName: string; options: { id: string; default?: unknown }[] };
   assert.equal(sol.shortName, "Sol");

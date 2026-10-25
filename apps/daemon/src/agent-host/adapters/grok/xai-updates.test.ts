@@ -721,7 +721,9 @@ test("a new turn opens a new episode", () => {
   r.normalizer.endTurn();
   r.normalizer.beginTurn();
   r.turn = "turn-2";
-  assert.equal(r.live(retry(2)).length, 1, "the counter is per request, the episode per turn");
+  assert.deepEqual(r.live(retry(2)).map((event) => [event.type, event.turnId, (event.payload as { state?: string }).state]), [
+    ["session.state.changed", "turn-2", "running"]
+  ]);
 });
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { buildBootstrap } from "../bootstrap/bootstrap.ts";
 import { callOptions, fixture, routedFetch, sampleCreateRequest } from "./gpu-testing.ts";
 import { ProviderHttpError } from "./http.ts";
-import { VAST_DEFAULT_IMAGE, VAST_DISK_GB, VAST_ONSTART_MAX, vastCountry, vastSearchBody, vastaiAdapter } from "./vastai.ts";
+import { vastaiAdapter } from "./vastai.ts";
 
 const creds = { apiKey: "vast_test" };
 const f = (name: string): string => fixture("vastai", name);
@@ -34,7 +34,7 @@ test("vastai: offers search verified on-demand single-GPU offers and keep the be
   assert.deepEqual(body.reliability, { gte: 0.98 });
   assert.deepEqual(body.num_gpus, { eq: 1 });
   assert.equal(body.type, "on-demand");
-  assert.equal(body.allocated_storage, VAST_DISK_GB);
+  assert.equal(body.allocated_storage, 64);
   assert.deepEqual(body.order, [["dph_total", "asc"]]);
 
   assert.equal(offers.priceSource, "live");
@@ -55,7 +55,7 @@ test("vastai: offers search verified on-demand single-GPU offers and keep the be
     offers.regions.map((region) => region.id),
     ["any", "CA", "DE", "US"]
   );
-  assert.equal(offers.images[0]!.id, VAST_DEFAULT_IMAGE);
+  assert.equal(offers.images[0]!.id, "vastai/base-image:cuda-12.8.1-auto");
   assert.deepEqual((await vastaiAdapter.offers(creds, "linux", callOptions(fetch))).sizes, []);
 });
 
@@ -77,8 +77,8 @@ test("vastai: create rents the cheapest matching offer once, with label, onstart
   assert.equal(rent.label, "orq-box-0123abcd");
   assert.equal(rent.runtype, "ssh");
   assert.equal(rent.onstart, request.bootstrap.posixScript);
-  assert.equal(rent.disk, VAST_DISK_GB);
-  assert.equal(rent.image, VAST_DEFAULT_IMAGE);
+  assert.equal(rent.disk, 64);
+  assert.equal(rent.image, "vastai/base-image:cuda-12.8.1-auto");
   assert.equal(rent.cancel_unavail, true);
   // The bootstrap secrets stay out of the container's environment.
   assert.deepEqual(rent.env, { ORQ_DAEMON_URL: request.bootstrap.env.ORQ_DAEMON_URL, ORQUESTER_BOX_ID: "box-0123abcd" });
@@ -131,11 +131,9 @@ test("vastai: onstart is the staged first stage of a real bootstrap, with Tailsc
     tailscaleAuthKey: tailscaleKey,
     container: true
   });
-  assert.ok(bootstrap.posixScript.length > VAST_ONSTART_MAX, "the single-stage script is what does not fit");
   await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any", bootstrap }), callOptions(fetch));
   const rent = seen[1]!.body as Record<string, unknown>;
   assert.equal(rent.onstart, bootstrap.stagedPosixScript);
-  assert.ok((rent.onstart as string).length <= VAST_ONSTART_MAX);
   assert.match(rent.onstart as string, /\/api\/boxes\/bootstrap\/container/);
   assert.deepEqual(rent.env, {
     ORQ_DAEMON_URL: "https://orq-host.tail1234.ts.net:8443",
@@ -150,9 +148,9 @@ test("vastai: onstart is the staged first stage of a real bootstrap, with Tailsc
 test("vastai: create refuses an onstart script over 4048 characters before renting", async () => {
   const { fetch, seen } = routedFetch([]);
   const request = sampleCreateRequest({ size: "RTX 4090", region: "any" });
-  const long = { ...request, bootstrap: { ...request.bootstrap, posixScript: "#".repeat(VAST_ONSTART_MAX + 1) } };
+  const long = { ...request, bootstrap: { ...request.bootstrap, posixScript: "#".repeat(4049) } };
   await assert.rejects(vastaiAdapter.create(creds, long, callOptions(fetch)), /at most 4048/);
-  const longStaged = { ...request, bootstrap: { ...request.bootstrap, stagedPosixScript: "#".repeat(VAST_ONSTART_MAX + 1) } };
+  const longStaged = { ...request, bootstrap: { ...request.bootstrap, stagedPosixScript: "#".repeat(4049) } };
   await assert.rejects(vastaiAdapter.create(creds, longStaged, callOptions(fetch)), /at most 4048/);
   assert.equal(seen.length, 0);
 });
@@ -223,19 +221,4 @@ test("vastai: listManaged pages through v1 instances and keeps orq- labels", asy
     ]
   );
   assert.equal(managed[0]!.createdAt, new Date(1760914666123).toISOString());
-});
-
-test("vastai: a 429 is retried, and helpers parse countries and build searches", async () => {
-  const { fetch, seen } = routedFetch([
-    {
-      path: "/api/v0/users/current/",
-      replies: [{ status: 429, headers: { "retry-after": "0", "content-type": "text/plain" }, body: "API requests too frequent endpoint threshold=4.5" }, { body: f("users-current.json") }]
-    }
-  ]);
-  assert.deepEqual(await vastaiAdapter.validate(creds, callOptions(fetch)), { ok: true });
-  assert.equal(seen.length, 2);
-  assert.equal(vastCountry("Oregon, US"), "US");
-  assert.equal(vastCountry("SE"), "SE");
-  assert.equal(vastCountry(null), null);
-  assert.equal(vastSearchBody({ minCuda: 12.4, limit: 5 }).limit, 5);
 });

@@ -100,8 +100,6 @@ export async function createClaudeSessionToolsLaunch(input: {
   /** What the thread's fallback is keyed on (agent `claude`, its account home, its project). */
   launch: Omit<SessionToolsLaunch, "agent">;
   signal: AbortSignal;
-  /** Overrides {@link CLAUDE_RELIST_TIMEOUT_MS} (tests). */
-  relistTimeoutMs?: number;
 }): Promise<ClaudeSessionToolsLaunch> {
   let names: ReadonlySet<string> = new Set();
   let instance: SessionToolsMcpServer | undefined;
@@ -116,7 +114,7 @@ export async function createClaudeSessionToolsLaunch(input: {
         resolve(value);
       };
       const wake = () => done(true);
-      const timer = setTimeout(() => done(false), input.relistTimeoutMs ?? CLAUDE_RELIST_TIMEOUT_MS);
+      const timer = setTimeout(() => done(false), CLAUDE_RELIST_TIMEOUT_MS);
       listWaiters.add(wake);
     });
   const { prepared, release } = await input.sessionTools.launchInProcess(input.threadId, { agent: "claude", ...input.launch }, async (next) => {

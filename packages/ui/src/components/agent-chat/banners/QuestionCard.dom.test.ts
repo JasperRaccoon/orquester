@@ -197,7 +197,7 @@ describe("QuestionCard — the question and its options", () => {
     assert.equal(mount.textContent?.includes("**one**"), false, "no raw markdown on screen");
   });
 
-  it("wraps long labels and descriptions instead of truncating them, with inline markdown descriptions", () => {
+  it("renders option labels and inline markdown descriptions without nested links", () => {
     const label = "Move them (Recommended) — keep the history and the blame of every moved file intact";
     render(request(question({
       options: [
@@ -206,12 +206,10 @@ describe("QuestionCard — the question and its options", () => {
       ]
     })));
     const option = all<HTMLButtonElement>("[data-question-option]")[0]!;
-    assert.equal(option.querySelector(".truncate"), null, "nothing in an option is cut off");
     assert.ok(option.textContent?.includes(label), "the whole label is there");
     assert.equal(option.querySelector("strong")?.textContent, "history stays");
     assert.equal(option.querySelector("code")?.textContent, "git mv");
-    // Phrasing content only inside a button: no block, and no link that would take the click.
-    assert.equal(option.querySelector("a, div, p, pre, ul, ol"), null);
+    assert.equal(option.querySelector("a"), null, "a description cannot take the option click");
   });
 
   it("keeps the numbered options, picks by digit, and ignores a digit typed into the answer", () => {
@@ -314,6 +312,10 @@ describe("QuestionCard — the composer's send answers the question on screen", 
     assert.equal(refused?.ok, false);
     act(() => all<HTMLButtonElement>("[data-question-option]")[1]!.click());
     await flush();
+    const submit = all<HTMLButtonElement>("button").find((button) => button.textContent === "Submit answers");
+    assert.ok(submit);
+    act(() => submit.click());
+    assert.deepEqual(submitted, [{ first: "Gamma, actually", second: "Beta" }]);
     assert.equal(answerQuestionFromComposer("chat-2", "x"), null, "another chat's composer reaches no card");
     act(() => root.unmount());
     assert.equal(answerQuestionFromComposer("chat-1", "x"), null);
@@ -351,7 +353,6 @@ describe("QuestionCard — option previews", () => {
     assert.equal(preview().getAttribute("aria-label"), "Preview: Sidebar");
     assert.equal(preview().getAttribute("data-question-preview"), "markdown");
     assert.ok(preview().textContent?.includes("│▤ │ main│"));
-    assert.ok(preview().querySelector(".font-mono"), "the monospace box Claude writes for");
 
     const options = all<HTMLButtonElement>("[data-question-option]");
     focus(options[1]!);

@@ -108,11 +108,12 @@ describe("where a session's link leads", () => {
   });
 
   it("a failed session list throws (the host retries after a reconnect)", async () => {
+    const offline = new Error("offline");
     const api = {
       listSessions: async () => {
-        throw new Error("offline");
+        throw offline;
       }
     } as unknown as Pick<ApiClient, "listSessions" | "listWorkspaces" | "listProjects">;
-    await assert.rejects(resolveSessionDeepLink(api, ID));
+    await assert.rejects(resolveSessionDeepLink(api, ID), (error) => error === offline);
   });
 });

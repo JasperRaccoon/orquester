@@ -48,7 +48,7 @@ import { systemClock, type Clock } from "./runtime-seams.ts";
  * last transition. Long on purpose: it only guards against a provider that
  * never reports an end, and a shorter bound killed real work.
  */
-export const UNCHECKED_BACKGROUND_TTL_MS = 6 * 60 * 60_000;
+const UNCHECKED_BACKGROUND_TTL_MS = 6 * 60 * 60_000;
 
 interface TaskEntry {
   /** When the task was first seen live (epoch ms). */

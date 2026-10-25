@@ -48,10 +48,10 @@ export const REFRESH_CONCURRENCY = 4;
  * bound on asking for it (`MANIFEST_TIMEOUT_MS`, 10 s), so the host never gives up on an answer
  * the daemon is about to give.
  */
-export const DAEMON_POINTING_READ_TIMEOUT_MS = 4_000;
+const DAEMON_POINTING_READ_TIMEOUT_MS = 4_000;
 
 /** How long the session list read for the workflow-owned trait may take before it counts as owned. */
-export const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 3_000;
+const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 3_000;
 
 /** How long the Knowledge Graph read of a chat may take before the manifest treats the plugin as off. */
 export const KNOWLEDGE_INFO_TIMEOUT_MS = 2_000;

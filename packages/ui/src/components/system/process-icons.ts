@@ -2,9 +2,7 @@
  * Which icon a process row shows, best first: the app's own artwork for the
  * agents, IDEs, browsers and shells it already draws elsewhere (the registry
  * icons of the new-tab menu), else a brand logo (simple-icons slug), else a
- * generic category. Pure — no React, no icon data — so `process-icons.check.ts`
- * can assert it with plain `node --import tsx`; `ProcessIcon.tsx` maps the
- * answer to artwork.
+ * generic category. `ProcessIcon.tsx` maps the answer to artwork.
  */
 
 /** Registry icon ids (`icons/registry-icons.tsx`) a process can be drawn with. */

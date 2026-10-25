@@ -11,8 +11,6 @@ import {
   keyProviders,
   providerAbbreviation,
   providerStatusView,
-  providerSubline,
-  totalsLine,
   windowsImageView
 } from "./providers.logic.ts";
 import {
@@ -20,7 +18,6 @@ import {
   connectionProblems,
   connectionRequest,
   httpsUrlProblem,
-  reachabilityView,
   tailscaleLocalView,
   tailscaleSetupFailure
 } from "./connection.logic.ts";
@@ -64,15 +61,6 @@ test("provider rows: Blacksmith has its own row, each tile its abbreviation", ()
   assert.deepEqual(keyProviders(null), []);
   assert.equal(providerAbbreviation(provider()), "HZ");
   assert.equal(providerAbbreviation(provider({ id: "digitalocean", label: "DigitalOcean" })), "DO");
-});
-
-test("the sub-line shows the key hint, the kinds it unlocks and the account step", () => {
-  assert.equal(providerSubline(provider()), "Key …a1b2 · Linux VM · New accounts need an ID check.");
-  assert.equal(
-    providerSubline(provider({ keyHint: null, accountNote: null, kinds: ["linux", "windows"] })),
-    "Linux VM, Windows"
-  );
-  assert.equal(providerSubline(provider({ keyHint: null, accountNote: null, kinds: [] })), "");
 });
 
 test("status: a pill when configured, the Add API key button when not", () => {
@@ -121,12 +109,6 @@ test("the Windows image row offers Prepare only while connected without an image
   assert.deepEqual(windowsImageView(preparing), { tone: "info", label: "Preparing…", message: "Installing updates", canPrepare: false });
   assert.equal(windowsImageView(provider({ windowsImage: { state: "failed", message: "x", updatedAt: null } }))?.canPrepare, true);
   assert.equal(windowsImageView(provider({ windowsImage: { state: "ready", message: null, updatedAt: null } }))?.label, "Ready");
-});
-
-test("the card header totals", () => {
-  assert.equal(totalsLine(null), null);
-  assert.equal(totalsLine({ activeCount: 1, hourlyUsd: 4.8, monthEstimatedUsd: 576 }), "1 box running · $4.80/h · $576 this month");
-  assert.equal(totalsLine({ activeCount: 0, hourlyUsd: 0, monthEstimatedUsd: 0 }), "0 boxes running · $0.00/h · $0.00 this month");
 });
 
 // ---------------------------------------------------------------------------
@@ -218,16 +200,6 @@ test("Tailscale mode also saves the public URL (macOS boxes) and the federated i
   assert.deepEqual(connectionRequest({ ...kept, workloadClientId: "", workloadAudience: "" }, withIdentity), {
     tailscaleWorkloadClientId: null,
     tailscaleWorkloadAudience: null
-  });
-});
-
-test("the reachability pill", () => {
-  assert.deepEqual(reachabilityView(null), { tone: "neutral", label: "Not checked", title: null });
-  assert.deepEqual(reachabilityView({ ...SETTINGS, reachable: "ok" }), { tone: "ok", label: "Reachable", title: null });
-  assert.deepEqual(reachabilityView({ ...SETTINGS, reachable: "failed", reachableMessage: "TLS handshake failed" }), {
-    tone: "danger",
-    label: "Unreachable",
-    title: "TLS handshake failed"
   });
 });
 

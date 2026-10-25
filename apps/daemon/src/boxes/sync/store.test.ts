@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -8,8 +8,9 @@ import { boxConfigChangesPath } from "@orquester/config";
 
 import { BoxConfigChangeStore, BoxSyncBaselines } from "./store.ts";
 
-test("config-changes.json keeps unknown fields, unknown states and unreadable entries on rewrite", async () => {
+test("config-changes.json keeps unknown fields, unknown states and unreadable entries on rewrite", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "orq-sync-store-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const path = boxConfigChangesPath(appdir);
   await mkdir(dirname(path), { recursive: true });
   const future = { id: "f1", boxId: "b1", createdAt: "2026-10-20T00:00:00.000Z", state: "quarantined", files: [], extra: { kept: true } };
@@ -24,8 +25,9 @@ test("config-changes.json keeps unknown fields, unknown states and unreadable en
   assert.ok(written.changes.some((set: { id?: string }) => set.id === "c1"));
 });
 
-test("an unreadable config-changes.json is moved aside, not overwritten", async () => {
+test("an unreadable config-changes.json is moved aside, not overwritten", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "orq-sync-store-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const path = boxConfigChangesPath(appdir);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, "{ not json");
@@ -36,8 +38,9 @@ test("an unreadable config-changes.json is moved aside, not overwritten", async 
   assert.ok(names.some((name) => name.startsWith("config-changes.json.unreadable-")));
 });
 
-test("baselines round-trip and drop unreadable entries", async () => {
+test("baselines round-trip and drop unreadable entries", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "orq-sync-store-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const baselines = new BoxSyncBaselines(appdir, 10);
   const map = await baselines.get("b1");
   map.set("/h/a", { h: "x".repeat(64), s: 3, m: 4 });

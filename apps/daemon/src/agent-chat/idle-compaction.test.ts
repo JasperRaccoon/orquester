@@ -8,7 +8,7 @@ import { agentPrefsSchema } from "@orquester/config";
 
 import type { DaemonApi, DaemonMethod, DaemonRequestOptions, DaemonResponse } from "../mcp/daemon-api.ts";
 import type { Clock } from "../workflows/contracts.ts";
-import { ChatIdleCompaction, idleCompactionCommandId, type IdleCompactionPrefs } from "./idle-compaction.ts";
+import { ChatIdleCompaction, type IdleCompactionPrefs } from "./idle-compaction.ts";
 import { sanitizeIdleCompactionCandidate } from "./summary.ts";
 
 const T0 = Date.parse("2026-10-22T12:00:00.000Z");
@@ -181,7 +181,6 @@ test("a 1h cache is compacted two minutes before it expires, once, under the tur
       body: { commandId: "idle-compact:s1:t1", idle: { turnId: "t1" } }
     }
   ]);
-  assert.equal(idleCompactionCommandId("s1", "t1"), "idle-compact:s1:t1");
   // Polls that report the same thing again never post again.
   h.service.onCandidate("s1", candidate("t1", HOUR));
   h.service.prefsChanged();
@@ -202,12 +201,12 @@ test("only 'before the cache expires' compacts; an account's override wins over 
   for (const mode of ["onReturn", "off"] as const) {
     const h = harness({ prefs: { claudeIdleCompaction: mode } });
     h.service.onCandidate("s1", candidate());
-    await advance(h, HOUR);
+    await advance(h, HOUR - IDLE_COMPACTION_LEAD_MS);
     assert.equal(h.host.posts.length, 0, mode);
   }
   const overridden = harness({ prefs: { claudeIdleCompaction: "beforeCacheExpires", claudeIdleCompactionByAccount: { acc1: "off" } } });
   overridden.service.onCandidate("s1", candidate());
-  await advance(overridden, HOUR);
+  await advance(overridden, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(overridden.host.posts.length, 0);
   const optedIn = harness({ prefs: { claudeIdleCompaction: "off", claudeIdleCompactionByAccount: { system: "beforeCacheExpires" } } });
   optedIn.chat.tabs.set("s1", chatTab({ accountId: "" }));
@@ -220,7 +219,7 @@ test("never another agent's chat", async () => {
   const h = harness();
   h.chat.tabs.set("s1", chatTab({ refId: "codex" }));
   h.service.onCandidate("s1", candidate());
-  await advance(h, HOUR);
+  await advance(h, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(h.host.posts.length, 0);
 });
 
@@ -240,12 +239,12 @@ test("each guard on the tab keeps it from compacting", async () => {
     const h = harness();
     h.chat.tabs.set("s1", chatTab(guard));
     h.service.onCandidate("s1", candidate());
-    await advance(h, HOUR);
+    await advance(h, HOUR - IDLE_COMPACTION_LEAD_MS);
     assert.equal(h.host.posts.length, 0, JSON.stringify(guard));
   }
   const small = harness();
   small.service.onCandidate("s1", candidate("t1", HOUR, 199_999));
-  await advance(small, HOUR);
+  await advance(small, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(small.host.posts.length, 0, "under 200k tokens");
 });
 
@@ -269,7 +268,7 @@ test("a guard that clears inside the window lets it go out; one that appears can
   later.service.onCandidate("s1", candidate());
   await settle(later);
   assert.equal(later.clock.pending(), 0);
-  await advance(later, HOUR);
+  await advance(later, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(later.host.posts.length, 0);
 });
 
@@ -298,7 +297,7 @@ test("closing the tab or turning the setting off cancels it", async () => {
   await settle(closed);
   closed.chat.close("s1");
   assert.equal(closed.clock.pending(), 0);
-  await advance(closed, HOUR);
+  await advance(closed, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(closed.host.posts.length, 0);
 
   const switched = harness();
@@ -308,7 +307,7 @@ test("closing the tab or turning the setting off cancels it", async () => {
   switched.service.prefsChanged();
   await settle(switched);
   assert.equal(switched.clock.pending(), 0);
-  await advance(switched, HOUR);
+  await advance(switched, HOUR - IDLE_COMPACTION_LEAD_MS);
   assert.equal(switched.host.posts.length, 0);
   // And back on: armed again, from the same log-derived window.
   switched.clock.t = T0;

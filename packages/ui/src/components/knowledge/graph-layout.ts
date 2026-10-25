@@ -67,7 +67,7 @@ const SPACING = 2.4;
  * The spectral pass packs a big graph into a fixed area, so its concepts
  * overlap: scale it about its centre until each has room. Never shrinks.
  */
-export function spread(
+function spread(
   positions: Record<string, { x: number; y: number }>,
   nodes: readonly { size: number }[]
 ): Record<string, { x: number; y: number }> {

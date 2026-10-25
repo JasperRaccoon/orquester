@@ -20,16 +20,13 @@
  */
 
 import {
-  currentInteractionMode,
   exceedsExchangeLimit,
   MAX_EXCHANGE_HOPS,
   nextCausedBy,
   parseCausedBy,
-  runningTurnOf,
   type CausedBy,
   RUNTIME_MODES,
   type RuntimeMode,
-  type ThreadSnapshotPayload,
   type Turn
 } from "@orquester/api/agent-chat";
 
@@ -43,15 +40,6 @@ export interface TurnPolicyCaller {
   runtimeMode: RuntimeMode;
   /** Its running turn is in plan mode. */
   planning: boolean;
-}
-
-/**
- * Whether a thread's running turn is in plan mode: `currentInteractionMode` — the active turn (else
- * the latest unsettled one, else the latest), and a steer of it that recorded another mode wins
- * (T6-M2: a default turn steered into plan plans).
- */
-export function runningTurnPlans(snap: ThreadSnapshotPayload): boolean {
-  return currentInteractionMode(snap) === "plan";
 }
 
 /**
@@ -107,17 +95,7 @@ export function openedThreadRuntimeMode(caller: TurnPolicyCaller, requested: Run
  */
 export const NEW_SESSION = "(new)";
 
-/**
- * The caller's exchange, server-side from its own snapshot (never from arguments): its running
- * turn's (`runningTurnOf`: the active turn, else the latest unsettled one, else the latest — the
- * turn `currentInteractionMode` reads) `causedBy` as `{id, hop}`, or null for a user-authored turn
- * (or an older log without it).
- */
-export function runningExchange(snap: ThreadSnapshotPayload): { id: string; hop: number } | null {
-  return exchangeOfTurn(runningTurnOf(snap));
-}
-
-/** {@link runningExchange} of a running turn already picked (a thread head's `runningTurn`). */
+/** The current exchange of a running turn read from the public thread head. */
 export function exchangeOfTurn(turn: Pick<Turn, "causedBy"> | null | undefined): { id: string; hop: number } | null {
   const causedBy = parseCausedBy(turn?.causedBy);
   return causedBy ? { id: causedBy.exchangeId, hop: causedBy.hop } : null;

@@ -6,7 +6,7 @@ import test from "node:test";
 import type { KnowledgeVisibility } from "@orquester/api";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
-import { FakeEmbedder, FakeEmbedderSource, FakeStore, edge, node, silentLogger } from "./test-fakes.ts";
+import { FakeEmbedder, FakeEmbedderSource, FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 
 // Spec "Fast": search returns within about 300 ms p95 at 5,000 entries. A fake embedder with the
 // real model's 384 dimensions stands in for the model (its own latency is measured by the
@@ -51,7 +51,7 @@ test("hybrid search over 5,000 entries: p95 under 300 ms", { timeout: 120_000 },
     return edge(`edge-${i}`, `concept-${a}`, `concept-${b}`, [`${entryIds[Math.floor(random() * ENTRIES)]}.md`]);
   });
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
-  graph.replace(nodes, edges);
+  await loadGraph(graph, nodes, edges);
 
   const indexDir = await mkdtemp(join(tmpdir(), "kg-perf-"));
   const embedder = new FakeEmbedder({ dimensions: 384 });

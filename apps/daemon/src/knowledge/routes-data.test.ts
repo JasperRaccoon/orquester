@@ -24,7 +24,7 @@ import type { KnowledgeEntryChange } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
-import { FakeEmbedder, FakeEmbedderSource, edge, node, silentLogger } from "./search/test-fakes.ts";
+import { FakeEmbedder, FakeEmbedderSource, edge, loadGraph, node, silentLogger } from "./search/test-fakes.ts";
 import { KnowledgeStore } from "./store/store.ts";
 
 // Route-level coverage: shapes, `{ code, message }` refusals, the plugin gate, visibility per
@@ -318,7 +318,8 @@ test("items, graph and search never show a profile chat what it cannot see", asy
   const h = await harness(t);
   const { seo, saas, alt, billing } = await seed(h);
   h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
-  h.graph.replace(
+  await loadGraph(
+    h.graph,
     [
       node("tactic-comparison", "Comparison pages", [`${alt}.md`, `${billing}.md`]),
       node("tool-stripe", "Stripe", [`${billing}.md`])
@@ -365,7 +366,7 @@ test("an edit that moves an entry out of a profile caller's view answers the edi
   const h = await harness(t);
   const { seo, saas, alt, billing } = await seed(h);
   h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
-  h.graph.replace([node("tactic-comparison", "Comparison pages", [`${alt}.md`, `${billing}.md`])], []);
+  await loadGraph(h.graph, [node("tactic-comparison", "Comparison pages", [`${alt}.md`, `${billing}.md`])], []);
 
   const moved = ok<KnowledgeEntryDetail>(
     await h.inject({ method: "PATCH", url: `${knowledgeRoutes.entry(alt)}?sessionId=seo-chat`, payload: { collections: [saas.id] } })

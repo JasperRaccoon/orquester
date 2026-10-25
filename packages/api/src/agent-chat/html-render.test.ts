@@ -11,7 +11,6 @@ import test from "node:test";
 import {
   HTML_RENDER_MAX_HEIGHT,
   HTML_RENDER_MIN_HEIGHT,
-  HTML_RENDER_THEME_TOKENS,
   htmlRenderFileName,
   htmlRenderFrameHeight,
   htmlRenderReferenceOfActivityPayload,
@@ -30,7 +29,7 @@ import {
   sanitizeHtmlRenderThemeVariables,
   type HtmlRenderReference
 } from "./html-render.ts";
-import { sessionToolMarkedData } from "./session-tools.ts";
+import { boundSessionToolData, sessionToolMarkedData } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 const ID = "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
@@ -106,7 +105,7 @@ const REGISTERED = new Set(["html_render", "html_preview"]);
 
 /** A row as the host's ingestion persists it: the provenance marker stamped on a registered tool's call. */
 function ingested(row: Record<string, unknown>): Record<string, unknown> {
-  return { ...row, data: sessionToolMarkedData(row.data, REGISTERED) };
+  return { ...row, data: boundSessionToolData(sessionToolMarkedData(row.data, REGISTERED)) };
 }
 
 /** A completed html_render row as each adapter emits it (before ingestion). */
@@ -117,7 +116,7 @@ const PROVIDER_ROWS: Record<string, Record<string, unknown>> = {
     title: "mcp__orquester__html_render",
     data: {
       toolName: "mcp__orquester__html_render",
-      input: { html: "<p>hi</p>", title: "Chart", height: 420 },
+      input: { html: `<p>${"x".repeat(200_000)}</p>`, title: "Chart", height: 420 },
       result: { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: RESULT_JSON }] }
     }
   },
@@ -189,7 +188,7 @@ const PROVIDER_ROWS: Record<string, Record<string, unknown>> = {
   }
 };
 
-test("the reference is found in every provider's ingested html_render row, slimmed once or twice", () => {
+test("the reference is found in every provider's bounded html_render row, slimmed once or twice", () => {
   for (const [provider, row] of Object.entries(PROVIDER_ROWS)) {
     const payload = ingested(row);
     assert.deepEqual(htmlRenderReferenceOfActivityPayload(payload), REF, provider);
@@ -286,19 +285,31 @@ test("theme variables from a host message are sanitised as the bootstrap does", 
 test("the stock theme gives every token, colours as hex", () => {
   for (const appearance of ["dark", "light"] as const) {
     const theme = htmlRenderStockTheme(appearance);
-    assert.deepEqual(Object.keys(theme.variables), [...HTML_RENDER_THEME_TOKENS]);
-    for (const [token, value] of Object.entries(theme.variables)) {
+    // Public theme-token names from agent visuals §2.3, independent of the exporter's list.
+    const requiredTokens = (
+      "--background --foreground --muted --muted-foreground --card --card-foreground --popover " +
+      "--popover-foreground --secondary --secondary-foreground --border --input --ring --primary " +
+      "--primary-foreground --accent --accent-foreground --accent-surface --accent-surface-foreground " +
+      "--destructive --destructive-foreground --destructive-surface --warning --warning-foreground " +
+      "--warning-surface --success --success-foreground --info --info-foreground --code-background " +
+      "--code-foreground --chart-1 --chart-2 --chart-3 --chart-4 --chart-5 --chart-6 --radius --font-sans --font-mono"
+    ).split(" ");
+    for (const token of requiredTokens) {
+      const value = theme.variables[token];
+      assert.ok(typeof value === "string" && value.length > 0, `${appearance} ${token}`);
       if (token === "--radius" || token.startsWith("--font-")) continue;
       assert.match(value, /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/, `${appearance} ${token}`);
     }
   }
-  assert.equal(htmlRenderStockTheme("dark").variables["--background"], "#030303");
-  assert.equal(htmlRenderStockTheme("light").variables["--background"], "#fcfcfd");
 });
 
-test("a palette variable that does not read as a triple falls back to stock", () => {
-  const theme = htmlRenderThemeFromPalette((variable) => (variable === "--n-950" ? "garbage" : undefined), "dark");
-  assert.equal(theme.variables["--background"], "#030303");
+test("palette RGB colors map to page tokens; an invalid triple falls back to stock", () => {
+  const palette: Record<string, string> = { "--n-950": "17 34 51", "--n-100": "170 187 204" };
+  const mapped = htmlRenderThemeFromPalette((variable) => palette[variable], "dark");
+  assert.equal(mapped.variables["--background"], "#112233");
+  assert.equal(mapped.variables["--foreground"], "#aabbcc");
+  const fallback = htmlRenderThemeFromPalette((variable) => (variable === "--n-950" ? "garbage" : undefined), "dark");
+  assert.equal(fallback.variables["--background"], htmlRenderStockTheme("dark").variables["--background"]);
 });
 
 test("the theme fragment and message round-trip the theme", () => {
@@ -315,27 +326,20 @@ test("the theme fragment and message round-trip the theme", () => {
 test("the bootstrap lands at the start of the head, before the page's own markup", () => {
   const page = '<!doctype html><html><head><meta charset="utf-8"><style>p{}</style></head><body><p>x</p></body></html>';
   const out = injectHtmlRenderBootstrap(page);
-  const at = out.indexOf('<style id="orq-theme">');
+  const at = out.indexOf("<style");
   assert.ok(at > out.indexOf("<head>") && at < out.indexOf("<style>p{}"));
-  assert.ok(!out.slice(out.indexOf("<head>"), at).includes('<meta charset="utf-8"><meta charset'), "no second charset");
-  assert.ok(out.includes("<script>(function(){"));
+  assert.equal(out.match(/<meta\b[^>]*\bcharset\s*=/gi)?.length, 1);
   assert.ok(out.endsWith("<body><p>x</p></body></html>"));
 });
 
 test("the bootstrap is never injected into a comment, script or template", () => {
   const page = "<!-- <head> --><script>var s='<head>'</script><template><head></template><p>x</p>";
   const out = injectHtmlRenderBootstrap(page);
-  assert.ok(out.startsWith("<!doctype html><head><meta charset"));
+  assert.match(out, /^<!doctype html>\s*<head\b/i);
   assert.ok(out.endsWith(page));
 });
 
 test("a page with only <html> or a doctype gets a head of its own", () => {
-  assert.ok(injectHtmlRenderBootstrap("<html lang=en><p>x</p></html>").startsWith("<html lang=en><head><meta"));
-  assert.ok(injectHtmlRenderBootstrap("<!DOCTYPE html><p>x</p>").startsWith("<!DOCTYPE html><head><meta"));
-});
-
-test("the default css follows the OS appearance and carries both stock palettes", () => {
-  const out = injectHtmlRenderBootstrap("<p>x</p>");
-  assert.match(out, /:root\{color-scheme:dark;--background:#030303;/);
-  assert.match(out, /@media \(prefers-color-scheme: light\)\{:root\{color-scheme:light;--background:#fcfcfd;/);
+  assert.match(injectHtmlRenderBootstrap("<html lang=en><p>x</p></html>"), /^<html lang=en><head\b/i);
+  assert.match(injectHtmlRenderBootstrap("<!DOCTYPE html><p>x</p>"), /^<!doctype html><head\b/i);
 });

@@ -174,9 +174,10 @@ describe("wire validation", () => {
     });
     assert.deepEqual(state().prompts.get("agent")?.createdBy, { kind: "agent", threadId: "t1", agent: "codex", title: "Plan" });
     assert.deepEqual(state().prompts.get("agent")?.usedByWorkflows, [{ workflowId: "w1", name: "Nightly" }]);
-    for (const createdBy of [null, "agent", [], {}, { kind: "" }]) {
-      applySavedPromptEvent({ type: "savedPrompt.upserted", payload: { id: "user", title: "T", body: "B", projectPath: null, createdBy, updatedAt: String(Math.random()) } });
-      assert.equal(state().prompts.get("user")?.createdBy, undefined, JSON.stringify(createdBy));
+    for (const [index, createdBy] of [null, "agent", [], {}, { kind: "" }].entries()) {
+      const id = `user-${index}`;
+      applySavedPromptEvent({ type: "savedPrompt.upserted", payload: { id, title: "T", body: "B", projectPath: null, createdBy } });
+      assert.equal(state().prompts.get(id)?.createdBy, undefined, JSON.stringify(createdBy));
     }
   });
 });
@@ -624,15 +625,6 @@ describe("reset", () => {
     assert.deepEqual(state().loads, {}, "nor its load state");
     applySavedPromptEvent({ type: "savedPrompt.upserted", payload: prompt({ id: "t" }) });
     assert.deepEqual(held(), ["t"], "tombstones are per connection too");
-  });
-
-  it("a reset before the request left sends nothing", async () => {
-    const api = new FakeApi();
-    const load = loadSavedPrompts(api, PROJECT);
-    resetSavedPrompts();
-    await load;
-    assert.deepEqual(api.listCalls, []);
-    assert.deepEqual(state().loads, {});
   });
 
   it("a client of another connection starts over", async () => {

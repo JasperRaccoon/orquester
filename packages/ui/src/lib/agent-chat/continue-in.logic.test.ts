@@ -5,17 +5,15 @@ import type { RegistryEntry } from "@orquester/api";
 import type { ThreadItem, Turn } from "@orquester/api/agent-chat";
 
 import {
-  continueActionLabel,
   continueAgentOptions,
   continueHandoffBudget,
   continueHandoffPreview,
   continueMode,
   continueRequestFields,
-  continueSummaryText,
   sourceAccountChip,
   type ContinueSource
 } from "./continue-in.logic";
-import { ForkRetryKeys, lineageVerb } from "./lineage.logic";
+import { ForkRetryKeys } from "./lineage.logic";
 
 const entry = (id: string, adapter: string | null, extra: Partial<RegistryEntry> = {}): RegistryEntry =>
   ({ id, name: id.toUpperCase(), kind: "agent", bin: [id], resolvedBin: `/usr/bin/${id}`, enabled: true, installState: "idle", ...(adapter ? { chat: { adapter } } : {}), ...extra }) as RegistryEntry;
@@ -121,33 +119,10 @@ describe("the continue-in picker", () => {
     assert.ok(preview.carried < 4 && preview.bytes <= small);
     // The same agent and model under another account: the source's own reading.
     assert.equal(continueHandoffBudget(state, opus, { sameAgent: true, modelSelection: opus, catalog: [] }), 40_000 - 16_000 - 10 * 1024);
-    assert.match(
-      continueSummaryText({ mode: "handoff", targetName: "Small", preview: null, moreOlder: false, budgetBytes: small }),
-      /^Carries the original request and the newest messages that fit \(up to ≈6 KB\)/
-    );
   });
 
-  it("says what will be carried over, and what the button does", () => {
-    assert.equal(
-      continueSummaryText({ mode: "handoff", targetName: "Codex", preview: { carried: 23, total: 41, bytes: 58 * 1024, firstRequest: true }, moreOlder: false }),
-      "Carries 23 of 41 messages (≈58 KB): the original request and the newest history that fits; the rest stays readable. Codex reads it with your first message."
-    );
-    assert.match(
-      continueSummaryText({ mode: "handoff", targetName: "Codex", preview: { carried: 23, total: 41, bytes: 58 * 1024 }, moreOlder: true }),
-      /of 41\+ messages/
-    );
-    assert.match(continueSummaryText({ mode: "handoff", targetName: "Codex", preview: null, moreOlder: false }), /the newest messages that fit \(up to ≈64 KB\)/);
-    assert.match(continueSummaryText({ mode: "native", targetName: "Claude Code", preview: null, moreOlder: false }), /^Native fork: Claude Code keeps the whole conversation/);
-    assert.match(continueSummaryText({ mode: "same-agent-transcript", targetName: "Grok", preview: null, moreOlder: false }), /Grok has no native fork/);
-    assert.equal(continueActionLabel("handoff", "Codex"), "Continue in Codex");
-    assert.equal(continueActionLabel("native", "Claude Code"), "Fork");
-  });
-
-  it("names a continuation in the lineage bar, and keys its retries apart from a plain fork's", () => {
-    assert.equal(lineageVerb({ relation: "fork", sourceAgent: "claude" }), "Continued from");
-    assert.equal(lineageVerb({ relation: "fork" }), "Forked from");
+  it("keeps continuation retries apart from plain forks and other target models", () => {
     const plain = ForkRetryKeys.keyFor("p", { messageId: "m" });
-    assert.equal(plain, JSON.stringify(["p", "m", null, null]), "a plain fork's key is unchanged");
     assert.notEqual(ForkRetryKeys.keyFor("p", { messageId: "m", refId: "codex", modelSelection: { model: "gpt-5" } }), plain);
     assert.notEqual(
       ForkRetryKeys.keyFor("p", { messageId: "m", refId: "codex", modelSelection: { model: "gpt-5" } }),

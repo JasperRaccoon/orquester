@@ -1,7 +1,7 @@
 /**
  * The gate's facts (unified MCP design 2026-10-15 §5.1, §5.4, §13 c): target classes, path
  * classification against a real directory tree (symlinks included), own children, the
- * workflow-owned lineage walk, and a workflow's project union.
+ * workflow-owned lineage walk.
  */
 
 import assert from "node:assert/strict";
@@ -16,7 +16,7 @@ import { canonicalProject, classifyPath, classifyTarget } from "../addressing.ts
 import type { ScopeClaim, ThreadCaller } from "../catalog/contract.ts";
 import { chatSummary } from "../fixtures.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { gateFacts, isWorkflowOwned, ownChildren, workflowProjectUnion } from "./scope.ts";
+import { gateFacts, isWorkflowOwned } from "./scope.ts";
 
 async function tree(t: { after(fn: () => Promise<void>): void }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "umcp-scope-")));
@@ -119,14 +119,12 @@ test("own children: lineage parent = the caller AND agentCreated; a GUI fork is 
     chatSummary({ id: "gui-fork", lineage: { parentThreadId: "me", relation: "fork", createdAt: "x" } }),
     chatSummary({ id: "cousin", lineage: { parentThreadId: "other", relation: "opened", createdAt: "x", agentCreated: true } })
   ];
-  assert.deepEqual([...ownChildren("me", sessions, ["kid", "gui-fork", "cousin", "ghost"])], ["kid"]);
 
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: sessions });
-  const facts = await gateFacts(api, caller(), claim({ sessions: ["me", "kid", "gui-fork"], ownChildrenOnly: "only yours" }));
-  assert.deepEqual(facts.notOwnChildren, ["gui-fork"], "self is judged by scope.self, not as a child");
+  const facts = await gateFacts(api, caller(), claim({ sessions: ["me", "kid", "gui-fork", "cousin", "ghost"], ownChildrenOnly: "only yours" }));
+  assert.deepEqual(facts.notOwnChildren, ["gui-fork", "cousin", "ghost"], "self is judged by scope.self, not as a child");
   const none = new FakeDaemonApi();
   assert.deepEqual((await gateFacts(none, caller(), claim({ sessions: ["kid"] }))).notOwnChildren, [], "no ownChildrenOnly: nothing read");
-  assert.deepEqual(none.calls, []);
 });
 
 test("workflow-owned: owner on the tab or any ancestor; a closed ancestor fails closed only behind an agent-made link", () => {
@@ -169,12 +167,4 @@ test("workflow-owned: the inheritable lineage marker is proof on its own — eve
   assert.equal(isWorkflowOwned(sessions, "marked-fork"), true, "without the marker this GUI fork of a closed parent would read as not owned");
   assert.equal(isWorkflowOwned(sessions, "kid"), true, "a descendant of a marked thread is owned through the walk");
   assert.equal(isWorkflowOwned(sessions, "plain-fork"), false);
-});
-
-test("a workflow's project union: names and paths, deduplicated and canonical; temp projects by workspace", async (t) => {
-  const { ws, api } = await tree(t);
-  const union = await workflowProjectUnion(api, { projects: ["acme/api", join(ws, "acme/api"), "beta/app"], pendingWorkspaces: ["acme", "acme"] });
-  assert.deepEqual(union, { projects: [join(ws, "acme/api"), join(ws, "beta/app")], pendingProjects: [{ workspace: "acme" }] });
-  assert.deepEqual(await workflowProjectUnion(api, { projects: ["acme/web"] }), { projects: [join(ws, "acme/web")] });
-  await assert.rejects(workflowProjectUnion(api, { projects: ["acme/nope"] }), { code: "PROJECT_NOT_FOUND" });
 });

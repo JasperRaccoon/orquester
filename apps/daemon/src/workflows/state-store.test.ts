@@ -42,13 +42,6 @@ test("a missing file loads empty, silently; updates persist atomically at 0600",
   assert.deepEqual((await readdir(join(dir, "daemon"))).filter((f) => f.endsWith(".tmp")), [], "no temp file left behind");
 });
 
-test("get() is a snapshot", async () => {
-  const store = new WorkflowStateStore({ path: join(await scratch(), "state.json") });
-  const snapshot = store.get();
-  snapshot.cooldowns["claude:a"] = cooldown;
-  assert.deepEqual(store.get().cooldowns, {});
-});
-
 test("a corrupt file starts empty, is moved aside and logged — never thrown", async () => {
   const dir = await scratch();
   const path = join(dir, "workflow-state.json");

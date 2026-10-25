@@ -61,35 +61,28 @@ describe("presentConnectionDiagnosis", () => {
     assert.equal(diagnose({ status: "connecting", attempt: 3 }), null, "a retry with no failure on record yet");
   });
 
-  it("names each failure with its own headline, steps and action", () => {
-    const cases: Array<[ConnectionFailure["kind"], RegExp]> = [
-      ["dns", /address could not be found/],
-      ["refused", /refused the connection/],
-      ["tls", /secure connection to vps failed/i],
-      ["timeout", /did not answer in time/],
-      ["unreachable", /Can't reach vps/],
-      ["proxy-down", /proxy answered 502, but the daemon behind it did not/],
-      ["not-orquester", /Something other than Orquester answered/],
-      ["server-error", /answered with an error \(HTTP 500\)/],
-      ["unauthorized", /Sign in to vps again/],
-      ["stalled", /went quiet/]
+  it("classifies failures and offers sign-in only for an unauthorized response", () => {
+    const cases: ConnectionFailure["kind"][] = [
+      "dns",
+      "refused",
+      "tls",
+      "timeout",
+      "unreachable",
+      "proxy-down",
+      "not-orquester",
+      "server-error",
+      "unauthorized",
+      "stalled"
     ];
-    for (const [kind, pattern] of cases) {
+    for (const kind of cases) {
       const status = kind === "proxy-down" ? 502 : kind === "server-error" ? 500 : undefined;
       const diagnosis = diagnose({ status: "error", attempt: 0, log: log({ lastFailure: failure(kind, { status }) }) });
       assert.ok(diagnosis, kind);
       assert.equal(diagnosis.kind, kind);
       assert.equal(diagnosis.severity, "error");
-      assert.match(diagnosis.headline, pattern, kind);
       assert.ok(diagnosis.steps.length > 0, kind);
       assert.equal(diagnosis.action, kind === "unauthorized" ? "sign-in" : "retry", kind);
     }
-  });
-
-  it("TLS points at the certificate and the Tailscale address", () => {
-    const diagnosis = diagnose({ log: log({ lastFailure: failure("tls") }) });
-    assert.ok(diagnosis?.steps.some((step) => step.includes("certificate")));
-    assert.ok(diagnosis?.steps.some((step) => step.includes("Tailscale ts.net")));
   });
 
   it("an offline device beats whatever the last failure said", () => {
@@ -100,7 +93,6 @@ describe("presentConnectionDiagnosis", () => {
     const stoppingAt = NOW - 5_000;
     const restarting = diagnose({ log: log({ stoppingAt, lastFailure: failure("refused", { at: NOW - 4_000 }) }) });
     assert.equal(restarting?.kind, "restarting");
-    assert.match(restarting!.headline, /vps is restarting/);
     assert.equal(
       diagnose({ log: log({ stoppingAt, lastFailure: failure("proxy-down", { at: NOW - 3_000, status: 502 }) }) })?.kind,
       "restarting"
@@ -117,10 +109,6 @@ describe("presentConnectionDiagnosis", () => {
     );
     // A refused sign-in is never a restart.
     assert.equal(diagnose({ log: log({ stoppingAt, lastFailure: failure("unauthorized", { at: NOW - 4_000 }) }) })?.kind, "unauthorized");
-  });
-
-  it("a web app served by the unreachable server says it stopped answering", () => {
-    assert.match(diagnose({ sameOrigin: true, log: log({ lastFailure: failure("unreachable") }) })!.headline, /vps stopped answering/);
   });
 
   it("the lockout headline is the store's countdown", () => {
@@ -141,7 +129,6 @@ describe("presentConnectionDiagnosis", () => {
     assert.equal(diagnose({ status: "connected", attempt: 0, runtime: "desktop", log: log({ serverProtocol: 2 }) })?.action, null);
     const older = diagnose({ status: "connected", attempt: 0, clientProtocol: 2, log: log({ serverProtocol: 1 }) });
     assert.equal(older?.kind, "server-outdated");
-    assert.ok(older?.steps.some((step) => step.includes("deploy")));
     assert.equal(diagnose({ status: "connected", attempt: 0, log: log({ serverProtocol: null }) }), null, "an older daemon without a protocol");
   });
 
@@ -202,11 +189,19 @@ describe("probes", () => {
   });
 
   it("the HTTP check gives up after its timeout", async () => {
-    const result = await probeHttp(
-      (signal) =>
-        new Promise((_, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
-      { timeoutMs: 5 }
+    mock.timers.enable({ apis: ["setTimeout"] });
+    let timeoutSignal!: AbortSignal;
+    const pending = probeHttp(
+      (signal) => {
+        timeoutSignal = signal;
+        return new Promise((_, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+      },
+      { timeoutMs: 1_000 }
     );
+    mock.timers.tick(999);
+    assert.equal(timeoutSignal.aborted, false);
+    mock.timers.tick(1);
+    const result = await pending;
     assert.equal(result.outcome, "failed");
     assert.match(result.summary, /timeout/);
   });

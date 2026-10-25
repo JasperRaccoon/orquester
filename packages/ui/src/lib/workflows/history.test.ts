@@ -29,12 +29,13 @@ describe("SnapshotHistory", () => {
     assert.equal(history.undo("a"), null);
   });
 
-  it("a null key never coalesces, and seal() ends a burst early", () => {
+  it("null keys and history navigation keep separate edit steps", () => {
     const history = new SnapshotHistory<number>();
     history.record(1, null, 0);
     history.record(2, null, 1);
     history.record(3, "k", 2);
-    history.seal();
+    assert.equal(history.undo(4), 3);
+    assert.equal(history.redo(3), 4);
     history.record(4, "k", 3);
     assert.equal(history.undo(5), 4);
     assert.equal(history.undo(4), 3);

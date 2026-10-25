@@ -1007,7 +1007,7 @@ const updateWorkflow = defineTool({
     const only = everything ? undefined : diff.touched;
     const prompts = await promptsFor(api, after, only);
     // Adding or changing a block that reads a secret, or retargeting one: never granted.
-    const secretUse = changesSecretUse(current, after, diff.touched);
+    const secretUse = changesSecretUse(after, diff.touched);
     // Workflows that run this one: the edit changes what they run (covered only with them).
     const callerList = await workflowCallers(api, current.id);
     const callers = callerParts(callerList, "change");

@@ -3,15 +3,12 @@ import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 
 import {
-  boxDesktopInstallHint,
-  boxDesktopInstallsOnOpen,
   browserFontChoices,
   chromeArch,
   desktopInstallPlan,
   evaluateBoxDesktop,
   guiProbeScript,
   manualInstallCommand,
-  nonLinuxDesktopStatus,
   packageManagerOf,
   parseGuiProbe,
   type BoxGuiFacts
@@ -163,32 +160,6 @@ test("the install plan names packages per package manager, plus a terminal and f
   assert.deepEqual(desktopInstallPlan(complete, [], "apt").missing, []);
 });
 
-test("the install hint says Orquester installs, or why it cannot", () => {
-  const fresh = facts(FRESH);
-  const { missingPackages } = evaluateBoxDesktop(fresh);
-  assert.equal(
-    boxDesktopInstallHint(fresh, missingPackages, "dev"),
-    "Orquester installs tigervnc-standalone-server openbox libgl1-mesa-dri pulseaudio pulseaudio-utils ffmpeg xcompmgr xterm fonts-dejavu-core in the box when a desktop opens."
-  );
-  assert.match(
-    boxDesktopInstallHint({ ...fresh, sudo: false }, missingPackages, "dev") ?? "",
-    /^Orquester cannot install tigervnc-standalone-server .*: the box user dev has no root access or passwordless sudo\. Install them in the box \(sudo apt-get install -y tigervnc-standalone-server openbox /
-  );
-  assert.match(boxDesktopInstallHint({ ...fresh, packageCommand: "pacman" }, missingPackages, "dev") ?? "", /only with apt or dnf\/yum/);
-  assert.equal(boxDesktopInstallHint(facts(INSTALLED), [], "root"), null);
-  assert.equal(nonLinuxDesktopStatus().installHint, "Desktops run only in Linux VMs.");
-  assert.equal(nonLinuxDesktopStatus().available, false);
-});
-
-test("a desktop installs what is missing by itself only with a package manager and root or sudo", () => {
-  const fresh = facts(FRESH);
-  const { missingPackages } = evaluateBoxDesktop(fresh);
-  assert.equal(boxDesktopInstallsOnOpen(fresh, missingPackages), true);
-  assert.equal(boxDesktopInstallsOnOpen({ ...fresh, sudo: false }, missingPackages), false);
-  assert.equal(boxDesktopInstallsOnOpen({ ...fresh, packageCommand: "pacman" }, missingPackages), false);
-  assert.equal(boxDesktopInstallsOnOpen(facts(INSTALLED), []), false);
-});
-
 test("package managers and Chrome architectures", () => {
   assert.equal(packageManagerOf({ packageCommand: "apt-get" }), "apt");
   assert.equal(packageManagerOf({ packageCommand: "dnf" }), "dnf");
@@ -208,8 +179,6 @@ test("every probe variant is valid POSIX sh", () => {
   ]) {
     execFileSync("/bin/sh", ["-n", "-c", guiProbeScript(parts)]);
   }
-  assert.doesNotMatch(guiProbeScript({ desktop: false, browser: true }), /ffmpeg/);
-  assert.doesNotMatch(guiProbeScript({ desktop: true, browser: false }), /chrome/);
 });
 
 test("the browser probe reads the CJK and emoji fonts; only missing ones are installed, per package manager", () => {

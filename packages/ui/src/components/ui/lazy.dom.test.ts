@@ -80,14 +80,11 @@ describe("lazy views", () => {
     console.error = originalConsoleError;
   });
 
-  it("a lazy dialog loads with its first opening and stays mounted across a close", async () => {
+  it("a lazy dialog loads on first opening and keeps its state across a close", async () => {
     let loads = 0;
-    let mounts = 0;
     const Dialog: React.FC<{ open: boolean }> = ({ open }) => {
-      React.useEffect(() => {
-        mounts += 1;
-      }, []);
-      return createElement("p", null, open ? "dialog open" : "dialog closed");
+      const [value, setValue] = React.useState("initial");
+      return createElement("button", { onClick: () => setValue("edited") }, open ? `dialog open ${value}` : "dialog closed");
     };
     const pending = deferredModule<{ Dialog: typeof Dialog }>();
     const LazyDialog = lazyDialog(
@@ -109,13 +106,14 @@ describe("lazy views", () => {
       pending.resolve({ Dialog });
       await pending.promise;
     });
-    assert.equal(host.textContent, "dialog open");
+    assert.equal(host.textContent, "dialog open initial");
+    act(() => host.querySelector("button")!.click());
+    assert.equal(host.textContent, "dialog open edited");
 
     act(() => root.render(createElement(LazyDialog, { open: false })));
     assert.equal(host.textContent, "dialog closed");
     act(() => root.render(createElement(LazyDialog, { open: true })));
-    assert.equal(host.textContent, "dialog open");
-    assert.equal(mounts, 1);
+    assert.equal(host.textContent, "dialog open edited");
     assert.equal(loads, 1);
   });
 

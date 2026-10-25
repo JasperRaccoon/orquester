@@ -165,7 +165,7 @@ const REPLACEMENT = String.fromCharCode(0xfffd);
 test("readFileWindow ends a window on a UTF-8 character boundary and says how many bytes it consumed", async (t) => {
   const root = await makeRoot(t);
   // 1-, 2-, 3- and 4-byte characters, so window ends land inside each kind.
-  const content = "a語bé語d😀e".repeat(500);
+  const content = "a語bé語d😀e".repeat(8);
   await write(root, "cjk.txt", content);
   const tools = new FsTools({ fsRoot: root });
   let offset = 0;

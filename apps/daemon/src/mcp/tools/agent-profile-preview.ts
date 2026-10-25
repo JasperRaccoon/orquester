@@ -344,8 +344,6 @@ export function redactUrlCredentials(url: string): string {
   return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#\s]+@/i, "$1***@");
 }
 
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-
 /** The digest a `files` pin compares (paths, hashes, flags), as the daemon's `treeDigest`. */
 export function treeDigest(tree: ProfilePreviewTree): string {
   const hash = createHash("sha256");
@@ -370,7 +368,7 @@ function entropy(text: string): number {
 }
 
 /** Whether a plain env / header value the AGENT wrote looks like a secret (flagged on the card). */
-export function looksLikeSecret(key: string, value: string): boolean {
+function looksLikeSecret(key: string, value: string): boolean {
   if (value.trim() === "" || ENV_REFERENCE.test(value)) return false;
   if (SECRET_KEY.test(key)) return true;
   const bare = value.replace(/^\s*bearer\s+/i, "").trim();
@@ -1262,6 +1260,3 @@ export async function editPreview(agent: Agent, changes: readonly ProfileChange[
   validateChanges(agent, changes, ctx.caller);
   return buildPreview(await readBatchFacts(ctx.api, agent, changes), ctx.caller);
 }
-
-/** sha256 of a string (tests and pins). */
-export { sha256 };

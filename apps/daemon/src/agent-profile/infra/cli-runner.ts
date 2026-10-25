@@ -67,9 +67,8 @@ interface AgentCliRun {
    * (`CODEX_HOME=<homes.codexHome>`); `ORQUESTER_*` names are refused.
    */
   env?: Readonly<Record<string, string>>;
-  /** Test seams. */
+  /** Grace between SIGTERM and SIGKILL after a deadline (default 2 s). */
   killGraceMs?: number;
-  maxOutputBytes?: number;
 }
 
 export interface AgentCliResult {
@@ -170,7 +169,6 @@ class CappedOutput {
  */
 export function runAgentCli(run: AgentCliRun): Promise<AgentCliResult> {
   const env = buildAgentCliEnv({ bin: run.bin, extra: run.env });
-  const maxBytes = run.maxOutputBytes ?? CLI_OUTPUT_MAX_BYTES;
   const graceMs = run.killGraceMs ?? CLI_KILL_GRACE_MS;
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(run.bin, [...run.args], {
@@ -182,8 +180,8 @@ export function runAgentCli(run: AgentCliRun): Promise<AgentCliResult> {
       stdio: [run.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true
     });
-    const stdout = new CappedOutput(maxBytes);
-    const stderr = new CappedOutput(maxBytes);
+    const stdout = new CappedOutput(CLI_OUTPUT_MAX_BYTES);
+    const stderr = new CappedOutput(CLI_OUTPUT_MAX_BYTES);
     let timedOut = false;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;

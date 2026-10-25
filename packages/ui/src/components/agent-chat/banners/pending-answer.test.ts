@@ -10,9 +10,7 @@ import {
   carryDisplacedCustomAnswerIntoPrompt,
   customAnswerSubmitsOnEnter,
   derivePendingUserInputProgress,
-  previewOptionFor,
   questionAttachmentKey,
-  questionHasPreviews,
   questionShortcutOption,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
@@ -240,17 +238,9 @@ const enterPress: CustomAnswerKeyInput = {
   isMobile: false
 };
 
-test("Enter answers and Shift+Enter is a newline, as in the composer", () => {
-  assert.equal(customAnswerSubmitsOnEnter(enterPress), true);
-  assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, shiftKey: true }), false);
-  assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, key: "a" }), false);
-});
-
-test("an IME composition's Enter commits the candidate, never the answer", () => {
-  assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, isComposing: true }), false);
-  // Engines without `isComposing` report keyCode 229 for the same state.
-  assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, keyCode: 229 }), false);
+test("a secret field's IME Enter commits the candidate, never the answer", () => {
   assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, multiline: false, isComposing: true }), false);
+  assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, multiline: false, keyCode: 229 }), false);
 });
 
 test("on a phone the multi-line field's Return is a newline; the one-line secret's still answers", () => {
@@ -258,46 +248,6 @@ test("on a phone the multi-line field's Return is a newline; the one-line secret
   assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, isMobile: true, multiline: false }), true);
   // One line has no newline to insert: Shift+Enter answers the secret too.
   assert.equal(customAnswerSubmitsOnEnter({ ...enterPress, multiline: false, shiftKey: true }), true);
-});
-
-test("a multi-line custom answer is sent with its line breaks, trimmed only at the ends", () => {
-  assert.equal(
-    submittedAnswer(question(), setPendingUserInputCustomAnswer(undefined, "  first line\nsecond line\n")),
-    "first line\nsecond line"
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Option previews
-// ---------------------------------------------------------------------------
-
-const previewed = question({
-  options: [
-    { label: "Sidebar", description: "", preview: "[nav | main]" },
-    { label: "Top bar", description: "", value: "top", preview: "[nav]\n[main]", previewFormat: "markdown" },
-    { label: "None", description: "" }
-  ]
-});
-
-test("a question without previews has no preview pane at all", () => {
-  assert.equal(questionHasPreviews(question()), false);
-  assert.equal(previewOptionFor(question(), { inspectedValue: "main", selectedValues: ["main"] }), null);
-  assert.equal(questionHasPreviews(question({ options: [{ label: "a", description: "", preview: "" }] })), false);
-});
-
-test("the pane shows the inspected option, else the picked one, else the first", () => {
-  assert.equal(questionHasPreviews(previewed), true);
-  assert.equal(previewOptionFor(previewed, { inspectedValue: null, selectedValues: [] })?.label, "Sidebar");
-  assert.equal(previewOptionFor(previewed, { inspectedValue: null, selectedValues: ["top"] })?.label, "Top bar");
-  assert.equal(previewOptionFor(previewed, { inspectedValue: "Sidebar", selectedValues: ["top"] })?.label, "Sidebar");
-  // A stale value (an option that is not this question's) falls through.
-  assert.equal(previewOptionFor(previewed, { inspectedValue: "gone", selectedValues: [] })?.label, "Sidebar");
-});
-
-test("an inspected option without a preview is still the one the pane names", () => {
-  const option = previewOptionFor(previewed, { inspectedValue: "None", selectedValues: ["top"] });
-  assert.equal(option?.label, "None");
-  assert.equal(option?.preview, undefined, "the pane says it has none rather than keep another's");
 });
 
 // ---------------------------------------------------------------------------

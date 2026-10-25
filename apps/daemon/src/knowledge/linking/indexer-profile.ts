@@ -22,7 +22,7 @@ export const KNOWLEDGE_INDEXER_MANAGED = "knowledge-indexer";
 export const KNOWLEDGE_WORKER_NEXT_TOOL = "knowledge_worker_next_task";
 export const KNOWLEDGE_WORKER_SUBMIT_TOOL = "knowledge_worker_submit";
 
-export const KNOWLEDGE_INDEXER_INSTRUCTIONS = `You are a Knowledge Graph indexing worker. You answer extraction tasks, one after another, and nothing else.
+const KNOWLEDGE_INDEXER_INSTRUCTIONS = `You are a Knowledge Graph indexing worker. You answer extraction tasks, one after another, and nothing else.
 
 Protocol:
 1. Call ${KNOWLEDGE_WORKER_NEXT_TOOL}.

@@ -11,7 +11,6 @@ import {
   writePreparedManifest,
   type PreparedManifest
 } from "./manifest.ts";
-import { preparerFor, sessionProfilePreparers } from "./preparer.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -58,15 +57,5 @@ describe("prepared manifest", () => {
     assert.throws(() => parsePreparedManifest({ ...MANIFEST, schema: 2 }), PreparedManifestError);
     assert.throws(() => parsePreparedManifest({ ...MANIFEST, agent: "cursor" }), PreparedManifestError);
     assert.throws(() => parsePreparedManifest({ ...MANIFEST, agentSection: "x" }), PreparedManifestError);
-  });
-});
-
-describe("preparer registry", () => {
-  it("has one slot per agent, each empty or that agent's preparer", () => {
-    assert.deepEqual(Object.keys(sessionProfilePreparers).sort(), ["claude", "codex", "grok", "opencode"]);
-    for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
-      const preparer = preparerFor(agent);
-      assert.ok(preparer === null || preparer.agent === agent, agent);
-    }
   });
 });

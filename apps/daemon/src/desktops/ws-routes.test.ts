@@ -102,7 +102,12 @@ async function startApp(t: TestContext, deps: Partial<DesktopWsDeps>): Promise<n
     ...deps
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
-  t.after(() => app.close());
+  t.after(async () => {
+    // A hand-built upgrade client has no WebSocket close-handshake implementation.
+    // End fixture-owned peers before Fastify waits for its upgraded connections.
+    for (const client of app.websocketServer.clients) client.terminate();
+    await app.close();
+  });
   return (app.server.address() as AddressInfo).port;
 }
 

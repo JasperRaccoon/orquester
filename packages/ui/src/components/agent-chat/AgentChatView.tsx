@@ -19,7 +19,6 @@ import {
 import { isGoalHeldForUpdate } from "../../lib/agent-chat/goal.logic";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
-import { noteRender } from "../../lib/render-probe";
 import { Modal, ModalCloseButton } from "../ui";
 import {
   useAgentChatPending,
@@ -296,7 +295,6 @@ function LiveChatTimeline({ threadSessionId, loading, heldRef, ...timeline }: Li
 }
 
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
-  noteRender("AgentChatView");
   const sessionId = session.id;
   // The chrome's fields only — never `entries` or `rows`, which every streamed
   // delta replaces: the timeline reads its rows itself (`LiveChatTimeline`), and

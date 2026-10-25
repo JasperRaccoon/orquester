@@ -109,6 +109,7 @@ test("29 a loop is a roster row of its own: started when created, re-noted per f
   );
   const [started] = rows;
   assert.equal(started?.payload.taskType, "scheduled");
+  assert.equal(only(rows, "task.started")[0]?.payload.prompt, undefined);
   assert.equal((started?.payload as { description?: string }).description, "Reply with exactly: tick");
   assert.equal(started?.turnId, "turn-1", "on the turn that created it");
   for (const row of rows) {
@@ -122,6 +123,7 @@ test("29 a fire is the CLI's own subagent: an agent row under its id, whose end 
   const rows = taskRows(run.events, FIRE);
   assert.equal(rows[0]?.type, "task.started");
   assert.equal(rows[0]?.payload.taskType, "subagent");
+  assert.equal(only(rows, "task.started")[0]?.payload.prompt, undefined);
   assert.equal(rows[0]?.payload.title, "loop: Reply with exactly: tick (every 1 minute)");
   assert.deepEqual(ends(run.events, FIRE), [["completed", "tick"]]);
   assert.deepEqual(run.turns, ["turn-1", "wake-1", "turn-2"], "its end woke the parent for a turn of its own");
@@ -196,6 +198,7 @@ test("30 the goal's planner is the CLI's own subagent; with it done, nothing of 
   const PLANNER = "01a0de9e-e2a1-7f31-a9be-c695a8111b2a";
   const run = driveCapture("30-goal.ndjson");
   assert.equal(taskRows(run.events, PLANNER)[0]?.payload.title, "goal plan writer");
+  assert.equal(only(taskRows(run.events, PLANNER), "task.started")[0]?.payload.prompt, undefined);
   assert.deepEqual(ends(run.events, PLANNER), [["completed", "Done"]]);
   const clock = createTestClock(0);
   const registry = createLivenessRegistry({ clock });

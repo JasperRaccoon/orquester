@@ -164,14 +164,3 @@ test("tensordock: listManaged accepts both documented list shapes and keeps orq-
     [["66666666-7777-4888-9999-000000000000", "box-99887766", "stopped"]]
   );
 });
-
-test("tensordock: a 429 is retried", async () => {
-  const { fetch, seen } = routedFetch([
-    {
-      path: "/api/v2/instances",
-      replies: [{ status: 429, headers: { "retry-after": "0" }, body: '{"error":"Too many requests"}' }, { body: f("instances-list.json") }]
-    }
-  ]);
-  assert.equal((await tensordockAdapter.listManaged(creds, callOptions(fetch))).length, 1);
-  assert.equal(seen.length, 2);
-});

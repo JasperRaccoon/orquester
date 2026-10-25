@@ -17,14 +17,14 @@ import {
 } from "./tool-output.ts";
 
 test("long output keeps the specified 8000-character tail and truncation marker", () => {
-  const text = "x".repeat(100_000) + "END";
+  const text = "x".repeat(8_001) + "END";
   const bounded = (boundRawOutput({ stdout: text }) as { stdout: string }).stdout;
   assert.match(bounded, /^\[Earlier output truncated\]/);
   assert.equal(bounded.replace(/^\[Earlier output truncated\]\s*/, ""), "x".repeat(7_997) + "END");
 });
 
 test("boundRawOutput bounds Grok's cumulative text fields", () => {
-  const bounded = boundRawOutput({ type: "Bash", output_for_prompt: "y".repeat(100_000) + "END", exit_code: 0 }) as Record<string, unknown>;
+  const bounded = boundRawOutput({ type: "Bash", output_for_prompt: "y".repeat(10_001) + "END", exit_code: 0 }) as Record<string, unknown>;
   const output = bounded["output_for_prompt"] as string;
   assert.ok(output.length < 10_000);
   assert.ok(output.endsWith("END"));
@@ -32,14 +32,14 @@ test("boundRawOutput bounds Grok's cumulative text fields", () => {
 });
 
 test("boundRawOutput bounds the BYTE ARRAY T3's list does not know about", () => {
-  const bounded = boundRawOutput({ type: "Bash", output: [...new Array(100_000).fill(65), 90] }) as Record<string, unknown>;
+  const bounded = boundRawOutput({ type: "Bash", output: [...new Array(10_001).fill(65), 90] }) as Record<string, unknown>;
   const output = bounded["output"] as number[];
   assert.ok(output.length < 10_000);
   assert.equal(output.at(-1), 90);
 });
 
 test("boundRawOutput reaches one level into Grok's discriminated payload", () => {
-  const bounded = boundRawOutput({ type: "ReadFile", FileContent: { content: "z".repeat(100_000) + "END", total_lines: 4 } }) as Record<string, Record<string, unknown>>;
+  const bounded = boundRawOutput({ type: "ReadFile", FileContent: { content: "z".repeat(10_001) + "END", total_lines: 4 } }) as Record<string, Record<string, unknown>>;
   const content = bounded["FileContent"]["content"] as string;
   assert.ok(content.length < 10_000);
   assert.ok(content.endsWith("END"));

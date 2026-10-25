@@ -1,30 +1,22 @@
 /**
  * The `visuals` family (unified MCP design 2026-10-15 §4 rows 42–43; design 2026-10-14 §2.1),
  * ported from `session-tools/html/html.test.ts` and run through THE executor as a chat caller:
- * what the agent is told, what it may send, and what it gets back. Plus the §9.5 byte budgets of
- * every Task 13 tool, measured on `tools/list` as an MCP client receives it.
+ * what it may send and what it gets back. Advertised metadata and byte budgets live in
+ * `catalog/registry.test.ts`, measured through the serializers clients consume.
  */
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
-  HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_MAX_HTML_CHARS,
-  HTML_RENDER_THEME_TOKENS,
   type HtmlRenderReference
 } from "@orquester/api/agent-chat";
 
-import type { AnyOrquesterTool, ThreadCaller, ToolCaller } from "../catalog/contract.ts";
-import { catalogFor, toolByName } from "../catalog/index.ts";
-import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "../executor.ts";
+import type { ThreadCaller, ToolCaller } from "../catalog/contract.ts";
+import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { secretsFamily } from "./secrets.ts";
-import { HTML_RENDER_SHOWN_MESSAGE, HTML_RENDER_TOKEN_LINE, visualsFamily } from "./visuals.ts";
 
 const THREAD = "thread-1";
 const REFERENCE: HtmlRenderReference = {
@@ -55,69 +47,6 @@ function errorOf(result: CallToolResult): { code: string; message: string } {
   assert.equal(result.isError, true);
   return result.structuredContent as { code: string; message: string };
 }
-
-const tool = (name: string) => visualsFamily.find((entry) => entry.name === name)!;
-
-describe("visuals definitions", () => {
-  const preview = tool("html_preview");
-  const render = tool("html_render");
-
-  it("are chat-only core tools: html_preview Read, html_render Act, both plan-safe; the catalog serves them", () => {
-    for (const entry of [preview, render]) {
-      assert.deepEqual(entry.audiences, ["chat"]);
-      assert.equal(entry.toolset, "core");
-      assert.equal(entry.planSafe, true);
-      assert.equal(toolByName(entry.name, "chat"), entry, `${entry.name} is the catalog's`);
-      assert.equal(toolByName(entry.name, "external"), undefined);
-    }
-    assert.equal(preview.tier, "read");
-    assert.equal(render.tier, "act");
-  });
-
-  it("keep the guidance with Orquester's widths and theme tokens, stated once", () => {
-    for (const fragment of [
-      "headless browser",
-      "screenshot of its top (≤ 4000px; PNG, or scaled-down JPEG past 3 MiB",
-      "contentHeight",
-      "stack traces point into page.html",
-      "before html_render",
-      "only public addresses, not this machine or its network",
-      "html_render still works",
-      "Page rules, layout and theme: html_render's"
-    ]) {
-      assert.ok(preview.description.includes(fragment), fragment);
-    }
-    for (const fragment of [
-      "above your final text reply",
-      "should not announce or restate the page",
-      "frame fits the page's height at each reader's width",
-      "inside this chat's project",
-      "transparent",
-      "even over style preferences like a black page",
-      "var(--radius)",
-      "100vh",
-      `${HTML_RENDER_COLUMN_WIDTH}px`,
-      HTML_RENDER_TOKEN_LINE
-    ]) {
-      assert.ok(render.description.includes(fragment), fragment.slice(0, 60));
-    }
-    // Every token a page receives is named for the agent, on one line.
-    for (const token of HTML_RENDER_THEME_TOKENS.filter((name) => !name.startsWith("--chart-"))) {
-      assert.ok(HTML_RENDER_TOKEN_LINE.includes(token), token);
-    }
-    assert.ok(HTML_RENDER_TOKEN_LINE.includes("--chart-1 … --chart-6"));
-    assert.doesNotMatch(`${preview.description} ${render.description}`, /\bT3\b/);
-    // The page rules live in html_render only (§9.5: one rule stated once).
-    assert.doesNotMatch(preview.description, /self-contained document/);
-  });
-
-  it("are read-only and open-world; only the preview is idempotent", () => {
-    assert.deepEqual(preview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true });
-    assert.deepEqual(render.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true });
-    assert.equal(preview.resultKind, "image");
-    assert.equal(render.resultKind, "json");
-  });
-});
 
 describe("visuals argument bounds", () => {
   const page = "<p>hi</p>";
@@ -153,7 +82,7 @@ describe("visuals argument bounds", () => {
       .onPublishHtml(() => ({ ok: true, value: REFERENCE }))
       .onPreviewHtml((request) => ({
         ok: true,
-        value: { screenshot: { data: "AAAA", mimeType: "image/png", width: 1, height: 1 }, width: request.width ?? HTML_RENDER_COLUMN_WIDTH, contentHeight: 1, capturedHeight: 1, consoleMessages: [] }
+        value: { screenshot: { data: "AAAA", mimeType: "image/png", width: 1, height: 1 }, width: request.width ?? 1, contentHeight: 1, capturedHeight: 1, consoleMessages: [] }
       }));
     for (const [name, args] of [
       ["html_preview", { html: "x".repeat(HTML_RENDER_MAX_HTML_CHARS), width: 240, appearance: "light" }],
@@ -180,14 +109,11 @@ describe("html_render", () => {
     assert.equal(request.title, "Chart");
     assert.equal(request.height, 420);
     assert.equal(request.signal, controller.signal);
-    const expected = { htmlRender: REFERENCE, message: HTML_RENDER_SHOWN_MESSAGE };
-    assert.deepEqual(result.structuredContent, expected);
+    const expected = result.structuredContent as { htmlRender: HtmlRenderReference; message: string };
+    assert.deepEqual(expected.htmlRender, REFERENCE);
+    assert.equal(typeof expected.message, "string");
     assert.equal(result.content.length, 1);
     assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), expected);
-    assert.equal(
-      HTML_RENDER_SHOWN_MESSAGE,
-      "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say."
-    );
   });
 
   it("answers a refusal as an error result with the publisher's own message", async () => {
@@ -270,61 +196,5 @@ describe("html_preview", () => {
     aborted.abort();
     assert.equal(errorOf(await call(api, "html_preview", { html: "<p>x</p>" }, { signal: aborted.signal })).code, "CANCELLED");
     assert.equal(api.previews.length, 0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// §9.5 budgets of Task 13's tools, on tools/list as an MCP client receives it
-// ---------------------------------------------------------------------------
-
-async function listed(tools: readonly AnyOrquesterTool[]): Promise<Map<string, { bytes: number; description: number }>> {
-  const server = new McpServer({ name: "orquester", version: "test" });
-  for (const entry of tools) {
-    const shape = audienceShape(entry, "chat");
-    server.registerTool(
-      entry.name,
-      { title: entry.title, description: audienceDescription(entry, "chat"), inputSchema: Object.keys(shape).length > 0 ? shape : audienceSchema(entry, "chat"), annotations: entry.annotations },
-      () => ({ content: [] })
-    );
-  }
-  const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "budget", version: "test" });
-  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
-  try {
-    const { tools: rows } = await client.listTools();
-    return new Map(rows.map((row) => [row.name, { bytes: Buffer.byteLength(JSON.stringify(row), "utf8"), description: Buffer.byteLength(row.description ?? "", "utf8") }]));
-  } finally {
-    await client.close();
-    await server.close();
-  }
-}
-
-describe("§9.5 byte budgets", () => {
-  it("each Task 13 tool meets its per-tool target", async () => {
-    const rows = await listed([...visualsFamily, ...secretsFamily]);
-    // Targets (baselines): html_preview 1 700 (1 849), html_render 3 000 (3 669), request_secret 1 500 (1 792).
-    const targets: Record<string, { bytes: number; description: number }> = {
-      html_preview: { bytes: 1_700, description: 2_000 },
-      html_render: { bytes: 3_000, description: 2_000 },
-      request_secret: { bytes: 1_500, description: 1_000 }
-    };
-    assert.deepEqual([...rows.keys()].sort(), Object.keys(targets).sort());
-    for (const [name, target] of Object.entries(targets)) {
-      const row = rows.get(name)!;
-      assert.ok(row.bytes <= target.bytes, `${name}: ${row.bytes} bytes > ${target.bytes}`);
-      assert.ok(row.description <= target.description, `${name}: description ${row.description} bytes > ${target.description}`);
-    }
-    // Together they stay inside the sum of their §9.5 targets (6 200; request_toolset's 700 is gone).
-    const sum = [...rows.values()].reduce((total, row) => total + row.bytes, 0);
-    assert.ok(sum <= 6_200, `Task 13's tools are ${sum} bytes together`);
-  });
-
-  it("every .describe() text is ≤ 160 bytes, and the chat catalog serves all three", () => {
-    for (const entry of [...visualsFamily, ...secretsFamily]) {
-      assert.ok(catalogFor("chat").includes(entry), entry.name);
-      for (const [key, field] of Object.entries(entry.input as Record<string, { description?: string }>)) {
-        assert.ok(Buffer.byteLength(field.description ?? "", "utf8") <= 160, `${entry.name}.${key}`);
-      }
-    }
   });
 });

@@ -104,7 +104,7 @@ export interface SessionProfilePreparer<A extends SessionProfileAgentId = Sessio
   perAccount: boolean;
   /**
    * Bump it whenever the preparer's output changes for the same inputs (a new recipe key, a fixed
-   * bug): every prepared dir built by another version is stale. Absent = `"0"`. Export it as a
+   * bug): every prepared dir built by another version is stale. Absent = `"0"`. Keep it as a
    * constant next to the preparer.
    */
   version?: string;

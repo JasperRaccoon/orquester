@@ -128,7 +128,7 @@ describe("approval cards", () => {
     });
     assert.equal((await fetchToolApprovalDetail(api(async () => ({ approval: summary("a") })), "s1", "a"))?.approvalId, "a");
     assert.equal(await fetchToolApprovalDetail(api(async () => ({ approval: summary("zzz") })), "s1", "a"), null);
-    await assert.rejects(fetchToolApprovalDetail(api(async () => Promise.reject(new HttpError(404))), "s1", "a"));
+    await assert.rejects(fetchToolApprovalDetail(api(async () => Promise.reject(new HttpError(404))), "s1", "a"), { status: 404 });
     assert.deepEqual(ids(), []);
   });
 });

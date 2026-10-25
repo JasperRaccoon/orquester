@@ -76,11 +76,6 @@ export class SessionToolCredentials {
     return () => this.revokeListeners.delete(listener);
   }
 
-  /** How many credentials are live (tests). */
-  get size(): number {
-    return this.byHash.size;
-  }
-
   private revokeWhere(predicate: (scope: SessionToolGrantScope) => boolean): void {
     for (const [hash, scope] of [...this.byHash]) {
       if (!predicate(scope)) continue;

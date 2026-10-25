@@ -61,7 +61,7 @@ export interface ApprovalPortDeps {
 }
 
 /** The notice a `create_workflow` card carries when the new workflow will join the chat's grant. */
-export const WORKFLOW_GRANT_NOTICE =
+const WORKFLOW_GRANT_NOTICE =
   "This chat's 'Allow workflows' grant will cover the new workflow: its later changes, runs and deletion from this chat won't ask again until you revoke the grant.";
 
 const READ_ONLY_GRANT =

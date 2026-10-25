@@ -1,16 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  emptyKnowledgeLinkingState,
   parseKnowledgeLinkingState,
   readKnowledgeLinkingState,
   serializeKnowledgeLinkingState
 } from "./knowledge-linking.ts";
-
-test("an empty state round-trips", () => {
-  const state = emptyKnowledgeLinkingState();
-  assert.deepEqual(parseKnowledgeLinkingState(JSON.parse(serializeKnowledgeLinkingState(state))), state);
-});
 
 test("a bad field costs that field only; unknown fields and records survive", () => {
   const parsed = parseKnowledgeLinkingState({

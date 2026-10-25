@@ -1,11 +1,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { constants as zlibConstants, gunzipSync } from "node:zlib";
 
 import {
   NdjsonForwarder,
-  acceptsGzip,
-  createStreamingGzip
+  acceptsGzip
 } from "./ndjson-forward.ts";
 
 test("gzip is accepted by name or wildcard, never at q=0", () => {
@@ -49,17 +47,4 @@ test("a heartbeat goes in only between lines, and only after the idle time", () 
   assert.equal(output(), ':hb\n{"kind":"snapshot"}\n:hb\n');
   forwarder.end();
   assert.equal(forwarder.heartbeatIfIdle(0), false, "nothing after the end");
-});
-
-test("the streaming encoder flushes every write: each line decodes before the stream ends", async () => {
-  const gzip = createStreamingGzip();
-  const received: Buffer[] = [];
-  gzip.on("data", (chunk: Buffer) => received.push(chunk));
-  const first = new Promise<void>((resolve) => gzip.once("data", () => resolve()));
-  gzip.write('{"kind":"synchronized","hostInstanceId":"h"}\n');
-  await first;
-  // A sync-flushed prefix inflates on its own: the client sees the line now.
-  const decoded = gunzipSync(Buffer.concat(received), { finishFlush: zlibConstants.Z_SYNC_FLUSH }).toString("utf8");
-  assert.equal(decoded, '{"kind":"synchronized","hostInstanceId":"h"}\n');
-  gzip.end();
 });

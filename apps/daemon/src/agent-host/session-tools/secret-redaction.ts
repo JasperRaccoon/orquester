@@ -249,11 +249,6 @@ export class SessionSecretRedactor {
     if (threadId !== parentThreadId) this.parents.set(threadId, parentThreadId);
   }
 
-  /** True while `threadId` itself has a value to mask (tests). */
-  holds(threadId: string): boolean {
-    return (this.byThread.get(threadId)?.size ?? 0) > 0;
-  }
-
   private valuesFor(threadId: string, everyValue: boolean): string[] {
     const all = new Set<string>();
     const seen = new Set<string>();

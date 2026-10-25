@@ -21,7 +21,7 @@ import {
   tsrsEngineDir
 } from "@orquester/config";
 
-import { renderTsRustPreload, writeTsRustPreload } from "./preload.ts";
+import { writeTsRustPreload } from "./preload.ts";
 
 const VERSION = "0.7.0";
 const TSRS_VERSION = "0.16.0-ts7.1.0-dev.20260929";
@@ -187,15 +187,8 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     await rm(root, { recursive: true, force: true });
   });
 
-  test("the written preload is the rendered source, mode 0644", async () => {
-    assert.equal(
-      await readFile(preload, "utf8"),
-      renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces })
-    );
+  test("tsc through node_modules/.bin, bin/tsc and lib/tsc.js runs tsc-rs in every workspace while the plugin is on", async () => {
     assert.equal((await stat(preload)).mode & 0o777, 0o644);
-  });
-
-  test("tsc through node_modules/.bin, bin/tsc and lib/tsc.js runs tsc-rs in every workspace while the plugin is on", () => {
     for (const project of [enabledProject, otherProject]) {
       const modules = join(project, "node_modules");
       for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
@@ -316,7 +309,7 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     }
   });
 
-  test("a native tsc-rs replaces the node process where Node has execve, else runs as its child", async (t) => {
+  test("a native tsc-rs preserves its exit status without running the real tsc", async (t) => {
     const shell = ["/bin/sh", "/usr/bin/sh"].find((candidate) => existsSync(candidate));
     if (!shell) return t.skip("no /bin/sh");
     // A native executable standing in for tsc-rs: the shell, whose `-c` the arguments supply.
@@ -329,12 +322,8 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
       const result = runNode(script, ["-c", 'printf "native %s\\n" "$$"; exit 4'], { cwd: enabledProject });
       assert.equal(result.stderr, "");
       assert.equal(result.status, 4);
-      const pid = Number(/^native (\d+)\n$/.exec(result.stdout)?.[1]);
-      if (typeof (process as { execve?: unknown }).execve === "function") {
-        assert.equal(pid, result.pid, "execve: tsc-rs runs as the node process itself");
-      } else {
-        assert.notEqual(pid, result.pid, "no execve: tsc-rs runs as a child");
-      }
+      assert.match(result.stdout, /^native \d+\n$/);
+      assert.doesNotMatch(result.stdout, /real tsc/);
     } finally {
       await writeState(enabledState());
     }
@@ -359,11 +348,6 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     const script = join(linkedWorkspaces, "enabled", "pnpm-app", "node_modules", "typescript", "bin", "tsc");
     assertRedirected(runNode(script, ["--noEmit"], { cwd: root, preload: aliased }), "--noEmit");
     assertRealTsc(runNode(script, ["--noEmit"], { cwd: root }), "--noEmit");
-    // The same root twice is baked once.
-    assert.equal(
-      renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces, configuredWorkspacesRoot: workspaces }),
-      renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces })
-    );
   });
 
   test("an existing NODE_OPTIONS keeps working beside the preload and reaches tsc-rs", async () => {

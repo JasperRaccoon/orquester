@@ -8,7 +8,6 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ChangeKindSplit } from "./ChangeKindSplit";
 import { DiffFilesView } from "./DiffFilesView";
 
 const PATCH = [
@@ -68,12 +67,4 @@ test("a cut patch keeps what arrived and says it was cut", () => {
   );
   assert.match(html, /kept/);
   assert.match(html, /cut at its size limit/);
-});
-
-test("the split stays quiet for an all-code change and counts files in files mode", () => {
-  assert.equal(renderToStaticMarkup(createElement(ChangeKindSplit, { files: [{ path: "a.ts", additions: 1, deletions: 0 }] })), "");
-  const html = renderToStaticMarkup(
-    createElement(ChangeKindSplit, { files: [{ path: "a.ts" }, { path: "a.test.ts" }, { path: "b.test.ts" }], mode: "files" })
-  );
-  assert.match(html, /aria-label="Code: 1 file; Tests: 2 files"/);
 });

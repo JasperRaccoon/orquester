@@ -66,6 +66,10 @@ test("another model, a corrupt manifest or a short file discards the cache", asy
   const reopened = await open(path2, "m", logger);
   assert.equal(reopened.get(H1), null);
   assert.ok(logger.lines.some((l) => l.includes("shorter")));
+  await reopened.put(H1, rows(1, 1));
+  await reopened.flush();
+  await writeFile(join(path2, "vectors.json"), "{invalid JSON");
+  assert.equal((await open(path2)).get(H1), null);
 });
 
 test("retain forgets dead hashes and compacts into a new generation", async (t) => {

@@ -58,10 +58,10 @@ function snapshot(overrides: Partial<AgentProfileSnapshot> = {}): AgentProfileSn
 describe("kind tabs", () => {
   it("a kind the agent should not have (another daemon version) gets a tab while it has items, after the rest", () => {
     assert.deepEqual(
-      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" }), item({ id: "mcp:b" })]).filter((tab) => tab.count > 0).map((tab) => [tab.id, tab.count]).sort(),
+      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" }), item({ id: "mcp:b" })]).filter((tab) => tab.count > 0).map((tab) => [tab.id, tab.count]),
       [
-        ["hook", 1],
-        ["mcp", 2]
+        ["mcp", 2],
+        ["hook", 1]
       ]
     );
   });
@@ -115,20 +115,20 @@ describe("filtering and grouping", () => {
   it("groups in the agent's kind order, each sorted by name, empty kinds left out", () => {
     const groups = groupProfileItems("claude", ITEMS);
     assert.deepEqual(
-      groups.map((group) => [group.kind, group.items.map((entry) => entry.name).sort()]).sort(),
+      groups.map((group) => [group.kind, group.items.map((entry) => entry.name)]),
       [
-        ["command", ["pr"]],
-        ["hook", ["PreToolUse"]],
         ["mcp", ["Atlas", "jira"]],
+        ["skill", ["review"]],
         ["plugin", ["superpowers"]],
-        ["skill", ["review"]]
+        ["hook", ["PreToolUse"]],
+        ["command", ["pr"]]
       ]
     );
   });
 
   it("a kind the agent should not have (another daemon version) still shows, after the rest", () => {
     const groups = groupProfileItems("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" })]);
-    assert.deepEqual(groups.map((group) => group.kind).sort(), ["hook", "mcp"]);
+    assert.deepEqual(groups.map((group) => group.kind), ["mcp", "hook"]);
   });
 });
 

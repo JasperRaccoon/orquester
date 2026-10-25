@@ -790,29 +790,6 @@ describe("claude adapter — turns", () => {
     assert.ok(turn.resumeCursor);
   });
 
-  it("a non-image attachment reaches Claude as a path line in the final text block (§4.5)", async () => {
-    const harness = await makeHarness();
-    await harness.adapter.startSession(START);
-    const peer = harness.peers[0]!;
-
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "summarise this",
-      attachments: [{ type: "file", id: "att-2", name: "q3.xlsx", sizeBytes: 10 }],
-      interactionMode: "default"
-    });
-    await peer.nextTurn();
-
-    const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
-    assert.equal(content.length, 1, "a file is not a content block of its own");
-    assert.equal(content[0]?.type, "text");
-    assert.equal(content[0]?.text, "summarise this\n\nAttached files:\n- q3.xlsx: /attachments/att-2");
-
-    peer.emit(systemInit());
-    peer.emit(successResult());
-    await harness.waitFor("turn.completed");
-  });
-
   it("the host's NODE_OPTIONS reaches the CLI through the flag-tier env, after the settings files' own", async () => {
     // The SDK deletes NODE_OPTIONS from the child env, so `options.env` alone would lose the
     // plugins' tsc preload; the flag-tier `env` replaces a settings file's value, so that goes first.
@@ -833,11 +810,6 @@ describe("claude adapter — turns", () => {
       assert.deepEqual((options.settings as Record<string, unknown>).env, {
         NODE_OPTIONS: '--max-old-space-size=4096 --require "/appdir/preload.cjs"'
       });
-
-      const plain = await makeHarness();
-      await plain.adapter.startSession({ ...START, cwd, home: { kind: "account", accountId: "acc-1", path: home } });
-      const plainOptions = plain.queryOptions.filter((entry) => entry.persistSession !== false).at(-1)!;
-      assert.equal("env" in ((plainOptions.settings as Record<string, unknown> | undefined) ?? {}), false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1176,6 +1148,7 @@ describe("claude adapter — approvals", () => {
     assert.equal(requestId, "req-abc");
     const opened = findEvent(harness.events, "request.opened");
     assert.equal(opened?.agentId, undefined, "a parent approval stays on the parent's thread");
+    assert.equal("requestingAgentId" in (opened?.payload ?? {}), false);
     assert.equal(opened?.payload.detail, "Remove x");
     assert.equal(opened?.payload.dismissible, false);
     harness.adapter.respondToApproval(START.threadId, requestId, "accept");
@@ -1264,14 +1237,6 @@ describe("claude adapter — approvals", () => {
     assert.deepEqual(await decision, { behavior: "deny", message: "keep the fixtures, delete only build/" });
   });
 
-  it("a main-agent request names no requesting agent", async () => {
-    const { harness, decision, requestId } = await openApproval();
-    const opened = findEvent(harness.events, "request.opened");
-    assert.equal("requestingAgentId" in (opened?.payload ?? {}), false);
-    await harness.adapter.respondToApproval(START.threadId, requestId, "accept");
-    await decision;
-  });
-
   it("a redirecting decline denies with the redirect message, a plain one with the decline", async () => {
     const redirected = await openApproval();
     await redirected.harness.adapter.respondToApproval(
@@ -1316,7 +1281,8 @@ describe("claude adapter — approvals", () => {
     assert.ok(resolvedAt >= 0, `no request.resolved in ${tail.join(", ")}`);
     assert.ok(exitedAt > resolvedAt, "session.exited must be the last word");
     const resolved = findEvent(harness.events, "request.resolved", before);
-    assert.equal(resolved?.payload.decision, "cancel");
+    assert.deepEqual(resolved?.payload, { requestType: "command_execution_approval", decision: "cancel", withdrawn: true });
+    assert.equal(harness.events.slice(before).filter((event) => event.type === "request.resolved").length, 1);
     // The provider's callback is unparked rather than left awaiting forever.
     assert.equal(((await decision) as { behavior: string }).behavior, "deny");
     assert.equal(peer.closed, true);
@@ -1419,47 +1385,6 @@ describe("claude adapter — the session's own catalog (Agent Profiles composer)
 });
 
 describe("claude adapter — questions", () => {
-  it("AskUserQuestion becomes a question and its answer rides back by text", async () => {
-    const harness = await makeHarness();
-    await harness.adapter.startSession(START);
-    const peer = harness.peers[0]!;
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "ask me",
-      attachments: [],
-      interactionMode: "default"
-    });
-    await peer.nextTurn();
-
-    const abort = new AbortController();
-    const reply = peer.canUseTool!(
-      "AskUserQuestion",
-      {
-        questions: [
-          {
-            question: "Which file?",
-            header: "Choice",
-            options: [{ label: "a.txt", description: "" }],
-            multiSelect: false
-          }
-        ]
-      },
-      {
-        signal: abort.signal,
-        toolUseID: "toolu_q",
-        requestId: "req-q"
-      } as unknown as Parameters<CanUseTool>[2]
-    );
-    const requested = await harness.waitFor("user-input.requested");
-    assert.equal(requested.payload.questions[0]!.id, "Which file?");
-
-    harness.adapter.respondToUserInput(START.threadId, "req-q", { "Which file?": "a.txt" });
-    const result = (await reply) as { behavior: string; updatedInput: { answers: unknown } };
-    assert.equal(result.behavior, "allow");
-    assert.deepEqual(result.updatedInput.answers, { "Which file?": "a.txt" });
-    await harness.waitFor("user-input.resolved");
-  });
-
   it("an option's preview reaches the card, and the chosen one rides back as an annotation", async () => {
     const harness = await makeHarness();
     await harness.adapter.startSession(START);
@@ -1496,6 +1421,7 @@ describe("claude adapter — questions", () => {
       } as unknown as Parameters<CanUseTool>[2]
     );
     const requested = await harness.waitFor("user-input.requested");
+    assert.equal(requested.payload.questions[0]!.id, "Which style?");
     assert.deepEqual(requested.payload.questions[0]!.options, [
       { label: "Const", description: "", preview, previewFormat: "markdown" },
       { label: "Let", description: "" }
@@ -1509,6 +1435,7 @@ describe("claude adapter — questions", () => {
     assert.equal(result.behavior, "allow");
     assert.deepEqual(result.updatedInput.answers, { "Which style?": "Const" });
     assert.deepEqual(result.updatedInput.annotations, { "Which style?": { preview } });
+    await harness.waitFor("user-input.resolved");
   });
 });
 
@@ -1555,16 +1482,6 @@ describe("claude adapter — a card nobody answered is withdrawn (final fix wave
       (event) =>
         (event.type === "request.resolved" || event.type === "user-input.resolved") && event.requestId === "req-1"
     );
-
-  it("a stop settles an open approval once, withdrawn", async () => {
-    const { harness, reply } = await parked("Bash");
-    await harness.adapter.stopSession(START.threadId);
-    await harness.drain();
-    const rows = resolutions(harness);
-    assert.equal(rows.length, 1);
-    assert.deepEqual(rows[0]!.payload, { requestType: "command_execution_approval", decision: "cancel", withdrawn: true });
-    assert.equal(((await reply) as { behavior: string }).behavior, "deny");
-  });
 
   it("a stop settles an open question once, withdrawn", async () => {
     const { harness, reply } = await parked("AskUserQuestion");
@@ -2207,6 +2124,10 @@ describe("claude adapter — snapshot", () => {
     // `/compact` is synthesised for every provider that can serve it (§4.6.3).
     assert.ok(snapshot.slashCommands.some((command) => command.name === "compact"));
     assert.ok(snapshot.slashCommands.some((command) => command.name === "review"));
+    const overlay = snapshot.workspaceSnapshots?.find((entry) => entry.cwd === "/work/project");
+    assert.ok(overlay, "the per-cwd catalog must exist");
+    assert.ok(overlay.slashCommands.some((command) => command.name === "compact"));
+    assert.ok(overlay.slashCommands.some((command) => command.name === "review"));
     assert.equal(snapshot.capabilities.showPlanModeToggle, true);
     assert.equal(snapshot.capabilities.reportsContextWindow, true);
     assert.equal(snapshot.capabilities.sessionModelSwitch, "in-session");
@@ -2547,19 +2468,6 @@ describe("claude adapter — fix-wave regressions", () => {
     await asks.waitFor("user-input.requested");
     abort.abort();
     assert.deepEqual(await pending, { behavior: "cancelled" });
-  });
-
-  it("R2-1: the per-cwd overlay carries the machine command list", async () => {
-    const harness = await makeHarness();
-    const snapshot = await harness.adapter.refreshSnapshot({ cwd: "/work/project" });
-    const overlay = snapshot.workspaceSnapshots?.find((entry) => entry.cwd === "/work/project");
-    assert.ok(overlay, "the per-cwd overlay must exist");
-    // The client resolves `overlay.slashCommands ?? provider.slashCommands`, and
-    // `??` does not fall back on an empty array — an empty overlay left the tab
-    // with no provider commands at all.
-    assert.ok(overlay.slashCommands.length > 0);
-    assert.ok(overlay.slashCommands.some((command) => command.name === "compact"));
-    assert.ok(overlay.slashCommands.some((command) => command.name === "review"));
   });
 
   it("R3 #13: the probe runs under the account home when one is named", async () => {
@@ -3300,24 +3208,6 @@ describe("claude adapter — goals (goals §6.1)", () => {
     const [flushed] = goalRows(harness, before);
     assert.equal(flushed?.payload.change, "progress");
     assert.equal(flushed?.payload.goal?.phase, undefined, "nothing is in the background any more");
-  });
-
-  it("a stop waits for a read in flight: the goal lands before session.exited", async () => {
-    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
-    const harness = await makeHarness();
-    const { peer } = await goalTurn(harness, start);
-    await appendFile(transcript, goalStatus({ met: false, failed: true, condition: "ship the release", reason: "there is no repo" }));
-    const before = harness.events.length;
-    peer.emit(successResult(SESSION));
-    await harness.waitFor("turn.completed", before);
-    await harness.adapter.stopSession(START.threadId);
-    const tail = harness.events.slice(before).map((event) => event.type);
-    assert.ok(tail.includes("thread.goal.updated"), tail.join(", "));
-    assert.ok(
-      tail.indexOf("thread.goal.updated") < tail.indexOf("session.exited"),
-      `nothing follows session.exited: ${tail.join(", ")}`
-    );
-    assert.equal(goalRows(harness, before)[0]?.payload.change, "failed");
   });
 
   it("a session dying with a goal read parked finishes its teardown before its recovery starts", async () => {

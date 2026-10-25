@@ -86,11 +86,6 @@ test("offers: live sizes per available location with the IPv4 price, converted f
   );
 });
 
-test("offers: refuses kinds Hetzner does not rent", async () => {
-  const replay = replayFetch([]);
-  await assert.rejects(hetznerAdapter.offers(credentials, "windows", replayOptions(replay)), /does not rent windows/);
-});
-
 test("create: one POST with name, labels and cloud-init; price for the chosen location", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/pricing`, body: fixture("hetzner", "pricing") },

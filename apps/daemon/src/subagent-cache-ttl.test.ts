@@ -37,7 +37,7 @@ const busyAgents = (count: number): SubagentRequest[] =>
   ]).flat();
 
 test("a 5m subagent that re-writes its prefix after a 10 minute wait would have read it at 1h", () => {
-  const costs = estimateSubagentCacheCosts(idleAgents(1, 10));
+  const costs = estimateSubagentCacheCosts(idleAgents(1, 10).reverse());
   // 5m: two 100k writes at 1.25x. 1h: one 100k write at 2x, then a 100k read at 0.1x.
   assert.deepEqual(costs, { requests: 2, cost5m: 250_000, cost1h: 210_000 });
 });
@@ -62,11 +62,6 @@ test("a 1h subagent that read its prefix after a wait would have re-written it a
   // 5m: first request 1.25x100k + 0.1x5k; after the wait only the 5k the agent
   // found warm on its first request is still read, the other 101k is written.
   assert.deepEqual(costs, { requests: 2, cost5m: 125_500 + 126_750, cost1h: 213_000 });
-});
-
-test("requests are ordered per subagent, whatever order they arrive in", () => {
-  const [first, second] = idleAgents(1, 10);
-  assert.deepEqual(estimateSubagentCacheCosts([second!, first!]), estimateSubagentCacheCosts([first!, second!]));
 });
 
 test("auto picks 1h when it would have been more than 5% cheaper", () => {

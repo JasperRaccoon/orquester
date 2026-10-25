@@ -8,7 +8,7 @@
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createWriteStream, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,6 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { InjectDaemonApi } from "../daemon-api.ts";
 import { executeToolCall } from "../executor.ts";
-import { unifiedDiff } from "./saved-prompts.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 type Outcome = { ok: true; value: Record<string, unknown> } | { ok: false; code: string; message: string };
@@ -66,7 +65,7 @@ async function harness(t: TestContext, options: { remotes?: Record<string, strin
     createDefaultDaemonConfig({ env: {} }),
     resolved as unknown as CreateServerArgs[1],
     createDefaultClientConfig(join(root, "daemon.sock")),
-    createWriteStream("/dev/null"),
+    { write() {} },
     { savedPrompts: library, workflows: workflowsList } as unknown as CreateServerArgs[4],
     { authRequired: false, mode: "local" }
   );
@@ -154,17 +153,22 @@ test("an agent-created prompt no workflow uses: update and delete are Act, with 
 
 test("the user's prompt: Admin saved-prompts — a card with the diff; grantable for this chat in Full access only, and the grant covers the next edit", async (t) => {
   const h = await harness(t);
-  const mine = await h.userPrompt({ title: "Review", body: "line 1\nline 2\nline 3" });
+  const before = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+  const after = before.replace("line 2\n", "line two\n").replace("line 18\n", "line eighteen\n");
+  const mine = await h.userPrompt({ title: "Review", body: before });
   const port = new FakeApprovalPort();
-  await h.value("update_saved_prompts", { action: "update", id: mine.id, body: "line 1\nline two\nline 3", reason: "fix wording" }, h.chat({ runtimeMode: "approval-required" }), port);
+  await h.value("update_saved_prompts", { action: "update", id: mine.id, body: after, reason: "fix wording" }, h.chat({ runtimeMode: "approval-required" }), port);
   const card = port.cards[0]!;
   assert.deepEqual([card.kind, card.family, card.reason], ["admin", "saved-prompts", "fix wording"]);
   assert.deepEqual(card.grantOptions, []);
-  assert.match(card.title, /edit the saved prompt "Review"/);
+  assert.match(card.title, /Review/);
   const diff = card.sections.find((section) => section.kind === "diff");
-  assert.ok(diff && diff.kind === "diff" && diff.unifiedDiff.includes("-line 2\n+line two"));
+  assert.ok(diff && diff.kind === "diff");
+  for (const line of ["-line 2", "+line two", "-line 18", "+line eighteen"]) {
+    assert.ok(diff.unifiedDiff.split("\n").includes(line), line);
+  }
   assert.ok(card.sections.some((section) => section.kind === "text" && section.text === "Created by you."));
-  assert.equal(h.library.get(mine.id)!.body, "line 1\nline two\nline 3");
+  assert.equal(h.library.get(mine.id)!.body, after);
   // Full access, its own (global) target: the card offers a chat grant; with it, the next edit runs card-free.
   await h.value("update_saved_prompts", { action: "update", id: mine.id, title: "Review 2" }, h.chat(), port);
   assert.deepEqual(port.cards[1]!.grantOptions, ["chat"]);
@@ -176,7 +180,7 @@ test("the user's prompt: Admin saved-prompts — a card with the diff; grantable
   assert.match(await h.refused("update_saved_prompts", { action: "delete", id: mine.id }, "APPROVAL_DENIED", h.chat({ runtimeMode: "approval-required" }), denying), /keep it/);
   assert.ok(h.library.get(mine.id));
   const deleteCard = denying.cards[0]!;
-  assert.ok(deleteCard.sections.some((section) => section.kind === "code" && section.title === "Body (deleted)" && section.text === "line 1\nline two\nline 3"));
+  assert.ok(deleteCard.sections.some((section) => section.kind === "code" && section.title === "Body (deleted)" && section.text === after));
 });
 
 test("a prompt a workflow uses: Admin workflows — the card names the workflows, never a grant, even under a saved-prompts grant", async (t) => {
@@ -268,16 +272,6 @@ test("list_saved_prompts: the chat's project and the global prompts, with create
   assert.equal(port.cards[0]?.family, "cross-workspace-read");
 });
 
-test("unifiedDiff: every changed line, three lines of context, separate hunks for distant changes", () => {
-  const before = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
-  const after = before.replace("line 2", "LINE 2").replace("line 18", "LINE 18");
-  const diff = unifiedDiff(before, after, "body");
-  assert.equal(diff.split("\n").filter((line) => line.startsWith("@@")).length, 2);
-  assert.ok(diff.startsWith("--- a/body\n+++ b/body\n@@ -1,5 +1,5 @@\n line 1\n-line 2\n+LINE 2\n line 3"));
-  assert.ok(diff.includes("@@ -15,6 +15,6 @@\n line 15\n line 16\n line 17\n-line 18\n+LINE 18\n line 19\n line 20"));
-  assert.equal(unifiedDiff("a", "a\nb", "t"), "--- a/t\n+++ b/t\n@@ -1,1 +1,2 @@\n a\n+b");
-});
-
 test("ruling S13: workflows of another workspace reach a chat below Full access only as a count; the user's card still names them", async (t) => {
   const h = await harness(t);
   const created = (await h.value("update_saved_prompts", { action: "create", title: "Shared", body: "b", global: true }, h.chat())).prompt as Row;
@@ -317,7 +311,7 @@ test("repository prompts: the gate judges a prompt by its first checkout — a s
     const port = new FakeApprovalPort();
     await h.value("update_saved_prompts", { action: "update", id: created.id, body: `via ${project}`, ...(project ? { project } : {}) }, inSibling({ runtimeMode: "approval-required" }), port);
     assert.deepEqual([port.cards[0]?.kind, port.cards[0]?.family], ["boundary", "cross-project"], String(project));
-    assert.equal(port.cards[0]!.scope.label, "Project acme/api — shared by every checkout of github.com/acme/site");
+    assert.match(port.cards[0]!.scope.label, /acme\/api.*github\.com\/acme\/site/);
   }
   const full = new FakeApprovalPort();
   await h.value("update_saved_prompts", { action: "update", id: created.id, body: "full" }, inSibling(), full);
@@ -348,7 +342,7 @@ test("an agent that rewrote its origin to another repository gets no card-free a
   await h.refused("update_saved_prompts", { action: "update", id: theirs.id, body: "planted" }, "APPROVAL_DENIED", attacker(), denying);
   await h.refused("update_saved_prompts", { action: "update", id: users.id, body: "planted" }, "APPROVAL_DENIED", attacker({ runtimeMode: "full-access" }), denying);
   assert.deepEqual(denying.cards.map((card) => [card.kind, card.family, card.grantOptions]), [["boundary", "cross-project", []], ["admin", "saved-prompts", []]]);
-  assert.equal(denying.cards[0]!.scope.label, "Project beta/app — shared by every checkout of github.com/beta/app");
+  assert.match(denying.cards[0]!.scope.label, /beta\/app.*github\.com\/beta\/app/);
   assert.equal(h.library.get(theirs.id)!.body, "beta secret body");
   assert.equal(h.library.get(users.id)!.body, "user secret body");
   // Approved, the result row keeps the other workspace's details out: no path, createdBy only its kind.
@@ -383,7 +377,8 @@ test("a first checkout that no longer exists: an ungrantable boundary card namin
     const port = new FakeApprovalPort();
     await h.value("update_saved_prompts", { action: "update", id: created.id, body: `in ${mode}` }, inSibling(mode), port);
     assert.deepEqual([port.cards[0]?.kind, port.cards[0]?.family, port.cards[0]?.grantOptions], ["boundary", "cross-project", []], mode);
-    assert.equal(port.cards[0]!.scope.label, "Project acme/api (no longer a project) — shared by every checkout of github.com/acme/site");
+    assert.match(port.cards[0]!.scope.label, /acme\/api.*github\.com\/acme\/site/);
+    assert.ok(port.cards[0]!.sections.some((section) => section.kind === "warning" && section.level === "caution" && section.text.includes("acme/api")), "an unresolved origin is flagged");
     assert.equal(h.library.get(created.id)!.body, `in ${mode}`);
   }
   const port = new FakeApprovalPort().grant({ family: "saved-prompts", scope: "chat", threadId: "me", projectPath: sibling });
@@ -447,11 +442,16 @@ test("list_saved_prompts rows say usesUnknown when the index cannot tell; a glob
   assert.equal("usesUnknown" in rows.find((row) => row.id === plain.id)!, false);
   h.unreadable.length = 0;
   // Records another build wrote: an agent one naming no thread, and a newer kind naming no chat.
-  const prompts = (h.library as unknown as { prompts: Map<string, SavedPrompt> }).prompts;
   const threadless = await h.library.create({ title: "Threadless", body: "b", projectPath: null }, { kind: "agent", threadId: "t-0", projectPath: "", agent: "codex", title: "Somewhere" });
-  prompts.set(threadless.id, { ...prompts.get(threadless.id)!, createdBy: { kind: "agent", agent: "codex", title: "Somewhere" } });
   const newer = await h.userPrompt({ title: "Newer" });
-  prompts.set(newer.id, { ...prompts.get(newer.id)!, createdBy: { kind: "workflow", title: "Nightly" } });
+  await writeFile(join(h.root, "daemon", "saved-prompts.json"), JSON.stringify({
+    version: 1,
+    prompts: [mentioned, plain,
+      { ...threadless, createdBy: { kind: "agent", agent: "codex", title: "Somewhere" } },
+      { ...newer, createdBy: { kind: "workflow", title: "Nightly" } }
+    ]
+  }));
+  await h.library.load();
   const creator = async (mode: ThreadCaller["runtimeMode"], id: string) => ((await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: mode }))).prompts as Row[]).find((row) => row.id === id)?.createdBy;
   assert.deepEqual(await creator("auto", threadless.id), { kind: "agent" });
   assert.deepEqual(await creator("full-access", threadless.id), { kind: "agent", agent: "codex", title: "Somewhere" });

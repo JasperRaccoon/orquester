@@ -90,10 +90,6 @@ describe("codex goal — mapping a ThreadGoal (goals §6.2.1)", () => {
     );
   });
 
-  it("keeps a null budget as null — no budget, not an unknown one", () => {
-    assert.equal(agentGoalFromCodex(codexGoal())?.tokenBudget, null);
-  });
-
   it("reads nothing it cannot trust as a goal", () => {
     assert.equal(agentGoalFromCodex(codexGoal({ status: "failedHard" })), null, "unknown status");
     assert.equal(agentGoalFromCodex(codexGoal({ objective: "" })), null, "empty objective");

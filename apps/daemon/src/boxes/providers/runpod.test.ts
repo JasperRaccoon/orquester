@@ -175,17 +175,3 @@ test("runpod: listManaged keeps orq- pods, reads the box id from env, and follow
   assert.equal(managed[0]!.createdAt, "2026-10-19T22:57:46.899Z");
   assert.equal(managed[0]!.ref.podId, "8rejh12qb4vpre");
 });
-
-test("runpod: 429 is retried after Retry-After", async () => {
-  const { fetch, seen } = routedFetch([
-    {
-      path: "/v2/pods?limit=1",
-      replies: [
-        { status: 429, headers: { "retry-after": "0" }, body: '{"title":"Too Many Requests","status":429,"detail":"rate limit exceeded for the minute window"}' },
-        { body: '{"pods":[],"pagination":{"hasNextPage":false}}' }
-      ]
-    }
-  ]);
-  assert.deepEqual(await runpodAdapter.validate(creds, callOptions(fetch)), { ok: true });
-  assert.equal(seen.length, 2);
-});

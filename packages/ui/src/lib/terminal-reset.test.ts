@@ -29,12 +29,3 @@ test("a reset lands after data already queued and before the replay that follows
   term.parse();
   assert.equal(term.screen, "SNAPSHOT 2\n");
 });
-
-test("an immediate reset would have let the queued snapshot through (the bug)", () => {
-  const term = new FakeTerminal();
-  term.write("SNAPSHOT 1\n");
-  term.reset();
-  term.write("SNAPSHOT 2\n");
-  term.parse();
-  assert.equal(term.screen, "SNAPSHOT 1\nSNAPSHOT 2\n");
-});
