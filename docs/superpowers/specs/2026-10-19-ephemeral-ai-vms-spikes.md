@@ -147,8 +147,12 @@ The command printed `{"access_token": "<grok.com subscription access token>", "e
   an invalid key (even with a later `expires_at`) changed nothing — later prompts kept working. When
   it started with an invalid key and the file was then rewritten with the valid one, the next prompt
   succeeded: it re-reads the file after a 401. Its docs ("Hot Reload") say external `auth.json`
-  changes are picked up. Whether a host Grok re-reads before spending its own OIDC refresh token is
-  **not verified**, so the broker waits for a host-local Grok holder.
+  changes are picked up. **It re-reads before spending its own OIDC refresh token** (1.0.67's own log
+  lines; the binary is closed): it refreshes under `auth.json.lock` ("could not acquire auth.json.lock
+  within timeout" → "returning transient to avoid refresh token reuse"), "disk has valid AT, adopting
+  instead of consuming RT", after a 401 "disk has a different token, accepting", and after a lost
+  race "adopted sibling token after PermanentFailure". It refreshes on its own 5 minutes before
+  expiry (`GROK_AUTH_EARLY_INVALIDATION_SECS`, default 300).
 - Issuer/client keys are not needed by the command's output.
 
 ## (d) Paths
@@ -166,9 +170,15 @@ The command printed `{"access_token": "<grok.com subscription access token>", "e
 
 | CLI | Host-local session holds the account and the token is short |
 |---|---|
-| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left and no refresh lock is fresh; otherwise hands out the current token while > 5 min are left and it was not rejected, else waits for the CLI's rewrite. |
+| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left; below that it hands out the current token while > 5 min are left and it was not rejected, else refreshes. While the CLI's refresh lock is fresh: no refresh — the current token if usable, else waits for the CLI's rewrite. |
 | Codex | Same as Claude (no refresh lock to check). |
-| Grok | Never refreshes: the current token while > 5 min are left and it was not rejected, else waits for the CLI's rewrite or the session ending (then the daemon refreshes). |
+| Grok | Same as Codex. |
+
+The hourly refresher renews a held account of these CLIs too, once its token is inside
+`HELD_REFRESH_MARGIN_MS` (85 min) and above the 10-minute floor — a window longer than one tick — so
+while the daemon runs a held token never runs down to where only its CLI renews it. A daemon refresh
+that gets `invalid_grant` for a refresh token the file no longer holds lost a race to a CLI: it reads
+as that CLI's refresh, not as a login to redo.
 
 With no host-local holder the daemon refreshes on demand. Box sessions never count as holders.
 
