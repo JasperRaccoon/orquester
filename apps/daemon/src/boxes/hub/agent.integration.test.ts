@@ -601,6 +601,38 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     }
   });
 
+  test("an agent child whose orq-agent was stopped (an OOM-failed unit) ends as lost, never as a clean exit", TIMEOUT, async (t) => {
+    if (!haveGo) return t.skip("Go toolchain not installed");
+    const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
+    try {
+      const notices: string[] = [];
+      const child = spawnBoxChild({
+        connection: relay,
+        command: "sh",
+        // Like `codex app-server`: reads its stdin until EOF, then exits 0.
+        args: ["-c", "echo ready; cat > /dev/null; echo eof"],
+        env: {},
+        cwd: work,
+        detach: { procId: "rc-3" },
+        onNotice: (message) => notices.push(message)
+      });
+      let err = "";
+      child.stderr.on("data", (chunk: Buffer) => (err += chunk.toString("utf8")));
+      await waitForText(child.stdout, "ready\n");
+      const down = waitStatus(relay, false);
+      // systemd stops a unit whose process was OOM-killed with SIGTERM to orq-agent alone (KillMode=process).
+      agent.child.kill("SIGTERM");
+      await agent.exited;
+      await down;
+      agent = startAgent(agentBin, { ORQ_DAEMON_URL: `http://127.0.0.1:${proxy.port}`, ORQ_DATA_DIR: dataDir });
+      // Its stdin ended with orq-agent, so it exited 0 unseen: the box can only say it was lost.
+      assert.deepEqual(await child.exited, { kind: "signal", code: null, signal: "SIGHUP" }, notices.join("\n"));
+      assert.match(err, /^\[orquester\] orq-agent restarted in the box/);
+    } finally {
+      relay.close();
+    }
+  });
+
   test("agent.shutdown ends orq-agent for good", TIMEOUT, async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const lost = waitStatus(connection, false);

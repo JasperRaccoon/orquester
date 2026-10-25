@@ -56,7 +56,7 @@ import { boxCloneUrl, boxGitConfig, boxGitSshTarget, type BoxGitEndpoint } from 
 import { boxGitConfigCommands, boxKnownHostsPath } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
-import { bubblewrapScript, gitClientScript, nodeScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
+import { boxSwapGiB, bubblewrapScript, gitClientScript, nodeScript, planToolchain, swapScript, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
 
 export type StoredBoxProject = NonNullable<StoredBox["project"]>;
 
@@ -770,6 +770,16 @@ export class BoxLifecycle {
         { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
       );
       if (bwrap.code !== 0) log(`Could not install bubblewrap (exit ${bwrap.code ?? bwrap.signal}); Codex runs without its sandbox here.`);
+      if (!sys.container) {
+        // Test runs the agents start can exhaust memory; best effort, never the step's failure.
+        log("Checking swap.");
+        const swap = await runBoxCommand(
+          connection,
+          { command: swapScript(boxSwapGiB(sys.memBytes)), shell: true },
+          { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
+        );
+        if (swap.code !== 0) log(`Could not add swap (exit ${swap.code ?? swap.signal}); a run that exhausts memory meets the OOM killer at once.`);
+      }
     }
     // Before the repo's own tools: a version file it has still decides the global Node.js.
     log("Checking Node.js (npm-installed agent CLIs and npx MCP servers).");

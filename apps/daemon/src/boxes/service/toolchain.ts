@@ -159,6 +159,33 @@ export function bubblewrapScript(): string {
   ].join("\n");
 }
 
+/** The swap a box gets: as much as its memory, from 1 to 8 GiB. */
+export function boxSwapGiB(memBytes: number): number {
+  return Math.min(8, Math.max(1, Math.round(memBytes / 1024 ** 3)));
+}
+
+/**
+ * Swap for a box that has none: cloud images ship without, so a test run that exhausts memory
+ * meets the OOM killer at once. `sizeGiB` of swap at `path` (listed in `fstab` so it survives a
+ * reboot), as root or through passwordless sudo, and only when the disk has three times that
+ * free. Exits 0 when it skips (swap already on, no root, too little disk); 1 when it failed.
+ */
+export function swapScript(sizeGiB: number, path = "/swapfile", fstab = "/etc/fstab"): string {
+  const size = Math.max(1, Math.floor(sizeGiB));
+  return [
+    "[ -n \"$(swapon --noheadings 2>/dev/null)\" ] && { echo 'Swap is already on.'; exit 0; }",
+    'SUDO=""',
+    'if [ "$(id -u)" != 0 ]; then',
+    "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO='sudo -n'; else echo 'No root access: skipped adding swap.'; exit 0; fi",
+    "fi",
+    `avail=$(df -Pk "$(dirname '${path}')" | awk 'NR==2{print $4}')`,
+    `[ "\${avail:-0}" -ge ${size * 3 * 1024 * 1024} ] || { echo 'Less than ${size * 3} GiB free on disk: skipped adding swap.'; exit 0; }`,
+    `$SUDO fallocate -l ${size}G '${path}' && $SUDO chmod 600 '${path}' && $SUDO mkswap '${path}' >/dev/null && $SUDO swapon '${path}' || { echo 'Adding swap failed.'; $SUDO rm -f '${path}'; exit 1; }`,
+    `grep -q '^${path} ' '${fstab}' 2>/dev/null || echo '${path} none swap sw 0 0' | $SUDO tee -a '${fstab}' >/dev/null`,
+    `echo 'Added ${size} GiB of swap.'`
+  ].join("\n");
+}
+
 /**
  * Install Node.js LTS through mise where `node` or `npm` is missing, whatever the repo uses: the
  * npm-installed agent CLIs (Codex, Grok, OpenCode) and the `npx` MCP servers synced into the box

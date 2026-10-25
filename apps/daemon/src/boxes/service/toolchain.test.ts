@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { boxGitConfigCommands } from "./git-setup.ts";
-import { gitClientScript, nodeScript, planToolchain, type ToolchainInput } from "./toolchain.ts";
+import { boxSwapGiB, gitClientScript, nodeScript, planToolchain, swapScript, type ToolchainInput } from "./toolchain.ts";
 
 function plan(files: Record<string, string>, extra: Partial<ToolchainInput> = {}) {
   return planToolchain({
@@ -219,4 +220,74 @@ test("no Node.js: mise installs the LTS globally and the profiles get its shims 
 test("a failed Node.js install fails the node script", async (t) => {
   const { home, bin } = await nodeStubs(t, { node: false, miseFails: true });
   assert.notEqual((await runNodeScript(home, bin)).code, 0);
+});
+
+/**
+ * A dir for {@link swapScript}: its swapfile and fstab, and a PATH of stubs — `id` reports `uid`,
+ * `df` reports `availKiB` free, `swapon` lists the swap once one was turned on (logging its calls),
+ * `fallocate` and `mkswap` log theirs; the rest are the real tools.
+ */
+async function swapStubs(t: TestContext, options: { uid: number; availKiB: number; swapOn?: boolean }): Promise<{ dir: string; bin: string; log: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-swap-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bin = join(dir, "stubs");
+  await mkdir(bin);
+  const log = join(dir, "calls.log");
+  const on = join(dir, "swap-on");
+  if (options.swapOn) await writeFile(on, "");
+  const stub = async (name: string, body: string): Promise<void> => {
+    await writeFile(join(bin, name), `#!/bin/sh\n${body}\n`);
+    await chmod(join(bin, name), 0o755);
+  };
+  for (const tool of ["awk", "chmod", "dirname", "grep", "rm", "tee"]) {
+    const found = ["/usr/bin", "/bin"].map((d) => join(d, tool));
+    await symlink(found.find((f) => existsSync(f))!, join(bin, tool));
+  }
+  await stub("id", `echo ${options.uid}`);
+  await stub("df", `echo 'Filesystem 1024-blocks Used Available Capacity Mounted'; echo "/dev/sda1 100 0 ${options.availKiB} 0% /"`);
+  await stub("swapon", `echo "swapon $*" >> "${log}"\nif [ "$1" = --noheadings ]; then [ -e "${on}" ] && echo "${dir}/swapfile file 8G 0B -2"; exit 0; fi\n: > "${on}"`);
+  await stub("fallocate", `echo "fallocate $*" >> "${log}"\n: > "$3"`);
+  await stub("mkswap", `echo "mkswap $*" >> "${log}"`);
+  return { dir, bin, log };
+}
+
+function runSwapScript(dir: string, bin: string, sizeGiB = 8): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    execFile("/bin/sh", ["-c", swapScript(sizeGiB, join(dir, "swapfile"), join(dir, "fstab"))], { env: { PATH: bin } }, (error, stdout, stderr) => {
+      const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
+      resolve({ code, out: `${stdout}${stderr}` });
+    });
+  });
+}
+
+test("a box without swap gets a swapfile, listed in fstab once; a box with swap is left alone", async (t) => {
+  const { dir, bin, log } = await swapStubs(t, { uid: 0, availKiB: 100 * 1024 * 1024 });
+  const first = await runSwapScript(dir, bin);
+  assert.equal(first.code, 0, first.out);
+  assert.match(first.out, /Added 8 GiB of swap/);
+  const calls = (await readFile(log, "utf8")).trim().split("\n");
+  assert.deepEqual(calls.slice(1), [`fallocate -l 8G ${dir}/swapfile`, `mkswap ${dir}/swapfile`, `swapon ${dir}/swapfile`]);
+  assert.equal(await readFile(join(dir, "fstab"), "utf8"), `${dir}/swapfile none swap sw 0 0\n`);
+  const again = await runSwapScript(dir, bin);
+  assert.match(again.out, /Swap is already on/);
+  assert.equal(await readFile(join(dir, "fstab"), "utf8"), `${dir}/swapfile none swap sw 0 0\n`);
+});
+
+test("no root access or too little disk: the swap script skips, saying why, and succeeds", async (t) => {
+  const user = await swapStubs(t, { uid: 1000, availKiB: 100 * 1024 * 1024 });
+  const skipped = await runSwapScript(user.dir, user.bin);
+  assert.equal(skipped.code, 0);
+  assert.match(skipped.out, /No root access/);
+  const small = await swapStubs(t, { uid: 0, availKiB: 10 * 1024 * 1024 });
+  const tight = await runSwapScript(small.dir, small.bin);
+  assert.equal(tight.code, 0);
+  assert.match(tight.out, /Less than 24 GiB free/);
+  await assert.rejects(readFile(join(small.dir, "swapfile")), "no swapfile is made");
+});
+
+test("a box's swap is its memory, from 1 to 8 GiB", () => {
+  assert.equal(boxSwapGiB(512 * 1024 ** 2), 1);
+  assert.equal(boxSwapGiB(7.56 * 1024 ** 3), 8);
+  assert.equal(boxSwapGiB(4 * 1024 ** 3), 4);
+  assert.equal(boxSwapGiB(64 * 1024 ** 3), 8);
 });

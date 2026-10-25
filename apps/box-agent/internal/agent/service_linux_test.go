@@ -5,6 +5,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,24 @@ func TestNeedrestartOverrideIsSkippedWithoutNeedrestart(t *testing.T) {
 	}
 	if pathExists(dir) {
 		t.Fatal("created needrestart's config dir on a box without needrestart")
+	}
+}
+
+func TestOOMPolicyDropInIsWrittenOnce(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "orq-agent.service.d")
+	changed, err := writeOOMPolicyDropIn(dir)
+	if err != nil || !changed {
+		t.Fatalf("first write: changed=%v err=%v", changed, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "oom-policy.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "[Service]\nOOMPolicy=continue\n") {
+		t.Fatalf("drop-in = %q", got)
+	}
+	// A second start finds it in place and asks for no reload.
+	if changed, err := writeOOMPolicyDropIn(dir); err != nil || changed {
+		t.Fatalf("second write: changed=%v err=%v", changed, err)
 	}
 }
