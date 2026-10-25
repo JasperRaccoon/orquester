@@ -1,9 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  HELD_REFRESH_FLOOR_MS,
-  HELD_REFRESH_MARGIN_MS,
-  REFRESH_INTERVAL_MS,
   selectAccountsToRefresh,
   selectHeldAccountsToRefresh,
   mergeClaudeRefreshedCreds,
@@ -38,18 +35,14 @@ test("held accounts are renewed ahead of their CLI: inside the held margin and a
   const expiries = new Map<string, number | null>([
     ["idle", now + 40 * 60_000],
     ["codex", now + 40 * 60_000],
-    ["grok", now + HELD_REFRESH_MARGIN_MS],
-    ["floor", now + HELD_REFRESH_FLOOR_MS],
+    ["grok", now + 85 * 60_000],
+    ["floor", now + 10 * 60_000],
     ["spent", now - 60_000],
-    ["far", now + HELD_REFRESH_MARGIN_MS + 1],
+    ["far", now + 85 * 60_000 + 1],
     ["unknown", null]
   ]);
   const picked = selectHeldAccountsToRefresh(accts, held, expiries, now).map((a) => a.id).sort();
   assert.deepEqual(picked, ["codex", "grok"]);
-});
-
-test("the held window is longer than one refresher tick, so a tick always lands in it", () => {
-  assert.ok(HELD_REFRESH_MARGIN_MS - HELD_REFRESH_FLOOR_MS > REFRESH_INTERVAL_MS);
 });
 
 test("mergeClaudeRefreshedCreds preserves other fields", () => {

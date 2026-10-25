@@ -3,7 +3,6 @@ import type { ServerResponse } from "node:http";
 import { describe, it } from "node:test";
 
 import {
-  AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
   agentRowsFrameOf,
   applyAgentRows,
   applyDomainEvent,
@@ -323,7 +322,13 @@ describe("thread stream — live delivery", () => {
     let emit: ((events: DomainEvent[]) => void) = () => undefined;
     const closed: string[] = [];
     // A subagent fleet's single turn: its snapshot alone is past the 8 MiB budget.
-    const large = { ...snapshot(1), padding: "x".repeat(AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES + 1024) } as unknown as ReturnType<typeof snapshot>;
+    const large: ThreadSnapshotPayload = {
+      ...snapshot(1),
+      items: [{
+        kind: "message", id: "large", role: "assistant", text: "x".repeat(8 * 1024 * 1024 + 1024),
+        streaming: false, turnId: null, createdAt: "1970-01-01T00:00:00.000Z", updatedAt: "1970-01-01T00:00:00.000Z"
+      }]
+    };
     const stream = createThreadStream({
       response: fake.response,
       hostInstanceId: "host-1",
@@ -339,6 +344,7 @@ describe("thread stream — live delivery", () => {
     await stream.start();
     emit([event(2)]);
     assert.deepEqual(closed, [], "never cut for its own snapshot");
+    assert.deepEqual(JSON.parse(fake.lines[0] ?? "{}"), { kind: "snapshot", thread: large });
     assert.deepEqual(
       fake.lines.map((line) => (JSON.parse(line) as { kind: string }).kind),
       ["snapshot", "synchronized", "event"]

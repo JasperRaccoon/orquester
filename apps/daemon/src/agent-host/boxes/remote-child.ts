@@ -52,7 +52,7 @@ import { DEFAULT_KILL_GRACE_MS, type ChildExitReason, type ProviderChild } from 
  * Codex with many subagents outran 4 MiB on a busy host. It grows as used, so it costs nothing
  * while the daemon keeps up.
  */
-export const DETACHED_BUFFER_BYTES = 128 * 1024 * 1024;
+const DETACHED_BUFFER_BYTES = 128 * 1024 * 1024;
 
 /** How long a detached child waits for its box link to come back (spec §9.2 decides the box's fate). */
 export const BOX_REATTACH_DEADLINE_MS = 15 * 60_000;

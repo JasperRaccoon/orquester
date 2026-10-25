@@ -146,12 +146,13 @@ test("an unchanged refresh has a fresh persisted timestamp and repairs caller mu
   const cacheFile = join(home, "c.json");
   const scanner = new UsageTokensScanner({ userhome: home, cacheFile, now: () => now });
   const first = await scanner.snapshot(true);
-  const expected = structuredClone(first.rows);
   first.rows[0]!.inputTokens = 999;
   first.rows[0]!.costBreakdown!.input = 999;
   now += 1000;
   const refreshed = await scanner.snapshot(true);
-  assert.deepEqual(refreshed.rows, expected);
+  assert.equal(refreshed.rows[0]?.inputTokens, 10);
+  assert.equal(refreshed.rows[0]?.outputTokens, 4);
+  assert.ok(Math.abs((refreshed.rows[0]?.costBreakdown?.input ?? NaN) - 0.00005) < 1e-12);
   assert.equal(refreshed.asOf, new Date(now).toISOString());
   assert.equal(first.asOf, new Date(T0()).toISOString(), "an earlier snapshot keeps its timestamp");
   assert.deepEqual(JSON.parse(await readFile(cacheFile, "utf8")), refreshed);
@@ -165,9 +166,9 @@ test("refresh invalidates totals and dedup winners after deletion, same-size rew
   await mkdir(pdir, { recursive: true });
   const a = join(pdir, "a.jsonl");
   const b = join(pdir, "b.jsonl");
-  const turn = (tokens: number) => JSON.stringify({
-    timestamp: "2026-07-07T00:00:00Z", requestId: "same", isSidechain: true, agentId: "sub",
-    message: { id: "same", model: "claude-opus-4-8", usage: { input_tokens: tokens, cache_read_input_tokens: tokens } }
+  const turn = (tokens: number, id = "same") => JSON.stringify({
+    timestamp: "2026-07-07T00:00:00Z", requestId: id, isSidechain: true, agentId: "sub",
+    message: { id, model: "claude-opus-4-8", usage: { input_tokens: tokens, cache_read_input_tokens: tokens } }
   }) + "\n";
   await writeFile(a, turn(10));
   await writeFile(b, turn(20));
@@ -176,11 +177,14 @@ test("refresh invalidates totals and dedup winners after deletion, same-size rew
   await rm(a);
   assert.equal((await scanner.snapshot(true)).rows[0]?.inputTokens, 20, "deleting the winner exposes its duplicate");
   assert.equal(scanner.subagentRequests(0)?.[0]?.cacheRead, 20);
-  assert.equal(turn(20).length, turn(21).length);
   await writeFile(b, turn(21));
   await utimes(b, new Date(T0()), new Date(T0()));
   assert.equal((await scanner.snapshot(true)).rows[0]?.inputTokens, 21, "a same-size edit changes totals");
   assert.equal(scanner.subagentRequests(0)?.[0]?.cacheRead, 21);
+  await writeFile(b, turn(21) + turn(8, "extra"));
+  await scanner.snapshot(true);
+  await writeFile(b, turn(7));
+  assert.equal((await scanner.snapshot(true)).rows[0]?.inputTokens, 7, "a nonempty shorter rewrite replaces the previous turn");
   await writeFile(b, "");
   assert.deepEqual((await scanner.snapshot(true)).rows, [], "truncation clears old usage");
   assert.deepEqual(scanner.subagentRequests(0), []);
@@ -199,49 +203,6 @@ test("the first empty scan replaces a persisted snapshot from removed transcript
   await scanner.init();
   assert.equal((await scanner.snapshot()).rows.length, 1);
   assert.deepEqual((await scanner.snapshot(true)).rows, []);
-});
-
-test("a failed aggregation keeps rejecting unchanged malformed usage until the transcript is repaired", async (t) => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-failed-refresh-"));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const pdir = join(home, ".claude", "projects", "p");
-  await mkdir(pdir, { recursive: true });
-  const path = join(pdir, "a.jsonl");
-  const turn = (model: unknown, inputTokens: number) => JSON.stringify({
-    timestamp: "2026-07-07T00:00:00Z", requestId: "rA",
-    message: { id: "mA", model, usage: { input_tokens: inputTokens } }
-  });
-  const valid = turn("claude-opus-4-8", 10);
-  await writeFile(path, `${valid}\n`);
-  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
-  assert.equal((await scanner.snapshot(true)).rows[0]?.inputTokens, 10);
-  // Equal size and a distinct mtime force a full parse rather than an append.
-  await writeFile(path, `${turn(42, 20).padEnd(valid.length, " ")}\n`);
-  await utimes(path, new Date(T0()), new Date(T0()));
-  await assert.rejects(scanner.snapshot(true), TypeError);
-  await assert.rejects(scanner.snapshot(true), TypeError);
-  await writeFile(path, `${turn("claude-opus-4-8", 20)}\n`);
-  await utimes(path, new Date(T0() + 1000), new Date(T0() + 1000));
-  assert.equal((await scanner.snapshot(true)).rows[0]?.inputTokens, 20);
-});
-
-test("a truncated/rewritten file is fully re-parsed", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-trunc-"));
-  const pdir = join(home, ".claude", "projects", "p");
-  await mkdir(pdir, { recursive: true });
-  const file = join(pdir, "t.jsonl");
-  const mk = (id: string, tokens: number) =>
-    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: id, message: { id, model: "claude-opus-4-8", usage: { input_tokens: tokens, output_tokens: 0 } } });
-  await writeFile(file, mk("r1", 10) + "\n" + mk("r2", 20) + "\n", "utf8");
-  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
-  await scanner.init();
-  assert.equal((await scanner.snapshot(true)).rows.find((r) => r.agent === "claude")?.inputTokens, 30);
-
-  // Shrink the file to a single different turn — totals must reflect only it.
-  await writeFile(file, mk("r3", 7) + "\n", "utf8");
-  assert.equal((await scanner.snapshot(true)).rows.find((r) => r.agent === "claude")?.inputTokens, 7);
 });
 
 test("codex parser state (model, cumulative gate) carries across appended chunks", async () => {

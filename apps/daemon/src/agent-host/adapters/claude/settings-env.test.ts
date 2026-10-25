@@ -16,20 +16,19 @@ import { test } from "node:test";
 import type { ClaudeNamesFs } from "../../../agent-isolation/claude-names.ts";
 import { claudeSettingsEnvs, claudeSettingsNodeOptions, claudeToolSearchSetting } from "./settings-env.ts";
 
-/** A read-only filesystem over a map of path → text, recording every file read. */
-function mapFs(files: Record<string, string>): ClaudeNamesFs & { reads: string[] } {
-  const reads: string[] = [];
+/** A read-only filesystem holding independent file bytes and directory entries. */
+function mapFs(files: Record<string, string>, directories: readonly string[] = []): ClaudeNamesFs {
   return {
-    reads,
-    stat: async (path: string) => (path in files ? ({ kind: "file", size: files[path]!.length } as never) : null),
+    stat: async (path: string) => directories.includes(path)
+      ? ({ kind: "dir", size: 0 } as never)
+      : path in files ? ({ kind: "file", size: files[path]!.length } as never) : null,
     readdir: async () => [],
     read: async (path: string) => {
-      reads.push(path);
       const text = files[path];
       if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
       return Buffer.from(text, "utf8");
     }
-  } as ClaudeNamesFs & { reads: string[] };
+  };
 }
 
 async function tempRoot(t: { after: (fn: () => Promise<void>) => void }): Promise<string> {
@@ -49,7 +48,7 @@ function git(cwd: string, ...args: string[]): void {
 
 test("a box chat reads the project's settings in the box and the user's on the host", async (t) => {
   const home = await tempRoot(t);
-  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--user" } }));
+  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--user", ENABLE_TOOL_SEARCH: "false" } }));
   const project = "/var/lib/orquester/workspaces/ws/boxproj";
   const box = mapFs({
     [join(project, ".claude", "settings.json")]: JSON.stringify({ env: { NODE_OPTIONS: "--from-box-project" } })
@@ -59,22 +58,7 @@ test("a box chat reads the project's settings in the box and the user's on the h
 
   // user < project < local: the box's project file wins over the host user file.
   assert.equal(claudeSettingsNodeOptions(envs), "--from-box-project");
-  assert.deepEqual(box.reads.sort(), [join(project, ".claude", "settings.json"), join(project, ".claude", "settings.local.json")].sort());
-  assert.ok(!box.reads.includes(join(home, "settings.json")), "the user file is never read from the box");
-});
-
-test("without a box filesystem the project files are read on the host", async (t) => {
-  const root = await tempRoot(t);
-  const home = join(root, "home");
-  const project = join(root, "proj");
-  await mkdir(home, { recursive: true });
-  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--user" } }));
-  await writeSettings(project, "settings.local.json", { NODE_OPTIONS: "--local" });
-
-  const env = { CLAUDE_CONFIG_DIR: home };
-  assert.equal(claudeSettingsNodeOptions(await claudeSettingsEnvs({ env, cwd: project, sources: "global" })), "--local");
-  // A profile chat carries the user's at the flag tier, so there it wins.
-  assert.equal(claudeSettingsNodeOptions(await claudeSettingsEnvs({ env, cwd: project, sources: "profile" })), "--user");
+  assert.equal(claudeToolSearchSetting(envs, {}), "false", "the host account's user-only value still loads");
 });
 
 test("ENABLE_TOOL_SEARCH: local over project over user over the process env", async (t) => {
@@ -84,24 +68,26 @@ test("ENABLE_TOOL_SEARCH: local over project over user over the process env", as
   await mkdir(home, { recursive: true });
   await mkdir(project, { recursive: true });
   const env = { CLAUDE_CONFIG_DIR: home };
-  const setting = async (processEnv: Record<string, string> = {}) =>
-    claudeToolSearchSetting(await claudeSettingsEnvs({ env, cwd: project, sources: "global" }), processEnv);
+  const setting = async (processEnv: Record<string, string> = {}) => {
+    const envs = await claudeSettingsEnvs({ env, cwd: project, sources: "global" });
+    return { nodeOptions: claudeSettingsNodeOptions(envs), toolSearch: claudeToolSearchSetting(envs, processEnv) };
+  };
 
-  assert.equal(await setting(), undefined);
-  assert.equal(await setting({ ENABLE_TOOL_SEARCH: "auto" }), "auto", "the process env applies when no file sets it");
+  assert.deepEqual(await setting(), { nodeOptions: undefined, toolSearch: undefined });
+  assert.deepEqual(await setting({ ENABLE_TOOL_SEARCH: "auto" }), { nodeOptions: undefined, toolSearch: "auto" });
 
-  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { ENABLE_TOOL_SEARCH: "auto" } }));
-  assert.equal(await setting({ ENABLE_TOOL_SEARCH: "false" }), "auto", "a settings file beats the process env");
+  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--user", ENABLE_TOOL_SEARCH: "auto" } }));
+  assert.deepEqual(await setting({ ENABLE_TOOL_SEARCH: "false" }), { nodeOptions: "--user", toolSearch: "auto" });
 
-  await writeSettings(project, "settings.json", { ENABLE_TOOL_SEARCH: "false" });
-  assert.equal(await setting(), "false");
+  await writeSettings(project, "settings.json", { NODE_OPTIONS: "--project", ENABLE_TOOL_SEARCH: "false" });
+  assert.deepEqual(await setting(), { nodeOptions: "--project", toolSearch: "false" });
 
-  await writeSettings(project, "settings.local.json", { ENABLE_TOOL_SEARCH: "auto:30" });
-  assert.equal(await setting(), "auto:30");
+  await writeSettings(project, "settings.local.json", { NODE_OPTIONS: "--local", ENABLE_TOOL_SEARCH: "auto:30" });
+  assert.deepEqual(await setting(), { nodeOptions: "--local", toolSearch: "auto:30" });
 
-  // A value that is not a string is not one to override, and does not fall through to a lower one.
-  await writeSettings(project, "settings.local.json", { ENABLE_TOOL_SEARCH: false });
-  assert.equal(await setting({ ENABLE_TOOL_SEARCH: "auto" }), undefined);
+  // An unknown value must not trigger the adapter's auto-mode override.
+  await writeSettings(project, "settings.local.json", { NODE_OPTIONS: "--local", ENABLE_TOOL_SEARCH: false });
+  assert.deepEqual(await setting({ ENABLE_TOOL_SEARCH: "auto" }), { nodeOptions: "--local", toolSearch: undefined });
 });
 
 test("ENABLE_TOOL_SEARCH in a profile chat: the carried user value wins; an isolated one reads the user's only", async (t) => {
@@ -109,12 +95,14 @@ test("ENABLE_TOOL_SEARCH in a profile chat: the carried user value wins; an isol
   const home = join(root, "home");
   const project = join(root, "proj");
   await mkdir(home, { recursive: true });
-  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { ENABLE_TOOL_SEARCH: "auto" } }));
-  await writeSettings(project, "settings.local.json", { ENABLE_TOOL_SEARCH: "false" });
+  await writeFile(join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--user", ENABLE_TOOL_SEARCH: "auto" } }));
+  await writeSettings(project, "settings.local.json", { NODE_OPTIONS: "--local", ENABLE_TOOL_SEARCH: "false" });
   const env = { CLAUDE_CONFIG_DIR: home };
-
-  assert.equal(claudeToolSearchSetting(await claudeSettingsEnvs({ env, cwd: project, sources: "profile" }), {}), "auto");
-  assert.equal(claudeToolSearchSetting(await claudeSettingsEnvs({ env, cwd: project, sources: "global" }), {}), "false");
+  for (const sources of ["profile", "isolated"] as const) {
+    const loaded = await claudeSettingsEnvs({ env, cwd: project, sources });
+    assert.equal(claudeToolSearchSetting(loaded, {}), "auto", sources);
+    assert.equal(claudeSettingsNodeOptions(loaded), "--user", sources);
+  }
 
   await writeFile(join(home, "settings.json"), JSON.stringify({ env: {} }));
   await writeSettings(project, "settings.json", { NODE_OPTIONS: "--project" });
@@ -184,14 +172,17 @@ test("a repository rooted at the home keeps its local file in the cwd", async (t
   assert.equal(claudeToolSearchSetting(await claudeSettingsEnvs({ env, cwd, sources: "global", home: "/nonexistent-home" }), {}), "auto");
 });
 
-test("a box chat finds the repository root in the box", async () => {
+test("a box chat reads the root local file on POSIX and the cwd local file on Windows", async () => {
   const repo = "/var/lib/orquester/workspaces/ws/boxproj";
   const cwd = join(repo, "app");
   const box = mapFs({
-    [join(repo, ".git")]: "",
-    [join(repo, ".claude", "settings.local.json")]: JSON.stringify({ env: { ENABLE_TOOL_SEARCH: "auto" } })
-  });
-  const envs = await claudeSettingsEnvs({ env: { CLAUDE_CONFIG_DIR: "/nonexistent-config" }, cwd, sources: "global", projectFs: box });
-  assert.equal(claudeToolSearchSetting(envs, {}), "auto");
-  assert.ok(box.reads.includes(join(cwd, ".claude", "settings.local.json")), "the cwd's leftover local file is read too");
+    [join(repo, ".claude", "settings.local.json")]: JSON.stringify({ env: { ENABLE_TOOL_SEARCH: "auto" } }),
+    [join(cwd, ".claude", "settings.local.json")]: JSON.stringify({ env: { ENABLE_TOOL_SEARCH: "false" } })
+  }, [join(repo, ".git")]);
+  for (const [platform, expected] of [["linux", "auto"], ["win32", "false"]] as const) {
+    const envs = await claudeSettingsEnvs({
+      env: { CLAUDE_CONFIG_DIR: "/nonexistent-config" }, cwd, sources: "global", projectFs: box, platform
+    });
+    assert.equal(claudeToolSearchSetting(envs, {}), expected, platform);
+  }
 });

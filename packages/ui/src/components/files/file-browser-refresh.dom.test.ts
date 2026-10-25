@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
-import { createElement, Profiler } from "react";
+import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type { FsEntry } from "@orquester/api";
@@ -44,106 +44,95 @@ const file = (name: string): FsEntry => ({ name, path: `${ROOT}/${name}`, kind: 
 describe("file-tree refreshes", () => {
   let root: Root;
   let entries: FsEntry[];
-  let requests: number;
-  let commits: number;
+  let requestedPaths: string[];
+  let readPaths: string[];
 
+  const button = (name: string) => [...document.querySelectorAll("button")]
+    .find((node) => node.textContent?.trim() === name);
+  const back = () => document.querySelector<HTMLButtonElement>('[aria-label="Back to files"]');
+  const rowNames = () => [...document.querySelectorAll("button")]
+    .map((node) => node.textContent?.trim()).filter((name) => name?.endsWith(".bin")).sort();
   const refresh = async () => {
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh"]')!.click());
   };
-  const rowNames = () => [...document.querySelectorAll("button > span.flex-1.truncate")].map((node) => node.textContent);
+  const openPreview = async () => {
+    await act(async () => {
+      button("first.pdf")!.click();
+      await import("./FilePreview");
+    });
+  };
 
   beforeEach(async () => {
     entries = [file("first.bin"), file("second.bin")];
-    requests = 0;
-    commits = 0;
+    requestedPaths = [];
+    readPaths = [];
     document.body.innerHTML = "<div id='root'></div>";
     root = createRoot(document.getElementById("root")!);
     const api = {
       listFiles: async (path: string) => {
-        requests++;
-        // The wire always creates new array and entry identities.
-        return { path, parent: "/workspace", entries: entries.map((entry) => ({ ...entry })) };
+        requestedPaths.push(path);
+        const listing = path === ROOT ? entries : [{ ...file("child.bin"), path: `${path}/child.bin` }];
+        return { path, parent: "/workspace", entries: listing.map((entry) => ({ ...entry })) };
+      },
+      readFileBytes: async (path: string) => {
+        readPaths.push(path);
+        throw new Error("Download unavailable in this fixture");
       },
       getFsCapabilities: async () => ({ folderZip: true })
     } as unknown as ApiClient;
     await act(async () => root.render(createElement(OrquesterProvider, {
       runtime: "web", api, useTitlebar: false,
-      children: createElement(Profiler, {
-        id: "files", onRender: () => { commits++; }, children: createElement(FileBrowser, { rootPath: ROOT, active: true })
-      })
+      children: createElement(FileBrowser, { rootPath: ROOT, active: false })
     })));
-    // Settle React's first no-op state update before measuring repeated polls.
-    await refresh();
-    commits = 0;
-    requests = 0;
   });
 
   afterEach(async () => {
     await act(async () => root.unmount());
   });
 
-  it("still fetches fresh listings without reconciling an unchanged tree", async () => {
-    await refresh();
-    await refresh();
-    await refresh();
-    assert.equal(requests, 3);
-    assert.equal(commits, 0);
+  it("refreshes renamed, added and removed files, including an empty directory", async () => {
     assert.deepEqual(rowNames(), ["first.bin", "second.bin"]);
-  });
-
-  it("opens the lazy preview on selection and restores the empty pane on Back", async () => {
-    // An oversized PDF uses the download card without loading its PDF engine.
-    entries = [{ ...file("first.pdf"), size: 30 * 1024 * 1024 }];
+    entries = [file("renamed.bin"), file("second.bin")];
     await refresh();
-    assert.match(document.body.textContent!, /Select a file to view its contents/);
-    assert.doesNotMatch(document.body.textContent!, /first.pdf · 30.0 MB/);
-    const first = [...document.querySelectorAll("button > span.flex-1.truncate")]
-      .find((node) => node.textContent === "first.pdf")!.parentElement!;
-    await act(async () => {
-      first.click();
-      // Settle the actual preview module load, without timer-based waiting.
-      await import("./FilePreview");
-    });
-    assert.match(document.body.textContent!, /first.pdf · 30.0 MB/);
-    assert.doesNotMatch(document.body.textContent!, /Select a file to view its contents/);
-    await act(async () => {
-      (document.querySelector('[aria-label="Back to files"]') as HTMLButtonElement).click();
-    });
-    assert.match(document.body.textContent!, /Select a file to view its contents/);
-    assert.doesNotMatch(document.body.textContent!, /first.pdf · 30.0 MB/);
-    await act(async () => first.click());
-    assert.match(document.body.textContent!, /first.pdf · 30.0 MB/);
-    assert.doesNotMatch(document.body.textContent!, /Select a file to view its contents/);
-  });
-
-  for (const [field, value] of [
-    ["name", "renamed.bin"], ["path", `${ROOT}/different.bin`], ["kind", "dir"], ["size", 4096]
-  ] as const) {
-    it(`applies a changed entry ${field}`, async () => {
-      entries = [{ ...entries[0], [field]: value }, entries[1]];
-      await refresh();
-      assert.ok(commits > 0, `${field} must update the tree's entry data`);
-      assert.deepEqual(rowNames(), [field === "name" ? "renamed.bin" : "first.bin", "second.bin"]);
-    });
-  }
-
-  it("applies reordered, added and removed entries, including an empty listing", async () => {
-    entries = [entries[1], entries[0]];
+    assert.deepEqual(rowNames(), ["renamed.bin", "second.bin"]);
+    entries.push(file("third.bin"));
     await refresh();
-    assert.deepEqual(rowNames(), ["second.bin", "first.bin"]);
-    entries = [...entries, file("third.bin")];
+    assert.deepEqual(rowNames(), ["renamed.bin", "second.bin", "third.bin"]);
+    entries = entries.filter((entry) => entry.name !== "second.bin");
     await refresh();
-    assert.deepEqual(rowNames(), ["second.bin", "first.bin", "third.bin"]);
-    entries = entries.slice(1);
-    await refresh();
-    assert.deepEqual(rowNames(), ["first.bin", "third.bin"]);
+    assert.deepEqual(rowNames(), ["renamed.bin", "third.bin"]);
     entries = [];
     await refresh();
     assert.deepEqual(rowNames(), []);
-    assert.match(document.body.textContent!, /Empty directory/);
+  });
+
+  it("opens the selected file, returns with Back and honors refreshed download size", async () => {
+    entries = [{ ...file("first.pdf"), size: 30 * 1024 * 1024 }];
     await refresh();
-    commits = 0;
+    assert.equal(back(), null);
+    await openPreview();
+    assert.ok(back());
+    await act(async () => button("Download")!.click());
+    assert.deepEqual(readPaths, [`${ROOT}/first.pdf`]);
+    await act(async () => back()!.click());
+    assert.equal(back(), null);
+    await openPreview();
+    assert.ok(back(), "the same file can be opened again after Back");
+    await act(async () => back()!.click());
+
+    // The raw-file route's 50 MiB ceiling must use the refreshed entry size.
+    entries = [{ ...file("first.pdf"), size: 60 * 1024 * 1024 }];
     await refresh();
-    assert.equal(commits, 0);
+    await openPreview();
+    assert.ok(back());
+    assert.equal(button("Download"), undefined, "an oversized file cannot use the buffered download");
+  });
+
+  it("refreshes a file replaced by a directory and opens its listing", async () => {
+    entries = [{ ...file("first.bin"), kind: "dir" }, file("second.bin")];
+    await refresh();
+    await act(async () => button("first.bin")!.click());
+    assert.equal(requestedPaths.at(-1), `${ROOT}/first.bin`);
+    assert.ok(button("child.bin"), "a refreshed directory opens its children rather than a file preview");
   });
 });

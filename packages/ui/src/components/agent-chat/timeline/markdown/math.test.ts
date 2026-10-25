@@ -356,10 +356,23 @@ describe("rendered in a message", () => {
     assert.ok(html.includes('data-markdown-copy="\\[\na\n\\]"'), html);
   });
 
-  it("keeps formulas reachable by keyboard", () => {
-    const html = message("$x$ and $$\ny\n$$");
-    assert.ok(html.includes('aria-label="Scroll inline equation"'), html);
-    assert.ok(html.includes('tabindex="0"'), html);
+  it("keeps formulas reachable by keyboard", async () => {
+    const { JSDOM } = await import("jsdom");
+    for (const [source, formula] of [["$x$", "x"], ["$$\ny\n$$", "y"]] as const) {
+      const fragment = JSDOM.fragment(message(source));
+      const named = (element: Element): boolean => Boolean(
+        element.getAttribute("aria-label")?.trim() ||
+        element.getAttribute("aria-labelledby")?.split(/\s+/).some((id) => fragment.getElementById(id)?.textContent?.trim())
+      );
+      const equation = fragment.querySelector<HTMLElement>('[role~="group"], [role~="region"]');
+      assert.ok(equation && named(equation), "the equation has a named accessible region");
+      assert.ok(
+        [equation, ...equation.querySelectorAll<HTMLElement>("*")].some((target) =>
+          target.tabIndex >= 0 && named(target) && target.textContent?.includes(formula)
+        ),
+        "the formula itself has a named keyboard focus target"
+      );
+    }
   });
 
   it("shows a formula KaTeX cannot parse as its source, not an error", () => {

@@ -9,7 +9,7 @@
  * - user: `<CLAUDE_CONFIG_DIR>/settings.json`;
  * - project: `<cwd>/.claude/settings.json`;
  * - local: `<root>/.claude/settings.local.json`, where `root` is the main checkout of the cwd's git
- *   repository (a worktree's `.git` file → its gitdir → `commondir`). It stays the cwd outside a
+ *   repository (a worktree's `.git` file → its gitdir → `commondir`). It stays the cwd on Windows, outside a
  *   repository, when the root is the cwd or the home, and when the root, its `.git` or its
  *   `.claude` is not owned by the CLI's user. When `root` is not the cwd, a `settings.local.json`
  *   an older Claude Code left in the cwd still applies, under the root's.
@@ -51,6 +51,8 @@ export async function claudeSettingsEnvs(input: {
   env: Readonly<Record<string, string | undefined>>;
   cwd: string;
   sources: ClaudeSettingsSources;
+  /** The CLI's target OS (a box's, when remote). Windows keeps its local file in the cwd. */
+  platform?: NodeJS.Platform;
   /**
    * boxes: where the project's files are read — a box chat's project lives in its box (the host
    * directory is an empty stub). The user file is the host account home's, the source of truth the
@@ -68,7 +70,9 @@ export async function claudeSettingsEnvs(input: {
   const files: Array<{ path: string; fs: ClaudeNamesFs }> = [];
   if (input.sources !== "isolated") {
     const cwd = resolve(input.cwd);
-    const localDir = await claudeLocalSettingsDir(cwd, fs, input.projectFs === undefined ? { home: input.home } : undefined);
+    const localDir = (input.platform ?? process.platform) === "win32"
+      ? cwd
+      : await claudeLocalSettingsDir(cwd, fs, input.projectFs === undefined ? { home: input.home } : undefined);
     const local = (dir: string): { path: string; fs: ClaudeNamesFs } => ({ path: join(dir, ".claude", "settings.local.json"), fs });
     files.push(local(localDir));
     if (localDir !== cwd) files.push(local(cwd));

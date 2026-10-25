@@ -15,7 +15,6 @@ import {
   COOLDOWN_MIN_LIFE_MS,
   createAgentTokenBroker,
   DEFAULT_MIN_VALID_SECONDS,
-  HELD_REFRESH_FLOOR_MS,
   MAX_REJECTED_TOKEN_LENGTH,
   REFRESH_COOLDOWN_MS
 } from "./broker.ts";
@@ -160,12 +159,12 @@ test("a host-local Claude holder: refreshed above the floor or with nothing usab
 
   // Below the floor: no refresh — the token, still good for 9 minutes, is handed out as is.
   w.refreshCalls.length = 0;
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + HELD_REFRESH_FLOOR_MS - MIN));
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 9 * MIN));
   assert.equal((await ask()).accessToken, "claude-access-OLD");
   assert.equal(w.refreshCalls.length, 0);
 
   // Below the floor and nearly spent: refreshed.
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + COOLDOWN_MIN_LIFE_MS - MIN));
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 4 * MIN));
   assert.equal((await ask()).accessToken, "claude-access-NEW");
   assert.deepEqual(w.refreshCalls, [{ agent: "claude", id: CLAUDE_ID, allowHeld: true }]);
 
@@ -175,14 +174,14 @@ test("a host-local Claude holder: refreshed above the floor or with nothing usab
   w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
   assert.equal((await ask()).accessToken, "claude-access-OLD");
   // ...and with none the request waits for the CLI's rewrite.
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + COOLDOWN_MIN_LIFE_MS - MIN));
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 4 * MIN));
   let settled = false;
   const locked = ask().finally(() => (settled = true));
   await settle(() => w.files.watcherCount(claudePath) === 1);
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(settled, false, "still waiting");
   // An unrelated rewrite (still short) does not end the wait.
-  w.files.write(claudePath, claudeCreds("claude-access-OLD2", NOW + COOLDOWN_MIN_LIFE_MS - 2 * MIN));
+  w.files.write(claudePath, claudeCreds("claude-access-OLD2", NOW + 3 * MIN));
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(settled, false);
   w.files.write(claudePath, claudeCreds("claude-access-CLI", NOW + 8 * 60 * MIN, "claude-refresh-CLI-SECRET"));

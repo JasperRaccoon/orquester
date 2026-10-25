@@ -136,14 +136,14 @@ test("index and API responses carry no token material", async () => {
   assert.equal(JSON.stringify(svc.list()).includes("SECRET"), false);
 });
 
-async function makeServiceWithFetch(t: TestContext, now: number, fetchImpl: typeof fetch) {
+async function makeServiceWithFetch(t: TestContext, now: number | (() => number), fetchImpl: typeof fetch) {
   t.mock.method(globalThis, "fetch", fetchImpl);
   const base = await mkdtemp(join(tmpdir(), "orq-fresh-"));
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
     userhome: base,
-    now: () => now
+    now: typeof now === "number" ? () => now : now
   });
   await svc.init();
   return svc;
@@ -480,34 +480,49 @@ test("the refresher re-reads the live sessions before spending a refresh token (
   assert.equal(called, 1);
 });
 
-test("the refresher renews a held account ahead of its CLI (above the floor), and skips one whose Claude CLI holds the refresh lock", async (t) => {
-  const now = Date.parse("2026-10-18T00:00:00Z");
+test("the refresher renews held accounts before their CLI, respects its lock, and renews after the lock clears on the next hourly tick", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let now = Date.parse("2026-10-18T00:00:00Z");
   const urls: string[] = [];
-  const svc = await makeServiceWithFetch(t, now, async (input) => {
+  let refreshRequested: () => void = () => {};
+  const nextRequest = () => new Promise<void>((resolve) => { refreshRequested = resolve; });
+  const svc = await makeServiceWithFetch(t, () => now, async (input) => {
     urls.push(String(input));
+    refreshRequested();
     return new Response(
       JSON.stringify({ access_token: jwt({ exp: Math.floor(now / 1000) + 864_000 }), refresh_token: "NEWR", expires_in: 28_800 }),
       { status: 200 }
     );
   });
-  const codex = await svc.importAccount({ content: codexBlob(Math.floor((now + 40 * 60_000) / 1000)) });
+  t.after(() => svc.stopRefresher());
+  // Import Claude first: observing the later Codex request means the first scan
+  // already checked and skipped Claude's lock, without inspecting the scanner.
   const claude = await svc.importAccount({
-    content: JSON.stringify({ claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: now + 30 * 60_000 } }),
+    content: JSON.stringify({ claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: now + 80 * 60_000 } }),
     label: "L"
   });
-  await mkdir(join(svc.homePath("claude", claude.id), ".oauth_refresh.lock")); // its CLI is refreshing
-  const due = (live: Set<string>) =>
-    (svc as unknown as { refreshDueAccounts(live: Set<string>): Promise<void> }).refreshDueAccounts(live);
-
-  await due(new Set([codex.id, claude.id]));
-  assert.deepEqual(urls, ["https://auth.openai.com/oauth/token"], "only the Codex account");
+  const codex = await svc.importAccount({ content: codexBlob(Math.floor((now + 40 * 60_000) / 1000)) });
+  const lock = join(svc.homePath("claude", claude.id), ".oauth_refresh.lock");
+  await mkdir(lock);
+  const held = new Set([claude.id, codex.id]);
+  let requested = nextRequest();
+  svc.startRefresher(() => held);
+  await requested;
+  // refreshNow joins this account's in-flight request through the public service API.
+  assert.equal(await svc.refreshNow("codex", codex.id), "refreshed");
+  assert.deepEqual(urls, ["https://auth.openai.com/oauth/token"]);
   const auth = JSON.parse(await readFile(join(svc.homePath("codex", codex.id), "auth.json"), "utf8"));
   assert.equal(auth.tokens.refresh_token, "NEWR");
 
-  // Lock gone: the Claude account is renewed on the next tick; the Codex one is fresh now.
-  await rm(join(svc.homePath("claude", claude.id), ".oauth_refresh.lock"), { recursive: true });
-  await due(new Set([codex.id, claude.id]));
+  await rm(lock, { recursive: true });
+  requested = nextRequest();
+  now += 60 * 60_000;
+  t.mock.timers.tick(60 * 60_000);
+  await requested;
+  assert.equal(await svc.refreshNow("claude", claude.id, { allowHeld: true }), "refreshed");
   assert.deepEqual(urls, ["https://auth.openai.com/oauth/token", "https://platform.claude.com/v1/oauth/token"]);
+  const credentials = JSON.parse(await readFile(join(svc.homePath("claude", claude.id), ".credentials.json"), "utf8"));
+  assert.equal(credentials.claudeAiOauth.refreshToken, "NEWR");
 });
 
 test("an invalid_grant for a refresh token a host CLI already rotated is that CLI's refresh, not a login to redo", async (t) => {

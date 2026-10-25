@@ -15,8 +15,7 @@ import { APPROVAL_REDIRECT_MESSAGE } from "../../adapter.ts";
 import { permissionResultForDecision } from "./decisions.ts";
 import {
   buildClaudeProbeOptions,
-  buildClaudeQueryOptions,
-  claudeToolSearchOverride
+  buildClaudeQueryOptions
 } from "./launch.ts";
 import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
 import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
@@ -475,42 +474,6 @@ describe("claude launch — NODE_OPTIONS (the plugins' tsc preload)", () => {
 });
 
 describe("claude launch — ENABLE_TOOL_SEARCH auto modes", () => {
-  it("maps Claude Code's auto modes to on and leaves every other value alone", () => {
-    const rows: Array<[string | undefined, "true" | undefined]> = [
-      [undefined, undefined],
-      ["", undefined],
-      ["true", undefined],
-      ["false", undefined],
-      ["1", undefined],
-      ["AUTO", undefined],
-      [" auto", undefined],
-      ["auto", "true"],
-      ["auto:10", "true"],
-      ["auto:50", "true"],
-      ["auto:99", "true"],
-      // auto:0 is already on, auto:100 already off; N clamps to 0..100.
-      ["auto:0", undefined],
-      ["auto:100", undefined],
-      ["auto:-5", undefined],
-      ["auto:150", undefined],
-      // parseInt reads a leading integer; an unparsable N means plain auto.
-      ["auto:5.5", "true"],
-      ["auto:0.5", undefined],
-      ["auto: 20 ", "true"],
-      ["auto:", "true"],
-      ["auto:abc", "true"],
-      // Scientific notation counts only as an integer; grouped digits are joined.
-      ["auto:1e1", "true"],
-      ["auto:1e2", undefined],
-      ["auto:1.5e0", "true"],
-      ["auto:1_000", undefined],
-      ["auto:1,000", undefined]
-    ];
-    for (const [value, expected] of rows) {
-      assert.equal(claudeToolSearchOverride(value), expected, `ENABLE_TOOL_SEARCH=${String(value)}`);
-    }
-  });
-
   function withToolSearch(toolSearchSetting: string | undefined, profile?: ClaudeProfileLaunch, nodeOptions?: string) {
     return buildClaudeQueryOptions({
       cwd: "/work/project",
@@ -526,21 +489,31 @@ describe("claude launch — ENABLE_TOOL_SEARCH auto modes", () => {
     });
   }
 
-  it("turns an auto mode on at the flag tier, since settings env beats the process env", () => {
-    const { options } = withToolSearch("auto");
-    assert.deepEqual((options.settings as Record<string, unknown>).env, { ENABLE_TOOL_SEARCH: "true" });
-    assert.equal(options.env?.ENABLE_TOOL_SEARCH, undefined, "the process env is left as built");
-  });
-
-  it("sits beside NODE_OPTIONS in the flag-tier env", () => {
-    const { options } = withToolSearch("auto:25", undefined, "--preload");
-    assert.deepEqual((options.settings as Record<string, unknown>).env, { NODE_OPTIONS: "--preload", ENABLE_TOOL_SEARCH: "true" });
-  });
-
-  it("leaves the user's own choice and the default untouched", () => {
-    for (const value of [undefined, "true", "false", "auto:0", "auto:100"]) {
-      const settings = withToolSearch(value).options.settings as Record<string, unknown> | undefined;
-      assert.equal(settings !== undefined && "env" in settings, false, `ENABLE_TOOL_SEARCH=${String(value)}`);
+  it("auto tool-search modes reach the flag tier alongside NODE_OPTIONS; explicit choices stay untouched", () => {
+    // Independent CLI configuration values, observed at the SDK launch boundary.
+    // Include the thresholds that already mean always-on/off, numeric spellings
+    // accepted by Claude Code, and an invalid suffix's documented auto fallback.
+    const rows: Array<[string | undefined, "true" | undefined]> = [
+      [undefined, undefined],
+      ["true", undefined],
+      ["false", undefined],
+      ["auto", "true"],
+      ["auto:25", "true"],
+      ["auto:0", undefined],
+      ["auto:100", undefined],
+      ["auto:-5", undefined],
+      ["auto:150", undefined],
+      ["auto:abc", "true"],
+      ["auto:1e1", "true"],
+      ["auto:1e2", undefined],
+      ["auto:1_000", undefined]
+    ];
+    for (const [value, expected] of rows) {
+      const settings = withToolSearch(value, undefined, "--preload").options.settings as Record<string, unknown>;
+      assert.deepEqual(settings.env, {
+        NODE_OPTIONS: "--preload",
+        ...(expected !== undefined ? { ENABLE_TOOL_SEARCH: expected } : {})
+      }, `ENABLE_TOOL_SEARCH=${String(value)}`);
     }
   });
 
@@ -631,33 +604,18 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
   });
 
   it("a profile without built-in tools passes tools: [] and loads MCP tools up front", () => {
-    const off = buildWith(profileLaunch({ disableBuiltinTools: true }));
+    const off = buildWith(profileLaunch({
+      disableBuiltinTools: true,
+      carriedSettings: { env: { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "true" } }
+    }));
     assert.deepEqual(off.options.tools, []);
+    assert.deepEqual(off.profileFiles?.settings.env, { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "false" });
     assert.equal(off.options.env?.ENABLE_TOOL_SEARCH, "false");
     assert.equal(off.options.env?.MAX_MCP_OUTPUT_TOKENS, "60000", "its tool results are its work");
     assert.deepEqual(off.options.allowedTools, ["mcp__orquester__send_message"], "the session tools stay pre-approved");
     const on = buildWith(profileLaunch());
     assert.equal("tools" in on.options, false);
     assert.equal(on.options.env?.ENABLE_TOOL_SEARCH, undefined);
-    assert.deepEqual(on.profileFiles?.settings.env, { TOKEN: "carried-secret" });
-  });
-
-  it("a profile without built-in tools keeps tool search off over a carried user value", () => {
-    // The carried user env rides the flag tier, which beats the process env's "false".
-    const carriedSettings = { env: { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "true" } };
-    const built = buildClaudeQueryOptions({
-      cwd: "/work/project",
-      executablePath: "/usr/local/bin/claude",
-      env: { PATH: "/usr/bin", HOME: "/home/orq" },
-      toolSearchSetting: "true",
-      runtimeMode: "approval-required",
-      models: MODELS,
-      attachmentsDir: "/appdir/threads/t1/attachments",
-      canUseTool: noopCanUseTool,
-      sessionId: "11111111-2222-3333-4444-555555555555",
-      profile: { launch: profileLaunch({ disableBuiltinTools: true, carriedSettings }), files: FILES }
-    });
-    assert.deepEqual(built.profileFiles?.settings.env, { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "false" });
   });
 
   it("a profile without built-in tools loads no filesystem settings (no CLAUDE.md walked up from its cwd)", () => {

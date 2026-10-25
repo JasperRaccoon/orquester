@@ -343,33 +343,6 @@ describe("thread index: search", () => {
     assert.equal(hit!.title, "New title");
   });
 
-  it("finds a prompt's first turn in ordinal order, scoped to its thread", async () => {
-    const log = new TestLog();
-    await indexed(log, [
-      created(),
-      ...liveTurn({ n: 1, prompt: "an earlier turn" }),
-      userMessage("shared", "needle prompt"),
-      replayedTurn("shared", "z-first", stampAt(20)),
-      replayedTurn("shared", "a-second", stampAt(21)),
-      done("direct", "a-second", "needle answer"),
-      done("unclaimed", null, "needle note")
-    ]);
-    const other = new TestLog("other-thread");
-    await indexed(other, [
-      created("/w/other"),
-      userMessage("shared", "needle other"),
-      replayedTurn("shared", "other-first", stampAt(1))
-    ], { projectPath: "/w/other", title: "Other" });
-
-    const hits = new Map(
-      index.search({ q: "needle", projectPath: "/w/p", limit: 10 }).map((hit) => [hit.id, hit])
-    );
-    assert.deepEqual([hits.get("shared")?.turnId, hits.get("shared")?.ordinal], ["z-first", 2]);
-    assert.deepEqual([hits.get("direct")?.turnId, hits.get("direct")?.ordinal], ["a-second", 3]);
-    assert.deepEqual([hits.get("unclaimed")?.turnId, hits.get("unclaimed")?.ordinal], [null, null]);
-    assert.equal(index.turnByPrompt(log.threadId, "shared")?.turnId, "z-first");
-    assert.equal(index.turnByPrompt(other.threadId, "shared")?.turnId, "other-first");
-  });
 });
 
 describe("thread index: activity paging", () => {
@@ -536,15 +509,32 @@ describe("thread index: activity paging", () => {
     const log = new TestLog();
     await indexed(log, [
       created(),
-      ...liveTurn({ n: 1, prompt: "one" }),
-      ...liveTurn({ n: 2, prompt: "two" })
+      ...liveTurn({ n: 1, prompt: "an earlier turn" }),
+      userMessage("shared", "needle prompt"),
+      replayedTurn("shared", "z-first", stampAt(20)),
+      replayedTurn("shared", "a-second", stampAt(21)),
+      done("direct", "a-second", "needle answer"),
+      done("unclaimed", null, "needle note")
     ]);
-    const id = log.threadId;
-    assert.equal(index.turnByPrompt(id, "u2")?.turnId, "t2");
-    assert.equal(index.turnByPrompt(id, "a1"), null, "an answer opens no turn");
+    const other = new TestLog("other-thread");
+    await indexed(other, [
+      created("/w/other"),
+      userMessage("shared", "needle other"),
+      replayedTurn("shared", "other-first", stampAt(1))
+    ], { projectPath: "/w/other", title: "Other" });
+
+    const hits = new Map(
+      index.search({ q: "needle", projectPath: "/w/p", limit: 10 }).map((hit) => [hit.id, hit])
+    );
+    assert.deepEqual([hits.get("shared")?.turnId, hits.get("shared")?.ordinal], ["z-first", 2]);
+    assert.deepEqual([hits.get("direct")?.turnId, hits.get("direct")?.ordinal], ["a-second", 3]);
+    assert.deepEqual([hits.get("unclaimed")?.turnId, hits.get("unclaimed")?.ordinal], [null, null]);
+    assert.equal(index.turnByPrompt(log.threadId, "shared")?.turnId, "z-first");
+    assert.equal(index.turnByPrompt(other.threadId, "shared")?.turnId, "other-first");
+    assert.equal(index.turnByPrompt(log.threadId, "a1"), null, "an answer opens no turn");
     await indexed(log, [reverted(1)]);
-    assert.equal(index.turnByPrompt(id, "u2"), null, "a removed turn's prompt opens nothing any more");
-    assert.equal(index.turnByPrompt(id, "u1")?.turnId, "t1");
+    assert.equal(index.turnByPrompt(log.threadId, "shared"), null, "a removed turn's prompt opens nothing any more");
+    assert.equal(index.turnByPrompt(log.threadId, "u1")?.turnId, "t1");
   });
 
   it("keepsUserMessage: a user message until a revert drops it by the fold's rule", async () => {

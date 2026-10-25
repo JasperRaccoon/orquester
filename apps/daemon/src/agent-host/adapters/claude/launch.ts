@@ -150,7 +150,7 @@ export const CLAUDE_NO_BUILTIN_TOOLS_ENV: Readonly<Record<string, string>> = { E
  * Claude Code 2.1.307's reading: `auto`, or `auto:N` with N clamped to 0..100 and an unparsable N
  * meaning `auto`.
  */
-export function claudeToolSearchOverride(value: string | undefined): "true" | undefined {
+function claudeToolSearchOverride(value: string | undefined): "true" | undefined {
   if (value === undefined) return undefined;
   if (value === "auto") return "true";
   if (!value.startsWith("auto:")) return undefined;

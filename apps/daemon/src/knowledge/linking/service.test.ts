@@ -402,6 +402,8 @@ describe("KnowledgeLinkingService — a myKG child left running by the previous 
 
     // The daemon died without stopping its child: it is still running, and ignores SIGTERM.
     let survivor = true;
+    let acknowledgeTerm!: () => void;
+    const termSent = new Promise<void>((resolve) => { acknowledgeTerm = resolve; });
     const second = await harness({
       appdir: first.appdir,
       store: first.store,
@@ -412,6 +414,7 @@ describe("KnowledgeLinkingService — a myKG child left running by the previous 
           () => survivor,
           (signal) => {
             events.push(signal);
+            if (signal === "SIGTERM") acknowledgeTerm();
             if (signal === "SIGKILL") survivor = false;
           }
         )
@@ -419,6 +422,8 @@ describe("KnowledgeLinkingService — a myKG child left running by the previous 
     });
     let started = false;
     const starting = second.service.start().then(() => (started = true));
+    // State loading uses real I/O: measure the grace after SIGTERM, not after calling start().
+    await Promise.race([termSent, starting]);
     await second.clock.advance(9_000);
     assert.deepEqual(events, ["spawn", "SIGTERM"], "no new child while the old one may still write to the session");
     assert.equal(started, false);

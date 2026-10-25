@@ -511,6 +511,7 @@ export class ClaudeSession {
     const settingsEnvs = await claudeSettingsEnvs({
       env: this.options.env,
       cwd: this.options.cwd,
+      platform: box?.launch.sys.os ?? process.platform,
       sources: profileLaunch === undefined ? "global" : profileLaunch.disableBuiltinTools === true ? "isolated" : "profile",
       ...(box !== undefined ? { projectFs: new BoxProjectFs(box.launch.connection) } : {}),
       ...(this.options.env.HOME !== undefined ? { home: this.options.env.HOME } : {})

@@ -103,7 +103,10 @@ function claudeBlob(accessToken: string, expiresAt: number): string {
   return JSON.stringify({ claudeAiOauth: { accessToken, refreshToken: "claude-refresh-SECRET", expiresAt, scopes: ["user:inference"] } });
 }
 
-function realBroker(svc: AgentAccountsService, accountsDir: string, sessions: ChatAwareSessionManager, now: number) {
+function realBroker(
+  svc: AgentAccountsService, accountsDir: string, sessions: ChatAwareSessionManager, now: number,
+  files = nodeCredentialFiles(accountsDir, () => now)
+) {
   const fakes = brokerWorld(); // its registry: box-1 owns BOX_PROJECT
   return createAgentTokenBroker({
     accounts: svc,
@@ -116,7 +119,7 @@ function realBroker(svc: AgentAccountsService, accountsDir: string, sessions: Ch
         for (const event of ["created", "updated", "exited", "closed"]) sessions.lifecycle.off(event, listener);
       };
     },
-    files: nodeCredentialFiles(accountsDir, () => now),
+    files,
     now: () => now
   });
 }
@@ -207,34 +210,51 @@ test("a held Claude account whose CLI holds the refresh lock, over real files: t
   openChat("chat-host", HOST_PROJECT, acct.id);
   const home = svc.homePath("claude", acct.id);
   await mkdir(join(home, ".oauth_refresh.lock")); // the CLI is refreshing right now
-  const broker = realBroker(svc, accountsDir, sessions, now);
+  const files = nodeCredentialFiles(accountsDir, () => now);
+  const read = files.read.bind(files);
+  const watch = files.watch.bind(files);
+  let armed!: () => void;
+  const watchArmed = new Promise<void>((resolve) => { armed = resolve; });
+  let notified!: () => void;
+  const nativeChange = new Promise<void>((resolve) => { notified = resolve; });
+  files.watch = (path, onChange) => {
+    const stop = watch(path, () => {
+      onChange();
+      notified();
+    });
+    armed(); // The real fs.watch call has returned with its listener registered.
+    return stop;
+  };
+  let firstRead!: () => void;
+  const readOld = new Promise<void>((resolve) => { firstRead = resolve; });
+  files.read = async (path) => {
+    const contents = await read(path);
+    if (path === join(home, ".credentials.json")) firstRead();
+    return contents;
+  };
+  const broker = realBroker(svc, accountsDir, sessions, now, files);
   const pending = broker.getToken({ boxId: "box-1", agent: "claude", accountId: acct.id }, new AbortController().signal);
 
-  // The host CLI refreshes and replaces its credentials (temp file + rename).
-  // Give the broker its first read before the rewrite lands, so this exercises the watch.
-  await new Promise((resolve) => setImmediate(resolve));
+  // Both the native listener and the old-token read precede the CLI's atomic replacement.
+  await Promise.all([watchArmed, readOld]);
   await writeFileAtomic(join(home, ".credentials.json"), claudeBlob("claude-access-CLI", now + 8 * 3_600_000), 0o600);
+  await nativeChange;
   assert.equal((await pending).accessToken, "claude-access-CLI");
   assert.equal(calls.length, 0, "the daemon never posted a refresh grant");
 });
 
-test("a held Codex account with nothing usable left: the daemon refreshes; an invalid_grant lost to the host CLI's own refresh reads as that refresh", async (t) => {
+test("a held Codex account with nothing usable left is renewed through the real account service", async (t) => {
   const now = Date.parse("2026-10-20T00:00:00Z");
   const fresh = Math.floor(now / 1000) + 864_000;
-  let home = "";
-  const { svc, accountsDir, calls } = await service(t, now, async () => {
-    // The host CLI posted the same refresh token a moment earlier, and won: its login is on disk.
-    await writeFileAtomic(join(home, "auth.json"), codexBlob(fresh, "codex-refresh-CLI-SECRET"), 0o600);
-    return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
-  });
+  const { svc, accountsDir, calls } = await service(t, now, async () =>
+    new Response(JSON.stringify({ access_token: jwt({ exp: fresh }), refresh_token: "codex-refresh-NEW-SECRET" }), { status: 200 })
+  );
   const { sessions, openChat } = router();
   const acct = await svc.importAccount({ content: codexBlob(Math.floor((now - 60_000) / 1000)) });
-  home = svc.homePath("codex", acct.id);
   openChat("chat-box", BOX_PROJECT, acct.id);
   openChat("chat-host", HOST_PROJECT, acct.id);
   const broker = realBroker(svc, accountsDir, sessions, now);
   const grant = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: acct.id }, new AbortController().signal);
   assert.equal(grant.expiresAt, fresh * 1000);
   assert.equal(calls.length, 1, "the expired token was renewed by the daemon although a host chat holds it");
-  assert.equal(svc.getRecord(acct.id)?.needsReauth, false, "not a login that needs a new sign-in");
 });

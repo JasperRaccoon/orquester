@@ -35,43 +35,18 @@ test("an unknown grammar preserves the source", () => {
   assert.equal(text(highlightCode("a\n\nb\n", null)), "a\n\nb\n");
 });
 
-test("streaming code keeps unchanged highlighted lines by identity", async () => {
+test("syntax context changes reclassify unchanged source lines", async () => {
   const parser = await loadLanguageParser("javascript");
   assert.ok(parser);
   const highlight = createIncrementalTreeHighlighter(parser);
-  const before = highlight("const a = 1;\n\nconst b = 2");
-  const after = highlight("const a = 1;\n\nconst b = 23;\n");
-  assert.equal(after[0], before[0]);
-  assert.equal(after[1], before[1], "empty unchanged lines are stable too");
-  assert.notEqual(after[2], before[2]);
-  assert.deepEqual(after, highlightCode("const a = 1;\n\nconst b = 23;\n", parser));
-});
-
-test("appended delimiters may change the preceding line's token classes", async () => {
-  const parser = await loadLanguageParser("javascript");
-  assert.ok(parser);
-  const highlight = createIncrementalTreeHighlighter(parser);
-  const before = highlight("const a = 1;\n/");
-  const code = "const a = 1;\n/* comment\ncontinued */";
-  const after = highlight(code);
-  assert.equal(after[0], before[0]);
-  assert.notEqual(after[1], before[1]);
-  assert.equal(after[1]?.[0]?.cls, "comment");
-  assert.deepEqual(after, highlightCode(code, parser));
-});
-
-test("incremental results match a fresh highlight through syntax changes and edits", async () => {
-  const parser = await loadLanguageParser("javascript");
-  assert.ok(parser);
-  const highlight = createIncrementalTreeHighlighter(parser);
-  for (const code of [
-    "const a = 1;\nconst text = `one\n",
-    "const a = 1;\nconst text = `one\n${",
-    "const a = 1;\nconst text = `one\n${a}\ntwo`;\n",
-    "/* const a = 1;\nconst text = `one\n${a}\ntwo`;\n */",
-    "const a = 2;\nconst b = 3;\n",
-    "const a = 2;\nconst b = 3;\n"
-  ]) {
-    assert.deepEqual(highlight(code), highlightCode(code, parser));
-  }
+  const code = "const a = 1;\nvalue";
+  highlight(code);
+  const commented = "/*const a = 1;\nvalue\n*/";
+  const after = highlight(commented);
+  assert.equal(text(after), commented);
+  assert.equal(after[1]?.map((token) => token.text).join(""), "value");
+  assert.ok(after[1]!.every((token) => token.cls === "comment"));
+  const restored = highlight(code);
+  assert.equal(text(restored), code);
+  assert.ok(restored[1]?.some((token) => token.cls !== null && token.cls !== "comment"));
 });

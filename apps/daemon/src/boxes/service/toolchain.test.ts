@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -264,25 +264,27 @@ test("a box without swap gets a swapfile, listed in fstab once; a box with swap 
   const { dir, bin, log } = await swapStubs(t, { uid: 0, availKiB: 100 * 1024 * 1024 });
   const first = await runSwapScript(dir, bin);
   assert.equal(first.code, 0, first.out);
-  assert.match(first.out, /Added 8 GiB of swap/);
+  assert.equal((await stat(join(dir, "swapfile"))).mode & 0o777, 0o600);
   const calls = (await readFile(log, "utf8")).trim().split("\n");
-  assert.deepEqual(calls.slice(1), [`fallocate -l 8G ${dir}/swapfile`, `mkswap ${dir}/swapfile`, `swapon ${dir}/swapfile`]);
+  assert.deepEqual(calls.filter((call) => !call.startsWith("swapon --noheadings")), [`fallocate -l 8G ${dir}/swapfile`, `mkswap ${dir}/swapfile`, `swapon ${dir}/swapfile`]);
   assert.equal(await readFile(join(dir, "fstab"), "utf8"), `${dir}/swapfile none swap sw 0 0\n`);
   const again = await runSwapScript(dir, bin);
-  assert.match(again.out, /Swap is already on/);
+  assert.equal(again.code, 0, again.out);
+  assert.equal((await readFile(log, "utf8")).match(/^fallocate /gm)?.length, 1, "existing swap is not allocated again");
   assert.equal(await readFile(join(dir, "fstab"), "utf8"), `${dir}/swapfile none swap sw 0 0\n`);
 });
 
-test("no root access or too little disk: the swap script skips, saying why, and succeeds", async (t) => {
+test("no root access or too little disk skips swap successfully without changing files", async (t) => {
   const user = await swapStubs(t, { uid: 1000, availKiB: 100 * 1024 * 1024 });
   const skipped = await runSwapScript(user.dir, user.bin);
   assert.equal(skipped.code, 0);
-  assert.match(skipped.out, /No root access/);
-  const small = await swapStubs(t, { uid: 0, availKiB: 10 * 1024 * 1024 });
+  await assert.rejects(readFile(join(user.dir, "swapfile")), { code: "ENOENT" });
+  await assert.rejects(readFile(join(user.dir, "fstab")), { code: "ENOENT" });
+  const small = await swapStubs(t, { uid: 0, availKiB: 20 * 1024 * 1024 });
   const tight = await runSwapScript(small.dir, small.bin);
   assert.equal(tight.code, 0);
-  assert.match(tight.out, /Less than 24 GiB free/);
-  await assert.rejects(readFile(join(small.dir, "swapfile")), "no swapfile is made");
+  await assert.rejects(readFile(join(small.dir, "swapfile")), { code: "ENOENT" });
+  await assert.rejects(readFile(join(small.dir, "fstab")), { code: "ENOENT" });
 });
 
 test("a box's swap is its memory, from 1 to 8 GiB", () => {
