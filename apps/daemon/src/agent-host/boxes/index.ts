@@ -31,8 +31,9 @@ import { join } from "node:path";
 import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { AccountHome, AgentAdapterId } from "@orquester/api/agent-chat";
 import type { BoxDetachedProcInfo, BoxPathMap, BoxSysInfo } from "@orquester/api";
-import { boxMcpSettingsPath, runInBoxServerNames, sessionProfileDir } from "@orquester/config";
+import { agentAccountsDir, boxMcpSettingsPath, runInBoxServerNames, sessionProfileDir } from "@orquester/config";
 
+import { credentialPath, grantFromCredentials, nodeCredentialFiles, type CredentialFiles } from "../../boxes/broker/credentials.ts";
 import { BOX_DISCONNECTED } from "../../boxes/client/mux.ts";
 import type { AgentTokenGrant, BoxConnection } from "../../boxes/contracts.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
@@ -56,7 +57,13 @@ import {
 } from "./mcp-bridge-registry.ts";
 import { mcpBridgeArgv, planMcpBridges, type McpBridgePlan, type McpServerSpec } from "./mcp-plan.ts";
 import { spawnBoxChild, type BoxProviderChild } from "./remote-child.ts";
-import { BoxTokenTracker, BOX_TOKEN_MIN_VALID_SECONDS, BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RENEW_RETRY_MS } from "./token-policy.ts";
+import {
+  BoxTokenTracker,
+  BOX_TOKEN_MIN_VALID_SECONDS,
+  BOX_TOKEN_REFUSAL_GRACE_MS,
+  BOX_TOKEN_RENEW_MAX_DELAY_MS,
+  BOX_TOKEN_RENEW_RETRY_MS
+} from "./token-policy.ts";
 
 export { BoxLaunchError } from "./errors.ts";
 export type { BoxConnector } from "./connections.ts";
@@ -116,6 +123,13 @@ export class BoxLaunch {
   private closed = false;
   private credentialWriter: ((grant: AgentTokenGrant) => Promise<void>) | null = null;
   private credentialWork: Promise<void> = Promise.resolve();
+  /** The access token the login file in the box holds now, and when it was written. Never logged. */
+  private credentialToken: string | null = null;
+  private credentialWrittenAt = 0;
+  /** An {@link adoptHostLogin} is queued and has not read the host's file yet. */
+  private adoptQueued = false;
+  /** The token {@link renewRejectedLogin} last asked the broker to replace. */
+  private rejectedRenewal: string | null = null;
   /** Cancels the armed mid-turn renewal of the login file, if any. */
   private cancelCredentialTimer: (() => void) | null = null;
 
@@ -255,14 +269,89 @@ export class BoxLaunch {
   /**
    * A login the CLI reads from a file in the box (Claude's refresh-token-free
    * `.credentials.json`): written now from a fresh grant, and rewritten by
-   * {@link refreshCredentials} whenever the token runs short.
+   * {@link refreshCredentials} whenever the token runs short, by
+   * {@link adoptHostLogin} whenever the account's login on this machine is renewed, and by
+   * {@link renewRejectedLogin} when the provider refuses it.
    */
   async installCredentials(write: (grant: AgentTokenGrant) => Promise<void>): Promise<void> {
     const grant = await this.token();
     await write(grant);
+    this.credentialToken = grant.accessToken;
+    this.credentialWrittenAt = this.host.now();
     this.credentialWriter = write;
     this.host.credentialLaunches.set(this.threadId, this);
     this.armCredentialTimer();
+    // Watched from now on; the one look right after covers a renewal since the grant above.
+    this.host.watchHostLogin(this);
+    void this.adoptHostLogin().catch((error: unknown) => {
+      this.host.logger.warn(`box ${this.box.boxId}: could not compare the login of ${this.threadId} with this machine's`, error);
+    });
+  }
+
+  /** Write `grant` into the box's login file and track it as the file's token. */
+  private async writeGrant(write: (grant: AgentTokenGrant) => Promise<void>, grant: AgentTokenGrant): Promise<void> {
+    await write(grant);
+    this.credentialToken = grant.accessToken;
+    this.credentialWrittenAt = this.host.now();
+    this.armCredentialTimer();
+  }
+
+  /** Run `job` after the launch's earlier login work; a failure is the caller's, not the chain's. */
+  private queueCredentialWork(job: () => Promise<void>): Promise<void> {
+    const work = this.credentialWork.then(job);
+    this.credentialWork = work.catch(() => undefined);
+    return work;
+  }
+
+  /**
+   * The account's login on this machine changed (`AgentHostBoxesImpl.watchHostLogin`). Renewing an
+   * account's login REVOKES its previous access token at once — the one the box's file holds,
+   * however long its expiry says it has left — whoever renews it: the daemon's refresher, the
+   * broker for another box, or a host CLI. So a token there that differs from the box's is
+   * fetched through the broker and written into the box right away. Coalesced: one queued look
+   * at a time.
+   */
+  adoptHostLogin(): Promise<void> {
+    if (this.credentialWriter === null || this.closed || this.adoptQueued) return this.credentialWork;
+    this.adoptQueued = true;
+    return this.queueCredentialWork(async () => {
+      this.adoptQueued = false;
+      const write = this.credentialWriter;
+      if (this.closed || write === null) return;
+      const hostToken = await this.host.hostLoginToken(this);
+      // An unreadable file is one being rewritten: its last write brings another look.
+      if (hostToken === null || hostToken === this.credentialToken) return;
+      const grant = await this.token();
+      if (grant.accessToken !== this.credentialToken) await this.writeGrant(write, grant);
+    });
+  }
+
+  /**
+   * The provider refused the box's token (a 401 the CLI reports while it retries): the broker is
+   * asked for a login other than that token (`rejectedAccessToken`) and the file rewritten, so the
+   * CLI — which re-reads the file after a 401 — retries with it. Once per refused token: a renewal
+   * that brings the same token back (the broker's refresh cooldown) is not asked again, and one
+   * that fails may be asked again by the next refusal. A refusal within
+   * {@link BOX_TOKEN_REFUSAL_GRACE_MS} of the file's rewrite is the previous token's: nothing is
+   * asked, so a token that just replaced a revoked one is not renewed (and revoked) in turn.
+   */
+  renewRejectedLogin(): Promise<void> {
+    const write = this.credentialWriter;
+    const rejected = this.credentialToken;
+    if (write === null || this.closed || rejected === null || this.rejectedRenewal === rejected) return this.credentialWork;
+    if (this.host.now() - this.credentialWrittenAt < BOX_TOKEN_REFUSAL_GRACE_MS) return this.credentialWork;
+    this.rejectedRenewal = rejected;
+    return this.queueCredentialWork(async () => {
+      // Replaced meanwhile (a renewal of the host's login landed first): nothing left to renew.
+      if (this.closed || this.credentialToken !== rejected) return;
+      try {
+        const grant = await this.token(BOX_TOKEN_MIN_VALID_SECONDS, undefined, rejected);
+        if (grant.accessToken !== rejected) await this.writeGrant(write, grant);
+      } catch (error) {
+        if (this.rejectedRenewal === rejected) this.rejectedRenewal = null;
+        throw error;
+      }
+    });
   }
 
   /**
@@ -300,19 +389,16 @@ export class BoxLaunch {
   refreshCredentials(): Promise<void> {
     const write = this.credentialWriter;
     if (write === null || this.closed || !this.host.tracker.stale(this.threadId)) return this.credentialWork;
-    this.credentialWork = this.credentialWork.then(async () => {
+    return this.queueCredentialWork(async () => {
       if (this.closed || !this.host.tracker.stale(this.threadId)) return;
       try {
-        await write(await this.token());
+        await this.writeGrant(write, await this.token());
       } catch (error) {
         const remaining = this.host.tracker.remainingMs(this.threadId);
         if (remaining !== null && remaining <= 0) throw error;
         this.host.logger.warn(`box ${this.box.boxId}: could not renew the login of ${this.threadId}; it keeps the current one`, error);
       }
     });
-    const work = this.credentialWork;
-    this.credentialWork = work.catch(() => undefined);
-    return work;
   }
 
   /** Write `content` into the box at `hostPath`'s mapped path (parents created); answers the box path. */
@@ -452,6 +538,7 @@ export class BoxLaunch {
     this.cancelCredentialTimer = null;
     this.host.tracker.forget(this.threadId);
     if (this.host.credentialLaunches.get(this.threadId) === this) this.host.credentialLaunches.delete(this.threadId);
+    this.host.unwatchHostLogin(this);
     const ids = this.bridgeIds.splice(0);
     await removeMcpBridgeEntries(this.host.appdir, this.box.boxId, ids).catch((error: unknown) => {
       this.host.logger.warn(`box ${this.box.boxId}: could not remove the session's MCP bridge entries`, error);
@@ -507,6 +594,8 @@ export interface AgentHostBoxesOptions {
   connectTimeoutMs?: number;
   /** Install commands by agent instead of the registry's (tests: a stand-in CLI, no network). */
   installCommands?: Partial<Record<AgentAdapterId, string>>;
+  /** Reads and watches the accounts' login files on this machine. Default: node:fs. */
+  loginFiles?: Pick<CredentialFiles, "read" | "watch">;
 }
 
 /** The session ref a resume cursor names, per adapter (Claude `resume`, Codex `threadId`, Grok/OpenCode `sessionId`). */
@@ -546,6 +635,9 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
   private readonly gitRunners = new Map<string, Promise<GitRunner>>();
   /** The live launch of each thread whose CLI reads its login from a file in the box (Claude). */
   readonly credentialLaunches = new Map<string, BoxLaunch>();
+  private readonly loginFiles: Pick<CredentialFiles, "read" | "watch">;
+  /** Per login file on this machine, its watch and the launches whose box holds a copy of it. */
+  private readonly loginWatches = new Map<string, { launches: Set<BoxLaunch>; stop: () => void }>();
   /** Per thread, the tail of its turn-start and turn-end daemon calls (see {@link inTurnOrder}). */
   private readonly turnCalls = new Map<string, Promise<void>>();
   private procSeq = 0;
@@ -567,6 +659,53 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     this.pool = new BoxConnectionPool(options.connector);
     this.connectTimeoutMs = options.connectTimeoutMs;
     this.installCommands = options.installCommands;
+    this.loginFiles = options.loginFiles ?? nodeCredentialFiles(agentAccountsDir(options.appdir), this.now);
+  }
+
+  /** The login file on this machine a launch's box login is a copy of, or null for an agent without one. */
+  private hostLoginPath(launch: BoxLaunch): string | null {
+    const agent = launch.input.agent;
+    return isTokenAgent(agent) && launch.input.home.path.length > 0 ? credentialPath(launch.input.home.path, agent) : null;
+  }
+
+  /**
+   * Watch the launch's account login on this machine: every rewrite has the launch look whether
+   * the token changed ({@link BoxLaunch.adoptHostLogin}). One watch per file, shared by its launches.
+   */
+  watchHostLogin(launch: BoxLaunch): void {
+    const path = this.hostLoginPath(launch);
+    if (path === null) return;
+    let entry = this.loginWatches.get(path);
+    if (entry === undefined) {
+      const launches = new Set<BoxLaunch>();
+      const stop = this.loginFiles.watch(path, () => {
+        for (const watcher of launches) {
+          void watcher.adoptHostLogin().catch((error: unknown) => {
+            this.logger.warn(`box ${watcher.box.boxId}: could not hand ${watcher.threadId} the account's renewed login`, error);
+          });
+        }
+      });
+      entry = { launches, stop };
+      this.loginWatches.set(path, entry);
+    }
+    entry.launches.add(launch);
+  }
+
+  unwatchHostLogin(launch: BoxLaunch): void {
+    const path = this.hostLoginPath(launch);
+    const entry = path === null ? undefined : this.loginWatches.get(path);
+    if (path === null || entry === undefined || !entry.launches.delete(launch) || entry.launches.size > 0) return;
+    entry.stop();
+    this.loginWatches.delete(path);
+  }
+
+  /** The access token of the launch's account login on this machine; null when the file has none (or is mid-rewrite). */
+  async hostLoginToken(launch: BoxLaunch): Promise<string | null> {
+    const path = this.hostLoginPath(launch);
+    const agent = launch.input.agent;
+    if (path === null || !isTokenAgent(agent)) return null;
+    const text = await this.loginFiles.read(path);
+    return text === null ? null : (grantFromCredentials(agent, text)?.accessToken ?? null);
   }
 
   /** A detached process id: unique per launch, readable in the box's process list. */

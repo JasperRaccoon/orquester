@@ -12,6 +12,13 @@
  * is atomic, so a mid-turn re-read sees the old file or the new one, spikes
  * doc (a)) (`BoxLaunch.refreshCredentials`). No restart is needed.
  *
+ * Its expiry is not the token's only end: renewing an account's login revokes
+ * the previous access token at once (observed 2026-10-25: a refresh on this
+ * machine, then 401 "OAuth access token has been revoked." in the box five
+ * seconds later, hours before its expiry). So the login file is also rewritten
+ * the moment the account's login file here changes, and when the API refuses
+ * the box's token (`BoxLaunch.adoptHostLogin`, `BoxLaunch.renewRejectedLogin`).
+ *
  * A token that was ALREADY inside the margin when the CLI got it (the broker
  * could not do better) is not "stale" until its last
  * {@link BOX_TOKEN_HARD_FLOOR_MS}: asking again before every turn for an
@@ -22,6 +29,12 @@ export const BOX_TOKEN_RESTART_MARGIN_MS = 30 * 60_000;
 export const BOX_TOKEN_HARD_FLOOR_MS = 5 * 60_000;
 /** What a spawn asks the broker for: comfortably more than the restart margin. */
 export const BOX_TOKEN_MIN_VALID_SECONDS = 45 * 60;
+/**
+ * A refusal this soon after the box's login file was rewritten is not taken as a refusal of the
+ * file's token: a request sent before the rewrite carried the previous one, and the CLI's retry
+ * reads the new file. A 401 comes back within moments of its request, so later ones are the file's.
+ */
+export const BOX_TOKEN_REFUSAL_GRACE_MS = 15_000;
 /** A renewal that did not land (the token still stale) is tried again this much later. */
 export const BOX_TOKEN_RENEW_RETRY_MS = 60_000;
 /** The renewal timer never waits longer than this before looking again (`setTimeout`'s range). */

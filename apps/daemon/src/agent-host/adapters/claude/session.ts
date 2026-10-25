@@ -79,7 +79,7 @@ import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 // boxes:
-import { boxProfileFiles, removeBoxProfileFiles, writeBoxProfileFiles, type ClaudeBoxSession } from "./box-launch.ts";
+import { boxProfileFiles, isBoxLoginRefusal, removeBoxProfileFiles, writeBoxProfileFiles, type ClaudeBoxSession } from "./box-launch.ts";
 import {
   claudeProfileLaunchFiles,
   removeClaudeProfileLaunchFiles,
@@ -725,6 +725,14 @@ export class ClaudeSession {
         // query and kills the CLI.
         if (this.closed) {
           continue;
+        }
+        // boxes: the provider refused the box's token (it was revoked by a renewal elsewhere). The
+        // CLI re-reads its login file before it retries, so a renewed one must land first: asked
+        // for at once, never awaited here.
+        if (this.options.box !== undefined && isBoxLoginRefusal(message)) {
+          void this.options.box.launch.renewRejectedLogin().catch((error: unknown) => {
+            this.options.context.logger.warn("claude: the box's refused login could not be renewed", error);
+          });
         }
         // A shell's last lines are written before its completion frame, but the
         // poll that would read them is 750 ms away. Drain here, BEFORE the

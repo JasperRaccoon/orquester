@@ -15,6 +15,9 @@
  *   re-reads on its next request — so it is rewritten with a fresh grant
  *   whenever the token has under 30 minutes left: before and after a turn, and
  *   by a timer mid-turn (`token-policy.ts`), with no restart (spikes doc (a));
+ *   at once whenever the account's login on this machine is renewed, which
+ *   revokes the token the box holds; and when the API refuses it
+ *   ({@link isBoxLoginRefusal});
  * - the MCP servers of the account's own config (user and local scope of its
  *   `.claude.json`) and a profile's `--mcp-config`, rewritten so every server
  *   that must run here is reached through `orq-agent mcp-bridge` under the same
@@ -99,6 +102,20 @@ async function accountMcpServers(claudeJson: string, cwd: string): Promise<{ spe
 
 /** Without an expiry from the broker, the file says one hour; the CLI does not refresh either way. */
 const UNKNOWN_EXPIRY_MS = 60 * 60_000;
+
+/**
+ * A CLI frame saying the API refused the box's login (`BoxLaunch.renewRejectedLogin`): an
+ * `api_retry` after a 401 — one per attempt; CLI 2.1.307 re-reads its login file after a 401 and
+ * retries with a token it finds changed there — or the assistant error that ends the request.
+ */
+export function isBoxLoginRefusal(message: unknown): boolean {
+  const frame = message as { type?: unknown; subtype?: unknown; error?: unknown; error_status?: unknown } | null;
+  if (frame === null || typeof frame !== "object") return false;
+  if (frame.type === "system" && frame.subtype === "api_retry") {
+    return frame.error_status === 401 || frame.error === "authentication_failed";
+  }
+  return frame.type === "assistant" && frame.error === "authentication_failed";
+}
 
 /**
  * The box's `.credentials.json` for a grant (spikes doc (a)): the access token, its expiry and

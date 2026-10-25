@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -10,13 +10,13 @@ import { claudeProjectMcpServers } from "../../agent-isolation/claude-names.ts";
 import { localBoxConnection } from "../../boxes/testing.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
-import { claudeBoxCredentials, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
+import { claudeBoxCredentials, isBoxLoginRefusal, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
 import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
 import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
 import { BoxDaemonCallError } from "./daemon-client.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
-import { BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
+import { BOX_TOKEN_REFUSAL_GRACE_MS, BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
 import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBoxConnection, rootedReadsBoxConnection } from "./testing.ts";
 
 const quiet: AdapterLogger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -306,6 +306,255 @@ test("Claude's box login is renewed mid-turn: a timer armed for the margin rewri
   // Closing the launch cancels the timer.
   await launch.close();
   assert.equal(live().length, 0);
+});
+
+/** A host login file's text as the Claude CLI and the daemon's refresher write it. */
+function hostLogin(accessToken: string, expiresAt: number, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ claudeAiOauth: { accessToken, refreshToken: "refresh-secret", expiresAt, scopes: ["user:inference"], ...extra } });
+}
+
+/** Login files on "this machine" whose rewrites the test fires by hand. */
+function manualLoginFiles(): {
+  files: Map<string, string>;
+  watching: () => string[];
+  fire: (path: string) => void;
+  read: (path: string) => Promise<string | null>;
+  watch: (path: string, onChange: () => void) => () => void;
+} {
+  const files = new Map<string, string>();
+  const watchers = new Map<string, Set<() => void>>();
+  return {
+    files,
+    watching: () => [...watchers.entries()].filter(([, set]) => set.size > 0).map(([path]) => path),
+    fire: (path) => {
+      for (const onChange of watchers.get(path) ?? []) onChange();
+    },
+    read: async (path) => files.get(path) ?? null,
+    watch: (path, onChange) => {
+      const set = watchers.get(path) ?? new Set<() => void>();
+      set.add(onChange);
+      watchers.set(path, set);
+      return () => set.delete(onChange);
+    }
+  };
+}
+
+test("a renewal of the account's login on this machine reaches every box chat on it at once: the old token is revoked", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
+  const now = 1_800_000_000_000;
+  const hostHome = "/accounts/claude/acct-1/home";
+  const hostPath = `${hostHome}/.credentials.json`;
+  const loginFiles = manualLoginFiles();
+  loginFiles.files.set(hostPath, hostLogin("access-1", now + 2 * 60 * 60_000));
+  const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 2 * 60 * 60_000 });
+  const boxes = createAgentHostBoxes({ appdir: join(root, "appdir"), connector: () => connection, tokens, sync: recordingSync(), logger: quiet, now: () => now, loginFiles });
+  const start = async (threadId: string) => {
+    const launch = await boxes.launch({
+      threadId,
+      agent: "claude",
+      box: launchBox(connection),
+      home: { kind: "account", accountId: "acct-1", path: hostHome },
+      cwd: "/w/p"
+    });
+    const path = `/box/${threadId}/.credentials.json`;
+    await launch.installCredentials((grant) => connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600, mkdirs: true }));
+    const fileToken = async () =>
+      (JSON.parse(await readFile(connection.localPathOf(path), "utf8")) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken;
+    return { launch, fileToken };
+  };
+  const one = await start("t1");
+  const two = await start("t2");
+  // Waits for the launches' queued login work (a token with hours left is not renewed here).
+  const settled = () => Promise.all([one.launch.refreshCredentials(), two.launch.refreshCredentials()]);
+  await settled();
+  // One watch for the account's file, shared; the look right after each install found the same token.
+  assert.deepEqual(loginFiles.watching(), [hostPath]);
+  assert.equal(tokens.requests.length, 2);
+
+  // The refresher renewed the account with well over the box's 30-minute margin left: both boxes
+  // get the new token now, through the broker — not when their old one would have run short.
+  loginFiles.files.set(hostPath, hostLogin("access-2", now + 8 * 60 * 60_000));
+  tokens.grant = { accessToken: "access-2", expiresAt: now + 8 * 60 * 60_000 };
+  loginFiles.fire(hostPath);
+  loginFiles.fire(hostPath);
+  await settled();
+  assert.equal(await one.fileToken(), "access-2");
+  assert.equal(await two.fileToken(), "access-2");
+  assert.equal(tokens.requests.length, 4);
+  assert.deepEqual(tokens.requests.slice(2), [
+    { boxId: connection.boxId, agent: "claude", accountId: "acct-1", minValidSeconds: 2700 },
+    { boxId: connection.boxId, agent: "claude", accountId: "acct-1", minValidSeconds: 2700 }
+  ]);
+
+  // A rewrite that keeps the token (the CLI updating other fields) and one caught mid-write ask nothing.
+  loginFiles.files.set(hostPath, hostLogin("access-2", now + 8 * 60 * 60_000, { subscriptionType: "max" }));
+  loginFiles.fire(hostPath);
+  await settled();
+  loginFiles.files.set(hostPath, '{"claudeAiOauth":{"accessTo');
+  loginFiles.fire(hostPath);
+  await settled();
+  assert.equal(tokens.requests.length, 4);
+
+  // The watch ends with the last launch on the account.
+  await one.launch.close();
+  assert.deepEqual(loginFiles.watching(), [hostPath]);
+  await two.launch.close();
+  assert.deepEqual(loginFiles.watching(), []);
+});
+
+test("a box login renewed on this machine between the install's grant and its watch is still adopted", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
+  const now = 1_800_000_000_000;
+  const hostHome = "/accounts/claude/acct-1/home";
+  const loginFiles = manualLoginFiles();
+  // The grant handed out names access-1, but the file already holds its successor.
+  loginFiles.files.set(`${hostHome}/.credentials.json`, hostLogin("access-2", now + 8 * 60 * 60_000));
+  const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 2 * 60 * 60_000 });
+  const boxes = createAgentHostBoxes({ appdir: join(root, "appdir"), connector: () => connection, tokens, sync: recordingSync(), logger: quiet, now: () => now, loginFiles });
+  const launch = await boxes.launch({
+    threadId: "t1",
+    agent: "claude",
+    box: launchBox(connection),
+    home: { kind: "account", accountId: "acct-1", path: hostHome },
+    cwd: "/w/p"
+  });
+  const path = "/box/t1/.credentials.json";
+  await launch.installCredentials(async (grant) => {
+    await connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600, mkdirs: true });
+    tokens.grant = { accessToken: "access-2", expiresAt: now + 8 * 60 * 60_000 };
+  });
+  await launch.refreshCredentials();
+  assert.equal((JSON.parse(await readFile(connection.localPathOf(path), "utf8")) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, "access-2");
+  assert.equal(tokens.requests.length, 2);
+  await launch.close();
+});
+
+test("a box login the API refuses is renewed past that token, once per refused token", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
+  let now = 1_800_000_000_000;
+  const requests: { rejectedAccessToken?: string }[] = [];
+  let answer: (rejected: string | undefined) => { accessToken: string; expiresAt: number } = () => ({ accessToken: "access-1", expiresAt: now + 2 * 60 * 60_000 });
+  const boxes = createAgentHostBoxes({
+    appdir: join(root, "appdir"),
+    connector: () => connection,
+    tokens: {
+      getToken: async (request) => {
+        requests.push(request);
+        return answer(request.rejectedAccessToken);
+      }
+    },
+    sync: recordingSync(),
+    logger: quiet,
+    now: () => now,
+    loginFiles: manualLoginFiles()
+  });
+  const launch = await boxes.launch({
+    threadId: "t1",
+    agent: "claude",
+    box: launchBox(connection),
+    home: { kind: "account", accountId: "acct-1", path: "/accounts/claude/acct-1/home" },
+    cwd: "/w/p"
+  });
+  const path = "/box/t1/.credentials.json";
+  const fileToken = async () =>
+    (JSON.parse(await readFile(connection.localPathOf(path), "utf8")) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken;
+  await launch.installCredentials((grant) => connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600, mkdirs: true }));
+  assert.equal(requests.length, 1);
+
+  // A refusal moments after the file was written is the previous token's: nothing is asked.
+  answer = (rejected) => ({ accessToken: rejected === "access-1" ? "access-2" : "access-1", expiresAt: now + 8 * 60 * 60_000 });
+  now += BOX_TOKEN_REFUSAL_GRACE_MS - 1;
+  await launch.renewRejectedLogin();
+  assert.equal(requests.length, 1);
+  assert.equal(await fileToken(), "access-1");
+  // Later, the CLI reports one refusal per retry: the broker is asked once, told which token was refused.
+  now += 1;
+  await Promise.all([launch.renewRejectedLogin(), launch.renewRejectedLogin()]);
+  assert.equal(await fileToken(), "access-2");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1]?.rejectedAccessToken, "access-1");
+
+  // A renewal that fails is asked again on the next refusal.
+  answer = () => {
+    throw new BoxDaemonCallError("TOKEN_UNAVAILABLE", "Could not reach the sign-in service.", 503);
+  };
+  now += BOX_TOKEN_REFUSAL_GRACE_MS;
+  await assert.rejects(launch.renewRejectedLogin(), (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_TOKEN_UNAVAILABLE");
+  answer = (rejected) => ({ accessToken: rejected === "access-2" ? "access-3" : "access-2", expiresAt: now + 8 * 60 * 60_000 });
+  await launch.renewRejectedLogin();
+  assert.equal(requests.length, 4);
+  assert.equal(requests[3]?.rejectedAccessToken, "access-2");
+  assert.equal(await fileToken(), "access-3");
+
+  // The broker hands the same token back (its refresh cooldown): the file stays, and further
+  // refusals of that token ask nothing more.
+  answer = () => ({ accessToken: "access-3", expiresAt: now + 8 * 60 * 60_000 });
+  now += BOX_TOKEN_REFUSAL_GRACE_MS;
+  await launch.renewRejectedLogin();
+  await launch.renewRejectedLogin();
+  assert.equal(requests.length, 5);
+  assert.equal(await fileToken(), "access-3");
+
+  // A closed launch renews nothing.
+  await launch.close();
+  answer = () => ({ accessToken: "access-4", expiresAt: now + 8 * 60 * 60_000 });
+  await launch.renewRejectedLogin();
+  assert.equal(requests.length, 5);
+});
+
+test("the box login follows the account's real login file: rewritten in place or replaced by a rename", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
+  const now = Date.now();
+  const hostHome = await mkdtemp(join(tmpdir(), "account-home-"));
+  const hostPath = join(hostHome, ".credentials.json");
+  await writeFile(hostPath, hostLogin("access-1", now + 2 * 60 * 60_000), { mode: 0o600 });
+  const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 2 * 60 * 60_000 });
+  const boxes = createAgentHostBoxes({ appdir: join(root, "appdir"), connector: () => connection, tokens, sync: recordingSync(), logger: quiet });
+  const launch = await boxes.launch({
+    threadId: "t1",
+    agent: "claude",
+    box: launchBox(connection),
+    home: { kind: "account", accountId: "acct-1", path: hostHome },
+    cwd: "/w/p"
+  });
+  const path = "/box/t1/.credentials.json";
+  const tokenOf = (text: string) => (JSON.parse(text) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken;
+  let boxToken = "";
+  await launch.installCredentials(async (grant) => {
+    await connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600, mkdirs: true });
+    boxToken = grant.accessToken;
+  });
+
+  tokens.grant = { accessToken: "access-2", expiresAt: now + 8 * 60 * 60_000 };
+  await writeFile(hostPath, hostLogin("access-2", now + 8 * 60 * 60_000), { mode: 0o600 });
+  await waitUntil(() => boxToken === "access-2", "the in-place rewrite adopted");
+  assert.equal(tokenOf(await readFile(connection.localPathOf(path), "utf8")), "access-2");
+
+  tokens.grant = { accessToken: "access-3", expiresAt: now + 8 * 60 * 60_000 };
+  await writeFile(`${hostPath}.tmp`, hostLogin("access-3", now + 8 * 60 * 60_000), { mode: 0o600 });
+  await rename(`${hostPath}.tmp`, hostPath);
+  await waitUntil(() => boxToken === "access-3", "the renamed file adopted");
+  assert.equal(tokenOf(await readFile(connection.localPathOf(path), "utf8")), "access-3");
+  await launch.close();
+});
+
+test("a Claude frame refusing the box's login: a 401 retry or the authentication error, nothing else", () => {
+  assert.equal(isBoxLoginRefusal({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 567, error_status: 401, error: "authentication_failed" }), true);
+  assert.equal(isBoxLoginRefusal({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 567, error_status: 401, error: "unknown" }), true);
+  assert.equal(isBoxLoginRefusal({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 900, error_status: 529, error: "overloaded" }), false);
+  assert.equal(isBoxLoginRefusal({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 900, error_status: 429, error: "rate_limit" }), false);
+  assert.equal(isBoxLoginRefusal({ type: "assistant", error: "authentication_failed", message: { content: [] } }), true);
+  assert.equal(isBoxLoginRefusal({ type: "assistant", error: "rate_limit", message: { content: [] } }), false);
+  assert.equal(isBoxLoginRefusal({ type: "result", subtype: "success", is_error: true, api_error_status: 401 }), false);
+  assert.equal(isBoxLoginRefusal(null), false);
 });
 
 test("a turn's attachments are copied into the box at their mapped path and named by it", async () => {
