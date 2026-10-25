@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { BoxExecOptions } from "../../boxes/contracts.ts";
 import { localBoxConnection } from "../../boxes/testing.ts";
-import { spawnBoxChild } from "./remote-child.ts";
+import { DETACHED_BUFFER_BYTES, spawnBoxChild } from "./remote-child.ts";
 import { reattachableBoxConnection } from "./testing.ts";
 
 /** Collect a readable's text until a predicate holds (event-driven, never a sleep). */
@@ -113,6 +114,27 @@ test("a detached child survives a dropped link and reattaches from the bytes it 
   assert.deepEqual(await child.exited, { kind: "exit", code: 7, signal: null });
 });
 
+test("a detached child asks the box to keep a large output buffer unless told otherwise", async () => {
+  const connection = reattachableBoxConnection();
+  const asked: (BoxExecOptions["detach"] | undefined)[] = [];
+  const exec = connection.exec.bind(connection);
+  connection.exec = (options: BoxExecOptions) => {
+    asked.push(options.detach);
+    return exec(options);
+  };
+  for (const detach of [{ procId: "agent-test-buffer" }, { procId: "agent-test-small", bufferBytes: 1024 }]) {
+    const child = spawnBoxChild({ connection, command: process.execPath, args: ["-e", ECHO], env: {}, cwd: process.cwd(), detach });
+    await collect(child.stdout).until((text) => text.includes("ready\n"));
+    child.stdin.write("quit\n");
+    await child.exited;
+  }
+  assert.deepEqual(asked, [
+    { procId: "agent-test-buffer", bufferBytes: DETACHED_BUFFER_BYTES },
+    { procId: "agent-test-small", bufferBytes: 1024 }
+  ]);
+  assert.ok(DETACHED_BUFFER_BYTES >= 64 * 1024 * 1024);
+});
+
 test("a detached child whose box never comes back ends as SIGHUP at the reattach deadline", async () => {
   const connection = reattachableBoxConnection();
   const notices: string[] = [];
@@ -137,7 +159,7 @@ test("a detached child whose box never comes back ends as SIGHUP at the reattach
 });
 
 /** A detached child that saw `ready`, its link dropped, and `orq-agent` restarted under it. */
-async function childAcrossARestart(mode: "lose" | "forget"): Promise<{ reason: unknown; errText: string; notices: string[] }> {
+async function childAcrossARestart(mode: "lose" | "forget" | "unrecorded"): Promise<{ reason: unknown; errText: string; notices: string[] }> {
   const connection = reattachableBoxConnection();
   const notices: string[] = [];
   const child = spawnBoxChild({
@@ -165,6 +187,12 @@ test("a child orq-agent lost in a restart ends with the box's reason and the sig
   assert.deepEqual(reason, { kind: "signal", code: null, signal: "SIGTERM" });
   assert.equal(errText, "[orquester] orq-agent restarted in the box, so this process's output could no longer be followed; it was stopped\n");
   assert.ok(notices.some((notice) => notice.includes("could no longer be followed")));
+});
+
+test("a child the box lists as ended without an exit code or signal never ends as a clean exit", async () => {
+  const { reason, errText } = await childAcrossARestart("unrecorded");
+  assert.deepEqual(reason, { kind: "signal", code: null, signal: "SIGHUP" });
+  assert.match(errText, /^\[orquester\] the box reported no exit code or signal for this process/);
 });
 
 test("a child the box has no record of ends as SIGHUP, saying the box no longer knows it", async () => {

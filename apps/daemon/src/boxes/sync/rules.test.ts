@@ -173,3 +173,15 @@ test("the plugin cache keeps installed versions only; temp clones and in-use mar
   assert.equal(claude.hostOnly("plugins/installed_plugins.json"), false);
   assert.equal(claude.hostOnly("skills/x/SKILL.md"), false);
 });
+
+test("Codex's plugins/ is its own marketplace store: host → box only, a box's downloads are never collected", () => {
+  const codex = syncRuleFor("codex", "account");
+  // Each box's Codex fetches the curated plugins its config.toml enables into plugins/cache itself.
+  assert.equal(isSyncedRel(codex, "plugins/cache/openai-curated/superpowers/0722921d/skills/x/SKILL.md"), true, "the host's copy is still pushed");
+  assert.equal(codex.hostOnly("plugins/cache/openai-curated/superpowers/0722921d/skills/x/scripts/render-graphs.js"), true);
+  assert.equal(codex.hostOnly("plugins/.remote-plugin-install-staging/x"), true);
+  assert.equal(codex.hostOnly("plugins"), true);
+  // What turns a plugin on stays two-way: config.toml.
+  assert.equal(codex.hostOnly("config.toml"), false);
+  assert.equal(codex.hostOnly("skills/x/SKILL.md"), false);
+});

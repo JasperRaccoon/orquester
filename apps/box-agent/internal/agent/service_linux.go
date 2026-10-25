@@ -24,13 +24,52 @@ const needrestartDir = "/etc/needrestart"
 const needrestartOverride = "# Written by orq-agent: restarting orq-agent.service loses the agent CLIs and terminals it runs.\n" +
 	"$nrconf{override_rc}->{qr(^orq-agent\\.service$)} = 0;\n"
 
-// ProtectService keeps package upgrades from restarting orq-agent (see needrestartDir). It runs
-// at every start, so boxes installed before it existed get it with their next update.
+// systemdDropInDir holds orq-agent.service's drop-ins.
+const systemdDropInDir = "/etc/systemd/system/orq-agent.service.d"
+
+// oomPolicyDropIn: systemd's default OOMPolicy=stop stops the whole unit when the kernel's OOM
+// killer kills any process in its cgroup. KillMode=process keeps the agent CLIs and test runs
+// orq-agent starts in that cgroup, so one test run that exhausts the box's memory stopped
+// orq-agent, and every agent CLI it served ended with it (their stdin is orq-agent's pipe).
+const oomPolicyDropIn = "# Written by orq-agent: a process of this unit killed for memory (a test run) must not stop\n" +
+	"# orq-agent, and with it every agent CLI it serves.\n" +
+	"[Service]\n" +
+	"OOMPolicy=continue\n"
+
+// ProtectService keeps package upgrades (see needrestartDir) and a process killed for memory
+// (see oomPolicyDropIn) from stopping orq-agent. It runs at every start, so boxes installed
+// before it existed get it with their next update.
 func ProtectService() error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	return writeNeedrestartOverride(needrestartDir)
+	if err := writeNeedrestartOverride(needrestartDir); err != nil {
+		return err
+	}
+	if !pathExists("/run/systemd/system") || !pathExists(systemdUnitPath) {
+		return nil
+	}
+	changed, err := writeOOMPolicyDropIn(systemdDropInDir)
+	if err != nil || !changed {
+		return err
+	}
+	// Applies to the running unit at once; nothing is restarted.
+	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// writeOOMPolicyDropIn writes the OOM policy drop-in under `dir`; false when it was already there.
+func writeOOMPolicyDropIn(dir string) (bool, error) {
+	path := filepath.Join(dir, "oom-policy.conf")
+	if current, err := os.ReadFile(path); err == nil && string(current) == oomPolicyDropIn {
+		return false, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, err
+	}
+	return true, writeFileAtomic(path, []byte(oomPolicyDropIn), 0o644)
 }
 
 // writeNeedrestartOverride writes the override under `dir` when needrestart is installed there.

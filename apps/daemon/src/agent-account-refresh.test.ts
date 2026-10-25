@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  HELD_REFRESH_FLOOR_MS,
+  HELD_REFRESH_MARGIN_MS,
+  REFRESH_INTERVAL_MS,
   selectAccountsToRefresh,
+  selectHeldAccountsToRefresh,
   mergeClaudeRefreshedCreds,
   refreshClaudeToken,
   mergeCodexRefreshedTokens,
@@ -9,7 +13,7 @@ import {
 } from "./agent-account-refresh.ts";
 import type { AgentAccountRecord } from "@orquester/config";
 
-function rec(id: string, agent: "claude" | "codex" = "claude"): AgentAccountRecord {
+function rec(id: string, agent: "claude" | "codex" | "grok" = "claude"): AgentAccountRecord {
   return { id, agent, label: id, email: null, plan: null, needsReauth: false, createdAt: "t", importedAt: "t" };
 }
 
@@ -25,6 +29,27 @@ test("selects idle accounts with soon/unknown expiry, skips live and far-future"
   ]);
   const picked = selectAccountsToRefresh(accts, live, expiries, now, 900_000).map((a) => a.id).sort();
   assert.deepEqual(picked, ["soon", "unknown"]);
+});
+
+test("held accounts are renewed ahead of their CLI: inside the held margin and above the floor, known expiry only", () => {
+  const now = 1_000_000;
+  const accts = [rec("idle"), rec("codex", "codex"), rec("grok", "grok"), rec("floor"), rec("spent", "codex"), rec("far"), rec("unknown")];
+  const held = new Set(["codex", "grok", "floor", "spent", "far", "unknown"]);
+  const expiries = new Map<string, number | null>([
+    ["idle", now + 40 * 60_000],
+    ["codex", now + 40 * 60_000],
+    ["grok", now + HELD_REFRESH_MARGIN_MS],
+    ["floor", now + HELD_REFRESH_FLOOR_MS],
+    ["spent", now - 60_000],
+    ["far", now + HELD_REFRESH_MARGIN_MS + 1],
+    ["unknown", null]
+  ]);
+  const picked = selectHeldAccountsToRefresh(accts, held, expiries, now).map((a) => a.id).sort();
+  assert.deepEqual(picked, ["codex", "grok"]);
+});
+
+test("the held window is longer than one refresher tick, so a tick always lands in it", () => {
+  assert.ok(HELD_REFRESH_MARGIN_MS - HELD_REFRESH_FLOOR_MS > REFRESH_INTERVAL_MS);
 });
 
 test("mergeClaudeRefreshedCreds preserves other fields", () => {

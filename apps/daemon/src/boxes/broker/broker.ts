@@ -20,13 +20,17 @@
  *    and return the new token. Concurrent requests for one account share one refresh. A refresh
  *    that cannot happen (no refresh token, the sign-in service unreachable) returns the current
  *    token while it has over 5 minutes left and is not the rejected one, instead of a refusal.
- * 4. When a host-local session holds it, that CLI is the refresher. Claude CLIs adopt a credential
- *    file another process rewrote, and re-read it (twice, the second time under their refresh
- *    lock) before spending their own refresh token, so the daemon refreshes directly — but only
- *    while the token has more than {@link HELD_REFRESH_FLOOR_MS} left and no CLI holds the refresh
- *    lock, so the two never post the same refresh token. Codex and Grok, and Claude below that
- *    floor, wait: the credential file is watched for the CLI's rewrite, the holder set for the
- *    session ending (then the daemon refreshes), until the request's signal ends the wait.
+ * 4. When a host-local session holds it, its CLI refreshes it too. Claude, Codex and Grok CLIs
+ *    adopt a credential file another process rewrote, re-reading it before spending their own
+ *    refresh token ({@link HOST_CLI_ADOPTS_DAEMON_REFRESH}), so the daemon refreshes directly while
+ *    the token has more than {@link HELD_REFRESH_FLOOR_MS} left: each CLI refreshes on its own only
+ *    inside the last 5 minutes, so the two never post the same refresh token. Below the floor a
+ *    token with over 5 minutes left that is not the rejected one is returned; with none, the daemon
+ *    refreshes anyway (the box fails without a renewal, and a CLI racing it adopts the file it
+ *    writes). A Claude CLI holding its refresh lock is renewing right now: no daemon refresh then,
+ *    and with no usable token the request waits — the credential file is watched for the CLI's
+ *    rewrite, the holder set for the session ending (then the daemon refreshes) — until the
+ *    request's signal ends the wait.
  *
  * Evidence for step 4 and the per-CLI facts: docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-spikes.md.
  * Nothing here logs a token; errors name codes and accounts only.
@@ -34,16 +38,16 @@
 
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 
-import { AgentAccountError } from "../../agent-account-paths.ts";
-import type { AccountRefreshOutcome } from "../../agent-accounts.ts";
-import type { AgentTokenBroker, AgentTokenGrant, BoxAgentId, BoxRegistry } from "../contracts.ts";
 import {
   CLAUDE_REFRESH_LOCK_STALE_MS,
   claudeRefreshLockPaths,
-  credentialPath,
-  grantFromCredentials,
-  type CredentialFiles
-} from "./credentials.ts";
+  HELD_REFRESH_FLOOR_MS,
+  HOST_CLI_ADOPTS_DAEMON_REFRESH
+} from "../../agent-account-refresh.ts";
+import { AgentAccountError } from "../../agent-account-paths.ts";
+import type { AccountRefreshOutcome } from "../../agent-accounts.ts";
+import type { AgentTokenBroker, AgentTokenGrant, BoxAgentId, BoxRegistry } from "../contracts.ts";
+import { credentialPath, grantFromCredentials, type CredentialFiles } from "./credentials.ts";
 
 /** The default life a token must have left when it is handed out (the box restarts or re-asks before it runs out). */
 export const DEFAULT_MIN_VALID_SECONDS = 45 * 60;
@@ -65,23 +69,7 @@ export const REFRESH_COOLDOWN_MS = 10 * 60_000;
 export const COOLDOWN_MIN_LIFE_MS = 5 * 60_000;
 /** Upper bound for `rejectedAccessToken`: access tokens (JWTs included) are a few KB. */
 export const MAX_REJECTED_TOKEN_LENGTH = 32 * 1024;
-/**
- * A held Claude account is refreshed by the daemon only while its token has more than this left.
- * The Claude CLI refreshes only inside the last 5 minutes (2.1.285: `now + 300000 >= expiresAt`),
- * so above 10 minutes it cannot be posting the same refresh token at the same moment.
- */
-export const HELD_REFRESH_FLOOR_MS = 10 * 60_000;
-
-/**
- * Per CLI: whether a RUNNING host CLI adopts a credential file the daemon refreshed before it
- * spends its own copy of the refresh token (spike findings). Only then may the daemon refresh an
- * account a host-local session holds.
- */
-export const HOST_CLI_ADOPTS_DAEMON_REFRESH: Readonly<Record<BoxAgentId, boolean>> = {
-  claude: true,
-  codex: false,
-  grok: false
-};
+export { HELD_REFRESH_FLOOR_MS, HOST_CLI_ADOPTS_DAEMON_REFRESH } from "../../agent-account-refresh.ts";
 
 const BOX_AGENTS: readonly BoxAgentId[] = ["claude", "codex", "grok"];
 const GONE_STATES = new Set(["destroying", "destroy-failed", "destroyed"]);
@@ -286,10 +274,15 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     return text === null ? null : grantFromCredentials(agent, text);
   }
 
-  /** Step 4's rule: may the daemon spend the refresh token while a host-local session holds the account? */
-  async function mayRefreshHeld(agent: BoxAgentId, home: string, grant: AgentTokenGrant | null): Promise<boolean> {
+  /**
+   * Step 4's rule: may the daemon spend the refresh token while a host-local session holds the
+   * account? Only for a CLI that adopts a daemon refresh, never while a Claude CLI holds its
+   * refresh lock, and — while the box can still use the current token (`usable`) — only above
+   * the floor.
+   */
+  async function mayRefreshHeld(agent: BoxAgentId, home: string, grant: AgentTokenGrant | null, usable: boolean): Promise<boolean> {
     if (!HOST_CLI_ADOPTS_DAEMON_REFRESH[agent]) return false;
-    if (grant === null || grant.expiresAt === null || grant.expiresAt - now() <= HELD_REFRESH_FLOOR_MS) return false;
+    if (usable && (grant === null || grant.expiresAt === null || grant.expiresAt - now() <= HELD_REFRESH_FLOOR_MS)) return false;
     if (agent === "claude") {
       const lockAge = await deps.files.ageOfNewest(claudeRefreshLockPaths(home));
       if (lockAge !== null && lockAge < CLAUDE_REFRESH_LOCK_STALE_MS) return false; // the CLI is refreshing right now
@@ -338,7 +331,7 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
           }
           // Refreshed moments ago: that token is the answer, not another refresh.
           if (grant !== null && inCooldown(accountId, grant)) return grant;
-          if (!held || (await mayRefreshHeld(agent, home, grant))) {
+          if (!held || (await mayRefreshHeld(agent, home, grant, stillUsable(grant)))) {
             const outcome = await refreshOnce(agent, accountId, held);
             if (outcome === "refreshed") {
               const fresh = await readGrant(agent, path);
@@ -363,6 +356,9 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
             }
             // "held": a host-local session took the account meanwhile; its CLI refreshes — wait for it.
           }
+          // Below the floor the holder's CLI may be renewing: a token that still works beats a
+          // wait the box gives up on. The box asks again when it is refused.
+          if (stillUsable(grant)) return grant;
           await change.wait(signal).catch(() => {
             throw waitTimeout();
           });

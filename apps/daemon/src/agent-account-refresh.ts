@@ -1,7 +1,57 @@
+import { join } from "node:path";
+
 import type { AgentAccountRecord } from "@orquester/config";
 
 export const REFRESH_INTERVAL_MS = 60 * 60_000;
 export const REFRESH_MARGIN_MS = 15 * 60_000;
+
+/**
+ * Per CLI: whether a RUNNING host CLI adopts a credential file the daemon refreshed before it
+ * spends its own copy of the refresh token. Only then may the daemon refresh an account a
+ * host-local session holds.
+ *
+ * - Claude (2.1.285, docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-spikes.md): re-reads the
+ *   file, the second time under its refresh lock ({@link claudeRefreshLockPaths}).
+ * - Codex (0.163 `codex-rs/login/src/auth/manager.rs`): `refresh_token()` (its proactive refresh)
+ *   and `UnauthorizedRecovery` (after a 401) both reload `auth.json` first and use a changed file
+ *   instead of refreshing; the reload keeps the account id, as `mergeCodexRefreshedTokens` does.
+ * - Grok (1.0.67, its own log lines): refreshes under `auth.json.lock`, "disk has valid AT, adopting
+ *   instead of consuming RT"; after a 401 "disk has a different token, accepting".
+ */
+export const HOST_CLI_ADOPTS_DAEMON_REFRESH: Readonly<Record<"claude" | "codex" | "grok", boolean>> = {
+  claude: true,
+  codex: true,
+  grok: true
+};
+
+/**
+ * A held account whose token still works is refreshed by the daemon only while it has more than
+ * this left. Each CLI refreshes on its own only inside the last 5 minutes (Claude 2.1.285
+ * `now + 300000 >= expiresAt`, Codex `CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES`, Grok
+ * `GROK_AUTH_EARLY_INVALIDATION_SECS` = 300), so above 10 it cannot be posting the same refresh
+ * token at the same moment.
+ */
+export const HELD_REFRESH_FLOOR_MS = 10 * 60_000;
+
+/**
+ * The refresher renews a held account once its token has this little left (and more than the
+ * floor). The window between the two is longer than one {@link REFRESH_INTERVAL_MS} tick, so a
+ * tick always lands in it and a held account's token never runs down to where only its CLI may
+ * renew it.
+ */
+export const HELD_REFRESH_MARGIN_MS = REFRESH_INTERVAL_MS + HELD_REFRESH_FLOOR_MS + REFRESH_MARGIN_MS;
+
+/**
+ * The locks a Claude CLI holds while it spends its refresh token (Claude Code 2.1.285, proper-lockfile
+ * directories refreshed every 5 s, stale after 60 s): `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`
+ * and the legacy `<CLAUDE_CONFIG_DIR>.lock`. The account home is the CLI's `CLAUDE_CONFIG_DIR`.
+ */
+export function claudeRefreshLockPaths(home: string): string[] {
+  return [join(home, ".oauth_refresh.lock"), `${home}.lock`];
+}
+
+/** proper-lockfile's default stale age, which Claude Code uses for its refresh lock. */
+export const CLAUDE_REFRESH_LOCK_STALE_MS = 60_000;
 
 export const CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 export const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -29,6 +79,25 @@ export function selectAccountsToRefresh(
     const exp = expiries.get(a.id);
     if (exp == null) return true; // unknown expiry → refresh to be safe
     return exp <= now + marginMs;
+  });
+}
+
+/**
+ * The HELD accounts the refresher renews ahead of their holder's CLI: one whose CLI adopts a
+ * daemon refresh, with a known expiry inside {@link HELD_REFRESH_MARGIN_MS} and above
+ * {@link HELD_REFRESH_FLOOR_MS}. An unknown expiry is left to the holder.
+ */
+export function selectHeldAccountsToRefresh(
+  accounts: AgentAccountRecord[],
+  held: Set<string>,
+  expiries: Map<string, number | null>,
+  now: number
+): AgentAccountRecord[] {
+  return accounts.filter((a) => {
+    if (a.agent !== "claude" && a.agent !== "codex" && a.agent !== "grok") return false;
+    if (!held.has(a.id) || !HOST_CLI_ADOPTS_DAEMON_REFRESH[a.agent]) return false;
+    const exp = expiries.get(a.id);
+    return exp != null && exp - now > HELD_REFRESH_FLOOR_MS && exp <= now + HELD_REFRESH_MARGIN_MS;
   });
 }
 

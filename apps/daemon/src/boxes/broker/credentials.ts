@@ -26,17 +26,7 @@ export function credentialPath(home: string, agent: BoxAgentId): string {
   return join(home, CREDENTIAL_FILENAME[agent]);
 }
 
-/**
- * The locks a Claude CLI holds while it spends its refresh token (Claude Code 2.1.285, proper-lockfile
- * directories refreshed every 5 s, stale after 60 s): `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`
- * and the legacy `<CLAUDE_CONFIG_DIR>.lock`. The account home is the CLI's `CLAUDE_CONFIG_DIR`.
- */
-export function claudeRefreshLockPaths(home: string): string[] {
-  return [join(home, ".oauth_refresh.lock"), `${home}.lock`];
-}
-
-/** proper-lockfile's default stale age, which Claude Code uses for its refresh lock. */
-export const CLAUDE_REFRESH_LOCK_STALE_MS = 60_000;
+export { CLAUDE_REFRESH_LOCK_STALE_MS, claudeRefreshLockPaths } from "../../agent-account-refresh.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

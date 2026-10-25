@@ -25,7 +25,8 @@
  *   `orq-agent` restarted under is listed `lost` (it was stopped, or had
  *   ended): it ends with the signal that stopped it. One the box has no
  *   record of ends as `SIGHUP`. Either way one `[orquester]` line on stderr
- *   says why, so the session's error names the cause.
+ *   says why, so the session's error names the cause. An end the box reports with neither an
+ *   exit code nor a signal is never taken for a clean exit: it ends as `SIGHUP`, saying so.
  * - **Output is never skipped.** The box's buffer may have moved past the
  *   offset (an attach reports `droppedBytes`, or a viewer overran it,
  *   `OUTPUT_OVERRUN`): the agent CLI's protocol stream now has a hole, so the
@@ -44,6 +45,14 @@ import type { BoxDetachedProcInfo } from "@orquester/api";
 import { BOX_DISCONNECTED } from "../../boxes/client/mux.ts";
 import type { BoxConnection, BoxExecOptions, BoxProcess } from "../../boxes/contracts.ts";
 import { DEFAULT_KILL_GRACE_MS, type ChildExitReason, type ProviderChild } from "../support/spawn.ts";
+
+/**
+ * The output buffer a detached child asks the box to keep (`orq-agent`'s default is 4 MiB). It
+ * only fills while the daemon reads slower than the CLI writes, and an overrun ends the CLI: a
+ * Codex with many subagents outran 4 MiB on a busy host. It grows as used, so it costs nothing
+ * while the daemon keeps up.
+ */
+export const DETACHED_BUFFER_BYTES = 128 * 1024 * 1024;
 
 /** How long a detached child waits for its box link to come back (spec §9.2 decides the box's fate). */
 export const BOX_REATTACH_DEADLINE_MS = 15 * 60_000;
@@ -90,11 +99,17 @@ export interface BoxProviderChild extends ProviderChild {
   signal(signal: NodeJS.Signals): boolean;
 }
 
+/** Neither an exit code nor a signal: the box could not tell how the process ended — never a clean exit. */
+const NO_EXIT_STATUS = "the box reported no exit code or signal for this process, so how it ended is unknown";
+
 function exitOf(code: number | null, signal: NodeJS.Signals | string | null): ChildExitReason {
   if (signal !== null && signal !== undefined) {
     return { kind: "signal", code: null, signal: signal as NodeJS.Signals };
   }
-  return { kind: "exit", code: code ?? 0, signal: null };
+  if (code === null || code === undefined) {
+    return { kind: "signal", code: null, signal: "SIGHUP" };
+  }
+  return { kind: "exit", code, signal: null };
 }
 
 /** Spawn `command` in the box. Never throws: a refused spawn is a `spawn-error` outcome. */
@@ -224,6 +239,15 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     if (!stderr.writableEnded) stderr.write(`[orquester] ${text}\n`);
   };
 
+  /** End as the box reported, saying so on stderr when it reported no status at all. */
+  const finishAsReported = (code: number | null, signal: NodeJS.Signals | string | null): void => {
+    if ((code === null || code === undefined) && (signal === null || signal === undefined)) {
+      notice(`box process ${procId}: ${NO_EXIT_STATUS}`);
+      explain(NO_EXIT_STATUS);
+    }
+    finish(exitOf(code, signal));
+  };
+
   /** Settle a detached process the box no longer streams: from its last known state. */
   const settleFromBox = async (why: string): Promise<void> => {
     const listed = (await connection.request("proc.list", {}).catch(() => null)) as BoxDetachedProcInfo[] | null;
@@ -235,7 +259,7 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
       return;
     }
     if (entry !== undefined && !entry.running) {
-      finish(exitOf(entry.exitCode, entry.signal));
+      finishAsReported(entry.exitCode, entry.signal);
       return;
     }
     notice(`box process ${procId}: ${why}`);
@@ -255,7 +279,7 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
 
     const maybeFinish = (): void => {
-      if (exitInfo !== null && outEnded && errEnded) finish(exitOf(exitInfo.code, exitInfo.signal));
+      if (exitInfo !== null && outEnded && errEnded) finishAsReported(exitInfo.code, exitInfo.signal);
     };
     const onOut = (chunk: Buffer): void => {
       opened = true;
@@ -287,7 +311,7 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
       exitInfo = { code, signal };
       maybeFinish();
       if (reason === null) {
-        drainTimer = setTimeout(() => finish(exitOf(code, signal)), EXIT_DRAIN_GRACE_MS);
+        drainTimer = setTimeout(() => finishAsReported(code, signal), EXIT_DRAIN_GRACE_MS);
       }
     };
     const onError = (error: Error): void => {
@@ -398,7 +422,7 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     cwd: options.cwd,
     env: options.env,
     ...(options.envUnset !== undefined && options.envUnset.length > 0 ? { envUnset: [...options.envUnset] } : {}),
-    ...(options.detach !== undefined ? { detach: { ...options.detach } } : {})
+    ...(options.detach !== undefined ? { detach: { bufferBytes: DETACHED_BUFFER_BYTES, ...options.detach } } : {})
   };
   try {
     hook(connection.exec(exec), "spawn");

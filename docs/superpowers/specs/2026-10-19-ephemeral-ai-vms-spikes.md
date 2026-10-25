@@ -106,11 +106,13 @@ proactive refresh seen). Managed Codex access tokens currently live about 10 day
   new turn listed both earlier replies. The state databases were rebuilt by Codex. Spec §8.5's
   "rebuilt in the box, never copied" holds.
 
-**Not verified:** whether a running host Codex re-reads `auth.json` that the daemon refreshed
-before it spends its own refresh token. The binary contains `Reloading auth for account`,
-`Skipping auth reload due to account id mismatch` and `Reloaded auth, changed:`, which suggests a
-reload path, but its place relative to the refresh grant is unproven. The broker therefore waits for
-a host-local Codex holder (its CLI) instead of refreshing.
+**A running host Codex re-reads `auth.json` before it spends its own refresh token** (verified in
+the 0.163.0 source, `codex-rs/login/src/auth/manager.rs`): `refresh_token()` — its proactive
+refresh, once the access token is inside its last 5 minutes — does a guarded reload first and skips
+the refresh when the file changed; after a 401, `UnauthorizedRecovery` runs a `Reload` step before
+its `RefreshToken` step. The reload is skipped (a permanent error) when the file's account id no
+longer matches, so a daemon refresh must keep `tokens.account_id` and replace the file by rename.
+The broker therefore refreshes a host-held Codex account like a Claude one: above the 10-minute floor.
 
 ## (c) Grok `auth_provider_command`
 
@@ -145,8 +147,12 @@ The command printed `{"access_token": "<grok.com subscription access token>", "e
   an invalid key (even with a later `expires_at`) changed nothing — later prompts kept working. When
   it started with an invalid key and the file was then rewritten with the valid one, the next prompt
   succeeded: it re-reads the file after a 401. Its docs ("Hot Reload") say external `auth.json`
-  changes are picked up. Whether a host Grok re-reads before spending its own OIDC refresh token is
-  **not verified**, so the broker waits for a host-local Grok holder.
+  changes are picked up. **It re-reads before spending its own OIDC refresh token** (1.0.67's own log
+  lines; the binary is closed): it refreshes under `auth.json.lock` ("could not acquire auth.json.lock
+  within timeout" → "returning transient to avoid refresh token reuse"), "disk has valid AT, adopting
+  instead of consuming RT", after a 401 "disk has a different token, accepting", and after a lost
+  race "adopted sibling token after PermanentFailure". It refreshes on its own 5 minutes before
+  expiry (`GROK_AUTH_EARLY_INVALIDATION_SECS`, default 300).
 - Issuer/client keys are not needed by the command's output.
 
 ## (d) Paths
@@ -164,9 +170,15 @@ The command printed `{"access_token": "<grok.com subscription access token>", "e
 
 | CLI | Host-local session holds the account and the token is short |
 |---|---|
-| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left and no refresh lock is fresh; otherwise waits for the CLI's rewrite. |
-| Codex | Waits for the CLI's rewrite, or for the session to end (then the daemon refreshes). |
+| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left; below that it hands out the current token while > 5 min are left and it was not rejected, else refreshes. While the CLI's refresh lock is fresh: no refresh — the current token if usable, else waits for the CLI's rewrite. |
+| Codex | Same as Claude (no refresh lock to check). |
 | Grok | Same as Codex. |
+
+The hourly refresher renews a held account of these CLIs too, once its token is inside
+`HELD_REFRESH_MARGIN_MS` (85 min) and above the 10-minute floor — a window longer than one tick — so
+while the daemon runs a held token never runs down to where only its CLI renews it. A daemon refresh
+that gets `invalid_grant` for a refresh token the file no longer holds lost a race to a CLI: it reads
+as that CLI's refresh, not as a login to redo.
 
 With no host-local holder the daemon refreshes on demand. Box sessions never count as holders.
 
