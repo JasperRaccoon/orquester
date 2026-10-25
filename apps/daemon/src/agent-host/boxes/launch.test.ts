@@ -103,10 +103,10 @@ test("a launch syncs the CLI's config roots first, pushes the transcript of a re
   assert.equal(await launch.version(), "9.9.9 (stand-in)");
 });
 
-test("a CLI missing in the box is installed on first use; a failing install is the chat's clear error", async () => {
+test("a CLI missing in the box is installed on first use (npm's globals under the home); a failing install is the chat's clear error", async () => {
   const home = await boxHome();
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
-  const target = join(home, ".local", "bin", "codex");
+  const target = join(home, ".npm-global", "bin", "codex");
   const make = (installCommand: string) =>
     createAgentHostBoxes({
       appdir: join(home, "appdir"),
@@ -127,7 +127,9 @@ test("a CLI missing in the box is installed on first use; a failing install is t
     make("echo 'npm ERR! network' >&2; exit 1").launch(input),
     (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_CLI_INSTALL_FAILED" && /npm ERR! network/.test(error.message)
   );
-  const launch = await make(`printf '#!/bin/sh\\necho codex-cli 0.159.0\\n' > '${target}' && chmod +x '${target}'`).launch(input);
+  // What `npm install -g` does with the prefix the install gets.
+  const install = `mkdir -p "$NPM_CONFIG_PREFIX/bin" && printf '#!/bin/sh\\necho codex-cli 0.159.0\\n' > "$NPM_CONFIG_PREFIX/bin/codex" && chmod +x "$NPM_CONFIG_PREFIX/bin/codex"`;
+  const launch = await make(install).launch(input);
   assert.equal(launch.bin, target);
 });
 

@@ -56,7 +56,7 @@ import { boxCloneUrl, boxGitConfig, boxGitSshTarget, type BoxGitEndpoint } from 
 import { boxGitConfigCommands, boxKnownHostsPath } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
-import { bubblewrapScript, gitClientScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
+import { bubblewrapScript, gitClientScript, nodeScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
 
 export type StoredBoxProject = NonNullable<StoredBox["project"]>;
 
@@ -125,6 +125,8 @@ export interface BoxLifecycleDeps {
   tooling?: BoxToolingProvisioner;
   git: BoxGitAccess;
   managedAgentHomes: () => ManagedAgentHome[];
+  /** Puts an agent's CLI in the box, installing it when missing (the `agents` step). Absent: the step is skipped. */
+  agentClis?: BoxAgentClis;
   setupLog: BoxSetupLog;
   clock: BoxClock;
   fetch?: typeof fetch;
@@ -136,6 +138,10 @@ export interface BoxLifecycleDeps {
    * (no Go toolchain to build them), and nothing billable is created. Absent: not checked.
    */
   agentBuilds?: { current(): Promise<{ version: string } | null> };
+}
+
+export interface BoxAgentClis {
+  ensure(connection: BoxConnection, agent: BoxAgentId, onProgress: (line: string) => void): Promise<{ installed: boolean }>;
 }
 
 export interface CreateBoxSpec {
@@ -502,6 +508,7 @@ export class BoxLifecycle {
         });
         await this.runStep(boxId, "clone", signal, (log) => this.cloneRepository(boxId, link, signal, log));
         await this.runStep(boxId, "toolchain", signal, (log) => this.installToolchain(boxId, link, signal, log));
+        await this.runStep(boxId, "agents", signal, (log) => this.installAgentClis(link, signal, log));
       }
 
       await this.runStep(boxId, "ready", signal, async () => {
@@ -764,6 +771,14 @@ export class BoxLifecycle {
       );
       if (bwrap.code !== 0) log(`Could not install bubblewrap (exit ${bwrap.code ?? bwrap.signal}); Codex runs without its sandbox here.`);
     }
+    // Before the repo's own tools: a version file it has still decides the global Node.js.
+    log("Checking Node.js (npm-installed agent CLIs and npx MCP servers).");
+    const node = await runBoxCommand(
+      connection,
+      { command: nodeScript(), shell: true },
+      { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
+    );
+    if (node.code !== 0) log(`Could not install Node.js (exit ${node.code ?? node.signal}); Codex, Grok and OpenCode cannot be installed with npm here.`);
     const present = new Set<string>();
     const contents: Record<string, string> = {};
     for (const file of TOOLCHAIN_PROBE_FILES) {
@@ -790,6 +805,43 @@ export class BoxLifecycle {
       state: "done",
       message: plan.mode === "devcontainer" ? "The devcontainer is up." : plan.commands.map((command) => command.label).join("; ")
     };
+  }
+
+  /**
+   * The CLI of every agent with a managed account, so a chat's first turn does not wait for (or
+   * fail at) its install. A failure fails the step, not the box; the chat tries the install again.
+   */
+  private async installAgentClis(connection: BoxConnection, signal: AbortSignal, log: (line: string) => void): Promise<StepOutcome> {
+    const clis = this.deps.agentClis;
+    if (!clis) return { state: "skipped", message: "Installing agent CLIs is not available in this build." };
+    const agents = [...new Set(this.deps.managedAgentHomes().map((home) => home.agent))];
+    if (agents.length === 0) return { state: "skipped", message: "No agent accounts; a CLI is installed when its first chat starts." };
+    const installed: string[] = [];
+    const present: string[] = [];
+    const failures: string[] = [];
+    for (const agent of agents) {
+      signal.throwIfAborted();
+      const name = SYNC_AGENT_NAMES[agent];
+      try {
+        // The install itself is bounded (`BOX_INSTALL_TIMEOUT_MS`); an abort stops waiting for it.
+        const result = await new Promise<{ installed: boolean }>((resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+          clis
+            .ensure(connection, agent, log)
+            .then(resolve, reject)
+            .finally(() => signal.removeEventListener("abort", onAbort));
+        });
+        (result.installed ? installed : present).push(name);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        log(`${name}: ${errorLine(error)}`);
+        failures.push(name);
+      }
+    }
+    if (failures.length > 0) throw new SetupStepError(`Could not install ${failures.join(", ")}; see the setup log.`);
+    const parts = [installed.length > 0 ? `Installed ${installed.join(", ")}` : null, present.length > 0 ? `${present.join(", ")} already there` : null];
+    return { state: "done", message: `${parts.filter((part) => part !== null).join("; ")}.` };
   }
 
   /**

@@ -70,6 +70,6 @@ test("a record with a kind, provider or state this build does not know has no su
   assert.equal(summary.providerLabel, "Fake Cloud");
   assert.deepEqual(
     summary.setup.map((step) => step.id),
-    ["create", "connect", "paths", "config", "tooling", "clone", "toolchain", "ready"]
+    ["create", "connect", "paths", "config", "tooling", "clone", "toolchain", "agents", "ready"]
   );
 });

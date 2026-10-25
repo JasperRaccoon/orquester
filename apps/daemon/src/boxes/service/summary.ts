@@ -45,6 +45,7 @@ export const SETUP_STEP_LABELS: Readonly<Record<BoxSetupStepId, string>> = {
   tooling: "Install plugin tooling",
   clone: "Clone the repository",
   toolchain: "Install the toolchain",
+  agents: "Install the agent CLIs",
   ready: "Ready"
 };
 

@@ -12,6 +12,7 @@ import { parseAccountsConfig } from "@orquester/config";
 
 import type { AccountsService } from "../../accounts.ts";
 import type { AgentAccountsService } from "../../agent-accounts.ts";
+import { boxLoginPath, ensureBoxAgentCli } from "../../agent-host/boxes/box-tools.ts";
 import type { Broadcaster } from "../../broadcaster.ts";
 import type { PluginsService } from "../../plugins/plugins-service.ts";
 import type { BoxAgentId } from "../contracts.ts";
@@ -87,6 +88,11 @@ export function createDaemonBoxService(host: DaemonBoxHost, parts: DaemonBoxPart
       knownHosts: (hostName, port) => knownHostsForBox({ keysDir: host.keysDir, home: host.home, host: hostName, port })
     },
     managedAgentHomes: () => managedAgentHomes(host.agentAccounts),
+    agentClis: {
+      // A fresh PATH probe: the toolchain step may just have put Node.js on it.
+      ensure: async (connection, agent, onProgress) =>
+        ensureBoxAgentCli(connection, agent, { path: await boxLoginPath(connection, { refresh: true }), onProgress })
+    },
     pluginEnabled: async () => (await host.plugins.get(EPHEMERAL_VMS_PLUGIN_ID)).enabled,
     onPluginChange: (listener) => {
       const onChanged = (response: PluginsResponse) =>

@@ -148,7 +148,7 @@ export function boxDestroyedOutsideOrquester(reason: BoxDestroyedReason | undefi
  * Setup steps, in order (spec §8.2). A temporary box runs only `create`,
  * `connect` and `ready`; a project box runs them all.
  */
-export type BoxSetupStepId = "create" | "connect" | "paths" | "config" | "tooling" | "clone" | "toolchain" | "ready";
+export type BoxSetupStepId = "create" | "connect" | "paths" | "config" | "tooling" | "clone" | "toolchain" | "agents" | "ready";
 export const BOX_SETUP_STEP_IDS: readonly BoxSetupStepId[] = [
   "create",
   "connect",
@@ -157,6 +157,7 @@ export const BOX_SETUP_STEP_IDS: readonly BoxSetupStepId[] = [
   "tooling",
   "clone",
   "toolchain",
+  "agents",
   "ready"
 ];
 export type BoxSetupStepState = "pending" | "running" | "done" | "failed" | "skipped";

@@ -90,6 +90,8 @@ function wellKnownBinDirs(connection: BoxConnection): string[] {
   return [
     joinBoxPath(os, home, ".local", "bin"),
     joinBoxPath(os, home, ".npm-global", "bin"),
+    // Node.js from the setup's toolchain step: an npm-installed CLI's `#!/usr/bin/env node` finds it.
+    joinBoxPath(os, home, ".local", "share", "mise", "shims"),
     joinBoxPath(os, home, ".bun", "bin"),
     joinBoxPath(os, home, ".opencode", "bin"),
     joinBoxPath(os, home, ".cargo", "bin"),
@@ -208,12 +210,15 @@ export async function ensureBoxAgentCli(
     throw new BoxLaunchError("BOX_CLI_INSTALL_FAILED", `${label} is not installed in the box, and Orquester has no installer for it.`);
   }
   input.onProgress?.(`Installing ${label} in the box…`);
+  // npm's global packages go under the home, on the lookup PATH (`wellKnownBinDirs`) whichever
+  // Node.js runs npm: a system one whose prefix needs root, or mise's, whose bin dir has no shims.
+  const npmPrefix: Record<string, string> = os === "win32" ? {} : { NPM_CONFIG_PREFIX: joinBoxPath(os, connection.sys.home, ".npm-global") };
   let result: BoxCommandResult;
   try {
     result = await runInBox(connection, {
       command: os === "win32" ? "powershell.exe" : "/bin/sh",
       args: os === "win32" ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-lc", command],
-      env: { ...(input.env ?? {}), [os === "win32" ? "Path" : "PATH"]: input.path },
+      env: { ...npmPrefix, ...(input.env ?? {}), [os === "win32" ? "Path" : "PATH"]: input.path },
       timeoutMs: BOX_INSTALL_TIMEOUT_MS,
       label: `install ${label} in the box`
     });

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { boxGitConfigCommands } from "./git-setup.ts";
-import { gitClientScript, planToolchain, type ToolchainInput } from "./toolchain.ts";
+import { gitClientScript, nodeScript, planToolchain, type ToolchainInput } from "./toolchain.ts";
 
 function plan(files: Record<string, string>, extra: Partial<ToolchainInput> = {}) {
   return planToolchain({
@@ -157,4 +157,66 @@ test("a failed install refreshes the package lists, retries, then fails with a m
   const missing = await runGitClientScript(none.bin);
   assert.equal(missing.code, 1);
   assert.match(missing.out, /no known package manager/);
+});
+
+/**
+ * A home and a PATH of stubs for {@link nodeScript}: `grep`, and `mise` (logging its calls), whose
+ * `use -g node@lts` puts `node` and `npm` stubs in its shims dir. `node: true` puts them on PATH first.
+ */
+async function nodeStubs(t: TestContext, options: { node: boolean; miseFails?: boolean }): Promise<{ home: string; bin: string; log: string }> {
+  const home = await mkdtemp(join(tmpdir(), "orq-node-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bin = join(home, "stubs");
+  await mkdir(bin);
+  const log = join(home, "mise.log");
+  const stub = async (dir: string, name: string, body: string): Promise<void> => {
+    await writeFile(join(dir, name), `#!/bin/sh\n${body}\n`);
+    await chmod(join(dir, name), 0o755);
+  };
+  await symlink("/bin/grep", join(bin, "grep"));
+  const shims = join(home, ".local", "share", "mise", "shims");
+  const install = options.miseFails
+    ? "exit 1"
+    : `/bin/mkdir -p "${shims}"; for tool in node npm; do /usr/bin/printf '#!/bin/sh\\n' > "${shims}/$tool"; /bin/chmod 755 "${shims}/$tool"; done`;
+  await stub(bin, "mise", `echo "mise $*" >> "${log}"\n${install}`);
+  if (options.node) for (const tool of ["node", "npm"]) await stub(bin, tool, "exit 0");
+  return { home, bin, log };
+}
+
+function runNodeScript(home: string, bin: string): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    execFile("/bin/sh", ["-c", nodeScript()], { env: { HOME: home, PATH: bin } }, (error, stdout, stderr) => {
+      const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
+      resolve({ code, out: `${stdout}${stderr}` });
+    });
+  });
+}
+
+test("Node.js already on PATH: the node script changes nothing", async (t) => {
+  const { home, bin, log } = await nodeStubs(t, { node: true });
+  const { code, out } = await runNodeScript(home, bin);
+  assert.equal(code, 0, out);
+  assert.match(out, /Node\.js is installed/);
+  await assert.rejects(readFile(log, "utf8"), "mise is never called");
+  await assert.rejects(readFile(join(home, ".profile"), "utf8"));
+});
+
+test("no Node.js: mise installs the LTS globally and the profiles get its shims and npm's global bin, once", async (t) => {
+  const { home, bin, log } = await nodeStubs(t, { node: false });
+  const first = await runNodeScript(home, bin);
+  assert.equal(first.code, 0, first.out);
+  assert.match(first.out, /Installing Node\.js LTS with mise/);
+  assert.equal(await readFile(log, "utf8"), "mise use -g node@lts\n");
+  // A second run finds the shims and leaves the profiles as they are.
+  assert.equal((await runNodeScript(home, bin)).code, 0);
+  for (const file of [".profile", ".bashrc", ".zshrc"]) {
+    const profile = await readFile(join(home, file), "utf8");
+    assert.equal(profile.match(/\.local\/share\/mise\/shims/g)?.length, 1, file);
+    assert.equal(profile.match(/\.npm-global\/bin/g)?.length, 1, file);
+  }
+});
+
+test("a failed Node.js install fails the node script", async (t) => {
+  const { home, bin } = await nodeStubs(t, { node: false, miseFails: true });
+  assert.notEqual((await runNodeScript(home, bin)).code, 0);
 });

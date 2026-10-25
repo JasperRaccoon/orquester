@@ -168,6 +168,7 @@ test("a project box: host paths, config sync, clone at a ref with the workspace 
       ["tooling", "skipped"],
       ["clone", "done"],
       ["toolchain", "done"],
+      ["agents", "skipped"],
       ["ready", "done"]
     ]
   );
@@ -189,6 +190,61 @@ test("a project box: host paths, config sync, clone at a ref with the workspace 
   // The host paths a box mirrors were created.
   assert.ok((await stat(join(base, "daemon", "agent-accounts"))).isDirectory());
   assert.ok((await stat(join(base, "daemon", "agent", "threads"))).isDirectory());
+});
+
+test("the agents step puts each managed account's agent CLI in the box once; a failed install fails the step, not the box", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const boxHome = await tempDir(t, "orq-box-home-");
+  const workspaceDir = join(base, "workspaces", "acme");
+  await mkdir(workspaceDir, { recursive: true });
+  const adapter = new FakeAdapter();
+  const ensured: string[] = [];
+  let codexFails = false;
+  const accountHome = (agent: string, id: string) => join(base, "daemon", "agent-accounts", agent, id, "home");
+  const { service, hub } = testBoxService({
+    baseDir: base,
+    adapters: [adapter],
+    overrides: {
+      managedAgentHomes: () => [
+        { agent: "claude", accountId: "c-1", home: accountHome("claude", "c-1") },
+        { agent: "claude", accountId: "c-2", home: accountHome("claude", "c-2") },
+        { agent: "codex", accountId: "x-1", home: accountHome("codex", "x-1") }
+      ],
+      agentClis: {
+        ensure: async (_connection, agent, onProgress) => {
+          ensured.push(agent);
+          if (agent === "codex" && codexFails) throw new Error("Codex is not installed in the box, and `npm install -g @openai/codex` failed there.");
+          onProgress(`checked ${agent}`);
+          return { installed: agent === "codex" };
+        }
+      }
+    }
+  });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => isolatedBoxConnection(boxId, boxHome);
+  const location = { kind: "box", boxKind: "linux", provider: "hetzner", size: "big", region: "ash" } as const;
+  const agentsStep = (boxId: string) => service.registry.get(boxId)!.setup!.find((step) => step.id === "agents")!;
+
+  const ok = await service.projects.create({ workspace: "acme", workspaceDir, gitAccountId: null, body: { source: "empty", name: "one", location } });
+  await service.settled();
+  assert.deepEqual(ensured, ["claude", "codex"], "one install per agent, not per account");
+  assert.equal(agentsStep(ok.box!.boxId).state, "done");
+  assert.equal(agentsStep(ok.box!.boxId).message, "Installed Codex; Claude already there.");
+  assert.match(await service.setupLog(ok.box!.boxId), /\[agents\] checked claude/);
+
+  ensured.length = 0;
+  codexFails = true;
+  const failed = await service.projects.create({ workspace: "acme", workspaceDir, gitAccountId: null, body: { source: "empty", name: "two", location } });
+  await service.settled();
+  const record = service.registry.get(failed.box!.boxId)!;
+  assert.deepEqual(ensured, ["claude", "codex"]);
+  assert.equal(agentsStep(record.id).state, "failed");
+  assert.equal(agentsStep(record.id).message, "Could not install Codex; see the setup log.");
+  assert.equal(record.state, "ready");
+  assert.match(String(record.stateReason), /Install the agent CLIs/);
+  assert.match(await service.setupLog(record.id), /\[agents\] Codex: Codex is not installed in the box/);
 });
 
 test("the config step says which account it syncs and how many files are sent, at most once a second", async (t) => {

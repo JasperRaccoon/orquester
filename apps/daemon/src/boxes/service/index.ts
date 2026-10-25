@@ -35,7 +35,7 @@ import type {
 import type { DaemonHttpAddress, LocalTailscale } from "../tailscale/local.ts";
 import { BoxSetupLog } from "./box-exec.ts";
 import { BoxError, errorLine } from "./errors.ts";
-import { BoxLifecycle, systemClock, type BoxClock, type BoxGitAccess, type ManagedAgentHome } from "./lifecycle.ts";
+import { BoxLifecycle, systemClock, type BoxAgentClis, type BoxClock, type BoxGitAccess, type ManagedAgentHome } from "./lifecycle.ts";
 import { resolvePlacement } from "./placement.ts";
 import { BoxProjects } from "./projects.ts";
 import { BoxReconciler } from "./reconciler.ts";
@@ -67,6 +67,8 @@ export interface BoxServiceDeps {
   git: BoxGitAccess;
   /** Every managed agent account home (the `config` step syncs each). */
   managedAgentHomes: () => ManagedAgentHome[];
+  /** Missing: the `agents` setup step is skipped with a message. */
+  agentClis?: BoxAgentClis;
   blacksmith?: BlacksmithSetupDriver;
   /** The `orq-agent` builds boxes download; a create is refused while there are none. Absent: not checked. */
   agentBuilds?: { current(): Promise<{ version: string } | null> };
@@ -183,6 +185,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     ...(deps.tooling ? { tooling: deps.tooling } : {}),
     git: deps.git,
     managedAgentHomes: deps.managedAgentHomes,
+    ...(deps.agentClis ? { agentClis: deps.agentClis } : {}),
     setupLog,
     clock,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),

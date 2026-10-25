@@ -77,11 +77,19 @@ const PATH_PREAMBLE = 'export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shi
 const ENSURE_MISE = "command -v mise >/dev/null 2>&1 || curl -fsSL https://mise.run | sh";
 const SHIMS_MARKER = "# orquester: mise shims";
 const SHIMS_LINE = `export PATH="$HOME/.local/share/mise/shims:$PATH" ${SHIMS_MARKER}`;
+const NPM_GLOBAL_MARKER = "# orquester: npm global bin";
+/** Where the box's agent CLI installs put npm's global packages (`ensureBoxAgentCli`). */
+const NPM_GLOBAL_LINE = `export PATH="$HOME/.npm-global/bin:$PATH" ${NPM_GLOBAL_MARKER}`;
 
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
 function script(...lines: string[]): string {
   return [PATH_PREAMBLE, ...lines].join("\n");
+}
+
+/** Append `line` to the login and interactive shell profiles that lack its marker: terminals opened later get it. */
+function persistLine(marker: string, line: string): string[] {
+  return ["~/.profile", "~/.bashrc", "~/.zshrc"].map((file) => `grep -qF ${shQuote(marker)} ${file} 2>/dev/null || printf '%s\\n' ${shQuote(line)} >> ${file}`);
 }
 
 /** `command -v <bin>` or install `<tool>` through mise. */
@@ -149,6 +157,23 @@ export function bubblewrapScript(): string {
     "elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm --needed bubblewrap",
     "else echo 'No package manager: skipped bubblewrap.'; fi"
   ].join("\n");
+}
+
+/**
+ * Install Node.js LTS through mise where `node` or `npm` is missing, whatever the repo uses: the
+ * npm-installed agent CLIs (Codex, Grok, OpenCode) and the `npx` MCP servers synced into the box
+ * need it. Puts mise's shims and npm's global bin dir on the PATH of terminals opened later.
+ */
+export function nodeScript(): string {
+  return script(
+    "command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && { echo 'Node.js is installed.'; exit 0; }",
+    "echo 'Installing Node.js LTS with mise.'",
+    ENSURE_MISE,
+    "mise use -g node@lts",
+    ...persistLine(SHIMS_MARKER, SHIMS_LINE),
+    ...persistLine(NPM_GLOBAL_MARKER, NPM_GLOBAL_LINE),
+    "command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1"
+  );
 }
 
 /**
@@ -227,9 +252,7 @@ export function planToolchain(input: ToolchainInput): ToolchainPlan {
       script: script(
         ENSURE_MISE,
         // Terminals opened later find the tools too.
-        ...["~/.profile", "~/.bashrc", "~/.zshrc"].map(
-          (file) => `grep -qF ${shQuote(SHIMS_MARKER)} ${file} 2>/dev/null || printf '%s\\n' ${shQuote(SHIMS_LINE)} >> ${file}`
-        )
+        ...persistLine(SHIMS_MARKER, SHIMS_LINE)
       )
     });
   }
