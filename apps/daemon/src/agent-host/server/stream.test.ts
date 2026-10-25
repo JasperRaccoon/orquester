@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 import { describe, it } from "node:test";
 
 import {
+  AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
   agentRowsFrameOf,
   applyAgentRows,
   applyDomainEvent,
@@ -314,6 +315,39 @@ describe("thread stream — live delivery", () => {
     assert.deepEqual(closed, ["budget"]);
     assert.equal(JSON.parse(fake.lines.at(-1) ?? "{}").kind, "error");
     assert.equal(fake.ended, true);
+  });
+
+  it("writes a snapshot larger than the budget whole: the budget bounds the live backlog, not the read", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fake = fakeResponse();
+    let emit: ((events: DomainEvent[]) => void) = () => undefined;
+    const closed: string[] = [];
+    // A subagent fleet's single turn: its snapshot alone is past the 8 MiB budget.
+    const large = { ...snapshot(1), padding: "x".repeat(AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES + 1024) } as unknown as ReturnType<typeof snapshot>;
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (listener) => {
+        emit = listener;
+        return () => undefined;
+      },
+      read: async () => [{ kind: "snapshot", thread: large }],
+      onClose: (reason) => closed.push(reason)
+    });
+    // The socket takes nothing in while the snapshot is still going out.
+    fake.hold();
+    await stream.start();
+    emit([event(2)]);
+    assert.deepEqual(closed, [], "never cut for its own snapshot");
+    assert.deepEqual(
+      fake.lines.map((line) => (JSON.parse(line) as { kind: string }).kind),
+      ["snapshot", "synchronized", "event"]
+    );
+    // Live frames behind it are still charged: a backlog past the budget is cut as before.
+    for (let index = 0; index < 20 && !stream.closed; index += 1) {
+      emit([event(3 + index, { type: "thread.message-sent", payload: { messageId: "large", role: "assistant", text: "x".repeat(1024 * 1024), streaming: true, turnId: null } })]);
+    }
+    assert.deepEqual(closed, ["budget"]);
   });
 
   it("releases the charge once the socket drains", async (t) => {

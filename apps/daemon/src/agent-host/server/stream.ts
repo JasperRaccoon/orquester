@@ -236,8 +236,18 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     options.onClose?.(reason);
   };
 
-  const writeLine = (line: string): void => {
+  /**
+   * `charge: false` is for the read's own frames (the snapshot or the replay): written whole and
+   * never counted. They are bounded by the thread itself, and one can be past the budget on its
+   * own (a subagent fleet's single turn); charging it closed the stream before its first row on
+   * every attempt, so the chat never loaded. The budget bounds the live backlog behind them.
+   */
+  const writeLine = (line: string, charge = true): void => {
     if (closed) return;
+    if (!charge) {
+      response.write(`${line}\n`);
+      return;
+    }
     const bytes = Buffer.byteLength(line) + 1;
     chargedBytes += bytes;
     if (chargedBytes > AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES) {
@@ -276,8 +286,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     });
   };
 
-  const writeFrame = (frame: AgentChatStreamFrame): void => {
-    writeLine(JSON.stringify(frame));
+  const writeFrame = (frame: AgentChatStreamFrame, charge = true): void => {
+    writeLine(JSON.stringify(frame), charge);
   };
 
   const emitEvents = (events: readonly DomainEvent[]): void => {
@@ -427,7 +437,7 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     if (closed) return;
 
     for (const frame of frames) {
-      writeFrame(frame);
+      writeFrame(frame, false);
     }
 
     // The heartbeat starts as soon as the headers are out: a very large
