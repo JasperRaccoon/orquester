@@ -135,8 +135,8 @@ const CARD_BACKDROP = "min-w-0 rounded-t-xl bg-neutral-950";
  *
  * **Fixed priority order, one request at a time.** Approval, then an
  * Orquester approval card, then pending question, then an agent's request for
- * a secret, then the plan-ready prompt,
- * then the mobile-collapsed question ({@link resolveDockCard}); a `1/N` counter says how many are behind it.
+ * a secret, then the plan-ready prompt; on a phone the question takes its
+ * compact layout ({@link resolveDockCard}); a `1/N` counter says how many are behind it.
  * Nothing here is ever a modal, nothing steals focus, and nothing scrolls
  * away — a request that scrolls away is a turn that hangs.
  *
@@ -274,7 +274,7 @@ export function ChatBannerDock({
     hasUserInput: userInput !== null,
     hasSecretRequest: secretRequest !== null,
     hasActionableProposedPlan: actionableProposedPlan,
-    isComposerCollapsedMobile: isMobile,
+    isMobile,
     hasAppConsent: appConsent !== null
   });
   /*

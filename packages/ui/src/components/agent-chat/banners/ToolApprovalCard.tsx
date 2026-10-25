@@ -326,116 +326,121 @@ export function ToolApprovalCard({
         className="min-w-0"
         onKeyDown={onCardKeyDown}
       >
-        <p className="break-words text-sm font-medium text-neutral-100">{card.title}</p>
-        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px]">
-          <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-300" data-scope-badge="">
-            {card.scope.label}
-          </span>
-          {(card.scope.projects ?? []).map((project) => (
-            <span
-              key={project.path}
-              className="rounded-full bg-neutral-800/70 px-2 py-0.5 text-neutral-400"
-              title={sanitizeApprovalLabel(project.path, 4096)}
-            >
-              {project.workspace}
-              {project.gitAccountLabel ? ` · git ${project.gitAccountLabel}` : ""}
+        {/* Capped, so a long preview never grows the card past the top of the
+            chat (the dock is bottom-anchored in a clipped overlay): it scrolls
+            here and the decision row below stays in view. */}
+        <div className="ac-scroll-thin max-h-[min(28rem,45dvh)] min-w-0 overflow-y-auto" data-tool-approval-body="">
+          <p className="break-words text-sm font-medium text-neutral-100">{card.title}</p>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-300" data-scope-badge="">
+              {card.scope.label}
             </span>
-          ))}
-        </div>
-        <p className="mt-2 break-words text-xs text-neutral-300" data-change-sentence="">
-          {toolApprovalChangeSentence(card)}
-        </p>
-        {card.reason ? (
-          <div className="mt-2 text-xs">
-            <span className="text-neutral-500">The agent's reason</span>
-            <p className="mt-0.5 whitespace-pre-wrap break-words text-neutral-400">{card.reason}</p>
-          </div>
-        ) : null}
-
-        <div className="mt-2 min-w-0">
-          {isMobile ? (
-            <>
-              {/* The flags stay in sight on the card; screen readers get them once, in the sheet
-                  (the review button says how many there are). */}
-              {flags.length > 0 ? (
-                <div aria-hidden="true" data-flags-duplicate="">
-                  <ToolApprovalPreview sections={flags} fullLoaded loadingFull={false} onLoadFull={loadFull} />
-                </div>
-              ) : null}
-              <button
-                type="button"
-                className={cn(BUTTON, SECONDARY, "mt-2 w-full justify-center")}
-                onClick={() => {
-                  setSheetOpen(true);
-                  // Opening the review is viewing it: a cut preview loads whole there.
-                  if (previewCut) loadFull();
-                }}
-                data-review-preview=""
+            {(card.scope.projects ?? []).map((project) => (
+              <span
+                key={project.path}
+                className="rounded-full bg-neutral-800/70 px-2 py-0.5 text-neutral-400"
+                title={sanitizeApprovalLabel(project.path, 4096)}
               >
-                Review what will run ({shown.sections.length} {shown.sections.length === 1 ? "part" : "parts"}
-                {warningCount > 0 ? `, ${warningCount} ${warningCount === 1 ? "flag" : "flags"}` : ""})
-              </button>
-              <BottomSheet open={sheetOpen} onClose={() => setSheetOpen(false)} label={`Preview: ${card.title}`}>
-                <div className="px-2 pb-3 text-xs">
-                  <p className="mb-2 break-words text-sm font-medium text-neutral-100">{card.title}</p>
-                  {preview(true)}
-                </div>
-              </BottomSheet>
-            </>
-          ) : (
-            preview(false)
-          )}
+                {project.workspace}
+                {project.gitAccountLabel ? ` · git ${project.gitAccountLabel}` : ""}
+              </span>
+            ))}
+          </div>
+          <p className="mt-2 break-words text-xs text-neutral-300" data-change-sentence="">
+            {toolApprovalChangeSentence(card)}
+          </p>
+          {card.reason ? (
+            <div className="mt-2 text-xs">
+              <span className="text-neutral-500">The agent's reason</span>
+              <p className="mt-0.5 whitespace-pre-wrap break-words text-neutral-400">{card.reason}</p>
+            </div>
+          ) : null}
+
+          <div className="mt-2 min-w-0">
+            {isMobile ? (
+              <>
+                {/* The flags stay in sight on the card; screen readers get them once, in the sheet
+                    (the review button says how many there are). */}
+                {flags.length > 0 ? (
+                  <div aria-hidden="true" data-flags-duplicate="">
+                    <ToolApprovalPreview sections={flags} fullLoaded loadingFull={false} onLoadFull={loadFull} />
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className={cn(BUTTON, SECONDARY, "mt-2 w-full justify-center")}
+                  onClick={() => {
+                    setSheetOpen(true);
+                    // Opening the review is viewing it: a cut preview loads whole there.
+                    if (previewCut) loadFull();
+                  }}
+                  data-review-preview=""
+                >
+                  Review what will run ({shown.sections.length} {shown.sections.length === 1 ? "part" : "parts"}
+                  {warningCount > 0 ? `, ${warningCount} ${warningCount === 1 ? "flag" : "flags"}` : ""})
+                </button>
+                <BottomSheet open={sheetOpen} onClose={() => setSheetOpen(false)} label={`Preview: ${card.title}`}>
+                  <div className="px-2 pb-3 text-xs">
+                    <p className="mb-2 break-words text-sm font-medium text-neutral-100">{card.title}</p>
+                    {preview(true)}
+                  </div>
+                </BottomSheet>
+              </>
+            ) : (
+              preview(false)
+            )}
+          </div>
+
+          {card.secretFields.length > 0 ? (
+            <div className="mt-3 flex flex-col gap-2" data-secret-fields="">
+              {card.secretFields.map((field) => {
+                const inputId = `${card.approvalId}-secret-${field.key}`;
+                return (
+                  <div key={field.key} className="min-w-0">
+                    <label htmlFor={inputId} className="mb-1 flex items-center gap-1.5 text-[11px] text-neutral-400">
+                      <KeyRound size={11} aria-hidden />
+                      {field.label}
+                    </label>
+                    <input
+                      id={inputId}
+                      {...SECRET_INPUT_ATTRIBUTES}
+                      value={secrets[field.key] ?? ""}
+                      disabled={submitting}
+                      maxLength={TOOL_APPROVAL_SECRET_MAX_CHARS}
+                      placeholder="Type the value (hidden)"
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setSecrets((current) => ({ ...current, [field.key]: value }));
+                      }}
+                      className={CARD_INPUT_CLASS}
+                    />
+                  </div>
+                );
+              })}
+              <p className="text-[11px] text-neutral-500">
+                Typed here, sent with your approval for this one change; never shown to the agent or kept in the chat.
+              </p>
+            </div>
+          ) : null}
+
+          {denyOpen ? (
+            <div className="mt-3 min-w-0">
+              <label htmlFor={denyReasonId} className="mb-1 block text-[11px] text-neutral-400">
+                Why not? Sent to the agent as your words (optional)
+              </label>
+              <textarea
+                ref={denyReasonRef}
+                id={denyReasonId}
+                value={denyReason}
+                disabled={submitting}
+                maxLength={TOOL_APPROVAL_DENY_REASON_MAX_CHARS}
+                rows={2}
+                onChange={(event) => setDenyReason(event.target.value)}
+                className={cn(CARD_INPUT_CLASS, "resize-y")}
+              />
+            </div>
+          ) : null}
         </div>
-
-        {card.secretFields.length > 0 ? (
-          <div className="mt-3 flex flex-col gap-2" data-secret-fields="">
-            {card.secretFields.map((field) => {
-              const inputId = `${card.approvalId}-secret-${field.key}`;
-              return (
-                <div key={field.key} className="min-w-0">
-                  <label htmlFor={inputId} className="mb-1 flex items-center gap-1.5 text-[11px] text-neutral-400">
-                    <KeyRound size={11} aria-hidden />
-                    {field.label}
-                  </label>
-                  <input
-                    id={inputId}
-                    {...SECRET_INPUT_ATTRIBUTES}
-                    value={secrets[field.key] ?? ""}
-                    disabled={submitting}
-                    maxLength={TOOL_APPROVAL_SECRET_MAX_CHARS}
-                    placeholder="Type the value (hidden)"
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setSecrets((current) => ({ ...current, [field.key]: value }));
-                    }}
-                    className={CARD_INPUT_CLASS}
-                  />
-                </div>
-              );
-            })}
-            <p className="text-[11px] text-neutral-500">
-              Typed here, sent with your approval for this one change; never shown to the agent or kept in the chat.
-            </p>
-          </div>
-        ) : null}
-
-        {denyOpen ? (
-          <div className="mt-3 min-w-0">
-            <label htmlFor={denyReasonId} className="mb-1 block text-[11px] text-neutral-400">
-              Why not? Sent to the agent as your words (optional)
-            </label>
-            <textarea
-              ref={denyReasonRef}
-              id={denyReasonId}
-              value={denyReason}
-              disabled={submitting}
-              maxLength={TOOL_APPROVAL_DENY_REASON_MAX_CHARS}
-              rows={2}
-              onChange={(event) => setDenyReason(event.target.value)}
-              className={cn(CARD_INPUT_CLASS, "resize-y")}
-            />
-          </div>
-        ) : null}
 
         {error !== null ? (
           <p role="alert" className="mt-2 text-[11px] text-danger-300">
@@ -451,7 +456,7 @@ export function ToolApprovalCard({
         ) : null}
 
         <div className="mt-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2 text-[11px] text-neutral-500">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-neutral-500">
             <span className="ac-tabular" data-expiry="">
               {toolApprovalExpiryText(card.expiresAt, time)}
             </span>
@@ -462,7 +467,9 @@ export function ToolApprovalCard({
               </button>
             ) : null}
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* Never `shrink-0`: on a narrow card the row is wider than the card
+              and must wrap inside it, not run off its edge. */}
+          <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
             {!denyOpen ? (
               <button
                 type="button"

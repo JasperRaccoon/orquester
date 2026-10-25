@@ -92,11 +92,18 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
       counter={pendingCount > 1 ? `1/${pendingCount}` : undefined}
     >
       <div className="min-w-0" data-secret-request={request.requestId}>
-        <p className="break-words text-sm text-neutral-200">{request.prompt}</p>
-        {request.purpose ? (
-          <p className="mt-1 break-words text-[11px] text-neutral-500">For: {request.purpose}</p>
-        ) : null}
-        <p className="mt-1 break-words text-[11px] text-neutral-500">{SECRET_REQUEST_SHARING_NOTE}</p>
+        {/* The agent's words can run long; capped, so the card never grows past
+            the top of the chat (the dock is bottom-anchored in a clipped
+            overlay) and the field and buttons stay in view. */}
+        <div className="ac-scroll-thin max-h-[min(12rem,28dvh)] min-w-0 overflow-y-auto">
+          <p className="whitespace-pre-wrap text-sm text-neutral-200 [overflow-wrap:anywhere]">{request.prompt}</p>
+          {request.purpose ? (
+            <p className="mt-1 whitespace-pre-wrap text-[11px] text-neutral-500 [overflow-wrap:anywhere]">
+              For: {request.purpose}
+            </p>
+          ) : null}
+          <p className="mt-1 break-words text-[11px] text-neutral-500">{SECRET_REQUEST_SHARING_NOTE}</p>
+        </div>
         <div className="mt-2 flex min-w-0 items-center gap-2">
           <input
             id={inputId}
@@ -121,12 +128,14 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
             {error}
           </p>
         ) : null}
-        <div className="mt-3 flex min-w-0 items-center justify-between gap-2">
-          <p id={noteId} className="flex min-w-0 items-center gap-1.5 text-[11px] text-neutral-500">
-            <ShieldCheck size={12} className="shrink-0" aria-hidden />
-            {SECRET_REQUEST_PRIVACY_NOTE}
+        {/* A narrow card stacks the note over the buttons: side by side, the
+            buttons squeezed the note into a column a word wide. */}
+        <div className="mt-3 flex min-w-0 flex-col gap-2.5 [@container(min-width:30rem)]:flex-row [@container(min-width:30rem)]:items-center [@container(min-width:30rem)]:justify-between">
+          <p id={noteId} className="flex min-w-0 items-start gap-1.5 text-[11px] leading-snug text-neutral-500">
+            <ShieldCheck size={12} className="mt-px shrink-0" aria-hidden />
+            <span className="min-w-0">{SECRET_REQUEST_PRIVACY_NOTE}</span>
           </p>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center justify-end gap-2">
             <button
               type="button"
               disabled={submitting}

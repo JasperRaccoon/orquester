@@ -64,7 +64,7 @@ test("the dock shows one card at a time, in a fixed priority order", () => {
     hasApproval: true,
     hasUserInput: true,
     hasActionableProposedPlan: true,
-    isComposerCollapsedMobile: false
+    isMobile: false
   };
   assert.equal(resolveDockCard(all), "approval");
   assert.equal(resolveDockCard({ ...all, hasApproval: false }), "question");
@@ -84,7 +84,7 @@ test("the dock shows one card at a time, in a fixed priority order", () => {
       hasApproval: false,
       hasUserInput: false,
       hasActionableProposedPlan: false,
-      isComposerCollapsedMobile: true,
+      isMobile: true,
       hasAppConsent: true
     }),
     "app-consent"
@@ -94,19 +94,21 @@ test("the dock shows one card at a time, in a fixed priority order", () => {
       hasApproval: false,
       hasUserInput: false,
       hasActionableProposedPlan: false,
-      isComposerCollapsedMobile: false
+      isMobile: false
     }),
     null
   );
 });
 
 test("an agent's request for a secret docks after approvals and questions, before the plan prompt — on mobile too", () => {
-  const base = { hasApproval: false, hasUserInput: false, hasActionableProposedPlan: true, isComposerCollapsedMobile: false };
+  const base = { hasApproval: false, hasUserInput: false, hasActionableProposedPlan: true, isMobile: false };
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: true }), "secret");
-  assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, isComposerCollapsedMobile: true }), "secret");
+  assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, isMobile: true }), "secret");
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, hasUserInput: true }), "question");
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, hasApproval: true }), "approval");
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: false }), "plan-ready");
+  // The plan prompt names the plan the composer's "Implement" carries out — on a phone too.
+  assert.equal(resolveDockCard({ ...base, hasSecretRequest: false, isMobile: true }), "plan-ready");
   // The agent's own secret request comes before an MCP App's consent.
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, hasAppConsent: true }), "secret");
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: false, hasAppConsent: true }), "app-consent");
@@ -117,11 +119,11 @@ test("an agent's request for a secret docks after approvals and questions, befor
 // ---------------------------------------------------------------------------
 
 test("an Orquester card comes after a provider approval and before everything else", () => {
-  const base = { hasApproval: false, hasUserInput: true, hasSecretRequest: true, hasActionableProposedPlan: true, isComposerCollapsedMobile: false, hasAppConsent: true };
+  const base = { hasApproval: false, hasUserInput: true, hasSecretRequest: true, hasActionableProposedPlan: true, isMobile: false, hasAppConsent: true };
   assert.equal(resolveDockCard({ ...base, hasToolApproval: true }), "tool-approval");
   assert.equal(resolveDockCard({ ...base, hasApproval: true, hasToolApproval: true }), "approval");
   assert.equal(resolveDockCard({ ...base, hasToolApproval: false }), "question");
-  assert.equal(resolveDockCard({ ...base, isComposerCollapsedMobile: true, hasToolApproval: true }), "tool-approval");
+  assert.equal(resolveDockCard({ ...base, isMobile: true, hasToolApproval: true }), "tool-approval");
 });
 
 test("only ⌘/Ctrl+Enter approves, and never within the guard", () => {
