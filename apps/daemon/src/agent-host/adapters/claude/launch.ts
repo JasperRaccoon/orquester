@@ -65,6 +65,11 @@ interface BuildClaudeQueryOptionsInput {
    * while `env` carries a NODE_OPTIONS: the flag-tier value below replaces it, so it goes first.
    */
   settingsNodeOptions?: string;
+  /**
+   * The `ENABLE_TOOL_SEARCH` the CLI would otherwise run with: its settings files' over the process
+   * env's (`settings-env.ts`). An auto mode is turned into `true` at the flag tier.
+   */
+  toolSearchSetting?: string;
   runtimeMode: RuntimeMode;
   modelSelection?: ModelSelection;
   /** The catalogue the snapshot published, for per-model option gating. */
@@ -130,9 +135,46 @@ interface BuiltClaudeQueryOptions {
 /**
  * Env of a launch with no built-in tools (a managed profile that works through MCP tools only):
  * every MCP tool loaded up front (no tool search to reach a deferred one), and tool results up to
- * 60k tokens — such a chat's tool results ARE its work (the Knowledge indexer's tasks).
+ * 60k tokens — such a chat's tool results ARE its work (the Knowledge indexer's tasks). Its
+ * `ENABLE_TOOL_SEARCH` is also set at the flag tier, since the user env carried there beats this.
  */
 export const CLAUDE_NO_BUILTIN_TOOLS_ENV: Readonly<Record<string, string>> = { ENABLE_TOOL_SEARCH: "false", MAX_MCP_OUTPUT_TOKENS: "60000" };
+
+/**
+ * What a chat's `ENABLE_TOOL_SEARCH` becomes at the flag tier: `true` for an auto mode, else
+ * nothing. In auto mode Claude Code sends every MCP tool schema in full while they fit under a
+ * share of the context window — on a 1M model the `orquester` tools do — so each request carries
+ * them, and a server that connects late changes the tool list and misses the prompt cache.
+ * `auto:0` already means on and `auto:100` off, so those stay; `true` (on) is the CLI's default.
+ *
+ * Claude Code 2.1.307's reading: `auto`, or `auto:N` with N clamped to 0..100 and an unparsable N
+ * meaning `auto`.
+ */
+export function claudeToolSearchOverride(value: string | undefined): "true" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "auto") return "true";
+  if (!value.startsWith("auto:")) return undefined;
+  const percent = parseClaudeInteger(value.slice("auto:".length));
+  if (Number.isNaN(percent)) return "true";
+  const clamped = Math.min(100, Math.max(0, percent));
+  return clamped > 0 && clamped < 100 ? "true" : undefined;
+}
+
+// Claude Code 2.1.307's integer parsing for auto:N: scientific notation counts only as an integer,
+// grouped digits (1_000, 1,000, 1 000) are joined, and anything else goes to parseInt.
+const CLAUDE_SCIENTIFIC_INTEGER = /^[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d+$/;
+const CLAUDE_GROUPED_INTEGER = /^[+-]?\d{1,3}([_,\u00A0\u202F ])\d{3}(?:\1\d{3})*$/;
+function parseClaudeInteger(text: string): number {
+  const value = text.trim();
+  if (value.length <= 32 && CLAUDE_SCIENTIFIC_INTEGER.test(value)) {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : Number.NaN;
+  }
+  if (value.length <= 32 && CLAUDE_GROUPED_INTEGER.test(value)) {
+    return Number.parseInt(value.replace(/[_,\u00A0\u202F ]/g, ""), 10);
+  }
+  return Number.parseInt(value, 10);
+}
 
 export function buildClaudeQueryOptions(
   input: BuildClaudeQueryOptionsInput
@@ -168,8 +210,19 @@ export function buildClaudeQueryOptions(
         ? `${input.settingsNodeOptions} ${input.env.NODE_OPTIONS}`
         : input.env.NODE_OPTIONS;
 
+  // Settings env beats the process env in the CLI, so the tool-search choice rides the flag tier too:
+  // off for a chat without built-in tools (no ToolSearch to reach a deferred tool), and on in place
+  // of an auto mode.
+  const profile = input.profile;
+  const toolSearch =
+    profile?.launch.disableBuiltinTools === true ? "false" : claudeToolSearchOverride(input.toolSearchSetting);
+  const settingsEnv: Record<string, string> = {
+    ...(nodeOptions !== undefined ? { NODE_OPTIONS: nodeOptions } : {}),
+    ...(toolSearch !== undefined ? { ENABLE_TOOL_SEARCH: toolSearch } : {})
+  };
+
   const settings: Record<string, unknown> = {
-    ...(nodeOptions !== undefined ? { env: { NODE_OPTIONS: nodeOptions } } : {}),
+    ...(Object.keys(settingsEnv).length > 0 ? { env: settingsEnv } : {}),
     ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
     ...(wantsThinkingSummaries ? { showThinkingSummaries: true } : {}),
     ...(fastMode === true ? { fastMode: true } : {}),
@@ -198,7 +251,6 @@ export function buildClaudeQueryOptions(
       ? `${CLAUDE_RUNTIME_INSTRUCTIONS}\n\n${input.sessionTools.instructions}`
       : CLAUDE_RUNTIME_INSTRUCTIONS;
 
-  const profile = input.profile;
   const profileFiles = profile !== undefined ? buildProfileFiles(profile.launch, settings) : undefined;
   if (profile !== undefined && profileFiles?.mcpConfig !== undefined) {
     extraArgs["mcp-config"] = profile.files.mcpConfig;
