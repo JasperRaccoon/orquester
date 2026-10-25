@@ -18,7 +18,8 @@ import {
 } from "./decisions.ts";
 import {
   buildClaudeProbeOptions,
-  buildClaudeQueryOptions
+  buildClaudeQueryOptions,
+  claudeToolSearchOverride
 } from "./launch.ts";
 import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
 import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
@@ -479,6 +480,85 @@ describe("claude launch — NODE_OPTIONS (the plugins' tsc preload)", () => {
   });
 });
 
+describe("claude launch — ENABLE_TOOL_SEARCH auto modes", () => {
+  it("maps Claude Code's auto modes to on and leaves every other value alone", () => {
+    const rows: Array<[string | undefined, "true" | undefined]> = [
+      [undefined, undefined],
+      ["", undefined],
+      ["true", undefined],
+      ["false", undefined],
+      ["1", undefined],
+      ["AUTO", undefined],
+      [" auto", undefined],
+      ["auto", "true"],
+      ["auto:10", "true"],
+      ["auto:50", "true"],
+      ["auto:99", "true"],
+      // auto:0 is already on, auto:100 already off; N clamps to 0..100.
+      ["auto:0", undefined],
+      ["auto:100", undefined],
+      ["auto:-5", undefined],
+      ["auto:150", undefined],
+      // parseInt reads a leading integer; an unparsable N means plain auto.
+      ["auto:5.5", "true"],
+      ["auto:0.5", undefined],
+      ["auto: 20 ", "true"],
+      ["auto:", "true"],
+      ["auto:abc", "true"],
+      // Scientific notation counts only as an integer; grouped digits are joined.
+      ["auto:1e1", "true"],
+      ["auto:1e2", undefined],
+      ["auto:1.5e0", "true"],
+      ["auto:1_000", undefined],
+      ["auto:1,000", undefined]
+    ];
+    for (const [value, expected] of rows) {
+      assert.equal(claudeToolSearchOverride(value), expected, `ENABLE_TOOL_SEARCH=${String(value)}`);
+    }
+  });
+
+  function withToolSearch(toolSearchSetting: string | undefined, profile?: ClaudeProfileLaunch, nodeOptions?: string) {
+    return buildClaudeQueryOptions({
+      cwd: "/work/project",
+      executablePath: "/usr/local/bin/claude",
+      env: { PATH: "/usr/bin", HOME: "/home/orq", ...(nodeOptions !== undefined ? { NODE_OPTIONS: nodeOptions } : {}) },
+      ...(toolSearchSetting !== undefined ? { toolSearchSetting } : {}),
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/appdir/threads/t1/attachments",
+      canUseTool: noopCanUseTool,
+      sessionId: "11111111-2222-3333-4444-555555555555",
+      ...(profile !== undefined ? { profile: { launch: profile, files: FILES } } : {})
+    });
+  }
+
+  it("turns an auto mode on at the flag tier, since settings env beats the process env", () => {
+    const { options } = withToolSearch("auto");
+    assert.deepEqual((options.settings as Record<string, unknown>).env, { ENABLE_TOOL_SEARCH: "true" });
+    assert.equal(options.env?.ENABLE_TOOL_SEARCH, undefined, "the process env is left as built");
+  });
+
+  it("sits beside NODE_OPTIONS in the flag-tier env", () => {
+    const { options } = withToolSearch("auto:25", undefined, "--preload");
+    assert.deepEqual((options.settings as Record<string, unknown>).env, { NODE_OPTIONS: "--preload", ENABLE_TOOL_SEARCH: "true" });
+  });
+
+  it("leaves the user's own choice and the default untouched", () => {
+    for (const value of [undefined, "true", "false", "auto:0", "auto:100"]) {
+      const settings = withToolSearch(value).options.settings as Record<string, unknown> | undefined;
+      assert.equal(settings !== undefined && "env" in settings, false, `ENABLE_TOOL_SEARCH=${String(value)}`);
+    }
+  });
+
+  it("a profile chat overrides the carried user value in its settings file", () => {
+    const carriedSettings = { env: { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "auto" } };
+    const built = withToolSearch("auto", profileLaunch({ carriedSettings }));
+    assert.deepEqual(built.profileFiles?.settings.env, { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "true" });
+    const kept = withToolSearch("false", profileLaunch({ carriedSettings: { env: { ENABLE_TOOL_SEARCH: "false" } } }));
+    assert.deepEqual(kept.profileFiles?.settings.env, { ENABLE_TOOL_SEARCH: "false" });
+  });
+});
+
 describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => {
   it("a Global chat is untouched: user source, no strict MCP, no plugins, no skills, no launch files", () => {
     const built = buildWith(undefined, { model: "default", options: [{ id: "thinking", value: true }] });
@@ -585,6 +665,25 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     const on = buildWith(profileLaunch());
     assert.equal("tools" in on.options, false);
     assert.equal(on.options.env?.ENABLE_TOOL_SEARCH, undefined);
+    assert.deepEqual(on.profileFiles?.settings.env, { TOKEN: "carried-secret" });
+  });
+
+  it("a profile without built-in tools keeps tool search off over a carried user value", () => {
+    // The carried user env rides the flag tier, which beats the process env's "false".
+    const carriedSettings = { env: { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "true" } };
+    const built = buildClaudeQueryOptions({
+      cwd: "/work/project",
+      executablePath: "/usr/local/bin/claude",
+      env: { PATH: "/usr/bin", HOME: "/home/orq" },
+      toolSearchSetting: "true",
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/appdir/threads/t1/attachments",
+      canUseTool: noopCanUseTool,
+      sessionId: "11111111-2222-3333-4444-555555555555",
+      profile: { launch: profileLaunch({ disableBuiltinTools: true, carriedSettings }), files: FILES }
+    });
+    assert.deepEqual(built.profileFiles?.settings.env, { TOKEN: "carried-secret", ENABLE_TOOL_SEARCH: "false" });
   });
 
   it("a profile without built-in tools loads no filesystem settings (no CLAUDE.md walked up from its cwd)", () => {
