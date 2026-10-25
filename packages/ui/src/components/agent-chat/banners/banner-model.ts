@@ -181,8 +181,9 @@ export function showBackgroundLivenessBanner(input: {
  * agent's request for a secret (`request_secret`, design 2026-10-14 §5 — the
  * agent waits on it as on a question, on mobile too), then an MCP App's
  * consent request (spec 2026-10-14 §3 — the agent's own requests come first:
- * an app waits, a turn is blocked), then the plan-ready prompt, then the
- * mobile-collapsed question. One request at a time.
+ * an app waits, a turn is blocked), then the plan-ready prompt. On a phone
+ * the question takes its compact layout (`question-mobile`). One request at a
+ * time.
  *
  * *T3: `ChatComposer.tsx:6152-6265` — the four-branch if-chain; T3 shows the
  * secret card in the timeline instead.*
@@ -208,17 +209,21 @@ export function resolveDockCard(input: {
   hasUserInput: boolean;
   hasSecretRequest?: boolean;
   hasActionableProposedPlan: boolean;
-  isComposerCollapsedMobile: boolean;
+  /** A phone: the question takes its compact layout. Nothing else depends on it. */
+  isMobile: boolean;
   hasAppConsent?: boolean;
 }): DockCard {
   if (input.hasApproval) return "approval";
   if (input.hasToolApproval === true) return "tool-approval";
   if (input.hasUserInput) {
-    return input.isComposerCollapsedMobile ? "question-mobile" : "question";
+    return input.isMobile ? "question-mobile" : "question";
   }
   if (input.hasSecretRequest === true) return "secret";
   if (input.hasAppConsent === true) return "app-consent";
-  if (input.hasActionableProposedPlan && !input.isComposerCollapsedMobile) return "plan-ready";
+  // On a phone too: the composer never collapses while a plan waits
+  // (`isComposerCollapsedMobile`), and its "Implement" needs this card to say
+  // which plan it carries out.
+  if (input.hasActionableProposedPlan) return "plan-ready";
   return null;
 }
 

@@ -444,13 +444,13 @@ export function QuestionCard({
           data-pending-user-input-toggle={isCollapsed ? "collapsed" : "expanded"}
           onClick={() => setCollapsedQuestionId(isCollapsed ? null : activeQuestion.id)}
           className={cn(
-            "-mx-0.5 flex items-center gap-1 rounded px-0.5 text-left",
+            "-mx-0.5 flex min-w-0 items-center gap-1 rounded px-0.5 text-left",
             "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
           )}
         >
           {/* R8-m2: without this, nothing signals the header is a toggle. */}
           <DisclosureChevron open={!isCollapsed} />
-          {activeQuestion.header}
+          <span className="min-w-0">{activeQuestion.header}</span>
         </button>
       }
       description={isCollapsed ? activeQuestion.question : undefined}

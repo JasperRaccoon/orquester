@@ -39,7 +39,7 @@ export interface BannerCardProps {
   description?: React.ReactNode;
   /** `1/N` when several requests are queued behind this one. */
   counter?: React.ReactNode;
-  /** Buttons, right-aligned on the first row. */
+  /** Buttons, right-aligned on the first row; under the body on a narrow card that has one. */
   actions?: React.ReactNode;
   /** The expanded body — detail blocks, option lists. */
   children?: React.ReactNode;
@@ -73,6 +73,12 @@ export interface BannerCardProps {
  * The row is a three-column grid — fixed icon column, flexible content,
  * auto actions — so a stack of banners has its icons and titles on the same
  * vertical lines regardless of what each one contains.
+ *
+ * The card is a size container and lays itself out by its OWN width, not the
+ * viewport's: a phone and a narrow desktop pane get the same narrow card. A
+ * narrow card with a body puts its actions under the body, right-aligned,
+ * and lets the body use the icon column; a header row of buttons would
+ * otherwise crush the title or run off the card.
  */
 export function BannerCard({
   variant = "default",
@@ -89,20 +95,23 @@ export function BannerCard({
   className
 }: BannerCardProps): React.ReactElement {
   const tone = VARIANT_TONE[variant];
+  const hasBody = Boolean(children);
   return (
     <div
       data-variant={variant}
       data-density={density}
       className={cn(
         // Square-bottomed and bottom-borderless: the composer closes the shape.
-        "rounded-t-xl border border-b-0 text-xs",
+        "rounded-t-xl border border-b-0 text-xs [container-type:inline-size]",
         TONE_BAND[tone],
         DENSITY[density],
         !noEnterAnimation && "ac-banner-enter",
         className
       )}
     >
-      <div className="grid w-full min-w-0 grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-1.5">
+      {/* Icon, content, actions, dismiss. Spaced by padding, not a column gap,
+          so an empty actions column leaves no gap behind. */}
+      <div className="grid w-full min-w-0 grid-cols-[1.5rem_minmax(0,1fr)_auto_auto] items-center">
         <span
           className={cn(
             "col-start-1 row-start-1 flex h-6 w-6 items-center justify-center",
@@ -111,29 +120,50 @@ export function BannerCard({
         >
           {icon}
         </span>
-        <div className="col-start-2 row-start-1 flex min-w-0 items-center gap-2">
-          <span className={cn("shrink-0 font-medium", TONE_BAND_TEXT[tone])}>{title}</span>
-          {description ? (
-            <span className="min-w-0 truncate text-neutral-500">{description}</span>
-          ) : null}
+        <div className="col-start-2 row-start-1 flex min-w-0 items-center gap-2 ps-1.5">
+          {/* The title wins the row: it wraps rather than run off the card. The
+              description truncates beside it, or drops to its own line when
+              less than 8rem is left there — never squeezed out of sight. */}
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className={cn("min-w-0 font-medium [overflow-wrap:anywhere]", TONE_BAND_TEXT[tone])}>{title}</span>
+            {description ? (
+              <span className="min-w-0 flex-1 basis-32 truncate text-neutral-500">{description}</span>
+            ) : null}
+          </div>
           {counter ? (
-            <span className="ac-tabular ml-auto shrink-0 text-[11px] text-neutral-500">
+            <span className="ac-tabular shrink-0 text-[11px] text-neutral-500">
               {counter}
             </span>
           ) : null}
         </div>
-        <div className="col-start-3 row-start-1 flex shrink-0 items-center gap-1.5">
-          {actions}
-          {onDismiss ? (
+        {actions ? (
+          <div
+            className={cn(
+              "flex items-center gap-1.5",
+              hasBody
+                ? "col-span-full row-start-3 mt-3 min-w-0 flex-wrap justify-end [@container(min-width:30rem)]:col-span-1 [@container(min-width:30rem)]:col-start-3 [@container(min-width:30rem)]:row-start-1 [@container(min-width:30rem)]:mt-0 [@container(min-width:30rem)]:flex-nowrap [@container(min-width:30rem)]:ps-1.5"
+                : "col-start-3 row-start-1 shrink-0 ps-1.5"
+            )}
+          >
+            {actions}
+          </div>
+        ) : null}
+        {onDismiss ? (
+          <div className="col-start-4 row-start-1 flex ps-1.5">
             <ChatIconButton label={dismissLabel} size="xs" onClick={onDismiss}>
               <X size={12} aria-hidden />
             </ChatIconButton>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
+        {/* Aligned under the title, not under the icon, once the card is wide
+            enough to spare the icon column — the icon column is chrome, and
+            body text hanging off it reads as a second column. */}
+        {hasBody ? (
+          <div className="col-span-full row-start-2 mt-2 min-w-0 [@container(min-width:30rem)]:ps-[1.875rem]">
+            {children}
+          </div>
+        ) : null}
       </div>
-      {/* Aligned under the title, not under the icon — the icon column is
-          chrome, and body text hanging off it reads as a second column. */}
-      {children ? <div className="mt-2 min-w-0 ps-[1.875rem]">{children}</div> : null}
     </div>
   );
 }
