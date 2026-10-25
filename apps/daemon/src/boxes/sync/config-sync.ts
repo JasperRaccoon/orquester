@@ -78,12 +78,14 @@ import {
   type BoxFsChangeEvent
 } from "@orquester/api";
 import {
+  daemonConfigDir,
   sessionProfilePreparedRootDir,
   type BoxSyncBaselineEntry,
   type StoredBoxConfigChangeFile,
   type StoredBoxConfigChangeSet
 } from "@orquester/config";
 
+import { agentHookScript, agentHookScriptPath } from "../../agent-hooks.ts";
 import { unifiedDiff } from "../../mcp/tools/agent-profile-preview.ts";
 import type { BoxConfigSync, BoxConnection, BoxHub, BoxSyncProgress, BoxSyncScope } from "../contracts.ts";
 import {
@@ -316,6 +318,8 @@ export class BoxConfigSyncService implements BoxConfigSync {
   private readonly hashes = new HostViewHashes();
   private readonly hasher: BoxHasher;
   private readonly preparedRoot: string | null;
+  /** Connections whose box got the managed hook script ({@link BoxConfigSyncService.ensureHookScript}). */
+  private readonly hookScripts = new WeakSet<BoxConnection>();
   private readonly denyRoots: readonly string[];
   private readonly hostDebounceMs: number;
   private readonly idleFlushMs: number;
@@ -357,8 +361,26 @@ export class BoxConfigSyncService implements BoxConfigSync {
     await this.enqueue(runtime, async () => {
       await this.store.load();
       await connection.request("agent.ensurePaths", { paths: roots.map((root) => boxPathOf(connection, root.root)) }, { signal });
+      await this.ensureHookScript(connection);
       await this.passAll(runtime, connection, roots, { mode: "full", signal, onProgress: options.onProgress });
     });
+  }
+
+  /**
+   * The managed hook script at its host path in the box, once per connection: the synced configs'
+   * managed hooks (Codex `hooks.json`, Claude and Grok settings) run it by that path, and every
+   * run of a missing one is a failed hook in the chat. It exits 0 there (no daemon socket to post
+   * to). Best effort: a failure is logged, never the sync's.
+   */
+  private async ensureHookScript(connection: BoxConnection): Promise<void> {
+    if (connection.sys.os === "win32" || this.hookScripts.has(connection)) return;
+    const path = boxPathOf(connection, agentHookScriptPath(daemonConfigDir(this.options.appdir)));
+    try {
+      await connection.writeFile(path, agentHookScript(), { mode: 0o755, mkdirs: true });
+      this.hookScripts.add(connection);
+    } catch (error) {
+      this.options.logger?.warn?.(`box sync (${connection.boxId}): could not write the agent hook script: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   watch(boxId: string, scope: BoxSyncScope): () => void {

@@ -58,7 +58,7 @@ export function isManagedGroup(group: unknown): boolean {
  * Orquester), otherwise POST the stdin payload to the daemon's unix socket.
  * Always exits 0 — a hook failure must never surface inside the agent.
  */
-function hookScript(): string {
+export function agentHookScript(): string {
   return `#!/bin/sh
 # orquester-managed agent hook v${SCRIPT_VERSION} — do not edit (rewritten by the daemon)
 [ -n "$ORQUESTER_SESSION_ID" ] || exit 0
@@ -85,7 +85,7 @@ export function agentHookScriptPath(daemonDir: string): string {
 
 /** Writes (or rewrites) the managed hook script; idempotent. */
 export async function ensureAgentHookScript(daemonDir: string): Promise<void> {
-  await writeFileAtomic(agentHookScriptPath(daemonDir), hookScript(), 0o755, false);
+  await writeFileAtomic(agentHookScriptPath(daemonDir), agentHookScript(), 0o755, false);
 }
 
 /** One Codex event the managed hooks listen to: its `hooks.json` name, its state-key label, its matcher. */

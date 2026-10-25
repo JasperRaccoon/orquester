@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -7,6 +8,7 @@ import { test } from "node:test";
 import type { BoxConfigChangesResponse, BoxConfigChangeSet, BoxPathMap } from "@orquester/api";
 import { secretFilesDir, sessionProfilePreparedRootDir } from "@orquester/config";
 
+import { agentHookScript } from "../../agent-hooks.ts";
 import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
 import { BoxConfigSyncService, BoxSyncError, type BoxConfigSyncOptions } from "./config-sync.ts";
@@ -139,6 +141,27 @@ test("initial sync mirrors dir links, materializes file links, blanks secrets an
     const content = await readFile(file, "utf8");
     for (const secret of SECRETS) assert.ok(!content.includes(secret), `${file} holds no secret`);
   }
+  await sync.close();
+});
+
+test("the managed hook script the synced configs run is in the box at its host path, written once per connection", async () => {
+  const f = await fixture();
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  const script = f.box1.local(join(f.appdir, "daemon", "hooks", "agent-hook.sh"));
+  assert.equal(await readFile(script, "utf8"), agentHookScript());
+  assert.notEqual((await stat(script)).mode & 0o111, 0, "executable");
+  // Without the daemon's socket it exits 0: no failed hook in the chat.
+  const code = await new Promise<number>((resolve) => {
+    const child = execFile(script, ["codex", "PreToolUse"], { env: { PATH: "/usr/bin:/bin" } }, (error) => resolve(error ? Number(error.code ?? 1) : 0));
+    // It may exit before reading the payload (no session id): a closed stdin is no failure.
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end('{"tool_name":"Bash"}');
+  });
+  assert.equal(code, 0);
+  await rm(script);
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(await exists(script), false, "not written again on the same connection");
   await sync.close();
 });
 
@@ -810,7 +833,13 @@ test("a box synced while links were materialized: its per-account copy becomes t
   await sync.ensureSynced("b1", f.scope, signal());
   assert.equal((await lstat(f.box1.local(join(f.home, "skills")))).isSymbolicLink(), true);
   assert.equal(await readFile(f.box1.local(join(f.system, "skills", "review", "SKILL.md")), "utf8"), "---\nname: review\n---\nReview carefully.\n");
-  assert.deepEqual(f.box1.writes.slice(writes), [], "the copy moved: nothing sent again");
+  // A new service writes the managed hook script once again; the synced files are not sent.
+  const hookScript = join(f.appdir, "daemon", "hooks", "agent-hook.sh");
+  assert.deepEqual(
+    f.box1.writes.slice(writes).filter((path) => path !== hookScript),
+    [],
+    "the copy moved: nothing sent again"
+  );
   await sync.turnEnded("b1", "t1");
   assert.equal(f.published.length, 0, "the moved copy matches its baseline: no change set");
   await sync.close();
