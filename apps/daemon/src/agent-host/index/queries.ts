@@ -68,7 +68,10 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
     ),
     turnById: db.prepare(`SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND turn_id = ?`),
     turnByPrompt: db.prepare(
-      `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND user_message_id = ?
+      // Without this index SQLite prefers walking the thread's ordinal index
+      // to satisfy ORDER BY, scanning every older turn to find a recent prompt.
+      `SELECT ${TURN_COLUMNS} FROM turns INDEXED BY turns_by_prompt
+       WHERE thread_id = ? AND user_message_id = ?
        ORDER BY ordinal LIMIT 1`
     ),
     revertSeq: db.prepare("SELECT revert_seq FROM threads WHERE thread_id = ?"),
@@ -175,17 +178,19 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
     ),
     // A prompt is persisted before the provider mints its turn id, so its
     // own `turn_id` is null; the turn that names it as `user_message_id` is
-    // the turn a hit on it must reveal.
+    // the turn a hit on it must reveal. Use the prompt index for both
+    // lookups: satisfying ORDER BY from the ordinal index scans the thread
+    // twice for each matching prompt.
     searchMessages: db.prepare(
       `SELECT 'message' AS kind, f.thread_id AS thread_id, f.message_id AS id,
               COALESCE(f.turn_id,
-                (SELECT p.turn_id FROM turns AS p
+                (SELECT p.turn_id FROM turns AS p INDEXED BY turns_by_prompt
                  WHERE p.thread_id = f.thread_id AND p.user_message_id = f.message_id
                  ORDER BY p.ordinal LIMIT 1)) AS turn_id,
               COALESCE(
                 (SELECT u.ordinal FROM turns AS u
                  WHERE u.thread_id = f.thread_id AND u.turn_id = f.turn_id),
-                (SELECT p.ordinal FROM turns AS p
+                (SELECT p.ordinal FROM turns AS p INDEXED BY turns_by_prompt
                  WHERE p.thread_id = f.thread_id AND p.user_message_id = f.message_id
                  ORDER BY p.ordinal LIMIT 1)) AS ordinal,
               f.role AS role, NULL AS activity_kind, f.seq AS seq, f.at AS at,

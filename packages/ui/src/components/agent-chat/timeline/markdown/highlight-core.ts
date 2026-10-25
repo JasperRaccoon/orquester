@@ -230,11 +230,13 @@ export function createIncrementalTreeHighlighter(
 ): (code: string) => HighlightedLine[] {
   let cachedText: string | null = null;
   let cachedTree: Tree | null = null;
+  let cachedLines: HighlightedLine[] = [];
 
   return (code: string) => {
     if (code.length > MAX_HIGHLIGHT_CHARS) {
       cachedText = null;
       cachedTree = null;
+      cachedLines = [];
       return plainLines(code);
     }
     let tree: Tree;
@@ -256,11 +258,32 @@ export function createIncrementalTreeHighlighter(
       // A grammar that throws must shrink the output, never kill the row.
       cachedText = null;
       cachedTree = null;
+      cachedLines = [];
       return plainLines(code);
     }
     cachedText = code;
     cachedTree = tree;
-    return treeToLines(code, tree);
+    const lines = treeToLines(code, tree);
+    // The parser reuses its tree, but the highlighting walk allocates every
+    // line again. Keep equal token runs by identity so the memoised line views
+    // skip the unchanged part of a streaming block. Compare every line rather
+    // than assuming a textual prefix is stable: an appended quote or comment
+    // delimiter can change the grammar's interpretation of preceding text.
+    for (let index = 0; index < Math.min(lines.length, cachedLines.length); index += 1) {
+      const before = cachedLines[index]!;
+      const next = lines[index]!;
+      if (
+        before.length === next.length &&
+        before.every((token, tokenIndex) => {
+          const other = next[tokenIndex]!;
+          return token.text === other.text && token.cls === other.cls;
+        })
+      ) {
+        lines[index] = before;
+      }
+    }
+    cachedLines = lines;
+    return lines;
   };
 }
 

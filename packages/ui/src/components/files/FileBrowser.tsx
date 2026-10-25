@@ -29,7 +29,7 @@ import {
   type ContextMenuItem
 } from "../ui";
 import { UploadProgressBar } from "../ui/upload-progress";
-import { FilePreview } from "./FilePreview";
+import { LazyBoundary, lazyNamed } from "../ui/lazy";
 import { SearchPanel } from "./SearchPanel";
 import { useApi } from "../../context/orquester-context";
 import { ApiError } from "../../lib/api-client";
@@ -43,6 +43,9 @@ import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { isWhiteboardFile } from "../../lib/whiteboard";
 import { useFileUpload } from "./use-file-upload";
 import { UploadConflictModal } from "./UploadConflictModal";
+
+// Directory browsing does not need the editor or any of the file viewers.
+const FilePreview = lazyNamed(() => import("./FilePreview"), "FilePreview");
 
 const parentOf = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/"))) || p;
 const joinPath = (dir: string, name: string) => `${dir.replace(/\/$/, "")}/${name}`;
@@ -131,7 +134,21 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
     async (dir: string) => {
       try {
         const result = await api.listFiles(dir);
-        setChildrenByPath((prev) => ({ ...prev, [dir]: result.entries }));
+        setChildrenByPath((prev) => {
+          const entries = prev[dir];
+          // Active trees poll every three seconds. Keep unchanged listings out
+          // of React so every visible row needn't reconcile on each response.
+          if (
+            entries?.length === result.entries.length &&
+            entries.every((entry, index) => {
+              const next = result.entries[index];
+              return entry.name === next.name && entry.path === next.path && entry.kind === next.kind && entry.size === next.size;
+            })
+          ) {
+            return prev;
+          }
+          return { ...prev, [dir]: result.entries };
+        });
       } catch {
         /* ignore */
       }
@@ -757,16 +774,24 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
           selectedFile ? "flex" : "hidden md:flex"
         )}
       >
-        <FilePreview
-          path={selectedFile}
-          size={selectedSize}
-          jumpToLine={pendingLine ?? undefined}
-          jumpToColumn={pendingColumn ?? undefined}
-          jumpLength={pendingLength ?? undefined}
-          jumpNonce={jumpNonce}
-          archivePreview={archivePreview}
-          onBack={() => setSelectedFile(null)}
-        />
+        {selectedFile ? (
+          <LazyBoundary>
+            <FilePreview
+              path={selectedFile}
+              size={selectedSize}
+              jumpToLine={pendingLine ?? undefined}
+              jumpToColumn={pendingColumn ?? undefined}
+              jumpLength={pendingLength ?? undefined}
+              jumpNonce={jumpNonce}
+              archivePreview={archivePreview}
+              onBack={() => setSelectedFile(null)}
+            />
+          </LazyBoundary>
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-neutral-600">
+            Select a file to view its contents
+          </div>
+        )}
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />}
