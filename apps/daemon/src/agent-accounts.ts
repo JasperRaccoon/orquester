@@ -38,9 +38,12 @@ import {
   decodeJwtPayload
 } from "./agent-account-identity.ts";
 import {
+  CLAUDE_REFRESH_LOCK_STALE_MS,
+  claudeRefreshLockPaths,
   REFRESH_INTERVAL_MS,
   REFRESH_MARGIN_MS,
   selectAccountsToRefresh,
+  selectHeldAccountsToRefresh,
   mergeClaudeRefreshedCreds,
   refreshClaudeToken,
   mergeCodexRefreshedTokens,
@@ -788,7 +791,7 @@ export class AgentAccountsService {
   startRefresher(getLiveAccountIds: () => Set<string>): void {
     if (this.refreshTimer) return;
     this.liveAccountIds = getLiveAccountIds;
-    const run = () => void this.refreshIdleAccounts(getLiveAccountIds()).catch((e) => this.opts.logger?.warn?.(`account refresh failed: ${String(e)}`));
+    const run = () => void this.refreshDueAccounts(getLiveAccountIds()).catch((e) => this.opts.logger?.warn?.(`account refresh failed: ${String(e)}`));
     this.refreshTimer = setInterval(run, REFRESH_INTERVAL_MS);
     this.refreshTimer.unref?.();
     run(); // once on start (after reattach, callers pass current live ids)
@@ -869,6 +872,7 @@ export class AgentAccountsService {
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
+        if (out.invalidGrant && (await this.rotatedMeanwhile(agent, credsPath, refreshToken))) return "refreshed";
         if (out.invalidGrant) await this.markNeedsReauth(id, true);
         return out.invalidGrant ? "invalid-grant" : "failed";
       }
@@ -883,6 +887,7 @@ export class AgentAccountsService {
           if (record.needsReauth) await this.markNeedsReauth(id, false);
           return "refreshed";
         }
+        if (out.invalidGrant && (await this.rotatedMeanwhile(agent, credsPath, refreshToken))) return "refreshed";
         if (out.invalidGrant) await this.markNeedsReauth(id, true);
         return out.invalidGrant ? "invalid-grant" : "failed";
       }
@@ -896,10 +901,25 @@ export class AgentAccountsService {
         if (record.needsReauth) await this.markNeedsReauth(id, false);
         return "refreshed";
       }
+      if (out.invalidGrant && (await this.rotatedMeanwhile(agent, credsPath, refreshToken))) return "refreshed";
       if (out.invalidGrant) await this.markNeedsReauth(id, true);
       return out.invalidGrant ? "invalid-grant" : "failed";
     } finally {
       await this.refreshLoginStatus(id);
+    }
+  }
+
+  /**
+   * Whether an `invalid_grant` answered a refresh token the file no longer holds: a host CLI renewed
+   * the account while this refresh was in flight (both posted the same single-use token) and wrote
+   * its login — a refresh that happened, not a login that expired.
+   */
+  private async rotatedMeanwhile(agent: ManagedAgent, credsPath: string, posted: string): Promise<boolean> {
+    try {
+      const current = storedRefreshToken(agent, JSON.parse(await readFile(credsPath, "utf8")));
+      return current !== null && current !== posted;
+    } catch {
+      return false;
     }
   }
 
@@ -921,7 +941,7 @@ export class AgentAccountsService {
     await this.refreshAccount(agent, id);
   }
 
-  private async refreshIdleAccounts(live: Set<string>): Promise<void> {
+  private async refreshDueAccounts(live: Set<string>): Promise<void> {
     await this.refreshLoginStatuses();
     const now = this.opts.now();
     const expiries = new Map<string, number | null>();
@@ -932,6 +952,21 @@ export class AgentAccountsService {
     for (const acct of due) {
       await this.refreshAccount(acct.agent, acct.id);
     }
+    // Held accounts too, ahead of their CLIs, while above the floor: a box launch (or a CLI after a
+    // long idle) never finds one run down to where only the holder may renew it.
+    for (const acct of selectHeldAccountsToRefresh(this.index.accounts, live, expiries, now)) {
+      if (acct.agent === "claude" && (await this.claudeRefreshLockHeld(acct.id))) continue; // its CLI is refreshing
+      await this.refreshAccount(acct.agent, acct.id, { allowHeld: true });
+    }
+  }
+
+  /** Whether a Claude CLI holds its refresh lock in the account's home right now (a fresh lock dir). */
+  private async claudeRefreshLockHeld(id: string): Promise<boolean> {
+    for (const path of claudeRefreshLockPaths(this.homePath("claude", id))) {
+      const stats = await lstat(path).catch(() => null);
+      if (stats && this.opts.now() - stats.mtimeMs < CLAUDE_REFRESH_LOCK_STALE_MS) return true;
+    }
+    return false;
   }
 
   private async persist(): Promise<void> {
@@ -954,6 +989,12 @@ export class AgentAccountsService {
     }
     return readFile(input.from.trim(), "utf8");
   }
+}
+
+/** The refresh token a credential file holds (each CLI's own field), or null. */
+function storedRefreshToken(agent: ManagedAgent, creds: any): string | null {
+  const value = agent === "claude" ? creds?.claudeAiOauth?.refreshToken : agent === "grok" ? grokAuthEntry(creds)?.refresh_token : creds?.tokens?.refresh_token;
+  return typeof value === "string" && value ? value : null;
 }
 
 /** The first 8 characters of an account id, filename-safe (ids are UUIDs). */

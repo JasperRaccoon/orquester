@@ -1,8 +1,8 @@
 /**
  * The token broker's rules (spec 2026-10-19 boxes §7): only access tokens leave, box sessions
- * never count as refreshers, concurrent requests share one refresh, a host-local holder makes a
- * request with no usable token wait for its CLI (Grok; Claude and Codex below the floor),
- * invalid_grant reaches the box.
+ * never count as refreshers, concurrent requests share one refresh, a host-local holder's CLI
+ * re-reads the file (the daemon refreshes above the floor, or with no usable token left; a Claude
+ * CLI holding its refresh lock is waited for), invalid_grant reaches the box.
  */
 
 import assert from "node:assert/strict";
@@ -146,108 +146,119 @@ test("concurrent requests for one account share one refresh", async () => {
   assert.deepEqual(new Set(grants.map((g) => g.accessToken)), new Set(["grok-access-NEW"]));
 });
 
-test("a host-local Codex holder: refreshed directly above the floor, waited for below it", async () => {
-  const w = world();
-  w.hostLocal.add(CODEX_ID);
-  const broker = createAgentTokenBroker(w.deps);
+const claudeLock = `${homeOf("claude", CLAUDE_ID)}/.oauth_refresh.lock`;
 
-  // 37 min left: short of minValidSeconds, far outside the CLI's 5-minute proactive refresh, and
-  // the CLI reloads auth.json before it spends its own refresh token.
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + 37 * MIN) / 1000), "old"));
-  const direct = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal());
-  assert.equal(direct.expiresAt, NOW + 8 * 60 * MIN);
-  assert.deepEqual(w.refreshCalls, [{ agent: "codex", id: CODEX_ID, allowHeld: true }]);
+test("a host-local Codex or Grok holder: refreshed above the floor; below it a usable token goes out, and with none the daemon refreshes", async () => {
+  for (const [agent, accountId, path, write] of [
+    ["codex", CODEX_ID, codexPath, (at: number, label: string) => codexAuth(Math.floor(at / 1000), label)],
+    ["grok", GROK_ID, grokPath, (at: number, label: string) => grokAuth(`grok-access-${label}`, at)]
+  ] as const) {
+    const w = world();
+    w.hostLocal.add(accountId);
+    const broker = createAgentTokenBroker(w.deps);
+    const ask = () => broker.getToken({ boxId: "box-1", agent, accountId }, signal());
 
-  // Below the floor and nearly spent: wait for the CLI's rewrite.
-  w.refreshCalls.length = 0;
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + 4 * MIN) / 1000), "old"));
-  let settled = false;
-  const pending = broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal()).finally(() => (settled = true));
-  await settle(() => w.files.watcherCount(codexPath) === 1);
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(settled, false, "still waiting");
+    // 37 min left: short of minValidSeconds, far outside the CLI's own 5-minute window, and the CLI
+    // re-reads its file before spending its own refresh token.
+    w.files.write(path, write(NOW + 37 * MIN, "old"));
+    assert.equal((await ask()).expiresAt, NOW + 8 * 60 * MIN, agent);
+    assert.deepEqual(w.refreshCalls, [{ agent, id: accountId, allowHeld: true }]);
 
-  // An unrelated rewrite (still short) does not end the wait.
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + 3 * MIN) / 1000), "old2"));
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(settled, false);
+    // Below the floor, still good for 8 minutes: handed out as is — the CLI may be renewing.
+    w.refreshCalls.length = 0;
+    w.files.write(path, write(NOW + 8 * MIN, "left"));
+    assert.equal((await ask()).expiresAt, NOW + 8 * MIN, agent);
+    assert.equal(w.refreshCalls.length, 0);
 
-  // The host CLI refreshed and rewrote its auth.json.
-  const fresh = Math.floor((NOW + 10 * 24 * 60 * MIN) / 1000);
-  w.files.write(codexPath, codexAuth(fresh, "cli"));
-  const grant = await pending;
-  assert.equal(grant.expiresAt, fresh * 1000);
-  assert.equal(w.refreshCalls.length, 0, "the daemon spent nothing");
-  assert.equal(w.files.watcherCount(codexPath), 0);
+    // Nearly spent, or already expired: the box fails without a renewal, so the daemon renews it.
+    for (const at of [NOW + 4 * MIN, NOW - 60 * MIN]) {
+      w.refreshCalls.length = 0;
+      w.files.write(path, write(at, "spent"));
+      assert.equal((await ask()).expiresAt, NOW + 8 * 60 * MIN, agent);
+      assert.deepEqual(w.refreshCalls, [{ agent, id: accountId, allowHeld: true }]);
+    }
+  }
 });
 
-test("a host-local holder whose session ends: the daemon refreshes then", async () => {
-  const w = world();
-  w.hostLocal.add(GROK_ID);
-  w.files.write(grokPath, grokAuth("grok-access-OLD", NOW + 2 * MIN));
-  const broker = createAgentTokenBroker(w.deps);
-  const pending = broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, signal());
-  await settle(() => w.files.watcherCount(grokPath) === 1);
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(w.refreshCalls.length, 0);
-
-  w.hostLocal.delete(GROK_ID);
-  w.sessionsChanged();
-  const grant = await pending;
-  assert.equal(grant.accessToken, "grok-access-NEW");
-  assert.deepEqual(w.refreshCalls, [{ agent: "grok", id: GROK_ID, allowHeld: false }]);
-});
-
-test("a wait ends with TOKEN_WAIT_TIMEOUT when the request's signal aborts", async () => {
-  const w = world();
-  w.hostLocal.add(CODEX_ID);
-  w.files.write(codexPath, codexAuth(Math.floor((NOW + MIN) / 1000)));
-  const broker = createAgentTokenBroker(w.deps);
-  const controller = new AbortController();
-  const pending = broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, controller.signal);
-  await settle(() => w.files.watcherCount(codexPath) === 1);
-  controller.abort();
-  await rejectsWith(pending, "TOKEN_WAIT_TIMEOUT", 504);
-  assert.equal(w.files.watcherCount(codexPath), 0);
-  assert.equal(w.refreshCalls.length, 0);
-});
-
-test("a host-local Claude holder: refreshed directly above the floor, waited for below it or while its CLI holds the refresh lock", async () => {
+test("a host-local Claude holder: refreshed above the floor or with nothing usable left, never while its CLI holds the refresh lock", async () => {
   const w = world();
   w.hostLocal.add(CLAUDE_ID);
   const broker = createAgentTokenBroker(w.deps);
+  const ask = () => broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal());
 
   // 30 min left: the CLI cannot be refreshing (it does inside the last 5) and it adopts the file.
   w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
-  const direct = await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal());
-  assert.equal(direct.accessToken, "claude-access-NEW");
+  assert.equal((await ask()).accessToken, "claude-access-NEW");
   assert.deepEqual(w.refreshCalls, [{ agent: "claude", id: CLAUDE_ID, allowHeld: true }]);
 
   // Below the floor: no refresh — the token, still good for 9 minutes, is handed out as is.
   w.refreshCalls.length = 0;
   w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + HELD_REFRESH_FLOOR_MS - MIN));
-  assert.equal((await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal())).accessToken, "claude-access-OLD");
+  assert.equal((await ask()).accessToken, "claude-access-OLD");
   assert.equal(w.refreshCalls.length, 0);
 
-  // Below the floor and nearly spent: wait for the CLI.
+  // Below the floor and nearly spent: refreshed.
   w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + COOLDOWN_MIN_LIFE_MS - MIN));
-  const belowFloor = broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal());
+  assert.equal((await ask()).accessToken, "claude-access-NEW");
+  assert.deepEqual(w.refreshCalls, [{ agent: "claude", id: CLAUDE_ID, allowHeld: true }]);
+
+  // The CLI holds its refresh lock (fresh mtime): no refresh. A usable token goes out...
+  w.refreshCalls.length = 0;
+  w.files.lockAges.set(claudeLock, 2_000);
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
+  assert.equal((await ask()).accessToken, "claude-access-OLD");
+  // ...and with none the request waits for the CLI's rewrite.
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + COOLDOWN_MIN_LIFE_MS - MIN));
+  let settled = false;
+  const locked = ask().finally(() => (settled = true));
+  await settle(() => w.files.watcherCount(claudePath) === 1);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(settled, false, "still waiting");
+  // An unrelated rewrite (still short) does not end the wait.
+  w.files.write(claudePath, claudeCreds("claude-access-OLD2", NOW + COOLDOWN_MIN_LIFE_MS - 2 * MIN));
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(settled, false);
+  w.files.write(claudePath, claudeCreds("claude-access-CLI", NOW + 8 * 60 * MIN, "claude-refresh-CLI-SECRET"));
+  assert.equal((await locked).accessToken, "claude-access-CLI");
+  assert.equal(w.refreshCalls.length, 0, "the daemon spent nothing");
+  assert.equal(w.files.watcherCount(claudePath), 0);
+
+  // A stale lock (a crashed CLI) does not block.
+  w.files.lockAges.set(claudeLock, 5 * MIN);
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
+  assert.equal((await ask()).accessToken, "claude-access-NEW");
+});
+
+test("a waiting request whose holder's session ends: the daemon refreshes then", async () => {
+  const w = world();
+  w.hostLocal.add(CLAUDE_ID);
+  w.files.lockAges.set(claudeLock, 2_000);
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 2 * MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  const pending = broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal());
   await settle(() => w.files.watcherCount(claudePath) === 1);
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(w.refreshCalls.length, 0);
-  w.files.write(claudePath, claudeCreds("claude-access-CLI", NOW + 8 * 60 * MIN, "claude-refresh-CLI-SECRET"));
-  assert.equal((await belowFloor).accessToken, "claude-access-CLI");
 
-  // Above the floor but the CLI holds its refresh lock (fresh mtime): no refresh either.
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
-  w.files.lockAges.set(`${homeOf("claude", CLAUDE_ID)}/.oauth_refresh.lock`, 2_000);
-  assert.equal((await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal())).accessToken, "claude-access-OLD");
+  w.hostLocal.delete(CLAUDE_ID);
+  w.sessionsChanged();
+  assert.equal((await pending).accessToken, "claude-access-NEW");
+  assert.deepEqual(w.refreshCalls, [{ agent: "claude", id: CLAUDE_ID, allowHeld: false }]);
+});
+
+test("a wait ends with TOKEN_WAIT_TIMEOUT when the request's signal aborts", async () => {
+  const w = world();
+  w.hostLocal.add(CLAUDE_ID);
+  w.files.lockAges.set(claudeLock, 2_000);
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  const controller = new AbortController();
+  const pending = broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, controller.signal);
+  await settle(() => w.files.watcherCount(claudePath) === 1);
+  controller.abort();
+  await rejectsWith(pending, "TOKEN_WAIT_TIMEOUT", 504);
+  assert.equal(w.files.watcherCount(claudePath), 0);
   assert.equal(w.refreshCalls.length, 0);
-
-  // A stale lock (a crashed CLI) does not block.
-  w.files.lockAges.set(`${homeOf("claude", CLAUDE_ID)}/.oauth_refresh.lock`, 5 * MIN);
-  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 30 * MIN));
-  assert.equal((await broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID }, signal())).accessToken, "claude-access-NEW");
 });
 
 test("invalid_grant reaches the box as TOKEN_NEEDS_REAUTH; other refresh failures as TOKEN_UNAVAILABLE", async () => {
@@ -423,62 +434,55 @@ test("concurrent requests rejecting the same token share one refresh", async () 
   assert.deepEqual(new Set(grants.map((g) => g.accessToken)), new Set(["grok-access-NEW"]));
 });
 
-test("a rejected token of a host-held Grok account: the request waits for that CLI's rewrite", async () => {
+test("a rejected token of a host-held account is renewed by the daemon, above the floor or below it", async () => {
   const w = world();
-  w.hostLocal.add(GROK_ID);
-  w.files.write(grokPath, grokAuth("grok-access-REFUSED", NOW + 5 * 60 * MIN));
-  const broker = createAgentTokenBroker(w.deps);
-  let settled = false;
-  const pending = broker
-    .getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID, rejectedAccessToken: "grok-access-REFUSED" }, signal())
-    .finally(() => (settled = true));
-  await settle(() => w.files.watcherCount(grokPath) === 1);
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(settled, false, "the refused token is not handed out again");
-  assert.equal(w.refreshCalls.length, 0, "the host CLI stays the only refresher");
-
-  w.files.write(grokPath, grokAuth("grok-access-CLI", NOW + 8 * 60 * MIN));
-  assert.equal((await pending).accessToken, "grok-access-CLI");
-  assert.equal(w.refreshCalls.length, 0);
-});
-
-test("a rejected token of a host-held Claude or Codex account above the floor is refreshed directly", async () => {
-  const w = world();
-  w.hostLocal.add(CLAUDE_ID);
-  w.hostLocal.add(CODEX_ID);
+  for (const id of [CLAUDE_ID, CODEX_ID, GROK_ID]) w.hostLocal.add(id);
   w.files.write(claudePath, claudeCreds("claude-access-REFUSED", NOW + 5 * 60 * MIN));
   w.files.write(codexPath, codexAuth(Math.floor((NOW + 10 * 24 * 60 * MIN) / 1000), "refused"));
+  w.files.write(grokPath, grokAuth("grok-access-REFUSED", NOW + 8 * MIN));
   const broker = createAgentTokenBroker(w.deps);
-  const grant = await broker.getToken(
+  const claude = await broker.getToken(
     { boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, rejectedAccessToken: "claude-access-REFUSED" },
     signal()
   );
-  assert.equal(grant.accessToken, "claude-access-NEW");
+  assert.equal(claude.accessToken, "claude-access-NEW");
   const refused = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal());
   const codex = await broker.getToken(
     { boxId: "box-1", agent: "codex", accountId: CODEX_ID, rejectedAccessToken: refused.accessToken },
     signal()
   );
   assert.notEqual(codex.accessToken, refused.accessToken);
+  // Below the floor: a refused token is no usable one.
+  const grok = await broker.getToken(
+    { boxId: "box-1", agent: "grok", accountId: GROK_ID, rejectedAccessToken: "grok-access-REFUSED" },
+    signal()
+  );
+  assert.equal(grok.accessToken, "grok-access-NEW");
   assert.deepEqual(w.refreshCalls, [
     { agent: "claude", id: CLAUDE_ID, allowHeld: true },
-    { agent: "codex", id: CODEX_ID, allowHeld: true }
+    { agent: "codex", id: CODEX_ID, allowHeld: true },
+    { agent: "grok", id: GROK_ID, allowHeld: true }
   ]);
 });
 
-test("a host-held account the daemon may not refresh: a still-usable token is handed out instead of a wait", async () => {
+test("a rejected token of a held Claude account whose CLI holds the refresh lock: the request waits for that CLI's rewrite", async () => {
   const w = world();
-  w.hostLocal.add(GROK_ID);
-  w.hostLocal.add(CODEX_ID);
+  w.hostLocal.add(CLAUDE_ID);
+  w.files.lockAges.set(claudeLock, 2_000);
+  w.files.write(claudePath, claudeCreds("claude-access-REFUSED", NOW + 5 * 60 * MIN));
   const broker = createAgentTokenBroker(w.deps);
-  // Grok's CLI is not shown to adopt a daemon refresh: 20 minutes left goes out as is.
-  w.files.write(grokPath, grokAuth("grok-access-LEFT", NOW + 20 * MIN));
-  assert.equal((await broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, signal())).accessToken, "grok-access-LEFT");
-  // Codex below the floor, with more than the minimum life left: the same.
-  const exp = Math.floor((NOW + HELD_REFRESH_FLOOR_MS - 2 * MIN) / 1000);
-  w.files.write(codexPath, codexAuth(exp, "left"));
-  assert.equal((await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal())).expiresAt, exp * 1000);
-  assert.equal(w.refreshCalls.length, 0, "the host CLIs stay the refreshers");
+  let settled = false;
+  const pending = broker
+    .getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, rejectedAccessToken: "claude-access-REFUSED" }, signal())
+    .finally(() => (settled = true));
+  await settle(() => w.files.watcherCount(claudePath) === 1);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(settled, false, "the refused token is not handed out again");
+  assert.equal(w.refreshCalls.length, 0, "the CLI is refreshing");
+
+  w.files.write(claudePath, claudeCreds("claude-access-CLI", NOW + 8 * 60 * MIN));
+  assert.equal((await pending).accessToken, "claude-access-CLI");
+  assert.equal(w.refreshCalls.length, 0);
 });
 
 test("rejectedAccessToken must be a non-empty string of bounded length", async () => {

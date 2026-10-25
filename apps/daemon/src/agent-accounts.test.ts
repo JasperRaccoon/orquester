@@ -506,6 +506,53 @@ test("the refresher re-reads the live sessions before spending a refresh token (
   assert.equal(called, 1);
 });
 
+test("the refresher renews a held account ahead of its CLI (above the floor), and skips one whose Claude CLI holds the refresh lock", async (t) => {
+  const now = Date.parse("2026-10-18T00:00:00Z");
+  const urls: string[] = [];
+  const svc = await makeServiceWithFetch(t, now, async (input) => {
+    urls.push(String(input));
+    return new Response(
+      JSON.stringify({ access_token: jwt({ exp: Math.floor(now / 1000) + 864_000 }), refresh_token: "NEWR", expires_in: 28_800 }),
+      { status: 200 }
+    );
+  });
+  const codex = await svc.importAccount({ content: codexBlob(Math.floor((now + 40 * 60_000) / 1000)) });
+  const claude = await svc.importAccount({
+    content: JSON.stringify({ claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: now + 30 * 60_000 } }),
+    label: "L"
+  });
+  await mkdir(join(svc.homePath("claude", claude.id), ".oauth_refresh.lock")); // its CLI is refreshing
+  const due = (live: Set<string>) =>
+    (svc as unknown as { refreshDueAccounts(live: Set<string>): Promise<void> }).refreshDueAccounts(live);
+
+  await due(new Set([codex.id, claude.id]));
+  assert.deepEqual(urls, ["https://auth.openai.com/oauth/token"], "only the Codex account");
+  const auth = JSON.parse(await readFile(join(svc.homePath("codex", codex.id), "auth.json"), "utf8"));
+  assert.equal(auth.tokens.refresh_token, "NEWR");
+
+  // Lock gone: the Claude account is renewed on the next tick; the Codex one is fresh now.
+  await rm(join(svc.homePath("claude", claude.id), ".oauth_refresh.lock"), { recursive: true });
+  await due(new Set([codex.id, claude.id]));
+  assert.deepEqual(urls, ["https://auth.openai.com/oauth/token", "https://platform.claude.com/v1/oauth/token"]);
+});
+
+test("an invalid_grant for a refresh token a host CLI already rotated is that CLI's refresh, not a login to redo", async (t) => {
+  const now = 1_000_000;
+  let home = "";
+  const svc = await makeServiceWithFetch(t, now, async () => {
+    await writeFile(join(home, "auth.json"), codexBlob(Math.floor(now / 1000) + 864_000).replace("OLDR", "CLIR"));
+    return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+  });
+  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  home = svc.homePath("codex", acct.id);
+  assert.equal(await svc.refreshNow("codex", acct.id), "refreshed");
+  assert.equal(svc.getRecord(acct.id)?.needsReauth, false);
+  // The file still holding what was posted: a real invalid_grant.
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
+  assert.equal(await svc.refreshNow("codex", acct.id), "invalid-grant");
+  assert.equal(svc.getRecord(acct.id)?.needsReauth, true);
+});
+
 // ---------------------------------------------------------------------------
 // Agent profile §5: the owner's instructions, commands, rules and skills are
 // shared into every managed account home.
