@@ -13,6 +13,7 @@ import type { HostThreadBox } from "../host-protocol.ts";
 import { claudeBoxCredentials, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
 import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
 import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
+import { BoxDaemonCallError } from "./daemon-client.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
 import { BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
@@ -101,6 +102,45 @@ test("a launch syncs the CLI's config roots first, pushes the transcript of a re
   assert.equal(launch.bin, join(home, ".local", "bin", "claude"));
   assert.equal(launch.accountId, "acct-1");
   assert.equal(await launch.version(), "9.9.9 (stand-in)");
+});
+
+test("a launch whose sync loses the box's link runs again once it is back; any other sync failure is the chat's error", async () => {
+  const home = await boxHome(["claude"]);
+  const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
+  const failing = (failures: Error[]) => {
+    const sync = recordingSync();
+    const ensureSynced = sync.ensureSynced;
+    sync.ensureSynced = async (boxId, scope, signal) => {
+      const failure = failures.shift();
+      if (failure !== undefined) throw failure;
+      await ensureSynced(boxId, scope, signal);
+    };
+    return { sync, boxes: createAgentHostBoxes({ appdir: join(home, "appdir"), connector: () => connection, tokens: recordingTokens({ accessToken: "t", expiresAt: null }), sync, logger: quiet }) };
+  };
+  const input = {
+    threadId: "t1",
+    agent: "claude" as const,
+    box: launchBox(connection),
+    home: { kind: "account" as const, accountId: "acct-1", path: "/accounts/claude/acct-1/home" },
+    cwd: "/w/p"
+  };
+  // orq-agent restarted under the launch (the daemon answered 500 BOX_DISCONNECTED).
+  const dropped = failing([new BoxDaemonCallError("BOX_DISCONNECTED", "The box is not connected", 500)]);
+  const launch = await dropped.boxes.launch(input);
+  assert.equal(launch.bin, join(home, ".local", "bin", "claude"));
+  assert.deepEqual(
+    dropped.sync.calls.map((call) => call.op),
+    ["ensureSynced"]
+  );
+  // Twice in a row is the chat's error, as is a failure that is not the link.
+  for (const failures of [
+    [new BoxDaemonCallError("BOX_NOT_READY", "The box is not connected.", 409), new BoxDaemonCallError("BOX_NOT_READY", "The box is not connected.", 409)],
+    [new BoxDaemonCallError("BOX_SYNC_FAILED", "disk full", 500)]
+  ]) {
+    const { boxes } = failing(failures);
+    await assert.rejects(boxes.launch(input), (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_SYNC_FAILED");
+    assert.equal(failures.length, 0);
+  }
 });
 
 test("a CLI missing in the box is installed on first use (npm's globals under the home); a failing install is the chat's clear error", async () => {

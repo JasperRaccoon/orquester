@@ -18,8 +18,8 @@ export type BoxLaunchErrorCode =
 export class BoxLaunchError extends Error {
   readonly code: BoxLaunchErrorCode;
 
-  constructor(code: BoxLaunchErrorCode, message: string) {
-    super(message);
+  constructor(code: BoxLaunchErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "BoxLaunchError";
     this.code = code;
   }

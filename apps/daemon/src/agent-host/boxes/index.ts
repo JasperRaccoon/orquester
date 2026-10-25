@@ -33,6 +33,7 @@ import type { AccountHome, AgentAdapterId } from "@orquester/api/agent-chat";
 import type { BoxDetachedProcInfo, BoxPathMap, BoxSysInfo } from "@orquester/api";
 import { boxMcpSettingsPath, runInBoxServerNames, sessionProfileDir } from "@orquester/config";
 
+import { BOX_DISCONNECTED } from "../../boxes/client/mux.ts";
 import type { AgentTokenGrant, BoxConnection } from "../../boxes/contracts.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
 import type { HostThreadBox, HostThreadProfile } from "../host-protocol.ts";
@@ -65,6 +66,12 @@ type TokenAgent = "claude" | "codex" | "grok";
 
 function isTokenAgent(agent: AgentAdapterId): agent is TokenAgent {
   return agent === "claude" || agent === "codex" || agent === "grok";
+}
+
+/** A failure that only says the box's link went away: the daemon's (`BOX_NOT_READY`, `BOX_DISCONNECTED`) or this host's own. */
+function isLinkDrop(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === BOX_DISCONNECTED || code === "BOX_NOT_READY";
 }
 
 /** How long a SIGKILLed leftover CLI may take to be reported gone before the start fails. */
@@ -592,6 +599,19 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
         "Chats in a box project run with an Orquester-managed account. Pick an account for this chat (Settings → Accounts adds one), then send the message again."
       );
     }
+    try {
+      return await this.launchOnce(input, accountId);
+    } catch (error) {
+      // The box's link dropped mid-launch: orq-agent restarted, as when the update it deferred
+      // while the chat's CLI ran applies the moment a launch stops that CLI (an account switch).
+      // The pool waits for the link to come back; the launch runs again from the start, once.
+      if (!(error instanceof BoxLaunchError) || !isLinkDrop(error.cause) || input.signal?.aborted === true) throw error;
+      this.logger.warn(`box ${input.box.boxId}: the link dropped while ${input.threadId} launched; launching again once it is back`);
+      return this.launchOnce(input, accountId);
+    }
+  }
+
+  private async launchOnce(input: BoxLaunchInput, accountId: string): Promise<BoxLaunch> {
     const connection = await this.pool.get(input.box, {
       ...(this.connectTimeoutMs !== undefined ? { timeoutMs: this.connectTimeoutMs } : {}),
       ...(input.signal !== undefined ? { signal: input.signal } : {})
@@ -620,7 +640,8 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       } catch (error) {
         throw new BoxLaunchError(
           "BOX_SYNC_FAILED",
-          `The agent's configuration could not be synced into the box, so it was not started: ${describeBoxFailure(error)}`
+          `The agent's configuration could not be synced into the box, so it was not started: ${describeBoxFailure(error)}`,
+          { cause: error }
         );
       }
     }
@@ -645,7 +666,8 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     } catch (error) {
       throw new BoxLaunchError(
         "BOX_UNAVAILABLE",
-        `The box could not list its processes, so this chat could not make sure an earlier run of its agent has stopped: ${describeBoxFailure(error)}`
+        `The box could not list its processes, so this chat could not make sure an earlier run of its agent has stopped: ${describeBoxFailure(error)}`,
+        { cause: error }
       );
     }
     for (const proc of procs) {
