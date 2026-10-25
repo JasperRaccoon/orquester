@@ -260,6 +260,10 @@ interface FileEntry {
 
 export class UsageTokensScanner {
   private cache: UsageTokensResponse = { rows: [], asOf: new Date(0).toISOString() };
+  /** Kept private so callers mutating a snapshot cannot change the next refresh. */
+  private aggregateCache: UsageTokenRow[] = [];
+  /** Stays dirty after a failed refresh until totals are successfully rebuilt. */
+  private aggregateDirty = true;
   /** Per-file parse cache keyed by absolute path. Recompute only re-reads files
    *  whose mtime/size changed or that are new, so cost scales with new bytes,
    *  not total history. Cross-file dedup is resolved at assembly time (below),
@@ -359,7 +363,12 @@ export class UsageTokensScanner {
 
     // Drop cache entries for files that no longer exist.
     const present = new Set(files.map((f) => f.path));
-    for (const path of [...this.fileCache.keys()]) if (!present.has(path)) this.fileCache.delete(path);
+    for (const path of this.fileCache.keys()) {
+      if (!present.has(path)) {
+        this.aggregateDirty = true;
+        this.fileCache.delete(path);
+      }
+    }
 
     // Re-read only new/changed files (mtime or size differs from the cache) —
     // and for append-only growth, only the appended bytes.
@@ -371,16 +380,26 @@ export class UsageTokensScanner {
       try {
         st = await stat(path);
       } catch {
-        this.fileCache.delete(path);
+        if (this.fileCache.has(path)) {
+          this.aggregateDirty = true;
+          this.fileCache.delete(path);
+        }
         continue;
       }
       const cached = this.fileCache.get(path);
       if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) continue;
+      this.aggregateDirty = true;
       await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
     }
 
     this.scanned = true;
-    this.cache = { rows: aggregateRows(this.dedupedRows()), asOf: new Date(this.opts.now()).toISOString() };
+    // An unchanged transcript set has the same dedup winners and totals. Keep
+    // the fresh scan timestamp without revisiting every historical turn.
+    if (this.aggregateDirty) {
+      this.aggregateCache = aggregateRows(this.dedupedRows());
+      this.aggregateDirty = false;
+    }
+    this.cache = { rows: structuredClone(this.aggregateCache), asOf: new Date(this.opts.now()).toISOString() };
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
   }
