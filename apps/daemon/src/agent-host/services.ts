@@ -470,8 +470,8 @@ export interface CheckpointService {
  * Fed from the same task events the roster folds, classifying each transition
  * rather than making it sticky: a task reporting `idle` or any terminal status
  * drops out, a status-free progress row never resurrects one, and a
- * subagent's own shells are covered by the owning agent's entry while a
- * *nested* agent counts on its own.
+ * subagent's own shells count as background work — they can outlive the
+ * agent — while a *nested* agent counts as an agent.
  *
  * Deliberately not persisted: after a host restart the registry is empty,
  * which is correct, because orphaned background work is not live.

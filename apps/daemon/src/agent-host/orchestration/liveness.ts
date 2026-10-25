@@ -232,28 +232,25 @@ export function createLivenessRegistry(
       drop(input.threadId, input.taskId);
       return;
     }
-    // A subagent's internal non-agent work (its own shells and monitors) is
-    // covered by the owning agent's entry. Nested agents fall through: they can
-    // outlive their parent and must keep the thread working.
+    // A subagent's own non-agent work (its shells and monitors) is background
+    // work like the parent's: while its agent runs the agent's entry already
+    // reads "working", and once the agent finishes the shell may run on —
+    // Claude keeps it in its live set, the finished agent its
+    // `parent_task_id` — so it must keep the thread "monitoring" until its own
+    // end, never vanish with its owner (2026-10-25). Nested agents keep their
+    // own type: they can outlive their parent and must keep the thread working.
     //
     // An `agentId` equal to the task's OWN id names no owner: Grok stamps every
     // row of a background shell with the shell itself
-    // (`adapters/grok/background-tasks.ts`), and reading that as "some agent's
-    // shell" dropped every Grok shell — a dev server left running neither read
-    // "monitoring" nor held a deploy's drain. Such a row is the task's own,
-    // classified below like any other. Claude stamps only a real owner, and
-    // Codex and OpenCode type every live row `subagent` (Codex's Stop/exit
-    // closer carries no type, but it is terminal either way), so none of them
-    // reads differently.
-    if (
+    // (`adapters/grok/background-tasks.ts`). Such a row is the task's own,
+    // classified by its type like any other. Codex and OpenCode type every
+    // live row `subagent` (Codex's Stop/exit closer carries no type, but it is
+    // terminal either way), so none of them reads differently.
+    const ownedWork =
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&
       input.agentId !== input.taskId &&
-      (taskType === undefined || MONITOR_TASK_TYPES.has(taskType))
-    ) {
-      drop(input.threadId, input.taskId);
-      return;
-    }
+      (taskType === undefined || MONITOR_TASK_TYPES.has(taskType));
 
     // `idle` counts as not-live: a resting (resumable) child is not doing
     // anything, and an all-idle fleet must not pin "working".
@@ -288,7 +285,7 @@ export function createLivenessRegistry(
       taskType: taskType ?? previous?.taskType,
       title: input.title ?? previous?.title
     };
-    if (taskType !== undefined && MONITOR_TASK_TYPES.has(taskType)) {
+    if (ownedWork || (taskType !== undefined && MONITOR_TASK_TYPES.has(taskType))) {
       state.monitors.set(input.taskId, { ...entry, expiresAt: null });
       return;
     }

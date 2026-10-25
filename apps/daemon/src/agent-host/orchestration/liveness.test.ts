@@ -31,16 +31,40 @@ describe("background liveness registry (§3.1)", () => {
     assert.equal(registry.liveness("t1"), null);
   });
 
-  it("a subagent's own shell is covered by its owner, a nested agent is not", () => {
+  it("a subagent's own shell is background work, a nested agent is an agent", () => {
     const registry = createLivenessRegistry();
     registry.observe(
       task("task.started", { taskId: "s1", taskType: "shell", agentId: "agent-1" })
     );
-    assert.equal(registry.liveness("t1"), null, "the owning agent covers its own shells");
+    assert.equal(registry.liveness("t1"), "monitoring", "an agent's shell is still running work");
+    assert.equal(registry.liveAgentCount("t1"), 0, "a shell is not an agent");
     registry.observe(
       task("task.started", { taskId: "n1", taskType: "subagent", agentId: "agent-1" })
     );
     assert.equal(registry.liveness("t1"), "working", "a nested agent counts on its own");
+  });
+
+  /**
+   * Claude keeps a subagent's background shell running after the subagent
+   * finishes: the CLI's live set still lists it, its `parent_task_id` the
+   * finished agent (2026-10-25). Dropping it as "covered by its owner" left the
+   * thread reading idle-and-finished while the shell ran on.
+   */
+  it("a subagent's shell outlives the subagent and keeps the thread monitoring", () => {
+    const registry = createLivenessRegistry();
+    registry.observe(task("task.started", { taskId: "agent-1", taskType: "local_agent" }));
+    registry.observe(
+      task("task.started", { taskId: "shell-1", taskType: "local_bash", agentId: "agent-1" })
+    );
+    assert.equal(registry.liveness("t1"), "working", "the running agent outranks its shell");
+    registry.observe(
+      task("task.completed", { taskId: "agent-1", taskType: "local_agent", status: "completed" })
+    );
+    assert.equal(registry.liveness("t1"), "monitoring", "the shell runs on without its agent");
+    registry.observe(
+      task("task.completed", { taskId: "shell-1", status: "completed", agentId: "agent-1" })
+    );
+    assert.equal(registry.liveness("t1"), null);
   });
 
   it("classification is per transition, not sticky", () => {
@@ -166,14 +190,14 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveAgentCount("t1"), 0, "a shell is not an agent");
   });
 
-  it("Claude's shapes are unchanged: an agent's shell is its owner's, the parent's monitors", () => {
+  it("Claude's shapes: an agent's shell and the parent's are both monitors", () => {
     const registry = createLivenessRegistry();
     // `claude/normalize.ts` stamps a task's OWNER (the agent whose tool call
     // launched it), never the task itself.
     registry.observe(
       task("task.started", { taskId: "shell-in-agent", taskType: "local_bash", agentId: "agent-1" })
     );
-    assert.equal(registry.liveness("t1"), null, "covered by the owning agent's entry");
+    assert.equal(registry.liveness("t1"), "monitoring", "an agent's shell is background work");
     registry.observe(task("task.started", { taskId: "parent-shell", taskType: "local_bash" }));
     assert.equal(registry.liveness("t1"), "monitoring");
     registry.observe(task("task.started", { taskId: "agent-1", taskType: "local_agent" }));
