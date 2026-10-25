@@ -20,13 +20,15 @@
  *    and return the new token. Concurrent requests for one account share one refresh. A refresh
  *    that cannot happen (no refresh token, the sign-in service unreachable) returns the current
  *    token while it has over 5 minutes left and is not the rejected one, instead of a refusal.
- * 4. When a host-local session holds it, that CLI is the refresher. Claude CLIs adopt a credential
- *    file another process rewrote, and re-read it (twice, the second time under their refresh
- *    lock) before spending their own refresh token, so the daemon refreshes directly — but only
- *    while the token has more than {@link HELD_REFRESH_FLOOR_MS} left and no CLI holds the refresh
- *    lock, so the two never post the same refresh token. Codex and Grok, and Claude below that
- *    floor, wait: the credential file is watched for the CLI's rewrite, the holder set for the
- *    session ending (then the daemon refreshes), until the request's signal ends the wait.
+ * 4. When a host-local session holds it, that CLI is the refresher. Claude and Codex CLIs adopt a
+ *    credential file another process rewrote, re-reading it before spending their own refresh
+ *    token ({@link HOST_CLI_ADOPTS_DAEMON_REFRESH}), so the daemon refreshes directly — but only
+ *    while the token has more than {@link HELD_REFRESH_FLOOR_MS} left and no Claude CLI holds the
+ *    refresh lock, so the two never post the same refresh token. Otherwise (Grok; Claude and
+ *    Codex below that floor) a token with over 5 minutes left that is not the rejected one is
+ *    returned; with none, the request waits: the credential file is watched for the CLI's
+ *    rewrite, the holder set for the session ending (then the daemon refreshes), until the
+ *    request's signal ends the wait.
  *
  * Evidence for step 4 and the per-CLI facts: docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-spikes.md.
  * Nothing here logs a token; errors name codes and accounts only.
@@ -74,12 +76,19 @@ export const HELD_REFRESH_FLOOR_MS = 10 * 60_000;
 
 /**
  * Per CLI: whether a RUNNING host CLI adopts a credential file the daemon refreshed before it
- * spends its own copy of the refresh token (spike findings). Only then may the daemon refresh an
- * account a host-local session holds.
+ * spends its own copy of the refresh token. Only then may the daemon refresh an account a
+ * host-local session holds.
+ *
+ * - Claude: spike findings.
+ * - Codex (0.163 `codex-rs/login/src/auth/manager.rs`): `refresh_token()` (its proactive refresh,
+ *   inside the last 5 minutes) and `UnauthorizedRecovery` (after a 401) both reload `auth.json`
+ *   first and use a changed file instead of refreshing; the reload keeps the account id, as
+ *   `mergeCodexRefreshedTokens` does.
+ * - Grok: not shown.
  */
 export const HOST_CLI_ADOPTS_DAEMON_REFRESH: Readonly<Record<BoxAgentId, boolean>> = {
   claude: true,
-  codex: false,
+  codex: true,
   grok: false
 };
 
@@ -363,6 +372,9 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
             }
             // "held": a host-local session took the account meanwhile; its CLI refreshes — wait for it.
           }
+          // The holder's CLI renews only when its own token runs out: until then, a token that
+          // still works beats a wait the box gives up on. The box asks again when it is refused.
+          if (stillUsable(grant)) return grant;
           await change.wait(signal).catch(() => {
             throw waitTimeout();
           });

@@ -891,7 +891,8 @@ export class AgentAccountsService {
       if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
       const out = await refreshCodexToken(refreshToken);
       if (out.ok) {
-        await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });
+        // Replaced by rename: a running Codex reloads it before refreshing and must never read a torn file.
+        await writeFileAtomic(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), 0o600);
         if (record.needsReauth) await this.markNeedsReauth(id, false);
         return "refreshed";
       }

@@ -106,11 +106,13 @@ proactive refresh seen). Managed Codex access tokens currently live about 10 day
   new turn listed both earlier replies. The state databases were rebuilt by Codex. Spec §8.5's
   "rebuilt in the box, never copied" holds.
 
-**Not verified:** whether a running host Codex re-reads `auth.json` that the daemon refreshed
-before it spends its own refresh token. The binary contains `Reloading auth for account`,
-`Skipping auth reload due to account id mismatch` and `Reloaded auth, changed:`, which suggests a
-reload path, but its place relative to the refresh grant is unproven. The broker therefore waits for
-a host-local Codex holder (its CLI) instead of refreshing.
+**A running host Codex re-reads `auth.json` before it spends its own refresh token** (verified in
+the 0.163.0 source, `codex-rs/login/src/auth/manager.rs`): `refresh_token()` — its proactive
+refresh, once the access token is inside its last 5 minutes — does a guarded reload first and skips
+the refresh when the file changed; after a 401, `UnauthorizedRecovery` runs a `Reload` step before
+its `RefreshToken` step. The reload is skipped (a permanent error) when the file's account id no
+longer matches, so a daemon refresh must keep `tokens.account_id` and replace the file by rename.
+The broker therefore refreshes a host-held Codex account like a Claude one: above the 10-minute floor.
 
 ## (c) Grok `auth_provider_command`
 
@@ -164,9 +166,9 @@ The command printed `{"access_token": "<grok.com subscription access token>", "e
 
 | CLI | Host-local session holds the account and the token is short |
 |---|---|
-| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left and no refresh lock is fresh; otherwise waits for the CLI's rewrite. |
-| Codex | Waits for the CLI's rewrite, or for the session to end (then the daemon refreshes). |
-| Grok | Same as Codex. |
+| Claude | Daemon refreshes (`refreshNow` with `allowHeld`) when > 10 min are left and no refresh lock is fresh; otherwise hands out the current token while > 5 min are left and it was not rejected, else waits for the CLI's rewrite. |
+| Codex | Same as Claude (no refresh lock to check). |
+| Grok | Never refreshes: the current token while > 5 min are left and it was not rejected, else waits for the CLI's rewrite or the session ending (then the daemon refreshes). |
 
 With no host-local holder the daemon refreshes on demand. Box sessions never count as holders.
 

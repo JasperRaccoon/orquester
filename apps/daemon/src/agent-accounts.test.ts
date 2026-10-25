@@ -168,8 +168,13 @@ test("ensureFreshForUsage refreshes an idle Codex account whose token is expirin
     return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "fresh@x.com" }) }), { status: 200 });
   });
   const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  const before = await stat(join(svc.homePath("codex", acct.id), "auth.json"));
   await svc.ensureFreshForUsage("codex", acct.id, new Set());
   assert.equal(called, 1);
+  // Replaced by rename: a running host Codex reloads auth.json before refreshing (never a torn read).
+  const after = await stat(join(svc.homePath("codex", acct.id), "auth.json"));
+  assert.notEqual(after.ino, before.ino, "a new file renamed over the old one");
+  assert.equal(after.mode & 0o777, 0o600);
   const auth = JSON.parse(await readFile(join(svc.homePath("codex", acct.id), "auth.json"), "utf8"));
   assert.equal(auth.tokens.access_token, "NEW");
   assert.equal(auth.tokens.refresh_token, "NEWR");

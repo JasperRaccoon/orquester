@@ -194,7 +194,13 @@ const CODEX_ACCOUNT = rule(
   "codex",
   "account",
   ["config.toml", "hooks.json", "AGENTS.md", "AGENTS.override.md", "prompts", "skills", "rules", "plugins", ".personality_migration", ".sandbox_migration"],
-  { exclude: (rel) => startsWithDir(rel, "skills/.system"), codecs: { "config.toml": "mcp-toml" } }
+  {
+    exclude: (rel) => startsWithDir(rel, "skills/.system"),
+    codecs: { "config.toml": "mcp-toml" },
+    // `plugins/` is Codex's own marketplace store: each box's Codex downloads the plugins
+    // `config.toml` enables into `plugins/cache` itself. What turns one on is `config.toml`.
+    hostOnly: (rel) => startsWithDir(rel, "plugins")
+  }
 );
 
 /** Codex prepared `CODEX_HOME` (`preparers/codex.ts`); its `auth.json` and `sessions` are links to the account's. */
