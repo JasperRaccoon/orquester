@@ -1,5 +1,5 @@
 /**
- * The Knowledge tab's pure rules: colours, error and status text, and the
+ * The Knowledge view's pure rules: colours, error and status text, and the
  * collection and entry forms. No React, no store.
  */
 

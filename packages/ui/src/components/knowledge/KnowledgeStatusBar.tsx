@@ -1,4 +1,4 @@
-// The Knowledge tab's bottom bar: entry, concept and collection counts, and
+// The Knowledge view's bottom bar: entry, concept and collection counts, and
 // the linking state (idle, queued, "Linking N entries…" with progress, paused
 // with the reason, or idle with "N entries could not be linked").
 

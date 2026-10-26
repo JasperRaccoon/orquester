@@ -1,5 +1,5 @@
 /**
- * The Knowledge tab in a DOM: the plugin's states, the graph view's node →
+ * The Knowledge view in a DOM: the plugin's states, the graph view's node →
  * side panel, the List toggle, editing a collection and an entry, and a focus
  * request (a citation) selecting its entry. The graph canvas is a stand-in
  * that draws one button per concept.
@@ -110,7 +110,7 @@ const ENTRY: KnowledgeItemResponse = {
   entry: { entry: entry(), concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }], related: [], citation: "" }
 };
 
-describe("the Knowledge tab", () => {
+describe("the Knowledge view", () => {
   let root: Root;
   let calls: string[];
   let patches: Array<[string, UpdateKnowledgeCollectionRequest | UpdateKnowledgeEntryRequest]>;

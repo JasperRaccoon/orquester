@@ -2,7 +2,7 @@ import React from "react";
 
 import { useIsDesktop } from "../../hooks";
 import { cn } from "../../lib/cn";
-import { useCurrentContext, type TabContext } from "../../store/app";
+import { useAppStore, useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
 import { MobileSectionOverlay } from "./MobileSections";
@@ -94,11 +94,14 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
  * {@link RightRailRow} wired to the app: the rail — and the dock, while a
  * panel is open — appears only on desktop and only with a project open. Phones
  * reach the same panels through the bottom section bar, which shows them over
- * the tab content (`MobileSections.tsx`).
+ * the tab content (`MobileSections.tsx`). The server-level Knowledge view
+ * belongs to no project, so neither shows beside it.
  */
 export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isDesktop = useIsDesktop();
-  const projectPath = useOpenProjectPath();
+  const openProjectPath = useOpenProjectPath();
+  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
+  const projectPath = knowledgeOpen ? null : openProjectPath;
   const { open, width } = useRightRailState();
   return (
     <RightRailRow

@@ -12,12 +12,10 @@ import {
   Monitor,
   PenTool,
   Plus,
-  SlidersHorizontal,
-  Waypoints
+  SlidersHorizontal
 } from "lucide-react";
 import {
   EXCALIDRAW_PLUGIN_ID,
-  KNOWLEDGE_GRAPH_PLUGIN_ID,
   type FsEntry,
   RUNTIME_MODES,
   SYSTEM_ACCOUNT_ID,
@@ -629,8 +627,6 @@ export const NewTabMenu: React.FC = () => {
   const createTodo = useAppStore((s) => s.createTodo);
   const openTodo = useAppStore((s) => s.openTodo);
   const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
-  const knowledgeOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, KNOWLEDGE_GRAPH_PLUGIN_ID));
-  const openKnowledge = useAppStore((s) => s.openKnowledge);
   const registry = useRegistry();
   // boxes: a box project offers agent chats and plain shells of the box's OS (spec §8.8);
   // desktops in a Linux VM run inside it, and are not offered in macOS / Windows VMs.
@@ -740,11 +736,6 @@ export const NewTabMenu: React.FC = () => {
         </DropdownItem>
       ))}
       {whiteboardsOn && ctx?.kind === "project" ? <WhiteboardEntries projectPath={ctx.project.path} /> : null}
-      {knowledgeOn && ctx?.kind === "project" ? (
-        <DropdownItem icon={<Waypoints size={14} />} onClick={() => openKnowledge(ctx.project.path)}>
-          Knowledge
-        </DropdownItem>
-      ) : null}
 
       <DropdownSeparator />
 

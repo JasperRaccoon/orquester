@@ -1,6 +1,7 @@
-// A Knowledge tab (the Knowledge Graph plugin): the server-wide knowledge base,
-// whichever project the tab is in. Graph first, with a List toggle; a side
-// panel for the selected entry or concept; the status bar at the bottom.
+// The Knowledge view (the Knowledge Graph plugin): the server-wide knowledge base,
+// shown over the main area whatever project (or none) is open. Graph first, with
+// a List toggle; a side panel for the selected entry or concept; the status bar
+// at the bottom.
 // MainView lazy-loads this module, and the graph canvas (Cytoscape) loads with
 // the first graph shown, so neither is in the app's main bundle.
 
@@ -35,7 +36,7 @@ const HISTORY_MAX = 20;
 const NO_IDS: readonly string[] = [];
 
 export interface KnowledgeViewProps {
-  /** What the tab was asked to show (a citation, `openKnowledgeEntry`); applied each time its nonce moves. */
+  /** What the view was asked to show (a citation, `openKnowledgeEntry`); applied each time its nonce moves. */
   focus: KnowledgeFocus | null;
   active: boolean;
   /** The graph canvas; tests pass a stand-in (the default is Cytoscape, loaded on first use). */

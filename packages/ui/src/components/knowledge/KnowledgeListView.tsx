@@ -1,4 +1,4 @@
-// The Knowledge tab's list view: collections down the left (All, each one with
+// The Knowledge view's list view: collections down the left (All, each one with
 // its entry count and the Agent Profiles that see it, Unfiled, "+ New
 // collection"), the entries of the chosen one as cards, newest first, paged.
 

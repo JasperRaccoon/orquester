@@ -51,6 +51,9 @@ const LaunchAppDialogHost: React.FC = () => {
  */
 const MobileBottomBars: React.FC = () => {
   const section = useMobileSection();
+  // The Knowledge view covers the project: its key bar and sections go with it.
+  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
+  if (knowledgeOpen) return null;
   return (
     <>
       {section === null && <MobileKeyBar />}

@@ -1,13 +1,13 @@
 /**
  * Knowledge Graph — this client's copy of the plugin's shared daemon state:
  * the status (counts and linking state) and the collections. Entries, the
- * graph and item details are read by the Knowledge tab itself, on demand; this
+ * graph and item details are read by the Knowledge view itself, on demand; this
  * store tells it when to read them again through revision counters.
  *
  * It converges on the daemon three ways, which race freely:
  *
  * - a **load** per connection (connect, reconnect and the plugin turning on —
- *   the app store), and the tab's own retries;
+ *   the app store), and the view's own retries;
  * - a refetch after each **mutation** (collection and entry edits are not
  *   applied optimistically: the daemon's answer is the only truth);
  * - `KNOWLEDGE_CHANNEL` **events**, routed here by the app store's

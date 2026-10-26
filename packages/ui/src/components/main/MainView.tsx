@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Monitor, PenTool, Waypoints, Workflow, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Monitor, PenTool, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
@@ -11,6 +11,7 @@ import { LimitedMarker } from "../ui/limited-marker";
 import { ResizeHandle } from "../ui";
 import { LazyBoundary, LoadingPane, lazyNamed } from "../ui/lazy";
 import { useIsDesktop, useRegistry } from "../../hooks";
+import { useBackClose } from "../../hooks/use-back-close";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
 import { ChatLoadingScreen } from "../agent-chat/ChatLoadingScreen";
@@ -28,7 +29,7 @@ import {
   type ProjectTab
 } from "../../store/app";
 
-// The Knowledge tab (and its graph library) loads with the first Knowledge tab, never with the app.
+// The Knowledge view (and its graph library) loads the first time it opens, never with the app.
 const KnowledgeView = React.lazy(() => import("../knowledge/KnowledgeView"));
 // Every other tab but the agent chat loads with the first tab of its kind: the
 // terminal (xterm), the file browser (CodeMirror, the PDF and Parquet
@@ -56,8 +57,6 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <Workflow size={13} />
   ) : tab.type === "whiteboard" ? (
     <PenTool size={13} />
-  ) : tab.type === "knowledge" ? (
-    <Waypoints size={13} />
   ) : tab.type === "browser" ? (
     <Globe size={13} />
   ) : tab.type === "desktop" ? (
@@ -101,12 +100,57 @@ function isUniform(weights: number[]): boolean {
 }
 
 /**
- * Main panel. Every tab of the current project is kept mounted (terminal output
- * streams stay open): tab view shows only the active one, grid view lays them
- * all out at once. Both modes share one render tree — only classes/styles
- * change — so toggling never tears a terminal (xterm + output stream) down.
+ * Main panel: the current project's tabs (or the landing view), or the
+ * server-level Knowledge view over them while it is open. The project side
+ * stays mounted under the Knowledge view, only hidden and inactive, so leaving
+ * it finds every terminal and chat as it was.
  */
 export const MainView: React.FC = () => {
+  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
+  return (
+    <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
+      <ProjectMain hidden={knowledgeOpen} />
+      <KnowledgeMain />
+    </main>
+  );
+};
+
+/**
+ * The Knowledge view, mounted from its first opening for the connected daemon
+ * on (its graph, selection and filters survive a close, as a tab's did) and
+ * `active` only while it shows. A connection switch drops it; it mounts again,
+ * fresh, when it next opens.
+ */
+const KnowledgeMain: React.FC = () => {
+  const open = useAppStore((s) => s.knowledgeView.open);
+  const focus = useAppStore((s) => s.knowledgeView.focus);
+  const connectionId = useAppStore((s) => s.activeConnectionId);
+  const closeKnowledge = useAppStore((s) => s.closeKnowledge);
+  // A phone's Back goes back to the project, like leaving any full-screen layer.
+  useBackClose(open, closeKnowledge);
+  const [openedFor, setOpenedFor] = React.useState<string | null | undefined>(open ? connectionId : undefined);
+  if (open && openedFor !== connectionId) setOpenedFor(connectionId);
+  if (!open && openedFor !== connectionId) return null;
+  return (
+    <div className={cn("min-h-0 w-full flex-1 flex-col", open ? "flex" : "hidden")}>
+      <LazyBoundary>
+        <React.Suspense fallback={<LoadingPane label="Opening the knowledge…" />}>
+          <KnowledgeView key={connectionId ?? ""} focus={focus} active={open} />
+        </React.Suspense>
+      </LazyBoundary>
+    </div>
+  );
+};
+
+/**
+ * The project side of the main panel. Every tab of the current project is kept
+ * mounted (terminal output streams stay open): tab view shows only the active
+ * one, grid view lays them all out at once. Both modes share one render tree —
+ * only classes/styles change — so toggling never tears a terminal (xterm +
+ * output stream) down. `hidden` (the Knowledge view is showing) hides it the
+ * same way, with no tab active or showing.
+ */
+const ProjectMain: React.FC<{ hidden: boolean }> = ({ hidden }) => {
   const ctx = useCurrentContext();
   const tabs = useProjectTabs();
   const activeId = useActiveTabId();
@@ -131,8 +175,8 @@ export const MainView: React.FC = () => {
   // one chord and dispatch turns and answers to threads the user cannot see.
   // This is the one layer that knows, so it is the one layer that says.
   const activeChatSessionId = React.useMemo(
-    () => activeChatSessionIdFor(tabs, activeId),
-    [tabs, activeId]
+    () => (hidden ? null : activeChatSessionIdFor(tabs, activeId)),
+    [hidden, tabs, activeId]
   );
   React.useEffect(() => {
     setActiveChatTab(activeChatSessionId);
@@ -145,9 +189,9 @@ export const MainView: React.FC = () => {
     // The natural landing surface: nothing is open, so offer the daemon's
     // recent projects (it falls back to the old placeholder when empty).
     return (
-      <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
+      <div className={cn("min-h-0 flex-1 overflow-hidden", hidden && "hidden")}>
         <RecentProjects />
-      </main>
+      </div>
     );
   }
 
@@ -167,7 +211,7 @@ export const MainView: React.FC = () => {
 
   if (tabs.length === 0) {
     return (
-      <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
+      <div className={cn("relative min-h-0 flex-1 flex-col overflow-hidden", hidden ? "hidden" : "flex")}>
         {openingOverlay}
         <SecretFilesProjectBar />
         <div className="min-h-0 flex-1">
@@ -181,7 +225,7 @@ export const MainView: React.FC = () => {
             />
           )}
         </div>
-      </main>
+      </div>
     );
   }
 
@@ -323,7 +367,7 @@ export const MainView: React.FC = () => {
   };
 
   return (
-    <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
+    <div className={cn("relative min-h-0 flex-1 flex-col overflow-hidden", hidden ? "hidden" : "flex")}>
       {openingOverlay}
       {/* The open project's secret-file drift, above every tab (or the grid). */}
       <SecretFilesProjectBar />
@@ -333,8 +377,9 @@ export const MainView: React.FC = () => {
         style={grid ? { gridTemplateColumns: colTemplate, gridTemplateRows: rowTemplate } : undefined}
       >
         {tabs.map((tab) => {
-          const active = tab.id === activeId;
-          const show = grid || active; // tab view: only active; grid: every cell
+          // Under the Knowledge view no tab is active or showing.
+          const active = !hidden && tab.id === activeId;
+          const show = !hidden && (grid || active); // tab view: only active; grid: every cell
           return (
             <div
               key={tab.id}
@@ -418,10 +463,6 @@ export const MainView: React.FC = () => {
                     />
                   ) : tab.type === "whiteboard" ? (
                     <WhiteboardView path={tab.path} title={tab.title} active={show} />
-                  ) : tab.type === "knowledge" ? (
-                    <React.Suspense fallback={<LoadingPane label="Opening the knowledge…" />}>
-                      <KnowledgeView focus={tab.focus} active={show} />
-                    </React.Suspense>
                   ) : tab.type === "workflow" ? (
                     <WorkflowEditorTab
                       workflowId={tab.workflowId}
@@ -471,6 +512,6 @@ export const MainView: React.FC = () => {
             />
           ))}
       </div>
-    </main>
+    </div>
   );
 };

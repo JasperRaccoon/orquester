@@ -1,7 +1,7 @@
 /**
  * Settings → Plugins → Knowledge Graph: while the plugin is on, the Activity
  * block (counts, linking state, the last run, tokens, the last error, worker
- * sessions, "Rebuild graph", "Open Knowledge tab"); always, the indexing
+ * sessions, "Rebuild graph", "Open Knowledge"); always, the indexing
  * settings (account, model, concurrency), which the daemon answers whether or
  * not the plugin is on so they can be set before turning it on.
  *
@@ -65,7 +65,6 @@ const KnowledgeActivity: React.FC = () => {
   const api = useAppStore((s) => s.api);
   const status = useKnowledgeState((s) => s.status);
   const statusError = useKnowledgeState((s) => s.statusError);
-  const hasProject = useAppStore((s) => s.currentProject !== null);
 
   // The store loads when the plugin turns on and on every connect; read again
   // on open so the block never shows a status from before a missed event.
@@ -73,9 +72,9 @@ const KnowledgeActivity: React.FC = () => {
     if (api) void loadKnowledgeStatus(api).catch(() => undefined);
   }, [api]);
 
-  const openTab = () => {
+  const openView = () => {
     const state = useAppStore.getState();
-    // Settings is a modal over the tab it opens.
+    // Settings is a modal over the view it opens.
     state.setSettingsOpen(false);
     state.openKnowledge();
   };
@@ -107,14 +106,8 @@ const KnowledgeActivity: React.FC = () => {
       )}
       <div className="flex flex-wrap gap-2 px-4 py-3">
         <RebuildButton disabled={status === null || !status.installed} />
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={!hasProject}
-          title={hasProject ? undefined : "Open a project first."}
-          onClick={openTab}
-        >
-          <Waypoints size={13} /> Open Knowledge tab
+        <Button size="sm" variant="outline" onClick={openView}>
+          <Waypoints size={13} /> Open Knowledge
         </Button>
       </div>
     </SettingsSection>

@@ -1,6 +1,6 @@
 /**
  * Knowledge Graph — wire validation for every `knowledgeRoutes` answer and
- * `knowledge` event payload the Knowledge tab reads, before any of it reaches
+ * `knowledge` event payload the Knowledge view reads, before any of it reaches
  * shared UI state.
  *
  * The rule throughout (as in `lib/boxes/validate.ts`): a record this client
@@ -399,7 +399,7 @@ function parseTokens(value: unknown): { in: number; out: number } {
   return isRecord(value) ? { in: count(value.in), out: count(value.out) } : { in: 0, out: 0 };
 }
 
-/** A status the tab can render, or null without `enabled` / `installed`. */
+/** A status the view can render, or null without `enabled` / `installed`. */
 export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
   if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.installed !== "boolean") return null;
   const tokens = isRecord(value.tokens) ? value.tokens : {};

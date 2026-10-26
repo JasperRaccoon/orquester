@@ -1,4 +1,4 @@
-// Shared fixtures for the knowledge store, wiring and Knowledge tab tests.
+// Shared fixtures for the knowledge store, wiring and Knowledge view tests.
 
 import type {
   KnowledgeCollectionView,

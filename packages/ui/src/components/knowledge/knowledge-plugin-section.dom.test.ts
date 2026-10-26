@@ -2,7 +2,7 @@
  * Settings → Plugins → Knowledge Graph in a DOM: only the indexing settings
  * while the plugin is off; Activity from the knowledge store (live on a `knowledge.status` event),
  * a worker chat's transcript opened read-only in place (never its folder as a project), the
- * rebuild confirmation with its estimate, "Open Knowledge tab"; and the
+ * rebuild confirmation with its estimate, "Open Knowledge"; and the
  * indexing settings saved with a PUT of what changed, showing the daemon's
  * refusal.
  */
@@ -355,11 +355,15 @@ describe("the Knowledge Graph plugin section", () => {
     }
   });
 
-  it("opens the Knowledge tab and closes Settings", async () => {
+  it("opens the Knowledge view and closes Settings, with no project open too", async () => {
     await show();
-    await click(buttonNamed("Open Knowledge tab"));
+    useAppStore.setState({ currentProject: null, settingsOpen: true });
+    await settle();
+    const open = buttonNamed("Open Knowledge");
+    assert.equal(open.disabled, false);
+    await click(open);
     assert.equal(useAppStore.getState().settingsOpen, false);
-    assert.equal(useAppStore.getState().knowledgeTabsByProject[PROJECT.path]?.length, 1);
+    assert.equal(useAppStore.getState().knowledgeView.open, true);
   });
 
   it("lists automatic and the Claude accounts, and saves only what changed", async () => {

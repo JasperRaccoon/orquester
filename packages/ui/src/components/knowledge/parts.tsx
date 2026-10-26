@@ -1,4 +1,4 @@
-// Small pieces the Knowledge tab's views and panels share.
+// Small pieces the Knowledge view's views and panels share.
 
 import React from "react";
 import { AlertTriangle } from "lucide-react";
