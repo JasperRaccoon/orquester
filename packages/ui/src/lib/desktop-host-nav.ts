@@ -10,9 +10,10 @@ import type { DesktopNotificationTarget } from "./desktop-host";
 import { requestSessionDeepLink } from "./session-deep-link";
 import { requestWorkflowDeepLink } from "./workflows/deep-link";
 
-/** The session tab on screen (the open project's, else the workspace's), or null. */
+/** The session tab on screen (the open project's, else the workspace's), or null — none while the Knowledge view covers it. */
 export function viewingSessionId(): string | null {
   const state = useAppStore.getState();
+  if (state.knowledgeView.open) return null;
   const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
   return key === null ? null : (state.activeTabByProject[key] ?? null);
 }

@@ -3210,7 +3210,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   openKnowledgeConcept: (conceptId) => set((state) => showKnowledge(state, { kind: "concept", id: conceptId })),
 
-  closeKnowledge: () => set(leaveKnowledge),
+  closeKnowledge: () =>
+    set((state) => {
+      if (!state.knowledgeView.open) return state;
+      // Revealing the active chat tab is the visit that clears its unread mark, as in activateTab.
+      const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
+      const id = key === null ? undefined : state.activeTabByProject[key];
+      const session = id === undefined ? undefined : state.sessions.find((s) => s.id === id);
+      const threadVisits =
+        session && session.kind === "agent-chat" ? visitChatThread(state.threadVisits, session) : state.threadVisits;
+      if (threadVisits !== state.threadVisits) {
+        saveThreadVisits(threadVisits);
+      }
+      return { ...leaveKnowledge(state), threadVisits };
+    }),
 
   openWorkflowTab: (projectPath, workflowId, opts) =>
     set((state) => {
@@ -4029,8 +4042,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         // activation stamps, so finishing a turn in front of the user left the
         // tab marked unread.
         const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
+        // Under the Knowledge view the active tab is hidden: not looked at.
         const looking =
           key !== null &&
+          !state.knowledgeView.open &&
           state.activeTabByProject[key] === summary.id &&
           summary.kind === "agent-chat";
         const threadVisits = looking

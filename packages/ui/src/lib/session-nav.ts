@@ -110,8 +110,11 @@ export interface JumpTarget {
 export function jumpToProject({ project, sessionId }: JumpTarget): boolean {
   const state = useAppStore.getState();
   const sameProject = state.currentProject?.path === project.path;
+  // Leaving the Knowledge view reveals the project: a change, like a new tab.
   const changed =
-    !sameProject || (sessionId !== undefined && state.activeTabByProject[project.path] !== sessionId);
+    state.knowledgeView.open ||
+    !sameProject ||
+    (sessionId !== undefined && state.activeTabByProject[project.path] !== sessionId);
   if (project.workspace && state.currentWorkspace !== project.workspace) {
     void state.openWorkspace(project.workspace);
   }

@@ -12,9 +12,11 @@ import {
   KNOWLEDGE_STATUS_EVENT,
   type AgentProfileAgentId,
   type AgentProfileSnapshot,
+  type EventMessage,
   type PluginInfo,
   type ProjectSummary,
-  type SecretVaultDetail
+  type SecretVaultDetail,
+  type SessionSummary
 } from "@orquester/api";
 import { useAppStore } from "../store/app.ts";
 import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./agent-profile/store.ts";
@@ -360,6 +362,18 @@ afterEach(async () => {
         assert.equal(store().knowledgeView.open, false, name);
         assert.equal(store().knowledgeView.focus, focus, `${name} keeps the focus`);
       }
+    });
+
+    it("a chat turn ending under it stays unread until closing it reveals the chat", () => {
+      const done = "2026-10-26T10:00:00.000Z";
+      const chat = { id: "c1", kind: "agent-chat", projectPath: P, latestTurn: { completedAt: done } } as unknown as SessionSummary;
+      useAppStore.setState({ activeTabByProject: { [P]: "c1" }, threadVisits: {} });
+      store().openKnowledge();
+      store().applyEvent({ channel: "sessions", type: "session.updated", payload: chat } as EventMessage);
+      assert.equal(store().sessions[0]?.id, "c1");
+      assert.equal(store().threadVisits.c1, undefined, "hidden under the view, the finished turn is not seen");
+      store().closeKnowledge();
+      assert.equal(store().threadVisits.c1, done, "closing the view shows the chat: that is the visit");
     });
 
     it("a workflow opened in another project leaves it showing", () => {
