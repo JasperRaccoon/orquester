@@ -1,5 +1,5 @@
 /**
- * The Knowledge tab's graph rules: which request to make, how a concept is
+ * The Knowledge view's graph rules: which request to make, how a concept is
  * coloured and sized, which ones carry a label. Pure — the canvas
  * (`KnowledgeGraphCanvas.tsx`) turns this into Cytoscape elements.
  */

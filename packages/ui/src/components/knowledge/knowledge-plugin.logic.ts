@@ -1,22 +1,24 @@
 /**
- * Settings → Plugins → Knowledge Graph: the indexing settings form (account,
- * model, concurrency) and the Activity block's text. Pure: no React, no store.
+ * Settings → Plugins → Knowledge Graph: the indexing settings form (account
+ * policy, model, concurrency) and the Activity block's text. Pure: no React,
+ * no store.
  */
 
 import {
   KNOWLEDGE_CONCURRENCY_MAX,
   KNOWLEDGE_CONCURRENCY_MIN,
   KNOWLEDGE_DEFAULT_SETTINGS,
+  knowledgeLegacyAccountId,
+  type AccountPolicy,
   type AgentAccount,
   type KnowledgeRebuildEstimate,
   type KnowledgeRunSummary,
-  type KnowledgeSettings,
   type KnowledgeWorkerView,
   type UpdateKnowledgeSettingsRequest
 } from "@orquester/api";
 
 import { shortAccountLabel } from "../../lib/account-label";
-import { parseKnowledgeSettings } from "../../lib/knowledge/validate";
+import { parseKnowledgeSettings, type KnowledgeSettingsAnswer } from "../../lib/knowledge/validate";
 import { formatDuration } from "../../lib/workflows/format";
 import { compactCount } from "../topbar/usage-format";
 
@@ -26,9 +28,16 @@ import { compactCount } from "../topbar/usage-format";
 
 /** Longest model name the daemon stores (`KNOWLEDGE_MODEL_MAX` in its settings service). */
 export const KNOWLEDGE_MODEL_INPUT_MAX = 200;
+/** The model indexing runs when none is set (the daemon's `DEFAULT_KNOWLEDGE_MODEL`); scoped usage limits are checked for it. */
+export const KNOWLEDGE_DEFAULT_MODEL = "sonnet";
 
 export interface KnowledgeSettingsForm {
-  /** null = automatic (first usable Claude account, with failover). */
+  /**
+   * Which Claude accounts indexing uses, as the workflow Agent block's account policy editor edits
+   * it; null on a server that predates policies, where `accountId` is edited instead.
+   */
+  accountPolicy: AccountPolicy | null;
+  /** The one account a server that predates policies takes (null = automatic). */
   accountId: string | null;
   /** "" = the default model. */
   model: string;
@@ -38,14 +47,36 @@ export interface KnowledgeSettingsForm {
 
 /**
  * The settings as the daemon sent them, read field by field (see
- * `parseKnowledgeSettings`); an answer that is not an object reads as the defaults.
+ * `parseKnowledgeSettings`; a null `accountPolicy` is a server that predates
+ * policies); an answer that is not an object reads as the defaults.
  */
-export function readKnowledgeSettings(value: unknown): KnowledgeSettings {
+export function readKnowledgeSettings(value: unknown): KnowledgeSettingsAnswer {
   return parseKnowledgeSettings(value) ?? { ...KNOWLEDGE_DEFAULT_SETTINGS };
 }
 
-export function knowledgeSettingsForm(settings: KnowledgeSettings): KnowledgeSettingsForm {
-  return { accountId: settings.accountId, model: settings.model ?? "", concurrency: String(settings.concurrency) };
+export function knowledgeSettingsForm(settings: KnowledgeSettingsAnswer): KnowledgeSettingsForm {
+  return {
+    accountPolicy: settings.accountPolicy,
+    accountId: settings.accountId,
+    model: settings.model ?? "",
+    concurrency: String(settings.concurrency)
+  };
+}
+
+/** The same policy, whatever its key order (an unset field and an absent one are the same). */
+export function sameAccountPolicy(a: AccountPolicy, b: AccountPolicy): boolean {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (typeof value !== "object" || value === null) return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .filter((key) => record[key] !== undefined)
+        .sort()
+        .map((key) => [key, canonical(record[key])])
+    );
+  };
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
 /** Why the form cannot be saved, or null. */
@@ -61,16 +92,24 @@ export function knowledgeSettingsProblem(form: KnowledgeSettingsForm): string | 
 
 /**
  * What a save sends: only the fields that changed from `saved` (an empty
- * object when nothing did), or the form's problem.
+ * object when nothing did), or the form's problem. A changed policy goes with
+ * the legacy `accountId` it approximates (a current daemon ignores it beside a
+ * policy). A server that predates policies (`saved.accountPolicy` null) is
+ * sent only the `accountId` chosen for it, the one account field it applies.
  */
 export function knowledgeSettingsPatch(
-  saved: KnowledgeSettings,
+  saved: KnowledgeSettingsAnswer,
   form: KnowledgeSettingsForm
 ): { patch: UpdateKnowledgeSettingsRequest } | { error: string } {
   const problem = knowledgeSettingsProblem(form);
   if (problem) return { error: problem };
   const patch: UpdateKnowledgeSettingsRequest = {};
-  if (form.accountId !== saved.accountId) patch.accountId = form.accountId;
+  if (saved.accountPolicy === null || form.accountPolicy === null) {
+    if (form.accountId !== saved.accountId) patch.accountId = form.accountId;
+  } else if (!sameAccountPolicy(form.accountPolicy, saved.accountPolicy)) {
+    patch.accountPolicy = form.accountPolicy;
+    patch.accountId = knowledgeLegacyAccountId(form.accountPolicy);
+  }
   const model = form.model.trim() === "" ? null : form.model.trim();
   if (model !== saved.model) patch.model = model;
   const concurrency = Number(form.concurrency.trim());
@@ -87,10 +126,11 @@ export interface KnowledgeAccountOption {
 export const KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL = "Automatic (with failover)";
 
 /**
- * The indexing-account picker: automatic, then the user's Claude accounts. A
- * chosen account this client does not list (removed, or the list not read
- * yet) stays as an option of its own, so the picker never shows a choice the
- * daemon does not have.
+ * The one-account picker a server that predates policies gets: automatic,
+ * then the user's Claude accounts (never the System login, which such a server
+ * refuses). A chosen account this client does not list (removed, or the list
+ * not read yet) stays as an option of its own, so the picker never shows a
+ * choice the daemon does not have.
  */
 export function knowledgeAccountOptions(
   accounts: readonly Pick<AgentAccount, "id" | "agent" | "label" | "needsReauth">[] | undefined,

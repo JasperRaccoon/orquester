@@ -2,9 +2,9 @@
  * Settings → Plugins → Knowledge Graph in a DOM: only the indexing settings
  * while the plugin is off; Activity from the knowledge store (live on a `knowledge.status` event),
  * a worker chat's transcript opened read-only in place (never its folder as a project), the
- * rebuild confirmation with its estimate, "Open Knowledge tab"; and the
+ * rebuild confirmation with its estimate, "Open Knowledge"; and the
  * indexing settings saved with a PUT of what changed, showing the daemon's
- * refusal.
+ * refusal; a server that predates account policies gets its one-account picker.
  */
 
 import assert from "node:assert/strict";
@@ -14,6 +14,7 @@ import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import {
   KNOWLEDGE_CHANNEL,
+  KNOWLEDGE_DEFAULT_ACCOUNT_POLICY as AUTO,
   KNOWLEDGE_STATUS_EVENT,
   type AgentAccountsResponse,
   type KnowledgeSettings,
@@ -78,7 +79,8 @@ describe("the Knowledge Graph plugin section", () => {
   let root: Root;
   let calls: string[];
   let puts: UpdateKnowledgeSettingsRequest[];
-  let settings: KnowledgeSettings;
+  /** The daemon's answer; one that predates policies has no `accountPolicy`. */
+  let settings: KnowledgeSettings | Omit<KnowledgeSettings, "accountPolicy">;
   let refuse: unknown;
   let initial: ReturnType<typeof useAppStore.getState>;
   let copied: string[];
@@ -134,7 +136,7 @@ describe("the Knowledge Graph plugin section", () => {
       configurable: true
     });
     refuse = null;
-    settings = { accountId: null, model: null, concurrency: 4 };
+    settings = { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 };
     resetKnowledge();
   });
 
@@ -198,11 +200,17 @@ describe("the Knowledge Graph plugin section", () => {
       input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     });
   };
-  const choose = async (select: HTMLSelectElement, value: string) => {
-    await act(async () => {
-      select.value = value;
-      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
+  /** A strategy card of the account policy editor. */
+  const radioNamed = (name: string): HTMLButtonElement => {
+    const found = [...doc().querySelectorAll('[role="radio"]')].find((r) => r.textContent?.includes(name));
+    assert.ok(found, `a radio "${name}"`);
+    return found as HTMLButtonElement;
+  };
+  /** An account's checkbox in the policy editor's list, by the account's label. */
+  const accountBox = (label: string): HTMLInputElement => {
+    const row = [...doc().querySelectorAll("label")].find((l) => l.textContent?.trim() === label && l.querySelector('input[type="checkbox"]'));
+    assert.ok(row, `an account "${label}"`);
+    return row.querySelector("input") as HTMLInputElement;
   };
 
   it("while the plugin is off shows no activity, but the indexing settings to prepare it", async () => {
@@ -210,9 +218,9 @@ describe("the Knowledge Graph plugin section", () => {
     assert.doesNotMatch(text(), /Activity|Rebuild graph/);
     assert.ok(!calls.includes("status"), "no status read");
     assert.ok(calls.includes("settings"), "the settings are read (the daemon answers them while off)");
-    await choose(field<HTMLSelectElement>("Indexing account"), "c2");
+    await click(radioNamed("Fixed order"));
     await click(buttonNamed("Save"));
-    assert.deepEqual(puts, [{ accountId: "c2" }]);
+    assert.deepEqual(puts, [{ accountPolicy: { ...AUTO, strategy: "fixed" }, accountId: null }]);
   });
 
   it("shows the activity and follows knowledge.status events", async () => {
@@ -355,33 +363,87 @@ describe("the Knowledge Graph plugin section", () => {
     }
   });
 
-  it("opens the Knowledge tab and closes Settings", async () => {
+  it("opens the Knowledge view and closes Settings, with no project open too", async () => {
     await show();
-    await click(buttonNamed("Open Knowledge tab"));
+    useAppStore.setState({ currentProject: null, settingsOpen: true });
+    await settle();
+    const open = buttonNamed("Open Knowledge");
+    assert.equal(open.disabled, false);
+    await click(open);
     assert.equal(useAppStore.getState().settingsOpen, false);
-    assert.equal(useAppStore.getState().knowledgeTabsByProject[PROJECT.path]?.length, 1);
+    assert.equal(useAppStore.getState().knowledgeView.open, true);
   });
 
-  it("lists automatic and the Claude accounts, and saves only what changed", async () => {
+  it("edits the account policy like a workflow Agent block over the Claude accounts, and saves only what changed", async () => {
     await show();
-    const account = field<HTMLSelectElement>("Indexing account");
-    assert.deepEqual(
-      [...account.options].map((o) => o.textContent),
-      ["Automatic (with failover)", "me", "Work"]
-    );
+    assert.match(text(), /Indexing accounts/);
+    assert.equal(radioNamed("Most quota left").getAttribute("aria-checked"), "true");
+    assert.ok(accountBox("me@example.com").checked && accountBox("Work").checked);
+    assert.ok(!text().includes("Codex"), "only Claude accounts are listed");
     assert.equal(field<HTMLInputElement>("Indexing model").placeholder, "Default (Sonnet)");
     assert.ok(buttonNamed("Save").disabled, "nothing to save yet");
 
-    await choose(account, "c2");
+    // Only "Work", 6 at once.
+    await click(accountBox("me@example.com"));
     await type(field<HTMLInputElement>("Concurrency"), "6");
     await click(buttonNamed("Save"));
-    assert.deepEqual(puts, [{ accountId: "c2", concurrency: 6 }]);
+    assert.deepEqual(puts, [{ accountPolicy: { ...AUTO, accounts: ["c2"] }, accountId: null, concurrency: 6 }]);
     assert.match(text(), /Saved/);
+    assert.ok(!accountBox("me@example.com").checked, "the saved answer is shown");
 
+    // A fixed order goes with its first account for daemons that predate policies.
     await type(field<HTMLInputElement>("Indexing model"), "opus");
-    await choose(field<HTMLSelectElement>("Indexing account"), "");
+    await click(radioNamed("Fixed order"));
     await click(buttonNamed("Save"));
-    assert.deepEqual(puts[1], { accountId: null, model: "opus" });
+    assert.deepEqual(puts[1], { accountPolicy: { ...AUTO, accounts: ["c2"], strategy: "fixed" }, accountId: "c2", model: "opus" });
+  });
+
+  it("Reset puts the saved policy back", async () => {
+    settings = { ...settings, accountPolicy: { ...AUTO, strategy: "soonest-reset", maxWeeklyPct: 80 } };
+    await show();
+    assert.equal(radioNamed("Quota that resets soonest").getAttribute("aria-checked"), "true");
+    await click(radioNamed("Most quota left"));
+    assert.ok(!buttonNamed("Save").disabled);
+    await click(buttonNamed("Reset"));
+    assert.equal(radioNamed("Quota that resets soonest").getAttribute("aria-checked"), "true");
+    assert.ok(buttonNamed("Save").disabled);
+    assert.deepEqual(puts, []);
+  });
+
+  it("on a server that predates account policies, picks its one account and sends only accountId", async () => {
+    settings = { accountId: "c1", model: null, concurrency: 4 };
+    await show();
+    assert.match(text(), /Indexing account(?!s)/);
+    assert.match(text(), /This server only supports choosing the one account it tries first; update the server to choose accounts by policy\./);
+    assert.equal(doc().querySelectorAll('[role="radio"]').length, 0, "no policy editor");
+    const select = field<HTMLSelectElement>("Indexing account");
+    assert.equal(select.value, "c1");
+    assert.deepEqual(
+      [...select.options].map((o) => [o.value, o.textContent]),
+      [
+        ["", "Automatic (with failover)"],
+        ["c1", "me"],
+        ["c2", "Work"]
+      ],
+      "Claude accounts only, no System login"
+    );
+
+    await act(async () => {
+      select.value = "c2";
+      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await click(buttonNamed("Save"));
+    assert.deepEqual(puts, [{ accountId: "c2" }]);
+    assert.match(text(), /Saved/);
+    assert.equal(field<HTMLSelectElement>("Indexing account").value, "c2", "the server's answer is shown");
+
+    await act(async () => {
+      const again = field<HTMLSelectElement>("Indexing account");
+      again.value = "";
+      again.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await click(buttonNamed("Save"));
+    assert.deepEqual(puts[1], { accountId: null });
   });
 
   it("refuses concurrency out of bounds before sending", async () => {

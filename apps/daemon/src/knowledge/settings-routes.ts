@@ -14,7 +14,7 @@ export interface KnowledgeSettingsRoutesDeps {
  * gates the remote one; nothing here is secret). Answered whether or not the
  * plugin is on, so Settings can prepare it before turning it on. `PUT` takes
  * a partial {@link KnowledgeSettings} and answers the settings as stored.
- * Refusals are `{ code, message }`: 400 `KNOWLEDGE_INVALID`, or the plugins
+ * Refusals are `{ code, message }`: 400 `KNOWLEDGE_INVALID` or `KNOWLEDGE_UNKNOWN_ACCOUNT`, or the plugins
  * service's own (500 `PLUGINS_UNREADABLE` when plugins.json does not read; 500
  * `PLUGINS_ERROR` otherwise, as the plugin routes answer). Fastify's own refusals (bad JSON, a body
  * over the limit, a media type with no parser) answer 400 `KNOWLEDGE_INVALID` or 413

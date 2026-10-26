@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, PenTool, Trash2, Waypoints, Workflow, X } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { LimitedMarker } from "../ui/limited-marker";
@@ -39,8 +39,6 @@ const tabIcon = (tab: ProjectTab, size = 16) => {
     <Workflow size={size} />
   ) : tab.type === "whiteboard" ? (
     <PenTool size={size} />
-  ) : tab.type === "knowledge" ? (
-    <Waypoints size={size} />
   ) : tab.type === "browser" ? (
     <Globe size={size} />
   ) : tab.type === "desktop" ? (

@@ -137,7 +137,6 @@ import type {
   KnowledgeSaveResponse,
   KnowledgeSearchRequest,
   KnowledgeSearchResponse,
-  KnowledgeSettings,
   KnowledgeStatus,
   UpdateKnowledgeCollectionRequest,
   UpdateKnowledgeEntryRequest,
@@ -151,7 +150,8 @@ import {
   parseKnowledgeRebuildEstimate,
   parseKnowledgeSearchResponse,
   parseKnowledgeSettings,
-  parseKnowledgeStatus
+  parseKnowledgeStatus,
+  type KnowledgeSettingsAnswer
 } from "./knowledge/validate";
 import {
   authRoutes,
@@ -1033,11 +1033,11 @@ export class ApiClient {
     return readKnowledge(parseKnowledgeStatus(await this.send<unknown>("GET", knowledgeRoutes.status, { signal })), "status");
   }
 
-  async getKnowledgeSettings(signal?: AbortSignal): Promise<KnowledgeSettings> {
+  async getKnowledgeSettings(signal?: AbortSignal): Promise<KnowledgeSettingsAnswer> {
     return readKnowledge(parseKnowledgeSettings(await this.send<unknown>("GET", knowledgeRoutes.settings, { signal })), "settings");
   }
 
-  async updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettings> {
+  async updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettingsAnswer> {
     return readKnowledge(parseKnowledgeSettings(await this.send<unknown>("PUT", knowledgeRoutes.settings, { body: req })), "settings");
   }
 

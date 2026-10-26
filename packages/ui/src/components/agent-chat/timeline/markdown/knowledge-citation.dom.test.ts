@@ -1,7 +1,7 @@
 /**
  * Knowledge citations in an assistant message, in a DOM: the URL filter keeps
  * exactly the citation scheme; a citation renders as a chip (a button with no
- * href) that opens the entry in the Knowledge tab and never navigates; whether
+ * href) that opens the entry in the Knowledge view and never navigates; whether
  * the entry exists is asked on hover, once per entry, and a deleted one is
  * struck through; with the plugin off it is plain text.
  */
@@ -226,15 +226,15 @@ describe("knowledge citations in a message", () => {
     assert.deepEqual(reads, [], "nothing is read on render");
   });
 
-  it("a click opens the entry in the Knowledge tab and does not navigate", async () => {
+  it("a click opens the entry in the Knowledge view and does not navigate", async () => {
     await show(true);
     const event = await fire(chips(LIVE)[0]!, "click");
     assert.equal(event.defaultPrevented, true);
     assert.equal(dom.window.location.href, "http://localhost/");
-    const tab = useAppStore.getState().knowledgeTabsByProject[PROJECT.path]?.[0];
-    assert.equal(tab?.focus?.kind, "entry");
-    assert.equal(tab?.focus?.id, LIVE);
-    assert.equal(useAppStore.getState().activeTabByProject[PROJECT.path], tab?.id);
+    const { open, focus } = useAppStore.getState().knowledgeView;
+    assert.equal(open, true);
+    assert.equal(focus?.kind, "entry");
+    assert.equal(focus?.id, LIVE);
   });
 
   it("middle-, ctrl-, meta- and keyboard activation never open a window or navigate", async () => {

@@ -1,5 +1,5 @@
 /**
- * The Knowledge tab's pure rules: colours, error and status text, and the
+ * The Knowledge view's pure rules: colours, error and status text, and the
  * collection and entry forms. No React, no store.
  */
 
@@ -52,6 +52,7 @@ const ERROR_CODES: ReadonlySet<string> = new Set<KnowledgeErrorCode>([
   "KNOWLEDGE_INVALID",
   "KNOWLEDGE_COLLECTION_EXISTS",
   "KNOWLEDGE_UNKNOWN_COLLECTION",
+  "KNOWLEDGE_UNKNOWN_ACCOUNT",
   "KNOWLEDGE_TOO_LARGE",
   "KNOWLEDGE_NOT_A_WORKER",
   "KNOWLEDGE_BUSY"
@@ -63,6 +64,7 @@ const FALLBACK_TEXT: Partial<Record<KnowledgeErrorCode, string>> = {
   KNOWLEDGE_NOT_FOUND: "It no longer exists.",
   KNOWLEDGE_COLLECTION_EXISTS: "A collection with that name already exists.",
   KNOWLEDGE_UNKNOWN_COLLECTION: "One of the collections no longer exists.",
+  KNOWLEDGE_UNKNOWN_ACCOUNT: "One of the accounts is not a Claude account on this server.",
   KNOWLEDGE_TOO_LARGE: "The text is too long.",
   KNOWLEDGE_BUSY: "The knowledge base is busy; try again in a moment."
 };

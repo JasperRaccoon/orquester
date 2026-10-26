@@ -11,7 +11,7 @@ import { useAppStore } from "../../../../store/app";
 /**
  * A knowledge citation in an agent's answer (Knowledge Graph spec,
  * "Citations"): `[Title · @handle](orquester-knowledge:entry/<id>)` renders as
- * a small chip that opens the entry in the current project's Knowledge tab.
+ * a small chip that opens the entry in the server-level Knowledge view.
  *
  * It is a `<button>`, never a link: there is no href to follow, so neither the
  * browser nor the desktop shell can treat it as an external URL. Whether the
@@ -36,7 +36,7 @@ export function KnowledgeCitation({ entryId, children }: { entryId: string; chil
       type="button"
       data-knowledge-citation={entryId}
       data-state={state}
-      title={deleted ? "This knowledge entry was deleted" : "Open in the Knowledge tab"}
+      title={deleted ? "This knowledge entry was deleted" : "Open in Knowledge"}
       onPointerEnter={check}
       onFocus={check}
       onClick={(event) => {

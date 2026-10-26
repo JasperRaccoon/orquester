@@ -191,9 +191,9 @@ export const FIT_PADDING = 30;
 
 /**
  * Fits the graph to its container, or — while the container has no size (the
- * tab is hidden; a refetch laid the graph out meanwhile) — remembers to, and
+ * view is hidden; a refetch laid the graph out meanwhile) — remembers to, and
  * fits when `whenSized` sees a size again. Fitting a zero-size viewport would
- * leave the graph at the minimum zoom when the tab comes back.
+ * leave the graph at the minimum zoom when the view comes back.
  */
 export class DeferredFit {
   private pending = false;

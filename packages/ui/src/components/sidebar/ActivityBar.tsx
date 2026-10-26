@@ -1,6 +1,8 @@
 import React from "react";
-import { Boxes, Settings, type LucideIcon } from "lucide-react";
+import { Boxes, Settings, Waypoints, type LucideIcon } from "lucide-react";
+import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { cn } from "../../lib/cn";
+import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { useAppStore } from "../../store/app";
 import { useAgentSessions } from "../attention";
 import { RIGHT_RAIL_PANEL_REGISTRY } from "../right-rail/panels";
@@ -50,13 +52,18 @@ const ActivityButton: React.FC<{
 
 /**
  * The desktop sidebar's leftmost column: one button per sidebar view — the
- * projects tree, workflows, Agent Profiles — and settings at the bottom.
+ * projects tree, workflows, Agent Profiles — then, while the Knowledge Graph
+ * plugin is on, Knowledge, and settings at the bottom. Knowledge is no sidebar
+ * view: it shows the server-level Knowledge view in the main area (pressed
+ * while it shows; a second click goes back to the project).
  * A view that is not showing carries a dot when it holds something that wants
  * the user: an agent blocked on them, a failed workflow run.
  */
 export const ActivityBar: React.FC = () => {
   const view = useSidebarView();
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const knowledgeOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, KNOWLEDGE_GRAPH_PLUGIN_ID));
+  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
   const agentWaiting = useAgentSessions().some((entry) => entry.bucket === "attention");
   const workflowFailed = useWorkflowAttention().length > 0;
 
@@ -82,6 +89,18 @@ export const ActivityBar: React.FC = () => {
           onClick={() => setSidebarView(id)}
         />
       ))}
+      {knowledgeOn && (
+        <ActivityButton
+          title="Knowledge"
+          Icon={Waypoints}
+          active={knowledgeOpen}
+          onClick={() => {
+            const state = useAppStore.getState();
+            if (state.knowledgeView.open) state.closeKnowledge();
+            else state.openKnowledge();
+          }}
+        />
+      )}
       <div className="flex-1" />
       <ActivityButton title="Settings" Icon={Settings} onClick={() => setSettingsOpen(true)} />
     </nav>

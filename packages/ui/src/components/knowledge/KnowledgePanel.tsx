@@ -1,4 +1,4 @@
-// The Knowledge tab's side panel: one entry (full text, metadata, concepts,
+// The Knowledge view's side panel: one entry (full text, metadata, concepts,
 // related entries; edit and delete) or one concept (type and confidence,
 // description, the entries behind it, the concepts it links to). Shared by the
 // graph and list views.

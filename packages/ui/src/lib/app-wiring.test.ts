@@ -12,9 +12,11 @@ import {
   KNOWLEDGE_STATUS_EVENT,
   type AgentProfileAgentId,
   type AgentProfileSnapshot,
+  type EventMessage,
   type PluginInfo,
   type ProjectSummary,
-  type SecretVaultDetail
+  type SecretVaultDetail,
+  type SessionSummary
 } from "@orquester/api";
 import { useAppStore } from "../store/app.ts";
 import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./agent-profile/store.ts";
@@ -228,8 +230,9 @@ afterEach(async () => {
   /**
    * The app store and the Knowledge Graph plugin: the knowledge store loads when
    * the plugin turns on, takes `knowledge` events only while it is on, and
-   * forgets everything when it turns off; the Knowledge tab opens once per
-   * project and carries the item it was asked to show.
+   * forgets everything when it turns off; the server-level Knowledge view opens
+   * over the main area with or without a project, carries the item it was asked
+   * to show, and leaves when the user goes to a project, a tab or a tool.
    */
 
   function fakeApi() {
@@ -288,9 +291,8 @@ afterEach(async () => {
     });
   });
 
-  describe("the Knowledge tab", () => {
+  describe("the Knowledge view", () => {
     const P = "/w/acme/app";
-    const Q = "/w/acme/site";
     const project = (path: string) => ({ name: path.split("/").pop(), workspace: "acme", path }) as ProjectSummary;
     const store = () => useAppStore.getState();
 
@@ -298,8 +300,9 @@ afterEach(async () => {
       useAppStore.setState({
         api: null,
         currentProject: project(P),
-        knowledgeTabsByProject: {},
+        knowledgeView: { open: false, focus: null },
         whiteboardTabsByProject: {},
+        gitTabsByProject: {},
         activeTabByProject: {},
         sessions: [],
         browsers: [],
@@ -307,54 +310,100 @@ afterEach(async () => {
       });
     });
 
-    it("opens once per project and focuses the open one again", () => {
+    it("opens over the main area without touching the project's tabs, and closes", () => {
+      useAppStore.setState({ sidebarDrawerOpen: true });
       store().openKnowledge();
-      const [tab] = store().knowledgeTabsByProject[P] ?? [];
-      assert.ok(tab);
-      assert.equal(tab.title, "Knowledge");
-      assert.equal(tab.focus, null);
-      assert.equal(store().activeTabByProject[P], tab.id);
+      assert.deepEqual(store().knowledgeView, { open: true, focus: null });
+      assert.equal(store().sidebarDrawerOpen, false, "opened from the phone's drawer, the drawer closes");
+      assert.deepEqual(store().activeTabByProject, {}, "no project tab is made or activated");
 
-      useAppStore.setState({ activeTabByProject: { [P]: null } });
-      store().openKnowledge();
-      assert.equal(store().knowledgeTabsByProject[P]?.length, 1);
-      assert.equal(store().activeTabByProject[P], tab.id);
+      store().closeKnowledge();
+      assert.equal(store().knowledgeView.open, false);
     });
 
-    it("openKnowledgeEntry selects the entry, with a new nonce each time", () => {
+    it("opens with no project open", () => {
+      useAppStore.setState({ currentProject: null, currentWorkspace: null });
       store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
-      const first = store().knowledgeTabsByProject[P]?.[0]?.focus;
+      assert.equal(store().knowledgeView.open, true);
+      assert.equal(store().knowledgeView.focus?.id, "ke_aaaaaaaaaaaa");
+    });
+
+    it("openKnowledgeEntry selects the entry, with a new nonce each time; a plain open keeps it", () => {
+      store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+      const first = store().knowledgeView.focus;
       assert.equal(first?.kind, "entry");
       assert.equal(first?.id, "ke_aaaaaaaaaaaa");
       store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
-      const second = store().knowledgeTabsByProject[P]?.[0]?.focus;
+      const second = store().knowledgeView.focus;
       assert.ok(second && first && second.nonce > first.nonce, "the same citation clicked again asks again");
-      assert.equal(store().knowledgeTabsByProject[P]?.length, 1);
 
       store().openKnowledgeConcept("tactic-alternatives");
-      assert.equal(store().knowledgeTabsByProject[P]?.[0]?.focus?.kind, "concept");
-      // A plain open keeps what the tab was showing.
+      assert.equal(store().knowledgeView.focus?.kind, "concept");
+      const concept = store().knowledgeView.focus;
+      // Closing and opening again keeps what the view was showing (same request, same nonce).
+      store().closeKnowledge();
       store().openKnowledge();
-      assert.equal(store().knowledgeTabsByProject[P]?.[0]?.focus?.id, "tactic-alternatives");
+      assert.equal(store().knowledgeView.focus, concept);
     });
 
-    it("opens in the project it is given, else the current one, and nowhere outside a project", () => {
-      store().openKnowledgeEntry("ke_aaaaaaaaaaaa", Q);
-      assert.equal(store().knowledgeTabsByProject[Q]?.length, 1);
-      assert.equal(store().knowledgeTabsByProject[P], undefined);
-      useAppStore.setState({ currentProject: null });
-      store().openKnowledge();
-      assert.equal(store().knowledgeTabsByProject[P], undefined);
+    it("going to the project, a tab or a tool leaves it, keeping its focus", () => {
+      const leaves: Array<[string, () => void]> = [
+        ["openProject (the same project)", () => store().openProject(project(P))],
+        ["activateTab", () => store().activateTab("tab-1")],
+        ["openGit", () => store().openGit()],
+        ["openFileBrowser", () => store().openFileBrowser()],
+        ["openWhiteboard", () => store().openWhiteboard(`${P}/whiteboards/Plan.excalidraw`)],
+        ["openWorkflowTab", () => store().openWorkflowTab(P, "wf_1", { title: "Flow" })]
+      ];
+      for (const [name, leave] of leaves) {
+        store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+        const focus = store().knowledgeView.focus;
+        leave();
+        assert.equal(store().knowledgeView.open, false, name);
+        assert.equal(store().knowledgeView.focus, focus, `${name} keeps the focus`);
+      }
     });
 
-    it("appears among the project's tabs and closes like a client-local tab", async () => {
-      store().openWhiteboard(`${P}/whiteboards/Plan.excalidraw`);
+    it("a chat turn ending under it stays unread until closing it reveals the chat", () => {
+      const done = "2026-10-26T10:00:00.000Z";
+      const chat = { id: "c1", kind: "agent-chat", projectPath: P, latestTurn: { completedAt: done } } as unknown as SessionSummary;
+      useAppStore.setState({ activeTabByProject: { [P]: "c1" }, threadVisits: {} });
       store().openKnowledge();
-      const knowledge = store().knowledgeTabsByProject[P]![0]!;
-      const whiteboard = store().whiteboardTabsByProject[P]![0]!;
-      await store().closeTab(knowledge.id);
-      assert.deepEqual(store().knowledgeTabsByProject[P], []);
-      assert.equal(store().activeTabByProject[P], whiteboard.id);
+      store().applyEvent({ channel: "sessions", type: "session.updated", payload: chat } as EventMessage);
+      assert.equal(store().sessions[0]?.id, "c1");
+      assert.equal(store().threadVisits.c1, undefined, "hidden under the view, the finished turn is not seen");
+      store().closeKnowledge();
+      assert.equal(store().threadVisits.c1, done, "closing the view shows the chat: that is the visit");
+    });
+
+    it("a workflow opened in another project leaves it showing", () => {
+      store().openKnowledge();
+      store().openWorkflowTab("/w/acme/site", "wf_1", { title: "Flow" });
+      assert.equal(store().knowledgeView.open, true);
+    });
+
+    it("closes when a loaded plugins list says the plugin is off, not while the list is unknown", () => {
+      useAppStore.setState({ plugins: [knowledgePlugin(true)] });
+      store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+      useAppStore.setState({ plugins: null });
+      assert.equal(store().knowledgeView.open, true, "a list not loaded yet says nothing");
+      useAppStore.setState({ plugins: [knowledgePlugin(false)] });
+      assert.deepEqual(store().knowledgeView, { open: false, focus: null });
+    });
+
+    it("closes and forgets its focus on a connection switch", async () => {
+      store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+      // The connection switched to gets an inert injected transport (no socket opens).
+      const target = { id: "target", name: "Target", kind: "local", endpoint: "unix:/x", status: "disconnected" } as const;
+      useAppStore.setState({ connect: async () => undefined, connectionStatus: "disconnected" });
+      await store().initConnections({ localConnection: target, localTransporter: { kind: "stub" } as never, defaultUseTitlebar: false });
+      useAppStore.setState({
+        activeConnectionId: "previous",
+        connections: [target, { ...target, id: "previous" }],
+        knowledgeView: { open: true, focus: { kind: "entry", id: "ke_aaaaaaaaaaaa", nonce: 1 } }
+      });
+      await store().selectConnection("target");
+      assert.deepEqual(store().knowledgeView, { open: false, focus: null });
     });
   });
 }

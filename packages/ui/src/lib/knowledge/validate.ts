@@ -1,6 +1,6 @@
 /**
  * Knowledge Graph — wire validation for every `knowledgeRoutes` answer and
- * `knowledge` event payload the Knowledge tab reads, before any of it reaches
+ * `knowledge` event payload the Knowledge view reads, before any of it reaches
  * shared UI state.
  *
  * The rule throughout (as in `lib/boxes/validate.ts`): a record this client
@@ -45,6 +45,7 @@ import {
   type KnowledgeStatus,
   type KnowledgeWorkerView
 } from "@orquester/api";
+import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -399,7 +400,7 @@ function parseTokens(value: unknown): { in: number; out: number } {
   return isRecord(value) ? { in: count(value.in), out: count(value.out) } : { in: 0, out: 0 };
 }
 
-/** A status the tab can render, or null without `enabled` / `installed`. */
+/** A status the view can render, or null without `enabled` / `installed`. */
 export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
   if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.installed !== "boolean") return null;
   const tokens = isRecord(value.tokens) ? value.tokens : {};
@@ -439,13 +440,23 @@ export function parseKnowledgeChangedEvent(value: unknown): KnowledgeChangedEven
 // ---------------------------------------------------------------------------
 
 /**
+ * The indexing settings as this client read a daemon's answer. `accountPolicy` is null when the
+ * answer carried none: that daemon predates account policies, ignores one sent to it and takes
+ * only `accountId` (null = automatic, or a Claude account id).
+ */
+export type KnowledgeSettingsAnswer = Omit<KnowledgeSettings, "accountPolicy"> & { accountPolicy: AccountPolicy | null };
+
+/**
  * The indexing settings, field by field (an older or newer daemon's answer may
  * lack one or carry another type): a bad field reads as its default, as the
- * daemon reads its own stored record. Null when it is not an object.
+ * daemon reads its own stored record; the account policy field by field too,
+ * and null when the answer has none (see {@link KnowledgeSettingsAnswer}).
+ * Null when it is not an object.
  */
-export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null {
+export function parseKnowledgeSettings(value: unknown): KnowledgeSettingsAnswer | null {
   if (!isRecord(value)) return null;
   const accountId = typeof value.accountId === "string" && value.accountId.trim() !== "" ? value.accountId : null;
+  const accountPolicy = readAccountPolicy(value.accountPolicy) ?? null;
   const model = typeof value.model === "string" && value.model.trim() !== "" ? value.model : null;
   const concurrency =
     typeof value.concurrency === "number" &&
@@ -454,7 +465,7 @@ export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null
     value.concurrency <= KNOWLEDGE_CONCURRENCY_MAX
       ? value.concurrency
       : KNOWLEDGE_DEFAULT_SETTINGS.concurrency;
-  return { accountId, model, concurrency };
+  return { accountPolicy, accountId, model, concurrency };
 }
 
 /** A rebuild estimate: both counts must be numbers (an estimate missing one is no estimate). */

@@ -33,6 +33,13 @@ describe("desktop notification navigation", () => {
     assert.equal(viewingSessionId(), null);
   });
 
+  it("sees no tab while the Knowledge view covers it", () => {
+    useAppStore.setState({ knowledgeView: { open: true, focus: null } });
+    assert.equal(viewingSessionId(), null);
+    useAppStore.setState({ knowledgeView: { open: false, focus: null } });
+    assert.equal(viewingSessionId(), "c1");
+  });
+
   it("opens a session through the session deep link", () => {
     openNotificationTarget({ kind: "session", sessionId: "c2" });
     assert.deepEqual(takeSessionDeepLink(), { sessionId: "c2" });

@@ -88,7 +88,7 @@ export interface KnowledgeServiceOptions {
   appdir: string;
   /** `PluginsService`: the plugin record (switch, settings, runtime version) and its `"changed"` events. */
   plugins: KnowledgeSettingsPlugins & KnowledgeRuntimeTrackerOptions["plugins"];
-  /** `AgentAccountsService`: the indexing account is checked to be a Claude account. */
+  /** `AgentAccountsService`: the indexing policy's accounts are checked to be Claude accounts. */
   accounts: KnowledgeSettingsAccounts;
   /** The session's record now (its tab), or null for a session the daemon does not know (it sees nothing). */
   session(sessionId: string): KnowledgeSessionInfo | null;

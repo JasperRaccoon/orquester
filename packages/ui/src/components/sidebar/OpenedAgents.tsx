@@ -65,7 +65,8 @@ const AgentCard: React.FC<{
     (s) => s.activeTabByProject[entry.session.projectPath] === entry.session.id
   );
   const inOpenProject = useAppStore((s) => s.currentProject?.path === entry.session.projectPath);
-  const onScreen = activeInProject && inOpenProject;
+  const knowledgeShowing = useAppStore((s) => s.knowledgeView.open);
+  const onScreen = activeInProject && inOpenProject && !knowledgeShowing;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Right-click, or a long press on a touch screen (iOS fires no `contextmenu`).
   const press = useLongPress((point) => setMenu(point));

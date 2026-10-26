@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { KNOWLEDGE_DEFAULT_SETTINGS, type AgentAccountsResponse, type KnowledgeSettings, type SessionSummary } from "@orquester/api";
+import {
+  KNOWLEDGE_DEFAULT_ACCOUNT_POLICY,
+  KNOWLEDGE_DEFAULT_SETTINGS,
+  type AgentAccountsResponse,
+  type KnowledgeSettings,
+  type SessionSummary,
+  type UsageResponse
+} from "@orquester/api";
 import { agentChatCommandPath, agentChatRoutes } from "@orquester/api/agent-chat";
+import type { AccountPolicy } from "@orquester/config";
 import type { DaemonApi } from "../../chat-client/index.ts";
 import type { AccountsReader } from "../../workflows/contracts.ts";
 import { emptyMemory } from "../../workflows/agent/failover.ts";
+import { selectAccount } from "../../workflows/agent/select.ts";
+import { knowledgeSettingsFrom } from "../settings.ts";
 import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
 import { createDaemonWorkerSessions, knowledgeWorkerChain, type DaemonWorkerCandidate } from "./daemon-workers.ts";
 import { KNOWLEDGE_INDEXER_PROFILE_ID, KNOWLEDGE_WORKER_PROMPT } from "./indexer-profile.ts";
@@ -20,20 +30,91 @@ const accounts = (ids: string[]): AccountsReader => ({
 const settings = (patch: Partial<KnowledgeSettings> = {}): KnowledgeSettings => ({ ...KNOWLEDGE_DEFAULT_SETTINGS, ...patch });
 
 describe("knowledgeWorkerChain", () => {
-  it("automatic: least used over the Claude accounts (the system login only without any), Sonnet by default", () => {
-    const [entry] = knowledgeWorkerChain(settings(), accounts(["c1", "c2", "cx1"]));
+  const NOW = new Date("2026-10-26T12:00:00.000Z");
+  const at = (hours: number): string => new Date(NOW.getTime() + hours * 3_600_000).toISOString();
+  const row = (id: string, session: number, weekly: number, weeklyResetHours: number) => ({
+    id,
+    label: id,
+    available: true,
+    stale: false,
+    session: { percent: session, resetsAt: at(2) },
+    weekly: { percent: weekly, resetsAt: at(weeklyResetHours) },
+    asOf: at(-0.05)
+  });
+  // c1 is the most used (60% weekly), c3 the least (40%) and resets soonest; c2 has the least weekly use.
+  const usage = {
+    agents: [
+      {
+        id: "claude",
+        available: true,
+        stale: false,
+        session: null,
+        weekly: null,
+        asOf: at(-0.05),
+        accounts: [row("c1", 10, 60, 72), row("c2", 50, 20, 120), row("c3", 5, 40, 24)],
+        aggregate: { strategy: "worst-account", accountCount: 3 }
+      }
+    ]
+  } as unknown as UsageResponse;
+  const ids = ["c1", "c2", "c3", "cx1"];
+  /** Who the workflow selection runs the chain on: the chosen account, else null. */
+  const chosen = (value: KnowledgeSettings, accountIds = ids): string | null =>
+    selectAccount({ chain: knowledgeWorkerChain(value), usage, accounts: accounts(accountIds).list(), cooldowns: {}, now: NOW }).chosen?.accountId ?? null;
+  const read = (stored: unknown, accountIds = ids) => knowledgeSettingsFrom(stored, accountIds.filter((id) => !id.startsWith("cx")));
+  const policy = (patch: Partial<AccountPolicy>): KnowledgeSettings => settings({ accountPolicy: { ...KNOWLEDGE_DEFAULT_ACCOUNT_POLICY, ...patch } });
+
+  it("one Claude entry carrying the settings' policy as it is, Sonnet by default", () => {
+    const value = policy({ strategy: "soonest-reset", maxWeeklyPct: 80 });
+    const [entry, ...rest] = knowledgeWorkerChain(value);
+    assert.deepEqual(rest, []);
     assert.equal(entry!.agent, "claude");
     assert.equal(entry!.model, "sonnet");
-    assert.equal(entry!.accounts.strategy, "least-used");
-    assert.equal(entry!.accounts.includeSystem, false);
-    assert.equal(knowledgeWorkerChain(settings(), accounts([]))[0]!.accounts.includeSystem, true);
+    assert.deepEqual(entry!.accounts, value.accountPolicy);
+    assert.equal(knowledgeWorkerChain(settings({ model: "opus" }))[0]!.model, "opus");
   });
 
-  it("a chosen account goes first, every other Claude account after it (failover)", () => {
-    const [entry] = knowledgeWorkerChain(settings({ accountId: "c2", model: "opus" }), accounts(["c1", "c2", "c3", "cx1"]));
+  it("legacy automatic (no record, accountId null): the least used Claude account; the System login only without any", () => {
+    for (const stored of [undefined, {}, { accountId: null, concurrency: 2 }]) {
+      const value = read(stored);
+      assert.deepEqual(value.accountPolicy, KNOWLEDGE_DEFAULT_ACCOUNT_POLICY);
+      assert.equal(chosen(value), "c3");
+    }
+    const none = read({ accountId: null }, []);
+    assert.equal(none.accountPolicy.includeSystem, true);
+    assert.equal(chosen(none, []), "system");
+  });
+
+  it("a legacy chosen account goes first, every other Claude account after it (failover)", () => {
+    const value = read({ accountId: "c2", model: "opus" });
+    assert.equal(value.accountPolicy.strategy, "fixed");
+    assert.deepEqual(value.accountPolicy.accounts, ["c2", "c1", "c3"]);
+    assert.equal(value.accountPolicy.includeSystem, false);
+    assert.equal(chosen(value), "c2");
+    const [entry] = knowledgeWorkerChain(value);
     assert.equal(entry!.model, "opus");
-    assert.equal(entry!.accounts.strategy, "fixed");
-    assert.deepEqual(entry!.accounts.accounts, ["c2", "c1", "c3"]);
+    // The legacy System login choice keeps the System login first.
+    const system = read({ accountId: "system" });
+    assert.deepEqual(system.accountPolicy.accounts, ["system", "c1", "c2", "c3"]);
+    assert.equal(system.accountPolicy.includeSystem, true);
+  });
+
+  it("each strategy, the allow-list, the caps and unknown usage choose as a workflow Agent block does", () => {
+    assert.equal(chosen(policy({ strategy: "least-used" })), "c3");
+    assert.equal(chosen(policy({ strategy: "least-used", leastUsedMetric: "weekly" })), "c2");
+    assert.equal(chosen(policy({ strategy: "least-used", accounts: ["c1", "c2"] })), "c2");
+    assert.equal(chosen(policy({ strategy: "soonest-reset" })), "c3");
+    assert.equal(chosen(policy({ strategy: "soonest-reset", accounts: ["c1", "c2"] })), "c1");
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["c1", "c3"] })), "c1");
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["c1", "c3"], maxWeeklyPct: 50 })), "c3");
+    assert.equal(chosen(policy({ strategy: "least-used", maxWeeklyPct: 30 })), "c2");
+    assert.equal(chosen(policy({ strategy: "least-used", maxSessionPct: 5, maxWeeklyPct: 30 })), null);
+    // An account with no usage reading: tried after the others, or never.
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["c4"] }), [...ids, "c4"]), "c4");
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["c4"], unknownUsage: "exclude" }), [...ids, "c4"]), null);
+    // The System login as a candidate (here with no usage reading, so after every account with one).
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["system"] })), "system");
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["system", "c1"] })), "c1");
+    assert.equal(chosen(policy({ strategy: "fixed", accounts: ["c1"], includeSystem: true, maxWeeklyPct: 50 })), "system");
   });
 });
 

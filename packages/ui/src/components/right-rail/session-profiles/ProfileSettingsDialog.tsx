@@ -367,7 +367,7 @@ const KnowledgeSection: React.FC<{ ids: readonly string[]; onChange: (ids: strin
       ) : list === null ? (
         <p className="text-[12px] text-neutral-500">Loading collections…</p>
       ) : list.length === 0 ? (
-        <p className="text-[12px] text-neutral-500">No collections yet. Create them in the Knowledge tab.</p>
+        <p className="text-[12px] text-neutral-500">No collections yet. Create them in Knowledge.</p>
       ) : (
         <ul className="space-y-0.5">
           {list.map((collection) => (

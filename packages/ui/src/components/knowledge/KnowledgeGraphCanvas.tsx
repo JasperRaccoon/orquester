@@ -1,6 +1,6 @@
-// The Knowledge tab's graph canvas: Cytoscape (bundled, canvas renderer), laid
+// The Knowledge view's graph canvas: Cytoscape (bundled, canvas renderer), laid
 // out with fCoSE in a worker (`graph-layout.worker.ts`). Loaded with the first
-// graph the Knowledge tab shows, so neither library is in the app's main bundle.
+// graph the Knowledge view shows, so neither library is in the app's main bundle.
 
 import React, { useEffect, useRef, useState } from "react";
 import cytoscape, { type Core, type ElementDefinition, type StylesheetJson } from "cytoscape";
@@ -22,7 +22,7 @@ export interface KnowledgeGraphCanvasProps {
   /** Concepts to mark (search hits, the selected entry's concepts). */
   highlightIds: ReadonlySet<string>;
   onSelect: (id: string | null) => void;
-  /** The tab is shown (a hidden container has no size: resize when it comes back). */
+  /** The view is shown (a hidden container has no size: resize when it comes back). */
   active: boolean;
 }
 
@@ -290,7 +290,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
     if (node.nonempty()) cy.animate({ center: { eles: node }, zoom: Math.max(cy.zoom(), 0.9) }, { duration: 250 });
   }, [selectedId, arranging]);
 
-  // A tab shown again: the container has its size back.
+  // The view shown again: the container has its size back.
   useEffect(() => {
     const cy = cyRef.current;
     if (!active || !cy) return;

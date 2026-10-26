@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SECRET_BLOBS_DIR_NAME, SECRET_VAULT_INDEX_FILE } from "./secret-files.ts";
+import { readAccountPolicy, type AccountPolicy } from "./workflows.ts";
 
 export const ORQUESTER_DIR_NAME = ".orquester";
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
@@ -1345,7 +1346,10 @@ export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
 
 /** The knowledge-graph settings fields a record carries with a usable type; others read as absent. */
 export interface StoredKnowledgeSettings {
+  /** Legacy (the single indexing account, null = automatic); still written beside `accountPolicy` for older builds. */
   accountId?: string | null;
+  /** The indexing accounts' selection policy, read field by field ({@link readAccountPolicy}). */
+  accountPolicy?: AccountPolicy;
   model?: string | null;
   concurrency?: number;
 }
@@ -1353,7 +1357,9 @@ export interface StoredKnowledgeSettings {
 /**
  * The knowledge-graph record's `settings`, field by field: a field of the wrong type (or a
  * `settings` that is not an object) reads as absent, so the caller falls back to its default.
- * Range checks are the caller's (the limits live in `@orquester/api`).
+ * `accountPolicy` is itself read field by field; one that is not an object reads as absent.
+ * Range checks and the legacy `accountId` → policy mapping are the caller's (the limits live in
+ * `@orquester/api`).
  */
 export function storedKnowledgeSettings(state: PluginState): StoredKnowledgeSettings {
   const raw = state.settings;
@@ -1363,6 +1369,8 @@ export function storedKnowledgeSettings(state: PluginState): StoredKnowledgeSett
   const nullableString = (value: unknown): value is string | null =>
     value === null || (typeof value === "string" && value.trim() !== "");
   if (nullableString(record.accountId)) out.accountId = record.accountId;
+  const accountPolicy = readAccountPolicy(record.accountPolicy);
+  if (accountPolicy) out.accountPolicy = accountPolicy;
   if (nullableString(record.model)) out.model = record.model;
   if (typeof record.concurrency === "number" && Number.isInteger(record.concurrency)) out.concurrency = record.concurrency;
   return out;

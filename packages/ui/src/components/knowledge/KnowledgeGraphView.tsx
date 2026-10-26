@@ -1,4 +1,4 @@
-// The Knowledge tab's graph view: a search box (by meaning) and collection
+// The Knowledge view's graph view: a search box (by meaning) and collection
 // filter chips above a canvas of concepts coloured by collection. The full
 // graph is the overview; when it is truncated, a selection or search hit shows
 // that item's neighbourhood instead.
@@ -153,7 +153,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   const selectionKey = selection ? `${selection.kind}:${selection.id}` : "";
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  // A selection made before any graph was read (a citation opening the tab, the List view
+  // A selection made before any graph was read (a citation opening the view, the List view
   // switched back to the graph) is placed once the first graph arrives.
   const placeLater = useRef(false);
   useEffect(() => {
