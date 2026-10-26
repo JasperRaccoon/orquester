@@ -14,10 +14,8 @@ import {
   KNOWLEDGE_COLORS,
   KNOWLEDGE_CONCURRENCY_MAX,
   KNOWLEDGE_CONCURRENCY_MIN,
-  KNOWLEDGE_DEFAULT_ACCOUNT_POLICY,
   KNOWLEDGE_DEFAULT_SETTINGS,
   knowledgeCitation,
-  knowledgeLegacyAccountPolicy,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
   type KnowledgeCollectionView,
@@ -47,7 +45,7 @@ import {
   type KnowledgeStatus,
   type KnowledgeWorkerView
 } from "@orquester/api";
-import { readAccountPolicy } from "@orquester/config";
+import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -442,18 +440,23 @@ export function parseKnowledgeChangedEvent(value: unknown): KnowledgeChangedEven
 // ---------------------------------------------------------------------------
 
 /**
+ * The indexing settings as this client read a daemon's answer. `accountPolicy` is null when the
+ * answer carried none: that daemon predates account policies, ignores one sent to it and takes
+ * only `accountId` (null = automatic, or a Claude account id).
+ */
+export type KnowledgeSettingsAnswer = Omit<KnowledgeSettings, "accountPolicy"> & { accountPolicy: AccountPolicy | null };
+
+/**
  * The indexing settings, field by field (an older or newer daemon's answer may
  * lack one or carry another type): a bad field reads as its default, as the
- * daemon reads its own stored record; the account policy field by field too.
- * A daemon that predates policies sends only `accountId`: its policy is
- * automatic, or a fixed order starting at that account (the accounts it fails
- * over to after it are not in the answer). Null when it is not an object.
+ * daemon reads its own stored record; the account policy field by field too,
+ * and null when the answer has none (see {@link KnowledgeSettingsAnswer}).
+ * Null when it is not an object.
  */
-export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null {
+export function parseKnowledgeSettings(value: unknown): KnowledgeSettingsAnswer | null {
   if (!isRecord(value)) return null;
   const accountId = typeof value.accountId === "string" && value.accountId.trim() !== "" ? value.accountId : null;
-  const accountPolicy =
-    readAccountPolicy(value.accountPolicy) ?? (accountId === null ? KNOWLEDGE_DEFAULT_ACCOUNT_POLICY : knowledgeLegacyAccountPolicy(accountId, []));
+  const accountPolicy = readAccountPolicy(value.accountPolicy) ?? null;
   const model = typeof value.model === "string" && value.model.trim() !== "" ? value.model : null;
   const concurrency =
     typeof value.concurrency === "number" &&

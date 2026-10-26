@@ -10,14 +10,15 @@ import {
   KNOWLEDGE_DEFAULT_SETTINGS,
   knowledgeLegacyAccountId,
   type AccountPolicy,
+  type AgentAccount,
   type KnowledgeRebuildEstimate,
   type KnowledgeRunSummary,
-  type KnowledgeSettings,
   type KnowledgeWorkerView,
   type UpdateKnowledgeSettingsRequest
 } from "@orquester/api";
 
-import { parseKnowledgeSettings } from "../../lib/knowledge/validate";
+import { shortAccountLabel } from "../../lib/account-label";
+import { parseKnowledgeSettings, type KnowledgeSettingsAnswer } from "../../lib/knowledge/validate";
 import { formatDuration } from "../../lib/workflows/format";
 import { compactCount } from "../topbar/usage-format";
 
@@ -31,8 +32,13 @@ export const KNOWLEDGE_MODEL_INPUT_MAX = 200;
 export const KNOWLEDGE_DEFAULT_MODEL = "sonnet";
 
 export interface KnowledgeSettingsForm {
-  /** Which Claude accounts indexing uses, as the workflow Agent block's account policy editor edits it. */
-  accountPolicy: AccountPolicy;
+  /**
+   * Which Claude accounts indexing uses, as the workflow Agent block's account policy editor edits
+   * it; null on a server that predates policies, where `accountId` is edited instead.
+   */
+  accountPolicy: AccountPolicy | null;
+  /** The one account a server that predates policies takes (null = automatic). */
+  accountId: string | null;
   /** "" = the default model. */
   model: string;
   /** As typed, so a half-typed value can be shown and refused. */
@@ -41,14 +47,20 @@ export interface KnowledgeSettingsForm {
 
 /**
  * The settings as the daemon sent them, read field by field (see
- * `parseKnowledgeSettings`); an answer that is not an object reads as the defaults.
+ * `parseKnowledgeSettings`; a null `accountPolicy` is a server that predates
+ * policies); an answer that is not an object reads as the defaults.
  */
-export function readKnowledgeSettings(value: unknown): KnowledgeSettings {
+export function readKnowledgeSettings(value: unknown): KnowledgeSettingsAnswer {
   return parseKnowledgeSettings(value) ?? { ...KNOWLEDGE_DEFAULT_SETTINGS };
 }
 
-export function knowledgeSettingsForm(settings: KnowledgeSettings): KnowledgeSettingsForm {
-  return { accountPolicy: settings.accountPolicy, model: settings.model ?? "", concurrency: String(settings.concurrency) };
+export function knowledgeSettingsForm(settings: KnowledgeSettingsAnswer): KnowledgeSettingsForm {
+  return {
+    accountPolicy: settings.accountPolicy,
+    accountId: settings.accountId,
+    model: settings.model ?? "",
+    concurrency: String(settings.concurrency)
+  };
 }
 
 /** The same policy, whatever its key order (an unset field and an absent one are the same). */
@@ -81,17 +93,20 @@ export function knowledgeSettingsProblem(form: KnowledgeSettingsForm): string | 
 /**
  * What a save sends: only the fields that changed from `saved` (an empty
  * object when nothing did), or the form's problem. A changed policy goes with
- * the legacy `accountId` it approximates, which a daemon that predates
- * policies applies instead (a current one ignores it beside a policy).
+ * the legacy `accountId` it approximates (a current daemon ignores it beside a
+ * policy). A server that predates policies (`saved.accountPolicy` null) is
+ * sent only the `accountId` chosen for it, the one account field it applies.
  */
 export function knowledgeSettingsPatch(
-  saved: KnowledgeSettings,
+  saved: KnowledgeSettingsAnswer,
   form: KnowledgeSettingsForm
 ): { patch: UpdateKnowledgeSettingsRequest } | { error: string } {
   const problem = knowledgeSettingsProblem(form);
   if (problem) return { error: problem };
   const patch: UpdateKnowledgeSettingsRequest = {};
-  if (!sameAccountPolicy(form.accountPolicy, saved.accountPolicy)) {
+  if (saved.accountPolicy === null || form.accountPolicy === null) {
+    if (form.accountId !== saved.accountId) patch.accountId = form.accountId;
+  } else if (!sameAccountPolicy(form.accountPolicy, saved.accountPolicy)) {
     patch.accountPolicy = form.accountPolicy;
     patch.accountId = knowledgeLegacyAccountId(form.accountPolicy);
   }
@@ -100,6 +115,37 @@ export function knowledgeSettingsPatch(
   const concurrency = Number(form.concurrency.trim());
   if (concurrency !== saved.concurrency) patch.concurrency = concurrency;
   return { patch };
+}
+
+export interface KnowledgeAccountOption {
+  /** "" = automatic (null on the wire). */
+  value: string;
+  label: string;
+}
+
+export const KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL = "Automatic (with failover)";
+
+/**
+ * The one-account picker a server that predates policies gets: automatic,
+ * then the user's Claude accounts (never the System login, which such a server
+ * refuses). A chosen account this client does not list (removed, or the list
+ * not read yet) stays as an option of its own, so the picker never shows a
+ * choice the daemon does not have.
+ */
+export function knowledgeAccountOptions(
+  accounts: readonly Pick<AgentAccount, "id" | "agent" | "label" | "needsReauth">[] | undefined,
+  selected: string | null
+): KnowledgeAccountOption[] {
+  const claude = (accounts ?? []).filter((account) => account.agent === "claude");
+  const options: KnowledgeAccountOption[] = [{ value: "", label: KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL }];
+  for (const account of claude) {
+    const label = shortAccountLabel(account.label) || account.id;
+    options.push({ value: account.id, label: account.needsReauth ? `${label} (needs sign-in)` : label });
+  }
+  if (selected !== null && !claude.some((account) => account.id === selected)) {
+    options.push({ value: selected, label: accounts === undefined ? selected : `Unknown account (${selected})` });
+  }
+  return options;
 }
 
 // ---------------------------------------------------------------------------

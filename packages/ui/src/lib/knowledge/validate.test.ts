@@ -205,16 +205,21 @@ describe("knowledge wire validation", () => {
       accounts: ["c1"],
       unknownUsage: "exclude"
     });
-    // A daemon that predates policies: its accountId's policy.
+    // A daemon that predates policies answers none: a null policy says so (it keeps only accountId).
     assert.deepEqual(parseKnowledgeSettings({ accountId: "c1", model: "opus", concurrency: 6 }), {
-      accountPolicy: { ...AUTO, strategy: "fixed", accounts: ["c1"] },
+      accountPolicy: null,
       accountId: "c1",
       model: "opus",
       concurrency: 6
     });
-    assert.deepEqual(parseKnowledgeSettings({ accountId: 7, model: "", concurrency: 99 }), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
-    assert.deepEqual(parseKnowledgeSettings({ accountId: " ", model: ["x"], concurrency: 2.5, accountPolicy: "x" }), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
-    assert.deepEqual(parseKnowledgeSettings({}), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: 7, model: "", concurrency: 99 }), { accountPolicy: null, accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: " ", model: ["x"], concurrency: 2.5, accountPolicy: "x" }), { accountPolicy: null, accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({}), { accountPolicy: null, accountId: null, model: null, concurrency: 4 });
+    // Reading an answer again keeps what it said (the settings form reads the client's answer).
+    const legacy = parseKnowledgeSettings({ accountId: "c1", model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings(legacy), legacy);
+    const current = parseKnowledgeSettings({ accountPolicy: policy, accountId: "c1", model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings(current), current);
     assert.equal(parseKnowledgeSettings(null), null);
     assert.equal(parseKnowledgeSettings([]), null);
     assert.equal(parseKnowledgeSettings("settings"), null);
@@ -239,7 +244,7 @@ describe("knowledge wire validation", () => {
     const client = new ApiClient({ id: "c1" } as never, transporter);
 
     answer = { accountId: 5, model: "opus", concurrency: "8" };
-    assert.deepEqual(await client.getKnowledgeSettings(), { accountPolicy: AUTO, accountId: null, model: "opus", concurrency: 4 });
+    assert.deepEqual(await client.getKnowledgeSettings(), { accountPolicy: null, accountId: null, model: "opus", concurrency: 4 });
     const policy = { ...AUTO, strategy: "fixed" as const, accounts: ["c2"] };
     answer = { accountPolicy: policy, accountId: "c2", model: null, concurrency: 3, secret: "x" };
     assert.deepEqual(await client.updateKnowledgeSettings({ accountPolicy: policy }), { accountPolicy: policy, accountId: "c2", model: null, concurrency: 3 });

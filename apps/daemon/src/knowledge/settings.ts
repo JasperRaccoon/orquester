@@ -8,14 +8,21 @@
  * default, the policy field by field; other keys in the object, including
  * another build's, are kept on write); writes are validated: concurrency within
  * KNOWLEDGE_CONCURRENCY_MIN..MAX, `accountPolicy` by the workflow policy schema
- * with every listed account a Claude account or the System login, `model` null
- * or a non-empty string.
+ * with no listed account another agent's (an id no account has is kept, as a
+ * workflow keeps it, and the selector skips it), `model` null or a non-empty
+ * string.
  *
  * Older builds read only `accountId`. A policy is therefore stored with the
  * `accountId` that approximates it for them ({@link knowledgeLegacyAccountId}:
  * a fixed order's first account, else null = automatic), and a legacy
  * `accountId` update (an older client) drops the stored policy so the record
  * means what that client chose.
+ *
+ * A reader tells that an older build changed the account by the stored pair no
+ * longer matching. After a downgrade, an older build that rewrites `accountId`
+ * twice and back to the first value (A→B→A) makes the pair match again, so the
+ * earlier policy comes back; this cannot be detected, since older builds keep
+ * the keys they do not know.
  */
 import type { EventEmitter } from "node:events";
 import {
@@ -134,7 +141,8 @@ export class KnowledgeSettingsService implements KnowledgeSettingsPort {
    * Validate and store a partial update; fields absent from `body` keep their
    * value, and keys this build does not know are ignored. Resolves the settings
    * as stored. Throws {@link KnowledgeSettingsError} (400): `KNOWLEDGE_INVALID`,
-   * or `KNOWLEDGE_UNKNOWN_ACCOUNT` for an account that is no Claude account.
+   * or `KNOWLEDGE_UNKNOWN_ACCOUNT` for a policy account of another agent, or a
+   * legacy `accountId` that is no Claude account.
    */
   async update(body: unknown): Promise<KnowledgeSettings> {
     const patch = this.validate(body);
@@ -195,8 +203,9 @@ export class KnowledgeSettingsService implements KnowledgeSettingsPort {
   }
 
   /**
-   * The workflow Agent block's policy schema (its defaults filled, unknown keys kept), with every
-   * listed account a Claude account's id or the System login, each once.
+   * The workflow Agent block's policy schema (its defaults filled, unknown keys kept), each listed
+   * account once. As in a workflow, an id no account has is accepted (the selector skips it at run
+   * time); only another agent's account is refused.
    */
   private validatePolicy(value: unknown): AccountPolicy {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -211,15 +220,21 @@ export class KnowledgeSettingsService implements KnowledgeSettingsPort {
     const policy = parsed.data;
     if (policy.accounts === undefined) return policy;
     const accounts = [...new Set(policy.accounts)];
-    for (const id of accounts) if (id !== SYSTEM_ACCOUNT_ID) this.checkAccount(id);
+    for (const id of accounts) if (id !== SYSTEM_ACCOUNT_ID) this.checkAccount(id, { allowUnknown: true });
     return { ...policy, accounts };
   }
 
-  /** Throws `KNOWLEDGE_UNKNOWN_ACCOUNT` unless `id` is a Claude account's. */
-  private checkAccount(id: string): void {
+  /**
+   * Throws `KNOWLEDGE_UNKNOWN_ACCOUNT` when `id` is another agent's account, or no account's unless
+   * `allowUnknown`.
+   */
+  private checkAccount(id: string, { allowUnknown = false } = {}): void {
     const account = this.options.accounts.list().accounts.find((candidate) => candidate.id === id);
     const shown = JSON.stringify(id.slice(0, 100));
-    if (!account) throw unknownAccount(`There is no agent account ${shown}.`);
+    if (!account) {
+      if (allowUnknown) return;
+      throw unknownAccount(`There is no agent account ${shown}.`);
+    }
     if (account.agent !== "claude") throw unknownAccount(`The account ${shown} is a ${account.agent} account; indexing runs on Claude accounts.`);
   }
 

@@ -4,7 +4,7 @@
  * a worker chat's transcript opened read-only in place (never its folder as a project), the
  * rebuild confirmation with its estimate, "Open Knowledge"; and the
  * indexing settings saved with a PUT of what changed, showing the daemon's
- * refusal.
+ * refusal; a server that predates account policies gets its one-account picker.
  */
 
 import assert from "node:assert/strict";
@@ -79,7 +79,8 @@ describe("the Knowledge Graph plugin section", () => {
   let root: Root;
   let calls: string[];
   let puts: UpdateKnowledgeSettingsRequest[];
-  let settings: KnowledgeSettings;
+  /** The daemon's answer; one that predates policies has no `accountPolicy`. */
+  let settings: KnowledgeSettings | Omit<KnowledgeSettings, "accountPolicy">;
   let refuse: unknown;
   let initial: ReturnType<typeof useAppStore.getState>;
   let copied: string[];
@@ -407,6 +408,42 @@ describe("the Knowledge Graph plugin section", () => {
     assert.equal(radioNamed("Quota that resets soonest").getAttribute("aria-checked"), "true");
     assert.ok(buttonNamed("Save").disabled);
     assert.deepEqual(puts, []);
+  });
+
+  it("on a server that predates account policies, picks its one account and sends only accountId", async () => {
+    settings = { accountId: "c1", model: null, concurrency: 4 };
+    await show();
+    assert.match(text(), /Indexing account(?!s)/);
+    assert.match(text(), /This server only supports choosing the one account it tries first; update the server to choose accounts by policy\./);
+    assert.equal(doc().querySelectorAll('[role="radio"]').length, 0, "no policy editor");
+    const select = field<HTMLSelectElement>("Indexing account");
+    assert.equal(select.value, "c1");
+    assert.deepEqual(
+      [...select.options].map((o) => [o.value, o.textContent]),
+      [
+        ["", "Automatic (with failover)"],
+        ["c1", "me"],
+        ["c2", "Work"]
+      ],
+      "Claude accounts only, no System login"
+    );
+
+    await act(async () => {
+      select.value = "c2";
+      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await click(buttonNamed("Save"));
+    assert.deepEqual(puts, [{ accountId: "c2" }]);
+    assert.match(text(), /Saved/);
+    assert.equal(field<HTMLSelectElement>("Indexing account").value, "c2", "the server's answer is shown");
+
+    await act(async () => {
+      const again = field<HTMLSelectElement>("Indexing account");
+      again.value = "";
+      again.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await click(buttonNamed("Save"));
+    assert.deepEqual(puts[1], { accountId: null });
   });
 
   it("refuses concurrency out of bounds before sending", async () => {

@@ -437,8 +437,9 @@ export const KNOWLEDGE_DEFAULT_SETTINGS: KnowledgeSettings = {
 };
 
 /**
- * A partial update. `accountPolicy` is validated with the workflow policy schema, and every
- * account it lists must be a Claude account's id or `SYSTEM_ACCOUNT_ID`. `accountId` is the legacy
+ * A partial update. `accountPolicy` is validated with the workflow policy schema, and no account
+ * it lists may be another agent's (an id no account has is kept and skipped at run time, as in a
+ * workflow; `SYSTEM_ACCOUNT_ID` is the System login). `accountId` is the legacy
  * field an older client sends: ignored when `accountPolicy` is sent too, else it replaces the
  * stored policy with the one it means (null, or a Claude account id).
  */
@@ -591,7 +592,7 @@ export type KnowledgeErrorCode =
   | "KNOWLEDGE_INVALID"
   | "KNOWLEDGE_COLLECTION_EXISTS"
   | "KNOWLEDGE_UNKNOWN_COLLECTION"
-  /** Settings: the indexing policy lists an id that is no Claude account (nor the System login). */
+  /** Settings: the indexing policy lists another agent's account, or a legacy `accountId` is no Claude account. */
   | "KNOWLEDGE_UNKNOWN_ACCOUNT"
   | "KNOWLEDGE_TOO_LARGE"
   | "KNOWLEDGE_NOT_A_WORKER"

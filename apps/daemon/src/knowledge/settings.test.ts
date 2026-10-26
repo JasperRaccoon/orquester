@@ -166,12 +166,20 @@ test("a policy update is stored with the accountId an older build would run; a l
   assert.equal((await h.onDisk()).settings.accountId, null);
   assert.deepEqual((await h.settings.update({ accountPolicy: { strategy: "fixed", accounts: ["system"] } })).accountId, "system");
 
+  // As in a workflow, an id no account has (one removed since) is kept; the selector skips it.
+  const gone = { ...AUTO, strategy: "fixed", accounts: ["gone", "claude-1"] };
+  assert.deepEqual(await h.settings.update({ accountPolicy: { strategy: "fixed", accounts: ["gone", "claude-1"] } }), {
+    ...DEFAULTS,
+    accountPolicy: gone,
+    accountId: "gone"
+  });
+
   // An older client's accountId: the record then means what it chose.
   assert.deepEqual(await h.settings.update({ accountId: "claude-2" }), { ...DEFAULTS, accountPolicy: fixed(["claude-2", "claude-1"]), accountId: "claude-2" });
   assert.deepEqual((await h.onDisk()).settings, { future: "kept", accountId: "claude-2" });
 });
 
-test("refusals: concurrency out of bounds, a bad policy, a non-Claude or unknown account, an empty model, a non-object", async (t) => {
+test("refusals: concurrency out of bounds, a bad policy, a non-Claude account, an unknown legacy accountId, an empty model, a non-object", async (t) => {
   const h = await harness(t);
   await invalid(h.settings.update({ concurrency: 0 }), /from 1 to 8/);
   await invalid(h.settings.update({ concurrency: 9 }), /from 1 to 8/);
@@ -188,7 +196,6 @@ test("refusals: concurrency out of bounds, a bad policy, a non-Claude or unknown
   await invalid(h.settings.update({ accountPolicy: { accounts: [""] } }), /accountPolicy\.accounts\.0/);
   await invalid(h.settings.update({ accountPolicy: { scoped: [{ label: "Fable" }] } }), /accountPolicy\.scoped\.0\.maxPct/);
   await unknownAccount(h.settings.update({ accountPolicy: { accounts: ["claude-1", "codex-1"] } }), /"codex-1" is a codex account/);
-  await unknownAccount(h.settings.update({ accountPolicy: { strategy: "fixed", accounts: ["gone"] } }), /no agent account "gone"/);
   await invalid(h.settings.update({ model: "" }), /model/);
   await invalid(h.settings.update({ model: 5 }), /model/);
   await invalid(h.settings.update({ model: "x".repeat(201) }), /longer than 200/);
