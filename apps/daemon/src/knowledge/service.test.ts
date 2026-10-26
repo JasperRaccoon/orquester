@@ -35,7 +35,7 @@ async function harness(t: TestContext, options: { enabled?: boolean; over?: Part
   const knowledge = new KnowledgeService({
     appdir,
     plugins,
-    accounts: { getRecord: () => undefined },
+    accounts: { list: () => ({ accounts: [] }) },
     session: () => null,
     profiles: {
       list: async () => ({ profiles: [], errors: [] }),

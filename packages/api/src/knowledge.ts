@@ -13,6 +13,8 @@
  * owns (`KnowledgeSessionOwner`), which work through the two worker tools.
  */
 
+import type { AccountPolicy } from "@orquester/config";
+
 // ---------------------------------------------------------------------------
 // Limits (enforced by the daemon; the UI mirrors them)
 // ---------------------------------------------------------------------------
@@ -397,7 +399,17 @@ export interface KnowledgeRebuildEstimate {
 // ---------------------------------------------------------------------------
 
 export interface KnowledgeSettings {
-  /** Claude account for worker sessions; null = automatic (first usable, with failover). */
+  /**
+   * Which Claude accounts the indexing sessions use, chosen like a workflow Agent block's chain
+   * entry (strategy, allow-list or fixed order, the System login, usage caps, unknown usage), with
+   * the same failover and shared cooldowns. A record with no policy (written before policies
+   * existed) answers the policy its legacy `accountId` meant ({@link knowledgeLegacyAccountPolicy}).
+   */
+  accountPolicy: AccountPolicy;
+  /**
+   * Legacy, for older clients: the account a fixed policy tries first, else null (automatic) —
+   * {@link knowledgeLegacyAccountId} of `accountPolicy`.
+   */
   accountId: string | null;
   /** Model for worker sessions; null = the default (a Sonnet-class model). */
   model: string | null;
@@ -405,13 +417,64 @@ export interface KnowledgeSettings {
   concurrency: number;
 }
 
+/** `SYSTEM_ACCOUNT_ID` (index.ts) — restated so this module does not import the root at load. */
+const SYSTEM_ACCOUNT = "system";
+
+/** Automatic on a host with Claude accounts: the least used of them (the policy schema's defaults). */
+export const KNOWLEDGE_DEFAULT_ACCOUNT_POLICY: AccountPolicy = {
+  strategy: "least-used",
+  includeSystem: false,
+  soonestResetWindow: "weekly",
+  leastUsedMetric: "max",
+  unknownUsage: "last"
+};
+
 export const KNOWLEDGE_DEFAULT_SETTINGS: KnowledgeSettings = {
+  accountPolicy: KNOWLEDGE_DEFAULT_ACCOUNT_POLICY,
   accountId: null,
   model: null,
   concurrency: KNOWLEDGE_CONCURRENCY_DEFAULT
 };
 
-export type UpdateKnowledgeSettingsRequest = Partial<KnowledgeSettings>;
+/**
+ * A partial update. `accountPolicy` is validated with the workflow policy schema, and every
+ * account it lists must be a Claude account's id or `SYSTEM_ACCOUNT_ID`. `accountId` is the legacy
+ * field an older client sends: ignored when `accountPolicy` is sent too, else it replaces the
+ * stored policy with the one it means (null, or a Claude account id).
+ */
+export interface UpdateKnowledgeSettingsRequest {
+  accountPolicy?: AccountPolicy;
+  /** @deprecated Send `accountPolicy`. */
+  accountId?: string | null;
+  model?: string | null;
+  concurrency?: number;
+}
+
+/**
+ * The policy a legacy `accountId` means, over the host's Claude account ids in their order, exactly
+ * as the plugin chose before policies existed: null (automatic) is the least used Claude account,
+ * with the System login only while there is no Claude account; an id is a fixed order with that
+ * account first and every other Claude account after it.
+ */
+export function knowledgeLegacyAccountPolicy(accountId: string | null, claudeAccountIds: readonly string[]): AccountPolicy {
+  if (accountId === null) return { ...KNOWLEDGE_DEFAULT_ACCOUNT_POLICY, includeSystem: claudeAccountIds.length === 0 };
+  return {
+    ...KNOWLEDGE_DEFAULT_ACCOUNT_POLICY,
+    strategy: "fixed",
+    accounts: [accountId, ...claudeAccountIds.filter((id) => id !== accountId)],
+    includeSystem: accountId === SYSTEM_ACCOUNT
+  };
+}
+
+/**
+ * The legacy `accountId` written beside a policy, so a build that predates policies still runs
+ * sensibly: a fixed order's first account (that build tries it first, then every other Claude
+ * account), else null (automatic: the least used Claude account). A reader also compares it with
+ * the stored `accountId` to tell that an older build changed the account after the policy was saved.
+ */
+export function knowledgeLegacyAccountId(policy: AccountPolicy): string | null {
+  return policy.strategy === "fixed" ? (policy.accounts?.[0] ?? null) : null;
+}
 
 // ---------------------------------------------------------------------------
 // Worker protocol (only sessions owned by the plugin)
@@ -528,6 +591,8 @@ export type KnowledgeErrorCode =
   | "KNOWLEDGE_INVALID"
   | "KNOWLEDGE_COLLECTION_EXISTS"
   | "KNOWLEDGE_UNKNOWN_COLLECTION"
+  /** Settings: the indexing policy lists an id that is no Claude account (nor the System login). */
+  | "KNOWLEDGE_UNKNOWN_ACCOUNT"
   | "KNOWLEDGE_TOO_LARGE"
   | "KNOWLEDGE_NOT_A_WORKER"
   | "KNOWLEDGE_BUSY"

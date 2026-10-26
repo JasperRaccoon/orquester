@@ -11,7 +11,7 @@
  * written the way the engine reads it (`lib/workflows/inspector-usage.ts`).
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useContext, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, KeyRound } from "lucide-react";
 
 import { SYSTEM_ACCOUNT_ID, type AccountPolicy } from "@orquester/api";
@@ -57,7 +57,7 @@ import {
   SmallButton,
   ToggleRow
 } from "../ui/controls";
-import { FieldAnchor, useInspector, useRevealOpen } from "./inspector-context";
+import { FieldAnchor, InspectorContext, useRevealOpen } from "./inspector-context";
 
 const TONE_VAR: Record<ReturnType<typeof usageTone>, string> = {
   ok: "var(--usage-ok)",
@@ -302,7 +302,8 @@ export const AccountPolicyEditor: React.FC<{
   /** The policy's validation field path ("config.chain.0.accounts"). */
   anchor: string;
 }> = ({ family, agentLabel, policy, onChange, model, models, anchor }) => {
-  const { problems } = useInspector();
+  // Also used outside a workflow inspector (Settings → Plugins → Knowledge Graph): no problems there.
+  const problems = useContext(InspectorContext)?.problems ?? [];
   const usage = useAppStore((state) => state.usage);
   const agentAccounts = useAppStore((state) => state.agentAccounts);
   const { accounts: managed, loaded } = useManagedAccounts(family);

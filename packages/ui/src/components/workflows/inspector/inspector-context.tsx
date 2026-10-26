@@ -42,6 +42,8 @@ export interface InspectorContextValue {
 
 export const InspectorContext = createContext<InspectorContextValue | null>(null);
 
+const NO_PROBLEMS: readonly WorkflowProblem[] = [];
+
 export function useInspector(): InspectorContextValue {
   const value = useContext(InspectorContext);
   if (value === null) throw new Error("useInspector outside an inspector");
@@ -99,7 +101,10 @@ export function useSectionProblems(prefixes: readonly string[]): ProblemCounts {
  * render, so the field is in the DOM by the frame the reveal focuses it.
  */
 export function useRevealOpen(anchors: readonly string[], defaultOpen = false): [boolean, (open: boolean) => void] {
-  const { reveal, problems } = useInspector();
+  // Outside an inspector (the account policy editor in Settings) nothing is revealed and there are no problems.
+  const inspector = useContext(InspectorContext);
+  const reveal = inspector?.reveal;
+  const problems = inspector?.problems ?? NO_PROBLEMS;
   const errors = countProblems(problems, anchors).errors;
   const covers = reveal != null && fieldCovered(reveal.field, anchors);
   const [open, setOpen] = useState(() => defaultOpen || errors > 0 || covers);

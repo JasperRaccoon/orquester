@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { KNOWLEDGE_DEFAULT_ACCOUNT_POLICY as AUTO } from "@orquester/api";
 
 import {
   parseKnowledgeChangedEvent,
@@ -191,10 +192,29 @@ describe("knowledge wire validation", () => {
   });
 
   it("reads the indexing settings field by field, a bad field as its default", () => {
-    assert.deepEqual(parseKnowledgeSettings({ accountId: "c1", model: "opus", concurrency: 6, extra: 1 }), { accountId: "c1", model: "opus", concurrency: 6 });
-    assert.deepEqual(parseKnowledgeSettings({ accountId: 7, model: "", concurrency: 99 }), { accountId: null, model: null, concurrency: 4 });
-    assert.deepEqual(parseKnowledgeSettings({ accountId: " ", model: ["x"], concurrency: 2.5 }), { accountId: null, model: null, concurrency: 4 });
-    assert.deepEqual(parseKnowledgeSettings({}), { accountId: null, model: null, concurrency: 4 });
+    const policy = { ...AUTO, strategy: "fixed", accounts: ["c1", "system"], includeSystem: true, scoped: [{ label: "Fable", maxPct: 60 }], future: 1 };
+    assert.deepEqual(parseKnowledgeSettings({ accountPolicy: policy, accountId: "c1", model: "opus", concurrency: 6, extra: 1 }), {
+      accountPolicy: policy,
+      accountId: "c1",
+      model: "opus",
+      concurrency: 6
+    });
+    // A policy read field by field: bad fields as their defaults, bad list items left out.
+    assert.deepEqual(parseKnowledgeSettings({ accountPolicy: { strategy: 3, accounts: ["c1", 2], maxWeeklyPct: -1, unknownUsage: "exclude" } })!.accountPolicy, {
+      ...AUTO,
+      accounts: ["c1"],
+      unknownUsage: "exclude"
+    });
+    // A daemon that predates policies: its accountId's policy.
+    assert.deepEqual(parseKnowledgeSettings({ accountId: "c1", model: "opus", concurrency: 6 }), {
+      accountPolicy: { ...AUTO, strategy: "fixed", accounts: ["c1"] },
+      accountId: "c1",
+      model: "opus",
+      concurrency: 6
+    });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: 7, model: "", concurrency: 99 }), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({ accountId: " ", model: ["x"], concurrency: 2.5, accountPolicy: "x" }), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
+    assert.deepEqual(parseKnowledgeSettings({}), { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 });
     assert.equal(parseKnowledgeSettings(null), null);
     assert.equal(parseKnowledgeSettings([]), null);
     assert.equal(parseKnowledgeSettings("settings"), null);
@@ -219,9 +239,10 @@ describe("knowledge wire validation", () => {
     const client = new ApiClient({ id: "c1" } as never, transporter);
 
     answer = { accountId: 5, model: "opus", concurrency: "8" };
-    assert.deepEqual(await client.getKnowledgeSettings(), { accountId: null, model: "opus", concurrency: 4 });
-    answer = { accountId: "c2", model: null, concurrency: 3, secret: "x" };
-    assert.deepEqual(await client.updateKnowledgeSettings({ accountId: "c2" }), { accountId: "c2", model: null, concurrency: 3 });
+    assert.deepEqual(await client.getKnowledgeSettings(), { accountPolicy: AUTO, accountId: null, model: "opus", concurrency: 4 });
+    const policy = { ...AUTO, strategy: "fixed" as const, accounts: ["c2"] };
+    answer = { accountPolicy: policy, accountId: "c2", model: null, concurrency: 3, secret: "x" };
+    assert.deepEqual(await client.updateKnowledgeSettings({ accountPolicy: policy }), { accountPolicy: policy, accountId: "c2", model: null, concurrency: 3 });
     answer = "<html>proxy error</html>";
     await assert.rejects(client.getKnowledgeSettings(), /knowledge settings this app cannot read/);
     await assert.rejects(client.updateKnowledgeSettings({}), /knowledge settings this app cannot read/);

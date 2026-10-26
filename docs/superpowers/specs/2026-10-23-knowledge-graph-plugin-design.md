@@ -398,16 +398,17 @@ init`.
   lists the current and recent ones, with a link to each transcript for
   debugging. Their usage appears under Usage like any chat.
 
-**Accounts.** Sessions run on the account picked in plugin settings. On a
-usage limit they fail over to the user's other Claude accounts, reusing the
+**Accounts.** Sessions run on the accounts the plugin settings' account
+policy picks (the same policy a workflow Agent block's chain entry carries).
+On a usage limit they fail over to the next account the policy allows, reusing the
 Agent block's selection and failover logic (`workflows/agent/select.ts`,
 `failover.ts`). If every account is limited, the run pauses and resumes once
 a limit resets. It never fails silently, and the status bar says why. Codex
 accounts could work the same way, since the mechanism is agent-agnostic,
 but v1 offers Claude only *(my call)*.
 
-**No usage cap or headroom rule (user decision).** Linking may use accounts
-right up to their limits. In exchange, the user asked that every run be as
+**No usage cap or headroom rule by default (user decision).** Linking may use accounts
+right up to their limits unless the account policy sets caps. In exchange, the user asked that every run be as
 token-efficient as possible, so the measures under "Light on tokens" are
 requirements, not tuning:
 
@@ -557,8 +558,13 @@ selected in its side panel.
   "Remove downloads" (refused while the plugin is on), and the last error.
 - **Settings:**
   - "Enable on this server"
-  - indexing account: a picker over Claude accounts, defaulting to automatic
-    with failover
+  - indexing accounts: the workflow Agent block's account policy editor over
+    the Claude accounts (most quota left, soonest reset, or a fixed order; an
+    allow-list, the System login, usage caps, unknown usage), defaulting to
+    the least used Claude account with failover. A record from before the
+    policy keeps its meaning: `accountId` null is automatic, an id is a fixed
+    order starting with it; `accountId` is still written beside the policy
+    for older builds
   - indexing model
   - concurrency
 - **Activity:** entries, last run (when, how long, calls, tokens), tokens

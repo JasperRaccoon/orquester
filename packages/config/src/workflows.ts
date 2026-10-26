@@ -156,6 +156,37 @@ export const accountPolicySchema = looseObject({
 });
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
+/**
+ * An account policy stored outside a workflow definition (the Knowledge Graph plugin's settings),
+ * read field by field so a value another build wrote never makes it unreadable: a field that does
+ * not parse reads as absent (its default), `accounts` and `scoped` items that do not parse are left
+ * out, and keys this build does not know are kept. Undefined when `value` is not an object.
+ */
+export function readAccountPolicy(value: unknown): AccountPolicy | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const shape = accountPolicySchema.shape;
+  const scopedRule = shape.scoped.unwrap().element;
+  const fields: Record<string, z.ZodTypeAny> = shape;
+  const out: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "__proto__") continue;
+    if (key === "accounts" && Array.isArray(field)) {
+      out.accounts = field.filter((item): item is string => typeof item === "string" && item.length > 0);
+    } else if (key === "scoped" && Array.isArray(field)) {
+      out.scoped = field.flatMap((item) => {
+        const rule = scopedRule.safeParse(item);
+        return rule.success ? [rule.data] : [];
+      });
+    } else if (Object.prototype.hasOwnProperty.call(fields, key)) {
+      const parsed = fields[key]!.safeParse(field);
+      if (parsed.success && parsed.data !== undefined) out[key] = parsed.data;
+    } else {
+      out[key] = field;
+    }
+  }
+  return accountPolicySchema.parse(out);
+}
+
 export const agentChainEntrySchema = looseObject({
   /**
    * Registry refId: claude | codex | grok | opencode. Any string parses (a definition may name an

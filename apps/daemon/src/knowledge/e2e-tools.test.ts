@@ -81,7 +81,7 @@ async function harness(t: TestContext) {
   const knowledge = new KnowledgeService({
     appdir,
     plugins,
-    accounts: { getRecord: () => undefined },
+    accounts: { list: () => ({ accounts: [] }) },
     session: (id) => sessions.get(id) ?? workerTab(id),
     profiles: profileStore,
     onProfileChange: (listener) => {

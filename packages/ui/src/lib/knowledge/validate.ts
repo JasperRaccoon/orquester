@@ -14,8 +14,10 @@ import {
   KNOWLEDGE_COLORS,
   KNOWLEDGE_CONCURRENCY_MAX,
   KNOWLEDGE_CONCURRENCY_MIN,
+  KNOWLEDGE_DEFAULT_ACCOUNT_POLICY,
   KNOWLEDGE_DEFAULT_SETTINGS,
   knowledgeCitation,
+  knowledgeLegacyAccountPolicy,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
   type KnowledgeCollectionView,
@@ -45,6 +47,7 @@ import {
   type KnowledgeStatus,
   type KnowledgeWorkerView
 } from "@orquester/api";
+import { readAccountPolicy } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -441,11 +444,16 @@ export function parseKnowledgeChangedEvent(value: unknown): KnowledgeChangedEven
 /**
  * The indexing settings, field by field (an older or newer daemon's answer may
  * lack one or carry another type): a bad field reads as its default, as the
- * daemon reads its own stored record. Null when it is not an object.
+ * daemon reads its own stored record; the account policy field by field too.
+ * A daemon that predates policies sends only `accountId`: its policy is
+ * automatic, or a fixed order starting at that account (the accounts it fails
+ * over to after it are not in the answer). Null when it is not an object.
  */
 export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null {
   if (!isRecord(value)) return null;
   const accountId = typeof value.accountId === "string" && value.accountId.trim() !== "" ? value.accountId : null;
+  const accountPolicy =
+    readAccountPolicy(value.accountPolicy) ?? (accountId === null ? KNOWLEDGE_DEFAULT_ACCOUNT_POLICY : knowledgeLegacyAccountPolicy(accountId, []));
   const model = typeof value.model === "string" && value.model.trim() !== "" ? value.model : null;
   const concurrency =
     typeof value.concurrency === "number" &&
@@ -454,7 +462,7 @@ export function parseKnowledgeSettings(value: unknown): KnowledgeSettings | null
     value.concurrency <= KNOWLEDGE_CONCURRENCY_MAX
       ? value.concurrency
       : KNOWLEDGE_DEFAULT_SETTINGS.concurrency;
-  return { accountId, model, concurrency };
+  return { accountPolicy, accountId, model, concurrency };
 }
 
 /** A rebuild estimate: both counts must be numbers (an estimate missing one is no estimate). */
