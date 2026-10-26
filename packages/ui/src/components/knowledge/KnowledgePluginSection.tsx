@@ -2,7 +2,7 @@
  * Settings → Plugins → Knowledge Graph: while the plugin is on, the Activity
  * block (counts, linking state, the last run, tokens, the last error, worker
  * sessions, "Rebuild graph", "Open Knowledge tab"); always, the indexing
- * settings (account, model, concurrency), which the daemon answers whether or
+ * settings (account policy, model, concurrency), which the daemon answers whether or
  * not the plugin is on so they can be set before turning it on.
  *
  * Activity reads the knowledge store's status, which `knowledge.status` events
@@ -20,6 +20,7 @@ import {
   type KnowledgeStatus,
   type KnowledgeWorkerView
 } from "@orquester/api";
+import type { ProviderModel } from "@orquester/api/agent-chat";
 
 import { cn } from "../../lib/cn";
 import { copyText } from "../../lib/clipboard";
@@ -32,8 +33,8 @@ import { Button, ConfirmDialog, Input } from "../ui";
 import { InfoRow, Notice, SettingRow, SettingsSection } from "../settings/primitives";
 import { knowledgeCountsText, knowledgeErrorText, linkingView } from "./knowledge.logic";
 import {
+  KNOWLEDGE_DEFAULT_MODEL,
   KNOWLEDGE_MODEL_INPUT_MAX,
-  knowledgeAccountOptions,
   knowledgeRebuildMessage,
   knowledgeRunLine,
   knowledgeSettingsForm,
@@ -46,9 +47,8 @@ import {
   type KnowledgeSettingsForm
 } from "./knowledge-plugin.logic";
 import { WorkerTranscriptDialog } from "./WorkerTranscriptDialog";
-
-const SELECT_CLASS =
-  "h-8 min-w-0 max-w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 text-base text-neutral-100 disabled:opacity-50 sm:text-sm";
+import { AccountPolicyEditor } from "../workflows/inspector/AccountPolicyEditor";
+import { ReadOnlyFieldset } from "../workflows/ui/controls";
 
 export const KnowledgePluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) => (
   <>
@@ -311,8 +311,8 @@ const RebuildButton: React.FC<{ disabled: boolean }> = ({ disabled }) => {
 // Indexing settings
 // ---------------------------------------------------------------------------
 
-/** Claude's model slugs, when this client has read the provider catalogue (suggestions only). */
-function useClaudeModelSlugs(): string[] {
+/** Claude's current models, when this client has read the provider catalogue (suggestions and scoped limits only). */
+function useClaudeModels(): ProviderModel[] {
   const api = useAppStore((s) => s.api);
   useEffect(() => {
     const transport = api?.agentChat;
@@ -324,7 +324,7 @@ function useClaudeModelSlugs(): string[] {
     () => providersStore.getState().providers
   );
   return useMemo(
-    () => (providerForRefId(providers, "claude")?.models ?? []).filter((m) => m.isLegacy !== true).map((m) => m.slug),
+    () => (providerForRefId(providers, "claude")?.models ?? []).filter((m) => m.isLegacy !== true),
     [providers]
   );
 }
@@ -332,8 +332,7 @@ function useClaudeModelSlugs(): string[] {
 const KnowledgeIndexingSettings: React.FC = () => {
   const ids = useId();
   const api = useAppStore((s) => s.api);
-  const accounts = useAppStore((s) => s.agentAccounts?.accounts);
-  const models = useClaudeModelSlugs();
+  const models = useClaudeModels();
 
   const [saved, setSaved] = useState<KnowledgeSettings | null>(null);
   const [form, setForm] = useState<KnowledgeSettingsForm | null>(null);
@@ -359,8 +358,6 @@ const KnowledgeIndexingSettings: React.FC = () => {
   }, [api]);
 
   useEffect(load, [load]);
-
-  const options = useMemo(() => knowledgeAccountOptions(accounts, form?.accountId ?? null), [accounts, form?.accountId]);
 
   if (form === null || saved === null) {
     return (
@@ -424,23 +421,21 @@ const KnowledgeIndexingSettings: React.FC = () => {
     <SettingsSection title="Indexing">
       <form aria-label="Knowledge indexing settings" className="divide-y divide-neutral-800/80" onSubmit={(event) => void save(event)}>
         <SettingRow
-          label="Indexing account"
-          htmlFor={`${ids}-account`}
-          description="The Claude account whose sessions link new entries into the graph. Automatic uses the first one that can run, and moves on when one reaches its usage limit."
+          stacked
+          label="Indexing accounts"
+          description="Which Claude accounts the indexing sessions use, chosen like a workflow Agent block: the one with the most quota left, the one whose quota resets soonest, or a fixed order. When one can't run, the next one takes over; when none can, indexing pauses until the earliest reset."
         >
-          <select
-            id={`${ids}-account`}
-            className={SELECT_CLASS}
-            disabled={saving}
-            value={form.accountId ?? ""}
-            onChange={(event) => change({ accountId: event.target.value === "" ? null : event.target.value })}
-          >
-            {options.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          <ReadOnlyFieldset readOnly={saving} className="min-w-0 max-w-2xl">
+            <AccountPolicyEditor
+              family="claude"
+              agentLabel="Claude"
+              policy={form.accountPolicy}
+              onChange={(accountPolicy) => change({ accountPolicy })}
+              model={form.model.trim() || KNOWLEDGE_DEFAULT_MODEL}
+              models={models}
+              anchor="accountPolicy"
+            />
+          </ReadOnlyFieldset>
         </SettingRow>
         <SettingRow label="Indexing model" htmlFor={`${ids}-model`} description="The model the indexing sessions use. Leave it empty for the default.">
           <Input
@@ -455,8 +450,8 @@ const KnowledgeIndexingSettings: React.FC = () => {
           />
           {models.length > 0 && (
             <datalist id={`${ids}-models`}>
-              {models.map((slug) => (
-                <option key={slug} value={slug} />
+              {models.map((m) => (
+                <option key={m.slug} value={m.slug} />
               ))}
             </datalist>
           )}

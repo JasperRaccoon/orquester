@@ -274,7 +274,7 @@ test("the Knowledge Graph routes are bearer-gated on the remote transport, worke
   const knowledge = new KnowledgeService({
     appdir,
     plugins: new FakeKnowledgePlugins(true),
-    accounts: { getRecord: () => undefined },
+    accounts: { list: () => ({ accounts: [] }) },
     session: () => null,
     profiles: { list: async () => ({ profiles: [], errors: [] }), read: async () => { throw new Error("no profiles"); } },
     publisher: { publish() {} },

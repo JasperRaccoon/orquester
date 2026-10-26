@@ -128,6 +128,46 @@ test("knowledge-graph settings read field by field; a bad value never makes the 
   assert.deepEqual(read(undefined), {});
 });
 
+test("knowledge-graph settings read the account policy field by field, keeping unknown keys", () => {
+  const read = (settings: unknown) =>
+    storedKnowledgeSettings(pluginStateOf(parsePluginsConfig({ plugins: { "knowledge-graph": { settings } } }), "knowledge-graph"));
+  const defaults = { strategy: "least-used", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" };
+  // A full, valid policy reads as stored.
+  const full = {
+    strategy: "fixed",
+    accounts: ["acc-2", "system"],
+    includeSystem: true,
+    maxSessionPct: 80,
+    maxWeeklyPct: 90,
+    scoped: [{ label: "Fable", maxPct: 70, onlyForModels: ["opus"] }],
+    soonestResetWindow: "session",
+    leastUsedMetric: "weekly",
+    unknownUsage: "exclude"
+  };
+  assert.deepEqual(read({ accountId: "acc-2", accountPolicy: full }), { accountId: "acc-2", accountPolicy: full });
+  // An empty object is the policy's defaults; no accountPolicy is none (the caller maps accountId).
+  assert.deepEqual(read({ accountPolicy: {} }), { accountPolicy: defaults });
+  assert.deepEqual(read({ accountId: null }), { accountId: null });
+  // Bad fields read as their defaults, bad list items are left out, unknown keys are kept.
+  assert.deepEqual(
+    read({
+      accountPolicy: {
+        strategy: "round-robin",
+        accounts: ["acc-1", 7, "", "acc-3"],
+        includeSystem: "yes",
+        maxSessionPct: 140,
+        maxWeeklyPct: 50,
+        scoped: [{ label: "Fable", maxPct: 60 }, { label: "", maxPct: 10 }, "x"],
+        unknownUsage: "skip",
+        future: { x: 1 }
+      }
+    }).accountPolicy,
+    { ...defaults, accounts: ["acc-1", "acc-3"], maxWeeklyPct: 50, scoped: [{ label: "Fable", maxPct: 60 }], future: { x: 1 } }
+  );
+  // A policy that is not an object reads as absent.
+  for (const accountPolicy of ["fixed", null, [1], 3]) assert.deepEqual(read({ accountPolicy }), {}, JSON.stringify(accountPolicy));
+});
+
 test("a plugin record's settings and their unknown keys survive a parse", () => {
   const config = parsePluginsConfig({
     plugins: { "knowledge-graph": { enabled: true, settings: { concurrency: 2, future: [1, 2] }, other: "kept" } }

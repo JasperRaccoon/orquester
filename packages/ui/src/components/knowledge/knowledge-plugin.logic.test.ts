@@ -1,23 +1,27 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { AgentAccount, KnowledgeRunSummary, KnowledgeWorkerView } from "@orquester/api";
+import { KNOWLEDGE_DEFAULT_ACCOUNT_POLICY, type AccountPolicy, type KnowledgeRunSummary, type KnowledgeSettings, type KnowledgeWorkerView } from "@orquester/api";
 
 import {
-  KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL,
-  knowledgeAccountOptions,
   knowledgeRunLine,
+  knowledgeSettingsForm,
   knowledgeSettingsPatch,
   knowledgeSettingsProblem,
   knowledgeWorkersShown,
   knowledgeWorkerText,
-  readKnowledgeSettings
+  readKnowledgeSettings,
+  sameAccountPolicy
 } from "./knowledge-plugin.logic";
 
-const SAVED = { accountId: null, model: null, concurrency: 4 };
+const AUTO = KNOWLEDGE_DEFAULT_ACCOUNT_POLICY;
+const SAVED: KnowledgeSettings = { accountPolicy: AUTO, accountId: null, model: null, concurrency: 4 };
+const fixed = (accounts: string[], extra: Partial<AccountPolicy> = {}): AccountPolicy => ({ ...AUTO, strategy: "fixed", accounts, ...extra });
 
 describe("knowledge settings form", () => {
   it("reads the daemon's settings field by field, defaulting bad fields", () => {
-    assert.deepEqual(readKnowledgeSettings({ accountId: "acc1", model: "opus", concurrency: 2, extra: true }), {
+    const policy = fixed(["acc1", "acc2"], { maxWeeklyPct: 80 });
+    assert.deepEqual(readKnowledgeSettings({ accountPolicy: policy, accountId: "acc1", model: "opus", concurrency: 2, extra: true }), {
+      accountPolicy: policy,
       accountId: "acc1",
       model: "opus",
       concurrency: 2
@@ -25,60 +29,42 @@ describe("knowledge settings form", () => {
     assert.deepEqual(readKnowledgeSettings({ accountId: 3, model: "", concurrency: 99 }), SAVED);
     assert.deepEqual(readKnowledgeSettings(null), SAVED);
     assert.deepEqual(readKnowledgeSettings({ concurrency: 1.5 }), SAVED);
+    // A policy's bad fields read as their defaults.
+    assert.deepEqual(readKnowledgeSettings({ accountPolicy: { strategy: "x", maxSessionPct: 50 } }).accountPolicy, { ...AUTO, maxSessionPct: 50 });
+    // A daemon that predates policies: automatic, or its account first.
+    assert.deepEqual(readKnowledgeSettings({ accountId: "acc1", model: null, concurrency: 4 }), { ...SAVED, accountPolicy: fixed(["acc1"]), accountId: "acc1" });
   });
 
   it("refuses concurrency outside 1..8 or not whole", () => {
+    const form = (concurrency: string, model = "") => ({ accountPolicy: AUTO, model, concurrency });
     for (const concurrency of ["", "0", "9", "2.5", "abc", "-1"]) {
-      assert.match(knowledgeSettingsProblem({ accountId: null, model: "", concurrency }) ?? "", /whole number from 1 to 8/, concurrency);
+      assert.match(knowledgeSettingsProblem(form(concurrency)) ?? "", /whole number from 1 to 8/, concurrency);
     }
     for (const concurrency of ["1", "8", " 3 "]) {
-      assert.equal(knowledgeSettingsProblem({ accountId: null, model: "", concurrency }), null, concurrency);
+      assert.equal(knowledgeSettingsProblem(form(concurrency)), null, concurrency);
     }
-    assert.match(knowledgeSettingsProblem({ accountId: null, model: "x".repeat(201), concurrency: "4" }) ?? "", /at most 200/);
+    assert.match(knowledgeSettingsProblem(form("4", "x".repeat(201))) ?? "", /at most 200/);
   });
 
-  it("sends only what changed; an empty model is null (the default)", () => {
-    assert.deepEqual(knowledgeSettingsPatch(SAVED, { accountId: null, model: "  ", concurrency: "4" }), { patch: {} });
-    assert.deepEqual(knowledgeSettingsPatch(SAVED, { accountId: "acc1", model: " opus ", concurrency: "6" }), {
-      patch: { accountId: "acc1", model: "opus", concurrency: 6 }
+  it("sends only what changed; an empty model is null (the default); a policy goes with its legacy accountId", () => {
+    assert.deepEqual(knowledgeSettingsPatch(SAVED, { accountPolicy: AUTO, model: "  ", concurrency: "4" }), { patch: {} });
+    assert.deepEqual(knowledgeSettingsPatch(SAVED, { accountPolicy: fixed(["acc1", "acc2"]), model: " opus ", concurrency: "6" }), {
+      patch: { accountPolicy: fixed(["acc1", "acc2"]), accountId: "acc1", model: "opus", concurrency: 6 }
     });
-    assert.deepEqual(
-      knowledgeSettingsPatch({ accountId: "acc1", model: "opus", concurrency: 6 }, { accountId: null, model: "", concurrency: "6" }),
-      { patch: { accountId: null, model: null } }
-    );
-    assert.ok("error" in knowledgeSettingsPatch(SAVED, { accountId: null, model: "", concurrency: "12" }));
-  });
-});
-
-describe("knowledge indexing account options", () => {
-  const account = (overrides: Partial<AgentAccount>): AgentAccount => ({
-    id: "a",
-    agent: "claude",
-    label: "me@example.com",
-    email: null,
-    plan: null,
-    needsReauth: false,
-    createdAt: "",
-    importedAt: "",
-    ...overrides
+    const saved: KnowledgeSettings = { accountPolicy: fixed(["acc1"]), accountId: "acc1", model: "opus", concurrency: 6 };
+    assert.deepEqual(knowledgeSettingsPatch(saved, { accountPolicy: { ...AUTO, maxWeeklyPct: 90 }, model: "", concurrency: "6" }), {
+      patch: { accountPolicy: { ...AUTO, maxWeeklyPct: 90 }, accountId: null, model: null }
+    });
+    assert.ok("error" in knowledgeSettingsPatch(SAVED, { accountPolicy: AUTO, model: "", concurrency: "12" }));
   });
 
-  it("lists automatic, then Claude accounts only", () => {
-    const options = knowledgeAccountOptions(
-      [account({ id: "c1" }), account({ id: "x1", agent: "codex", label: "codex" }), account({ id: "c2", label: "Work", needsReauth: true })],
-      null
-    );
-    assert.deepEqual(options, [
-      { value: "", label: KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL },
-      { value: "c1", label: "me" },
-      { value: "c2", label: "Work (needs sign-in)" }
-    ]);
-  });
-
-  it("keeps a chosen account the list lacks as its own option", () => {
-    assert.deepEqual(knowledgeAccountOptions([account({ id: "c1" })], "gone").at(-1), { value: "gone", label: "Unknown account (gone)" });
-    // The list not read yet: just the id, not "unknown".
-    assert.deepEqual(knowledgeAccountOptions(undefined, "c9").at(-1), { value: "c9", label: "c9" });
+  it("an edit that comes back to the saved policy is no change, whatever the key order or unset fields", () => {
+    const saved: KnowledgeSettings = { ...SAVED, accountPolicy: fixed(["a", "b"], { maxSessionPct: 80 }) };
+    const form = knowledgeSettingsForm(saved);
+    const reordered = { maxSessionPct: 80, accounts: ["a", "b"], unknownUsage: "last", strategy: "fixed", leastUsedMetric: "max", soonestResetWindow: "weekly", includeSystem: false, maxWeeklyPct: undefined } as AccountPolicy;
+    assert.deepEqual(knowledgeSettingsPatch(saved, { ...form, accountPolicy: reordered }), { patch: {} });
+    assert.equal(sameAccountPolicy(saved.accountPolicy, fixed(["b", "a"], { maxSessionPct: 80 })), false);
+    assert.equal(sameAccountPolicy(saved.accountPolicy, fixed(["a", "b"])), false);
   });
 });
 

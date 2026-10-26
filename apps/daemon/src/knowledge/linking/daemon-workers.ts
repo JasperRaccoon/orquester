@@ -12,16 +12,15 @@
  * - `profileId` = the managed "Knowledge indexer" profile (no items, no built-in tools).
  *
  * Then one turn (`KNOWLEDGE_WORKER_PROMPT`); the chat works through the worker tools inside it.
- * Accounts come from the Agent block's selection and failover (`select.ts`, `failover.ts`): the
- * chosen account first (`settings.accountId`, "fixed" order with every other Claude account
- * after it), else automatic (least used; the system login only when no Claude account is
- * managed), with the workflows' shared cooldowns. The watch is the Agent block's unattended
+ * Accounts come from the Agent block's selection and failover (`select.ts`, `failover.ts`) over
+ * the settings' account policy (`settings.accountPolicy`: strategy, allow-list or fixed order,
+ * System login, usage caps, unknown usage — a legacy `accountId` read as its policy), with the
+ * workflows' shared cooldowns. The watch is the Agent block's unattended
  * watcher (`watch.ts`); an open question or approval (none is expected) is answered the way a
  * workflow answers it.
  */
 
 import {
-  SYSTEM_ACCOUNT_ID,
   type CreateSessionRequest,
   type KnowledgeSessionOwner,
   type KnowledgeSettings,
@@ -62,20 +61,13 @@ export interface DaemonWorkerSessionsDeps {
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
 }
 
-/** The selection chain for the current settings (one Claude entry). */
-export function knowledgeWorkerChain(settings: KnowledgeSettings, accounts: AccountsReader): AgentChainEntry[] {
+/**
+ * The selection chain for the current settings: one Claude entry with the settings' account
+ * policy as it is (a legacy `accountId` was already mapped to its policy when the settings were read).
+ */
+export function knowledgeWorkerChain(settings: KnowledgeSettings): AgentChainEntry[] {
   const model = settings.model?.trim() || DEFAULT_KNOWLEDGE_MODEL;
-  const claude = accounts.list().accounts.filter((account) => account.agent === "claude").map((account) => account.id);
-  const base = { soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
-  const accountsPolicy = settings.accountId
-    ? {
-        ...base,
-        strategy: "fixed" as const,
-        accounts: [settings.accountId, ...claude.filter((id) => id !== settings.accountId)],
-        includeSystem: settings.accountId === SYSTEM_ACCOUNT_ID
-      }
-    : { ...base, strategy: "least-used" as const, includeSystem: claude.length === 0 };
-  return [{ agent: "claude", model, options: [], accounts: accountsPolicy }];
+  return [{ agent: "claude", model, options: [], accounts: settings.accountPolicy }];
 }
 
 export function createDaemonWorkerSessions(deps: DaemonWorkerSessionsDeps): WorkerSessionPort<DaemonWorkerCandidate> {
@@ -89,7 +81,7 @@ export function createDaemonWorkerSessions(deps: DaemonWorkerSessionsDeps): Work
 
   return {
     async pick(memory: FailoverMemory): Promise<WorkerPick<DaemonWorkerCandidate>> {
-      const chain = knowledgeWorkerChain(deps.settings(), deps.accounts);
+      const chain = knowledgeWorkerChain(deps.settings());
       const catalog = new AgentCatalog(deps.api);
       const pick = await pickCandidate(failover, chain, memory, 0, (candidate) => catalog.check(candidate));
       if (pick.kind === "none") {

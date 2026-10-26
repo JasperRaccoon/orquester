@@ -1,13 +1,15 @@
 /**
- * Settings → Plugins → Knowledge Graph: the indexing settings form (account,
- * model, concurrency) and the Activity block's text. Pure: no React, no store.
+ * Settings → Plugins → Knowledge Graph: the indexing settings form (account
+ * policy, model, concurrency) and the Activity block's text. Pure: no React,
+ * no store.
  */
 
 import {
   KNOWLEDGE_CONCURRENCY_MAX,
   KNOWLEDGE_CONCURRENCY_MIN,
   KNOWLEDGE_DEFAULT_SETTINGS,
-  type AgentAccount,
+  knowledgeLegacyAccountId,
+  type AccountPolicy,
   type KnowledgeRebuildEstimate,
   type KnowledgeRunSummary,
   type KnowledgeSettings,
@@ -15,7 +17,6 @@ import {
   type UpdateKnowledgeSettingsRequest
 } from "@orquester/api";
 
-import { shortAccountLabel } from "../../lib/account-label";
 import { parseKnowledgeSettings } from "../../lib/knowledge/validate";
 import { formatDuration } from "../../lib/workflows/format";
 import { compactCount } from "../topbar/usage-format";
@@ -26,10 +27,12 @@ import { compactCount } from "../topbar/usage-format";
 
 /** Longest model name the daemon stores (`KNOWLEDGE_MODEL_MAX` in its settings service). */
 export const KNOWLEDGE_MODEL_INPUT_MAX = 200;
+/** The model indexing runs when none is set (the daemon's `DEFAULT_KNOWLEDGE_MODEL`); scoped usage limits are checked for it. */
+export const KNOWLEDGE_DEFAULT_MODEL = "sonnet";
 
 export interface KnowledgeSettingsForm {
-  /** null = automatic (first usable Claude account, with failover). */
-  accountId: string | null;
+  /** Which Claude accounts indexing uses, as the workflow Agent block's account policy editor edits it. */
+  accountPolicy: AccountPolicy;
   /** "" = the default model. */
   model: string;
   /** As typed, so a half-typed value can be shown and refused. */
@@ -45,7 +48,23 @@ export function readKnowledgeSettings(value: unknown): KnowledgeSettings {
 }
 
 export function knowledgeSettingsForm(settings: KnowledgeSettings): KnowledgeSettingsForm {
-  return { accountId: settings.accountId, model: settings.model ?? "", concurrency: String(settings.concurrency) };
+  return { accountPolicy: settings.accountPolicy, model: settings.model ?? "", concurrency: String(settings.concurrency) };
+}
+
+/** The same policy, whatever its key order (an unset field and an absent one are the same). */
+export function sameAccountPolicy(a: AccountPolicy, b: AccountPolicy): boolean {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (typeof value !== "object" || value === null) return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .filter((key) => record[key] !== undefined)
+        .sort()
+        .map((key) => [key, canonical(record[key])])
+    );
+  };
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
 /** Why the form cannot be saved, or null. */
@@ -61,7 +80,9 @@ export function knowledgeSettingsProblem(form: KnowledgeSettingsForm): string | 
 
 /**
  * What a save sends: only the fields that changed from `saved` (an empty
- * object when nothing did), or the form's problem.
+ * object when nothing did), or the form's problem. A changed policy goes with
+ * the legacy `accountId` it approximates, which a daemon that predates
+ * policies applies instead (a current one ignores it beside a policy).
  */
 export function knowledgeSettingsPatch(
   saved: KnowledgeSettings,
@@ -70,42 +91,15 @@ export function knowledgeSettingsPatch(
   const problem = knowledgeSettingsProblem(form);
   if (problem) return { error: problem };
   const patch: UpdateKnowledgeSettingsRequest = {};
-  if (form.accountId !== saved.accountId) patch.accountId = form.accountId;
+  if (!sameAccountPolicy(form.accountPolicy, saved.accountPolicy)) {
+    patch.accountPolicy = form.accountPolicy;
+    patch.accountId = knowledgeLegacyAccountId(form.accountPolicy);
+  }
   const model = form.model.trim() === "" ? null : form.model.trim();
   if (model !== saved.model) patch.model = model;
   const concurrency = Number(form.concurrency.trim());
   if (concurrency !== saved.concurrency) patch.concurrency = concurrency;
   return { patch };
-}
-
-export interface KnowledgeAccountOption {
-  /** "" = automatic (null on the wire). */
-  value: string;
-  label: string;
-}
-
-export const KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL = "Automatic (with failover)";
-
-/**
- * The indexing-account picker: automatic, then the user's Claude accounts. A
- * chosen account this client does not list (removed, or the list not read
- * yet) stays as an option of its own, so the picker never shows a choice the
- * daemon does not have.
- */
-export function knowledgeAccountOptions(
-  accounts: readonly Pick<AgentAccount, "id" | "agent" | "label" | "needsReauth">[] | undefined,
-  selected: string | null
-): KnowledgeAccountOption[] {
-  const claude = (accounts ?? []).filter((account) => account.agent === "claude");
-  const options: KnowledgeAccountOption[] = [{ value: "", label: KNOWLEDGE_AUTOMATIC_ACCOUNT_LABEL }];
-  for (const account of claude) {
-    const label = shortAccountLabel(account.label) || account.id;
-    options.push({ value: account.id, label: account.needsReauth ? `${label} (needs sign-in)` : label });
-  }
-  if (selected !== null && !claude.some((account) => account.id === selected)) {
-    options.push({ value: selected, label: accounts === undefined ? selected : `Unknown account (${selected})` });
-  }
-  return options;
 }
 
 // ---------------------------------------------------------------------------
