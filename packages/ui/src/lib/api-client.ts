@@ -129,6 +129,8 @@ import type {
   KnowledgeCollectionsResponse,
   KnowledgeEntriesQuery,
   KnowledgeEntriesResponse,
+  KnowledgeFacetsRequest,
+  KnowledgeFacetsResponse,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeItemResponse,
@@ -145,6 +147,7 @@ import type {
 import {
   parseKnowledgeCollectionsResponse,
   parseKnowledgeEntriesResponse,
+  parseKnowledgeFacetsResponse,
   parseKnowledgeGraphResponse,
   parseKnowledgeItemResponse,
   parseKnowledgeRebuildEstimate,
@@ -1060,10 +1063,21 @@ export class ApiClient {
     return this.send("DELETE", knowledgeRoutes.collection(id));
   }
 
-  /** Newest first; `nextCursor` pages on. */
+  /** Newest first; `nextCursor` pages on. The filter params (comma-separated lists, ISO bounds) narrow it like a search's filters. */
   async listKnowledgeEntries(query: KnowledgeEntriesQuery = {}, signal?: AbortSignal): Promise<KnowledgeEntriesResponse> {
     const data = await this.send<unknown>("GET", knowledgeRoutes.entries, {
-      query: { collection: query.collection, cursor: query.cursor, limit: query.limit },
+      query: {
+        collection: query.collection,
+        cursor: query.cursor,
+        limit: query.limit,
+        kinds: query.kinds,
+        authors: query.authors,
+        years: query.years,
+        postedAfter: query.postedAfter,
+        postedBefore: query.postedBefore,
+        savedAfter: query.savedAfter,
+        savedBefore: query.savedBefore
+      },
       signal
     });
     return readKnowledge(parseKnowledgeEntriesResponse(data), "entries list");
@@ -1091,10 +1105,20 @@ export class ApiClient {
     return readKnowledge(parseKnowledgeGraphResponse(data), "graph");
   }
 
-  /** Hybrid search (meaning + keywords) over every collection the user can see. */
+  /**
+   * Hybrid search (meaning + keywords, or "more like these" entries) over every collection the user
+   * can see, with filters, sort, diversity, facets and cursor paging. An older daemon answers
+   * without `total` / `nextCursor` (see `parseKnowledgeSearchResponse`).
+   */
   async searchKnowledge(req: KnowledgeSearchRequest, signal?: AbortSignal): Promise<KnowledgeSearchResponse> {
     const data = await this.send<unknown>("POST", knowledgeRoutes.search, { body: req, signal });
     return readKnowledge(parseKnowledgeSearchResponse(data), "search result");
+  }
+
+  /** Kinds, authors, collections and years, with counts, over every visible entry the narrowing and filters keep. */
+  async getKnowledgeFacets(req: KnowledgeFacetsRequest, signal?: AbortSignal): Promise<KnowledgeFacetsResponse> {
+    const data = await this.send<unknown>("POST", knowledgeRoutes.facets, { body: req, signal });
+    return readKnowledge(parseKnowledgeFacetsResponse(data), "facets");
   }
 
   saveKnowledge(req: KnowledgeSaveRequest): Promise<KnowledgeSaveResponse> {

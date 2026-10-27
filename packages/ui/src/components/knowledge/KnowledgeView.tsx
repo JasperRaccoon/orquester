@@ -21,6 +21,7 @@ import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
 import { KnowledgePanel, type KnowledgeSelection } from "./KnowledgePanel";
 import { KnowledgeStatusBar } from "./KnowledgeStatusBar";
 import { KnowledgeCollectionDialog } from "./KnowledgeCollectionDialog";
+import { EMPTY_KNOWLEDGE_QUERY, type KnowledgeQuery } from "./query-state";
 import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 
 const LazyCanvas = React.lazy(() => import("./KnowledgeGraphCanvas"));
@@ -61,6 +62,19 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
   const [listCollection, setListCollection] = useState<ListCollection>("all");
   const [dialog, setDialog] = useState<{ open: boolean; collection: KnowledgeCollectionView | null }>({ open: false, collection: null });
   const [panelItem, setPanelItem] = useState<KnowledgeItemResponse | null>(null);
+  /** What the List view searches for; shared with the Graph view's search and the panel's "More like this". */
+  const [query, setQuery] = useState<KnowledgeQuery>(EMPTY_KNOWLEDGE_QUERY);
+
+  /**
+   * Switch to the List view searching `next` — the panel's "More like this"
+   * (`openList(findSimilarQuery(id))`) and the Graph view's "Show all results"
+   * (`openList(query)`). `collection`, when given, also narrows the list to it.
+   */
+  const openList = useCallback((next: KnowledgeQuery, collection?: ListCollection) => {
+    setQuery(next);
+    if (collection !== undefined) setListCollection(collection);
+    setView("list");
+  }, []);
 
   // Through refs, so a select never runs inside another state update.
   const selectionRef = useRef(selection);
@@ -206,6 +220,8 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 collections={collections}
                 collection={listCollection}
                 onCollection={setListCollection}
+                query={query}
+                onQueryChange={setQuery}
                 selection={selection}
                 onSelect={select}
                 onNewCollection={() => setDialog({ open: true, collection: null })}
