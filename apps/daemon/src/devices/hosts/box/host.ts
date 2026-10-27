@@ -193,6 +193,9 @@ export class BoxDeviceHost implements DeviceHost {
   /** The profile of each lease's simulator (for `listDevices`; memory only). */
   private readonly leaseProfiles = new Map<string, string>();
   private disposed = false;
+  /** Cold boots in line ({@link oneBootAtATime}). */
+  private bootQueue: Promise<void> = Promise.resolve();
+  private bootsRunning = 0;
 
   constructor(private readonly deps: BoxDeviceHostDeps) {
     this.id = `box:${deps.boxId}`;
@@ -695,15 +698,37 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   private async bootAndAttach(link: BoxConnection, udid: string, signal: AbortSignal, progress: (step: string, label: string) => void, booted = false): Promise<void> {
-    if (!booted) {
-      progress("boot", "Booting iOS");
-      await this.simctl(link, ["boot", udid], signal);
-    }
-    await this.simctl(link, ["bootstatus", udid, "-b"], signal, this.timing.bootStatusMs);
-    progress("first-frame", "Waiting for the home screen");
-    await this.waitForFrame(link, udid, signal);
+    await this.oneBootAtATime(signal, () => progress("boot-queue", "Waiting for another device on this host to finish booting"), async () => {
+      if (!booted) {
+        progress("boot", "Booting iOS");
+        await this.simctl(link, ["boot", udid], signal);
+      }
+      await this.simctl(link, ["bootstatus", udid, "-b"], signal, this.timing.bootStatusMs);
+      progress("first-frame", "Waiting for the home screen");
+      await this.waitForFrame(link, udid, signal);
+    });
     progress("connect-video", "Connecting the video");
     await this.hubPost("/vendor/serve-sim/grid/api/start", { udid }, signal, this.timing.streamStartMs);
+  }
+
+  /**
+   * Cold boots run one at a time per host: two at once saturate a 6 vCPU Mac (integration run:
+   * ~70 s each instead of ~37 s), so queueing gets the first device ready sooner at the same total.
+   */
+  private async oneBootAtATime(signal: AbortSignal, onQueued: () => void, run: () => Promise<void>): Promise<void> {
+    const previous = this.bootQueue;
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => (release = resolve));
+    this.bootQueue = previous.then(() => mine);
+    try {
+      if (this.bootsRunning > 0) onQueued();
+      this.bootsRunning += 1;
+      await Promise.race([previous, new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))]);
+      await run();
+    } finally {
+      this.bootsRunning -= 1;
+      release();
+    }
   }
 
   /** Until a screenshot is a rendered screen, not the boot logo (bounded: the boot goes on after {@link BoxHostTiming.frameWaitMs}). */

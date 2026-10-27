@@ -219,6 +219,21 @@ describe("BoxDeviceHost", () => {
     assert.equal(box.sims.size, 0);
   });
 
+  it("boots one simulator at a time per host", async () => {
+    const host = makeHost();
+    await prepared(host);
+    box.log.length = 0;
+    const steps: string[] = [];
+    const [a, b] = await Promise.all([
+      host.boot({ leaseId: "A", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal),
+      host.boot({ leaseId: "B", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal, (progress) => steps.push(progress.step))
+    ]);
+    const at = (line: string) => box.log.indexOf(line);
+    // The second boot starts after the first one's last frame check.
+    assert.ok(at(`simctl boot ${b.deviceId}`) > box.log.lastIndexOf(`frame ${a.deviceId}`));
+    assert.ok(steps.includes("boot-queue"));
+  });
+
   it("refuses a profile this Xcode has no simulator for, and cleans up a failed boot", async () => {
     const host = makeHost();
     await prepared(host);
