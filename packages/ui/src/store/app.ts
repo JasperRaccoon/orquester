@@ -742,6 +742,15 @@ export interface KnowledgeViewState {
   focus: KnowledgeFocus | null;
 }
 
+/**
+ * Whether a server-level view (Knowledge, or the Devices fleet) covers the
+ * main area: the project's tabs are hidden and inactive under it, and the
+ * right rail and the phone's bottom bars step aside. At most one shows.
+ */
+export function serverViewOpen(state: Pick<AppState, "knowledgeView" | "devicesFleetOpen">): boolean {
+  return state.knowledgeView.open || state.devicesFleetOpen;
+}
+
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "agent-chat"; sessionId: string; session: SessionSummary }
@@ -1082,6 +1091,8 @@ export interface AppState {
   whiteboardTabsByProject: Record<string, WhiteboardTab[]>;
   /** The server-level Knowledge view: whether it covers the main area, and what it shows. */
   knowledgeView: KnowledgeViewState;
+  /** The server-level Devices fleet view (devices phase 2 §2.9) covers the main area; client-local, in memory. */
+  devicesFleetOpen: boolean;
   /** Server cache of to-do records (all loaded scopes/refs). */
   todos: TodoListRecord[];
   /**
@@ -1311,6 +1322,14 @@ export interface AppState {
   /** Leave the Knowledge view: the main area shows the current project (or landing view) again. */
   closeKnowledge: () => void;
   /**
+   * Show the server-level Devices fleet view over the main area (in Knowledge's
+   * place when that shows), with or without a project; closes the mobile drawer.
+   * Going to a project, a tab or a session leaves it, as it leaves Knowledge.
+   */
+  openDevicesFleet: () => void;
+  /** Leave the Devices fleet view: the main area shows the current project (or landing view) again. */
+  closeDevicesFleet: () => void;
+  /**
    * Open (or focus) the editor tab of workflow `workflowId` in project
    * `projectPath` — one per workflow, reused when open; `runId` selects a run
    * in its run view (`null` clears it; absent leaves it). `title` is used only
@@ -1480,6 +1499,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workflowTabsByProject: {},
   whiteboardTabsByProject: {},
   knowledgeView: { open: false, focus: null },
+  devicesFleetOpen: false,
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
@@ -2570,7 +2590,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Opening a project reveals the main view — close the mobile drawer,
         // and the Knowledge view if it was covering it (the same project included).
         sidebarDrawerOpen: false,
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         activeTabByProject: {
           ...state.activeTabByProject,
           [project.path]: active ?? fallback
@@ -2840,6 +2860,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const project = get().currentProject;
     // The new tab (or its loading screen) is what the user asked to see.
     if (get().knowledgeView.open) get().closeKnowledge();
+    if (get().devicesFleetOpen) get().closeDevicesFleet();
     // A slow resume used to leave the clicked row looking inert, so a second
     // click launched the same conversation again and was refused. The first
     // one now owns the screen (`openingChat`) until it lands.
@@ -3002,7 +3023,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       sessions: upsertSession(state.sessions, session),
       ...(state.currentProject?.path === session.projectPath
-        ? { activeTabByProject: { ...state.activeTabByProject, [session.projectPath]: session.id }, ...leaveKnowledge(state) }
+        ? { activeTabByProject: { ...state.activeTabByProject, [session.projectPath]: session.id }, ...leaveServerViews(state) }
         : {})
     }));
     return result;
@@ -3101,7 +3122,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const tab: FileTab = { id: crypto.randomUUID(), projectPath: project.path, title: "Files" };
       return {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         fileTabsByProject: {
           ...state.fileTabsByProject,
           [project.path]: [...(state.fileTabsByProject[project.path] ?? []), tab]
@@ -3128,7 +3149,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? { ...existing, reveal }
         : { id: crypto.randomUUID(), projectPath: project.path, title: "Files", reveal };
       return {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         fileTabsByProject: {
           ...state.fileTabsByProject,
           [project.path]: existing ? [tab, ...tabs.slice(1)] : [tab]
@@ -3147,11 +3168,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const existing = state.gitTabsByProject[project.path]?.[0];
       if (existing) {
-        return { ...leaveKnowledge(state), activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
+        return { ...leaveServerViews(state), activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
       }
       const tab: GitTab = { id: crypto.randomUUID(), projectPath: project.path, title: "Git" };
       return {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         gitTabsByProject: {
           ...state.gitTabsByProject,
           [project.path]: [tab]
@@ -3169,11 +3190,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const tabs = state.whiteboardTabsByProject[project.path] ?? [];
       const existing = tabs.find((t) => t.path === path);
       if (existing) {
-        return { ...leaveKnowledge(state), activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
+        return { ...leaveServerViews(state), activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
       }
       const tab: WhiteboardTab = { id: crypto.randomUUID(), projectPath: project.path, path, title: whiteboardTitle(path) };
       return {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         whiteboardTabsByProject: { ...state.whiteboardTabsByProject, [project.path]: [...tabs, tab] },
         activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
       };
@@ -3220,19 +3241,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   openKnowledgeConcept: (conceptId) => set((state) => showKnowledge(state, { kind: "concept", id: conceptId })),
 
   closeKnowledge: () =>
-    set((state) => {
-      if (!state.knowledgeView.open) return state;
-      // Revealing the active chat tab is the visit that clears its unread mark, as in activateTab.
-      const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
-      const id = key === null ? undefined : state.activeTabByProject[key];
-      const session = id === undefined ? undefined : state.sessions.find((s) => s.id === id);
-      const threadVisits =
-        session && session.kind === "agent-chat" ? visitChatThread(state.threadVisits, session) : state.threadVisits;
-      if (threadVisits !== state.threadVisits) {
-        saveThreadVisits(threadVisits);
-      }
-      return { ...leaveKnowledge(state), threadVisits };
-    }),
+    set((state) => (state.knowledgeView.open ? revealProject(state) : state)),
+
+  openDevicesFleet: () =>
+    set((state) => ({
+      devicesFleetOpen: true,
+      // One server-level view at a time: the fleet takes Knowledge's place.
+      knowledgeView: state.knowledgeView.open ? { ...state.knowledgeView, open: false } : state.knowledgeView,
+      // On a phone it opens from the drawer, which would otherwise stay over it.
+      sidebarDrawerOpen: false
+    })),
+
+  closeDevicesFleet: () => set((state) => (state.devicesFleetOpen ? revealProject(state) : state)),
 
   openWorkflowTab: (projectPath, workflowId, opts) =>
     set((state) => {
@@ -3240,8 +3260,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const tabs = state.workflowTabsByProject[projectPath] ?? [];
       const existing = tabs.find((t) => t.workflowId === workflowId);
       const activeTabByProject = { ...state.activeTabByProject };
-      // The editor shows only in its project: leave the Knowledge view when that is the open one.
-      const knowledge = state.currentProject?.path === projectPath ? leaveKnowledge(state) : {};
+      // The editor shows only in its project: leave a server-level view when that is the open one.
+      const knowledge = state.currentProject?.path === projectPath ? leaveServerViews(state) : {};
       if (existing) {
         activeTabByProject[projectPath] = existing.id;
         const runId = opts && "runId" in opts ? (opts.runId ?? null) : existing.runId;
@@ -3284,7 +3304,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const browser = await api.createBrowser({ projectPath: currentProject.path, url });
       set((state) => ({
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         browsers: upsertBrowser(state.browsers, browser),
         activeTabByProject: { ...state.activeTabByProject, [currentProject.path]: browser.id }
       }));
@@ -3340,7 +3360,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) throw new Error("Not connected");
     const desktop = await api.createDesktop(request);
     set((state) => ({
-      ...leaveKnowledge(state),
+      ...leaveServerViews(state),
       desktops: upsertDesktopIn(state.desktops, desktop),
       activeTabByProject: { ...state.activeTabByProject, [desktop.projectPath]: desktop.id }
     }));
@@ -3354,7 +3374,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const desktop = state.desktops.find((d) => d.id === desktopId);
       return {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         // The app's `desktop.updated` follows; recording it now keeps the
         // close confirm accurate in between.
         desktops: upsertDesktopApp(state.desktops, desktopId, app),
@@ -3470,7 +3490,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (threadVisits !== state.threadVisits) {
         saveThreadVisits(threadVisits);
       }
-      return { ...leaveKnowledge(state), activeTabByProject: { ...state.activeTabByProject, [key]: id }, threadVisits };
+      return { ...leaveServerViews(state), activeTabByProject: { ...state.activeTabByProject, [key]: id }, threadVisits };
     }),
 
   markTabUnread: (id) =>
@@ -3718,7 +3738,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // workspace main view is hidden behind it, so deselect the project (its tabs are
       // preserved — reopening the project restores them) to bring the list into view.
       const nav = {
-        ...leaveKnowledge(state),
+        ...leaveServerViews(state),
         ...(rec.scope === "workspace" && state.currentProject ? { currentProject: null } : {})
       };
       const existing = state.todoTabsByContext[key]?.find((t) => t.todoId === rec.id);
@@ -4057,10 +4077,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         // activation stamps, so finishing a turn in front of the user left the
         // tab marked unread.
         const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
-        // Under the Knowledge view the active tab is hidden: not looked at.
+        // Under a server-level view (Knowledge, the Devices fleet) the active tab is hidden: not looked at.
         const looking =
           key !== null &&
-          !state.knowledgeView.open &&
+          !serverViewOpen(state) &&
           state.activeTabByProject[key] === summary.id &&
           summary.kind === "agent-chat";
         const threadVisits = looking
@@ -4131,6 +4151,8 @@ useAppStore.subscribe((state, previous) => {
   if (state.plugins === previous.plugins) return;
   const on = devicesOn(state.plugins);
   setDevicesPluginOn(on);
+  // The fleet view's entry point goes with the plugin (a list not loaded yet leaves it).
+  if (!on && state.plugins !== null && state.devicesFleetOpen) useAppStore.setState({ devicesFleetOpen: false });
   if (state.plugins === null) resetDevices();
   if (on === devicesOn(previous.plugins)) return;
   if (on && state.api) void loadDevices(state.api).catch(() => undefined);
@@ -4361,7 +4383,7 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
  */
 function withoutDaemonTabs(
   state: Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject">
-): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject" | "knowledgeView"> {
+): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject" | "knowledgeView" | "devicesFleetOpen"> {
   const ids = new Set<string>();
   for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
   for (const tabs of Object.values(state.whiteboardTabsByProject)) for (const tab of tabs) ids.add(tab.id);
@@ -4371,7 +4393,8 @@ function withoutDaemonTabs(
     workflowTabsByProject: {},
     whiteboardTabsByProject: {},
     activeTabByProject,
-    knowledgeView: { open: false, focus: null }
+    knowledgeView: { open: false, focus: null },
+    devicesFleetOpen: false
   };
 }
 
@@ -4381,18 +4404,41 @@ let knowledgeFocusNonce = 0;
 function showKnowledge(state: AppState, focus: Omit<KnowledgeFocus, "nonce"> | null): Partial<AppState> {
   return {
     knowledgeView: { open: true, focus: focus ? { ...focus, nonce: ++knowledgeFocusNonce } : state.knowledgeView.focus },
+    // One server-level view at a time: Knowledge takes the fleet's place.
+    devicesFleetOpen: false,
     // On a phone it opens from the drawer, which would otherwise stay over it.
     sidebarDrawerOpen: false
   };
 }
 
 /**
- * Leave the Knowledge view, keeping its focus for the next visit. Merged into
- * every action that goes to a project, a tab or a session, so what the user
- * went to is what shows; the state is kept as is when the view is closed.
+ * Leave the server-level views (Knowledge keeps its focus for the next visit).
+ * Merged into every action that goes to a project, a tab or a session, so what
+ * the user went to is what shows; the state is kept as is when none shows.
  */
-function leaveKnowledge(state: Pick<AppState, "knowledgeView">): Pick<AppState, "knowledgeView"> {
-  return { knowledgeView: state.knowledgeView.open ? { ...state.knowledgeView, open: false } : state.knowledgeView };
+function leaveServerViews(
+  state: Pick<AppState, "knowledgeView" | "devicesFleetOpen">
+): Pick<AppState, "knowledgeView" | "devicesFleetOpen"> {
+  return {
+    knowledgeView: state.knowledgeView.open ? { ...state.knowledgeView, open: false } : state.knowledgeView,
+    devicesFleetOpen: false
+  };
+}
+
+/**
+ * Close the server-level view and show the project under it. Revealing the
+ * active chat tab is the visit that clears its unread mark, as in activateTab.
+ */
+function revealProject(state: AppState): Partial<AppState> {
+  const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
+  const id = key === null ? undefined : state.activeTabByProject[key];
+  const session = id === undefined ? undefined : state.sessions.find((s) => s.id === id);
+  const threadVisits =
+    session && session.kind === "agent-chat" ? visitChatThread(state.threadVisits, session) : state.threadVisits;
+  if (threadVisits !== state.threadVisits) {
+    saveThreadVisits(threadVisits);
+  }
+  return { ...leaveServerViews(state), threadVisits };
 }
 
 /** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */

@@ -1,4 +1,4 @@
-import { useAppStore } from "../store/app";
+import { serverViewOpen, useAppStore } from "../store/app";
 import type { ProjectSummary, WorkspaceSummary } from "../types";
 
 /**
@@ -110,9 +110,9 @@ export interface JumpTarget {
 export function jumpToProject({ project, sessionId }: JumpTarget): boolean {
   const state = useAppStore.getState();
   const sameProject = state.currentProject?.path === project.path;
-  // Leaving the Knowledge view reveals the project: a change, like a new tab.
+  // Leaving a server-level view reveals the project: a change, like a new tab.
   const changed =
-    state.knowledgeView.open ||
+    serverViewOpen(state) ||
     !sameProject ||
     (sessionId !== undefined && state.activeTabByProject[project.path] !== sessionId);
   if (project.workspace && state.currentWorkspace !== project.workspace) {
