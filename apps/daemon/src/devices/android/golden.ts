@@ -85,6 +85,9 @@ export interface GoldenDeps {
   density?: number;
 }
 
+/** How long a restarted SystemUI gets to draw its status bar and cutout before going on. */
+export const SYSTEM_UI_SETTLE_MS = 5_000;
+
 /** The fabricated overlay that carries a snapshot's display cutout in dp. */
 export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
 
@@ -94,7 +97,8 @@ export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
  * on a scaled framebuffer the camera hole lands off-centre. Reads `cutoutSpec` from `dumpsys
  * display`, fabricates `config_mainBuiltInDisplayCutout` in dp — with the overlay's rect
  * approximation in dp and its fill, so the hole is drawn whole — (needs `adb root`, Google APIs
- * images allow it; `adb unroot` after), disables the pixel one. Resolves what it did.
+ * images allow it; `adb unroot` after), disables the pixel one, and restarts SystemUI so it draws
+ * the new hole. Resolves what it did.
  */
 export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: NodeJS.ProcessEnv; serial: string; cutoutDensity: number; signal: AbortSignal }): Promise<"kept" | "fixed"> {
   const { exec, adb, env, serial, signal } = input;
@@ -130,6 +134,18 @@ export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: 
     for (const [name] of overlays) {
       const enabled = await shell(`cmd overlay enable com.android.shell:${name}`);
       if (enabled.exitCode !== 0 || /exception/i.test(enabled.stdout + enabled.stderr)) throw new Error(`enabling the cutout overlay failed: ${lastLine(enabled)}`);
+    }
+    // SystemUI keeps drawing the hole it drew at boot (the pixel one) until it starts again.
+    const systemUi = async () => (await shell("pidof com.android.systemui")).stdout.trim();
+    const before = await systemUi();
+    if (before) {
+      await shell(`kill ${before.split(/\s+/)[0]}`);
+      for (let tries = 0; tries < 60; tries++) {
+        await delay(500, signal);
+        const now = await systemUi();
+        if (now && now !== before) break;
+      }
+      await delay(SYSTEM_UI_SETTLE_MS, signal);
     }
   } finally {
     await adbRun(["unroot"]).catch(() => undefined);
