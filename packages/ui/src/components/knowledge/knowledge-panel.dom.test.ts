@@ -10,7 +10,14 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement, useState } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import type { KnowledgeEntryDetail, KnowledgeItemResponse, KnowledgeMergeRequest, UpdateKnowledgeEntryRequest } from "@orquester/api";
+import type {
+  KnowledgeConceptDetail,
+  KnowledgeConceptMerge,
+  KnowledgeEntryDetail,
+  KnowledgeItemResponse,
+  KnowledgeMergeRequest,
+  UpdateKnowledgeEntryRequest
+} from "@orquester/api";
 
 import { collection, collections, entry, summary } from "../../lib/knowledge/fixtures.test-helpers";
 import type { KnowledgeSelection } from "./KnowledgePanel";
@@ -118,6 +125,8 @@ describe("the entry panel", () => {
   let similarAsked: string[];
   let items: Map<string, KnowledgeItemResponse>;
   let failMerge: boolean;
+  let failUndo: boolean;
+  let merges: KnowledgeConceptMerge[];
   let renders = 0;
 
   const api = {
@@ -149,6 +158,22 @@ describe("the entry panel", () => {
       if (failMerge) throw Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: `No such entry: ${OLDER}.` } });
       for (const id of req.ids) if (id !== req.keep) items.delete(id);
       return {};
+    },
+    listKnowledgeConceptMerges: async () => {
+      calls.push("merges");
+      return { merges };
+    },
+    undoKnowledgeConceptMerge: async (id: string) => {
+      calls.push(`undo:${id}`);
+      if (failUndo) throw Object.assign(new Error("500"), { status: 500, body: { code: "KNOWLEDGE_ERROR", message: "The graph is being reloaded." } });
+      const merge = merges.find((m) => m.id === id)!;
+      merges = merges.filter((m) => m.id !== id);
+      const kept = items.get(merge.into.id);
+      if (kept?.kind === "concept") {
+        const gone = new Set(merge.merged.map((c) => c.id));
+        items.set(merge.into.id, { kind: "concept", concept: { ...kept.concept, mergedFrom: (kept.concept.mergedFrom ?? []).filter((c) => !gone.has(c.id)) } });
+      }
+      return {};
     }
   };
 
@@ -163,6 +188,8 @@ describe("the entry panel", () => {
     const suffix = String(++fixtureId).padStart(9, "0");
     OPEN = `ke_new${suffix}`;
     OLDER = `ke_old${suffix}`;
+    failUndo = false;
+    merges = [];
     items = new Map();
     resetKnowledge();
     setPlainTextBody(false);
@@ -180,13 +207,16 @@ describe("the entry panel", () => {
     });
   };
 
-  const show = async (detail: KnowledgeEntryDetail, opts: { findSimilar?: boolean } = {}) => {
-    items.set(detail.entry.id, { kind: "entry", entry: detail });
+  const show = async (detail: KnowledgeEntryDetail | KnowledgeConceptDetail, opts: { findSimilar?: boolean; api?: object } = {}) => {
+    const first: KnowledgeSelection =
+      "concept" in detail ? { kind: "concept", id: detail.concept.id } : { kind: "entry", id: detail.entry.id };
+    if ("concept" in detail) items.set(detail.concept.id, { kind: "concept", concept: detail });
+    else items.set(detail.entry.id, { kind: "entry", entry: detail });
     // Holds the selection as the Knowledge view does.
     const Host = () => {
-      const [selection, setSelection] = useState<KnowledgeSelection>({ kind: "entry", id: detail.entry.id });
+      const [selection, setSelection] = useState<KnowledgeSelection>(first);
       return createElement(KnowledgePanel, {
-        api: api as never,
+        api: (opts.api ?? api) as never,
         selection,
         collections: COLLECTIONS,
         onSelect: (next: KnowledgeSelection, options?: { replace?: boolean }) => {
@@ -342,5 +372,180 @@ describe("the entry panel", () => {
     const alert = doc().querySelector('section[aria-label="Possible duplicates"] [role="alert"]');
     assert.match(alert?.textContent ?? "", /Nothing was merged/i);
     assert.ok(alert?.textContent?.includes(`No such entry: ${OLDER}`));
+  });
+
+  describe("phase 2: disagreements, distinctive concepts, novelty", () => {
+    const DISAGREES = "ke_dis000000000";
+    const pair = { from: { id: "tactic-short", name: "Short trial", type: "Tactic" }, to: { id: "tactic-long", name: "Long trial", type: "Tactic" } };
+    const phase2 = (overrides: Partial<KnowledgeEntryDetail> = {}) =>
+      openDetail({
+        concepts: [{ id: "tactic-short", name: "Short trial", type: "Tactic" }],
+        similar: [
+          {
+            entry: summary({ id: SIMILAR, title: "A close one" }),
+            similarity: 0.91,
+            reasons: [
+              { kind: "meaning", similarity: 0.91 },
+              {
+                kind: "concepts",
+                concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }, { id: "tactic-b", name: "B", type: "Tactic" }],
+                shared: 2,
+                distinctive: [{ id: "tactic-b", name: "B", type: "Tactic" }]
+              }
+            ]
+          },
+          {
+            entry: summary({ id: DISAGREES, title: "Long trials win" }),
+            similarity: 0.4,
+            reasons: [{ kind: "contradicts", source: "checked", pairs: [pair], note: "<i>Seven days</i> against thirty." }]
+          }
+        ],
+        possibleDuplicates: [],
+        novelty: { newConcepts: [{ id: "tactic-short", name: "Short trial", type: "Tactic" }], cluster: { label: "Trials", size: 6 } },
+        ...overrides
+      });
+
+    it("shows Disagrees with above Similar: the note as text, the clashing concepts, each opening", async () => {
+      await show(phase2());
+      const sections = [...doc().querySelectorAll("section[aria-label]")].map((s) => s.getAttribute("aria-label"));
+      assert.ok(sections.indexOf("Disagrees with") >= 0 && sections.indexOf("Disagrees with") < sections.indexOf("Similar entries"), sections.join(", "));
+      const section = doc().querySelector('section[aria-label="Disagrees with"]')!;
+      const row = section.querySelector(`[data-knowledge-disagrees="${DISAGREES}"]`)!;
+      assert.match(row.textContent!, /Long trials win/);
+      assert.match(row.textContent!, /<i>Seven days<\/i> against thirty\./, "the note, as text");
+      assert.equal(row.querySelector("i"), null);
+      assert.match(row.textContent!, /Short trial≠Long trial/);
+      assert.match(row.textContent!, /Checked by an agent/);
+      await click(buttonNamed("Long trial", row));
+      assert.deepEqual(selected, [{ kind: "concept", id: "tactic-long" }]);
+
+      await show(phase2());
+      const entryButton = [...doc().querySelectorAll('section[aria-label="Disagrees with"] button')].find((b) => b.textContent?.startsWith("Long trials win"));
+      assert.ok(entryButton);
+      await click(entryButton);
+      assert.deepEqual(selected.at(-1), { kind: "entry", id: DISAGREES });
+    });
+
+    it("marks the distinctive shared concepts, and the disagreeing entry among the similar ones", async () => {
+      await show(phase2());
+      const similar = doc().querySelector('section[aria-label="Similar entries"]')!;
+      const row = similar.querySelector(`[data-knowledge-similar="${SIMILAR}"]`)!;
+      const distinctive = [...row.querySelectorAll("[data-knowledge-distinctive]")];
+      assert.deepEqual(
+        distinctive.map((chip) => [chip.getAttribute("data-knowledge-distinctive"), chip.textContent]),
+        [["tactic-b", "B"]]
+      );
+      assert.match(distinctive[0]!.getAttribute("title") ?? "", /few entries share it/);
+      assert.match(similar.querySelector(`[data-knowledge-similar="${DISAGREES}"]`)!.textContent!, /Disagrees/);
+    });
+
+    it("says what is new here and which cluster it joins; nothing from an older daemon", async () => {
+      await show(phase2());
+      const line = doc().querySelector("[data-knowledge-novelty]")!;
+      assert.match(line.textContent!, /New here:\s*Short trial\s*· Part of “Trials” \(6 entries\)/);
+      await click(buttonNamed("Short trial", line));
+      assert.deepEqual(selected, [{ kind: "concept", id: "tactic-short" }]);
+
+      const { novelty: _novelty, ...older } = phase2({ similar: [] });
+      await show(older);
+      assert.equal(doc().querySelector("[data-knowledge-novelty]"), null);
+      assert.equal(doc().querySelector('section[aria-label="Disagrees with"]'), null);
+    });
+  });
+
+  describe("phase 2: the concept panel", () => {
+    const KEPT = "tactic-pricing";
+    const concept = (overrides: Partial<KnowledgeConceptDetail> = {}): KnowledgeConceptDetail => ({
+      concept: { id: KEPT, name: "Pricing page", type: "Tactic", confidence: 0.9, description: null, aliases: ["Prices page"], attributes: {} },
+      collections: [],
+      entries: [],
+      neighbors: [],
+      mergedFrom: [
+        { id: "tactic-prices", name: "Prices page", type: "Tactic" },
+        { id: "tactic-plans", name: "Plans page", type: "Tactic" }
+      ],
+      similarConcepts: [{ concept: { id: "tactic-pricing-test", name: "Pricing test", type: "Tactic" }, similarity: 0.81 }],
+      ...overrides
+    });
+    const merge = (id: string, merged: string[]): KnowledgeConceptMerge => ({
+      id,
+      into: { id: KEPT, name: "Pricing page", type: "Tactic" },
+      merged: merged.map((m) => ({ id: m, name: m, type: "Tactic" })),
+      similarity: 0.93,
+      createdAt: "2026-10-27T10:00:00.000Z"
+    });
+    const mergedRow = (id: string) => doc().querySelector(`[data-knowledge-merged="${id}"]`);
+
+    it("lists similar concepts, each opening", async () => {
+      await show(concept());
+      const section = doc().querySelector('section[aria-label="Similar concepts"]')!;
+      assert.match(section.textContent!, /Pricing test\s*81%/);
+      await click(section.querySelector('[data-knowledge-similar-concept="tactic-pricing-test"]')!);
+      assert.deepEqual(selected, [{ kind: "concept", id: "tactic-pricing-test" }]);
+    });
+
+    it("undoes a merge only once confirmed: finds its id, deletes it, and reads the concept again", async () => {
+      merges = [merge("cm_other", ["tactic-plans"]), merge("cm_prices", ["tactic-prices"]), { ...merge("cm_elsewhere", ["tactic-prices"]), into: { id: "x", name: "X", type: "Tactic" } }];
+      await show(concept());
+      const section = doc().querySelector('section[aria-label="Merged from"]')!;
+      assert.match(section.textContent!, /Prices page.*Plans page/);
+      await click(buttonNamed("Undo", mergedRow("tactic-prices")!));
+      const dialog = doc().querySelector('[role="dialog"]');
+      assert.ok(dialog, "asks first");
+      assert.match(dialog.textContent ?? "", /“Prices page” becomes a concept of its own again/);
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [], "nothing happens before confirming");
+
+      await click(buttonNamed("Undo merge", dialog));
+      await settle();
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges", "undo:cm_prices"], "the merge into this concept that lists it");
+      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2, "read again after the undo");
+      assert.equal(mergedRow("tactic-prices"), null, "no longer merged");
+      assert.ok(mergedRow("tactic-plans"));
+      assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]'), null);
+    });
+
+    it("cancelling the confirmation changes nothing", async () => {
+      merges = [merge("cm_prices", ["tactic-prices"])];
+      await show(concept());
+      await click(buttonNamed("Undo", mergedRow("tactic-prices")!));
+      await click(buttonNamed("Cancel", doc().querySelector('[role="dialog"]')!));
+      assert.equal(doc().querySelector('[role="dialog"]'), null);
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), []);
+    });
+
+    it("says why when the undo is refused, and keeps the merge listed", async () => {
+      merges = [merge("cm_prices", ["tactic-prices"]), merge("cm_plans", ["tactic-plans"])];
+      failUndo = true;
+      await show(concept());
+      await click(buttonNamed("Undo", mergedRow("tactic-prices")!));
+      await click(buttonNamed("Undo merge", doc().querySelector('[role="dialog"]')!));
+      await settle();
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges", "undo:cm_prices"]);
+      assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]')?.textContent, "Could not undo the merge: The graph is being reloaded.");
+      assert.ok(mergedRow("tactic-prices"));
+    });
+
+    it("reads the concept again when its merge is no longer in effect", async () => {
+      merges = [merge("cm_a", ["tactic-a"]), merge("cm_b", ["tactic-b"])];
+      await show(concept());
+      await click(buttonNamed("Undo", mergedRow("tactic-plans")!));
+      await click(buttonNamed("Undo merge", doc().querySelector('[role="dialog"]')!));
+      await settle();
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges"], "nothing to delete");
+      assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]')?.textContent, "“Plans page” is no longer merged into this concept.");
+      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2);
+    });
+
+    it("lists merges without Undo for a client without the routes, and nothing from an older daemon", async () => {
+      const { listKnowledgeConceptMerges: _list, undoKnowledgeConceptMerge: _undo, ...older } = api;
+      await show(concept(), { api: older });
+      assert.ok(mergedRow("tactic-prices"));
+      assert.equal(buttons("Undo").length, 0);
+
+      const { mergedFrom: _merged, similarConcepts: _similar, ...olderDaemon } = concept();
+      await show(olderDaemon);
+      assert.equal(doc().querySelector('section[aria-label="Merged from"]'), null);
+      assert.equal(doc().querySelector('section[aria-label="Similar concepts"]'), null);
+    });
   });
 });

@@ -4,9 +4,23 @@ import { describe, it } from "node:test";
 import type { KnowledgeEntryDetail, KnowledgeSimilarEntry } from "@orquester/api";
 
 import { entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
-import { entryPanelIds, knowledgeMergePlan, markdownBodyPreview, mergeErrorText, similarSection } from "./panel.logic.ts";
+import {
+  clusterText,
+  contradictionSourceText,
+  disagreements,
+  distinctiveConcepts,
+  entryPanelIds,
+  findConceptMerge,
+  knowledgeMergePlan,
+  markdownBodyPreview,
+  mergeErrorText,
+  reasonLabel,
+  similarSection,
+  undoMergeMessage
+} from "./panel.logic.ts";
 
 const SELF = "ke_aaaaaaaaaaaa";
+const ref = (name: string) => ({ id: `tactic-${name.toLowerCase()}`, name, type: "Tactic" });
 
 function similar(id: string, overrides: Partial<KnowledgeSimilarEntry> = {}, entryOverrides: Parameters<typeof summary>[0] = {}): KnowledgeSimilarEntry {
   return { entry: summary({ id, title: `Entry ${id.slice(-1)}`, ...entryOverrides }), similarity: null, reasons: [], ...overrides };
@@ -110,5 +124,63 @@ describe("the body's Markdown preview", () => {
     assert.match(markdownBodyPreview(four, 100).text, /\n````$/);
     const tilde = `intro\n\n~~~\n\`\`\`\n${"inner line\n".repeat(20)}`;
     assert.match(markdownBodyPreview(tilde, 100).text, /\n~~~$/);
+  });
+});
+
+describe("disagreements, distinctive concepts and concept merges (phase 2)", () => {
+  const item = (id: string, reasons: KnowledgeSimilarEntry["reasons"]): KnowledgeSimilarEntry => ({ entry: summary({ id, title: id }), similarity: 0.5, reasons });
+  const pair = { from: ref("Price"), to: ref("Free") };
+
+  it("lists the similar entries that disagree, each once, never the entry itself, in the daemon's order", () => {
+    const similar = [
+      item("ke_one", [{ kind: "meaning", similarity: 0.9 }]),
+      item("ke_two", [
+        { kind: "meaning", similarity: 0.6 },
+        { kind: "contradicts", source: "checked", pairs: [], note: "Says the opposite." }
+      ]),
+      item(SELF, [{ kind: "contradicts", source: "graph", pairs: [pair], note: null }]),
+      item("ke_three", [{ kind: "contradicts", source: "graph", pairs: [pair], note: null }]),
+      item("ke_two", [{ kind: "contradicts", source: "graph", pairs: [pair], note: null }])
+    ];
+    assert.deepEqual(
+      disagreements({ entry: entry({ id: SELF }), similar }).map((d) => [d.entry.id, d.source, d.note, d.pairs.length]),
+      [
+        ["ke_two", "checked", "Says the opposite.", 0],
+        ["ke_three", "graph", null, 1]
+      ]
+    );
+    assert.deepEqual(disagreements({ entry: entry({ id: SELF }) }), [], "an older daemon");
+    assert.equal(contradictionSourceText("checked"), "Checked by an agent");
+    assert.equal(contradictionSourceText("graph"), "From the concept graph");
+  });
+
+  it("labels a contradiction first among an entry's reasons", () => {
+    const { items } = similarSection({
+      entry: entry({ id: SELF }),
+      related: [],
+      similar: [item("ke_two", [{ kind: "meaning", similarity: 0.6 }, { kind: "contradicts", source: "graph", pairs: [pair], note: null }])]
+    });
+    assert.deepEqual(items[0]!.reasons.map(reasonLabel), ["Disagrees", "Meaning 60%"]);
+  });
+
+  it("names a concepts reason's distinctive concepts, none for an older daemon", () => {
+    assert.deepEqual(distinctiveConcepts({ kind: "concepts", concepts: [ref("A"), ref("B")], shared: 2, distinctive: [ref("B")] }), [ref("B")]);
+    assert.deepEqual(distinctiveConcepts({ kind: "concepts", concepts: [ref("A")], shared: 1 }), []);
+    assert.deepEqual(distinctiveConcepts({ kind: "meaning", similarity: 0.9 }), []);
+  });
+
+  it("describes a cluster with or without its label", () => {
+    assert.equal(clusterText({ label: "Paywalls", size: 12 }), "“Paywalls” (12 entries)");
+    assert.equal(clusterText({ label: null, size: 1 }), "a cluster of 1 entry");
+  });
+
+  it("finds the merge that folded a concept in: the one listing it, else the only one into the concept", () => {
+    const merge = (id: string, into: string, merged: string[]) => ({ id, into: ref(into), merged: merged.map(ref) });
+    const merges = [merge("m1", "Pricing", ["Prices"]), merge("m2", "Pricing", ["Price page"]), merge("m3", "Other", ["Prices"])];
+    assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Price page").id)?.id, "m2");
+    assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Unknown").id), null, "two merges into it, neither lists it");
+    assert.equal(findConceptMerge([merge("m1", "Pricing", [])], ref("Pricing").id, ref("Renamed").id)?.id, "m1", "the only one into it");
+    assert.equal(findConceptMerge(merges, ref("Gone").id, ref("Prices").id), null);
+    assert.match(undoMergeMessage({ name: "Pricing" }, { name: "Prices" }), /^“Prices” becomes a concept of its own again.*“Pricing”.*not merged automatically again\.$/);
   });
 });

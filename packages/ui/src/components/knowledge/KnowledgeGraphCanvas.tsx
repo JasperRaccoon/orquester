@@ -11,7 +11,7 @@ import { KNOWLEDGE_COLORS, type KnowledgeColor } from "@orquester/api";
 
 import { IconButton } from "../ui";
 import { cn } from "../../lib/cn";
-import type { CanvasEdge, CanvasNode } from "./graph.logic";
+import { canvasEdgeClasses, type CanvasEdge, type CanvasNode } from "./graph.logic";
 import { knowledgeColorProperty } from "./knowledge.logic";
 import { DeferredFit, FIT_PADDING, Layouts, seedPositions, warmStart, type LayoutWorkerLike, type Positions } from "./graph-layout";
 import LayoutWorker from "./graph-layout.worker.ts?worker";
@@ -64,6 +64,8 @@ interface Palette {
   edgeStrong: string;
   ring: string;
   hit: string;
+  /** Edges between entries that disagree. */
+  destructive: string;
 }
 
 /** `"96 165 250"` (a theme triple) → `"rgb(96,165,250)"`; fallback when the property is unset. */
@@ -85,7 +87,8 @@ function readPalette(): Palette {
     edge: triple(style, "--n-700", "rgb(64,64,64)"),
     edgeStrong: triple(style, "--n-300", "rgb(212,212,212)"),
     ring: triple(style, "--n-100", "rgb(245,245,245)"),
-    hit: triple(style, "--sem-warn-400", "rgb(251,191,36)")
+    hit: triple(style, "--sem-warn-400", "rgb(251,191,36)"),
+    destructive: triple(style, "--sem-danger-400", "rgb(248,113,113)")
   };
 }
 
@@ -128,6 +131,8 @@ function stylesheet(p: Palette): StylesheetJson {
     { selector: "edge.tree", style: { width: 1.3, opacity: 0.7 } },
     { selector: "edge.knn", style: { width: 0.7, opacity: 0.4, "line-style": "dashed", "line-dash-pattern": [4, 3] } },
     { selector: "edge.near", style: { width: 1.6, "line-color": p.edgeStrong, opacity: 0.95, "z-index": 9 } },
+    // Entries that disagree: the destructive colour, solid, whether selected or not (fading still applies).
+    { selector: "edge.contradicts", style: { width: 1.8, "line-color": p.destructive, "line-style": "solid", opacity: 0.9, "z-index": 8 } },
     { selector: "edge.faded", style: { opacity: 0.06 } }
   ];
 }
@@ -148,7 +153,7 @@ const nodeClasses = (node: CanvasNode) => [node.labelled ? "labelled" : "", node
 
 function elementsOf(nodes: readonly CanvasNode[], edges: readonly CanvasEdge[], p: Palette): ElementDefinition[] {
   const out: ElementDefinition[] = nodes.map((node) => ({ group: "nodes", data: nodeData(node, p), classes: nodeClasses(node) }));
-  for (const edge of edges) out.push({ group: "edges", data: { id: `e:${edge.id}`, source: edge.from, target: edge.to }, classes: edge.variant ?? "" });
+  for (const edge of edges) out.push({ group: "edges", data: { id: `e:${edge.id}`, source: edge.from, target: edge.to }, classes: canvasEdgeClasses(edge) });
   return out;
 }
 
@@ -278,6 +283,8 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
           element.data(nodeData(node, palette));
           element.classes(nodeClasses(node));
         }
+        // A pair found to disagree (or no longer) is redrawn in place, not laid out again.
+        for (const edge of edges) cy.getElementById(`e:${edge.id}`).classes(canvasEdgeClasses(edge));
       });
       return;
     }

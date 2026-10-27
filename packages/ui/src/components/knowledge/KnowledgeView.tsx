@@ -1,12 +1,12 @@
 // The Knowledge view (the Knowledge Graph plugin): the server-wide knowledge base,
 // shown over the main area whatever project (or none) is open. Graph first, with
-// a List toggle; a side panel for the selected entry or concept; the status bar
-// at the bottom.
+// List and (where the daemon serves them) Insights toggles; a side panel for the
+// selected entry or concept; the status bar at the bottom.
 // MainView lazy-loads this module, and the graph canvas (Cytoscape) loads with
 // the first graph shown, so neither is in the app's main bundle.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { List, Loader2, RefreshCw, Settings, Share2, Waypoints } from "lucide-react";
+import { Lightbulb, List, Loader2, RefreshCw, Settings, Share2, Waypoints } from "lucide-react";
 import { KNOWLEDGE_GRAPH_PLUGIN_ID, type KnowledgeCollectionView, type KnowledgeItemResponse } from "@orquester/api";
 
 import { Button } from "../ui";
@@ -16,7 +16,8 @@ import { knowledgeStore, loadKnowledge, useKnowledgeState } from "../../lib/know
 import { useAppStore, type KnowledgeFocus } from "../../store/app";
 import { Centered, ErrorLine, TOOLBAR_SEGMENTED } from "./parts";
 import { knowledgeErrorCode, knowledgeErrorText, pruneSelectionHistory } from "./knowledge.logic";
-import { KnowledgeGraphView } from "./KnowledgeGraphView";
+import { KnowledgeGraphView, type SelectedConcept } from "./KnowledgeGraphView";
+import { KnowledgeInsightsView, useInsightsSupport } from "./KnowledgeInsightsView";
 import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
 import { KnowledgePanel, type KnowledgeSelectOptions, type KnowledgeSelection } from "./KnowledgePanel";
 import { KnowledgeStatusBar } from "./KnowledgeStatusBar";
@@ -26,11 +27,18 @@ import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 
 const LazyCanvas = React.lazy(() => import("./KnowledgeGraphCanvas"));
 
-type ViewMode = "graph" | "list";
+type ViewMode = "graph" | "list" | "insights";
 
-const VIEW_OPTIONS = [
-  { value: "graph" as const, label: "Graph", icon: <Share2 size={12} /> },
-  { value: "list" as const, label: "List", icon: <List size={12} /> }
+// On a phone the options show their icons only (their names stay for screen readers and tests),
+// so the toggle shares a toolbar line with the layer switch at ~360 px.
+const viewLabel = (label: string) => <span className="max-md:sr-only">{label}</span>;
+const GRAPH_LIST_OPTIONS = [
+  { value: "graph" as const, label: viewLabel("Graph"), icon: <Share2 size={12} />, title: "Graph" },
+  { value: "list" as const, label: viewLabel("List"), icon: <List size={12} />, title: "List" }
+];
+const VIEW_OPTIONS: { value: ViewMode; label: React.ReactNode; icon: React.ReactNode; title: string }[] = [
+  ...GRAPH_LIST_OPTIONS,
+  { value: "insights" as const, label: viewLabel("Insights"), icon: <Lightbulb size={12} />, title: "Insights" }
 ];
 
 const HISTORY_MAX = 20;
@@ -173,7 +181,22 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
     [panelItem, selection]
   );
 
-  const toggle = <SegmentedControl value={view} options={VIEW_OPTIONS} onChange={setView} size="xs" ariaLabel="View" className={TOOLBAR_SEGMENTED} />;
+  const selectedConcept = useMemo<SelectedConcept | null>(
+    () =>
+      panelItem?.kind === "concept" && selection?.kind === "concept" && panelItem.concept.concept.id === selection.id
+        ? { id: panelItem.concept.concept.id, name: panelItem.concept.concept.name, entryIds: panelItem.concept.entries.map((e) => e.id) }
+        : null,
+    [panelItem, selection]
+  );
+
+  // Insights only where the daemon serves them (one that predates them answers 404).
+  const ready = on && status !== null && status.installed;
+  const [insightsSupported, recordInsights] = useInsightsSupport(api, ready, view === "insights");
+  useEffect(() => {
+    if (insightsSupported === false) setView((v) => (v === "insights" ? "graph" : v));
+  }, [insightsSupported]);
+  const viewOptions = insightsSupported === true || view === "insights" ? VIEW_OPTIONS : GRAPH_LIST_OPTIONS;
+  const toggle = <SegmentedControl value={view} options={viewOptions} onChange={setView} size="xs" ariaLabel="View" className={TOOLBAR_SEGMENTED} />;
   const openPlugins = () => openSettings("plugins");
 
   let body: React.ReactNode;
@@ -260,8 +283,22 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onQueryChange={setQuery}
                 // The graph's one collection chip, when exactly one is on, narrows the list the same way.
                 onOpenInList={() => openList(query, graphFilter.length === 1 ? graphFilter[0] : "all")}
+                selectedConcept={selectedConcept}
                 active={active}
                 Canvas={Canvas}
+                toolbarEnd={toggle}
+              />
+            ) : view === "insights" ? (
+              <KnowledgeInsightsView
+                api={api}
+                collections={collectionList}
+                // The graph's collection chips: insights are scoped like the similarity graph.
+                filter={graphFilter}
+                onFilter={setGraphFilter}
+                selection={selection}
+                onSelect={select}
+                onUnsupported={() => recordInsights(false)}
+                onSupported={() => recordInsights(true)}
                 toolbarEnd={toggle}
               />
             ) : (

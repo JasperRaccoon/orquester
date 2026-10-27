@@ -52,8 +52,17 @@ import {
   type KnowledgeWorkerView
 } from "@orquester/api";
 import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
-import type { KnowledgeRelatedReason, KnowledgeSimilarEntry } from "@orquester/api";
+import type { KnowledgeNovelty, KnowledgeRelatedReason, KnowledgeSimilarEntry } from "@orquester/api";
 import type { KnowledgeSimilarityCluster, KnowledgeSimilarityEdge, KnowledgeSimilarityGraphResponse, KnowledgeSimilarityNode } from "@orquester/api";
+import type {
+  KnowledgeBridge,
+  KnowledgeConceptMerge,
+  KnowledgeConceptMergesResponse,
+  KnowledgeContradiction,
+  KnowledgeInsightsResponse,
+  KnowledgeLinkGap,
+  KnowledgeSingleSource
+} from "@orquester/api";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -184,6 +193,25 @@ export function parseKnowledgeConceptRef(value: unknown): KnowledgeConceptRef | 
   return { id: value.id, name: str(value.name, value.id) || value.id, type: str(value.type) || "concept" };
 }
 
+/** Concept refs, each once (and never `exceptId`); null when `value` is not an array. */
+function conceptRefs(value: unknown, exceptId?: string): KnowledgeConceptRef[] | null {
+  const refs = list(value, parseKnowledgeConceptRef);
+  if (!refs) return null;
+  const seen = new Set<string>(exceptId === undefined ? [] : [exceptId]);
+  return refs.filter((ref) => !seen.has(ref.id) && (seen.add(ref.id), true));
+}
+
+/** A 0..1 similarity, clamped; null when it is not a finite number. */
+function unitSimilarity(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+}
+
+/** A similarity-cluster reference (`{ label, size }`); null when it is not an object. */
+export function parseKnowledgeClusterRef(value: unknown): { label: string | null; size: number } | null {
+  if (!isRecord(value)) return null;
+  return { label: typeof value.label === "string" && value.label.trim() !== "" ? value.label : null, size: count(value.size) };
+}
+
 function parseAttributes(value: unknown): KnowledgeConcept["attributes"] {
   const out: KnowledgeConcept["attributes"] = {};
   if (!isRecord(value)) return out;
@@ -282,8 +310,15 @@ function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarityNode |
 
 function parseKnowledgeSimilarityEdge(value: unknown): KnowledgeSimilarityEdge | null {
   if (!isRecord(value) || typeof value.from !== "string" || typeof value.to !== "string" || value.from === value.to) return null;
-  return { from: value.from, to: value.to, similarity: num(value.similarity), tree: bool(value.tree) };
+  const edge: KnowledgeSimilarityEdge = { from: value.from, to: value.to, similarity: num(value.similarity), tree: bool(value.tree) };
+  // Phase 2 fields: absent from an older daemon (and anything unreadable reads as absent).
+  if (typeof value.sharedConcepts === "number" && Number.isFinite(value.sharedConcepts)) edge.sharedConcepts = count(value.sharedConcepts);
+  if (typeof value.contradicts === "boolean") edge.contradicts = value.contradicts;
+  return edge;
 }
+
+/** A cluster's concepts the contract allows (its best first). */
+const CLUSTER_CONCEPTS_MAX = 5;
 
 /**
  * Nodes deduplicated by id; an edge whose ends are not both in the answer is left out, and two
@@ -311,6 +346,7 @@ export function parseKnowledgeSimilarityGraphResponse(value: unknown): Knowledge
     const seen = byPair.get(pair);
     if (seen) {
       if (edge.tree) seen.tree = true;
+      if (edge.contradicts) seen.contradicts = true;
       continue;
     }
     byPair.set(pair, edge);
@@ -319,11 +355,15 @@ export function parseKnowledgeSimilarityGraphResponse(value: unknown): Knowledge
   const clusters: KnowledgeSimilarityCluster[] = Array.isArray(value.clusters)
     ? value.clusters.map((item: unknown, index: number) => {
         if (!isRecord(item)) return { id: index, size: nodes.filter((n) => n.cluster === index).length, label: null };
-        return {
+        const cluster: KnowledgeSimilarityCluster = {
           id: typeof item.id === "number" ? count(item.id) : index,
           size: typeof item.size === "number" ? count(item.size) : nodes.filter((n) => n.cluster === index).length,
           label: typeof item.label === "string" && item.label.trim() !== "" ? item.label : null
         };
+        // Absent from an older daemon.
+        const concepts = conceptRefs(item.concepts);
+        if (concepts) cluster.concepts = concepts.slice(0, CLUSTER_CONCEPTS_MAX);
+        return cluster;
       })
     : [];
   const totals = isRecord(value.totals) ? value.totals : {};
@@ -348,13 +388,42 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
       const ref = parseKnowledgeConceptRef(item.concept);
       return edge && ref ? { edge, concept: ref } : null;
     }) ?? [];
-  return {
+  const detail: KnowledgeConceptDetail = {
     concept,
     collections: strings(value.collections),
     entries: list(value.entries, parseKnowledgeEntrySummary) ?? [],
     neighbors
   };
+  // Phase 2 (absent from an older daemon): never the concept itself, each concept once.
+  const mergedFrom = conceptRefs(value.mergedFrom, concept.id);
+  if (mergedFrom) detail.mergedFrom = mergedFrom;
+  const similar = list(value.similarConcepts, parseSimilarConcept);
+  if (similar) {
+    const seen = new Set<string>([concept.id]);
+    detail.similarConcepts = similar.filter((item) => !seen.has(item.concept.id) && (seen.add(item.concept.id), true));
+  }
+  return detail;
 }
+
+function parseSimilarConcept(value: unknown): { concept: KnowledgeConceptRef; similarity: number } | null {
+  if (!isRecord(value)) return null;
+  const concept = parseKnowledgeConceptRef(value.concept);
+  const similarity = unitSimilarity(value.similarity);
+  return concept && similarity !== null ? { concept, similarity } : null;
+}
+
+function parseConceptPair(value: unknown): { from: KnowledgeConceptRef; to: KnowledgeConceptRef } | null {
+  if (!isRecord(value)) return null;
+  const from = parseKnowledgeConceptRef(value.from);
+  const to = parseKnowledgeConceptRef(value.to);
+  return from && to ? { from, to } : null;
+}
+
+/** Where a contradiction comes from; an unknown source (a newer daemon's) reads as the concept graph's. */
+const contradictionSource = (value: unknown): "graph" | "checked" => (value === "checked" ? "checked" : "graph");
+
+/** A daemon note, shown as text; null when empty. */
+const noteOf = (value: unknown): string | null => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
 
 /**
  * Why an entry is shown beside another; null for one this client cannot read (an unknown kind from
@@ -369,8 +438,14 @@ function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedReason | n
         : null;
     case "concepts": {
       const concepts = list(value.concepts, parseKnowledgeConceptRef) ?? [];
-      return { kind: "concepts", concepts, shared: Math.max(count(value.shared), concepts.length) };
+      const reason: KnowledgeRelatedReason = { kind: "concepts", concepts, shared: Math.max(count(value.shared), concepts.length) };
+      // Absent from an older daemon.
+      const distinctive = conceptRefs(value.distinctive);
+      if (distinctive) reason.distinctive = distinctive;
+      return reason;
     }
+    case "contradicts":
+      return { kind: "contradicts", source: contradictionSource(value.source), pairs: list(value.pairs, parseConceptPair) ?? [], note: noteOf(value.note) };
     case "author":
       return typeof value.value === "string" && value.value.trim() !== "" ? { kind: "author", value: value.value } : null;
     default:
@@ -420,7 +495,15 @@ function parseEntryDetail(value: unknown): KnowledgeEntryDetail | null {
   if (similar) detail.similar = similar;
   const possibleDuplicates = parseSimilarList(value.possibleDuplicates, entry.id);
   if (possibleDuplicates) detail.possibleDuplicates = possibleDuplicates;
+  const novelty = parseKnowledgeNovelty(value.novelty);
+  if (novelty) detail.novelty = novelty;
   return detail;
+}
+
+/** What an entry adds; null (absent, as from an older daemon) when it is not an object. */
+export function parseKnowledgeNovelty(value: unknown): KnowledgeNovelty | null {
+  if (!isRecord(value)) return null;
+  return { newConcepts: conceptRefs(value.newConcepts) ?? [], cluster: parseKnowledgeClusterRef(value.cluster) };
 }
 
 export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemResponse | null {
@@ -434,6 +517,106 @@ export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemRespons
     return concept ? { kind: "concept", concept } : null;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Concept merges (phase 2 spec, "Concept merges")
+// ---------------------------------------------------------------------------
+
+/** One merge: null without an id or a concept kept; unreadable merged concepts are left out. */
+export function parseKnowledgeConceptMerge(value: unknown): KnowledgeConceptMerge | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  const into = parseKnowledgeConceptRef(value.into);
+  if (!into) return null;
+  return {
+    id: value.id,
+    into,
+    merged: conceptRefs(value.merged, into.id) ?? [],
+    similarity: unitSimilarity(value.similarity) ?? 0,
+    createdAt: str(value.createdAt)
+  };
+}
+
+/** The concept-merges answer; null without a merge list. */
+export function parseKnowledgeConceptMergesResponse(value: unknown): KnowledgeConceptMergesResponse | null {
+  if (!isRecord(value)) return null;
+  const merges = list(value.merges, parseKnowledgeConceptMerge);
+  return merges ? { merges } : null;
+}
+
+// ---------------------------------------------------------------------------
+// Insights (phase 2 spec, "Insights")
+// ---------------------------------------------------------------------------
+
+/** Two different readable entries, or null. */
+function entryPair(a: unknown, b: unknown): { a: KnowledgeEntrySummary; b: KnowledgeEntrySummary } | null {
+  const first = parseKnowledgeEntrySummary(a);
+  const second = parseKnowledgeEntrySummary(b);
+  return first && second && first.id !== second.id ? { a: first, b: second } : null;
+}
+
+export function parseKnowledgeContradiction(value: unknown): KnowledgeContradiction | null {
+  if (!isRecord(value)) return null;
+  const pair = entryPair(value.a, value.b);
+  if (!pair) return null;
+  return {
+    ...pair,
+    similarity: unitSimilarity(value.similarity),
+    source: contradictionSource(value.source),
+    pairs: list(value.pairs, parseConceptPair) ?? [],
+    note: noteOf(value.note)
+  };
+}
+
+export function parseKnowledgeBridge(value: unknown): KnowledgeBridge | null {
+  if (!isRecord(value)) return null;
+  const entry = parseKnowledgeEntrySummary(value.entry);
+  if (!entry) return null;
+  return { entry, clusters: list(value.clusters, parseKnowledgeClusterRef) ?? [], concepts: conceptRefs(value.concepts) ?? [] };
+}
+
+export function parseKnowledgeSingleSource(value: unknown): KnowledgeSingleSource | null {
+  if (!isRecord(value)) return null;
+  const concept = parseKnowledgeConceptRef(value.concept);
+  const entry = parseKnowledgeEntrySummary(value.entry);
+  if (!concept || !entry) return null;
+  return { concept, entry, cluster: parseKnowledgeClusterRef(value.cluster) };
+}
+
+export function parseKnowledgeLinkGap(value: unknown): KnowledgeLinkGap | null {
+  if (!isRecord(value)) return null;
+  const pair = entryPair(value.a, value.b);
+  const similarity = unitSimilarity(value.similarity);
+  if (!pair || similarity === null) return null;
+  return { ...pair, similarity, queued: bool(value.queued) };
+}
+
+/**
+ * The insights answer. An item this client cannot read is left out, and a missing list reads as
+ * empty; a total reads as its list's length when unreadable, and never as less. Null when it is not
+ * an object or carries none of the four lists.
+ */
+export function parseKnowledgeInsightsResponse(value: unknown): KnowledgeInsightsResponse | null {
+  if (!isRecord(value)) return null;
+  const contradictions = list(value.contradictions, parseKnowledgeContradiction);
+  const bridges = list(value.bridges, parseKnowledgeBridge);
+  const singleSource = list(value.singleSource, parseKnowledgeSingleSource);
+  const gaps = list(value.gaps, parseKnowledgeLinkGap);
+  if (!contradictions && !bridges && !singleSource && !gaps) return null;
+  const totals = isRecord(value.totals) ? value.totals : {};
+  const total = (field: unknown, shown: number) => Math.max(typeof field === "number" && Number.isFinite(field) ? count(field) : 0, shown);
+  return {
+    contradictions: contradictions ?? [],
+    bridges: bridges ?? [],
+    singleSource: singleSource ?? [],
+    gaps: gaps ?? [],
+    totals: {
+      contradictions: total(totals.contradictions, contradictions?.length ?? 0),
+      bridges: total(totals.bridges, bridges?.length ?? 0),
+      singleSource: total(totals.singleSource, singleSource?.length ?? 0),
+      gaps: total(totals.gaps, gaps?.length ?? 0)
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +832,13 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
   };
   // Absent from a daemon that predates it (and anything not a boolean reads as absent).
   if (typeof value.embeddingModelReady === "boolean") status.embeddingModelReady = value.embeddingModelReady;
+  // Phase 2 (absent from an older daemon); `relink` null means nothing is left to re-link.
+  if (value.relink === null) status.relink = null;
+  else if (isRecord(value.relink) && typeof value.relink.total === "number") {
+    const total = count(value.relink.total);
+    status.relink = { pending: Math.min(count(value.relink.pending), total), done: Math.min(count(value.relink.done), total), total };
+  }
+  if (typeof value.conceptMerges === "number" && Number.isFinite(value.conceptMerges)) status.conceptMerges = count(value.conceptMerges);
   return status;
 }
 

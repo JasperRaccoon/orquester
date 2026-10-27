@@ -15,6 +15,8 @@ import type {
   KnowledgeEntryDetail,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
+  KnowledgeInsightsQuery,
+  KnowledgeInsightsResponse,
   KnowledgeItemResponse,
   KnowledgeMergeRequest,
   UpdateKnowledgeCollectionRequest,
@@ -552,5 +554,97 @@ describe("the Knowledge view", () => {
     assert.deepEqual(calls.filter((c) => c.startsWith("graph:")), ["graph:", "graph:ke_aaaaaaaaaaaa", "graph:"]);
     assert.doesNotMatch(text(), /Nothing visible has that id/);
     assert.match(text(), /Showing the 2 most connected of 5,000 concepts/);
+  });
+
+  it("shows the automatic re-linking in the status bar while entries are left to it", async () => {
+    await show();
+    const bar = () => doc().querySelector('[role="status"][aria-label="Knowledge status"]')!;
+    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "an older daemon says nothing");
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: { pending: 89, done: 37, total: 126 } }) }));
+    const relink = bar().querySelector("[data-knowledge-relink]");
+    assert.equal(relink?.textContent, "Re-linking 37/126");
+    assert.match(relink?.getAttribute("title") ?? "", /89 entries are still to be linked again/);
+    assert.match(bar().textContent!, /Linking idle/, "beside the linking state");
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: null }) }));
+    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "nothing left");
+  });
+
+  describe("the Insights view (phase 2)", () => {
+    const INSIGHTS: KnowledgeInsightsResponse = {
+      contradictions: [{ a: summary(), b: summary({ id: "ke_bbbbbbbbbbbb", title: "Other" }), similarity: 0.8, source: "graph", pairs: [], note: "They disagree." }],
+      bridges: [],
+      singleSource: [],
+      gaps: [],
+      totals: { contradictions: 1, bridges: 0, singleSource: 0, gaps: 0 }
+    };
+    const missingRoute = () => Object.assign(new Error("404"), { status: 404, body: { message: "Route GET:/api/knowledge/insights not found", error: "Not Found", statusCode: 404 } });
+    const viewRadio = (label: string) =>
+      ([...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === label) as HTMLButtonElement | undefined) ?? null;
+    const insightsApi = (read: (query: KnowledgeInsightsQuery) => Promise<KnowledgeInsightsResponse>) => ({
+      getKnowledgeInsights: (query: KnowledgeInsightsQuery = {}) => {
+        calls.push(`insights:${JSON.stringify(query)}`);
+        return read(query);
+      }
+    });
+
+    it("is not offered by a client without it", async () => {
+      await show();
+      assert.equal(viewRadio("Insights"), null);
+      assert.ok(viewRadio("Graph") && viewRadio("List"));
+    });
+
+    it("is not offered by a daemon that predates it (a one-item read asks)", async () => {
+      await show({
+        api: insightsApi(async () => {
+          throw missingRoute();
+        })
+      });
+      assert.deepEqual(
+        calls.filter((c) => c.startsWith("insights:")),
+        ['insights:{"limit":1}']
+      );
+      assert.equal(viewRadio("Insights"), null);
+    });
+
+    it("is offered where the daemon serves it: its items open in the side panel, narrowed by the graph's chips", async () => {
+      await show({ api: insightsApi(async () => INSIGHTS) });
+      const insights = viewRadio("Insights");
+      assert.ok(insights, "a third view option");
+      assert.ok(insights.querySelector("svg"), "with its icon (a phone shows the icons only)");
+      await click(insights);
+      assert.equal(doc().querySelector('[data-testid="canvas"]'), null);
+      const contradictions = doc().querySelector('section[aria-label="Contradictions"]');
+      assert.ok(contradictions);
+      assert.match(contradictions.textContent!, /They disagree\./);
+      assert.deepEqual(calls.filter((c) => c.startsWith("insights:")).slice(1), ["insights:{}"]);
+
+      await click(contradictions.querySelector('[data-insight-entry="ke_bbbbbbbbbbbb"]')!);
+      assert.equal(doc().querySelector("aside")?.getAttribute("aria-label"), "Entry details");
+      assert.ok(calls.includes("item:ke_bbbbbbbbbbbb"));
+
+      const chips = doc().querySelector('[role="group"][aria-label="Filter by collection"]')!;
+      await click([...chips.querySelectorAll("button")].find((b) => b.textContent === "SEO")!);
+      assert.equal(calls.filter((c) => c.startsWith("insights:")).at(-1), 'insights:{"collections":"kc_seo"}');
+      // The same chips narrow the graph.
+      await click(viewRadio("Graph")!);
+      assert.equal([...doc().querySelectorAll('[aria-label="Filter by collection"] button')].find((b) => b.textContent === "SEO")?.getAttribute("aria-pressed"), "true");
+    });
+
+    it("falls back to the graph, and stops offering it, when the daemon no longer serves it", async () => {
+      let served = true;
+      await show({
+        api: insightsApi(async () => {
+          if (served) return INSIGHTS;
+          throw missingRoute();
+        })
+      });
+      await click(viewRadio("Insights")!);
+      assert.ok(doc().querySelector('section[aria-label="Contradictions"]'));
+      served = false;
+      await act(async () => knowledgeStore.setState((s) => ({ graphRevision: s.graphRevision + 1 })));
+      await settle();
+      assert.ok(doc().querySelector('[data-testid="canvas"]'), "back on the graph");
+      assert.equal(viewRadio("Insights"), null);
+    });
   });
 });

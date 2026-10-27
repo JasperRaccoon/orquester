@@ -148,12 +148,15 @@ import { knowledgeRoutes } from "@orquester/api";
 import type {
   CreateKnowledgeCollectionRequest,
   KnowledgeCollectionsResponse,
+  KnowledgeConceptMergesResponse,
   KnowledgeEntriesQuery,
   KnowledgeEntriesResponse,
   KnowledgeFacetsRequest,
   KnowledgeFacetsResponse,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
+  KnowledgeInsightsQuery,
+  KnowledgeInsightsResponse,
   KnowledgeItemResponse,
   KnowledgeMergeRequest,
   KnowledgeRebuildEstimate,
@@ -170,9 +173,11 @@ import type {
 } from "@orquester/api";
 import {
   parseKnowledgeCollectionsResponse,
+  parseKnowledgeConceptMergesResponse,
   parseKnowledgeEntriesResponse,
   parseKnowledgeFacetsResponse,
   parseKnowledgeGraphResponse,
+  parseKnowledgeInsightsResponse,
   parseKnowledgeItemResponse,
   parseKnowledgeRebuildEstimate,
   parseKnowledgeSearchResponse,
@@ -1283,6 +1288,23 @@ export class ApiClient {
       signal
     });
     return readKnowledge(parseKnowledgeSimilarityGraphResponse(data), "similarity graph");
+  }
+
+  /** Contradictions, bridges, single-source concepts and link gaps, scoped like the similarity graph. A daemon that predates it answers 404. */
+  async getKnowledgeInsights(query: KnowledgeInsightsQuery = {}, signal?: AbortSignal): Promise<KnowledgeInsightsResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.insights, { query: { collections: query.collections, limit: query.limit }, signal });
+    return readKnowledge(parseKnowledgeInsightsResponse(data), "insights");
+  }
+
+  /** The automatic concept merges in effect. A daemon that predates them answers 404. */
+  async listKnowledgeConceptMerges(signal?: AbortSignal): Promise<KnowledgeConceptMergesResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.conceptMerges, { signal });
+    return readKnowledge(parseKnowledgeConceptMergesResponse(data), "concept merges");
+  }
+
+  /** Undo one automatic concept merge: its concepts are separate again, and that pair is never merged automatically again. */
+  undoKnowledgeConceptMerge(id: string): Promise<unknown> {
+    return this.send("DELETE", knowledgeRoutes.conceptMerge(id));
   }
 
   /**

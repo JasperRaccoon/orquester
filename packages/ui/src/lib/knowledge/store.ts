@@ -296,6 +296,16 @@ export function mergeKnowledgeEntries(api: KnowledgeApi, req: KnowledgeMergeRequ
   return mutate(api, () => api.mergeKnowledgeEntries(req), { entries: req.ids, graph: true });
 }
 
+/** The concept-merge routes (phase 2) — `ApiClient` satisfies it. */
+export interface KnowledgeConceptMergeApi extends KnowledgeApi {
+  undoKnowledgeConceptMerge(id: string): Promise<unknown>;
+}
+
+/** Undo one automatic concept merge: the graph (and every panel showing a concept) reads again. */
+export function undoKnowledgeConceptMerge(api: KnowledgeConceptMergeApi, id: string): Promise<void> {
+  return mutate(api, () => api.undoKnowledgeConceptMerge(id), { graph: true });
+}
+
 // ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------

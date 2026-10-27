@@ -23,7 +23,8 @@ import { deleteKnowledgeEntry, knowledgeStore, mergeKnowledgeEntries, type Knowl
 import { CollectionChip, ErrorLine, Eyebrow, SectionLabel } from "./parts";
 import { KnowledgeEntryEditor } from "./KnowledgeEntryEditor";
 import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
-import { DuplicatesBanner, EntryBody, SimilarEntries } from "./KnowledgeEntrySections";
+import { Disagreements, DuplicatesBanner, EntryBody, NoveltyLine, SimilarEntries } from "./KnowledgeEntrySections";
+import { MergedFrom, SimilarConcepts, type KnowledgeConceptSectionsApi } from "./KnowledgeConceptSections";
 import { entryPanelIds, type KnowledgeMergePlan } from "./panel.logic";
 
 /** What the panel shows; `edit` opens an entry straight in its editor. */
@@ -39,7 +40,7 @@ export interface KnowledgeSelectOptions {
 }
 
 /** The routes the panel reads, on top of the store's. `ApiClient` satisfies it. */
-export interface KnowledgePanelApi extends KnowledgeApi {
+export interface KnowledgePanelApi extends KnowledgeConceptSectionsApi {
   getKnowledgeItem(id: string, signal?: AbortSignal): Promise<KnowledgeItemResponse>;
 }
 
@@ -218,7 +219,7 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
                 onFindSimilar={onFindSimilar}
               />
             ) : (
-              <ConceptDetailView api={api} detail={item.concept} collections={collections} onSelect={onSelect} />
+              <ConceptDetailView key={item.concept.concept.id} api={api} detail={item.concept} collections={collections} onSelect={onSelect} onRefresh={retry} />
             )}
           </>
         )}
@@ -385,8 +386,10 @@ const EntryDetailView: React.FC<{
             ))}
           </div>
         )}
+        <NoveltyLine novelty={detail.novelty} onOpenConcept={(id) => onSelect({ kind: "concept", id })} />
       </section>
 
+      <Disagreements detail={detail} onOpen={(id) => onSelect({ kind: "entry", id })} onOpenConcept={(id) => onSelect({ kind: "concept", id })} />
       <SimilarEntries detail={detail} onOpen={(id) => onSelect({ kind: "entry", id })} onFindSimilar={onFindSimilar} />
     </div>
   );
@@ -401,7 +404,9 @@ const ConceptDetailView: React.FC<{
   detail: KnowledgeConceptDetail;
   collections: readonly KnowledgeCollectionView[];
   onSelect: (selection: KnowledgeSelection) => void;
-}> = ({ api, detail, collections, onSelect }) => {
+  /** Read the concept again (a merge it lists is no longer in effect). */
+  onRefresh: () => void;
+}> = ({ api, detail, collections, onSelect, onRefresh }) => {
   const { concept } = detail;
   const confidence = Math.round(Math.min(1, Math.max(0, concept.confidence)) * 100);
   return (
@@ -465,6 +470,9 @@ const ConceptDetailView: React.FC<{
           </ul>
         )}
       </section>
+
+      <SimilarConcepts detail={detail} onOpen={(id) => onSelect({ kind: "concept", id })} />
+      <MergedFrom api={api} detail={detail} onRefresh={onRefresh} />
     </div>
   );
 };

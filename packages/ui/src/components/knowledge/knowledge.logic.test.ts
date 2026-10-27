@@ -9,6 +9,8 @@ import {
   cleanFilters,
   clearFilterField,
   collectionFormError,
+  conceptMergesText,
+  relinkView,
   entriesQueryOf,
   missingExamplesOf,
   pruneSelectionHistory,
@@ -341,5 +343,25 @@ describe("deleted example entries and history", () => {
     assert.deepEqual(pruneSelectionHistory([e("a"), e("b"), e("a"), c("b")], new Set(["b"]), e("x")), [e("a"), c("b")]);
     assert.deepEqual(pruneSelectionHistory([e("a"), e("b")], new Set(["b"]), e("a")), [], "Back would go nowhere");
     assert.deepEqual(pruneSelectionHistory([e("a"), e("k")], new Set(), e("k")), [e("a")]);
+  });
+});
+
+describe("re-linking and concept merges in the status (phase 2)", () => {
+  it("says Re-linking done/total while entries are left, and nothing otherwise", () => {
+    const view = relinkView({ pending: 89, done: 37, total: 126 });
+    assert.equal(view?.label, "Re-linking 37/126");
+    assert.match(view?.detail ?? "", /^89 entries are still to be linked again/);
+    assert.equal(relinkView({ pending: 1, done: 1234, total: 1235 })?.label, "Re-linking 1,234/1,235");
+    assert.match(relinkView({ pending: 1, done: 0, total: 1 })?.detail ?? "", /^1 entry is still/);
+    assert.equal(relinkView(null), null, "nothing left");
+    assert.equal(relinkView(undefined), null, "an older daemon");
+    assert.equal(relinkView({ pending: 0, done: 0, total: 0 }), null);
+  });
+
+  it("counts the concept merges in effect, and says nothing from an older daemon", () => {
+    assert.equal(conceptMergesText(12), "12 in effect");
+    assert.equal(conceptMergesText(1500), "1,500 in effect");
+    assert.equal(conceptMergesText(0), "None");
+    assert.equal(conceptMergesText(undefined), null);
   });
 });

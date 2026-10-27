@@ -157,6 +157,25 @@ export function knowledgeCountsText(status: Pick<KnowledgeStatus, "entries" | "c
   ].join(" · ");
 }
 
+/**
+ * The automatic re-linking (phase 2 spec): "Re-linking 37/126" and its tooltip while entries are
+ * left to re-link, else null (nothing left, or an older daemon).
+ */
+export function relinkView(relink: KnowledgeStatus["relink"]): { label: string; detail: string } | null {
+  if (!relink || relink.total <= 0) return null;
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  return {
+    label: `Re-linking ${fmt(relink.done)}/${fmt(relink.total)}`,
+    detail: `${plural(relink.pending, "entry is", "entries are")} still to be linked again, with the concepts of similar entries in view. It runs in the background, after new saves.`
+  };
+}
+
+/** "12 in effect" — the automatic concept merges (phase 2), or null from an older daemon. */
+export function conceptMergesText(conceptMerges: number | undefined): string | null {
+  if (conceptMerges === undefined) return null;
+  return conceptMerges === 0 ? "None" : `${conceptMerges.toLocaleString("en-US")} in effect`;
+}
+
 const PAUSE_TEXT: Record<KnowledgePauseReason, string> = {
   "usage-limit": "every Claude account is at its usage limit",
   "no-account": "no Claude account can run it",
