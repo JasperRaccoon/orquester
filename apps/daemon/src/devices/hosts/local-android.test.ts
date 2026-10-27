@@ -13,7 +13,7 @@ import type { ExecFn } from "../android/exec.ts";
 import { isProcessAlive, waitForExit } from "../android/procs.ts";
 import { readHostState, writeHostState } from "../android/state.ts";
 import type { KvmProbe } from "../android/readiness.ts";
-import { createDeviceToolchain } from "../toolchain/index.ts";
+import { createDeviceToolchain, DEVICE_TOOL_VERSIONS } from "../toolchain/index.ts";
 import { LocalAndroidHost } from "./local-android.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -194,5 +194,24 @@ test("uploads land in their own 0700 dir with a safe name", async () => {
   await withHost({}, async ({ host }) => {
     const { path } = await host.uploadFile(Readable.from([Buffer.from("apk")]), "../../evil app.apk");
     assert.match(path, /\/uploads\/[0-9a-f-]{36}\/evil_app\.apk$/);
+  });
+});
+
+test("agent-device: the pinned CLI under this node with the private env; refused until installed", async () => {
+  await withHost({}, async ({ appDir, host }) => {
+    assert.throws(() => host.agentDeviceCommand(), /not installed/);
+    const toolchain = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null });
+    const dir = join(toolchain.layout.tools, `agent-device@${DEVICE_TOOL_VERSIONS["agent-device"]}`);
+    await touch(join(dir, "node_modules", "agent-device", "bin", "agent-device.mjs"));
+    await touch(join(dir, ".install-complete"));
+    const command = host.agentDeviceCommand();
+    assert.equal(command.command, process.execPath);
+    assert.deepEqual(command.args, [join(dir, "node_modules", "agent-device", "bin", "agent-device.mjs")]);
+    assert.equal(command.env.ANDROID_ADB_SERVER_PORT, toolchain.env.ANDROID_ADB_SERVER_PORT);
+    assert.equal(command.env.AGENT_DEVICE_STATE_DIR, toolchain.layout.agentDeviceState);
+    assert.ok(Object.values(command.env).every((value) => typeof value === "string"));
+    // Viewer counts are taken per device without throwing.
+    host.viewersChanged("emulator-5586", 2);
+    host.viewersChanged("emulator-5586", 0);
   });
 });

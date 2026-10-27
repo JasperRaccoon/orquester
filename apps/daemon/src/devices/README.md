@@ -70,7 +70,10 @@ Facts and flags come from the spike (`docs/superpowers/research/2026-10-27-devic
 | `android/state.ts` | `hub.json`: hub and emulator pids; `planReattach` (keep / reap / forget). |
 | `android/capacity.ts`, `readiness.ts`, `procs.ts` | Capacity formula, the readiness checklist with fix action ids, `/proc` readers. |
 
-Integration check on a KVM machine (installs into a throwaway appdir, ~10 min the first time;
+Integration check on a KVM machine — install, two concurrent leases, hub `/api/devices` with the
+token, agent-device through `--config`, a simulated daemon restart (reattach), release; then
+`open_device` + `device_action snapshot` through a real `DeviceService` — in a throwaway appdir
+(~6 min the first time: ~2 min install, ~4 min golden snapshot;
 `ORQ_IT_SDK=<sdk>` hard-links an existing SDK instead of downloading it; never touches the live
 daemon's appdir or ports):
 

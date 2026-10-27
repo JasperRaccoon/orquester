@@ -4,18 +4,27 @@
  * with `ORQ_IT_SDK=<sdk dir>`, hard-linked), creates the profile's AVD, boots two leases at once
  * (the first one makes the golden snapshot), checks `sys.boot_completed`, the hub's device list
  * with its token and agent-device through its `--config`, "restarts the daemon" (a second host
- * reattaches), releases both and checks nothing of the appdir keeps running.
+ * reattaches), releases both; then, through a real `DeviceService` (the local factory, the
+ * agent-device runner and actions), opens one device as an agent and runs `device_action snapshot`;
+ * finally checks nothing of the appdir keeps running.
  *
  *   cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/integration.it.ts /var/lib/orquester/tmp/devices-local-it/app [profile]
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
-import { LocalAndroidHost } from "../hosts/local-android.ts";
+import { deviceLeasesPath, deviceScreenshotsDir, devicesSettingsPath } from "@orquester/config";
+
+import { createDeviceActionExecutor } from "../actions.ts";
+import { createAgentDeviceClient } from "../agent-device.ts";
+import { createLocalAndroidHostFactory, LocalAndroidHost } from "../hosts/local-android.ts";
+import { DeviceScreenshots } from "../screenshots.ts";
+import { DeviceService } from "../service.ts";
+import { DeviceLeaseStore, DeviceSettingsStore } from "../store.ts";
 import { createDeviceToolchain } from "../toolchain/index.ts";
 import { execFile } from "./exec.ts";
 import { listProcStats, processMatches } from "./procs.ts";
@@ -121,6 +130,34 @@ log("after restart:", host.state().status, host.capacity(), "same hub:", host.hu
 
 for (const lease of [...leases]) await timed(`release ${lease.id}`, () => host.release(lease, { shutdown: true }));
 await host.teardown();
+leases.length = 0;
+
+// Through the device service, as an agent's tools reach it.
+await writeFile(devicesSettingsPath(appDir), JSON.stringify({ version: 1, settings }));
+const agentDevice = createAgentDeviceClient({ toolchain, env: process.env, logger });
+const service = new DeviceService({
+  settingsStore: new DeviceSettingsStore({ file: devicesSettingsPath(appDir), logger }),
+  leaseStore: new DeviceLeaseStore({ file: deviceLeasesPath(appDir), logger }),
+  factories: [createLocalAndroidHostFactory({ appDir, env: process.env, toolchain, logger })],
+  actions: createDeviceActionExecutor({ agentDevice, logger }),
+  screenshots: new DeviceScreenshots(deviceScreenshotsDir(appDir), logger),
+  publish: () => undefined,
+  logger,
+  idleTimer: false,
+  openWaitMs: 300_000
+});
+await service.start();
+await timed("service: hub ready", async () => {
+  while (service.hosts.get("local")?.state().status !== "ready") await new Promise((resolve) => setTimeout(resolve, 250));
+});
+const opened = await timed("service: open_device", () => service.toolOpen("it-thread", { platform: "android", profile: profileId }, signal));
+log("open_device:", opened.ready, opened.lease.key, opened.lease.state);
+for (const round of [1, 2]) {
+  const snapshot = await timed(`service: device_action snapshot #${round}`, () => service.toolAction("it-thread", undefined, { action: "snapshot" }, signal));
+  log(`snapshot #${round}:`, (snapshot.text ?? "").split("\n").slice(0, 8).join(" | "));
+}
+await timed("service: release", async () => void (await service.releaseThread("it-thread")));
+await service.stop();
 
 const left: string[] = [];
 const marker = { key: "ANDROID_AVD_HOME", value: toolchain.layout.avd };

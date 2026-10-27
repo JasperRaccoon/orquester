@@ -62,14 +62,14 @@ import { delay, isProcessAlive, listProcStats, processMatches, readMemAvailable,
 import { evaluateReadiness, ffmpegHasLibx264, FIX_ACTIONS, groupMembers, type KvmProbe, type ReadinessProbe } from "../android/readiness.ts";
 import { type EmulatorRecord, emptyHostState, type HostStateFile, type HubRecord, planReattach, readHostState, writeHostState } from "../android/state.ts";
 import { DeviceError } from "../errors.ts";
-import type { DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress, DeviceHostState } from "../host.ts";
+import type { AgentDeviceCommand, DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress, DeviceHostState } from "../host.ts";
 import { clearGolden, goldenReady, writeGoldenMarker } from "../toolchain/android-sdk.ts";
-import { DEVICE_TOOL_NAMES, type DeviceToolchain } from "../toolchain/index.ts";
+import { DEVICE_TOOL_NAMES, type LocalDeviceToolchain } from "../toolchain/index.ts";
 
 export interface LocalAndroidHostDeps {
   appDir: string;
   env: NodeJS.ProcessEnv;
-  toolchain: DeviceToolchain;
+  toolchain: LocalDeviceToolchain;
   logger: Pick<Console, "info" | "warn" | "error">;
   /** Tests: the program runner and the KVM probe. */
   exec?: ExecFn;
@@ -158,6 +158,8 @@ export class LocalAndroidHost implements DeviceHost {
   private readonly hub: HubSupervisor;
   private readonly agentDevice: AgentDeviceDaemon;
   private readonly emulators = new Map<string, EmulatorRecord>();
+  /** Open proxied streams per device (`viewersChanged`). */
+  private readonly viewers = new Map<string, number>();
   /** Console ports being booted (not yet in `emulators`). */
   private readonly reserved = new Set<number>();
   private readonly profileQueue = new KeyedQueue();
@@ -557,6 +559,22 @@ export class LocalAndroidHost implements DeviceHost {
     this.hub.noteViewer();
   }
 
+  /** The proxy's open streams of one device; the hub recycles its capture sessions once no device is watched. */
+  viewersChanged(deviceId: string, count: number): void {
+    if (count > 0) this.viewers.set(deviceId, count);
+    else this.viewers.delete(deviceId);
+    this.hub.setViewers([...this.viewers.values()].reduce((sum, n) => sum + n, 0));
+  }
+
+  /** The pinned agent-device CLI under the daemon's node, with this host's private environment (no secrets: the token is in `--config`). */
+  agentDeviceCommand(): AgentDeviceCommand {
+    const entry = this.deps.toolchain.toolEntry("agent-device");
+    if (!entry) throw new DeviceError("UNAVAILABLE", "agent-device is not installed on this machine yet. Ask the owner to set devices up in Settings → Devices.");
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(this.env)) if (value !== undefined) env[key] = value;
+    return { command: this.nodePath, args: [entry], env };
+  }
+
   async listDevices(): Promise<DeviceSummary[]> {
     const devices: DeviceSummary[] = [];
     for (const profileId of androidProfiles(this.ctx.settings())) {
@@ -715,6 +733,7 @@ export class LocalAndroidHost implements DeviceHost {
     const how = await stopEmulator({ exec: this.exec, adb: join(this.layout.sdk, "platform-tools", "adb"), env: this.env, serial: record.serial, pid: record.pid, pgid: record.pgid });
     if (how === "sigkill") this.deps.logger.warn(`[devices] ${record.serial} needed SIGKILL to stop`);
     if (this.emulators.get(record.serial) === record) this.emulators.delete(record.serial);
+    if (this.viewers.delete(record.serial)) this.hub.setViewers([...this.viewers.values()].reduce((sum, n) => sum + n, 0));
     await this.persistState();
     this.changed();
   }

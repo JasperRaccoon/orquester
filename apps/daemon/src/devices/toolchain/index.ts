@@ -66,6 +66,7 @@ export interface AndroidSdkStatus {
   avds: { profile: string; created: boolean; snapshot: boolean }[];
 }
 
+/** The toolchain seam every host uses (box hosts: the pinned tools on this machine). */
 export interface DeviceToolchain {
   /** Every pinned tool's state. */
   tools(): Promise<DeviceToolStatus[]>;
@@ -73,12 +74,16 @@ export interface DeviceToolchain {
   ensureTool(name: DeviceToolName, signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<string>;
   /** The executable of an installed tool (`node_modules/.bin/<bin>`), or null. */
   toolBin(name: DeviceToolName): string | null;
-  /** The installed tool's entry module, run as `node <entry>` (no PATH lookup of `node`), or null. */
-  toolEntry(name: DeviceToolName): string | null;
   /** The Android SDK's state. */
   androidStatus(profiles: readonly string[]): Promise<AndroidSdkStatus>;
   /** Install the SDK packages and system image, create the AVDs (golden snapshots: the local host, lazily). */
   ensureAndroid(profiles: readonly string[], signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<void>;
+}
+
+/** The full local toolchain the local Android host drives step by step. */
+export interface LocalDeviceToolchain extends DeviceToolchain {
+  /** The installed tool's entry module, run as `node <entry>` (no PATH lookup of `node`), or null. */
+  toolEntry(name: DeviceToolName): string | null;
   /** cmdline-tools, licences, platform-tools and emulator. */
   ensureAndroidSdk(signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<void>;
   /** The API 35 system image (needs the SDK). */
@@ -118,7 +123,7 @@ function failed(what: string, error: unknown): DeviceError {
   return new DeviceError("UNAVAILABLE", `${what} failed: ${reason}`);
 }
 
-export function createDeviceToolchain(deps: DeviceToolchainDeps): DeviceToolchain {
+export function createDeviceToolchain(deps: DeviceToolchainDeps): LocalDeviceToolchain {
   const layout = androidLayout(deps.appDir);
   const nodePath = deps.nodePath ?? process.execPath;
   const env = buildAndroidEnv(layout, deps.env, { user: deps.env.USER || safeUser(), nodePath, adbPort: adbServerPort(deps.appDir) });
@@ -134,7 +139,7 @@ export function createDeviceToolchain(deps: DeviceToolchainDeps): DeviceToolchai
     await mkdir(layout.runtime, { recursive: true, mode: 0o700 });
   };
 
-  const toolchain: DeviceToolchain = {
+  const toolchain: LocalDeviceToolchain = {
     layout,
     env,
 

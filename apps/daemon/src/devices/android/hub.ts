@@ -7,9 +7,11 @@
  * restarted with exponential backoff, reset after 60 s healthy.
  *
  * Capture sessions linger for minutes after the last viewer leaves (ffmpeg keeps re-encoding a
- * still screen) and the hub has no API to end one without killing the emulator, so a hub that has
- * capture children, no loopback connection and no viewer signal for {@link RECYCLE_IDLE_MS} is
- * restarted ("recycled").
+ * still screen) and the hub has no API to end one without killing the emulator, so the hub is
+ * restarted ("recycled") once it has capture children and nobody watches: {@link RECYCLE_AFTER_LAST_VIEWER_MS}
+ * after the proxy reports its last stream closed (`setViewers(0)`), or — without counts (a hub
+ * reattached after a restart) — after {@link RECYCLE_IDLE_MS} with no loopback connection and no
+ * viewer signal. One hub streams every device, so it waits until no device is watched.
  *
  * The token: with `--require-token` the hub CLI generates its own (it overwrites
  * `EXPO_DEVICE_HUB_SESSION_TOKEN`), and publishes it in `<EXPO_DEVICE_HUB_STATE_DIR>/server-<port>.json`
@@ -32,6 +34,8 @@ export const HUB_TICK_MS = 5_000;
 export const HUB_HEALTHY_RESET_MS = 60_000;
 export const HUB_BACKOFF_MAX_MS = 60_000;
 export const RECYCLE_IDLE_MS = 60_000;
+/** After the proxy reports the last viewer gone: a short grace for a reconnect (a reload, a tab switch). */
+export const RECYCLE_AFTER_LAST_VIEWER_MS = 15_000;
 
 export type HubStatus = "stopped" | "starting" | "running" | "failed";
 
@@ -63,8 +67,23 @@ export function hubBackoffMs(failures: number): number {
 }
 
 /** Whether a hub's capture sessions should be ended now (pure: the supervisor feeds it each tick). */
-export function shouldRecycle(input: { captureChildren: number; connections: number; lastViewerAt: number | null; idleSince: number | null; now: number }): boolean {
-  if (input.captureChildren === 0 || input.connections > 0) return false;
+export function shouldRecycle(input: {
+  captureChildren: number;
+  connections: number;
+  /** Streams the proxy has open now; null: no count reported since the hub started. */
+  openViewers: number | null;
+  /** When the proxy's count last dropped to 0. */
+  lastViewerLeftAt: number | null;
+  lastViewerAt: number | null;
+  idleSince: number | null;
+  now: number;
+}): boolean {
+  if (input.captureChildren === 0) return false;
+  if (input.openViewers !== null) {
+    if (input.openViewers > 0 || input.lastViewerLeftAt === null) return false;
+    return input.now - input.lastViewerLeftAt >= RECYCLE_AFTER_LAST_VIEWER_MS;
+  }
+  if (input.connections > 0) return false;
   if (input.lastViewerAt !== null && input.now - input.lastViewerAt < RECYCLE_IDLE_MS) return false;
   return input.idleSince !== null && input.now - input.idleSince >= RECYCLE_IDLE_MS;
 }
@@ -81,6 +100,8 @@ export class HubSupervisor {
   private busy: Promise<void> = Promise.resolve();
   private lastViewerAt: number | null = null;
   private idleSince: number | null = null;
+  private openViewers: number | null = null;
+  private lastViewerLeftAt: number | null = null;
   private readonly now: () => number;
 
   constructor(private readonly deps: HubDeps) {
@@ -111,6 +132,14 @@ export class HubSupervisor {
   noteViewer(): void {
     this.lastViewerAt = this.now();
     this.idleSince = null;
+  }
+
+  /** The proxy's count of open streams across every device of this hub. */
+  setViewers(count: number): void {
+    const previous = this.openViewers;
+    this.openViewers = Math.max(0, count);
+    if (this.openViewers > 0) this.lastViewerAt = this.now();
+    else if (previous === null || previous > 0) this.lastViewerLeftAt = this.now();
   }
 
   /** Reattach to a recorded hub that is still ours and healthy; false when it is not. */
@@ -223,9 +252,12 @@ export class HubSupervisor {
     const now = this.now();
     if (captureChildren === 0 || connections > 0) this.idleSince = null;
     else this.idleSince ??= now;
-    if (!shouldRecycle({ captureChildren, connections, lastViewerAt: this.lastViewerAt, idleSince: this.idleSince, now })) return;
-    this.deps.logger.info(`[devices] recycling the device hub: ${captureChildren} capture process(es) with no viewer for ${Math.round((now - this.idleSince!) / 1000)} s`);
+    const input = { captureChildren, connections, openViewers: this.openViewers, lastViewerLeftAt: this.lastViewerLeftAt, lastViewerAt: this.lastViewerAt, idleSince: this.idleSince, now };
+    if (!shouldRecycle(input)) return;
+    const since = this.lastViewerLeftAt ?? this.idleSince ?? now;
+    this.deps.logger.info(`[devices] recycling the device hub: ${captureChildren} capture process(es) with no viewer for ${Math.round((now - since) / 1000)} s`);
     this.idleSince = null;
+    this.lastViewerLeftAt = null;
     await this.kill();
     await this.spawnHub(record.port);
   }
@@ -264,6 +296,8 @@ export class HubSupervisor {
         this.healthySince = this.now();
         this.lastViewerAt = null;
         this.idleSince = null;
+        this.openViewers = this.openViewers === null ? null : 0;
+        this.lastViewerLeftAt = null;
         this.setStatus("running", null);
         this.deps.logger.info(`[devices] device hub started (pid ${pid}, port ${port})`);
         return;
