@@ -26,8 +26,10 @@ import type { KnowledgeQuery } from "./query-state";
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
+let knowledgeStore: typeof import("../../lib/knowledge/store").knowledgeStore;
 let KnowledgeListView: typeof import("./KnowledgeListView").KnowledgeListView;
 let EMPTY: KnowledgeQuery;
+let withoutExamples: typeof import("./query-state").withoutExamples;
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Node", "navigator", "KeyboardEvent", "MouseEvent", "FocusEvent", "Event"] as const;
@@ -42,9 +44,9 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ resetKnowledge } = await import("../../lib/knowledge/store"));
+  ({ resetKnowledge, knowledgeStore } = await import("../../lib/knowledge/store"));
   ({ KnowledgeListView } = await import("./KnowledgeListView"));
-  ({ EMPTY_KNOWLEDGE_QUERY: EMPTY } = await import("./query-state"));
+  ({ EMPTY_KNOWLEDGE_QUERY: EMPTY, withoutExamples } = await import("./query-state"));
 });
 
 after(() => {
@@ -80,6 +82,9 @@ describe("the List view", () => {
   let facetCalls: KnowledgeFacetsRequest[];
   let selected: string[];
   let current: KnowledgeQuery;
+  /** The harness' query setter and whether the list is mounted (as KnowledgeView switches views). */
+  let setOutside: (query: KnowledgeQuery) => void;
+  let setListShown: (shown: boolean) => void;
 
   const fakeApi = (overrides: Record<string, unknown> = {}) => ({
     listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}): Promise<KnowledgeEntriesResponse> => (
@@ -134,7 +139,11 @@ describe("the List view", () => {
   const show = async (api: Record<string, unknown> = {}, initial: Partial<KnowledgeQuery> = {}) => {
     const Harness = () => {
       const [query, setQuery] = useState<KnowledgeQuery>({ ...EMPTY, ...initial });
+      const [shown, setShown] = useState(true);
       current = query;
+      setOutside = setQuery;
+      setListShown = setShown;
+      if (!shown) return null;
       return createElement(KnowledgeListView, {
         api: fakeApi(api) as never,
         collections: collections(),
@@ -142,6 +151,7 @@ describe("the List view", () => {
         onCollection: () => undefined,
         query,
         onQueryChange: setQuery,
+        onExamplesGone: (ids: string[]) => setQuery((q) => withoutExamples(q, ids)),
         selection: null,
         onSelect: (s) => void selected.push(s.id),
         onNewCollection: () => undefined,
@@ -224,6 +234,85 @@ describe("the List view", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+
+  it("keeps words typed just before leaving the view", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await show();
+      await type("seo");
+      await tick(100);
+      // Off to the Graph view within the wait: the words reach the query anyway.
+      await act(async () => setListShown(false));
+      await settle();
+      assert.equal(current.text, "seo");
+      await act(async () => setListShown(true));
+      await settle();
+      assert.equal(input().value, "seo");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("never mixes words typed just before \"More like this\" into its example query", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await show();
+      await type("tips");
+      await tick(100);
+      // "More like this" from the panel within the wait: an example query, without the words.
+      await act(async () => setOutside({ ...EMPTY, similarTo: ["ke_seed0000000"] }));
+      await settle();
+      await tick(300);
+      assert.deepEqual(current.similarTo, ["ke_seed0000000"]);
+      assert.equal(current.text, "", "the pending words did not join the example query");
+      assert.equal(input().value, "", "the box follows the new query");
+      assert.ok(searches.every((req) => !(req.similarTo && req.query)), "no search mixed them");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("never loses a page loaded around a background refresh", async () => {
+    const page = (cursor: string | undefined): KnowledgeEntriesResponse =>
+      cursor === "p2"
+        ? { entries: [summary({ id: "ke_second00000", title: "Second page entry", savedAt: "2026-01-01T10:00:00.000Z" })], nextCursor: "p3" }
+        : { entries: [summary({ id: "ke_listed00000", title: "First page entry", savedAt: "2026-01-02T10:00:00.000Z" })], nextCursor: "p2" };
+    let hold: Array<() => void> | null = null;
+    await show({
+      listKnowledgeEntries: (query: KnowledgeEntriesQuery = {}) => {
+        lists.push(query);
+        const held = hold;
+        return held ? new Promise<KnowledgeEntriesResponse>((resolve) => held.push(() => resolve(page(query.cursor)))) : Promise.resolve(page(query.cursor));
+      }
+    });
+    const loadMore = () => buttonNamed("Load more");
+    const refresh = async () => {
+      await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1, changedEntryIds: null })));
+      await settle();
+    };
+
+    // A refresh in flight: Load more waits for it (its answer replaces the list).
+    hold = [];
+    await refresh();
+    assert.equal(loadMore().disabled, true);
+    await click(loadMore());
+    assert.deepEqual(lists.map((q) => q.cursor), [undefined, undefined], "no page read meanwhile");
+    hold.shift()!();
+    await settle();
+    assert.equal(loadMore().disabled, false);
+
+    // Load more, then a refresh before its page arrives: the refresh reads that page too.
+    await click(loadMore());
+    const pending = hold.shift()!;
+    await refresh();
+    pending();
+    while (hold.length > 0) {
+      hold.shift()!();
+      await settle();
+    }
+    assert.deepEqual(lists.map((q) => q.cursor), [undefined, undefined, "p2", undefined, "p2"]);
+    assert.match(text(), /First page entry.*Second page entry/);
   });
 
   it("moves between results with ↑/↓, opens with the card, and Esc clears the box", async () => {
@@ -322,6 +411,43 @@ describe("the List view", () => {
     assert.deepEqual(current.similarTo, []);
     assert.deepEqual(current.unlike, [], "no \"not like\" without a \"like\"");
     assert.ok(doc().querySelector('ul[aria-label="Entries"]'), "back to the plain list");
+  });
+
+  it("lets go of a deleted example the search is refused for, back to the plain list when none is left", async () => {
+    const notFound = (id: string) => Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: `No visible entry "${id}".` } });
+    await show(
+      {
+        searchKnowledge: async (req: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> => {
+          searches.push(req);
+          const gone = (req.similarTo ?? []).find((id) => id === "ke_gone0000000");
+          if (gone) throw notFound(gone);
+          return { hits: [hit("ke_bbbbbbbbbbbb", "Hit B")], searched: [], total: 1, nextCursor: null };
+        }
+      },
+      { similarTo: ["ke_gone0000000", "ke_seed0000000"] }
+    );
+    assert.deepEqual(current.similarTo, ["ke_seed0000000"]);
+    assert.deepEqual(searches.at(-1)?.similarTo, ["ke_seed0000000"]);
+    assert.match(text(), /1 result/);
+    assert.doesNotMatch(text(), /No visible entry/);
+
+    act(() => root.unmount());
+    root = createRoot(doc().body.appendChild(doc().createElement("div")));
+    searches = [];
+    lists = [];
+    await show(
+      {
+        searchKnowledge: async (req: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> => {
+          searches.push(req);
+          throw notFound("ke_gone0000000");
+        }
+      },
+      { similarTo: ["ke_gone0000000"], unlike: ["ke_bbbbbbbbbbbb"] }
+    );
+    assert.deepEqual([current.similarTo, current.unlike], [[], []]);
+    assert.equal(searches.length, 1, "asked once");
+    assert.ok(doc().querySelector('ul[aria-label="Entries"]'), "the plain list");
+    assert.doesNotMatch(text(), /No visible entry|Retry/);
   });
 
   it("Rediscover: older entries like this week's, hidden for an older daemon, dismissible", async () => {

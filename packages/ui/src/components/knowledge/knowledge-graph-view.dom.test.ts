@@ -150,16 +150,18 @@ describe("the Graph view", () => {
     opts: {
       api?: Record<string, unknown> | null;
       installed?: boolean;
+      embeddingModelReady?: boolean;
       query?: KnowledgeQuery;
       onQueryChange?: (query: KnowledgeQuery) => void;
       onOpenInList?: () => void;
+      filter?: string[];
     } = {}
   ) => {
     const props = {
       api: (opts.api === null ? null : api(opts.api)) as never,
-      status: status({ installed: opts.installed ?? true }),
+      status: status({ installed: opts.installed ?? true, ...(opts.embeddingModelReady !== undefined ? { embeddingModelReady: opts.embeddingModelReady } : {}) }),
       collections: [collection()],
-      filter: [],
+      filter: opts.filter ?? [],
       onFilter: () => undefined,
       selection: null,
       onSelect: (s: KnowledgeSelection | null) => selections.push(s),
@@ -196,11 +198,14 @@ describe("the Graph view", () => {
       input().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     });
   };
+  /** Press `name` in the search box; true when the handler kept the browser's own default. */
   const key = async (name: string) => {
+    let kept = true;
     await act(async () => {
-      input().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: name, bubbles: true }));
+      kept = input().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
     });
     await settle();
+    return kept;
   };
 
   it("does not offer the Similarity layer to a daemon without its route, or a client without it", async () => {
@@ -264,6 +269,47 @@ describe("the Graph view", () => {
     await click([...doc().querySelectorAll('[role="radiogroup"][aria-label="Colour by"] button')].find((b) => b.textContent === "Cluster")!);
   });
 
+  it("keeps a picked cluster on the same entries when a refetch reorders the clusters, and lets go when it is gone", async () => {
+    let answer: KnowledgeSimilarityGraphResponse = {
+      ...SIMILARITY,
+      nodes: [simNode("ke_a", 0), simNode("ke_b", 0), simNode("ke_c", 1), simNode("ke_d", 1)],
+      clusters: [
+        { id: 0, size: 2, label: "Paywalls" },
+        { id: 1, size: 2, label: "Pricing" }
+      ]
+    };
+    await show({ api: { getKnowledgeSimilarityGraph: async () => answer } });
+    await click(layerRadio("Similarity")!);
+    const legendButton = (label: string) => [...doc().querySelectorAll('ul[aria-label="Clusters"] button')].find((b) => b.textContent?.startsWith(label))!;
+    await click(legendButton("Paywalls"));
+    assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_b"]);
+
+    // Pricing grew: the daemon numbers it first now.
+    answer = {
+      ...answer,
+      nodes: [simNode("ke_a", 1), simNode("ke_b", 1), simNode("ke_c", 0), simNode("ke_d", 0), simNode("ke_e", 0)],
+      clusters: [
+        { id: 0, size: 3, label: "Pricing" },
+        { id: 1, size: 2, label: "Paywalls" }
+      ]
+    };
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_b"], "still the Paywalls entries");
+    assert.equal(legendButton("Paywalls").getAttribute("aria-pressed"), "true");
+
+    // The Paywalls cluster broke up: nothing stays marked, and its key coming back later marks nothing.
+    const brokenUp = answer;
+    answer = { ...answer, nodes: [simNode("ke_c", 0), simNode("ke_d", 0), simNode("ke_e", 0)], clusters: [{ id: 0, size: 3, label: "Pricing" }] };
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.equal(lastCanvas().highlightIds.size, 0);
+    answer = brokenUp;
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.equal(lastCanvas().highlightIds.size, 0);
+  });
+
   it("remembers the layer for the session and keeps one canvas for both", async () => {
     await show();
     await click(layerRadio("Similarity")!);
@@ -288,7 +334,7 @@ describe("the Graph view", () => {
     assert.equal(similarityReads.length, before + 1);
   });
 
-  it("says embeddings are being computed, or that the runtime is needed, when nothing is embedded", async () => {
+  it("says embeddings are being computed, or that the embedding model is still being downloaded, when nothing is embedded", async () => {
     const waiting = { ...SIMILARITY, nodes: [], edges: [], clusters: [], truncated: false, totals: { entries: 3, embedded: 0 } };
     await show({ api: { getKnowledgeSimilarityGraph: async () => waiting } });
     await click(layerRadio("Similarity")!);
@@ -297,8 +343,11 @@ describe("the Graph view", () => {
 
     act(() => root.unmount());
     root = createRoot(doc().body.appendChild(doc().createElement("div")));
-    await show({ api: { getKnowledgeSimilarityGraph: async () => waiting }, installed: false });
-    assert.match(text(), /Install the Knowledge runtime to see similarity/);
+    await show({ api: { getKnowledgeSimilarityGraph: async () => waiting }, embeddingModelReady: false });
+    assert.match(text(), /The embedding model is still being downloaded/);
+    assert.match(text(), /Search matches the words meanwhile/);
+    assert.doesNotMatch(text(), /Embeddings are being computed/);
+    assert.equal(doc().querySelector(".animate-spin, .motion-safe\\:animate-spin"), null, "no spinner while the model is missing");
     const open = [...doc().querySelectorAll("button")].find((b) => b.textContent?.includes("Open Plugins"))!;
     await click(open);
     assert.equal(useAppStore.getState().settingsSection, "plugins");
@@ -395,6 +444,27 @@ describe("the Graph view", () => {
       root = createRoot(doc().body.appendChild(doc().createElement("div")));
       await searchWith();
       assert.equal([...doc().querySelectorAll("button")].find((b) => b.textContent?.startsWith("Show all")), undefined);
+    });
+
+    it("promises no count when two or more collection chips are on", async () => {
+      await searchWith({ onOpenInList: () => undefined, filter: ["kc_seo", "kc_ads"] });
+      assert.deepEqual(searches.at(-1)?.collections, ["kc_seo", "kc_ads"]);
+      const line = doc().querySelector('[role="listbox"]')!.parentElement!.lastElementChild!;
+      assert.equal(line.textContent, "Show in List (all collections)");
+    });
+
+    it("closes the list on the first Escape (keeping the words, against the browser's own clear) and clears on the second", async () => {
+      const changes: KnowledgeQuery[] = [];
+      const query: KnowledgeQuery = { text: "paywall", similarTo: [], unlike: [], filters: {}, sort: null };
+      await searchWith({ query, onQueryChange: (q) => changes.push(q) });
+      await act(async () => input().focus());
+      await key("ArrowDown");
+      assert.ok(doc().querySelector('[role="listbox"]'), "the list is open");
+      assert.equal(await key("Escape"), false, "the browser does not clear the search field");
+      assert.equal(doc().querySelector('[role="listbox"]'), null, "the list closed");
+      assert.equal(changes.length, 0, "the words stay");
+      await key("Escape");
+      assert.equal(changes.at(-1)?.text, "");
     });
 
     it("edits the shared query's words and searches with its filters", async () => {

@@ -12,9 +12,11 @@ import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type {
   KnowledgeEntriesQuery,
+  KnowledgeEntryDetail,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeItemResponse,
+  KnowledgeMergeRequest,
   UpdateKnowledgeCollectionRequest,
   UpdateKnowledgeEntryRequest
 } from "@orquester/api";
@@ -374,6 +376,109 @@ describe("the Knowledge view", () => {
       searches.some((req) => (req as { similarTo?: string[] }).similarTo?.[0] === "ke_aaaaaaaaaaaa"),
       `a search for entries like it (${JSON.stringify(searches)})`
     );
+  });
+
+  const notFound = (message = "No such entry.") => Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message } });
+  const entriesChanged = async (ids: string[]) => {
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1, changedEntryIds: ids })));
+    await settle();
+  };
+  const entryItem = (id: string, title: string, savedAt: string, possibleDuplicates: KnowledgeEntryDetail["possibleDuplicates"] = []): KnowledgeItemResponse => ({
+    kind: "entry",
+    entry: { entry: entry({ id, title, savedAt }), concepts: [], related: [], similar: [], possibleDuplicates, citation: "" }
+  });
+
+  it("a More like this whose example is deleted falls back to the plain list instead of failing forever", async () => {
+    const gone = new Set<string>();
+    const searches: Array<{ similarTo?: string[] }> = [];
+    await show({
+      focus: { kind: "entry", id: "ke_aaaaaaaaaaaa", nonce: 1 },
+      api: {
+        getKnowledgeItem: async (id: string) => {
+          calls.push(`item:${id}`);
+          if (gone.has(id)) throw notFound();
+          return ENTRY;
+        },
+        // The list holds another entry (Rediscover may search like it).
+        listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => (
+          calls.push(`entries:${query.collection ?? "all"}`), { entries: [summary({ id: "ke_dddddddddddd", title: "Another" })], nextCursor: null }
+        ),
+        searchKnowledge: async (req: { similarTo?: string[] }) => {
+          searches.push(req);
+          const missing = (req.similarTo ?? []).find((id) => gone.has(id));
+          if (missing) throw notFound(`No visible entry "${missing}".`);
+          return { hits: [], searched: [], total: 0, nextCursor: null };
+        }
+      }
+    });
+    await click(buttonNamed("More like this"));
+    await settle();
+    assert.match(text(), /Like:/);
+    assert.equal(searches.at(-1)?.similarTo?.[0], "ke_aaaaaaaaaaaa");
+
+    // Deleted elsewhere: the change names it, the search would be refused.
+    gone.add("ke_aaaaaaaaaaaa");
+    calls.length = 0;
+    await entriesChanged(["ke_aaaaaaaaaaaa"]);
+    await settle();
+    assert.doesNotMatch(text(), /Like:/, "the example chip is gone");
+    assert.doesNotMatch(text(), /No visible entry|It no longer exists/, "no error stays");
+    assert.ok(calls.includes("entries:all"), "the plain list again");
+    const before = searches.length;
+    await entriesChanged(["ke_bbbbbbbbbbbb"]);
+    assert.ok(
+      searches.slice(before).every((req) => !req.similarTo?.includes("ke_aaaaaaaaaaaa")),
+      "it does not ask for that search again"
+    );
+  });
+
+  it("after a merge deletes the open entry, Back skips it; a deleted entry leaves the history", async () => {
+    const OLDER = "ke_aaaaaaaaaaaa";
+    const OPEN = "ke_bbbbbbbbbbbb";
+    const FIRST = "ke_cccccccccccc";
+    const items = new Map<string, KnowledgeItemResponse>([
+      [OLDER, entryItem(OLDER, "Original", "2026-10-01T10:00:00.000Z")],
+      [OPEN, entryItem(OPEN, "Copy", "2026-10-20T10:00:00.000Z", [{ entry: summary({ id: OLDER, title: "Original", savedAt: "2026-10-01T10:00:00.000Z" }), similarity: 0.97, reasons: [] }])],
+      [FIRST, entryItem(FIRST, "Where I started", "2026-10-05T10:00:00.000Z")]
+    ]);
+    const merges: KnowledgeMergeRequest[] = [];
+    const overrides = {
+      getKnowledgeItem: async (id: string) => {
+        const found = items.get(id);
+        if (!found) throw notFound();
+        return found;
+      },
+      mergeKnowledgeEntries: async (req: KnowledgeMergeRequest) => {
+        merges.push(req);
+        for (const id of req.ids) if (id !== req.keep) items.delete(id);
+        return {};
+      }
+    };
+    await show({ focus: { kind: "entry", id: FIRST, nonce: 1 }, api: overrides });
+    await act(async () => root.render(createElement(KnowledgeView, { focus: { kind: "entry", id: OPEN, nonce: 2 }, active: true, Canvas: StubCanvas })));
+    await settle();
+    const panelTitle = () => doc().querySelector("aside")?.textContent ?? "";
+    assert.match(panelTitle(), /Copy/);
+
+    await click(buttonNamed("Merge"));
+    await click([...doc().querySelectorAll('[role="dialog"] button')].find((b) => b.textContent?.trim() === "Merge")!);
+    await settle();
+    assert.deepEqual(merges, [{ ids: [OLDER, OPEN], keep: OLDER }]);
+    assert.match(panelTitle(), /Original/, "the kept entry is open");
+
+    await click(buttonNamed("Back"));
+    assert.match(panelTitle(), /Where I started/, "Back skips the deleted entry");
+    assert.equal([...doc().querySelectorAll("button")].some((b) => b.getAttribute("aria-label") === "Back"), false);
+
+    // Back in history, then deleted elsewhere: no Back to it.
+    await act(async () => root.render(createElement(KnowledgeView, { focus: { kind: "entry", id: OLDER, nonce: 3 }, active: true, Canvas: StubCanvas })));
+    await settle();
+    assert.match(panelTitle(), /Original/);
+    assert.ok(buttonNamed("Back"));
+    items.delete(FIRST);
+    await entriesChanged([FIRST]);
+    await settle();
+    assert.equal([...doc().querySelectorAll("button")].some((b) => b.getAttribute("aria-label") === "Back"), false, "the deleted entry left the history");
   });
 
   const showList = async () =>

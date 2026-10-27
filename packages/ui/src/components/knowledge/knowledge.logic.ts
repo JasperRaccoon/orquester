@@ -32,7 +32,8 @@ import {
   type KnowledgeSearchResponse,
   type KnowledgeSearchSort,
   type KnowledgeStatus,
-  type UpdateKnowledgeEntryRequest
+  type UpdateKnowledgeEntryRequest,
+  encodeKnowledgeFilterList
 } from "@orquester/api";
 
 import { effectiveSort, isSearching, type KnowledgeQuery } from "./query-state";
@@ -108,6 +109,37 @@ export function knowledgeErrorText(error: unknown): string {
   if (code && FALLBACK_TEXT[code]) return FALLBACK_TEXT[code]!;
   if (error instanceof Error && error.message) return error.message;
   return String(error);
+}
+
+/**
+ * The example entries a refused search says are gone, or null when it says no such thing. A search
+ * answers `KNOWLEDGE_NOT_FOUND` only for an unknown (or hidden) example, naming it as
+ * `No visible entry "<id, at most 80 characters>"`; a message naming none of them (another daemon
+ * version) means every example is in doubt, and all are returned.
+ */
+export function missingExamplesOf(error: unknown, query: Pick<KnowledgeQuery, "similarTo" | "unlike">): string[] | null {
+  if (knowledgeErrorCode(error) !== "KNOWLEDGE_NOT_FOUND") return null;
+  const examples = [...new Set([...query.similarTo, ...query.unlike])];
+  if (examples.length === 0) return null;
+  const message = errorBody(error)?.message;
+  const named = typeof message === "string" ? examples.filter((id) => message.includes(`"${id.slice(0, 80)}"`)) : [];
+  return named.length > 0 ? named : examples;
+}
+
+/**
+ * The panel's Back history without the entries in `gone` (deleted): what is left never repeats a
+ * place twice in a row, nor ends on `current` (Back would go nowhere).
+ */
+export function pruneSelectionHistory<T extends { kind: string; id: string }>(history: readonly T[], gone: ReadonlySet<string>, current: { kind: string; id: string } | null): T[] {
+  const same = (a: { kind: string; id: string } | null | undefined, b: { kind: string; id: string } | null | undefined) => !!a && !!b && a.kind === b.kind && a.id === b.id;
+  const kept: T[] = [];
+  for (const item of history) {
+    if (item.kind === "entry" && gone.has(item.id)) continue;
+    if (same(kept[kept.length - 1], item)) continue;
+    kept.push(item);
+  }
+  while (same(kept[kept.length - 1], current)) kept.pop();
+  return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +490,7 @@ export function searchKeyOf(query: KnowledgeQuery, collection: string): string {
   return JSON.stringify(searchRequestOf(query, collection));
 }
 
-/** The plain list's query string: the collection and the filters (comma-separated lists, ISO bounds). */
+/** The plain list's query string: the collection and the filters (lists as `encodeKnowledgeFilterList` writes them, ISO bounds). */
 export function entriesQueryOf(
   collection: string,
   filters: KnowledgeSearchFilters,
@@ -469,8 +501,8 @@ export function entriesQueryOf(
   if (page.cursor) query.cursor = page.cursor;
   const clean = cleanFilters(filters) ?? {};
   for (const field of KNOWLEDGE_FACET_FIELDS) {
-    const values = clean[field];
-    if (values) query[field] = values.join(",");
+    const encoded = encodeKnowledgeFilterList(clean[field]);
+    if (encoded) query[field] = encoded;
   }
   for (const bound of BOUNDS) {
     const value = clean[bound];

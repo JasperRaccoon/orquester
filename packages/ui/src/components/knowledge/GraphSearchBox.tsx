@@ -36,13 +36,15 @@ export interface GraphSearchBoxProps {
   onPick: (hit: KnowledgeSearchHit) => void;
   /** "Show all N results" (hidden when absent). */
   onShowAll?: () => void;
+  /** The collection chips the search is narrowed to (empty: all), for the "Show all" line's wording. */
+  filter: readonly string[];
   /** The List view's filters or examples narrow the results too. */
   narrowed: boolean;
 }
 
 const hitKey = (hit: KnowledgeSearchHit) => (hit.kind === "entry" ? `entry:${hit.entry.id}` : `concept:${hit.concept.id}`);
 
-export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, state, open, onOpen, collections, onPick, onShowAll, narrowed }) => {
+export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, state, open, onOpen, collections, onPick, onShowAll, filter, narrowed }) => {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
   const listId = useId();
@@ -72,6 +74,8 @@ export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, st
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.stopPropagation();
+      // A search input clears itself on Escape (Chromium, Electron): the first press only closes the list.
+      event.preventDefault();
       if (showing) onOpen(false);
       else onText("");
       return;
@@ -165,7 +169,7 @@ export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, st
               }}
               className="flex shrink-0 items-center justify-between gap-2 border-t border-neutral-800 px-3 py-2 text-left text-xs font-medium text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
             >
-              {showAllLabel(state.answer)}
+              {showAllLabel(state.answer, filter)}
               <ArrowRight size={12} />
             </button>
           )}

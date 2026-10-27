@@ -113,7 +113,7 @@ function openDetail(overrides: Partial<KnowledgeEntryDetail> = {}): KnowledgeEnt
 describe("the entry panel", () => {
   let root: Root;
   let calls: string[];
-  let selected: KnowledgeSelection[];
+  let selected: Array<KnowledgeSelection & { replaced?: boolean }>;
   let similarAsked: string[];
   let items: Map<string, KnowledgeItemResponse>;
   let failMerge: boolean;
@@ -185,8 +185,8 @@ describe("the entry panel", () => {
         api: api as never,
         selection,
         collections: COLLECTIONS,
-        onSelect: (next: KnowledgeSelection) => {
-          selected.push(next);
+        onSelect: (next: KnowledgeSelection, options?: { replace?: boolean }) => {
+          selected.push(options?.replace ? { ...next, replaced: true } : next);
           setSelection(next);
         },
         onClose: () => undefined,
@@ -239,6 +239,18 @@ describe("the entry panel", () => {
     await show(openDetail());
     assert.ok(doc().querySelector('[data-knowledge-body="plain"]'));
     assert.equal(buttonNamed("Plain text").getAttribute("aria-pressed"), "true");
+  });
+
+  it("loads a remote image in the body only when clicked (no tracking pixel on open)", async () => {
+    await show(openDetail({ entry: entry({ id: OPEN, body: "Saved post.\n\n![pixel](https://tracker.example/p.gif)" }) }));
+    const body = doc().querySelector('[data-knowledge-body="markdown"]')!;
+    assert.equal(body.querySelector("img"), null, "nothing is requested on open");
+    const load = [...body.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Load image"));
+    assert.ok(load, "a click-to-load button stands in");
+    assert.equal(load.textContent, "Load image: pixel (tracker.example)");
+    assert.equal(load.getAttribute("title"), "https://tracker.example/p.gif");
+    await click(load);
+    assert.equal(body.querySelector("img")?.getAttribute("src"), "https://tracker.example/p.gif");
   });
 
   it("cuts a long body's Markdown until asked for the rest", async () => {
@@ -304,7 +316,7 @@ describe("the entry panel", () => {
     await click(buttonNamed("Merge", dialog));
     await settle();
     assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [`merge:{"ids":["${OLDER}","${OPEN}"],"keep":"${OLDER}"}`]);
-    assert.deepEqual(selected, [{ kind: "entry", id: OLDER }]);
+    assert.deepEqual(selected, [{ kind: "entry", id: OLDER, replaced: true }], "in the deleted entry's place: Back does not lead to it");
     assert.doesNotMatch(text(), /This entry was deleted/);
   });
 

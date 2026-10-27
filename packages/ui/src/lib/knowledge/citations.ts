@@ -92,12 +92,20 @@ export function resetKnowledgeCitations(): void {
   generation += 1;
   connectionId = null;
   client = null;
+  forgetAll();
+}
+
+/**
+ * Drop every answer and every read in flight. Their late answers are dropped by the generation
+ * check without a word, so tell the cards now — also when only reads were in flight (else a card
+ * would stay on "Loading…").
+ */
+function forgetAll(): void {
+  const had = known.size > 0 || inFlight.size > 0;
   inFlight.clear();
   latest.clear();
-  if (known.size > 0) {
-    known.clear();
-    emit();
-  }
+  known.clear();
+  if (had) emit();
 }
 
 export function knowledgeCitationState(id: string): KnowledgeCitationState {
@@ -152,12 +160,7 @@ export function checkKnowledgeCitation(api: KnowledgeCitationsApi, id: string): 
 function entriesChanged(ids: readonly string[] | null): void {
   if (ids === null) {
     generation += 1;
-    inFlight.clear();
-    latest.clear();
-    if (known.size > 0) {
-      known.clear();
-      emit();
-    }
+    forgetAll();
     return;
   }
   const api = client;
@@ -179,12 +182,15 @@ knowledgeStore.subscribe((state, previous) => {
   entriesChanged(state.entriesRevision < previous.entriesRevision ? null : state.changedEntryIds);
 });
 
-const subscribe = (listener: () => void) => {
+/** Run `listener` whenever an answer or a pending read changes (the hooks below; tests). */
+export function subscribeKnowledgeCitations(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
-};
+}
+
+const subscribe = subscribeKnowledgeCitations;
 
 export function useKnowledgeCitationState(id: string): KnowledgeCitationState {
   const snapshot = () => knowledgeCitationState(id);

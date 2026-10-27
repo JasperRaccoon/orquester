@@ -10,6 +10,8 @@ import {
   clearFilterField,
   collectionFormError,
   entriesQueryOf,
+  missingExamplesOf,
+  pruneSelectionHistory,
   entryFormOf,
   entryFormPatch,
   entryPostUrl,
@@ -38,7 +40,7 @@ import {
   viaBadges,
   withoutExample
 } from "./knowledge.logic.ts";
-import { EMPTY_KNOWLEDGE_QUERY, findSimilarQuery, withUnlike, type KnowledgeQuery } from "./query-state.ts";
+import { EMPTY_KNOWLEDGE_QUERY, findSimilarQuery, withUnlike, withoutExamples, type KnowledgeQuery } from "./query-state.ts";
 
 describe("knowledge colours", () => {
 
@@ -226,6 +228,13 @@ describe("the List view's requests", () => {
     });
   });
 
+  it("send a filter list whose value holds a comma (or starts with '[') as a JSON array", () => {
+    const query = entriesQueryOf("all", { authors: ["Patel, Om", "@om"], kinds: ["[draft]"], years: ["2026"] });
+    assert.equal(query.authors, JSON.stringify(["Patel, Om", "@om"]));
+    assert.equal(query.kinds, JSON.stringify(["[draft]"]));
+    assert.equal(query.years, "2026");
+  });
+
   it("scope a filter's counts to the collection and the other filters, never its own", () => {
     const filters = { kinds: ["thread"], authors: ["om"], years: ["2026"] };
     assert.deepEqual(facetsRequestOf("kc_seo", filters, "kinds"), { collections: ["kc_seo"], filters: { authors: ["om"], years: ["2026"] } });
@@ -355,5 +364,35 @@ describe("Rediscover", () => {
     assert.deepEqual(rediscoverEntries({ hits: [hit("ke_5"), concept, hit("ke_x")], searched: [], total: 2 }, ["ke_5"])?.map((e) => e.id), ["ke_x"]);
     assert.equal(rediscoverEntries({ hits: [], searched: [], total: 0 }, ["ke_5"]), null);
     assert.equal(rediscoverEntries({ hits: [hit("ke_x")], searched: [] }, ["ke_5"]), null, "no total: an older daemon");
+  });
+});
+
+describe("deleted example entries and history", () => {
+  const notFound = (message: string) => Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message } });
+  const examples = { ...EMPTY_KNOWLEDGE_QUERY, text: "", similarTo: ["ke_a", "ke_b"], unlike: ["ke_c"] };
+
+  it("let go of examples; with no \"more like\" left, \"less like\" goes too", () => {
+    assert.equal(withoutExamples(examples, ["ke_x"]), examples, "the same query when none is an example");
+    assert.deepEqual(withoutExamples(examples, ["ke_a"]), { ...examples, similarTo: ["ke_b"], unlike: ["ke_c"] });
+    assert.deepEqual(withoutExamples(examples, ["ke_c"]), { ...examples, unlike: [] });
+    const none = withoutExamples(examples, ["ke_a", "ke_b"]);
+    assert.deepEqual([none.similarTo, none.unlike], [[], []]);
+  });
+
+  it("read which examples a refused search names, else doubt them all", () => {
+    assert.deepEqual(missingExamplesOf(notFound('No visible entry "ke_b".'), examples), ["ke_b"]);
+    assert.deepEqual(missingExamplesOf(notFound("Gone."), examples), ["ke_a", "ke_b", "ke_c"]);
+    const long = "ke_" + "x".repeat(100);
+    assert.deepEqual(missingExamplesOf(notFound(`No visible entry "${long.slice(0, 80)}".`), { similarTo: [long], unlike: [] }), [long]);
+    assert.equal(missingExamplesOf(new Error("offline"), examples), null);
+    assert.equal(missingExamplesOf(notFound("Gone."), { similarTo: [], unlike: [] }), null);
+  });
+
+  it("prune deleted entries from Back history, never repeating a place or ending where you are", () => {
+    const e = (id: string) => ({ kind: "entry" as const, id });
+    const c = (id: string) => ({ kind: "concept" as const, id });
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("b"), e("a"), c("b")], new Set(["b"]), e("x")), [e("a"), c("b")]);
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("b")], new Set(["b"]), e("a")), [], "Back would go nowhere");
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("k")], new Set(), e("k")), [e("a")]);
   });
 });

@@ -205,9 +205,30 @@ export function markdownBodyPreview(body: string, limit = MARKDOWN_BODY_PREVIEW_
     if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
   }
   let text = body.slice(0, cut).replace(/\s+$/, "");
-  const fences = text.split("\n").filter((line) => /^\s{0,3}(```|~~~)/.test(line));
-  if (fences.length % 2 === 1) text += `\n${fences[fences.length - 1]!.trim().slice(0, 3)}`;
+  const fence = openCodeFence(text);
+  if (fence) text += `\n${fence}`;
   return { text, rest: body.length - cut };
+}
+
+/**
+ * The fence that closes the code block still open at the end of `text`, or null when none is
+ * (CommonMark: an opening fence is 3+ backticks or tildes indented at most 3 spaces — a backtick
+ * one with no backtick in its info string; only a run of the same character, at least as long,
+ * with nothing but spaces after it closes it).
+ */
+export function openCodeFence(text: string): string | null {
+  let open: { char: string; length: number } | null = null;
+  for (const line of text.split("\n")) {
+    const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!match) continue;
+    const run = match[1]!;
+    const after = match[2]!;
+    if (!open) {
+      if (run[0] === "`" && after.includes("`")) continue;
+      open = { char: run[0]!, length: run.length };
+    } else if (run[0] === open.char && run.length >= open.length && after.trim() === "") open = null;
+  }
+  return open ? open.char.repeat(open.length) : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ import {
   entriesKeyOf,
   entriesQueryOf,
   knowledgeErrorText,
+  missingExamplesOf,
   rediscoverEntries,
   rediscoverRequestOf,
   rediscoverSeeds,
@@ -73,24 +74,33 @@ function useEntriesRevision(): number {
  * Pages of a list (entries, or a search's hits) identified by `key` (null: not shown — nothing is
  * read and what was read is kept). Whenever entries change it is read again as deep as the user had
  * paged ("Load more"), so loaded cards never drop away; a different key starts from a spinner.
+ * "Load more" waits while such a refetch is in flight (`refetching`): its answer replaces the list,
+ * so a page loaded meanwhile would drop away again.
  */
 function usePaged<T>(
   key: string | null,
   read: ((cursor: string | null, signal?: AbortSignal) => Promise<PageAnswer<T>>) | null,
-  idOf: (item: T) => string
+  idOf: (item: T) => string,
+  /** A failure the caller mends by changing what is read (so `key` moves): true when it did, and no error shows. */
+  recover?: (error: unknown) => boolean
 ) {
   const [page, setPage] = useState<Paged<T>>({ status: "loading" });
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const [refetching, setRefetching] = useState(false);
   const revision = useEntriesRevision();
   const [retries, setRetries] = useState(0);
   const seq = useRef(0);
   const shown = useRef<string | null>(null);
   /** Pages shown (the first one plus each "Load more"); a refetch reads as many. */
   const depth = useRef(1);
+  /** A "Load more" in flight: a refetch starting meanwhile drops its answer, so it reads that page too. */
+  const loadingMore = useRef(false);
   const readRef = useRef(read);
   readRef.current = read;
   const idOfRef = useRef(idOf);
   idOfRef.current = idOf;
+  const recoverRef = useRef(recover);
+  recoverRef.current = recover;
   const ready = read !== null;
 
   useEffect(() => {
@@ -105,7 +115,9 @@ function usePaged<T>(
       setPage({ status: "loading" });
     } else setPage((p) => (p.status === "ready" ? p : { status: "loading" }));
     setMore({ busy: false, error: null });
-    const wanted = depth.current;
+    setRefetching(true);
+    const wanted = depth.current + (loadingMore.current ? 1 : 0);
+    loadingMore.current = false;
     void (async () => {
       let pages: Pages<T> | null = null;
       let count = 0;
@@ -117,17 +129,22 @@ function usePaged<T>(
       if (mine !== seq.current || controller.signal.aborted) return;
       depth.current = Math.max(1, count);
       setPage({ status: "ready", ...pages });
+      setRefetching(false);
     })().catch((error: unknown) => {
-      if (mine === seq.current && !controller.signal.aborted) setPage({ status: "error", message: knowledgeErrorText(error) });
+      if (mine !== seq.current || controller.signal.aborted) return;
+      if (recoverRef.current?.(error)) return;
+      setPage({ status: "error", message: knowledgeErrorText(error) });
+      setRefetching(false);
     });
     return () => controller.abort();
   }, [key, ready, revision, retries]);
 
   const loadMore = useCallback(async () => {
     const reader = readRef.current;
-    if (!reader || page.status !== "ready" || !page.nextCursor || more.busy) return;
+    if (!reader || page.status !== "ready" || !page.nextCursor || more.busy || refetching) return;
     const mine = seq.current;
     setMore({ busy: true, error: null });
+    loadingMore.current = true;
     try {
       const answer = await reader(page.nextCursor);
       if (mine !== seq.current) return;
@@ -135,11 +152,13 @@ function usePaged<T>(
       setPage((p) => (p.status === "ready" ? { status: "ready", ...appendPage(p, answer, idOfRef.current) } : p));
       setMore({ busy: false, error: null });
     } catch (error) {
-      if (mine === seq.current) setMore({ busy: false, error: knowledgeErrorText(error) });
+      if (mine === seq.current && !recoverRef.current?.(error)) setMore({ busy: false, error: knowledgeErrorText(error) });
+    } finally {
+      if (mine === seq.current) loadingMore.current = false;
     }
-  }, [page, more.busy]);
+  }, [page, more.busy, refetching]);
 
-  return { page, more, loadMore, retry: () => setRetries((r) => r + 1) };
+  return { page, more, refetching, loadMore, retry: () => setRetries((r) => r + 1) };
 }
 
 /** Rediscover is dismissed for the rest of the app session (all Knowledge views). */
@@ -182,6 +201,12 @@ function useExampleTitles(api: KnowledgeListApi | null, ids: readonly string[], 
   const [read, setRead] = useState<Record<string, string | null>>({});
   const asked = useRef(new Set<string>());
   const idsKey = ids.join(",");
+  // Entries changed: their titles are read again (an edit renames the chip).
+  const revision = useEntriesRevision();
+  useEffect(() => {
+    const changed = knowledgeStore.getState().changedEntryIds;
+    for (const id of [...asked.current]) if (changed === null || changed.includes(id)) asked.current.delete(id);
+  }, [revision]);
   useEffect(() => {
     if (!api) return;
     for (const id of ids) {
@@ -194,7 +219,7 @@ function useExampleTitles(api: KnowledgeListApi | null, ids: readonly string[], 
     }
     // `idsKey` stands for `ids`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, idsKey, known]);
+  }, [api, idsKey, known, revision]);
   const remember = useCallback((id: string, title: string) => setRead((r) => ({ ...r, [id]: title })), []);
   const titleOf = useCallback((id: string): string | null | undefined => known.get(id) ?? read[id], [known, read]);
   return { titleOf, remember };
@@ -244,12 +269,18 @@ const EmptyResults: React.FC<{ icon: React.ReactNode; title: string; hint: strin
   </div>
 );
 
-const MoreButton: React.FC<{ nextCursor: string | null; more: { busy: boolean; error: string | null }; onMore: () => void }> = ({ nextCursor, more, onMore }) =>
+const MoreButton: React.FC<{
+  nextCursor: string | null;
+  more: { busy: boolean; error: string | null };
+  /** A refetch of the list is in flight: its answer replaces the list, so no page is added meanwhile. */
+  waiting: boolean;
+  onMore: () => void;
+}> = ({ nextCursor, more, waiting, onMore }) =>
   nextCursor || more.error ? (
     <div className="mx-auto flex max-w-3xl flex-col items-center gap-2 py-3">
       {more.error && <ErrorLine>{more.error}</ErrorLine>}
       {nextCursor && (
-        <Button size="sm" variant="outline" onClick={onMore} disabled={more.busy}>
+        <Button size="sm" variant="outline" onClick={onMore} disabled={more.busy || waiting}>
           {more.busy && <Loader2 size={12} className="motion-safe:animate-spin" />} Load more
         </Button>
       )}
@@ -266,6 +297,11 @@ export interface KnowledgeListViewProps {
   /** What the list searches for (owned by KnowledgeView, shared with the Graph view and the panel). */
   query: KnowledgeQuery;
   onQueryChange: (query: KnowledgeQuery) => void;
+  /**
+   * The search was refused because example entries are gone (deleted): let go of them (the query
+   * moves on). Absent: the refusal shows as an error.
+   */
+  onExamplesGone?: (ids: string[]) => void;
   selection: KnowledgeSelection | null;
   onSelect: (selection: KnowledgeSelection) => void;
   onNewCollection: () => void;
@@ -281,6 +317,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
   onCollection,
   query,
   onQueryChange,
+  onExamplesGone,
   selection,
   onSelect,
   onNewCollection,
@@ -298,7 +335,15 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
   const search = usePaged<KnowledgeSearchHit>(
     searching ? searchKeyOf(query, collection) : null,
     api ? (cursor, signal) => api.searchKnowledge(searchRequestOf(query, collection, { cursor }), signal).then(searchPageOf) : null,
-    searchHitKey
+    searchHitKey,
+    // An example entry deleted: let go of it (nothing left to search: the plain list) rather than
+    // asking again, forever, for a search the daemon must refuse.
+    (error) => {
+      const missing = onExamplesGone ? missingExamplesOf(error, query) : null;
+      if (!missing || !onExamplesGone) return false;
+      onExamplesGone(missing);
+      return true;
+    }
   );
 
   // Rediscover: seeded by this week's entries at the top of the plain, unfiltered list.
@@ -405,7 +450,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
             )}
           </ul>
         )}
-        <MoreButton nextCursor={search.page.nextCursor} more={search.more} onMore={() => void search.loadMore()} />
+        <MoreButton nextCursor={search.page.nextCursor} more={search.more} waiting={search.refetching} onMore={() => void search.loadMore()} />
       </>
     );
   } else if (entries.page.status === "ready") {
@@ -446,7 +491,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
             ))}
           </ul>
         )}
-        <MoreButton nextCursor={entries.page.nextCursor} more={entries.more} onMore={() => void entries.loadMore()} />
+        <MoreButton nextCursor={entries.page.nextCursor} more={entries.more} waiting={entries.refetching} onMore={() => void entries.loadMore()} />
       </>
     );
   }

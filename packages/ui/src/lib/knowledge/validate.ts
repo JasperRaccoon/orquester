@@ -632,7 +632,7 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
     isRecord(value.lastError) && typeof value.lastError.message === "string"
       ? { message: value.lastError.message, at: str(value.lastError.at) }
       : null;
-  return {
+  const status: KnowledgeStatus = {
     enabled: value.enabled,
     installed: value.installed,
     entries: count(value.entries),
@@ -647,6 +647,9 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
     tokens: { week: parseTokens(tokens.week), total: parseTokens(tokens.total) },
     lastError
   };
+  // Absent from a daemon that predates it (and anything not a boolean reads as absent).
+  if (typeof value.embeddingModelReady === "boolean") status.embeddingModelReady = value.embeddingModelReady;
+  return status;
 }
 
 /** `knowledge.changed`'s payload, or null when it is not an object. */

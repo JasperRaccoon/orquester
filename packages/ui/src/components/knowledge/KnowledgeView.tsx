@@ -12,16 +12,16 @@ import { KNOWLEDGE_GRAPH_PLUGIN_ID, type KnowledgeCollectionView, type Knowledge
 import { Button } from "../ui";
 import { SegmentedControl } from "../settings/primitives";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
-import { loadKnowledge, useKnowledgeState } from "../../lib/knowledge/store";
+import { knowledgeStore, loadKnowledge, useKnowledgeState } from "../../lib/knowledge/store";
 import { useAppStore, type KnowledgeFocus } from "../../store/app";
 import { Centered, ErrorLine } from "./parts";
-import { knowledgeErrorText } from "./knowledge.logic";
+import { knowledgeErrorCode, knowledgeErrorText, pruneSelectionHistory } from "./knowledge.logic";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
 import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
-import { KnowledgePanel, type KnowledgeSelection } from "./KnowledgePanel";
+import { KnowledgePanel, type KnowledgeSelectOptions, type KnowledgeSelection } from "./KnowledgePanel";
 import { KnowledgeStatusBar } from "./KnowledgeStatusBar";
 import { KnowledgeCollectionDialog } from "./KnowledgeCollectionDialog";
-import { EMPTY_KNOWLEDGE_QUERY, type KnowledgeQuery, findSimilarQuery } from "./query-state";
+import { EMPTY_KNOWLEDGE_QUERY, type KnowledgeQuery, findSimilarQuery, withoutExamples } from "./query-state";
 import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 
 const LazyCanvas = React.lazy(() => import("./KnowledgeGraphCanvas"));
@@ -81,7 +81,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
   selectionRef.current = selection;
   const historyRef = useRef(history);
   historyRef.current = history;
-  const select = useCallback((next: KnowledgeSelection | null) => {
+  const select = useCallback((next: KnowledgeSelection | null, options?: KnowledgeSelectOptions) => {
     const current = selectionRef.current;
     selectionRef.current = next;
     if (!next) {
@@ -90,7 +90,9 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
       return;
     }
     if (current && (current.kind !== next.kind || current.id !== next.id)) {
-      setHistory((h) => [...h.slice(-(HISTORY_MAX - 1)), { kind: current.kind, id: current.id }]);
+      // `replace` (a merge moved off the entry it deleted): the current item leaves no way back to it.
+      if (options?.replace) setHistory((h) => pruneSelectionHistory(h, new Set(), next));
+      else setHistory((h) => [...h.slice(-(HISTORY_MAX - 1)), { kind: current.kind, id: current.id }]);
     }
     setSelection(next);
   }, []);
@@ -101,6 +103,50 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
     setHistory(h.slice(0, -1));
     setSelection(previous);
   }, []);
+
+  // Entries deleted (here, by a merge, or elsewhere) let go of the shared query's examples (a search
+  // naming one would only be refused) and of the Back history. An entries change names what changed
+  // (an edit or a delete alike): those of them still in use are asked about, and the gone dropped.
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const forgetEntries = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return;
+    const gone = new Set(ids);
+    setQuery((q) => withoutExamples(q, gone));
+    setHistory((h) => {
+      const next = pruneSelectionHistory(h, gone, selectionRef.current);
+      historyRef.current = next;
+      return next;
+    });
+  }, []);
+  // A search refused for a gone example names it (else every example is in doubt): only the query lets go.
+  const dropExamples = useCallback((ids: readonly string[]) => setQuery((q) => withoutExamples(q, ids)), []);
+  useEffect(() => {
+    if (!api) return;
+    let live = true;
+    const unsubscribe = knowledgeStore.subscribe((state, previous) => {
+      if (state.entriesRevision <= previous.entriesRevision) return;
+      const named = state.changedEntryIds;
+      const q = queryRef.current;
+      const inUse = new Set([...q.similarTo, ...q.unlike, ...historyRef.current.filter((s) => s.kind === "entry").map((s) => s.id)]);
+      const asked = [...inUse].filter((id) => named === null || named.includes(id));
+      if (asked.length === 0) return;
+      void Promise.all(
+        asked.map((id) =>
+          api.getKnowledgeItem(id).then(
+            () => null,
+            (error: unknown) => (knowledgeErrorCode(error) === "KNOWLEDGE_NOT_FOUND" ? id : null)
+          )
+        )
+      ).then((answers) => {
+        if (live) forgetEntries(answers.filter((id): id is string => id !== null));
+      });
+    });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, [api, forgetEntries]);
 
   // A focus request (a citation clicked, `openKnowledgeEntry`) selects its item.
   useEffect(() => {
@@ -226,6 +272,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onCollection={setListCollection}
                 query={query}
                 onQueryChange={setQuery}
+                onExamplesGone={dropExamples}
                 selection={selection}
                 onSelect={select}
                 onNewCollection={() => setDialog({ open: true, collection: null })}

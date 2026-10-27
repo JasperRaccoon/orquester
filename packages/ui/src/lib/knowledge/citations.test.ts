@@ -11,6 +11,7 @@ import {
   knowledgeCitationPending,
   knowledgeCitationState,
   resetKnowledgeCitations,
+  subscribeKnowledgeCitations,
   type KnowledgeCitationsApi
 } from "./citations.ts";
 import { applyKnowledgeEvent, resetKnowledge } from "./store.ts";
@@ -83,6 +84,33 @@ describe("knowledge citation answers", () => {
     await asked;
     await flush();
     assert.equal(knowledgeCitationState(ID), "deleted");
+  });
+
+  it("tell the cards a read in flight was dropped, with nothing known yet (no card stays on Loading…)", async () => {
+    for (const drop of [
+      // A change naming no entry forgets everything.
+      () => applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: [] })),
+      // A connection switch or the plugin turning off.
+      () => resetKnowledge()
+    ]) {
+      resetKnowledgeCitations();
+      const one = fakeApi("c1");
+      const asked = checkKnowledgeCitation(one.api, ID);
+      assert.equal(knowledgeCitationPending(ID), true);
+      const seen: boolean[] = [];
+      const unsubscribe = subscribeKnowledgeCitations(() => seen.push(knowledgeCitationPending(ID)));
+      try {
+        drop();
+        assert.deepEqual(seen, [false], "told at once that the read is no longer pending");
+        // Its late answer is dropped without a word, and leaves nothing pending.
+        one.pending.shift()!.resolve();
+        await asked;
+        assert.equal(knowledgeCitationPending(ID), false);
+        assert.equal(knowledgeCitationState(ID), "unknown");
+      } finally {
+        unsubscribe();
+      }
+    }
   });
 
   it("keep the newest answer when an older read settles last", async () => {

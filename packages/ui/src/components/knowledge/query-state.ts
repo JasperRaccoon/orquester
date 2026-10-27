@@ -45,6 +45,19 @@ export function withUnlike(query: KnowledgeQuery, entryId: string): KnowledgeQue
   return { ...query, similarTo: query.similarTo.filter((id) => id !== entryId), unlike: [...query.unlike, entryId] };
 }
 
+/**
+ * Let go of example entries (deleted ones): out of "more like" and "less like"; with no "more like"
+ * left, "less like" goes too (it means nothing alone), and a query with no words left is the plain
+ * list again. The same query when none of `ids` is an example.
+ */
+export function withoutExamples(query: KnowledgeQuery, ids: Iterable<string>): KnowledgeQuery {
+  const gone = new Set(ids);
+  if (!query.similarTo.some((id) => gone.has(id)) && !query.unlike.some((id) => gone.has(id))) return query;
+  const similarTo = query.similarTo.filter((id) => !gone.has(id));
+  const unlike = similarTo.length === 0 ? [] : query.unlike.filter((id) => !gone.has(id));
+  return { ...query, similarTo, unlike };
+}
+
 /** The effective sort: the explicit one, else relevance when searching and newest when not. */
 export function effectiveSort(query: KnowledgeQuery): KnowledgeSearchSort {
   return query.sort ?? (isSearching(query) ? "relevance" : "newest");
