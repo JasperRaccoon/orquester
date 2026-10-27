@@ -569,6 +569,28 @@ describe("the Knowledge view", () => {
     assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "nothing left");
   });
 
+  it("fits the status bar on a phone while re-linking: the linking progress bar steps aside and the re-linking text truncates", async () => {
+    await show();
+    const bar = () => doc().querySelector('[role="status"][aria-label="Knowledge status"]')!;
+    const classes = (element: Element | null) => new Set((element?.getAttribute("class") ?? "").split(/\s+/));
+    const running = { state: "running" as const, runId: "r1", mode: "update" as const, step: "pass2", progress: { done: 3, total: 10 }, pendingEntries: 0 };
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, linking: running }) }));
+    assert.ok(!classes(bar().querySelector('[role="progressbar"]')).has("max-md:hidden"), "shown on a phone without re-linking");
+
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, linking: running, relink: { pending: 89, done: 37, total: 126 } }) }));
+    assert.ok(classes(bar().querySelector('[role="progressbar"]')).has("max-md:hidden"), "below md, the progress bar steps aside for the re-linking");
+    assert.ok(!classes(bar().querySelector('[role="progressbar"]')).has("hidden"), "still shown on a desktop");
+    const relink = bar().querySelector("[data-knowledge-relink]");
+    assert.ok(classes(relink).has("min-w-0") && !classes(relink).has("shrink-0"), "the re-linking may shrink");
+    const label = [...(relink?.querySelectorAll("span") ?? [])].find((s) => s.textContent === "Re-linking 37/126");
+    assert.ok(label && classes(label).has("truncate") && classes(label).has("min-w-0"), "and its text truncates");
+    // Every item but the icons can shrink: nothing in the bar keeps a fixed width on a phone.
+    for (const child of bar().children) {
+      if (child.getAttribute("role") === "progressbar") continue;
+      assert.ok(!classes(child).has("shrink-0"), `${child.textContent} shrinks`);
+    }
+  });
+
   describe("the Insights view (phase 2)", () => {
     const INSIGHTS: KnowledgeInsightsResponse = {
       contradictions: [{ a: summary(), b: summary({ id: "ke_bbbbbbbbbbbb", title: "Other" }), similarity: 0.8, source: "graph", pairs: [], note: "They disagree." }],
