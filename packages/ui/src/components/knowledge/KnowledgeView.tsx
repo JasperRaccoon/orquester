@@ -12,11 +12,13 @@ import { KNOWLEDGE_GRAPH_PLUGIN_ID, type KnowledgeCollectionView, type Knowledge
 import { Button } from "../ui";
 import { SegmentedControl } from "../settings/primitives";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
+import { useIsDesktop } from "../../hooks/use-media-query";
 import { knowledgeStore, loadKnowledge, useKnowledgeState } from "../../lib/knowledge/store";
 import { useAppStore, type KnowledgeFocus } from "../../store/app";
 import { Centered, ErrorLine, TOOLBAR_SEGMENTED } from "./parts";
 import { knowledgeErrorCode, knowledgeErrorText, pruneSelectionHistory } from "./knowledge.logic";
-import { KnowledgeGraphView, type SelectedConcept } from "./KnowledgeGraphView";
+import { KnowledgeGraphView, type ConceptMarksRequest } from "./KnowledgeGraphView";
+import type { ConceptMarks } from "./graph.logic";
 import { KnowledgeInsightsView, useInsightsSupport } from "./KnowledgeInsightsView";
 import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
 import { KnowledgePanel, type KnowledgeSelectOptions, type KnowledgeSelection } from "./KnowledgePanel";
@@ -181,13 +183,26 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
     [panelItem, selection]
   );
 
-  const selectedConcept = useMemo<SelectedConcept | null>(
-    () =>
-      panelItem?.kind === "concept" && selection?.kind === "concept" && panelItem.concept.concept.id === selection.id
-        ? { id: panelItem.concept.concept.id, name: panelItem.concept.concept.name, entryIds: panelItem.concept.entries.map((e) => e.id) }
-        : null,
-    [panelItem, selection]
+  // The concept panel's "Show its entries in Similarity": the graph's Similarity layer with them
+  // marked. On a phone the panel covers the graph, so it closes to show it.
+  const isDesktop = useIsDesktop();
+  const [similaritySupported, setSimilaritySupported] = useState<boolean | null>(null);
+  const [conceptMarks, setConceptMarks] = useState<ConceptMarksRequest | null>(null);
+  const marksNonce = useRef(0);
+  const showConceptEntries = useCallback(
+    (marks: ConceptMarks) => {
+      marksNonce.current += 1;
+      setConceptMarks({ marks, nonce: marksNonce.current });
+      setView("graph");
+      if (!isDesktop) select(null);
+    },
+    [isDesktop, select]
   );
+  const conceptMarksShown = useCallback(() => setConceptMarks(null), []);
+  // Known once a graph view asked (it stays known while the List or Insights view is shown).
+  const onSimilaritySupport = useCallback((supported: boolean | null) => {
+    if (supported !== null) setSimilaritySupported(supported);
+  }, []);
 
   // Insights only where the daemon serves them (one that predates them answers 404).
   const ready = on && status !== null && status.installed;
@@ -283,7 +298,9 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onQueryChange={setQuery}
                 // The graph's one collection chip, when exactly one is on, narrows the list the same way.
                 onOpenInList={() => openList(query, graphFilter.length === 1 ? graphFilter[0] : "all")}
-                selectedConcept={selectedConcept}
+                conceptMarks={conceptMarks}
+                onConceptMarksShown={conceptMarksShown}
+                onSimilaritySupport={onSimilaritySupport}
                 active={active}
                 Canvas={Canvas}
                 toolbarEnd={toggle}
@@ -329,6 +346,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onBack={history.length > 0 ? back : undefined}
                 onItem={setPanelItem}
                 onFindSimilar={(id) => openList(findSimilarQuery(id), "all")}
+                onShowConceptEntries={similaritySupported === true ? showConceptEntries : undefined}
               />
             </div>
           )}

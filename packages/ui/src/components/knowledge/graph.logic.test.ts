@@ -7,6 +7,7 @@ import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
   canvasEdgeClasses,
   collectionLegend,
+  conceptMarksOf,
   conceptMarksText,
   contradictingEdgeCount,
   drawnEntryIds,
@@ -259,5 +260,32 @@ describe("cross-graph navigation and contradictions (phase 2)", () => {
     assert.equal(conceptMarksText(pricing(["a"]), 1), "Marked the entry behind “Pricing”.");
     assert.equal(conceptMarksText(pricing(["a", "b", "zz"]), 2), "Marked 2 of the 3 entries behind “Pricing” (the rest are not drawn).");
     assert.equal(conceptMarksText(pricing(["zz", "yy"]), 0), "None of the 2 entries behind “Pricing” is drawn here.");
+  });
+
+  it("marks every entry of a concept from `entryIds`, else says it marks only the 50 newest", () => {
+    const summaries = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `ke_${String(i).padStart(3, "0")}` }));
+    const concept = { id: "tactic-pricing", name: "Pricing" };
+    // A current daemon lists every visible entry id, past the 50 entries it details.
+    const all = conceptMarksOf({ concept, entries: summaries(50), entryIds: [...summaries(120).map((e) => e.id), "ke_000"] });
+    assert.equal(all.entryIds.length, 120, "every id, each once");
+    assert.equal(all.newest, null);
+    assert.equal(conceptMarksText(all, 120), "Marked the 120 entries behind “Pricing”.");
+    assert.equal(conceptMarksText(all, 70), "Marked 70 of the 120 entries behind “Pricing” (the rest are not drawn).");
+    // Capped at 2,000: those are the newest.
+    const capped = conceptMarksOf({ concept, entries: summaries(50), entryIds: summaries(2_000).map((e) => e.id) });
+    assert.equal(capped.newest, 2_000);
+    assert.equal(conceptMarksText(capped, 2_000), "Marked the 2,000 newest entries behind “Pricing”.");
+
+    // An older daemon: only `entries`, capped at the newest 50, so never "all".
+    const older = conceptMarksOf({ concept, entries: summaries(50) });
+    assert.equal(older.entryIds.length, 50);
+    assert.equal(older.newest, 50);
+    assert.equal(conceptMarksText(older, 50), "Marked the 50 newest entries behind “Pricing”.");
+    assert.equal(conceptMarksText(older, 30), "Marked 30 of the 50 newest entries behind “Pricing” (the rest are not drawn).");
+    assert.equal(conceptMarksText(older, 0), "None of the 50 newest entries behind “Pricing” is drawn here.");
+    // Fewer than 50 from an older daemon: that is all of them.
+    const few = conceptMarksOf({ concept, entries: summaries(3) });
+    assert.equal(few.newest, null);
+    assert.equal(conceptMarksText(few, 3), "Marked the 3 entries behind “Pricing”.");
   });
 });

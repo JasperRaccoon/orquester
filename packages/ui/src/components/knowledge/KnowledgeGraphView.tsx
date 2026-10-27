@@ -4,8 +4,8 @@
 // neighbourhood instead. The Similarity layer shows the entries themselves, joined by meaning
 // (nearest neighbours and a spanning forest) and coloured by cluster or collection, with the
 // pairs that disagree drawn in the destructive colour. The two layers lead into each other: a
-// cluster's top concept opens in the Concepts layer, and a selected concept's entries are marked
-// in the Similarity layer.
+// cluster's top concept opens in the Concepts layer, and a concept's entries are marked in the
+// Similarity layer (asked for from the concept panel, which a phone shows over the graph).
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, Settings, Share2, Sparkles, Waypoints } from "lucide-react";
@@ -50,6 +50,7 @@ import {
   similaritySearchSummary,
   truncationNote,
   type CanvasEdge,
+  type ConceptMarks,
   type GraphLayer,
   type SimilarityColorBy
 } from "./graph.logic";
@@ -215,15 +216,20 @@ export interface KnowledgeGraphViewProps {
   onQueryChange?: (query: KnowledgeQuery) => void;
   /** "Show all N results": the List view with the same query (the line is hidden without it). */
   onOpenInList?: () => void;
-  /** The selected concept's entries, once the panel has read it ("Show its entries in Similarity"). */
-  selectedConcept?: SelectedConcept | null;
+  /**
+   * The concept panel's "Show its entries in Similarity": applied once per nonce (the Similarity
+   * layer, with those entries marked), then `onConceptMarksShown` lets the Knowledge view drop it.
+   */
+  conceptMarks?: ConceptMarksRequest | null;
+  onConceptMarksShown?: () => void;
+  /** Whether the daemon serves the Similarity layer (null: not known yet), each time that is learnt. */
+  onSimilaritySupport?: (supported: boolean | null) => void;
 }
 
-/** A concept the panel has read: its name and the entries behind it. */
-export interface SelectedConcept {
-  id: string;
-  name: string;
-  entryIds: readonly string[];
+/** A request to mark a concept's entries on the Similarity layer; a new nonce asks again. */
+export interface ConceptMarksRequest {
+  marks: ConceptMarks;
+  nonce: number;
 }
 
 const NO_IDS: ReadonlySet<string> = new Set();
@@ -244,7 +250,9 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   query: sharedQuery,
   onQueryChange,
   onOpenInList,
-  selectedConcept = null
+  conceptMarks: marksRequest = null,
+  onConceptMarksShown,
+  onSimilaritySupport
 }) => {
   const openSettings = useAppStore((s) => s.openSettings);
 
@@ -255,6 +263,9 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   useEffect(() => {
     if (supported === false && sessionLayer === "similarity") sessionLayer = "concepts";
   }, [supported]);
+  const onSimilaritySupportRef = useRef(onSimilaritySupport);
+  onSimilaritySupportRef.current = onSimilaritySupport;
+  useEffect(() => onSimilaritySupportRef.current?.(supported), [supported]);
   const [colorBy, setColorByState] = useState<SimilarityColorBy>(sessionColorBy);
   const setColorBy = (next: SimilarityColorBy) => {
     sessionColorBy = next;
@@ -264,7 +275,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   /** The legend line whose entries are marked. */
   const [picked, setPicked] = useState<string | null>(null);
   /** A concept's entries marked on the Similarity layer ("Show its entries in Similarity"). */
-  const [conceptMarks, setConceptMarks] = useState<SelectedConcept | null>(null);
+  const [conceptMarks, setConceptMarks] = useState<ConceptMarks | null>(null);
   const chooseLayer = (next: GraphLayer) => {
     sessionLayer = next;
     setLayerChoice(next);
@@ -280,11 +291,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     const target = { kind: "concept" as const, id: concept.id };
     setFocus((current) => focusFor(target, graphRef.current, current));
   };
-  // …and a selected concept's entries are marked on the Similarity layer.
-  const showConceptEntries = (concept: SelectedConcept) => {
-    chooseLayer("similarity");
-    setConceptMarks(concept);
-  };
+  // …and a concept's entries are marked on the Similarity layer (the concept panel asks, below).
 
   // --- Concepts layer ---
   const [focus, setFocus] = useState<string | null>(null);
@@ -369,6 +376,18 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     setPicked(null);
     setConceptMarks(null);
   }, [filterKey]);
+  // The concept panel's "Show its entries in Similarity" (after the filter's reset above, which also
+  // runs on mount: a request that mounted this view is applied, not cleared). Once per nonce.
+  const onMarksShownRef = useRef(onConceptMarksShown);
+  onMarksShownRef.current = onConceptMarksShown;
+  const marksNonce = marksRequest?.nonce;
+  useEffect(() => {
+    if (!marksRequest) return;
+    chooseLayer("similarity");
+    setConceptMarks(marksRequest.marks);
+    onMarksShownRef.current?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marksNonce]);
 
   const colorOf = useMemo(() => new Map<string, KnowledgeColor>(collections.map((c) => [c.id, c.color])), [collections]);
   const knownCollections = useMemo(() => new Set(collections.map((c) => c.id)), [collections]);
@@ -407,11 +426,6 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     return ids;
   }, [pickedIds, markedConceptIds, hits]);
   const contradictions = useMemo(() => (similarity ? contradictingEdgeCount(similarity) : 0), [similarity]);
-  // "Show its entries in Similarity": the selected concept, once the panel has read it.
-  const offerConceptEntries =
-    selection?.kind === "concept" && selectedConcept !== null && selectedConcept.id === selection.id && selectedConcept.entryIds.length > 0 && supported === true
-      ? selectedConcept
-      : null;
 
   const onCanvasIds = useMemo(
     () => new Set(layer === "concepts" ? (graph?.nodes.map((n) => n.id) ?? []) : (similarity?.nodes.map((n) => n.id) ?? [])),
@@ -637,16 +651,6 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
                         </button>
                       )}
                     </span>
-                  )}
-                  {layer === "concepts" && offerConceptEntries && (
-                    <button
-                      type="button"
-                      onClick={() => showConceptEntries(offerConceptEntries)}
-                      className="pointer-events-auto inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border border-neutral-700 bg-neutral-900/90 px-3 py-1 text-[11.5px] font-medium text-neutral-200 shadow-sm hover:border-neutral-500"
-                    >
-                      <Sparkles size={12} className="shrink-0" />
-                      <span className="truncate">Show its entries in Similarity</span>
-                    </button>
                   )}
                   {layer === "similarity" && conceptMarks && similarity && (
                     <span

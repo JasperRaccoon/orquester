@@ -11,6 +11,7 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type {
+  KnowledgeConceptDetail,
   KnowledgeEntriesQuery,
   KnowledgeEntryDetail,
   KnowledgeGraphQuery,
@@ -19,6 +20,7 @@ import type {
   KnowledgeInsightsResponse,
   KnowledgeItemResponse,
   KnowledgeMergeRequest,
+  KnowledgeSimilarityGraphResponse,
   UpdateKnowledgeCollectionRequest,
   UpdateKnowledgeEntryRequest
 } from "@orquester/api";
@@ -79,13 +81,17 @@ after(() => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
-/** The canvas stand-in: a button per concept, marking the selected one. */
-const StubCanvas = ({ nodes, selectedId, onSelect }: KnowledgeGraphCanvasProps) =>
+/** The canvas stand-in: a button per node, marking the selected and the highlighted ones. */
+const StubCanvas = ({ nodes, selectedId, highlightIds, layer, onSelect }: KnowledgeGraphCanvasProps) =>
   createElement(
     "div",
-    { "data-testid": "canvas" },
+    { "data-testid": "canvas", "data-layer": layer ?? "concepts" },
     nodes.map((n) =>
-      createElement("button", { key: n.id, type: "button", "data-node": n.id, "data-selected": String(n.id === selectedId), onClick: () => onSelect(n.id) }, n.label)
+      createElement(
+        "button",
+        { key: n.id, type: "button", "data-node": n.id, "data-selected": String(n.id === selectedId), "data-hit": String(highlightIds.has(n.id)), onClick: () => onSelect(n.id) },
+        n.label
+      )
     )
   );
 
@@ -366,6 +372,81 @@ describe("the Knowledge view", () => {
     assert.equal(doc().querySelector('[data-node="tactic-alternatives"]')?.getAttribute("data-selected"), "true", "the canvas selects the kept concept");
     assert.ok(calls.includes("item:tactic-alternatives"), "the selection moved to the kept id");
     assert.equal([...doc().querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Back"), undefined, "the old id is not a place to go back to");
+  });
+
+  describe("the concept panel's Show its entries in Similarity", () => {
+    const ids = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, "0")}`);
+    const simNode = (id: string) => ({ id, title: `Entry ${id}`, kind: "post", author: null, handle: null, savedAt: "2026-10-20T10:00:00.000Z", collections: [], cluster: 0, degree: 1 });
+    // The Similarity layer draws two of the concept's entries: one of the 50 newest, one past them.
+    const SIM: KnowledgeSimilarityGraphResponse = {
+      nodes: ["ke_m00", "ke_m55", "ke_other"].map(simNode),
+      edges: [{ from: "ke_m00", to: "ke_m55", similarity: 0.9, tree: true }],
+      clusters: [{ id: 0, size: 3, label: null }],
+      truncated: false,
+      totals: { entries: 3, embedded: 3 }
+    };
+    const conceptWith = (extra: Partial<KnowledgeConceptDetail>): KnowledgeItemResponse =>
+      CONCEPT.kind === "concept" ? { kind: "concept", concept: { ...CONCEPT.concept, ...extra } } : CONCEPT;
+    const similarityApi = (item: KnowledgeItemResponse) => ({
+      getKnowledgeSimilarityGraph: async () => SIM,
+      getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : item)
+    });
+    const panelButton = () =>
+      [...(doc().querySelector('aside[aria-label="Concept details"]')?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.trim() === "Show its entries in Similarity");
+    const canvas = () => doc().querySelector('[data-testid="canvas"]');
+    const hits = () => [...doc().querySelectorAll('[data-node][data-hit="true"]')].map((b) => b.getAttribute("data-node")).sort();
+    const backToConcepts = async () => {
+      // The layer is remembered for the session: leave the next test on Concepts.
+      const concepts = [...doc().querySelectorAll('[role="radiogroup"][aria-label="Layer"] button')].find((b) => b.textContent === "Concepts");
+      if (concepts) await click(concepts);
+    };
+    const setDesktop = (desktop: boolean | null) => {
+      const target = dom.window as unknown as { matchMedia?: unknown };
+      if (desktop === null) delete target.matchMedia;
+      else target.matchMedia = () => ({ matches: desktop, addEventListener: () => undefined, removeEventListener: () => undefined });
+    };
+    afterEach(() => setDesktop(null));
+
+    it("on a phone, closes the panel and shows every entry of the concept marked on the Similarity layer, past the 50 it details", async () => {
+      await show({ api: similarityApi(conceptWith({ entries: [summary()], entryIds: ids("ke_m", 60) })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      const offer = panelButton();
+      assert.ok(offer, "the concept panel offers it (the graph is out of sight behind it on a phone)");
+      await click(offer);
+      assert.equal(doc().querySelector("aside"), null, "the panel closed so the graph shows");
+      assert.equal(canvas()?.getAttribute("data-layer"), "similarity");
+      assert.deepEqual(hits(), ["ke_m00", "ke_m55"], "marked from entryIds: one past the 50 newest too");
+      assert.match(text(), /Marked 2 of the 60 entries behind “Alternatives pages” \(the rest are not drawn\)\./);
+      await backToConcepts();
+    });
+
+    it("on a desktop, keeps the panel open beside the graph", async () => {
+      setDesktop(true);
+      await show({ api: similarityApi(conceptWith({ entries: [summary()], entryIds: ["ke_m00", "ke_m01"] })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      await click(panelButton()!);
+      assert.ok(doc().querySelector('aside[aria-label="Concept details"]'), "still open");
+      assert.equal(canvas()?.getAttribute("data-layer"), "similarity");
+      assert.deepEqual(hits(), ["ke_m00"]);
+      await backToConcepts();
+    });
+
+    it("from an older daemon (no entryIds), marks the 50 newest it details and says so", async () => {
+      const newest = ids("ke_m", 50).map((id) => summary({ id }));
+      await show({ api: similarityApi(conceptWith({ entries: newest })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      await click(panelButton()!);
+      assert.deepEqual(hits(), ["ke_m00"], "ke_m55 is not among the 50 it knows of");
+      assert.match(text(), /Marked 1 of the 50 newest entries behind “Alternatives pages” \(the rest are not drawn\)\./);
+      await backToConcepts();
+    });
+
+    it("is not offered where the daemon has no Similarity layer", async () => {
+      await show();
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      assert.ok(doc().querySelector('aside[aria-label="Concept details"]'));
+      assert.equal(panelButton(), undefined);
+    });
   });
 
   it("deleting an entry asks first, then closes the panel", async () => {

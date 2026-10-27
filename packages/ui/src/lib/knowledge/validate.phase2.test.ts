@@ -121,6 +121,16 @@ describe("phase 2 wire validation", () => {
         { concept: ref("t-far"), similarity: 1 }
       ]);
     });
+
+    it("reads every visible entry id of a concept, each once, absent from an older daemon", () => {
+      const older = parseKnowledgeItemResponse(conceptItem({}));
+      assert.ok(older?.kind === "concept" && !("entryIds" in older.concept));
+      const read = parseKnowledgeItemResponse(conceptItem({ entryIds: ["ke_b", "ke_a", 7, "", null, "ke_b", "ke_c"] }));
+      assert.ok(read?.kind === "concept");
+      assert.deepEqual(read.concept.entryIds, ["ke_b", "ke_a", "ke_c"], "in the daemon's order (newest first)");
+      const broken = parseKnowledgeItemResponse(conceptItem({ entryIds: "ke_a" }));
+      assert.ok(broken?.kind === "concept" && !("entryIds" in broken.concept), "not a list: as from an older daemon");
+    });
   });
 
   describe("the similarity graph", () => {

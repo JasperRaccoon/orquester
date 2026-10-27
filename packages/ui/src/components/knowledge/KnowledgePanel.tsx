@@ -5,7 +5,7 @@
 // graph and list views.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, Loader2, Pencil, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, Pencil, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
 import type {
   KnowledgeCollectionView,
   KnowledgeConceptDetail,
@@ -26,6 +26,7 @@ import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErr
 import { Disagreements, DuplicatesBanner, EntryBody, NoveltyLine, SimilarEntries } from "./KnowledgeEntrySections";
 import { MergedFrom, SimilarConcepts, type KnowledgeConceptSectionsApi } from "./KnowledgeConceptSections";
 import { entryPanelIds, type KnowledgeMergePlan } from "./panel.logic";
+import { conceptMarksOf, type ConceptMarks } from "./graph.logic";
 
 /** What the panel shows; `edit` opens an entry straight in its editor. */
 export interface KnowledgeSelection {
@@ -145,9 +146,21 @@ export interface KnowledgePanelProps {
   onItem?: (item: KnowledgeItemResponse | null) => void;
   /** "More like this" on an entry: search for entries similar to it (hidden when absent). */
   onFindSimilar?: (entryId: string) => void;
+  /** "Show its entries in Similarity" on a concept: mark them on the graph's Similarity layer (hidden when absent). */
+  onShowConceptEntries?: (marks: ConceptMarks) => void;
 }
 
-export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, collections, onSelect, onClose, onBack, onItem, onFindSimilar }) => {
+export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({
+  api,
+  selection,
+  collections,
+  onSelect,
+  onClose,
+  onBack,
+  onItem,
+  onFindSimilar,
+  onShowConceptEntries
+}) => {
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const onSelectRef = useRef(onSelect);
@@ -244,7 +257,15 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
                 onFindSimilar={onFindSimilar}
               />
             ) : (
-              <ConceptDetailView key={item.concept.concept.id} api={api} detail={item.concept} collections={collections} onSelect={onSelect} onRefresh={retry} />
+              <ConceptDetailView
+                key={item.concept.concept.id}
+                api={api}
+                detail={item.concept}
+                collections={collections}
+                onSelect={onSelect}
+                onRefresh={retry}
+                onShowEntries={onShowConceptEntries}
+              />
             )}
           </>
         )}
@@ -431,9 +452,13 @@ const ConceptDetailView: React.FC<{
   onSelect: (selection: KnowledgeSelection) => void;
   /** Read the concept again (a merge it lists is no longer in effect). */
   onRefresh: () => void;
-}> = ({ api, detail, collections, onSelect, onRefresh }) => {
+  /** "Show its entries in Similarity" (hidden when absent). */
+  onShowEntries?: ((marks: ConceptMarks) => void) | undefined;
+}> = ({ api, detail, collections, onSelect, onRefresh, onShowEntries }) => {
   const { concept } = detail;
   const confidence = Math.round(Math.min(1, Math.max(0, concept.confidence)) * 100);
+  // Every entry from `entryIds` (an older daemon: the newest 50 it details).
+  const marks = conceptMarksOf(detail);
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
@@ -449,6 +474,12 @@ const ConceptDetailView: React.FC<{
           </div>
         )}
       </div>
+
+      {onShowEntries && marks.entryIds.length > 0 && (
+        <Button size="sm" variant="outline" className="max-w-full" onClick={() => onShowEntries(marks)}>
+          <Sparkles size={12} className="shrink-0" /> <span className="truncate">Show its entries in Similarity</span>
+        </Button>
+      )}
 
       <section>
         <SectionLabel>Entries ({detail.entries.length})</SectionLabel>

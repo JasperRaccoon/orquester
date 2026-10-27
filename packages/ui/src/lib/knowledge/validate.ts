@@ -405,6 +405,8 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
     const seen = new Set<string>([concept.id]);
     detail.similarConcepts = similar.filter((item) => !seen.has(item.concept.id) && (seen.add(item.concept.id), true));
   }
+  // Every visible entry id (newest first), where `entries` holds the newest 50 in full.
+  if (Array.isArray(value.entryIds)) detail.entryIds = [...new Set(strings(value.entryIds).filter((id) => id !== ""))];
   return detail;
 }
 
