@@ -123,6 +123,11 @@ export interface BoxSysInfo {
   dataDir: string;
   /** Running inside a container (no systemd, limited kernel features). */
   container: boolean;
+  /**
+   * Linux: `/dev/kvm` exists and the account processes run as can open it read-write (Android
+   * emulators need it). False elsewhere; absent from `orq-agent` builds that predate it.
+   */
+  kvm?: boolean;
 }
 
 /**

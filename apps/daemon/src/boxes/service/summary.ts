@@ -181,6 +181,7 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
     image: record.image ?? null,
     os: OSES.includes(record.os as BoxOs) ? (record.os as BoxOs) : null,
     arch: ARCHES.includes(record.arch as BoxArch) ? (record.arch as BoxArch) : null,
+    ...(typeof record.kvm === "boolean" ? { kvm: record.kvm } : {}),
     state: record.state,
     stateReason: record.stateReason ?? null,
     destroyedReason: isDestroyedReason(record.destroyedReason) ? record.destroyedReason : null,

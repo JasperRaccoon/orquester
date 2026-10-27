@@ -73,6 +73,8 @@ export const storedBoxSchema = z
     os: z.string().nullable().optional(),
     arch: z.string().nullable().optional(),
     libc: z.string().nullable().optional(),
+    /** Whether `/dev/kvm` was usable by `orq-agent` at connect (Linux; absent: not reported). */
+    kvm: z.boolean().optional(),
     hourlyUsd: z.number().nullable().optional(),
     createdAt: isoString,
     readyAt: isoString.nullable().optional(),
