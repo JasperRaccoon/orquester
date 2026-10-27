@@ -157,10 +157,16 @@ export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, gr
   return {
     vectors: () => search.vectorIndex(),
     conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
+    // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.
     contradicting: (conceptId) => {
       const scope = everything();
-      const view = graph.concept(conceptId, scope);
-      return view ? view.neighbors.filter((neighbor) => neighbor.edge.type === "contradicts").map((neighbor) => neighbor.concept.id) : [];
+      const self = graph.canonicalConceptId(conceptId);
+      const out = new Set<string>();
+      for (const edge of graph.visibleEdgesOfType("contradicts", scope, [self])) {
+        const other = graph.conceptRef(edge.from === self ? edge.to : edge.from, scope);
+        if (other) out.add(other.id);
+      }
+      return [...out];
     }
   };
 }

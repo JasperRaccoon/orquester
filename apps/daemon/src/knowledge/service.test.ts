@@ -444,3 +444,24 @@ test("linking's graph view follows the concept-merge overlay: a merged concept's
   assert.deepEqual(view.contradicting("tactic-72h"), ["tactic-48h"]);
   assert.deepEqual(view.contradicting("tactic-3d"), ["tactic-48h"], "a folded id answers its kept concept");
 });
+
+test("linking's `contradicting` reads the graph's adjacency, never a concept detail (no similar-concept ranking per concept)", async () => {
+  const store = new SearchFakeStore();
+  store.put("ke_aaaaaaaaaaaa", "wait 48 hours", [], {}, true);
+  store.put("ke_bbbbbbbbbbbb", "wait 72 hours", [], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(
+    graph,
+    [node("tactic-48h", "Wait 48 hours", ["ke_aaaaaaaaaaaa.md"]), node("tactic-72h", "Wait 72 hours", ["ke_bbbbbbbbbbbb.md"])],
+    [edge("e1", "tactic-48h", "tactic-72h", null, "contradicts"), edge("e2", "tactic-72h", "tactic-48h", null, "contradicts")]
+  );
+  let similarCalls = 0;
+  graph.setSimilarConcepts(() => {
+    similarCalls += 1;
+    return [];
+  });
+  const view = linkGraphView({ listCollections: () => store.listCollections() }, graph, { vectorIndex: () => new FakeVectorIndex() });
+  assert.deepEqual(view.contradicting("tactic-48h"), ["tactic-72h"], "two edges, one concept");
+  assert.deepEqual(view.contradicting("tactic-72h"), ["tactic-48h"]);
+  assert.equal(similarCalls, 0);
+});
