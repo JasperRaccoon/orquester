@@ -128,6 +128,8 @@ const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 10;
 const CONTRADICTION_PAIRS_MAX = 3;
 const INSIGHT_CONCEPTS_MAX = 5;
 const NOVELTY_CONCEPTS_MAX = 8;
+/** Entry ids a concept lists beyond the entries it shows in full. */
+const CONCEPT_ENTRY_IDS_MAX = 200;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -323,6 +325,17 @@ function windowFooter(start: number, end: number, length: number, from: number):
   return start > 0 ? `[chars ${start}–${end} of ${length}, the end]` : null;
 }
 
+/**
+ * Concept names as one list shows them: a name that repeats in it (compared without case) carries
+ * its type, so "TikTok, TikTok" reads "TikTok (Channel), TikTok (Organization)".
+ */
+function conceptLabels(concepts: readonly KnowledgeConceptRef[]): string[] {
+  const key = (concept: KnowledgeConceptRef) => oneLine(concept.name).toLowerCase();
+  const counts = new Map<string, number>();
+  for (const concept of concepts) counts.set(key(concept), (counts.get(key(concept)) ?? 0) + 1);
+  return concepts.map((concept) => (counts.get(key(concept))! > 1 ? conceptName(concept) : label(concept.name)));
+}
+
 /** "meaning 0.91", "shares concepts A (distinctive), B +2 more", "same author". */
 function reasonText(reason: KnowledgeRelatedReason): string {
   if (reason.kind === "meaning") return `meaning ${reason.similarity.toFixed(2)}`;
@@ -330,7 +343,9 @@ function reasonText(reason: KnowledgeRelatedReason): string {
   if (reason.kind === "contradicts") return reason.note ? `disagrees: ${clipText(oneLine(reason.note), DESCRIPTION_CHARS)}` : "disagrees";
   // Few entries have a distinctive concept (absent from an older daemon): it says more than a common one.
   const distinctive = new Set((reason.distinctive ?? []).map((concept) => concept.id));
-  const named = reason.concepts.slice(0, 3).map((concept) => `${label(concept.name)}${distinctive.has(concept.id) ? " (distinctive)" : ""}`);
+  const shown = reason.concepts.slice(0, 3);
+  const names = conceptLabels(shown);
+  const named = shown.map((concept, index) => `${names[index]}${distinctive.has(concept.id) ? " (distinctive)" : ""}`);
   if (named.length === 0) return `shares ${reason.shared} concept${reason.shared === 1 ? "" : "s"}`;
   const more = reason.shared - named.length;
   return `shares concept${reason.shared === 1 ? "" : "s"} ${named.join(", ")}${more > 0 ? ` +${more} more` : ""}`;
@@ -456,10 +471,21 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
   if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
-    lines.push("Entries:");
-    for (const entry of detail.entries.slice(0, listMax)) {
+    // Every visible entry counts (`entryIds`; absent from an older daemon): the newest are shown in
+    // full, the others by id, so none goes missing from the list.
+    const all = detail.entryIds ?? detail.entries.map((entry) => entry.id);
+    const shown = detail.entries.slice(0, listMax);
+    lines.push(all.length > shown.length ? `Entries (${all.length}; the newest ${shown.length} in full):` : "Entries:");
+    for (const entry of shown) {
       const [head, ...rest] = entryBlock(entry, names, "  ");
       lines.push(`- ${head}`, ...rest);
+    }
+    const shownIds = new Set(shown.map((entry) => entry.id));
+    const others = all.filter((id) => !shownIds.has(id));
+    if (others.length > 0) {
+      const listed = others.slice(0, CONCEPT_ENTRY_IDS_MAX);
+      const more = others.length - listed.length;
+      lines.push(`- also: ${listed.join(", ")}${more > 0 ? `, +${more} more` : ""}`);
     }
   }
   if (detail.neighbors.length > 0) {
@@ -618,7 +644,7 @@ function renderInsights(response: KnowledgeInsightsResponse, over: readonly stri
       ...(item.concepts.length > 0 ? [`   via: ${item.concepts.slice(0, INSIGHT_CONCEPTS_MAX).map(conceptName).join(", ")}${item.concepts.length > INSIGHT_CONCEPTS_MAX ? ` +${item.concepts.length - INSIGHT_CONCEPTS_MAX} more` : ""}`] : []),
       `   cite: ${item.entry.citation}`
     ]),
-    ...insightsSection("Single source", "claims only one entry backs", response.singleSource, totals?.singleSource, (item) => [
+    ...insightsSection("Single source", "claims its cluster discusses that only one entry backs", response.singleSource, totals?.singleSource, (item) => [
       `${conceptName(item.concept)} [${item.concept.id}] → only ${entryRef(item.entry)}${item.cluster ? ` · in ${clusterText(item.cluster)}` : ""}`,
       `   cite: ${item.entry.citation}`
     ]),

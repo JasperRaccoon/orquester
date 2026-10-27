@@ -175,19 +175,36 @@ test("POST /facets refusals: bad shapes and filters are KNOWLEDGE_INVALID; hidde
   refused(await post({}), 409, "KNOWLEDGE_DISABLED");
 });
 
-test("entry details carry similar entries and possible duplicates, scoped to the caller", async (t) => {
+test("entry details carry similar entries and possible duplicates (near-copies only), scoped to the caller", async (t) => {
   const h = await harness(t);
   const { alt, billing, comparison, unrelated } = await seed(h);
   const detail = ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(alt) }));
   assert.deepEqual(detail.similar!.map((s) => s.entry.id), [billing, comparison]);
-  assert.deepEqual(detail.possibleDuplicates!.map((s) => s.entry.id), [billing, comparison]);
+  assert.deepEqual(detail.possibleDuplicates, [], "close in meaning (0.95, 0.92), other texts: not duplicates");
   assert.ok(!detail.similar!.some((s) => s.entry.id === unrelated || s.entry.id === alt));
+
+  // A repost of it, lightly edited, in SEO; another in SaaS (hidden from the SEO chat).
+  const reposts = ok<KnowledgeSaveResponse>(
+    await h.inject({
+      method: "POST",
+      url: knowledgeRoutes.save,
+      payload: {
+        entries: [
+          { body: "One page per competitor, [competitor] vs [you]. Reposted.", title: "New alternatives", collections: ["SEO"] },
+          { body: "Write one page per competitor, [competitor] vs [you].", title: "New alternatives twin", collections: ["SaaS"] }
+        ]
+      }
+    })
+  );
+  const [repost, twin] = reposts.results.map((r) => r.entryId);
+  const after = ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(alt) }));
+  assert.deepEqual(after.possibleDuplicates!.map((s) => s.entry.id), [twin, repost]);
 
   const scoped = ok<KnowledgeItemResponse>(await h.inject({ method: "GET", url: knowledgeRoutes.item(alt), headers: { "x-test-agent": "seo-chat" } }));
   assert.equal(scoped.kind, "entry");
   if (scoped.kind === "entry") {
-    assert.deepEqual(scoped.entry.similar!.map((s) => s.entry.id), [comparison]);
-    assert.deepEqual(scoped.entry.possibleDuplicates!.map((s) => s.entry.id), [comparison]);
+    assert.deepEqual(scoped.entry.similar!.map((s) => s.entry.id), [repost, comparison]);
+    assert.deepEqual(scoped.entry.possibleDuplicates!.map((s) => s.entry.id), [repost]);
     assert.ok(!JSON.stringify(scoped.entry.similar).includes("Annual billing"));
   }
 });
@@ -197,17 +214,18 @@ test("save: each saved entry lists visible near-duplicates outside the same save
   const { alt, comparison } = await seed(h);
   const batch = {
     entries: [
-      { body: "Alternatives pages rank for competitor names with buyer intent.", title: "New alternatives", collections: ["SEO"] },
-      { body: "Every competitor deserves its own alternatives page, honestly written.", title: "New alternatives twin", collections: ["SEO"] },
+      { body: "One page per competitor, [competitor] vs [you], honestly written.", title: "New alternatives", collections: ["SEO"] },
+      { body: "One page per competitor, [competitor] vs [you], honestly written, always.", title: "New alternatives twin", collections: ["SEO"] },
       { body: "One page per competitor, [competitor] vs [you].", collections: ["SEO"] }
     ]
   };
   const asProfile = ok<KnowledgeSaveResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.save, payload: batch, headers: { "x-test-agent": "seo-chat" } }));
   const [first, second, dup] = asProfile.results;
-  assert.deepEqual(first!.similar!.map((s) => s.entryId), [alt, comparison], "the twin is in the same save; Annual billing is hidden from this chat");
+  // Close in meaning to Alternatives and Comparison pages, a near-copy of Alternatives only.
+  assert.deepEqual(first!.similar!.map((s) => s.entryId), [alt], "the twin is in the same save; Comparison pages is another text");
   assert.equal(first!.similar![0]!.title, "Alternatives pages");
   assert.match(first!.similar![0]!.citation, new RegExp(`orquester-knowledge:entry/${alt}`));
-  assert.deepEqual(second!.similar!.map((s) => s.entryId), [alt, comparison]);
+  assert.deepEqual(second!.similar!.map((s) => s.entryId), [alt]);
   assert.equal(dup!.status, "duplicate");
   assert.equal(dup!.similar, undefined);
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { FakeVectorIndex, around, axis } from "./fake-vector-index.ts";
-import { findLinkGaps } from "./gaps.ts";
+import { findLinkGaps, linkGapConceptKey } from "./gaps.ts";
 
 const DIMS = 8;
 
@@ -65,4 +65,36 @@ test("scoped ids, the limit and the threshold are honoured", async () => {
   assert.deepEqual(await findLinkGaps({ ids: ["ke_a", "ke_c", "ke_d"], index, conceptsOf, minimum: 0.85, limit: 10 }), []);
   assert.equal((await findLinkGaps({ ids: ["ke_a", "ke_b", "ke_c"], index, conceptsOf, minimum: 0.85, limit: 1 })).length, 1);
   assert.deepEqual(await findLinkGaps({ ids: ["ke_a", "ke_b", "ke_c"], index, conceptsOf, minimum: 0.999, limit: 10 }), []);
+});
+
+test("a hub close to everything is no gap with each of its neighbours; two entries as close as their usual neighbours are", async () => {
+  const dims = 32;
+  const vector = (parts: [number, number][]): Float32Array => {
+    const out = new Float32Array(dims);
+    for (const [dim, value] of parts) out[dim] = value;
+    const norm = Math.hypot(...out);
+    return out.map((value) => value / norm);
+  };
+  const index = new FakeVectorIndex();
+  const concepts: Record<string, string[]> = {};
+  // Ten entries on one topic (0.97 apart), linked to it; a long guide near all of them (0.89) linked
+  // to something else; two short posts close to each other (0.92) and to nothing else.
+  for (let i = 1; i <= 10; i += 1) {
+    index.set(`ke_g${i}`, vector([[0, 1], [i, 0.18]]));
+    concepts[`ke_g${i}`] = ["topic"];
+  }
+  index.set("ke_hub", vector([[0, 1], [20, 0.48]]));
+  concepts.ke_hub = ["guide"];
+  index.set("ke_p", vector([[25, 1], [26, 0.3]]));
+  index.set("ke_q", vector([[25, 1], [27, 0.3]]));
+  concepts.ke_p = ["sim swap"];
+  concepts.ke_q = ["esim"];
+  const gaps = await findLinkGaps({ ids: Object.keys(concepts), index, conceptsOf: (id) => concepts[id] ?? [], minimum: 0.85, limit: 50 });
+  assert.deepEqual(gaps.map((g) => [g.a, g.b]), [["ke_p", "ke_q"]]);
+});
+
+test("link gaps compare concepts by name: one thing extracted under two types links its entries", () => {
+  assert.equal(linkGapConceptKey({ name: "App  Store" }), linkGapConceptKey({ name: "app store" }));
+  assert.equal(linkGapConceptKey({ name: "Café" }), linkGapConceptKey({ name: "cafe" }));
+  assert.notEqual(linkGapConceptKey({ name: "App Store" }), linkGapConceptKey({ name: "Play Store" }));
 });

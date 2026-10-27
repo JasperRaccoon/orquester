@@ -5,7 +5,7 @@ import { knowledgeCitation, type KnowledgeEntryMeta, type KnowledgeInsightsRespo
 import type { KnowledgePairCheck } from "../ports.ts";
 import { FakeVectorIndex, around } from "./fake-vector-index.ts";
 import { KnowledgeGraph } from "./graph.ts";
-import { KnowledgeInsights } from "./insights.ts";
+import { KnowledgeInsights, conceptCentrality } from "./insights.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { type KnowledgeScope, knowledgeScope, visibleCollections } from "./visibility.ts";
@@ -35,7 +35,15 @@ async function setup() {
     citation: knowledgeCitation(meta)
   });
   const port = () => ({ all: () => pairChecks, get: () => null, onChange: () => () => undefined });
-  const similarity = new KnowledgeSimilarity({ store, graph, index: () => index, summary, pairChecks: port, pairChecksRevision: () => checksRevision });
+  const similarity = new KnowledgeSimilarity({
+    store,
+    graph,
+    index: () => index,
+    summary,
+    body: (id) => store.entries.get(id)?.body ?? null,
+    pairChecks: port,
+    pairChecksRevision: () => checksRevision
+  });
   const insights = new KnowledgeInsights({
     store,
     graph,
@@ -79,6 +87,9 @@ async function setup() {
       node("tactic-p4q", "P4 and Q4", files("p4", "q4")),
       node("tactic-p4h", "P4 and H", files("p4", "h")),
       // Single-source claims, a topic that is not a claim, a hidden entry's own claim, one shared with it.
+      // Solo tactic and Solo metric are about topics two of their cluster's other entries discuss.
+      node("topic-pa", "Pricing tables", files("p2", "p3")),
+      node("topic-ra", "Retention", files("r2", "r3")),
       node("tactic-solo1", "Solo tactic", files("p1")),
       node("rule-solo2", "Solo rule", files("p1"), { type: "rule" }),
       node("metric-solo3", "Solo metric", files("r1"), { type: "metric" }),
@@ -90,7 +101,12 @@ async function setup() {
       node("tactic-c2", "Weekly posting", files("r3")),
       node("tactic-cs", "Hidden disagreement", files("h"))
     ],
-    [edge("x1", "tactic-c1", "tactic-c2", null, "contradicts"), edge("x2", "tactic-cs", "tactic-c1", null, "contradicts")]
+    [
+      edge("x1", "tactic-c1", "tactic-c2", null, "contradicts"),
+      edge("x2", "tactic-cs", "tactic-c1", null, "contradicts"),
+      edge("t1", "tactic-solo1", "topic-pa", null, "about"),
+      edge("t2", "metric-solo3", "topic-ra", null, "measures")
+    ]
   );
   const scope = (visibility: KnowledgeVisibility, narrow?: string[]) => knowledgeScope(visibility, store.collections.map((c) => c.id), narrow);
   return {
@@ -146,34 +162,30 @@ test("bridges: an entry whose distinctive topic concepts reach two other cluster
   assert.ok(!JSON.stringify(seo).includes(ke("h")) && !JSON.stringify(seo).includes("Hidden note"));
 });
 
-test("single-source: claims on exactly one visible entry in a cluster of 3 or more, one per entry in turn", async () => {
+test("single-source: claims on exactly one visible entry in a cluster of 3 or more whose topic its peers discuss, most discussed first", async () => {
   const s = await setup();
   const seo = await s.insights.list({}, s.seoOnly);
   const clusterOf = await clusters(s, s.seoOnly);
-  // Entries in the clusters of four (P, Q) before R's, newest first; P1's second claim on the next
-  // turn. The claims shared with the hidden entry are unbacked as far as this chat sees.
+  // Solo metric: both of R1's peers link to Retention, which it measures (2 of 2); Solo tactic: two
+  // of P1's three peers link to Pricing tables (2 of 3). Every other claim on one entry is about
+  // nothing its cluster discusses: Solo rule and the claims shared with the hidden entry have no
+  // topic, Daily and Weekly posting only each other (in other clusters).
   assert.deepEqual(
     seo.singleSource.map((item) => [item.concept.id, item.entry.id]),
     [
-      ["tactic-c1", ke("q2")],
-      ["tactic-p4h", ke("p4")],
-      ["tactic-hidshare", ke("p2")],
-      ["tactic-solo1", ke("p1")],
-      ["tactic-c2", ke("r3")],
       ["metric-solo3", ke("r1")],
-      ["rule-solo2", ke("p1")]
+      ["tactic-solo1", ke("p1")]
     ]
   );
-  assert.deepEqual(seo.singleSource[0]!.cluster, clusterOf("q2"));
-  assert.deepEqual(seo.singleSource[4]!.cluster, clusterOf("r3"));
-  assert.equal(seo.totals.singleSource, 7);
-  assert.deepEqual((await s.insights.list({ limit: 2 }, s.seoOnly)).singleSource.map((item) => item.concept.id), ["tactic-c1", "tactic-p4h"]);
+  assert.deepEqual(seo.singleSource[0]!.cluster, clusterOf("r1"));
+  assert.deepEqual(seo.singleSource[1]!.cluster, clusterOf("p1"));
+  assert.equal(seo.totals.singleSource, 2);
+  assert.deepEqual((await s.insights.list({ limit: 1 }, s.seoOnly)).singleSource.map((item) => item.concept.id), ["metric-solo3"]);
   assert.ok(!JSON.stringify(seo).includes("Secret claim"), "a hidden entry's own claim is never listed");
-  assert.ok(!seo.singleSource.some((item) => item.concept.id === "topic-solo"), "not a claim");
 
-  const all = await s.insights.list({}, s.all);
-  const ids = all.singleSource.map((item) => item.concept.id);
-  assert.ok(ids.includes("tactic-secret") && !ids.includes("tactic-hidshare") && !ids.includes("tactic-p4h"));
+  // A survey entry (a synthesis) restates its sources: never the single source of a claim.
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "synthesis" }, true);
+  assert.deepEqual((await s.insights.list({}, s.seoOnly)).singleSource.map((item) => item.concept.id), ["metric-solo3"]);
 });
 
 test("contradictions: graph and checked, checked first; a hidden entry is never on either side", async () => {
@@ -271,4 +283,13 @@ test("concept merges into a hidden concept never name it: insights, clusters, si
   assert.ok(novelty?.newConcepts.some((c) => c.id === "tactic-solo1" && c.name === "Solo tactic"));
   // Everything visible: the kept concepts as they are.
   assert.match(JSON.stringify(await s.insights.list({}, s.all)), /Hidden disagreement/);
+});
+
+test("conceptCentrality: the share of an entry's concepts that are the concept or its neighbours", () => {
+  const neighbours = (id: string) => (id === "tactic-warm-up" ? ["tool-proxy", "channel-tiktok", "tool-elsewhere"] : []);
+  const post = new Set(["tactic-warm-up", "tool-proxy", "channel-tiktok", "topic-other"]);
+  assert.equal(conceptCentrality("tactic-warm-up", post, neighbours), 3 / 4);
+  const guide = new Set(["tactic-warm-up", ...Array.from({ length: 99 }, (_, i) => `topic-${i}`)]);
+  assert.equal(conceptCentrality("tactic-warm-up", guide, neighbours), 1 / 100, "a side remark of a long guide");
+  assert.equal(conceptCentrality("tactic-warm-up", new Set(), neighbours), 0);
 });
