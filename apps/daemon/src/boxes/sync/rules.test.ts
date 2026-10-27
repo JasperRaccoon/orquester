@@ -84,6 +84,10 @@ test("include lists keep transcripts, caches, telemetry and state out", () => {
   assert.equal(isSyncedRel(codex, "config.toml"), true);
   assert.equal(isSyncedRel(codex, "skills/mine/SKILL.md"), true);
   assert.equal(isSyncedRel(codex, "skills/.system/x/SKILL.md"), false);
+  // Only the account config keeps Codex's project trust in the box; a prepared copy is host → box.
+  assert.equal(codex.codec("config.toml"), "codex-toml");
+  assert.equal(syncRuleFor("codex", "prepared").codec("config.toml"), "mcp-toml");
+  assert.equal(syncRuleFor("grok", "account").codec("config.toml"), "mcp-toml");
   for (const rel of ["sessions/2026/01/01/rollout-x.jsonl", "state_5.sqlite", "logs_2.sqlite-wal", "auth.json", "history.jsonl", "models_cache.json"]) {
     assert.equal(isSyncedRel(codex, rel), false, rel);
   }

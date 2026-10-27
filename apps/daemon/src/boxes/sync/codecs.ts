@@ -2,7 +2,7 @@
  * Config sync — how a host file becomes its box copy and back (`SyncCodecId` in `rules.ts`).
  *
  * Every codec defines two *views*: `hostView(host)` is what the box copy must be equal to, and
- * `boxView(box)` is the box copy seen the same way. The two sides are in sync exactly when the
+ * `boxView(box, host)` is the box copy seen the same way. The two sides are in sync exactly when the
  * views are byte-equal, and the sync baseline stores the SHA-256 of that view — so a host write
  * that does not touch what syncs (Claude rewriting `.claude.json` state) is not a change, and a
  * pending box change is only stale when the host's view moved.
@@ -13,6 +13,13 @@
  * edit restores every value the box left blank from the host file, so an agent that adds a key
  * next to a secret never wipes the secret. A config that does not parse cannot be checked for
  * secrets and does not sync (its `hostView` is null).
+ *
+ * **Codex project trust** (`codex-toml`). Codex trusts the project it runs in by adding
+ * `[projects."<dir>"] trust_level` to its `config.toml`. In a box that trust is the box's own: the
+ * box view takes its trust entries from the host (`boxView` gets the host file), so a box that
+ * only trusts dirs is in sync, approving a box edit never carries trust to the host (a box must
+ * not trust host dirs), and a host trust change still moves the host view and is pushed. A push
+ * keeps the box's own entries (`toBox` gets the box copy) so Codex need not add them again.
  *
  * Formatting: JSON(C) and TOML edits go through `jsonc-parser`'s `modify` and the Agent config
  * TOML editor (`editToml`), so comments and layout survive on both sides.
@@ -33,7 +40,8 @@ export interface CodecContext {
 export interface SyncCodec {
   /** What the box copy must equal; null = the host file cannot be synced (unparseable config). */
   hostView(host: Buffer, ctx: CodecContext): Buffer | null;
-  boxView(box: Buffer, ctx: CodecContext): Buffer;
+  /** The box copy seen as `hostView` sees the host; `host` = the host file now (null = none), for Codex trust. */
+  boxView(box: Buffer, host: Buffer | null, ctx: CodecContext): Buffer;
   /** The bytes to write into the box, given its current copy (null = none). Null = do not write. */
   toBox(host: Buffer, box: Buffer | null, ctx: CodecContext): Buffer | null;
   /** The host bytes after approving the box's copy (null host = the file is new on the host). */
@@ -339,7 +347,7 @@ const claudeJsonCodec: SyncCodec = {
     const subset = claudeSubset(parseJsonDoc(redacted), hostKeyToBox(ctx));
     return Buffer.from(canonicalJson(claudeSubsetDoc(subset)), "utf8");
   },
-  boxView(box, ctx) {
+  boxView(box, _host, ctx) {
     const subset = claudeSubset(parseJsonDoc(box.toString("utf8")), (key) => (boxToHostPath(ctx.paths, key) === null ? null : key));
     return Buffer.from(canonicalJson(claudeSubsetDoc(subset)), "utf8");
   },
@@ -376,10 +384,89 @@ const claudeJsonCodec: SyncCodec = {
   }
 };
 
+const PROJECTS = "projects";
+const TRUST_LEVEL = "trust_level";
+
+/** `projects.<dir>.trust_level` of a Codex config, by dir. */
+function trustLevels(doc: Doc | null): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  const projects = doc?.[PROJECTS];
+  if (!isPlainObject(projects)) return out;
+  for (const [dir, project] of Object.entries(projects)) {
+    if (isPlainObject(project) && Object.hasOwn(project, TRUST_LEVEL)) out.set(dir, project[TRUST_LEVEL]);
+  }
+  return out;
+}
+
+/**
+ * `text` with its trust entries made `trust` (a dir's table, and `projects`, go when nothing else
+ * is left in them); null when it does not parse or cannot be edited.
+ */
+function withTrust(text: string, trust: ReadonlyMap<string, unknown>): string | null {
+  const doc = parseTomlDoc(text);
+  if (doc === null) return null;
+  const projects = isPlainObject(doc[PROJECTS]) ? doc[PROJECTS] : {};
+  const edits: TomlEdit[] = [];
+  let tablesLeft = Object.keys(projects).length;
+  for (const dir of trustLevels(doc).keys()) {
+    if (trust.has(dir)) continue;
+    const whole = Object.keys(projects[dir] as Doc).length === 1;
+    if (whole) tablesLeft--;
+    edits.push({ op: "delete", path: whole ? [PROJECTS, dir] : [PROJECTS, dir, TRUST_LEVEL] });
+  }
+  for (const [dir, level] of trust) {
+    if (canonicalJson(getPath(doc, [PROJECTS, dir, TRUST_LEVEL]) ?? null) !== canonicalJson(level)) {
+      edits.push({ op: "set", path: [PROJECTS, dir, TRUST_LEVEL], value: level });
+    }
+  }
+  if (edits.length === 0) return text;
+  // Nothing of `projects` left: drop the table itself rather than leave an empty one behind.
+  const all = tablesLeft === 0 && edits.every((edit) => edit.op === "delete") ? [{ op: "delete" as const, path: [PROJECTS] }] : edits;
+  try {
+    return editToml(text, all);
+  } catch {
+    return null;
+  }
+}
+
+const tomlCodec = redactingCodec(tomlFormat);
+
+/** Codex's account `config.toml`: `mcp-toml`, with project trust kept in the box (module doc). */
+const codexTomlCodec: SyncCodec = {
+  ...tomlCodec,
+  boxView(box, host, ctx) {
+    const hostView = host === null ? null : tomlCodec.hostView(host, ctx);
+    const boxText = box.toString("utf8");
+    const text = withTrust(boxText, trustLevels(hostView === null ? null : parseTomlDoc(hostView.toString("utf8"))));
+    if (text === null || text === boxText) return box;
+    // Its own trust set aside, a box copy that says what the host says is the host's view (taking
+    // trust tables out of the text need not give back the host's exact layout).
+    if (hostView !== null && canonicalJson(parseTomlDoc(text)) === canonicalJson(parseTomlDoc(hostView.toString("utf8")))) return hostView;
+    return Buffer.from(text, "utf8");
+  },
+  toBox(host, box, ctx) {
+    const view = tomlCodec.toBox(host, box, ctx);
+    if (view === null || box === null) return view;
+    const hostTrust = trustLevels(parseTomlDoc(view.toString("utf8")));
+    const trust = new Map([...trustLevels(parseTomlDoc(box.toString("utf8"))), ...hostTrust]);
+    if (trust.size === hostTrust.size) return view;
+    const text = withTrust(view.toString("utf8"), trust);
+    return text === null ? view : Buffer.from(text, "utf8");
+  },
+  toHost(box, host, ctx) {
+    const next = tomlCodec.toHost(box, host, ctx);
+    const text = withTrust(next.toString("utf8"), trustLevels(host === null ? null : parseTomlDoc(host.toString("utf8"))));
+    // Never write the box's trust to the host: an edit that cannot keep it out is not applied.
+    if (text === null) throw new Error("config.toml: the box's project trust could not be kept off the host");
+    return Buffer.from(text, "utf8");
+  }
+};
+
 const CODECS: Readonly<Record<SyncCodecId, SyncCodec>> = {
   raw: rawCodec,
   "mcp-json": redactingCodec(jsonFormat),
-  "mcp-toml": redactingCodec(tomlFormat),
+  "mcp-toml": tomlCodec,
+  "codex-toml": codexTomlCodec,
   "claude-json": claudeJsonCodec
 };
 

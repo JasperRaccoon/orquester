@@ -118,3 +118,23 @@ test("account labels, the failover notice and the Limited marker", () => {
     title: "Usage limit reached · Resumes automatically at 3:40 PM (in 1h 12m)"
   });
 });
+
+test("an overload reads as the model at capacity and its retry, never offers a switch", () => {
+  const retryAt = iso(NOW + 30_000);
+  const overloaded = state({ kind: "overloaded", resetAt: retryAt, resumeAt: retryAt, message: "Selected model is at capacity." });
+  const armed = usageLimitBannerModel({ state: overloaded, refId: "claude", accounts: ACCOUNTS, now: NOW, clock: UTC });
+  assert.equal(armed.title, "Model at capacity");
+  assert.equal(armed.detail, "· Retries automatically shortly");
+  assert.deepEqual(armed.toggle, { label: "Cancel auto-retry", armed: false });
+  assert.equal(armed.canSwitch, false);
+  assert.equal(armed.tooltip, "Selected model is at capacity.");
+
+  const off = usageLimitBannerModel({ state: { ...overloaded, autoResume: "off", resumeAt: null }, refId: "claude", accounts: ACCOUNTS, now: NOW });
+  assert.deepEqual(off.toggle, { label: "Retry automatically", armed: true });
+  assert.equal(off.detail, "· Not retrying automatically");
+
+  assert.deepEqual(limitedMarker({ usageLimit: overloaded }, NOW, UTC), {
+    label: "At capacity",
+    title: "Model at capacity · Retries automatically shortly"
+  });
+});

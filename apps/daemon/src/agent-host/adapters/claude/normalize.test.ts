@@ -3327,6 +3327,13 @@ describe("claude normaliser — account failures carry a structured reason (work
     );
   });
 
+  it("a 529 result is overloaded, not the account's failure", () => {
+    const normalizer = make();
+    normalizer.handleMessage(assistantError("overloaded"));
+    const events = normalizer.handleMessage(failedResult(529));
+    assert.deepEqual(failures(events), [["runtime.error", "overloaded", undefined]]);
+  });
+
   it("authentication_failed, and a 401 or 403, are auth", () => {
     const normalizer = make();
     normalizer.handleMessage(assistantError("authentication_failed"));

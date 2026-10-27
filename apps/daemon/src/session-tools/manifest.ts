@@ -76,7 +76,7 @@ export interface ManifestKnowledge {
 /** The two tools only a knowledge worker session is advertised. */
 export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next_task", "knowledge_worker_submit"];
 /** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
-export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete"];
+export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
 function alwaysAdmin(tool: AnyOrquesterTool): boolean {
