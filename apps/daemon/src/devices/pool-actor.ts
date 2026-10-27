@@ -11,8 +11,9 @@
  *   follow once it resolves. A host the factory adds while renting takes the pending one's place.
  *   A failed rental fails the requests it was for, and holds back rentals ahead of demand for
  *   {@link RENTAL_BACKOFF_MS}.
- * - **Scale down.** `destroy()` on idle and drained rented hosts; hosts kept for `minWarmHosts` (or
- *   drained) are reported to the factories (`keepWarm`) so their own idle teardown spares them.
+ * - **Scale down.** `destroy()` on idle and drained rented hosts (the one idle teardown of rented
+ *   hosts: `pool.idleTeardownMinutes`; the factories only clean up failed ones), sparing the
+ *   platform's `minWarmHosts`.
  * - **Spend.** Read from `deps.spend` (the box records: the factories' own source), never counted
  *   twice.
  * - **Learned capacity.** A host the pool rented reports its capacity once ready: recorded per
@@ -522,11 +523,6 @@ export class DevicePool {
   private spent(): { todayUsd: number; monthUsd: number; committedUsd: number } {
     const spend = this.deps.spend?.() ?? { todayUsd: 0, monthUsd: 0 };
     return { todayUsd: spend.todayUsd, monthUsd: spend.monthUsd, committedUsd: spend.committedUsd ?? 0 };
-  }
-
-  /** The pool keeps this host (warm minimum, or draining it itself): a factory's idle teardown spares it. */
-  keepWarm(hostId: string): boolean {
-    return (this.lastDecision?.warmHostIds.includes(hostId) ?? false) || this.isDraining(hostId);
   }
 
   private offer(platform: DevicePlatform): PoolRentalOffer | null {

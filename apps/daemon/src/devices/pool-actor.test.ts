@@ -190,6 +190,29 @@ test("caps: maxHourlyUsd refuses with the cap named; a failed rental fails its r
   }
 });
 
+test("the pool is the one idle teardown of rented hosts: an unreachable one with no device goes after the same time (never a warm slot); a failed one is left to its factory", async () => {
+  const clock = { now: T0 };
+  const box = boxFactory();
+  const lost = box.makeBox("box:lost");
+  const failed = box.makeBox("box:failed");
+  box.factory.hosts.push(lost, failed);
+  const { t } = await start({ local: null, box, clock, pool: { idleTeardownMinutes: 5, minWarmHosts: { android: 1 } } });
+  try {
+    lost.status = { status: "unreachable", detail: null };
+    failed.status = { status: "failed", detail: "its hub crashed" };
+    t.service.pool.tick();
+    clock.now += 4 * MIN;
+    t.service.pool.tick();
+    assert.deepEqual(box.destroyed, []);
+    clock.now += 2 * MIN;
+    t.service.pool.tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(box.destroyed, ["box:lost"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("drain: no new lease on the host, destroyed once its last lease ends; undrain takes it back", async () => {
   const box = boxFactory();
   const host = box.makeBox("box:x");
@@ -200,7 +223,6 @@ test("drain: no new lease on the host, destroyed once its last lease ends; undra
     const drained = t.service.setHostDraining("box:x", true);
     assert.equal(drained.pool?.draining, true);
     assert.deepEqual(t.service.poolSummary().drainingHostIds, ["box:x"]);
-    assert.equal(box.factory.ctx?.keepWarm?.("box:x"), true);
     // Drained: the next open cannot land there (and nothing may be rented).
     assert.equal(await codeOf(t.service.toolOpen("t2", { platform: "android" }, signal())), "PLATFORM_NOT_READY");
     assert.deepEqual(box.destroyed, []);
@@ -219,7 +241,7 @@ test("drain: no new lease on the host, destroyed once its last lease ends; undra
   }
 });
 
-test("idle teardown after idleTeardownMinutes, sparing minWarmHosts (and telling the factory)", async () => {
+test("idle teardown after idleTeardownMinutes, sparing minWarmHosts", async () => {
   const clock = { now: T0 };
   const box = boxFactory();
   box.factory.hosts.push(box.makeBox("box:x"));
@@ -229,7 +251,6 @@ test("idle teardown after idleTeardownMinutes, sparing minWarmHosts (and telling
     t.service.pool.tick();
     assert.deepEqual(box.destroyed, []);
     assert.equal(t.service.hostSummaries()[0]?.pool?.warm, true);
-    assert.equal(box.factory.ctx?.keepWarm?.("box:x"), true);
     await t.service.updateSettings({ pool: { minWarmHosts: { android: 0 } } });
     t.service.pool.tick();
     await new Promise<void>((resolve) => setImmediate(resolve));

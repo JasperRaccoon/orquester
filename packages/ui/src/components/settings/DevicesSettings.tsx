@@ -575,16 +575,19 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
               patch={(value) => ({ ios: { lifetimeMinutes: value } })}
             />
           </SettingRow>
-          <SettingRow label="Idle teardown" description="A Mac host with no device for this long is destroyed.">
+          <SettingRow
+            label="Idle teardown"
+            description="Any rented device host (Mac or Linux) with no device for this long is destroyed, except hosts kept warm; your own Mac stops its device helpers. The same setting as Fleet → Idle teardown."
+          >
             <NumberField
               id="ios.idleTeardownMinutes"
               label="Idle teardown in minutes"
               suffix="min"
-              value={ios.idleTeardownMinutes}
+              value={settings.pool.idleTeardownMinutes}
               limits={DEVICES_SETTINGS_LIMITS.idleTeardownMinutes}
               disabled={rentDisabled}
               ctx={ctx}
-              patch={(value) => ({ ios: { idleTeardownMinutes: value } })}
+              patch={(value) => ({ pool: { idleTeardownMinutes: value } })}
             />
           </SettingRow>
           <SettingRow label="Simulators per host" description="Beyond this a second host is rented.">
@@ -794,10 +797,10 @@ const FleetSection: React.FC<{ settings: DevicesSettingsValue; ctx: SaveContext 
               patch={(value) => ({ pool: { minWarmHosts: { ios: value } } })}
             />
           </SettingRow>
-          <SettingRow label="Pool idle teardown">
+          <SettingRow label="Idle teardown" description="A rented host with no device for this long is destroyed, except warm ones (the same setting as the Mac hosts' Idle teardown).">
             <NumberField
               id="pool.idleTeardownMinutes"
-              label="Pool idle teardown in minutes"
+              label="Idle teardown in minutes"
               suffix="min"
               value={pool.idleTeardownMinutes}
               limits={L.idleTeardownMinutes}

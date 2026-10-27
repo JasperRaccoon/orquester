@@ -245,8 +245,7 @@ export class DeviceService implements DeviceToolsPort {
       activeLeases: (hostId) => this.leases.filter((lease) => lease.hostId === hostId && isLiveLease(lease)),
       addHost: (host) => this.hosts.add(host),
       removeHost: (hostId) => this.hosts.remove(hostId),
-      logger: this.logger,
-      keepWarm: (hostId) => this.pool.keepWarm(hostId)
+      logger: this.logger
     };
     for (const factory of this.deps.factories) {
       await factory.start(ctx).catch((error) => this.logger.error(`[devices] the ${factory.kind} host factory failed to start`, errorText(error)));
