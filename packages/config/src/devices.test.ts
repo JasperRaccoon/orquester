@@ -15,7 +15,6 @@ import {
   parseDevicesSettingsFile,
   readDevicesSettings,
   serializeDeviceLeasesFile,
-  serializeDevicesSettingsFile,
   serializeDevicePoolStateFile,
   serializeDevicesSettingsFile
 } from "./devices.ts";
