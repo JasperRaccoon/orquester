@@ -154,8 +154,12 @@ complexity was added to report a misleading improvement.
 
 Slowest measured-reference file harnesses: HTML browser 28.116 s; device cache
 20.125 s; Grok replay 18.293 s; Grok lifecycle 14.124 s; sandbox 12.211 s.
-Slowest final harnesses: HTML browser 32.269 s; Grok lifecycle 14.704 s; knowledge
-search performance 8.729 s; Android box host 8.681 s; UI history 8.019 s.
+Slowest final post-b1c file harnesses:
+  32.175 s  apps/daemon/src/html-preview/browser.test.ts
+  14.134 s  apps/daemon/src/agent-host/adapters/grok/lifecycle.test.ts
+  8.782 s  apps/daemon/src/devices/hosts/box/android-host.test.ts
+  8.730 s  apps/daemon/src/knowledge/search/search.perf.test.ts
+  8.403 s  packages/ui/src/lib/agent-chat/store.history.test.ts
 Fresh browser processes protect profile/privacy isolation. Real process grace,
 child identity and orphan ownership cannot safely become mocked success. Search
 protects the full 5,000-entry workload and result fidelity. Hardware-host tests
@@ -238,10 +242,16 @@ hidden by a green final run; it led to actual native fixture isolation.
 GIT DELIVERY
 
 Work remains on main as requested. Cleanup commit 701ab21b, retrieval merge
-301959ab and Devices merge b659841b preserve incoming history. The final ee5c3249
+301959ab and Devices merge b659841b preserve incoming history. The ee5c3249
 merge is 9b6308a714c77d89baf534e7476d1db912acb186. Report/confirmation and push
 status are recorded in delivery.json and the final chat reply. Fetch and
 integration use ordinary merges; no history rewrite, force push or protection
 bypass is authorized. The final chat reply records the actual push result and
 remote-HEAD verification. The additional e866b62b merge preserves the schema fix
 and consolidates its two duplicate catalog setups. No deployment is part of this task.
+
+Final validated integration commit: 8f6489f21247ae2e10640e222909bf4c34533c32.
+It includes b1c975af and all previously fetched remote history. The final report-only
+commit follows it. The normal push result and exact final remote SHA are supplied
+in the final chat response; delivery.json deliberately records the pre-push
+integration checkpoint rather than predicting a network operation.

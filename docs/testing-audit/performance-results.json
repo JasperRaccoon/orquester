@@ -1991,7 +1991,8 @@
         }
       }
     ],
-    "comparisonLimit": "Previous baseline/matching/official measurements precede the final five-file MCP schema fix and its consolidation. No new upstream e866 whole-suite baseline was timed; the prior matching comparison remains explicitly scoped to ee5/9b. No global or CI speedup is inferred from this integration run."
+    "comparisonLimit": "Previous baseline/matching/official measurements precede the final five-file MCP schema fix and its consolidation. No new upstream e866 whole-suite baseline was timed; the prior matching comparison remains explicitly scoped to ee5/9b. No global or CI speedup is inferred from this integration run.",
+    "validatedMergeCommit": "1dc6d954a9194098dc0e9ec01c823efe9824ccd9"
   },
   "realModelDiagnostic": {
     "result": "PASS",
@@ -2473,7 +2474,9 @@
         }
       }
     ],
-    "comparisonLimit": "No separate b1c upstream full-suite baseline was timed. Earlier matching comparison remains explicitly scoped to ee5/9b. One new independently specified search regression is now exercised; the real model was separately verified with explicit opt-in. No overall or CI speedup is inferred from cross-feature timing differences."
+    "comparisonLimit": "No separate b1c upstream full-suite baseline was timed. Earlier matching comparison remains explicitly scoped to ee5/9b. One new independently specified search regression is now exercised; the real model was separately verified with explicit opt-in. No overall or CI speedup is inferred from cross-feature timing differences.",
+    "validatedMergeCommit": "8f6489f21247ae2e10640e222909bf4c34533c32"
   },
-  "timingEventsPolicy": "Full case events retain latest measured upstream, its matching cleanup, and final integrated source. Intermediate confirmation runs retain complete resources, package counts and slow-file summaries in this JSON without duplicating every case event."
+  "timingEventsPolicy": "Full case events retain latest measured upstream, its matching cleanup, and final integrated source. Intermediate confirmation runs retain complete resources, package counts and slow-file summaries in this JSON without duplicating every case event.",
+  "measurementReporterSha256": "259975e2dc4bf1ce6e33b8681a241c70475349163f911f5ee6a0e83846d5a1f6"
 }

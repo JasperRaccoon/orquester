@@ -1,0 +1,21 @@
+{
+  "branch": "main",
+  "remote": "origin",
+  "pushTarget": "refs/heads/main",
+  "lastFetchedRemoteCommit": "b1c975af002cbc27d37296dc04f4aa81fc76881f",
+  "remoteIncludedInValidatedHistory": true,
+  "validatedIntegrationCommit": "8f6489f21247ae2e10640e222909bf4c34533c32",
+  "commits": {
+    "cleanup": "701ab21b084fad91dc3fc11cd072e60de0d2697b",
+    "retrievalMerge": "301959abe462eaa22d8585611c73c315a27bb641",
+    "devicesMerge": "b659841b45d59f6b5ddefda63c778c54a855672f",
+    "performanceMerge": "9b6308a714c77d89baf534e7476d1db912acb186",
+    "schemaMerge": "1dc6d954a9194098dc0e9ec01c823efe9824ccd9",
+    "steeringMerge": "8f6489f21247ae2e10640e222909bf4c34533c32"
+  },
+  "mergePolicy": "Ordinary history-preserving merges; no rebase/force push or protection bypass",
+  "sourceFileCount": 4641,
+  "sourceHashesUnchangedThroughoutFinalSuiteAndAfterCommit": true,
+  "validation": "All final gates passed; see validation-results.json and performance-results.json",
+  "deliveryReceipt": "This file records the validated pre-push checkpoint. The final chat response records the actual push result and verified remote HEAD; no successful network operation is predicted here."
+}

@@ -182,5 +182,12 @@
       "headAtMeasurement": "1dc6d954a9194098dc0e9ec01c823efe9824ccd9",
       "pendingMerge": "b1c975af002cbc27d37296dc04f4aa81fc76881f"
     }
-  ]
+  ],
+  "finalValidatedMergeCommit": "8f6489f21247ae2e10640e222909bf4c34533c32",
+  "finalSourceHashVerifiedAfterCommit": true,
+  "documentationGate": {
+    "command": "pnpm check:changed --no-cache",
+    "result": "PASS",
+    "scope": "Final report-only diff; no TypeScript/manifest/root-config or test changes selected"
+  }
 }
