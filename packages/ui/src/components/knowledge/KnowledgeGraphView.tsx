@@ -347,6 +347,12 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     [similarity, colorBy, collections, filter]
   );
   const pickedItem = legend.items.find((item) => item.key === picked) ?? null;
+  // A picked line gone from a newer answer (its cluster broke up, its collection emptied) lets go,
+  // rather than coming back on whatever later takes its key.
+  const pickedGone = picked !== null && similarityLoad.status === "ready" && pickedItem === null;
+  useEffect(() => {
+    if (pickedGone) setPicked(null);
+  }, [pickedGone]);
   const pickedIds = useMemo(
     () => (similarity && pickedItem ? legendMemberIds(similarity, pickedItem.members, knownCollections) : NO_IDS),
     [similarity, pickedItem, knownCollections]

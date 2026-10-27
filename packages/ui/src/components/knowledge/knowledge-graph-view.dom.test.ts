@@ -269,6 +269,47 @@ describe("the Graph view", () => {
     await click([...doc().querySelectorAll('[role="radiogroup"][aria-label="Colour by"] button')].find((b) => b.textContent === "Cluster")!);
   });
 
+  it("keeps a picked cluster on the same entries when a refetch reorders the clusters, and lets go when it is gone", async () => {
+    let answer: KnowledgeSimilarityGraphResponse = {
+      ...SIMILARITY,
+      nodes: [simNode("ke_a", 0), simNode("ke_b", 0), simNode("ke_c", 1), simNode("ke_d", 1)],
+      clusters: [
+        { id: 0, size: 2, label: "Paywalls" },
+        { id: 1, size: 2, label: "Pricing" }
+      ]
+    };
+    await show({ api: { getKnowledgeSimilarityGraph: async () => answer } });
+    await click(layerRadio("Similarity")!);
+    const legendButton = (label: string) => [...doc().querySelectorAll('ul[aria-label="Clusters"] button')].find((b) => b.textContent?.startsWith(label))!;
+    await click(legendButton("Paywalls"));
+    assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_b"]);
+
+    // Pricing grew: the daemon numbers it first now.
+    answer = {
+      ...answer,
+      nodes: [simNode("ke_a", 1), simNode("ke_b", 1), simNode("ke_c", 0), simNode("ke_d", 0), simNode("ke_e", 0)],
+      clusters: [
+        { id: 0, size: 3, label: "Pricing" },
+        { id: 1, size: 2, label: "Paywalls" }
+      ]
+    };
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_b"], "still the Paywalls entries");
+    assert.equal(legendButton("Paywalls").getAttribute("aria-pressed"), "true");
+
+    // The Paywalls cluster broke up: nothing stays marked, and its key coming back later marks nothing.
+    const brokenUp = answer;
+    answer = { ...answer, nodes: [simNode("ke_c", 0), simNode("ke_d", 0), simNode("ke_e", 0)], clusters: [{ id: 0, size: 3, label: "Pricing" }] };
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.equal(lastCanvas().highlightIds.size, 0);
+    answer = brokenUp;
+    await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1 })));
+    await settle();
+    assert.equal(lastCanvas().highlightIds.size, 0);
+  });
+
   it("remembers the layer for the session and keeps one canvas for both", async () => {
     await show();
     await click(layerRadio("Similarity")!);

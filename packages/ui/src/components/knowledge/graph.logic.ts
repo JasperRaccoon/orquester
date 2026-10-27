@@ -264,9 +264,20 @@ const LEGEND_MAX = 12;
  * The cluster legend: each cluster of two or more entries with its label
  * ("Untitled" without one) and size, largest first, then one line for the
  * entries in no cluster.
+ *
+ * A cluster line's key names the cluster by its first member entry id (the
+ * smallest), not by its index or `id`: the daemon numbers clusters by rank in
+ * each answer, so a refetch that reorders them would move a picked line to
+ * another cluster. Its key outlives a refetch while that entry stays in a
+ * cluster, and is gone (the pick lets go) when it does not.
  */
 export function similarityLegend(graph: Pick<KnowledgeSimilarityGraphResponse, "nodes" | "clusters">, max = LEGEND_MAX): Legend {
   const palette = clusterColors(graph.clusters);
+  const anchors = new Map<number, string>();
+  for (const node of graph.nodes) {
+    const anchor = anchors.get(node.cluster);
+    if (anchor === undefined || node.id < anchor) anchors.set(node.cluster, node.id);
+  }
   const items: LegendItem[] = [];
   let more = 0;
   graph.clusters.forEach((cluster, index) => {
@@ -275,7 +286,9 @@ export function similarityLegend(graph: Pick<KnowledgeSimilarityGraphResponse, "
       more += 1;
       return;
     }
-    items.push({ key: `cluster:${index}`, label: cluster.label ?? "Untitled", size: cluster.size, color: palette[index] ?? null, members: { kind: "cluster", index } });
+    const anchor = anchors.get(index);
+    const key = anchor === undefined ? `cluster#${index}` : `cluster:${anchor}`;
+    items.push({ key, label: cluster.label ?? "Untitled", size: cluster.size, color: palette[index] ?? null, members: { kind: "cluster", index } });
   });
   const alone = graph.nodes.filter((node) => palette[node.cluster] == null).length;
   if (alone > 0) items.push({ key: "singletons", label: "In no cluster", size: alone, color: null, members: { kind: "singletons" } });
