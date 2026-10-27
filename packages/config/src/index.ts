@@ -1437,7 +1437,8 @@ export const chatUsageLimitRecordSchema = z
       })
       .passthrough()
       .optional()
-      .catch(undefined)
+      .catch(undefined),
+    kind: z.literal("overloaded").optional().catch(undefined)
   })
   .passthrough();
 export type ChatUsageLimitRecord = z.infer<typeof chatUsageLimitRecordSchema>;

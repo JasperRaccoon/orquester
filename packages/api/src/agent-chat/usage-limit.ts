@@ -13,7 +13,7 @@
  */
 
 import { isAgentOwnedActivity } from "./compaction.ts";
-import { failureReasonOfActivity } from "./failure-reason.ts";
+import { failureReasonOfActivity, overloadOfActivity } from "./failure-reason.ts";
 import type { ThreadItem, Turn } from "./thread.ts";
 
 /** What the daemon sends into a chat when its limit has reset (T3 Code's wording). */
@@ -24,6 +24,21 @@ export const USAGE_LIMIT_CONTINUE_MESSAGE = "Continue where you left off.";
  * provider's own clock, and a message sent on the second may still meet the old window.
  */
 export const USAGE_LIMIT_RESUME_MARGIN_MS = 45_000;
+
+/**
+ * How long after a chat stopped on a provider's capacity error ({@link ThreadUsageLimitNotice.kind}
+ * `overloaded`) the daemon retries it the first time; each retry that meets the error again waits
+ * twice as long, up to {@link OVERLOAD_RETRY_MAX_MS}.
+ */
+export const OVERLOAD_RETRY_BASE_MS = 30_000;
+export const OVERLOAD_RETRY_MAX_MS = 5 * 60_000;
+
+/**
+ * What stopped the chat: absent — the account's usage limit; `overloaded` — the provider had no
+ * capacity for the model (Codex "Selected model is at capacity"), retried shortly, with no account
+ * cooldown and no account switch.
+ */
+export type UsageLimitKind = "overloaded";
 
 /** How many of a thread's newest rows {@link usageLimitNoticeOf} looks through. */
 const NOTICE_SCAN_ROWS = 500;
@@ -45,6 +60,8 @@ export interface ThreadUsageLimitNotice {
   at: string;
   /** The turn is still open: the Claude SDK parks a turn on a rejected window instead of failing it. */
   parked: boolean;
+  /** Absent: a usage limit. */
+  kind?: UsageLimitKind;
 }
 
 function isProgress(item: ThreadItem): boolean {
@@ -67,7 +84,8 @@ function isProgress(item: ThreadItem): boolean {
  * they started before the limit (their `tool.completed` / `tool.output` and `task.*` rows land
  * after it), and none of that means the conversation went on; nor does a subagent's own new
  * message after the reset — what clears the limit is the user's next message, or the main
- * agent's own next row. An auth failure is not a limit.
+ * agent's own next row. An auth failure is not a limit. A provider's capacity failure
+ * (`reason: "overloaded"`) is reported the same way, with `kind: "overloaded"`.
  */
 export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly Turn[]): ThreadUsageLimitNotice | null {
   let progressAfter = false;
@@ -81,12 +99,13 @@ export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly
       continue;
     }
     if (isAgentOwnedActivity(item)) continue;
-    const failure = failureReasonOfActivity(item);
+    const overload = overloadOfActivity(item);
+    const failure = overload !== null ? { reason: "overloaded" as const, message: overload.message, resetsAt: undefined } : failureReasonOfActivity(item);
     if (failure === null) {
       if (isProgress(item)) progressAfter = true;
       continue;
     }
-    if (failure.reason !== "usage_limit") continue;
+    if (failure.reason !== "usage_limit" && failure.reason !== "overloaded") continue;
     if (progressAfter) return null;
     const at = Date.parse(item.createdAt);
     const latest = turns.at(-1) ?? null;
@@ -105,7 +124,8 @@ export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly
       ...(failure.resetsAt !== undefined ? { resetsAt: failure.resetsAt } : {}),
       message: failure.message.slice(0, 500),
       at: item.createdAt,
-      parked
+      parked,
+      ...(failure.reason === "overloaded" ? { kind: "overloaded" as const } : {})
     };
   }
   return null;
@@ -158,6 +178,8 @@ export interface ChatUsageLimitState {
   /** The provider's message, for a tooltip. */
   message?: string;
   action?: ChatUsageLimitAction;
+  /** Absent: a usage limit. `overloaded`: `resetAt` is when the retry is due, not an account reset. */
+  kind?: UsageLimitKind;
 }
 
 /** The chat moved to another account after a usage limit (`SessionSummary.limitFailover`). */

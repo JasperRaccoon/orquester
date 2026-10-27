@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnowledgeCollection, KnowledgeEntry, KnowledgeEntryMeta } from "@orquester/api";
-import type { KnowledgeEntryChange } from "../ports.ts";
+import type { KnowledgeEntryChange, KnowledgeVectorThresholds } from "../ports.ts";
 import { knowledgeContentHash } from "../store/normalize.ts";
-import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
+import type { KnowledgeEmbedKind, KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import type { KnowledgeSearchStore } from "./search.ts";
 
@@ -109,13 +109,17 @@ export class FakeStore implements KnowledgeSearchStore {
 export class FakeEmbedder implements KnowledgeEmbedder {
   readonly dimensions: number;
   readonly modelId: string;
+  readonly thresholds: KnowledgeVectorThresholds;
   calls = 0;
   texts = 0;
+  /** The kind of every `embed` call, in order. */
+  kinds: KnowledgeEmbedKind[] = [];
   failWith: Error | null = null;
 
-  constructor(options: { dimensions?: number; modelId?: string; groups?: string[][] } = {}) {
+  constructor(options: { dimensions?: number; modelId?: string; groups?: string[][]; thresholds?: KnowledgeVectorThresholds } = {}) {
     this.dimensions = options.dimensions ?? 32;
     this.modelId = options.modelId ?? "fake/semantic";
+    this.thresholds = options.thresholds ?? { minimum: 0.25, good: 0.4, strong: 0.6, duplicate: 0.92 };
     (options.groups ?? DEFAULT_GROUPS).forEach((group, index) => {
       for (const word of group) this.group.set(word, index);
     });
@@ -125,8 +129,9 @@ export class FakeEmbedder implements KnowledgeEmbedder {
   private readonly group = new Map<string, number>();
   private readonly reserved: number;
 
-  async embed(texts: readonly string[]): Promise<Float32Array[]> {
+  async embed(texts: readonly string[], kind: KnowledgeEmbedKind = "passage"): Promise<Float32Array[]> {
     this.calls += 1;
+    this.kinds.push(kind);
     this.texts += texts.length;
     if (this.failWith) throw this.failWith;
     return texts.map((text) => this.vector(text));

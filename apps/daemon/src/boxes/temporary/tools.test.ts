@@ -8,10 +8,12 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createServer, connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -20,7 +22,7 @@ import type { StoredBox } from "@orquester/config";
 import type { BoxProcess } from "../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
 import { boxSummary, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
-import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, OutputTail, shellArgv, TemporaryBoxTools } from "./tools.ts";
+import { BOX_DOWNLOAD_MAX_BYTES, boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, OutputTail, shellArgv, TemporaryBoxTools } from "./tools.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "boxes-temporary-")));
 const PROJECT = join(ROOT, "workspaces", "acme", "game");
@@ -45,7 +47,7 @@ interface World {
   open: Set<string>;
 }
 
-function world(options: { connect?: boolean } = {}): World {
+function world(options: { connect?: boolean; tar?: string } = {}): World {
   const boxes = new FakeTemporaryBoxes()
     .add(boxSummary({ id: "box-a", threadId: "chat-a" }))
     .add(boxSummary({ id: "box-b", threadId: "chat-b" }))
@@ -60,7 +62,7 @@ function world(options: { connect?: boolean } = {}): World {
   };
   const open = new Set(["chat-a", "chat-b"]);
   let next = 0;
-  const tools = new TemporaryBoxTools({ clock, isChatOpen: (id) => open.has(id), newId: () => `id${(next += 1)}`, logger: { warn: () => {}, error: () => {} } });
+  const tools = new TemporaryBoxTools({ clock, isChatOpen: (id) => open.has(id), newId: () => `id${(next += 1)}`, logger: { warn: () => {}, error: () => {} }, ...(options.tar ? { tar: options.tar } : {}) });
   if (options.connect !== false) {
     tools.connect({ boxes, hub: { get: (boxId) => (boxId === "box-a" || boxId === "box-b" ? connection : undefined) } });
   }
@@ -464,6 +466,70 @@ test("download: a file is read with a length (the stat's size), never until the 
   assert.ok(file.ok, file.ok ? "" : file.message);
   assert.deepEqual(reads, [{ length: 10 }]);
   assert.equal(readFileSync(join(PROJECT, "sized.bin"), "utf8"), "0123456789");
+});
+
+test("download: tar can close its input before the box finishes; the entire source still decides success", async (t) => {
+  const remote = join(BOX, "early-tar");
+  mkdirSync(remote);
+  writeFileSync(join(remote, "payload.txt"), "payload");
+  const packed = spawnSync("tar", ["-cf", "-", "-C", remote, "."]);
+  assert.equal(packed.status, 0, packed.stderr.toString());
+
+  for (const scenario of ["success", "source-error", "cancel", "too-large", "tar-error"] as const) {
+    await t.test(scenario, async (t) => {
+      const tar = join(ROOT, `early-tar-${scenario}.cjs`);
+      const receipt = `${tar}.closed`;
+      // Real tar reads the archive's end markers, then the wrapper closes fd 0 BEFORE the
+      // source releases its tail. The watched receipt makes the ordering deterministic.
+      writeFileSync(tar, `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const { closeSync, writeFileSync } = require("node:fs");
+const child = spawnSync("tar", process.argv.slice(2), { stdio: ["inherit", "ignore", "inherit"] });
+closeSync(0);
+writeFileSync(${JSON.stringify(receipt)}, "closed");
+process.exit(child.status ?? 1);
+`, { mode: 0o755 });
+      let closed!: () => void;
+      const inputClosed = new Promise<void>((resolve) => { closed = resolve; });
+      const watcher = watch(ROOT, (_event, name) => {
+        if (name?.toString() === basename(receipt)) closed();
+      });
+      t.after(() => { closed(); watcher.close(); });
+      const controller = new AbortController();
+      const { tools, connection } = world({ tar });
+      const padding = Buffer.alloc(1024);
+      const invalidArchive = Buffer.alloc(10240);
+      invalidArchive.fill(1, 0, 512);
+      connection.readTar = async () => Readable.from((async function* () {
+        yield scenario === "tar-error" ? invalidArchive : packed.stdout;
+        await inputClosed;
+        if (scenario === "source-error") throw new Error("the box failed after the archive");
+        if (scenario === "cancel") controller.abort();
+        if (scenario === "too-large") {
+          // Reuse one chunk: exercise the byte cap after tar exits without allocating 4 GiB.
+          const chunk = Buffer.alloc(1024 * 1024);
+          for (let bytes = 0; bytes <= BOX_DOWNLOAD_MAX_BYTES; bytes += chunk.length) yield chunk;
+        } else {
+          yield padding;
+        }
+      })());
+      const target = join(PROJECT, `early-tar-${scenario}`);
+      const result = await tools.download("box-a", { remotePath: remote, localPath: target }, { principal: agent(), signal: controller.signal });
+      if (scenario === "success") {
+        assert.ok(result.ok, result.ok ? "" : result.message);
+        assert.equal(result.value.bytes, packed.stdout.length + padding.length);
+        assert.equal(readFileSync(join(target, "payload.txt"), "utf8"), "payload");
+      } else {
+        assert.ok(!result.ok);
+        const code = scenario === "cancel" ? "CANCELLED" : scenario === "too-large" ? "TOO_LARGE" : "BOX_TRANSFER_FAILED";
+        assert.equal(result.code, code, result.message);
+        if (scenario === "source-error") assert.match(result.message, /the box failed after the archive/);
+        if (scenario === "tar-error") assert.match(result.message, /tar could not unpack the directory/);
+        assert.throws(() => statSync(target), { code: "ENOENT" });
+      }
+      assert.deepEqual(readdirSync(PROJECT).filter((name) => name.startsWith(".orq-download-")), []);
+    });
+  }
 });
 
 test("download: a directory whose only entry has its own name keeps its shape", async () => {

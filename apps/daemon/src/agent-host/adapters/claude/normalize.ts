@@ -5099,7 +5099,8 @@ function failureFields(failure: ClaudeFailure | undefined): {
  * about the account's limits. A usage limit is the turn's last assistant
  * frame flagged `rate_limit`, or a window a `rate_limit_event` rejected and
  * nothing cleared since; its reset is the LATEST such window names, since the
- * account works again only once every one of them has reset.
+ * account works again only once every one of them has reset. A 529 result is
+ * `overloaded`: not the account's failure.
  */
 function resultFailure(
   result: SDKResultMessage,
@@ -5124,6 +5125,10 @@ function resultFailure(
       }
     }
     return { reason: "usage_limit", ...(resetsAt !== undefined ? { resetsAt } : {}) };
+  }
+  // 529: the API had no capacity — the provider's doing, retried shortly (`usage-limit.ts`).
+  if (isOverloadedResult(result)) {
+    return { reason: "overloaded" };
   }
   return undefined;
 }

@@ -4,7 +4,13 @@ import {
   KNOWLEDGE_CHANGED_EVENT,
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_COLORS,
+  KNOWLEDGE_FILTER_MAX_VALUES,
   KNOWLEDGE_GRAPH_MAX_NODES,
+  KNOWLEDGE_MERGE_MAX_ENTRIES,
+  KNOWLEDGE_SEARCH_MAX_LIMIT,
+  KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
+  KNOWLEDGE_SIMILARITY_GRAPH_MAX_K,
+  KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES,
   knowledgeRoutes,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
@@ -12,14 +18,19 @@ import {
   type KnowledgeCollectionsResponse,
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
+  type KnowledgeFacetsResponse,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
+  type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
+  type KnowledgeSimilarityGraphResponse,
   type KnowledgeVisibility
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { KnowledgeLinkingPort, KnowledgeSettingsPort, KnowledgeVisibilityPort } from "./ports.ts";
+import { computeKnowledgeFacets } from "./search/facets.ts";
+import { entryMatchesFilter, parseKnowledgeFilters } from "./search/filters.ts";
 import type { KnowledgeSearch } from "./search/search.ts";
 import { entryInScope } from "./search/visibility.ts";
 import { KnowledgeError, type KnowledgeLogger, knowledgeFrameworkError } from "./store/errors.ts";
@@ -93,6 +104,14 @@ const updateEntrySchema = z.object({
   postedAt: nullableText,
   collections: z.array(z.string()).optional()
 });
+/** The store checks the rest (distinct ids, keep among them, title and text limits). */
+const mergeEntriesSchema = z.object({
+  ids: z.array(z.string().min(1).max(200)).min(2).max(KNOWLEDGE_MERGE_MAX_ENTRIES),
+  keep: z.string().min(1).max(200).optional(),
+  title: z.string().optional(),
+  body: z.string().optional(),
+  sessionId
+});
 const saveSchema = z.object({
   entries: z.array(
     z.object({
@@ -112,19 +131,55 @@ const saveSchema = z.object({
     .transform((value) => value ?? undefined),
   sessionId
 });
+/** A field an agent may also send as `null` (read as absent). */
+const nullish = <T extends z.ZodTypeAny>(schema: T) => schema.nullish().transform((value) => value ?? undefined);
+const filterValue = z.string().max(200);
+/** ISO dates are checked by the search's filter parser (`search/filters.ts`), which says what is wrong. */
+const isoBound = nullish(z.string().max(40));
+const exampleList = nullish(z.array(z.string().max(100)).max(KNOWLEDGE_SIMILAR_MAX_EXAMPLES));
 const searchSchema = z.object({
-  query: z.string(),
-  collections: z
-    .array(z.string())
-    .nullish()
-    .transform((value) => value ?? undefined),
-  limit: z.number().int().optional(),
+  query: nullish(z.string()),
+  collections: nullish(z.array(z.string())),
+  limit: nullish(z.number().int().min(1).max(KNOWLEDGE_SEARCH_MAX_LIMIT)),
+  filters: nullish(
+    z.object({
+      kinds: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      authors: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      years: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      postedAfter: isoBound,
+      postedBefore: isoBound,
+      savedAfter: isoBound,
+      savedBefore: isoBound
+    })
+  ),
+  similarTo: exampleList,
+  unlike: exampleList,
+  sort: nullish(z.enum(["relevance", "recent", "newest"])),
+  diverse: nullish(z.boolean()),
+  cursor: nullish(z.string().min(1).max(500)),
+  facets: nullish(z.boolean()),
   sessionId
 });
+/**
+ * A filter list on the query string, comma-separated or a JSON array (`search/filters.ts` splits and
+ * checks it). Room for the most values at ~200 characters each in the JSON form: every character
+ * escaped to two (quotes, backslashes), plus each value's quotes and comma, plus the brackets.
+ */
+const filterListParam = z
+  .string()
+  .max(KNOWLEDGE_FILTER_MAX_VALUES * (2 * 200 + 3) + 2)
+  .optional();
 const entriesQuerySchema = z.object({
   collection: z.string().min(1).optional(),
   cursor: z.string().min(1).max(500).optional(),
   limit: intFromQuery(1, 1_000),
+  kinds: filterListParam,
+  authors: filterListParam,
+  years: filterListParam,
+  postedAfter: z.string().max(40).optional(),
+  postedBefore: z.string().max(40).optional(),
+  savedAfter: z.string().max(40).optional(),
+  savedBefore: z.string().max(40).optional(),
   sessionId
 });
 const graphQuerySchema = z.object({
@@ -132,6 +187,27 @@ const graphQuerySchema = z.object({
   focus: z.string().min(1).max(300).optional(),
   depth: intFromQuery(1, 3),
   limit: intFromQuery(1, KNOWLEDGE_GRAPH_MAX_NODES),
+  sessionId
+});
+const facetsSchema = z.object({
+  collections: nullish(z.array(z.string())),
+  filters: nullish(
+    z.object({
+      kinds: z.array(z.string()).optional(),
+      authors: z.array(z.string()).optional(),
+      years: z.array(z.string()).optional(),
+      postedAfter: z.string().optional(),
+      postedBefore: z.string().optional(),
+      savedAfter: z.string().optional(),
+      savedBefore: z.string().optional()
+    })
+  ),
+  sessionId
+});
+const similarityGraphQuerySchema = z.object({
+  collections: z.string().optional(),
+  k: intFromQuery(1, KNOWLEDGE_SIMILARITY_GRAPH_MAX_K),
+  limit: intFromQuery(1, KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES),
   sessionId
 });
 const sessionQuerySchema = z.object({ sessionId });
@@ -341,7 +417,8 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     handle(async (request): Promise<KnowledgeEntriesResponse> => {
       const query = parse(entriesQuerySchema, request.query, "query");
       const visibility = await visibilityOf(request, query.sessionId);
-      return deps.search.listEntries({ collection: query.collection, cursor: query.cursor, limit: query.limit }, visibility);
+      const { sessionId: _session, ...entriesQuery } = query;
+      return deps.search.listEntries(entriesQuery, visibility);
     })
   );
 
@@ -388,6 +465,36 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     })
   );
 
+  // Merge: the kept entry edited as a PATCH edits it, the others deleted as DELETE deletes them,
+  // in one step. Every id must be visible (a hidden one answers like an unknown one, naming it);
+  // the store checks the rest before it changes anything.
+  app.post(
+    knowledgeRoutes.entriesMerge,
+    { bodyLimit: ENTRY_BODY_LIMIT },
+    handle(async (request): Promise<KnowledgeMergeResponse> => {
+      const body = parse(mergeEntriesSchema, request.body, "merge");
+      const visibility = await visibilityOf(request, body.sessionId);
+      const scope = deps.search.scope(visibility);
+      for (const id of body.ids) {
+        const meta = deps.store.getMeta(id);
+        if (!meta || !entryInScope(meta, scope)) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", `No such entry: ${id.slice(0, 80)}.`);
+      }
+      const outcome = await deps.store.mergeEntries({ ids: body.ids, keep: body.keep, title: body.title, body: body.body });
+      const keptId = outcome.kept.id;
+      if (outcome.keptChanged) await deps.search.indexEntries([keptId]);
+      const touched = [...(outcome.keptChanged ? [keptId] : []), ...outcome.deleted];
+      if (touched.length > 0) changed({ entryIds: touched, ...(outcome.deleted.length > 0 || outcome.collectionsChanged ? { collections: true } : {}) });
+      if (outcome.notDeleted.length > 0) {
+        const kept = outcome.keptChanged ? `${keptId} was updated` : `${keptId} was kept unchanged`;
+        const deleted = outcome.deleted.length > 0 ? `deleted ${outcome.deleted.join(", ")}` : "deleted none";
+        const left = outcome.notDeleted.map((item) => `${item.id} (${item.message})`).join(", ");
+        throw new KnowledgeError("KNOWLEDGE_ERROR", `The merge stopped part-way: ${kept}; ${deleted}; still there: ${left}. Delete those to finish.`);
+      }
+      // The merge only adds collections to the kept entry, so it stays visible; answer it as an edit does.
+      return { kept: await entryDetail(keptId, visibility, { evenIfHidden: true }), deleted: outcome.deleted };
+    })
+  );
+
   // --- items and the graph -------------------------------------------------
 
   app.get<{ Params: { id: string } }>(
@@ -409,14 +516,42 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     })
   );
 
-  // --- search and save -----------------------------------------------------
+  app.get(
+    knowledgeRoutes.similarityGraph,
+    handle(async (request): Promise<KnowledgeSimilarityGraphResponse> => {
+      const query = parse(similarityGraphQuerySchema, request.query, "query");
+      const visibility = await visibilityOf(request, query.sessionId);
+      const refs = (query.collections ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const narrow = refs.length > 0 ? deps.search.resolveVisible(refs, visibility, true) : null;
+      return deps.search.similarity.graph({ k: query.k, limit: query.limit }, deps.search.scope(visibility, narrow));
+    })
+  );
+
+  // --- search, facets and save ---------------------------------------------
 
   app.post(
     knowledgeRoutes.search,
     handle(async (request): Promise<KnowledgeSearchResponse> => {
       const body = parse(searchSchema, request.body, "search");
       const visibility = await visibilityOf(request, body.sessionId);
-      return deps.search.search({ query: body.query, collections: body.collections, limit: body.limit }, visibility);
+      const { sessionId: _session, ...searchRequest } = body;
+      return deps.search.search(searchRequest, visibility);
+    })
+  );
+
+  app.post(
+    knowledgeRoutes.facets,
+    handle(async (request): Promise<KnowledgeFacetsResponse> => {
+      const body = parse(facetsSchema, request.body, "facets request");
+      const visibility = await visibilityOf(request, body.sessionId);
+      const narrow = body.collections && body.collections.length > 0 ? deps.search.resolveVisible(body.collections, visibility, true) : null;
+      const filter = parseKnowledgeFilters(body.filters);
+      const scope = deps.search.scope(visibility, narrow);
+      const kept = deps.store.listMeta().filter((meta) => entryInScope(meta, scope) && entryMatchesFilter(meta, filter));
+      return { facets: computeKnowledgeFacets(kept, scope, deps.store.listCollections()), total: kept.length };
     })
   );
 
@@ -435,9 +570,13 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
       if (touched.length > 0 || outcome.createdCollections.length > 0) {
         changed({ ...(touched.length > 0 ? { entryIds: touched } : {}), collections: true });
       }
+      // Possible duplicates already in the knowledge base, among what the caller can see (no extra
+      // wait: entries not embedded within the indexing wait above get none).
+      const saved = outcome.results.filter((r) => r.status === "saved").map((r) => r.entryId);
+      const similar = saved.length > 0 ? deps.search.similarity.similarForSaved(saved, deps.search.scope(await visibilityOf(request, body.sessionId))) : null;
       const linking = deps.linking.status();
       return {
-        results: outcome.results,
+        results: similar ? outcome.results.map((r) => (r.status === "saved" ? { ...r, similar: similar.get(r.entryId) ?? [] } : r)) : outcome.results,
         createdCollections: outcome.createdCollections,
         linking: linking.state === "running" ? "running" : linking.state === "queued" || linking.state === "paused" ? "queued" : "not-needed"
       };

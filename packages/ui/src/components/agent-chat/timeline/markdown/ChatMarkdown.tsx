@@ -1,4 +1,5 @@
 import React from "react";
+import { Image as ImageIcon } from "lucide-react";
 import Markdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { parseForgeLink, parseKnowledgeCitationHref } from "@orquester/api";
@@ -59,6 +60,11 @@ export interface ChatMarkdownProps {
   streaming?: boolean;
   /** Opens a workspace-relative link in an editor tab instead of navigating. */
   onOpenFile?: ((path: string) => void) | undefined;
+  /**
+   * Remote (`http(s):`) images: `"load"` (the default) shows them at once; `"click"` holds each back
+   * behind a "Load image" button, so text saved from elsewhere cannot fire a tracking pixel on open.
+   */
+  remoteImages?: "load" | "click";
   className?: string;
 }
 
@@ -70,9 +76,10 @@ interface MarkdownConfig {
   mode: "light" | "dark";
   streaming: boolean;
   onOpenFile: ((path: string) => void) | undefined;
+  remoteImages: "load" | "click";
 }
 
-const DEFAULT_CONFIG: MarkdownConfig = { mode: "dark", streaming: false, onOpenFile: undefined };
+const DEFAULT_CONFIG: MarkdownConfig = { mode: "dark", streaming: false, onOpenFile: undefined, remoteImages: "load" };
 
 const MarkdownConfigCtx = React.createContext<MarkdownConfig>(DEFAULT_CONFIG);
 
@@ -205,11 +212,37 @@ function LocalMarkdownImage({ path, alt }: { path: string; alt: string }): React
   return <img src={url} alt={alt} title={path} className={IMAGE_CLASS} />;
 }
 
+/** A remote image held back until clicked (`remoteImages: "click"`): nothing is requested before. */
+function ClickToLoadImage({ src, alt }: { src: string; alt: string }): React.ReactElement {
+  const [load, setLoad] = React.useState(false);
+  if (load) return <img src={src} alt={alt} className={IMAGE_CLASS} />;
+  let host = "";
+  try {
+    host = new URL(src, "http://invalid").host;
+  } catch {
+    // Unparseable: the button just says "Load image".
+  }
+  const label = [alt.trim(), host && host !== "invalid" ? `(${host})` : ""].filter(Boolean).join(" ");
+  return (
+    <button
+      type="button"
+      title={src}
+      onClick={() => setLoad(true)}
+      className="inline-flex max-w-full items-center gap-1 rounded border border-neutral-800 px-1.5 py-0.5 align-middle text-xs text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
+    >
+      <ImageIcon size={12} className="shrink-0" />
+      <span className="truncate">Load image{label ? `: ${label}` : ""}</span>
+    </button>
+  );
+}
+
 function MarkdownImage({ src, alt }: { src?: string | undefined; alt?: string | undefined }): React.ReactElement {
   const { workspaceRoot } = useTimelineRowContext();
+  const { remoteImages } = React.useContext(MarkdownConfigCtx);
   const source = resolveMarkdownImageSource(src ?? "", workspaceRoot);
   if (source.kind === "local") return <LocalMarkdownImage path={source.path} alt={alt ?? ""} />;
   if (source.kind === "unresolved") return <MissingImage label={alt || source.src} />;
+  if (remoteImages === "click") return <ClickToLoadImage key={source.src} src={source.src} alt={alt ?? ""} />;
   return <img src={source.src} alt={alt ?? ""} className={IMAGE_CLASS} />;
 }
 
@@ -284,6 +317,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   text,
   streaming = false,
   onOpenFile,
+  remoteImages = "load",
   className
 }: ChatMarkdownProps): React.ReactElement {
   const mode = useAppStore((state) => state.resolvedMode);
@@ -304,8 +338,8 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   }, [armed, math]);
 
   const config = React.useMemo<MarkdownConfig>(
-    () => ({ mode, streaming, onOpenFile }),
-    [mode, streaming, onOpenFile]
+    () => ({ mode, streaming, onOpenFile, remoteImages }),
+    [mode, streaming, onOpenFile, remoteImages]
   );
 
   return (

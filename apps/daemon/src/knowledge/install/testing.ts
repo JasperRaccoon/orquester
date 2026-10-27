@@ -67,18 +67,24 @@ export async function makeUvBuild(dir: string, target = "x86_64-unknown-linux-gn
   return { tgz, build: { version: UV_VERSION, target, sha256: sha256(tgz), url, sha256Url: `${url}.sha256` } };
 }
 
-/** A two-file embedding model fixture. */
-export function makeModel(): { spec: EmbeddingModelSpec; files: Map<string, Buffer> } {
+/** A two-file embedding model fixture (`id` and `tag` make another one: an older or newer model). */
+export function makeModel(options: { id?: string; tag?: string } = {}): { spec: EmbeddingModelSpec; files: Map<string, Buffer> } {
+  const id = options.id ?? "Fixture/mini-model";
+  const tag = options.tag ?? "";
   const files = new Map<string, Buffer>([
-    ["config.json", Buffer.from('{"model_type":"bert"}\n')],
-    ["onnx/model_quantized.onnx", Buffer.from("fake-onnx-bytes")]
+    ["config.json", Buffer.from(`{"model_type":"bert"${tag ? `,"tag":"${tag}"` : ""}}\n`)],
+    ["onnx/model_quantized.onnx", Buffer.from(`fake-onnx-bytes${tag}`)]
   ]);
   const spec: EmbeddingModelSpec = {
-    id: "Fixture/mini-model",
-    revision: "0123456789abcdef0123456789abcdef01234567",
+    id,
+    revision: createHash("sha1").update(`${id}\u0000${tag}`).digest("hex"),
     dimensions: 384,
     files: [...files].map(([path, bytes]) => ({ path, sha256: sha256(bytes), size: bytes.length })),
-    fileUrl: (path) => `https://hf.invalid/Fixture/mini-model/resolve/rev/${path}`
+    fileUrl: (path) => `https://hf.invalid/${id}/resolve/rev${tag}/${path}`,
+    queryPrefix: "query: ",
+    passagePrefix: "passage: ",
+    maxTokens: 512,
+    thresholds: { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 }
   };
   return { spec, files };
 }

@@ -23,6 +23,11 @@ export class Bm25Index {
   private readonly terms = new Map<string, string[]>();
   private totalLength = 0;
 
+  /** Whether the document `key` has the (tokenized) term in any field. */
+  contains(key: string, term: string): boolean {
+    return this.postings.get(term)?.has(key) ?? false;
+  }
+
   add(key: string, fields: readonly Bm25Field[]): void {
     if (this.lengths.has(key)) this.remove(key);
     const tf = new Map<string, number>();

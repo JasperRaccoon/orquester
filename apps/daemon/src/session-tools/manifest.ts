@@ -73,7 +73,7 @@ export interface ManifestKnowledge {
 /** The two tools only a knowledge worker session is advertised. */
 export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next_task", "knowledge_worker_submit"];
 /** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
-export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete"];
+export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for

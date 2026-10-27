@@ -703,6 +703,8 @@ export function sanitizeUsageLimitNotice(value: unknown): ThreadUsageLimitNotice
   if (typeof row.activityId !== "string" || row.activityId.length === 0 || row.activityId.length > 200) return null;
   if (row.turnId !== null && (typeof row.turnId !== "string" || row.turnId.length === 0 || row.turnId.length > 200)) return null;
   if (typeof row.at !== "string" || !Number.isFinite(Date.parse(row.at))) return null;
+  // A kind this build does not know (a newer host's) is not acted on as a usage limit.
+  if (row.kind !== undefined && row.kind !== "overloaded") return null;
   const resetsAt = typeof row.resetsAt === "string" && Number.isFinite(Date.parse(row.resetsAt)) ? row.resetsAt : undefined;
   return {
     activityId: row.activityId,
@@ -710,7 +712,8 @@ export function sanitizeUsageLimitNotice(value: unknown): ThreadUsageLimitNotice
     ...(resetsAt !== undefined ? { resetsAt } : {}),
     message: typeof row.message === "string" ? row.message.slice(0, 500) : "",
     at: row.at,
-    parked: row.parked === true
+    parked: row.parked === true,
+    ...(row.kind === "overloaded" ? { kind: "overloaded" as const } : {})
   };
 }
 

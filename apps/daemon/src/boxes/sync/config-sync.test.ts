@@ -943,3 +943,68 @@ test("a deleted file is never executable on the card", async () => {
   assert.equal(files.get("hooks/new.sh")!.executable, true);
   await sync.close();
 });
+
+test("the project trust Codex adds in a box makes no change set, is never sent back nor to the host; real edits still are", async () => {
+  const f = await fixture();
+  const codexHome = join(f.appdir, "daemon", "agent-accounts", "codex", "c1", "home");
+  const config = join(codexHome, "config.toml");
+  await put(
+    config,
+    'model = "gpt"\n\n[mcp_servers.gh]\ncommand = "gh-mcp"\nenv = { GH_TOKEN = "ghp_mcpsecret" }\n\n[projects."/host/proj"]\ntrust_level = "trusted"\n'
+  );
+  const scope: BoxSyncScope = { agent: "codex", configRoots: [codexHome], threadId: "t1" };
+  const sync = f.make();
+  await sync.ensureSynced("b1", scope, signal());
+  await sync.ensureSynced("b2", scope, signal());
+  sync.watch("b2", scope);
+  await sync.idle();
+  const boxConfig = f.box1.local(config);
+  const trust = '\n[projects."/w/box-proj"]\ntrust_level = "trusted"\n';
+
+  // Codex trusts the project it runs in: no change set, not undone, nothing written anywhere.
+  sync.turnStarted("b1", "t1");
+  await put(boxConfig, (await readFile(boxConfig, "utf8")) + trust);
+  await sync.turnEnded("b1", "t1");
+  assert.equal(f.published.length, 0, "no change set");
+  const writes = f.box1.writes.length;
+  await sync.ensureSynced("b1", scope, signal());
+  await sync.ensureSynced("b1", scope, signal());
+  assert.equal(f.box1.writes.length, writes, "the box's trust is not pushed back");
+  assert.ok((await readFile(boxConfig, "utf8")).includes("/w/box-proj"));
+  assert.ok(!(await readFile(config, "utf8")).includes("/w/box-proj"), "the host is untouched");
+
+  // A host edit still reaches the box, which keeps its own trust; then nothing more is sent.
+  await put(config, (await readFile(config, "utf8")).replace('model = "gpt"', 'model = "gpt-2"'));
+  await sync.ensureSynced("b1", scope, signal());
+  const pushed = await readFile(boxConfig, "utf8");
+  assert.match(pushed, /model = "gpt-2"/);
+  assert.ok(pushed.includes("/w/box-proj") && pushed.includes("/host/proj"));
+  assert.ok(!pushed.includes("ghp_mcpsecret"));
+  const afterPush = f.box1.writes.length;
+  await sync.ensureSynced("b1", scope, signal());
+  assert.equal(f.box1.writes.length, afterPush, "in sync after the push");
+  assert.equal(f.published.length, 0);
+
+  // Trust next to a new MCP server: one change for the server only; approving it carries no trust.
+  sync.turnStarted("b1", "t2");
+  await put(boxConfig, `${pushed}\n[mcp_servers.fs]\ncommand = "fs-mcp"\n${trust.replace("box-proj", "box-proj-2")}`);
+  await sync.turnEnded("b1", "t2");
+  const set = pendingSet(f.published);
+  assert.equal(set.files.length, 1);
+  assert.equal(set.files[0]!.executable, true, "an MCP server change runs code");
+  assert.ok(set.files[0]!.diff.includes("fs-mcp"));
+  assert.ok(!set.files[0]!.diff.includes("box-proj"), "the card shows no box trust");
+  await sync.decide(set.id, "approve");
+  const host = await readFile(config, "utf8");
+  assert.ok(host.includes('command = "fs-mcp"') && host.includes("ghp_mcpsecret") && host.includes("/host/proj"));
+  assert.ok(!host.includes("box-proj"), "no box trust reaches the host");
+  await sync.idle();
+  assert.ok((await readFile(f.box2.local(config), "utf8")).includes("fs-mcp"), "the approved server reaches the other box");
+  const afterApprove = f.box1.writes.length;
+  const sets = f.published.length;
+  await sync.ensureSynced("b1", scope, signal());
+  assert.equal(f.box1.writes.length, afterApprove, "the approving box is in sync");
+  assert.equal(f.published.length, sets);
+  assert.ok((await readFile(boxConfig, "utf8")).includes("box-proj-2"));
+  await sync.close();
+});
