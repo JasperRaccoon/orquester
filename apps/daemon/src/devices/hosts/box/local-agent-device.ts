@@ -5,7 +5,8 @@
  * The device toolchain owns pinned installs (`toolchain/`): its `toolBin` and `ensureTool` are
  * used when it has them. Until it can install, the same layout is installed here (devices spec §5:
  * `<devicesToolsDir>/agent-device@<version>`, npm into a staging dir with this daemon's Node,
- * `.install-complete` sentinel, renamed into place), so the toolchain finds it later.
+ * `.install-complete` sentinel, renamed into place; `npm ci --ignore-scripts` from the shipped
+ * lockfile), so the toolchain finds it later.
  */
 
 import { execFile } from "node:child_process";
@@ -17,6 +18,7 @@ import { devicesToolsDir } from "@orquester/config";
 
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import type { DeviceToolchain } from "../../toolchain/index.ts";
+import { NPM_CI_ARGS, toolLock } from "../../toolchain/npm-tools.ts";
 
 const VERSION = DEVICE_TOOL_VERSIONS["agent-device"];
 const INSTALL_TIMEOUT_MS = 10 * 60_000;
@@ -77,17 +79,22 @@ async function install(input: { appDir: string; toolchain?: DeviceToolchain; sig
   try {
     const nodeDir = dirname(process.execPath);
     const npm = existsSync(join(nodeDir, "npm")) ? join(nodeDir, "npm") : "npm";
+    // The shipped lockfile, no lifecycle scripts (agent-device has no native build).
+    const lock = toolLock("agent-device", VERSION);
+    if (!lock) throw new Error(`this build ships no lockfile for agent-device@${VERSION}`);
+    await writeFile(join(staging, "package.json"), lock.packageJson);
+    await writeFile(join(staging, "package-lock.json"), lock.packageLock);
     await new Promise<void>((resolve, reject) => {
       execFile(
         npm,
-        ["install", "--prefix", staging, "--no-audit", "--no-fund", "--save-exact", `agent-device@${VERSION}`],
+        [...NPM_CI_ARGS, "--prefix", staging],
         {
           env: { ...process.env, PATH: `${nodeDir}${delimiter}${process.env.PATH ?? ""}`, npm_config_update_notifier: "false" },
           timeout: INSTALL_TIMEOUT_MS,
           maxBuffer: 8 * 1024 * 1024,
           signal: input.signal
         },
-        (error, _stdout, stderr) => (error ? reject(new Error(`npm install agent-device@${VERSION} failed: ${String(stderr).trim().split("\n").slice(-3).join(" ") || error.message}`)) : resolve())
+        (error, _stdout, stderr) => (error ? reject(new Error(`npm ci agent-device@${VERSION} failed: ${String(stderr).trim().split("\n").slice(-3).join(" ") || error.message}`)) : resolve())
       );
     });
     if (!existsSync(entryIn(staging))) throw new Error(`npm installed no agent-device@${VERSION} entry`);

@@ -937,7 +937,7 @@ export class BoxAndroidHost implements DeviceHost {
     if (record) await this.stopRecord(record);
   }
 
-  async release(lease: StoredDeviceLease): Promise<void> {
+  async release(lease: StoredDeviceLease, _options?: { shutdown: boolean }): Promise<void> {
     // Every lease's emulator is a read-only instance made for it: it always goes. Unreachable: the
     // next prepare reaps it (no live lease holds it then).
     if (lease.deviceId === null || !this.deps.connection()?.connected) return;
