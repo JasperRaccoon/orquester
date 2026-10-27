@@ -57,6 +57,16 @@ const TREE_CANDIDATES = 8;
 const YIELD_EVERY_MS = 40;
 /** Similarity graphs kept (per scope, k, limit, index generation, graph revision and node set). */
 const GRAPH_CACHE_SIZE = 8;
+/** Latest graphs kept for novelty and saves, one per scope and model (more scopes than the graph cache: they are read without drawing). */
+const LATEST_SIZE = 32;
+/**
+ * A scope whose latest graph was drawn in the background this recently is not drawn again in the
+ * background (its latest may have been evicted by other scopes) unless the vectors or the concept
+ * graph moved since: novelty and saves read null meanwhile.
+ */
+const BACKGROUND_REDRAW_MS = 5 * 60_000;
+/** Background draws remembered for {@link BACKGROUND_REDRAW_MS} (the least recent go first). */
+const BACKGROUND_DRAWS_MAX = 256;
 /**
  * How the graph's clusters and labels are made; part of the cache key, so a daemon never serves a
  * graph drawn by an older rule. Bump it whenever clustering or labelling changes.
@@ -140,6 +150,8 @@ export interface KnowledgeSimilarityOptions {
   pairChecks?: () => KnowledgePairChecksPort | null;
   /** Moves whenever the pair checks change (part of the graph's cache key); absent: never. */
   pairChecksRevision?: () => number;
+  /** Milliseconds now (background draws are spaced by it); default `Date.now`. */
+  now?: () => number;
 }
 
 interface Candidate {
@@ -254,7 +266,7 @@ export class KnowledgeSimilarity {
   private readonly index: () => KnowledgeVectorIndex | null;
   private readonly summary: KnowledgeSimilarityOptions["summary"];
   private readonly body: KnowledgeSimilarityOptions["body"];
-  /** Entry id → its shingles at a content hash; least recently used first. */
+  /** Entry id → its shingles, keyed by a hash of the body they were made from; least recently used first. */
   private readonly shingleCache = new Map<string, { hash: string; shingles: Set<string> }>();
   /** Similarity graphs drawn in the background (novelty, a save's cluster), by scope and model. */
   private readonly drawing = new Map<string, Promise<void>>();
@@ -267,6 +279,9 @@ export class KnowledgeSimilarity {
    * `cluster` read it without waiting for a new one); least recently used first.
    */
   private readonly latest = new Map<string, { seq: number; structure: GraphStructure }>();
+  /** Background draws by scope and model: when, and at which vectors and concept graph; least recent first. */
+  private readonly backgroundDraws = new Map<string, { at: number; generation: number; revision: number }>();
+  private readonly now: () => number;
   private seq = 0;
   /** LLM topic names for clusters ({@link connectClusterLabels}); null: the concept labels only. */
   private clusterNames: KnowledgeClusterLabelsPort | null = null;
@@ -279,6 +294,7 @@ export class KnowledgeSimilarity {
     this.body = options.body;
     this.pairChecks = options.pairChecks ?? (() => null);
     this.pairChecksRevision = options.pairChecksRevision ?? (() => 0);
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -461,16 +477,18 @@ export class KnowledgeSimilarity {
   }
 
   private shinglesOf(id: string): Set<string> | null {
-    const hash = this.store.getMeta(id)?.contentHash ?? null;
+    // Keyed by the body actually read, not the entry's content hash: the two can disagree for a
+    // moment (an edit lands in one before the other), and shingles must match the text compared.
+    const body = this.store.getMeta(id) ? this.body(id) : null;
+    if (body === null) return null;
+    const hash = createHash("sha1").update(body, "utf8").digest("base64");
     const cached = this.shingleCache.get(id);
     if (cached && cached.hash === hash) {
       this.shingleCache.delete(id); // most recently used last
       this.shingleCache.set(id, cached);
       return cached.shingles;
     }
-    const body = hash === null ? null : this.body(id);
-    if (body === null) return null;
-    const made = { hash: hash!, shingles: shingles(body) };
+    const made = { hash, shingles: shingles(body) };
     this.shingleCache.delete(id);
     this.shingleCache.set(id, made);
     while (this.shingleCache.size > SHINGLES_CACHE_SIZE) this.shingleCache.delete(this.shingleCache.keys().next().value!);
@@ -554,11 +572,16 @@ export class KnowledgeSimilarity {
    * exists is still in scope (otherwise its labels could name what the caller no longer sees).
    */
   private latestStructure(scope: KnowledgeScope, index: KnowledgeVectorIndex): GraphStructure | null {
-    const found = this.latest.get(JSON.stringify([scopeKey(scope), index.modelId()]));
+    const key = JSON.stringify([scopeKey(scope), index.modelId()]);
+    const found = this.latest.get(key);
     if (!found) return null;
     for (const id of found.structure.ids) {
       const meta = this.store.getMeta(id);
-      if (meta && !entryInScope(meta, scope)) return null;
+      if (meta && !entryInScope(meta, scope)) {
+        // Stale, not evicted: a new one may be drawn in the background at once.
+        this.backgroundDraws.delete(key);
+        return null;
+      }
     }
     return found.structure;
   }
@@ -571,6 +594,16 @@ export class KnowledgeSimilarity {
   private drawInBackground(scope: KnowledgeScope, index: KnowledgeVectorIndex): void {
     const key = JSON.stringify([scopeKey(scope), index.modelId()]);
     if (this.drawing.has(key)) return;
+    // Bounded: a scope drawn lately is not drawn again (its latest graph may have made room for
+    // other scopes') until the vectors or the concept graph move, or a while has passed.
+    const at = this.now();
+    const generation = index.generation();
+    const revision = this.knowledgeGraph.revision();
+    const last = this.backgroundDraws.get(key);
+    if (last && at - last.at < BACKGROUND_REDRAW_MS && last.generation === generation && last.revision === revision) return;
+    this.backgroundDraws.delete(key);
+    this.backgroundDraws.set(key, { at, generation, revision });
+    while (this.backgroundDraws.size > BACKGROUND_DRAWS_MAX) this.backgroundDraws.delete(this.backgroundDraws.keys().next().value!);
     const drawn = new Promise<void>((resolve) => setImmediate(resolve))
       .then(() => this.graph({}, scope))
       .then(
@@ -592,7 +625,7 @@ export class KnowledgeSimilarity {
     if (previous && previous.seq > seq) return;
     this.latest.delete(key);
     this.latest.set(key, { seq, structure });
-    while (this.latest.size > GRAPH_CACHE_SIZE) this.latest.delete(this.latest.keys().next().value!);
+    while (this.latest.size > LATEST_SIZE) this.latest.delete(this.latest.keys().next().value!);
   }
 
   // -------------------------------------------------------------------------
