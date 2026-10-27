@@ -21,6 +21,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { isIPv6 } from "node:net";
 
 import {
   BYO_MACHINE_KINDS,
@@ -63,37 +64,82 @@ export type PairingScriptOutcome =
   | { ok: false; status: 404 | 429 | 503; code: string; message: string; retryAfterSeconds?: number };
 
 /**
- * Failed pairing fetches per client: {@link PairingThrottle.MAX_FAILURES} within
- * {@link PairingThrottle.WINDOW_MS}, then refused until the window ends. Codes carry 144 random
- * bits, so this only keeps a guesser from making noise.
+ * The throttle's key for a client address: an IPv4 address as is (an IPv4-mapped IPv6 one too),
+ * an IPv6 address by its /64 (one host usually holds a whole /64, so per-address keys would let
+ * it rotate freely); anything else verbatim.
+ */
+export function pairingThrottleKey(client: string): string {
+  const address = client.split("%")[0]!.toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address);
+  if (mapped) return mapped[1]!;
+  if (!isIPv6(address)) return client;
+  let text = address;
+  const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(2).map(Number) as [number, number, number, number];
+    text = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.includes("::") ? (text.split("::") as [string, string]) : [text, null];
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === null ? left : [...left, ...Array<string>(8 - left.length - right.length).fill("0"), ...right];
+  return `${groups
+    .slice(0, 4)
+    .map((group) => parseInt(group, 16).toString(16))
+    .join(":")}::/64`;
+}
+
+/**
+ * Failed pairing fetches per client ({@link pairingThrottleKey}): {@link PairingThrottle.MAX_FAILURES}
+ * within {@link PairingThrottle.WINDOW_MS}, then refused until the window ends. Codes carry 144
+ * random bits, so this only keeps a guesser from making noise. At most
+ * {@link PairingThrottle.MAX_CLIENTS} clients are remembered: the map is ordered by window start,
+ * so expired windows leave from its front and, when full, the oldest window goes (every check O(1)
+ * amortized).
  */
 export class PairingThrottle {
   static readonly MAX_FAILURES = 10;
   static readonly WINDOW_MS = 15 * 60_000;
-  private static readonly PRUNE_THRESHOLD = 1024;
+  static readonly MAX_CLIENTS = 4096;
   private readonly failures = new Map<string, { count: number; since: number }>();
 
   constructor(private readonly now: () => number) {}
 
+  /** How many clients are remembered (tests). */
+  get size(): number {
+    return this.failures.size;
+  }
+
   retryAfterMs(client: string): number {
-    const entry = this.failures.get(client);
+    this.prune();
+    const entry = this.failures.get(pairingThrottleKey(client));
     if (!entry) return 0;
-    const ends = entry.since + PairingThrottle.WINDOW_MS;
-    if (ends <= this.now()) {
-      this.failures.delete(client);
-      return 0;
-    }
-    return entry.count >= PairingThrottle.MAX_FAILURES ? ends - this.now() : 0;
+    return entry.count >= PairingThrottle.MAX_FAILURES ? entry.since + PairingThrottle.WINDOW_MS - this.now() : 0;
   }
 
   recordFailure(client: string): void {
-    const now = this.now();
-    if (this.failures.size > PairingThrottle.PRUNE_THRESHOLD) {
-      for (const [key, entry] of this.failures) if (entry.since + PairingThrottle.WINDOW_MS <= now) this.failures.delete(key);
+    this.prune();
+    const key = pairingThrottleKey(client);
+    const entry = this.failures.get(key);
+    if (entry) {
+      entry.count += 1;
+      return;
     }
-    const entry = this.failures.get(client);
-    if (!entry || entry.since + PairingThrottle.WINDOW_MS <= now) this.failures.set(client, { count: 1, since: now });
-    else entry.count += 1;
+    // A new window goes last (the map stays ordered by `since`); full: the oldest window goes.
+    if (this.failures.size >= PairingThrottle.MAX_CLIENTS) {
+      const oldest = this.failures.keys().next();
+      if (!oldest.done) this.failures.delete(oldest.value);
+    }
+    this.failures.set(key, { count: 1, since: this.now() });
+  }
+
+  /** Drop the windows that ended (all at the front). */
+  private prune(): void {
+    const now = this.now();
+    for (const [key, entry] of this.failures) {
+      if (entry.since + PairingThrottle.WINDOW_MS > now) break;
+      this.failures.delete(key);
+    }
   }
 }
 
