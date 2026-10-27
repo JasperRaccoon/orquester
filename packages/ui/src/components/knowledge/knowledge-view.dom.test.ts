@@ -109,6 +109,10 @@ const CONCEPT: KnowledgeItemResponse = {
   }
 };
 
+/** The concept answer for `id` (as the daemon answers it: under the id asked for). */
+const conceptItem = (id: string): KnowledgeItemResponse =>
+  CONCEPT.kind === "concept" && id !== CONCEPT.concept.concept.id ? { kind: "concept", concept: { ...CONCEPT.concept, concept: { ...CONCEPT.concept.concept, id } } } : CONCEPT;
+
 const ENTRY: KnowledgeItemResponse = {
   kind: "entry",
   entry: { entry: entry(), concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }], related: [], citation: "" }
@@ -126,7 +130,7 @@ describe("the Knowledge view", () => {
     listKnowledgeCollections: async () => (calls.push("collections"), collections([collection({ profiles: [{ id: "p1", name: "SaaS expert" }] }), collection({ id: "kc_ads", name: "Ads", color: "chart-2", entryCount: 0 })])),
     getKnowledgeGraph: async (query: KnowledgeGraphQuery = {}) => (calls.push(`graph:${query.focus ?? ""}`), GRAPH),
     searchKnowledge: async () => ({ hits: [], searched: [] }),
-    getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : CONCEPT),
+    getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : conceptItem(id)),
     listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => (calls.push(`entries:${query.collection ?? "all"}`), { entries: [summary()], nextCursor: null }),
     createKnowledgeCollection: async () => (calls.push("create"), {}),
     updateKnowledgeCollection: async (id: string, req: UpdateKnowledgeCollectionRequest) => (patches.push([id, req]), {}),
@@ -349,6 +353,19 @@ describe("the Knowledge view", () => {
     await click(buttonNamed("Save"));
     assert.deepEqual(patches, [["ke_aaaaaaaaaaaa", { title: "Alternatives pages, revisited", collections: ["kc_ads", "kc_seo"] }]]);
     assert.equal(doc().querySelector('form[aria-label="Edit entry"]'), null);
+  });
+
+  it("a concept asked for by a merged-away id becomes the kept concept it resolves to, without a Back to the old id", async () => {
+    // The daemon answers a merged-away id with the concept it was merged into.
+    await show({
+      focus: { kind: "concept", id: "tactic-merged-away", nonce: 1 },
+      api: { getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : CONCEPT) }
+    });
+    const aside = doc().querySelector('aside[aria-label="Concept details"]');
+    assert.ok(aside, "the panel shows the kept concept");
+    assert.equal(doc().querySelector('[data-node="tactic-alternatives"]')?.getAttribute("data-selected"), "true", "the canvas selects the kept concept");
+    assert.ok(calls.includes("item:tactic-alternatives"), "the selection moved to the kept id");
+    assert.equal([...doc().querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Back"), undefined, "the old id is not a place to go back to");
   });
 
   it("deleting an entry asks first, then closes the panel", async () => {

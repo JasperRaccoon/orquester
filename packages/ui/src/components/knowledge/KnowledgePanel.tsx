@@ -58,17 +58,31 @@ function relevantIds(item: KnowledgeItemResponse | null, id: string): Set<string
   return ids;
 }
 
+/** The id of the item an answer holds (a concept asked for by a merged-away id answers as the kept one). */
+function itemId(item: KnowledgeItemResponse): string {
+  return item.kind === "entry" ? item.entry.entry.id : item.concept.concept.id;
+}
+
 /**
  * Read one item, and read it again when the store says it changed: the graph
- * was reloaded, or entries it shows were edited or deleted.
+ * was reloaded, or entries it shows were edited or deleted. `onRead` hears each
+ * answer with the id it was read for.
  */
-function useKnowledgeItem(api: KnowledgePanelApi | null, id: string): { load: Load; retry: () => void } {
+function useKnowledgeItem(
+  api: KnowledgePanelApi | null,
+  id: string,
+  onRead?: (item: KnowledgeItemResponse, id: string) => void
+): { load: Load; retry: () => void } {
   const [load, setLoad] = useState<Load>({ status: "loading", item: null });
   const [tick, setTick] = useState(0);
   const relevant = useRef<Set<string>>(new Set([id]));
   const held = useRef<KnowledgeItemResponse | null>(null);
+  const onReadRef = useRef(onRead);
+  onReadRef.current = onRead;
 
   useEffect(() => {
+    // Moved to the id the held answer already is (a merged-away concept's kept one): keep showing it.
+    if (held.current && itemId(held.current) === id) return;
     held.current = null;
     relevant.current = new Set([id]);
     setLoad({ status: "loading", item: null });
@@ -97,6 +111,7 @@ function useKnowledgeItem(api: KnowledgePanelApi | null, id: string): { load: Lo
         held.current = item;
         relevant.current = relevantIds(item, id);
         setLoad({ status: "ready", item });
+        onReadRef.current?.(item, id);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -133,7 +148,19 @@ export interface KnowledgePanelProps {
 }
 
 export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, collections, onSelect, onClose, onBack, onItem, onFindSimilar }) => {
-  const { load, retry } = useKnowledgeItem(api, selection.id);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  // The daemon answers a merged-away concept id with the concept kept in its place: the selection
+  // takes the kept id (the graph selects, centres and marks by it), leaving no way Back to the old one.
+  const resolved = useCallback((item: KnowledgeItemResponse, id: string) => {
+    const current = selectionRef.current;
+    if (item.kind !== "concept" || current.kind !== "concept" || current.id !== id) return;
+    const kept = item.concept.concept.id;
+    if (kept !== id) onSelectRef.current({ kind: "concept", id: kept }, { replace: true });
+  }, []);
+  const { load, retry } = useKnowledgeItem(api, selection.id, resolved);
   const item = load.status === "gone" ? null : load.item;
   const onItemRef = useRef(onItem);
   onItemRef.current = onItem;
@@ -145,8 +172,6 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
   const [merging, setMerging] = useState(false);
   const selectedId = useRef(selection.id);
   selectedId.current = selection.id;
-  const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
   const merge = useCallback(
     async (plan: KnowledgeMergePlan) => {
       if (!api) throw new Error("Not connected.");
