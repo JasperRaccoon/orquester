@@ -81,6 +81,8 @@ export interface LocalAndroidHostDeps {
 }
 
 const BOOT_TIMEOUT_MS = 5 * 60_000;
+/** How long a teardown waits for boots in flight (they are aborted first) before stopping everything anyway. */
+const TEARDOWN_BOOT_WAIT_MS = 2 * 60_000;
 const SAMPLE_MS = 15_000;
 const AGENT_DEVICE_CHECK_MS = 30_000;
 const UPLOAD_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -177,6 +179,9 @@ export class LocalAndroidHost implements DeviceHost {
   private memAvailable: number | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private disposed = false;
+  private tearingDown = false;
+  /** Boots in flight (a teardown waits for them). */
+  private readonly inFlight = new Set<Promise<unknown>>();
   private readonly threads = availableParallelism();
 
   constructor(
@@ -271,10 +276,25 @@ export class LocalAndroidHost implements DeviceHost {
     this.events.removeAllListeners();
   }
 
-  /** Android was switched off: every emulator, the hub and the agent-device daemon stop. */
+  /**
+   * Android (or the plugin) was switched off: no new boot starts; boots in flight finish or fail
+   * (bounded); then every emulator, the hub, the agent-device daemon and the adb server stop.
+   */
   async teardown(): Promise<void> {
-    for (const record of [...this.emulators.values()]) await this.stopRecord(record).catch(() => undefined);
-    await this.dispose();
+    this.tearingDown = true;
+    if (this.inFlight.size > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...this.inFlight]), new Promise<void>((resolve) => (timer = setTimeout(resolve, TEARDOWN_BOOT_WAIT_MS)))]);
+      clearTimeout(timer);
+    }
+    for (const record of [...this.emulators.values()]) await this.stopRecord(record).catch((error) => this.deps.logger.warn(`[devices] stopping ${record.serial} failed`, errorText(error)));
+    this.disposed = true;
+    for (const timer of this.timers.splice(0)) clearInterval(timer);
+    await this.hub.stop().catch(() => undefined);
+    await this.agentDevice.stop().catch(() => undefined);
+    await this.exec(join(this.layout.sdk, "platform-tools", "adb"), ["kill-server"], { env: this.env, timeoutMs: 10_000 }).catch(() => undefined);
+    await this.stateWrites;
+    this.events.removeAllListeners();
   }
 
   settingsChanged(): void {
@@ -607,7 +627,18 @@ export class LocalAndroidHost implements DeviceHost {
     return devices;
   }
 
-  async boot(request: DeviceBootRequest, signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<DeviceBootResult> {
+  boot(request: DeviceBootRequest, signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<DeviceBootResult> {
+    if (this.tearingDown) return Promise.reject(new DeviceError("UNAVAILABLE", "Android emulators on this machine are being turned off."));
+    const run = this.bootNow(request, signal, onProgress);
+    this.inFlight.add(run);
+    void run.then(
+      () => this.inFlight.delete(run),
+      () => this.inFlight.delete(run)
+    );
+    return run;
+  }
+
+  private async bootNow(request: DeviceBootRequest, signal: AbortSignal, onProgress?: (progress: DeviceHostProgress) => void): Promise<DeviceBootResult> {
     const progress = (step: string, label: string) => onProgress?.({ step, label, state: "running" });
     const profile = request.profile;
     if (profile.platform !== "android") throw new DeviceError("INVALID_ARGUMENT", `${profile.label} is not an Android profile.`);
@@ -638,7 +669,7 @@ export class LocalAndroidHost implements DeviceHost {
     }
     signal.throwIfAborted();
     progress("start-device", `Starting ${profile.label}`);
-    const ports = await this.reservePorts();
+    const ports = await this.reservePorts(true);
     const serial = serialOf(ports.consolePort);
     const logPath = join(this.layout.logs, `${serial}.log`);
     let record: EmulatorRecord | null = null;
@@ -794,9 +825,21 @@ export class LocalAndroidHost implements DeviceHost {
     if (!this.disposed) this.events.emit("change");
   }
 
-  /** One allocation at a time: two boots probing the same free port concurrently would both take it. */
-  private reservePorts(): Promise<{ consolePort: number; grpcPort: number; release(): void }> {
-    return this.profileQueue.run(" ports", () => this.reservePortsNow());
+  /**
+   * One allocation at a time: two boots probing the same free port concurrently would both take it.
+   * A lease's slot is re-checked against capacity here, in the same queue, so concurrent boots
+   * never overrun it (the check at the start of a boot may be minutes old).
+   */
+  private reservePorts(forLease = false): Promise<{ consolePort: number; grpcPort: number; release(): void }> {
+    return this.profileQueue.run(" ports", () => {
+      if (forLease) {
+        const { total } = this.capacityNumbers();
+        if (this.leasedCount() + this.reserved.size >= total) {
+          throw new DeviceError("DEVICE_CAPACITY", `This machine runs ${this.leasedCount()} of at most ${total} emulators now. Release a device first.`);
+        }
+      }
+      return this.reservePortsNow();
+    });
   }
 
   private async reservePortsNow(): Promise<{ consolePort: number; grpcPort: number; release(): void }> {
@@ -910,12 +953,14 @@ export function createLocalAndroidHostFactory(deps: LocalAndroidHostDeps): Devic
     settingsChanged(settings) {
       void enqueue(settings);
     },
-    async stop() {
+    async stop(options) {
       await queue;
       const current = host;
       host = null;
       if (ctx && current) ctx.removeHost(current.id);
-      await current?.dispose();
+      // Plugin off: nothing keeps running; a shutdown leaves devices for the next start.
+      if (options?.teardown) await current?.teardown();
+      else await current?.dispose();
       ctx = null;
     }
   };

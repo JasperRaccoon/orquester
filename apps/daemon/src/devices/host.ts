@@ -287,8 +287,12 @@ export interface DeviceHostFactory {
   /** What `provision` would rent for `platform` now (the spend card shows it); null when it cannot. */
   provisionQuote?(platform: DevicePlatform): DeviceRentalQuote | null;
   settingsChanged?(settings: DevicesSettings): void;
-  /** Stop: dispose every host it added (devices keep running). */
-  stop(): Promise<void>;
+  /**
+   * Stop: dispose every host it added (devices keep running; a restart reattaches). `teardown`: the
+   * plugin was turned off — wait for boots in flight, then stop everything its hosts run (devices,
+   * hub, agent-device daemon, adb server) so nothing of the plugin keeps running.
+   */
+  stop(options?: { teardown?: boolean }): Promise<void>;
 }
 
 /** The hosts that exist now. */
