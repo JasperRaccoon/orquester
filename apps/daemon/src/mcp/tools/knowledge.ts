@@ -523,10 +523,13 @@ const optionalText = (max: number) => z.string().trim().min(1).max(max).optional
 /** An edit's metadata field: a new value, or null to clear it. */
 const clearableText = (max: number) => z.string().trim().min(1).max(max).nullable().optional();
 /** An entry id, as citations carry it. */
-const entryId = z.string().trim().regex(/^ke_[a-z0-9]{12}$/, "an entry id looks like ke_ and 12 letters or digits");
+// Schemas used by more than one field are factories: a zod instance reused inside one tool is
+// listed as a JSON-schema "$ref" to the first field, which clients such as Claude Code do not follow
+// (they then send the value as a string). `catalog/schema-refs.test.ts` keeps every tool free of them.
+const entryId = () => z.string().trim().regex(/^ke_[a-z0-9]{12}$/, "an entry id looks like ke_ and 12 letters or digits");
 
 /** A search's example entries (`similarTo`, `unlike`). */
-const exampleIds = z.array(entryId).max(KNOWLEDGE_SIMILAR_MAX_EXAMPLES);
+const exampleIds = () => z.array(entryId()).max(KNOWLEDGE_SIMILAR_MAX_EXAMPLES);
 /**
  * A filter list (`kinds`, `authors`): values of at most `max` characters. Refinements here and below,
  * not lengths or patterns: they cost the advertised schema nothing (the family's byte budget), and
@@ -543,7 +546,8 @@ const filterValues = (max: number) =>
     )
     .max(KNOWLEDGE_FILTER_MAX_VALUES);
 const filterYear = z.string().trim().refine((value) => YEAR.test(value), "a year looks like 2025");
-const dateBound = z
+const dateBound = () =>
+  z
   .string()
   .trim()
   .refine((value) => ISO_DATE.test(value) && !Number.isNaN(Date.parse(value.slice(0, 10))), "a date bound is an ISO date (YYYY-MM-DD) or date-time");
@@ -657,16 +661,16 @@ const knowledgeSearch = defineTool({
     "Search the shared knowledge base in the collections this chat can see, by meaning and keywords (query), by example (similarTo) or both; filters narrow it. Use it before deciding on a topic those collections cover; on your own while working, don't announce it. When the user asks you directly, answer from the entries found, paste each used entry's `cite` link verbatim, and never pass off general knowledge as from it. Never cite a weak hit as evidence.",
   input: {
     query: z.string().trim().min(1).max(KNOWLEDGE_QUERY_MAX_CHARS).optional().describe("Needed without similarTo."),
-    similarTo: exampleIds.optional().describe("Entry ids: find more like these."),
-    unlike: exampleIds.optional().describe("With similarTo: less like these."),
+    similarTo: exampleIds().optional().describe("Entry ids: find more like these."),
+    unlike: exampleIds().optional().describe("With similarTo: less like these."),
     collections: z.array(collectionRef).max(KNOWLEDGE_COLLECTIONS_MAX).optional().describe("Names or ids."),
     kinds: filterValues(KIND_MAX_CHARS).optional().describe('"thread", "article"…'),
     authors: filterValues(AUTHOR_MAX_CHARS).optional().describe("Names or @handles."),
     years: z.array(filterYear).max(KNOWLEDGE_FILTER_MAX_VALUES).optional().describe('"2025" (postedAt, else savedAt).'),
-    postedAfter: dateBound.optional().describe("Inclusive ISO date (each bound); posted bounds skip undated entries."),
-    postedBefore: dateBound.optional(),
-    savedAfter: dateBound.optional(),
-    savedBefore: dateBound.optional(),
+    postedAfter: dateBound().optional().describe("Inclusive ISO date (each bound); posted bounds skip undated entries."),
+    postedBefore: dateBound().optional(),
+    savedAfter: dateBound().optional(),
+    savedBefore: dateBound().optional(),
     sort: z.enum(["relevance", "recent", "newest"]).optional().describe("Default relevance; recent boosts newer; newest: latest saved first."),
     limit: z.number().int().min(1).max(KNOWLEDGE_SEARCH_MAX_LIMIT).optional().describe("Default 8."),
     cursor: z
@@ -708,7 +712,7 @@ const knowledgeSearch = defineTool({
 });
 
 /** An entry or concept id, as `knowledge_get` takes it. */
-const itemId = z.string().trim().min(1).max(200);
+const itemId = () => z.string().trim().min(1).max(200);
 
 const knowledgeGet = defineTool({
   name: "knowledge_get",
@@ -716,8 +720,8 @@ const knowledgeGet = defineTool({
   description:
     "Read knowledge entries whole — text, metadata, concepts, similar entries, possible duplicates — or a concept (description, entries, links). A cut body's footer gives the from to read on with. Paste the `cite` link of each entry you use, verbatim.",
   input: {
-    id: itemId.optional().describe("An entry id (ke_…) or a concept id."),
-    ids: z.array(itemId).min(1).max(KNOWLEDGE_GET_MAX_IDS).optional().describe("Up to 5, instead of id."),
+    id: itemId().optional().describe("An entry id (ke_…) or a concept id."),
+    ids: z.array(itemId()).min(1).max(KNOWLEDGE_GET_MAX_IDS).optional().describe("Up to 5, instead of id."),
     from: z.number().int().min(0).optional().describe("Character offset into the body (from a footer or a passage).")
   },
   audiences: ["chat"],
@@ -782,7 +786,7 @@ const knowledgeUpdate = defineTool({
   title: "Edit a knowledge entry",
   description:
     "Edit one entry in place (id from knowledge_search). Only the fields you pass change; collections replaces the set; null clears author, handle, url or postedAt. Correct an entry with this, not a second save. Keep saved posts verbatim unless the user asks. A changed text or title is linked again.",
-  input: { id: entryId.describe("The entry's id (ke_…)."), ...updateFields },
+  input: { id: entryId().describe("The entry's id (ke_…)."), ...updateFields },
   audiences: ["chat"],
   toolset: "knowledge",
   tier: "act",
@@ -805,7 +809,7 @@ const knowledgeDelete = defineTool({
   title: "Delete knowledge entries",
   description:
     "Delete entries for good (ids from knowledge_search). There is no undo: delete only what the user asked to remove, or entries you saved by mistake. Each id is reported deleted or not, with the reason.",
-  input: { ids: z.array(entryId).min(1).max(KNOWLEDGE_DELETE_MAX_IDS).describe("Entry ids (ke_…).") },
+  input: { ids: z.array(entryId()).min(1).max(KNOWLEDGE_DELETE_MAX_IDS).describe("Entry ids (ke_…).") },
   audiences: ["chat"],
   toolset: "knowledge",
   tier: "act",
@@ -840,8 +844,8 @@ const knowledgeMerge = defineTool({
   description:
     "Merge duplicate entries into one: the kept one gets all their collections (and title, body if given); the others are deleted. No undo.",
   input: {
-    ids: z.array(entryId).min(2).max(KNOWLEDGE_MERGE_MAX_ENTRIES),
-    keep: entryId.optional().describe("One of ids; default the oldest."),
+    ids: z.array(entryId()).min(2).max(KNOWLEDGE_MERGE_MAX_ENTRIES),
+    keep: entryId().optional().describe("One of ids; default the oldest."),
     title: optionalText(KNOWLEDGE_TITLE_MAX),
     body: entryBody.optional().describe("The combined text; default the kept one's.")
   },

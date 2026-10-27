@@ -199,7 +199,8 @@ function authoringView(agent: Agent): Record<string, unknown> {
 // get_agent_profile
 // ---------------------------------------------------------------------------
 
-const agentArg = z.enum(AGENT_PROFILE_AGENTS);
+/** Factories here: one instance in two fields is listed as a "$ref" (see `catalog/schema-refs.test.ts`). */
+const agentArg = () => z.enum(AGENT_PROFILE_AGENTS);
 
 async function profileSummary(client: ProfileClient): Promise<Record<string, unknown>> {
   const body = await client.overview();
@@ -307,7 +308,7 @@ const getAgentProfile = defineTool({
   description:
     "Agent CLIs' global config (Claude Code, Codex, Grok, OpenCode). {} → each CLI: installed, version, counts. {agent} → its items (id, source, revision), instruction file, `authoring`. {agent, itemId} → one item (MCP env/header values never shown). {agent, instructions: true} → the instruction file, paged by offset. {agent, marketplace} → its plugins.",
   input: {
-    agent: agentArg.optional().describe("Omit for every CLI's summary."),
+    agent: agentArg().optional().describe("Omit for every CLI's summary."),
     kind: z.enum(PROFILE_ITEM_KINDS).optional(),
     query: z.string().min(1).max(256).optional().describe("Filter: id, name, description or source contains it."),
     itemId: z.string().min(1).max(1_024).optional().describe("e.g. \"mcp:jira\", \"skill:handoff\"."),
@@ -349,9 +350,9 @@ const getAgentProfile = defineTool({
 // edit_agent_profile
 // ---------------------------------------------------------------------------
 
-const secretValue = z.union([z.string().max(MAX_SECRET_VALUE_CHARS), z.null(), z.object({ ask: z.literal(true) }).strict()]);
-const secretMap = z.record(z.string().min(1).max(256), secretValue);
-const docSchema = z.object({
+const secretValue = () => z.union([z.string().max(MAX_SECRET_VALUE_CHARS), z.null(), z.object({ ask: z.literal(true) }).strict()]);
+const secretMap = () => z.record(z.string().min(1).max(256), secretValue());
+const docSchema = () => z.object({
   name: z.string().min(1).max(256).optional(),
   frontmatter: z.record(z.unknown()).optional().describe("e.g. {description}; update changes only the keys named, null removes one."),
   body: z.string().max(MAX_TEXT_CHARS).optional().describe("The whole markdown body; update: omit to keep.")
@@ -367,13 +368,13 @@ const changeSchema = z.object({
     command: z.string().min(1).max(MAX_PATH_CHARS).optional(),
     args: z.array(z.string().max(MAX_PATH_CHARS)).max(500).optional(),
     cwd: z.string().min(1).max(MAX_PATH_CHARS).nullable().optional(),
-    env: secretMap.optional().describe("{KEY: value | {ask: true} | null (remove)}; keys not named are kept."),
+    env: secretMap().optional().describe("{KEY: value | {ask: true} | null (remove)}; keys not named are kept."),
     url: z.string().min(1).max(MAX_PATH_CHARS).optional(),
-    headers: secretMap.optional().describe("As env."),
+    headers: secretMap().optional().describe("As env."),
     advanced: z.record(z.unknown()).optional().describe("Non-secret extras (get_agent_profile authoring.mcpAdvancedFields).")
   }).strict().optional(),
-  skill: docSchema.optional(),
-  command: docSchema.optional(),
+  skill: docSchema().optional(),
+  command: docSchema().optional(),
   hook: z.object({
     event: z.string().min(1).max(256).optional(),
     matcher: z.string().max(MAX_PATH_CHARS).nullable().optional(),
@@ -393,7 +394,7 @@ const changeSchema = z.object({
       z.object({ type: z.literal("path"), path: z.string().min(1).max(MAX_PATH_CHARS) }).strict()
     ])
   }).strict().optional(),
-  toAgent: agentArg.optional(),
+  toAgent: agentArg().optional(),
   onConflict: z.enum(["fail", "replace", "keep-both"]).optional().describe("If an item of that name exists. Default fail."),
   text: z.string().max(MAX_TEXT_CHARS).optional().describe("write_instructions: the whole new file."),
   url: z.string().min(1).max(MAX_PATH_CHARS).optional().describe("import_scan: a Git URL (https or ssh; …/tree/<ref>/<path> picks a folder)."),
@@ -661,7 +662,7 @@ const editAgentProfile = defineTool({
     "MCP env/header secrets: pass {ask: true}; the user types the value in the approval card, never in chat.",
   externalNote: "MCP env/header values are write-only and never returned.",
   input: {
-    agent: agentArg,
+    agent: agentArg(),
     changes: z.array(changeSchema).min(1).max(MAX_PROFILE_CHANGES),
     reason: z.string().max(300).optional().describe("Why, shown on the approval card.")
   },
