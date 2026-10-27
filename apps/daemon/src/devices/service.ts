@@ -711,6 +711,23 @@ export class DeviceService implements DeviceToolsPort {
     return this.hosts.get(hostId)?.hubOrigin() ?? null;
   }
 
+  /** The hub's session token the proxy adds upstream, or null (none, or unknown host). Never sent to clients. */
+  hubToken(hostId: string): string | null {
+    return this.hosts.get(hostId)?.hubToken?.() ?? null;
+  }
+
+  /** How many proxied streams of a leased device are open now: its host may recycle an unwatched capture. */
+  streamViewers(hostId: string, deviceParam: string, count: number): void {
+    const lease = this.leases.find((entry) => entry.hostId === hostId && (entry.deviceId === deviceParam || entry.stream?.deviceParam === deviceParam));
+    const host = this.hosts.get(hostId);
+    if (!host?.viewersChanged) return;
+    try {
+      host.viewersChanged(lease?.deviceId ?? deviceParam, count);
+    } catch (error) {
+      this.logger.warn(`[devices] ${hostId} failed to take a viewer count`, errorText(error));
+    }
+  }
+
   /** Release every idle lease (spec §7: `leaseIdleMinutes` with no agent or viewer activity). */
   async sweepIdle(): Promise<void> {
     for (const lease of idleLeases(this.leases, this.nowMs(), this.settings().leaseIdleMinutes)) {
