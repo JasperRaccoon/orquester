@@ -168,8 +168,13 @@ export function highlightParts(text: string, terms: readonly string[]): TextPart
   return parts;
 }
 
-/** The dropdown's last line: "Show all 31 results" (the response's total when the daemon sends one). */
-export function showAllLabel(answer: Pick<KnowledgeSearchResponse, "total" | "hits">): string {
+/**
+ * The dropdown's last line: "Show all 31 results" (the response's total when the daemon sends one).
+ * The List view narrows to one collection at most, so with two or more collection chips on (`filter`)
+ * it opens on every collection: no count is promised then.
+ */
+export function showAllLabel(answer: Pick<KnowledgeSearchResponse, "total" | "hits">, filter: readonly string[] = []): string {
+  if (filter.length > 1) return "Show in List (all collections)";
   const total = typeof answer.total === "number" && Number.isFinite(answer.total) ? Math.max(0, Math.floor(answer.total)) : null;
   if (total === null) return "Show all results";
   return `Show all ${total.toLocaleString("en-US")} ${total === 1 ? "result" : "results"}`;

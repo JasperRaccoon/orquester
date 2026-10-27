@@ -161,5 +161,11 @@ describe("the Show all line", () => {
     assert.equal(showAllLabel({ hits: [], total: 1 }), "Show all 1 result");
     assert.equal(showAllLabel({ hits: [], total: 1200 }), "Show all 1,200 results");
     assert.equal(showAllLabel({ hits: [] }), "Show all results");
+    assert.equal(showAllLabel({ hits: [], total: 31 }, ["kc_seo"]), "Show all 31 results", "one chip: the List view narrows the same way");
+  });
+
+  it("promises no count when two or more collection chips are on (the List view opens on all of them)", () => {
+    assert.equal(showAllLabel({ hits: [], total: 31 }, ["kc_seo", "kc_ads"]), "Show in List (all collections)");
+    assert.equal(showAllLabel({ hits: [] }, ["kc_seo", "kc_ads", "kc_x"]), "Show in List (all collections)");
   });
 });

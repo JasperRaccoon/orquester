@@ -498,6 +498,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
           collections={collections}
           onPick={pick}
           onShowAll={onOpenInList}
+          filter={filter}
           narrowed={searchIsNarrowed(query)}
         />
         {searchNote && (

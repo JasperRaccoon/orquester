@@ -154,13 +154,14 @@ describe("the Graph view", () => {
       query?: KnowledgeQuery;
       onQueryChange?: (query: KnowledgeQuery) => void;
       onOpenInList?: () => void;
+      filter?: string[];
     } = {}
   ) => {
     const props = {
       api: (opts.api === null ? null : api(opts.api)) as never,
       status: status({ installed: opts.installed ?? true, ...(opts.embeddingModelReady !== undefined ? { embeddingModelReady: opts.embeddingModelReady } : {}) }),
       collections: [collection()],
-      filter: [],
+      filter: opts.filter ?? [],
       onFilter: () => undefined,
       selection: null,
       onSelect: (s: KnowledgeSelection | null) => selections.push(s),
@@ -197,11 +198,14 @@ describe("the Graph view", () => {
       input().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     });
   };
+  /** Press `name` in the search box; true when the handler kept the browser's own default. */
   const key = async (name: string) => {
+    let kept = true;
     await act(async () => {
-      input().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: name, bubbles: true }));
+      kept = input().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
     });
     await settle();
+    return kept;
   };
 
   it("does not offer the Similarity layer to a daemon without its route, or a client without it", async () => {
@@ -399,6 +403,27 @@ describe("the Graph view", () => {
       root = createRoot(doc().body.appendChild(doc().createElement("div")));
       await searchWith();
       assert.equal([...doc().querySelectorAll("button")].find((b) => b.textContent?.startsWith("Show all")), undefined);
+    });
+
+    it("promises no count when two or more collection chips are on", async () => {
+      await searchWith({ onOpenInList: () => undefined, filter: ["kc_seo", "kc_ads"] });
+      assert.deepEqual(searches.at(-1)?.collections, ["kc_seo", "kc_ads"]);
+      const line = doc().querySelector('[role="listbox"]')!.parentElement!.lastElementChild!;
+      assert.equal(line.textContent, "Show in List (all collections)");
+    });
+
+    it("closes the list on the first Escape (keeping the words, against the browser's own clear) and clears on the second", async () => {
+      const changes: KnowledgeQuery[] = [];
+      const query: KnowledgeQuery = { text: "paywall", similarTo: [], unlike: [], filters: {}, sort: null };
+      await searchWith({ query, onQueryChange: (q) => changes.push(q) });
+      await act(async () => input().focus());
+      await key("ArrowDown");
+      assert.ok(doc().querySelector('[role="listbox"]'), "the list is open");
+      assert.equal(await key("Escape"), false, "the browser does not clear the search field");
+      assert.equal(doc().querySelector('[role="listbox"]'), null, "the list closed");
+      assert.deepEqual(changes, [], "the words stay");
+      await key("Escape");
+      assert.deepEqual(changes.at(-1)?.text, "");
     });
 
     it("edits the shared query's words and searches with its filters", async () => {
