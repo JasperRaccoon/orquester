@@ -440,6 +440,33 @@ test("a concept merged into a hidden one is shown as itself: search, entry and c
   assert.equal((await search.conceptDetail("tool-tables", ALL))?.concept.id, "tool-stripe");
 });
 
+test("a concept detail lists every visible entry id behind it, merged sources included, newest first, up to 2,000", async (t) => {
+  const many = Array.from({ length: 2_005 }, (_, i) => `ke_many${String(i).padStart(8, "0")}`);
+  const { search, graph } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      for (const id of many) store.put(id, `Note ${id} about pricing pages.`, [SEO], {}, true);
+    }
+  });
+  await loadGraph(graph, [
+    node("tactic-pricing", "Pricing pages", [...many.slice(0, 1_000), BILLING].map((id) => `${id}.md`)),
+    node("tactic-pricing-page", "Pricing page", [...many.slice(1_000), ALT].map((id) => `${id}.md`)),
+    node("tactic-small", "Small", [`${CLOUDFLARE}.md`, `${BILLING}.md`])
+  ]);
+  graph.setConceptMerges([{ id: "cm_pricing", type: "tactic", into: "tactic-pricing", merged: ["tactic-pricing-page"], similarity: 0.95, createdAt: "2026-10-27T10:00:00.000Z" }]);
+  await search.idle();
+  const detail = (await search.conceptDetail("tactic-pricing-page", SEO_ONLY))!;
+  const newestFirst = [...many].reverse();
+  assert.equal(detail.entryIds?.length, 2_000);
+  assert.deepEqual(detail.entryIds, newestFirst.slice(0, 2_000), "newest first; the hidden BILLING and the oldest past 2,000 left out");
+  assert.deepEqual(
+    detail.entries.map((e) => e.id),
+    newestFirst.slice(0, 50)
+  );
+  assert.deepEqual((await search.conceptDetail("tactic-small", SEO_ONLY))!.entryIds, [CLOUDFLARE], "a hidden entry is never listed");
+  assert.deepEqual((await search.conceptDetail("tactic-small", ALL))!.entryIds, [BILLING, CLOUDFLARE]);
+});
+
 test("query by example ranks toward positive and away from negative examples, excluding both", async (t) => {
   const like = "ke_likeseedaaaa";
   const unlike = "ke_zunlikeseed1";

@@ -60,6 +60,8 @@ export const KNOWLEDGE_ENTRIES_MAX_LIMIT = 200;
 export const KNOWLEDGE_QUERY_MAX = 1_000;
 const RELATED_LIMIT = 8;
 const CONCEPT_ENTRIES_LIMIT = 50;
+/** Ids of a concept detail's visible entries (`KnowledgeConceptDetail.entryIds`), newest first. */
+const CONCEPT_ENTRY_IDS_LIMIT = 2_000;
 /** Candidates each signal list keeps. */
 const CANDIDATES = 100;
 const RRF_K = 60;
@@ -647,19 +649,19 @@ export class KnowledgeSearch {
     const scope = this.scope(visibility);
     const view = this.graph.concept(id, scope);
     if (!view) return null;
-    const entries = view.entryIds
+    // Every visible entry behind it (a merged concept's: those of its visible sources), newest first.
+    const newest = view.entryIds
       .map((entryId) => this.store.getMeta(entryId))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
-      .sort(newestFirst)
-      .slice(0, CONCEPT_ENTRIES_LIMIT)
-      .map((m) => this.summary(m, scope));
+      .sort(newestFirst);
     return {
       concept: view.concept,
       collections: view.collections,
-      entries,
+      entries: newest.slice(0, CONCEPT_ENTRIES_LIMIT).map((m) => this.summary(m, scope)),
       neighbors: view.neighbors,
       mergedFrom: view.mergedFrom,
-      similarConcepts: view.similarConcepts
+      similarConcepts: view.similarConcepts,
+      entryIds: newest.slice(0, CONCEPT_ENTRY_IDS_LIMIT).map((m) => m.id)
     };
   }
 
