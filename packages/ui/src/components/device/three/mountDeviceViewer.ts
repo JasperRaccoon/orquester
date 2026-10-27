@@ -12,6 +12,7 @@ interface MountableViewer {
     y: number,
     captured?: boolean,
   ) => { x: number; y: number } | null;
+  readonly projectPoint?: (x: number, y: number) => { x: number; y: number } | null;
   readonly orbit: (deltaX: number, deltaY: number) => void;
   readonly setInteractionActive: (active: boolean, mode: "touch" | "orbit") => void;
   readonly resetPose: () => void;
@@ -43,6 +44,10 @@ export function mountDeviceViewer<V extends MountableViewer>(
     readonly interactionRef: { current: PhoneInteraction | null };
     readonly onInputCancel: (cancel: (() => void) | null) => void;
     readonly onResetReady: (reset: (() => void) | null) => void;
+    /** The viewer's screen-to-canvas projection (the Device panel's overlay), while it is mounted. */
+    readonly onProjectReady?: (
+      project: ((x: number, y: number) => { x: number; y: number } | null) | null,
+    ) => void;
     readonly onFrameListener: (listener: (() => void) | null) => void;
     readonly onUnavailable: (failure: DeviceViewerFailure) => void;
     readonly cancelInput?: (viewer: V) => void;
@@ -84,6 +89,7 @@ export function mountDeviceViewer<V extends MountableViewer>(
       }
       viewerRef.current = viewer;
       options.onResetReady(viewer.resetPose);
+      if (viewer.projectPoint) options.onProjectReady?.(viewer.projectPoint);
       const interaction = createPhoneInteraction({
         screenPoint: (point, captured) => viewer.screenPoint(point.x, point.y, captured),
         touch: options.touch,
@@ -112,6 +118,7 @@ export function mountDeviceViewer<V extends MountableViewer>(
     interactionRef.current = null;
     options.onInputCancel(null);
     options.onResetReady(null);
+    options.onProjectReady?.(null);
     options.onFrameListener(null);
     observer?.disconnect();
     window.removeEventListener("blur", blur);

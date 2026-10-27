@@ -79,6 +79,7 @@ export function DevicePhoneViewport(props: {
       interactionRef,
       onInputCancel: bindings.onInputCancel,
       onResetReady: bindings.onResetReady,
+      onProjectReady: bindings.onProjectReady,
       onFrameListener: bindings.onFrameListener,
       onUnavailable: (failure) => latest.current.onUnavailable(failure),
       subscribeTrackpadScrollEnd: (listener) =>

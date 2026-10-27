@@ -14,7 +14,7 @@ import {
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import type { DeviceAssetSource } from "./model.ts";
-import { createDisplayProjection, updateDisplayUv, type PhoneDisplayLayout } from "./phoneScene.ts";
+import { createDisplayProjection, createDisplayViewPoint, updateDisplayUv, type PhoneDisplayLayout } from "./phoneScene.ts";
 
 /** GLB resources belong to one viewer; the live framebuffer texture belongs to its stream presentation. */
 export function disposeDeviceModel(root: Object3D) {
@@ -91,6 +91,13 @@ export function createImportedPhoneScene(
     screenHeight,
     () => layout,
   );
+  const viewPoint = createDisplayViewPoint(
+    display,
+    orientation,
+    screenWidth,
+    screenHeight,
+    () => layout,
+  );
   return {
     root,
     orientation,
@@ -102,6 +109,7 @@ export function createImportedPhoneScene(
       updateDisplayUv(display.geometry, screenWidth, screenHeight, layout);
     },
     screenPoint: projection,
+    viewPoint,
     dispose() {
       // The model slot owns imported resources. This scene owns only its replacement screen material.
       display.material = originalMaterial;

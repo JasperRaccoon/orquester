@@ -116,6 +116,7 @@ export function DeviceFlatViewport(props: {
             />
           ))}
           <div
+            data-device-flat-screen=""
             className="absolute touch-none select-none overflow-hidden bg-black"
             style={{
               left: px(geometry.screen.x),

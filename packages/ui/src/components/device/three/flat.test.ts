@@ -8,6 +8,7 @@ import {
   flatMediaRotation,
   flatMediaStyle,
   flatScreenPoint,
+  flatViewPoint,
 } from "./flat.ts";
 import { createPhoneScene, phoneDisplayLayout } from "./phoneScene.ts";
 import { ANDROID_PHONE_SHAPE, IOS_PHONE_SHAPE } from "./shapeProfile.ts";
@@ -150,5 +151,21 @@ describe("flat layout", () => {
     const scale = flatDeviceScale(geometry, { width: 400, height: 400 });
     assert.ok(scale > 0 && geometry.height * scale < 400 && geometry.width * scale < 400);
     assert.equal(flatDeviceScale(geometry, { width: 0, height: 400 }), 0);
+  });
+});
+
+describe("flatViewPoint", () => {
+  it("maps a screen point to pixels from the viewport's top-left and inverts flatScreenPoint", () => {
+    const screen = { left: 120, top: 60, width: 200, height: 400 };
+    const root = { left: 100, top: 50 };
+    assert.deepEqual(flatViewPoint(screen, root, 0, 0), { x: 20, y: 10 });
+    assert.deepEqual(flatViewPoint(screen, root, 0.5, 0.25), { x: 120, y: 110 });
+    const seen = flatViewPoint(screen, root, 0.3, 0.7)!;
+    const back = flatScreenPoint(screen, seen.x + root.left, seen.y + root.top, false)!;
+    assert.ok(Math.abs(back.x - 0.3) < 1e-9 && Math.abs(back.y - 0.7) < 1e-9);
+  });
+  it("clamps to the screen and refuses an unsized screen", () => {
+    assert.deepEqual(flatViewPoint({ left: 0, top: 0, width: 10, height: 10 }, { left: 0, top: 0 }, 2, -1), { x: 10, y: 0 });
+    assert.equal(flatViewPoint({ left: 0, top: 0, width: 0, height: 10 }, { left: 0, top: 0 }, 0.5, 0.5), null);
   });
 });

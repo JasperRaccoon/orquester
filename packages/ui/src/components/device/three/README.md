@@ -60,6 +60,10 @@ The viewport fills its positioned parent and measures it itself.
   layout when the canvas size changed). Cheap to call per frame.
 - `resetView()` — turn the 3D device back to face the viewer.
 - `cancelInput()` — end any touch or gesture in progress (focus loss, control handover).
+- `projectPoint(x, y)` — where a point on the screen as seen (the `onTouch` space) shows now, in
+  CSS pixels from the viewport's top-left (3D: through the camera; flat: the bezel's screen box);
+  null before a frame or for scenes that cannot project (the foldables, the iPhone Duo). The Device
+  panel draws the agent's taps with it.
 
 Pointer presses focus the closest `[data-device-view]` ancestor, so give the panel root that
 attribute and a `tabIndex` for keyboard input.

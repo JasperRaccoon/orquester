@@ -189,3 +189,22 @@ export function flatScreenPoint(
   if (!captured && (x < 0 || x > 1 || y < 0 || y > 1)) return null;
   return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
 }
+
+/**
+ * Where a point on the flat screen as seen (0..1, top-left 0,0) shows, in CSS pixels from the
+ * top-left of `root` (the viewport's own box): the inverse of {@link flatScreenPoint}, for drawing
+ * over the device. Null when the screen has no size yet.
+ */
+export function flatViewPoint(
+  screen: Pick<DOMRect, "left" | "top" | "width" | "height">,
+  root: Pick<DOMRect, "left" | "top">,
+  x: number,
+  y: number,
+): { x: number; y: number } | null {
+  if (screen.width <= 0 || screen.height <= 0 || ![x, y].every(Number.isFinite)) return null;
+  const clamp = (value: number) => Math.min(1, Math.max(0, value));
+  return {
+    x: screen.left - root.left + clamp(x) * screen.width,
+    y: screen.top - root.top + clamp(y) * screen.height,
+  };
+}
