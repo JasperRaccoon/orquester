@@ -61,6 +61,34 @@ test("open → ready lease on the local host; list, release and the events they 
   }
 });
 
+test("agents see and open only the profiles Settings → Devices offers (as the panel's picker)", async () => {
+  const host = new FakeDeviceHost();
+  const t = await startTestDeviceService({
+    factories: [new FakeHostFactory("local", ["android"], [host])],
+    settings: { android: { enabled: true, profiles: ["pixel-tablet", "pixel-fold"] } }
+  });
+  try {
+    assert.deepEqual(
+      t.service.toolList("t1").profiles.map((profile) => profile.id),
+      ["pixel-tablet", "pixel-fold"]
+    );
+    // A disabled profile is refused with the enabled ones and how the owner enables more.
+    const refused = await t.service.toolOpen("t1", { platform: "android", profile: "galaxy-s26" }, signal()).then(
+      () => null,
+      (error: unknown) => error
+    );
+    assert.ok(refused instanceof DeviceError && refused.code === "INVALID_ARGUMENT");
+    assert.match(refused.message, /Galaxy S26 \(galaxy-s26\) is not enabled.*Enabled Android profiles: pixel-tablet, pixel-fold\..*Settings → Devices → Android → Profiles/);
+    assert.equal(host.booted.length, 0);
+    // None named: the default (Pixel 9) is off, so the first enabled one.
+    const opened = await t.service.toolOpen("t1", { platform: "android" }, signal());
+    assert.equal(host.booted[0]!.profile.id, "pixel-tablet");
+    assert.equal(opened.lease.name, "Pixel Tablet");
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("limits: the chat's lease cap, a full host, a platform that is off or not set up", async () => {
   const host = new FakeDeviceHost();
   host.total = 2;

@@ -2386,7 +2386,10 @@ agents use devices, and at least one platform is enabled. Design:
   it starts. Every tool's `device` takes either; omitted, it is the chat's only device.
 - **Profiles**: Android `pixel-9`, `pixel-tablet`, `pixel-fold`, `galaxy-s26`, `galaxy-s26-plus`,
   `galaxy-s26-ultra`, `galaxy-z-fold8`, `galaxy-z-flip8` (Android 15); iOS `iphone-17-pro`,
-  `iphone-17-pro-max`, `ipad-pro-13`, `iphone-duo` (iOS 26). `list_devices` lists the enabled ones.
+  `iphone-17-pro-max`, `ipad-pro-13`, `iphone-duo` (iOS 26). `list_devices` lists the ones the
+  owner enabled in Settings → Devices (the panel's picker offers the same); `open_device` refuses
+  another (`INVALID_ARGUMENT`, naming the enabled ones) and, without `profile`, opens `iphone-17-pro`
+  / `pixel-9` when enabled, else the platform's first enabled profile.
 - **Leases** are exclusive: a chat holds at most 3 devices (`DEVICE_LEASE_LIMIT`), another chat's
   device is never reachable (`DEVICE_NOT_LEASED`). A lease ends with `close_device`, the user's
   Release, the chat closing, or an hour with no agent or viewer activity.
