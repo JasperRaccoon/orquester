@@ -73,6 +73,8 @@ function useEntriesRevision(): number {
  * Pages of a list (entries, or a search's hits) identified by `key` (null: not shown — nothing is
  * read and what was read is kept). Whenever entries change it is read again as deep as the user had
  * paged ("Load more"), so loaded cards never drop away; a different key starts from a spinner.
+ * "Load more" waits while such a refetch is in flight (`refetching`): its answer replaces the list,
+ * so a page loaded meanwhile would drop away again.
  */
 function usePaged<T>(
   key: string | null,
@@ -81,12 +83,15 @@ function usePaged<T>(
 ) {
   const [page, setPage] = useState<Paged<T>>({ status: "loading" });
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const [refetching, setRefetching] = useState(false);
   const revision = useEntriesRevision();
   const [retries, setRetries] = useState(0);
   const seq = useRef(0);
   const shown = useRef<string | null>(null);
   /** Pages shown (the first one plus each "Load more"); a refetch reads as many. */
   const depth = useRef(1);
+  /** A "Load more" in flight: a refetch starting meanwhile drops its answer, so it reads that page too. */
+  const loadingMore = useRef(false);
   const readRef = useRef(read);
   readRef.current = read;
   const idOfRef = useRef(idOf);
@@ -105,7 +110,9 @@ function usePaged<T>(
       setPage({ status: "loading" });
     } else setPage((p) => (p.status === "ready" ? p : { status: "loading" }));
     setMore({ busy: false, error: null });
-    const wanted = depth.current;
+    setRefetching(true);
+    const wanted = depth.current + (loadingMore.current ? 1 : 0);
+    loadingMore.current = false;
     void (async () => {
       let pages: Pages<T> | null = null;
       let count = 0;
@@ -117,17 +124,21 @@ function usePaged<T>(
       if (mine !== seq.current || controller.signal.aborted) return;
       depth.current = Math.max(1, count);
       setPage({ status: "ready", ...pages });
+      setRefetching(false);
     })().catch((error: unknown) => {
-      if (mine === seq.current && !controller.signal.aborted) setPage({ status: "error", message: knowledgeErrorText(error) });
+      if (mine !== seq.current || controller.signal.aborted) return;
+      setPage({ status: "error", message: knowledgeErrorText(error) });
+      setRefetching(false);
     });
     return () => controller.abort();
   }, [key, ready, revision, retries]);
 
   const loadMore = useCallback(async () => {
     const reader = readRef.current;
-    if (!reader || page.status !== "ready" || !page.nextCursor || more.busy) return;
+    if (!reader || page.status !== "ready" || !page.nextCursor || more.busy || refetching) return;
     const mine = seq.current;
     setMore({ busy: true, error: null });
+    loadingMore.current = true;
     try {
       const answer = await reader(page.nextCursor);
       if (mine !== seq.current) return;
@@ -136,10 +147,12 @@ function usePaged<T>(
       setMore({ busy: false, error: null });
     } catch (error) {
       if (mine === seq.current) setMore({ busy: false, error: knowledgeErrorText(error) });
+    } finally {
+      if (mine === seq.current) loadingMore.current = false;
     }
-  }, [page, more.busy]);
+  }, [page, more.busy, refetching]);
 
-  return { page, more, loadMore, retry: () => setRetries((r) => r + 1) };
+  return { page, more, refetching, loadMore, retry: () => setRetries((r) => r + 1) };
 }
 
 /** Rediscover is dismissed for the rest of the app session (all Knowledge views). */
@@ -244,12 +257,18 @@ const EmptyResults: React.FC<{ icon: React.ReactNode; title: string; hint: strin
   </div>
 );
 
-const MoreButton: React.FC<{ nextCursor: string | null; more: { busy: boolean; error: string | null }; onMore: () => void }> = ({ nextCursor, more, onMore }) =>
+const MoreButton: React.FC<{
+  nextCursor: string | null;
+  more: { busy: boolean; error: string | null };
+  /** A refetch of the list is in flight: its answer replaces the list, so no page is added meanwhile. */
+  waiting: boolean;
+  onMore: () => void;
+}> = ({ nextCursor, more, waiting, onMore }) =>
   nextCursor || more.error ? (
     <div className="mx-auto flex max-w-3xl flex-col items-center gap-2 py-3">
       {more.error && <ErrorLine>{more.error}</ErrorLine>}
       {nextCursor && (
-        <Button size="sm" variant="outline" onClick={onMore} disabled={more.busy}>
+        <Button size="sm" variant="outline" onClick={onMore} disabled={more.busy || waiting}>
           {more.busy && <Loader2 size={12} className="motion-safe:animate-spin" />} Load more
         </Button>
       )}
@@ -405,7 +424,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
             )}
           </ul>
         )}
-        <MoreButton nextCursor={search.page.nextCursor} more={search.more} onMore={() => void search.loadMore()} />
+        <MoreButton nextCursor={search.page.nextCursor} more={search.more} waiting={search.refetching} onMore={() => void search.loadMore()} />
       </>
     );
   } else if (entries.page.status === "ready") {
@@ -446,7 +465,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
             ))}
           </ul>
         )}
-        <MoreButton nextCursor={entries.page.nextCursor} more={entries.more} onMore={() => void entries.loadMore()} />
+        <MoreButton nextCursor={entries.page.nextCursor} more={entries.more} waiting={entries.refetching} onMore={() => void entries.loadMore()} />
       </>
     );
   }

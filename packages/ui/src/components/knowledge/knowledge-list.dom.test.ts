@@ -26,6 +26,7 @@ import type { KnowledgeQuery } from "./query-state";
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
+let knowledgeStore: typeof import("../../lib/knowledge/store").knowledgeStore;
 let KnowledgeListView: typeof import("./KnowledgeListView").KnowledgeListView;
 let EMPTY: KnowledgeQuery;
 
@@ -42,7 +43,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ resetKnowledge } = await import("../../lib/knowledge/store"));
+  ({ resetKnowledge, knowledgeStore } = await import("../../lib/knowledge/store"));
   ({ KnowledgeListView } = await import("./KnowledgeListView"));
   ({ EMPTY_KNOWLEDGE_QUERY: EMPTY } = await import("./query-state"));
 });
@@ -268,6 +269,48 @@ describe("the List view", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+
+  it("never loses a page loaded around a background refresh", async () => {
+    const page = (cursor: string | undefined): KnowledgeEntriesResponse =>
+      cursor === "p2"
+        ? { entries: [summary({ id: "ke_second00000", title: "Second page entry", savedAt: "2026-01-01T10:00:00.000Z" })], nextCursor: "p3" }
+        : { entries: [summary({ id: "ke_listed00000", title: "First page entry", savedAt: "2026-01-02T10:00:00.000Z" })], nextCursor: "p2" };
+    let hold: Array<() => void> | null = null;
+    await show({
+      listKnowledgeEntries: (query: KnowledgeEntriesQuery = {}) => {
+        lists.push(query);
+        const held = hold;
+        return held ? new Promise<KnowledgeEntriesResponse>((resolve) => held.push(() => resolve(page(query.cursor)))) : Promise.resolve(page(query.cursor));
+      }
+    });
+    const loadMore = () => buttonNamed("Load more");
+    const refresh = async () => {
+      await act(async () => knowledgeStore.setState((s) => ({ entriesRevision: s.entriesRevision + 1, changedEntryIds: null })));
+      await settle();
+    };
+
+    // A refresh in flight: Load more waits for it (its answer replaces the list).
+    hold = [];
+    await refresh();
+    assert.equal(loadMore().disabled, true);
+    await click(loadMore());
+    assert.deepEqual(lists.map((q) => q.cursor), [undefined, undefined], "no page read meanwhile");
+    hold.shift()!();
+    await settle();
+    assert.equal(loadMore().disabled, false);
+
+    // Load more, then a refresh before its page arrives: the refresh reads that page too.
+    await click(loadMore());
+    const pending = hold.shift()!;
+    await refresh();
+    pending();
+    while (hold.length > 0) {
+      hold.shift()!();
+      await settle();
+    }
+    assert.deepEqual(lists.map((q) => q.cursor), [undefined, undefined, "p2", undefined, "p2"]);
+    assert.match(text(), /First page entry.*Second page entry/);
   });
 
   it("moves between results with ↑/↓, opens with the card, and Esc clears the box", async () => {
