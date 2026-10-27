@@ -61,9 +61,19 @@ viewport components, viewer mounting, trackpad gestures, Duo and fold controls),
 together with `scripts/convert-device-model.py`. Each ported file carries an
 `// Adapted from T3 Code (MIT, Copyright 2026 T3 Tools Inc.): <path>` header.
 The device models under `packages/ui/src/components/device/models/` are
-conversions of Apple Inc.'s published AR assets; they are not covered by this
-licence, and `sources.json` beside them records each source URL, checksum and
-conversion.
+conversions of Apple Inc.'s published AR assets and of Samsung Electronics Co.,
+Ltd.'s published product-viewer models (Galaxy S26, S26+, S26 Ultra, Z Fold8 and
+Z Flip8). They are not covered by this licence, no open-source or redistribution
+licence has been established for either author's assets, and `sources.json`
+beside them records each author, source URL, checksum and conversion.
+
+The device stream client (`packages/ui/src/components/device/stream/**`) adapts
+T3 Code's `packages/client-runtime/src/device/stream.ts`, `avcConfig.ts` (with
+its tests) and `frame.ts`: the avcc envelope demuxer, the SPS reorder-metadata
+repair, SEMU packet and Annex-B parsing, the decoder handling, serve-sim and
+serve-emu input encoding, the HID and Android key tables and text chunking.
+Each adapted file carries the same `// Adapted from T3 Code (MIT, Copyright 2026
+T3 Tools Inc.): <path>` header.
 
 T3 Code is distributed under the MIT licence, reproduced in full below.
 

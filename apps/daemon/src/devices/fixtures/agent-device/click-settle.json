@@ -1,0 +1,31 @@
+{
+ "success": true,
+ "data": {
+  "x": 360,
+  "y": 1133,
+  "message": "Tapped @e10 (360, 1133)",
+  "referenceWidth": 720,
+  "referenceHeight": 1280,
+  "targetKind": "ref",
+  "ref": "e10",
+  "refLabel": "Google search",
+  "selectorChain": [
+   "id=\"com.google.android.apps.nexuslauncher:id/search_container_hotseat\"",
+   "role=\"framelayout\" label=\"Google search\"",
+   "label=\"Google search\""
+  ],
+  "settle": {
+   "settled": false,
+   "waitedMs": 10457,
+   "captures": 2,
+   "quietMs": 500,
+   "timeoutMs": 10000,
+   "hint": "A snapshot capture stalled past the settle budget, so no settled diff is shown. The action itself succeeded; observe with wait stable or snapshot."
+  },
+  "resolution": {
+   "source": "ref",
+   "phase": "pre-action",
+   "kind": "exact"
+  }
+ }
+}

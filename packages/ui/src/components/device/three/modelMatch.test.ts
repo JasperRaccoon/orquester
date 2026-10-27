@@ -36,6 +36,30 @@ it("never gives an Android device an Apple model", () => {
   assert.equal(resolveDeviceModelId("android", "Pixel 9"), null);
 });
 
+it("matches Samsung emulator names and AVD profiles exactly and case-insensitively", () => {
+  const cases: [string, DeviceModelId | null][] = [
+    ["Galaxy S26", "galaxy-s26"],
+    ["galaxy s26+", "galaxy-s26-plus"],
+    ["GALAXY S26 ULTRA", "galaxy-s26-ultra"],
+    ["Galaxy Z Fold8", "galaxy-z-fold8"],
+    ["galaxy z flip8", "galaxy-z-flip8"],
+    ["orq-galaxy-s26", "galaxy-s26"],
+    ["galaxy-s26-plus", "galaxy-s26-plus"],
+    ["orq-galaxy-z-fold8", "galaxy-z-fold8"],
+    ["orq-galaxy-z-flip8", "galaxy-z-flip8"],
+    // Pixels and near names keep the procedural body.
+    ["orq-pixel-9", null],
+    ["orq-pixel-fold", null],
+    ["Galaxy S26 Plus", null],
+    ["Galaxy S26 FE", null],
+    ["Galaxy Z Fold7", null],
+    ["Galaxy Z Fold8 ", null],
+    ["Samsung Galaxy S26", null],
+  ];
+  for (const [name, id] of cases) assert.equal(resolveDeviceModelId("android", name), id, name);
+  assert.equal(resolveDeviceModelId("ios", "Galaxy S26"), null);
+});
+
 it("has a recorded source for every model id it can return", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../models/sources.json", import.meta.url), "utf8"),
@@ -56,6 +80,11 @@ it("has a recorded source for every model id it can return", () => {
   ];
   for (const name of names) {
     const id = resolveDeviceModelId("ios", name);
+    assert.ok(id && recorded.has(id), `${name} -> ${id} has no sources.json entry`);
+  }
+  const samsung = ["Galaxy S26", "Galaxy S26+", "Galaxy S26 Ultra", "Galaxy Z Fold8", "Galaxy Z Flip8"];
+  for (const name of samsung) {
+    const id = resolveDeviceModelId("android", name);
     assert.ok(id && recorded.has(id), `${name} -> ${id} has no sources.json entry`);
   }
   for (const model of manifest.models)

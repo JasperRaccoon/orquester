@@ -34,6 +34,11 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `ws-routes.ts` | `/ws-device/:hostId/*`: token, plugin, host and lease checks, then `HubProxy.handleWebSocket`. |
 | `wiring.ts` | `createDaemonDevices`: follows the plugin (service on/off), builds the factories and executor, routes. |
 | `testing.ts` | `FakeDeviceHost`, `FakeHostFactory`, `FakeActionExecutor`, `startTestDeviceService`. |
+| `hub-proxy.ts` | The hub proxy: path/method allowlists, leased-device check, header allowlists, the hub token as `Authorization: Bearer`, WS relay (8 MiB back-pressure), input → `userInput`, viewer counts → `DeviceHost.viewersChanged`. |
+| `mjpeg-still-frame.ts` | Re-sends the last MJPEG part once when the stream goes quiet (so `<img>` paints a still screen). |
+| `agent-device.ts` | The agent-device runner: pinned `--config`/`--session`/device flags before the command, no shell, scrubbed `AGENT_DEVICE_*`, caps; `--json` refusals → `DeviceError`. Fixtures: `fixtures/agent-device/`. |
+| `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs; `DeviceHost.performAction` / `installApp` answer first. |
+| `screenshot-image.ts` | PNG decode, downscale and baseline JPEG encode: screenshots fit `DEVICE_SCREENSHOT_MAX_BASE64_CHARS`. |
 | `hosts/box-host.ts` | Box device hosts: rented Macs (box purpose `device-host`, its `devices` setup step is this factory's preparer) and own Macs marked for devices (`byo`); adoption at start, `provision`/`provisionQuote` (spend rules), idle teardown, drain near the deadline. |
 | `hosts/box/host.ts` | `BoxDeviceHost`: prepare over `BoxConnection` (probe, pinned tools, detached hub, agent-device daemon, forwards, 0600 `--config`), runner warm-up, simulators per lease. |
 | `hosts/box/remote.ts`, `simctl.ts`, `rental.ts`, `agent-device-config.ts` | Box layout and the commands run there; `simctl` parsing, profile → device type, the boot-frame heuristic; rental spec and approval; the agent-device config file. `testing.ts`: `FakeMacBox`. |
@@ -45,9 +50,6 @@ inside it, keep the exported signature `wiring.ts` calls):
 |---|---|---|
 | `toolchain/` (`index.ts`, `../tool-versions.json`) | toolchain: pinned npm tools, Android SDK, AVDs, golden snapshots | reports everything missing, refuses installs |
 | `hosts/local-android.ts` | local Android host: supervised hub, emulators, capacity, readiness with fix actions | adds a `PlaceholderDeviceHost` (`hosts/placeholder.ts`) while Android is enabled |
-| `hub-proxy.ts` | allowlisted HTTP/WS proxy to the hub, MJPEG still frame, back-pressure, `userInput` on first input | 503 / close 1013 |
-| `agent-device.ts` | the agent-device CLI runner (`--config`, `--session`, no shell, no token in argv) | refuses |
-| `actions.ts` | `device_action` kinds → agent-device, `--settle` diffs, ref → point, screenshots, `install`, `launch` | refuses |
 | `pool.ts` | phase 2 scheduler (`decidePool`), keeping `choosePlacement`'s contract | phase 1 rules |
 | `service.ts`, `leases.ts`, `http-routes.ts`, `ws-routes.ts`, `wiring.ts` | shared: extend, don't fork | complete for phase 1 |
 

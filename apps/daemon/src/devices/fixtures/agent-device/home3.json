@@ -1,0 +1,17 @@
+{
+ "success": false,
+ "error": {
+  "code": "SESSION_NOT_FOUND",
+  "message": "No active session. Run open first.",
+  "hint": "Run open first or pass an explicit device selector.",
+  "diagnosticId": "mvq6v1di-1ba412ec",
+  "logPath": "/tmp/orq-smoke/ad-state/sessions/orq-fixture/requests/8be4604bd516f495.ndjson",
+  "diagnosticsRecord": {
+   "session": "orq-fixture",
+   "requestId": "8be4604bd516f495"
+  },
+  "details": {
+   "dispatched": "unknown"
+  }
+ }
+}
