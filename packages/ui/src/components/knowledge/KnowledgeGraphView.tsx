@@ -276,6 +276,9 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   const openConcept = (concept: KnowledgeConceptRef) => {
     chooseLayer("concepts");
     onSelect({ kind: "concept", id: concept.id });
+    // Also when it is selected already (the selection does not move, so its effect does not run).
+    const target = { kind: "concept" as const, id: concept.id };
+    setFocus((current) => focusFor(target, graphRef.current, current));
   };
   // …and a selected concept's entries are marked on the Similarity layer.
   const showConceptEntries = (concept: SelectedConcept) => {

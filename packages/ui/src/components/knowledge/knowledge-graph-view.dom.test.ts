@@ -562,6 +562,30 @@ describe("the Graph view", () => {
       assert.equal(lastCanvas().layer, "concepts");
     });
 
+    it("a cluster's concept that is already selected but not drawn centres the Concepts layer on it again", async () => {
+      const graphReads = await showHeld();
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-far"]')!);
+      assert.deepEqual(graphReads, ["", "tactic-far"]);
+      // Back to the overview, where it is not drawn; it stays selected.
+      await click([...doc().querySelectorAll("button")].find((b) => b.textContent === "Back to the overview")!);
+      assert.deepEqual(graphReads, ["", "tactic-far", ""]);
+      assert.deepEqual(selections.at(-1), { kind: "concept", id: "tactic-far" });
+
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-far"]')!);
+      assert.equal(lastCanvas().layer, "concepts");
+      assert.deepEqual(graphReads, ["", "tactic-far", "", "tactic-far"], "its neighbourhood, though the selection did not move");
+
+      // One that is drawn leaves the overview as it is.
+      await click([...doc().querySelectorAll("button")].find((b) => b.textContent === "Back to the overview")!);
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-b"]')!);
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-b"]')!);
+      assert.deepEqual(graphReads, ["", "tactic-far", "", "tactic-far", ""]);
+    });
+
     it("an older daemon's clusters offer no concepts", async () => {
       await showHeld({ api: { getKnowledgeSimilarityGraph: async () => SIMILARITY } });
       await click(layerRadio("Similarity")!);
