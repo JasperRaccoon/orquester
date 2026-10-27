@@ -77,14 +77,31 @@ export function parseKnowledgeFilters(filters: KnowledgeSearchFilters | undefine
   return isEmptyFilter(parsed) ? NO_FILTER : parsed;
 }
 
-/** The comma-separated list form used on the entries route's query string. */
-export function splitFilterList(value: string | undefined): string[] | undefined {
+/**
+ * A filter list as the entries route's query string carries it (`encodeKnowledgeFilterList`):
+ * comma-separated, or — when a value holds a comma — a JSON array of strings (a value whose trimmed
+ * form starts with "["). Throws `KNOWLEDGE_INVALID` for a "[" value that is not such an array.
+ */
+export function splitFilterList(value: string | undefined, what = "A filter list"): string[] | undefined {
   if (value === undefined) return undefined;
-  const parts = value
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-  return parts.length > 0 ? parts : undefined;
+  const trimmed = value.trim();
+  let parts: string[];
+  if (trimmed.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = null;
+    }
+    if (!Array.isArray(parsed) || !parsed.every((part) => typeof part === "string")) {
+      throw new KnowledgeError("KNOWLEDGE_INVALID", `${what} starting with "[" must be a JSON array of strings (or send the values comma-separated).`);
+    }
+    parts = parsed;
+  } else {
+    parts = value.split(",");
+  }
+  const out = parts.map((part) => part.trim()).filter((part) => part.length > 0);
+  return out.length > 0 ? out : undefined;
 }
 
 export function isEmptyFilter(filter: KnowledgeEntryFilter): boolean {

@@ -525,9 +525,9 @@ export class KnowledgeSearch {
    */
   async listEntries(query: KnowledgeEntriesQuery, visibility: KnowledgeVisibility): Promise<KnowledgeEntriesResponse> {
     const filter = parseKnowledgeFilters({
-      kinds: splitFilterList(query.kinds),
-      authors: splitFilterList(query.authors),
-      years: splitFilterList(query.years),
+      kinds: splitFilterList(query.kinds, "kinds"),
+      authors: splitFilterList(query.authors, "authors"),
+      years: splitFilterList(query.years, "years"),
       postedAfter: query.postedAfter,
       postedBefore: query.postedBefore,
       savedAfter: query.savedAfter,
@@ -695,8 +695,8 @@ export class KnowledgeSearch {
       }
     });
     await Promise.all(workers);
-    // Attach cached vectors now; the rest are embedded by the backfill the first query or save starts.
-    await this.vectors.loadCached();
+    // Attach cached vectors now; the rest are embedded in the background (and again for each new model).
+    await this.vectors.backfillAll();
   }
 
   private async indexText(id: string): Promise<void> {

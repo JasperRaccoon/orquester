@@ -91,10 +91,19 @@ test("token-dense bodies chunk under the model's limit: header + prefix + chunk 
     code: Array.from({ length: 120 }, (_, i) => `const v${i} = items.filter((x) => x.id !== ${i}).map((x) => ({ ...x, rank: x.rank * 2 }));`).join("\n"),
     prose: "Las páginas de alternativas convierten bien. Write one per competitor, with honest comparison tables. ".repeat(80)
   };
-  for (const [name, body] of Object.entries(bodies)) {
-    const passages = chunkBody(body).map((span) => embeddingPassage(header, body.slice(span.start, span.end)));
-    await embedder.embed(passages, "passage");
-    assert.deepEqual(warnings, [], `${name}: ${warnings.join("; ")}`);
+  // A header at its cap: a 200-character CJK title and a 120-character author.
+  const longHeader = embeddingHeader({
+    title: "付费墙测试显示年度订阅的转化率更高我们在抖音上投放广告并优化了落地页".repeat(7).slice(0, 200),
+    author: "María José Fernández de la Cruz y Montenegro, Growth Lead at Example Corporation International ".repeat(2).slice(0, 120),
+    handle: "mariajose_growth",
+    kind: "article"
+  });
+  for (const [label, head] of [["header", header], ["long header", longHeader]] as const) {
+    for (const [name, body] of Object.entries(bodies)) {
+      const passages = chunkBody(body).map((span) => embeddingPassage(head, body.slice(span.start, span.end)));
+      await embedder.embed(passages, "passage");
+      assert.deepEqual(warnings, [], `${label}, ${name}: ${warnings.join("; ")}`);
+    }
   }
   // And truncation is reported when it does happen (a body chunked for nothing).
   await embedder.embed([bodies.chinese], "passage");

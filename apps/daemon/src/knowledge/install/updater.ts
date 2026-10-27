@@ -7,7 +7,8 @@
  * A release that failed to install is not retried by the hourly check while a
  * working one is in place (each try is a large download); a manual check is.
  * A current version holding another embedding model than the pinned one (installed before the
- * model changed) is repaired by the next check with a download of the model alone.
+ * model changed) is repaired by the next check with a download of the model alone; when that
+ * repair fails, the hourly check leaves it to the next start, turning on, or a manual check.
  */
 import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { knowledgeRuntimeDir } from "@orquester/config";

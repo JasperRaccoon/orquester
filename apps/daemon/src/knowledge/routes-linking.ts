@@ -48,6 +48,8 @@ export interface KnowledgeStatusCounts {
   collections: number;
   /** Entries with `linkState: "failed"`. */
   failedEntries: number;
+  /** Whether the embedding model is installed and loadable (`KnowledgeStatus.embeddingModelReady`). */
+  embeddingModelReady?: boolean;
 }
 
 export type KnowledgeLinkingRouteService = Pick<
@@ -79,7 +81,8 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
     recentRuns: snapshot.recentRuns,
     workers: snapshot.workers,
     tokens: snapshot.tokens,
-    lastError: snapshot.lastError
+    lastError: snapshot.lastError,
+    ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {})
   };
 }
 
