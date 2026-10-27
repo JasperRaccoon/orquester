@@ -133,6 +133,36 @@ export function cutoutSpecInDp(spec, density) {
   return `${out.join(" ")} ${markers ? `${markers} ` : ""}@dp`;
 }
 
+/** The guest command that prints the cutout rect SystemUI sizes the hole's window by (in pixels, like the cutout). */
+export const CUTOUT_RECT_LOOKUP = "cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation";
+/** The guest command that prints whether the cutout is drawn filled (`true`: without it no hole is drawn). */
+export const CUTOUT_FILL_LOOKUP = "cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout";
+
+/**
+ * The guest commands (as root, run in order: fabricate all, disable, enable all) that carry a
+ * display cutout in dp: `OrqCutout` with `dp` ({@link cutoutSpecInDp}'s, no `'`), `OrqCutoutRect`
+ * with the rect approximation re-expressed in dp, `OrqCutoutFill` when the image fills the hole;
+ * the device emulation overlays enabled in `overlayList` (`cmd overlay list`) are disabled.
+ * `rect` and `fill` are what {@link CUTOUT_RECT_LOOKUP} and {@link CUTOUT_FILL_LOOKUP} printed.
+ */
+export function cutoutOverlayPlan(input) {
+  if (input.dp.includes("'")) throw new Error("unexpected cutout spec");
+  const looked = (text) => text.trim().replace(/^@\S+ -> /, "");
+  const rect = cutoutSpecInDp(looked(input.rect), input.density);
+  const overlays = [["OrqCutout", "string/config_mainBuiltInDisplayCutout", `0x03 '${input.dp}'`]];
+  if (rect && !rect.includes("'")) overlays.push(["OrqCutoutRect", "string/config_mainBuiltInDisplayCutoutRectApproximation", `0x03 '${rect}'`]);
+  if (looked(input.fill) === "true") overlays.push(["OrqCutoutFill", "bool/config_fillMainBuiltInDisplayCutout", "0x12 0xffffffff"]);
+  const emulation = input.overlayList
+    .split("\n")
+    .map((line) => /^\s*\[x\]\s+(com\.android\.internal\.emulation\.[A-Za-z0-9_.]+)/.exec(line)?.[1])
+    .filter((name) => name !== undefined);
+  return {
+    fabricate: overlays.map(([name, resource, value]) => `cmd overlay fabricate --target android --name ${name} android:${resource} ${value}`),
+    disable: emulation.map((name) => `cmd overlay disable ${name}`),
+    enable: overlays.map(([name]) => `cmd overlay enable com.android.shell:${name}`)
+  };
+}
+
 /** Placeholders avdmanager 22 leaves behind; none may survive the patch. */
 export function hasAvdPlaceholders(text) {
   return /=<(build|temp)>/.test(text);
@@ -140,7 +170,7 @@ export function hasAvdPlaceholders(text) {
 ORQ_AVD_TUNING
 cat > "$TUNE/tune.mjs" << 'ORQ_AVD_TUNE'
 import { readFileSync, writeFileSync } from "node:fs";
-import { cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-tuning.mjs";
+import { cutoutOverlayPlan, cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-tuning.mjs";
 const [command, ...args] = process.argv.slice(2);
 if (command === "patch") {
   const [file, name, width, height, density, gpuMode] = args;
@@ -155,6 +185,11 @@ if (command === "patch") {
   console.log(Number.isInteger(deviceDensity) && deviceDensity > 0 ? String(deviceDensity) : "");
 } else if (command === "cutout") {
   console.log(cutoutSpecInDp(args[0] ?? "", Number(args[1])) ?? "");
+} else if (command === "cutout-plan") {
+  const [part, dp, rect, fill, density, overlayList] = args;
+  const commands = cutoutOverlayPlan({ dp, rect, fill, density: Number(density), overlayList })[part];
+  if (!commands) process.exit(2);
+  if (commands.length > 0) console.log(commands.join("\n"));
 } else if (command === "avd-marker") {
   const [file, profile, configHash, deviceDensity] = args;
   const marker = { profile, configHash, createdAt: new Date().toISOString(), ...(deviceDensity ? { deviceDensity: Number(deviceDensity) } : {}), source: "cache" };
@@ -197,29 +232,59 @@ stop_emulator() {
   LAUNCHER=
 }
 
-# The dp display cutout (golden.ts fixDisplayCutout): best effort, as on a box host.
+# The dp display cutout (golden.ts fixDisplayCutout, the overlays from avd-tuning.mjs cutoutOverlayPlan): best effort, as on a box host.
 fix_cutout() {
   spec=$(sh_adb 30 'dumpsys display' | sed -n 's/.*cutoutSpec={\([^}]*\)}.*/\1/p' | head -1)
   dp=$(node "$TUNE/tune.mjs" cutout "$spec" "$1")
   if [ -z "$dp" ]; then echo "display cutout kept"; return 0; fi
   case "$dp" in *"'"*) warn "unexpected cutout spec"; return 1 ;; esac
-  emulation=$(sh_adb 30 'cmd overlay list' | sed -n 's/^[[:space:]]*\[x\][[:space:]]*\(com\.android\.internal\.emulation\.[A-Za-z0-9_.]*\).*/\1/p')
+  list=$(sh_adb 30 'cmd overlay list') || true
   root=$(timeout 30 adb -s "$SERIAL" root 2>&1) || { warn "adb root failed: $root"; return 1; }
   case "$root" in *"cannot run as root"*) warn "adb root failed: $root"; return 1 ;; esac
   sleep 1
   timeout 60 adb -s "$SERIAL" wait-for-device
-  ok=1
-  made=$(sh_adb 30 'cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 '\'''"$dp"''\''' 2>&1) || ok=0
-  if printf '%s' "$made" | grep -qiE 'error|exception'; then ok=0; fi
-  if [ "$ok" = 1 ]; then
-    for overlay in $emulation; do sh_adb 30 "cmd overlay disable $overlay" > /dev/null 2>&1 || true; done
-    enabled=$(sh_adb 30 'cmd overlay enable com.android.shell:OrqCutout' 2>&1) || ok=0
-    if printf '%s' "$enabled" | grep -qi exception; then ok=0; fi
+  # What the emulation overlay also sets for the hole, read before it goes: its rect and its fill.
+  rect=$(sh_adb 30 'cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation') || true
+  fill=$(sh_adb 30 'cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout') || true
+  failed=
+  fabricate=$(node "$TUNE/tune.mjs" cutout-plan fabricate "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  disable=$(node "$TUNE/tune.mjs" cutout-plan disable "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  enable=$(node "$TUNE/tune.mjs" cutout-plan enable "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  if [ -z "$failed" ]; then
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      out=$(sh_adb 30 "$command" 2>&1 < /dev/null) || failed=1
+      if [ -n "$failed" ] || printf '%s' "$out" | grep -qiE 'error|exception'; then failed="fabricating the cutout overlay failed: $out"; break; fi
+    done <<< "$fabricate"
+  fi
+  if [ -z "$failed" ]; then
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      sh_adb 30 "$command" > /dev/null 2>&1 < /dev/null || true
+    done <<< "$disable"
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      out=$(sh_adb 30 "$command" 2>&1 < /dev/null) || failed=1
+      if [ -n "$failed" ] || printf '%s' "$out" | grep -qi exception; then failed="enabling the cutout overlay failed: $out"; break; fi
+    done <<< "$enable"
+  fi
+  if [ -z "$failed" ]; then
+    # SystemUI keeps drawing the hole it drew at boot (the pixel one) until it starts again.
+    before=$(sh_adb 30 'pidof com.android.systemui' | tr -d '\r')
+    if [ -n "$before" ]; then
+      sh_adb 30 "kill ${before%% *}" > /dev/null 2>&1 || true
+      for _ in $(seq 60); do
+        sleep 0.5
+        now=$(sh_adb 30 'pidof com.android.systemui' | tr -d '\r')
+        if [ -n "$now" ] && [ "$now" != "$before" ]; then break; fi
+      done
+      sleep 5
+    fi
   fi
   timeout 30 adb -s "$SERIAL" unroot > /dev/null 2>&1 || true
   sleep 1
   timeout 60 adb -s "$SERIAL" wait-for-device || true
-  if [ "$ok" != 1 ]; then warn "the cutout overlay failed: $made $enabled"; return 1; fi
+  if [ -n "$failed" ]; then warn "$failed"; return 1; fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if sh_adb 30 'dumpsys display' | grep -q 'cutoutSpec={[^}]*@dp'; then echo "display cutout fixed"; return 0; fi
     sleep 0.5
@@ -304,7 +369,7 @@ make_profile() {
 }
 
 emulator -accel-check
-make_profile 'orq-pixel-9' 'system-images;android-35;google_apis;x86_64' 'pixel_9' '720' '1616' '280' 'pixel-9' 'da01c7039bad6976'
-make_profile 'orq-pixel-tablet' 'system-images;android-35;google_apis;x86_64' 'pixel_tablet' '1280' '800' '160' 'pixel-tablet' '3abbce542286cc49'
-make_profile 'orq-pixel-fold' 'system-images;android-35;google_apis;x86_64' 'pixel_fold' '1104' '920' '210' 'pixel-fold' 'df396afb8a4bc9b1'
+make_profile 'orq-pixel-9' 'system-images;android-35;google_apis;x86_64' 'pixel_9' '720' '1616' '280' 'pixel-9' '4315e12699067d19'
+make_profile 'orq-pixel-tablet' 'system-images;android-35;google_apis;x86_64' 'pixel_tablet' '1280' '800' '160' 'pixel-tablet' '3e4b45e65af65d7c'
+make_profile 'orq-pixel-fold' 'system-images;android-35;google_apis;x86_64' 'pixel_fold' '1104' '920' '210' 'pixel-fold' 'ea218d2942ac8cc3'
 timeout 30 adb kill-server || true

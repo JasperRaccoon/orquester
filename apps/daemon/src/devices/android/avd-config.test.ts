@@ -3,7 +3,20 @@ import test from "node:test";
 
 import { deviceProfile } from "@orquester/api";
 
-import { AVD_HARDWARE, avdConfigHash, avdHardware, avdName, avdScreen, cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-config.ts";
+import {
+  AVD_HARDWARE,
+  avdConfigHash,
+  avdHardware,
+  avdName,
+  avdScreen,
+  CUTOUT_FILL_LOOKUP,
+  CUTOUT_RECT_LOOKUP,
+  cutoutOverlayPlan,
+  cutoutSpecInDp,
+  hasAvdPlaceholders,
+  parseIni,
+  patchAvdConfig
+} from "./avd-config.ts";
 
 // What avdmanager 22 writes for pixel_fold (abridged), placeholders included.
 const FOLD = `PlayStore.enabled=no
@@ -109,4 +122,29 @@ test("cutout: the system image's pixel spec becomes dp (lengths only; arc flags 
   assert.equal(cutoutSpecInDp("M 505,61 a 35,35 0 1 0 70,0 35,35 0 1 0 -70,0 Z @left", 420), "M 192.381 23.238 a 13.333 13.333 0 1 0 26.667 0 13.333 13.333 0 1 0 -26.667 0 Z @left @dp");
   assert.equal(cutoutSpecInDp("M 0,0 L 1,1 @dp", 420), null);
   assert.equal(cutoutSpecInDp("", 420), null);
+});
+
+test("cutout overlays: the dp cutout, its rect in dp and the fill; the enabled emulation overlays disabled", () => {
+  const dp = "m 1 2 @left @dp";
+  const list = "android\n[x] com.android.internal.emulation.pixel_9\n[ ] com.android.internal.emulation.pixel_8\n";
+  // `cmd overlay lookup` may print the resource before the value.
+  const plan = cutoutOverlayPlan({ dp, rect: "@android:string/config_mainBuiltInDisplayCutoutRectApproximation -> m 420,0 h 42 z @left\n", fill: "true\n", density: 420, overlayList: list });
+  assert.deepEqual(plan, {
+    fabricate: [
+      "cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 'm 1 2 @left @dp'",
+      "cmd overlay fabricate --target android --name OrqCutoutRect android:string/config_mainBuiltInDisplayCutoutRectApproximation 0x03 'm 160 0 h 16 z @left @dp'",
+      "cmd overlay fabricate --target android --name OrqCutoutFill android:bool/config_fillMainBuiltInDisplayCutout 0x12 0xffffffff"
+    ],
+    disable: ["cmd overlay disable com.android.internal.emulation.pixel_9"],
+    enable: ["cmd overlay enable com.android.shell:OrqCutout", "cmd overlay enable com.android.shell:OrqCutoutRect", "cmd overlay enable com.android.shell:OrqCutoutFill"]
+  });
+  // No rect (or one already in dp), no fill, nothing to disable: the cutout alone.
+  assert.deepEqual(cutoutOverlayPlan({ dp, rect: "m 1 2 @dp", fill: "false", density: 420, overlayList: "" }), {
+    fabricate: ["cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 'm 1 2 @left @dp'"],
+    disable: [],
+    enable: ["cmd overlay enable com.android.shell:OrqCutout"]
+  });
+  assert.throws(() => cutoutOverlayPlan({ dp: "m 1 2 @left'x @dp", rect: "", fill: "", density: 420, overlayList: "" }), /unexpected cutout spec/);
+  assert.equal(CUTOUT_RECT_LOOKUP, "cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation");
+  assert.equal(CUTOUT_FILL_LOOKUP, "cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout");
 });
