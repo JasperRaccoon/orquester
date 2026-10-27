@@ -191,7 +191,12 @@ describe("box device host factory", () => {
     assert.deepEqual(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: true })), { kind: "byo", platform: "ios" });
     assert.equal(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: false })), null);
     // Own Linux machines with KVM wait for the phase 2 Android driver.
-    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: true })), null);
+    // Linux: rented device hosts run Android; an own Linux machine only with a usable /dev/kvm.
+    assert.deepEqual(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: true })), { kind: "byo", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: false })), null);
+    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux" })), null);
+    assert.deepEqual(deviceHostOfRecord(record("d", { kind: "linux" })), { kind: "box", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("d", { kind: "windows" })), null);
   });
 
   it("adopts rented device hosts and own Macs at start, and follows their boxes", async () => {
@@ -250,7 +255,17 @@ describe("box device host factory", () => {
     // A device host that ran 17 h this month ($81.6) leaves no room for 4 h more ($19.2) under $100.
     boxes.records.set("old", record("old", { state: "destroyed", providerRef: { runId: 1 }, createdAt: new Date(T0 - 17 * 3_600_000).toISOString(), destroyedAt: new Date(T0).toISOString() }));
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
-    assert.equal(factory.provisionQuote!("android"), null);
+    // Android: a Blacksmith Linux runner of `pool.androidSize` (default 16 vCPU).
+    assert.deepEqual(factory.provisionQuote!("android"), {
+      platform: "android",
+      provider: "blacksmith",
+      providerLabel: "Blacksmith",
+      size: "16vcpu",
+      sizeLabel: "16 vCPU x64 · 64 GB",
+      hourlyUsd: 1.92,
+      lifetimeMinutes: 240,
+      needsApproval: false
+    });
     boxes.configured = false;
     assert.equal(factory.provisionQuote!("ios"), null);
   });
@@ -283,29 +298,24 @@ describe("box device host factory", () => {
     assert.equal(boxes.started.length, 1);
   });
 
-  it("a rented host with no lease is idle whatever its state (unreachable too); a failed one goes at once; pool-warm ones stay", async () => {
+  it("a failed rented host with no lease goes at once; idle rented hosts are left to the pool (whatever their state)", async () => {
     boxes.records.set("a", record("a"));
     boxes.records.set("f", record("f"));
     boxes.mac("f");
-    let warm = false;
-    await factory.start({ ...context(), keepWarm: (hostId) => warm && hostId === "box:a" });
+    await factory.start(context());
     await eventually(() => factory.host("f")!.isReady(), "f ready");
-    // `a` never connects (unreachable): it still bills, so its idle clock runs.
+    // `a` never connects (unreachable): the pool's idle teardown handles it, not this sweep.
     assert.equal(added.get("box:a")!.state().status, "unreachable");
     const failed = factory.host("f")!;
     failed.state = () => ({ status: "failed", detail: "its hub crashed" });
     await factory.sweepIdle();
     assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"]);
     assert.match(boxes.destroyed[0]!.message ?? "", /its hub crashed/);
-    warm = true;
     now += 25 * 60_000;
     await factory.sweepIdle();
-    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"], "kept warm by the pool");
-    warm = false;
+    now += 25 * 60_000;
     await factory.sweepIdle();
-    now += 21 * 60_000;
-    await factory.sweepIdle();
-    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f", "a"]);
+    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"]);
   });
 
   it("rents a Mac host: refuses without approval, then rents, prepares and resolves it ready", async () => {
@@ -350,7 +360,8 @@ describe("box device host factory", () => {
     await assert.rejects(pending, /Setup failed; the box was torn down/);
   });
 
-  it("destroys an idle rented host after the idle time, and only stops an own Mac's helpers", async () => {
+  it("never destroys an idle rented host (the pool does); an own Mac's helpers stop after pool.idleTeardownMinutes", async () => {
+    settings = { ...settings, ios: { ...settings.ios, idleTeardownMinutes: 60 }, pool: { ...settings.pool, idleTeardownMinutes: 20 } };
     boxes.records.set("a", record("a"));
     boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true }));
     const ownMac = boxes.mac("b");
@@ -358,21 +369,21 @@ describe("box device host factory", () => {
     await factory.start(context());
     await eventually(() => factory.host("a")!.isReady() && factory.host("b")!.isReady(), "both hosts ready");
 
-    leases = [{ id: "L1", hostId: "box:a" } as StoredDeviceLease];
+    leases = [{ id: "L1", hostId: "box:b" } as StoredDeviceLease];
     await factory.sweepIdle();
     now += 30 * 60_000;
     await factory.sweepIdle();
-    assert.deepEqual(boxes.destroyed, [], "a host with a lease stays");
+    assert.equal(added.get("box:b")!.state().status, "ready", "a host with a lease keeps its helpers");
 
     leases = [];
     await factory.sweepIdle();
     now += 19 * 60_000;
     await factory.sweepIdle();
-    assert.deepEqual(boxes.destroyed, []);
+    assert.equal(added.get("box:b")!.state().status, "ready");
     now += 2 * 60_000;
     await factory.sweepIdle();
-    assert.deepEqual(boxes.destroyed, [{ boxId: "a", reason: "deleted", message: "Idle: no device for 20 min (Settings → Devices)." }]);
-    assert.ok(!added.has("box:a"));
+    assert.deepEqual(boxes.destroyed, [], "the idle rented host is the pool's");
+    assert.ok(added.has("box:a"));
     // The own Mac is never destroyed: its helpers stop.
     assert.equal(added.get("box:b")!.state().status, "needs-setup");
     assert.equal(ownMac.hub, null);

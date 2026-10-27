@@ -176,7 +176,8 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
     service = null;
     notifyTools();
     await current.releaseAll("plugin-off").catch((error) => logger.warn("[devices] releasing leases failed", error instanceof Error ? error.message : String(error)));
-    await current.stop().catch(() => undefined);
+    // Boots in flight finish or abort first; then every device, hub and helper stops.
+    await current.stop({ teardown: true }).catch(() => undefined);
     current.events.off("tools", notifyTools);
   };
 

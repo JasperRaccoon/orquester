@@ -80,6 +80,7 @@ import {
   parseProbe,
   remoteEnv,
   remoteLayout,
+  writeBoxToolLocks,
   type RemoteLayout,
   type RemoteProbe,
   type RemoteResult
@@ -341,9 +342,9 @@ export class BoxDeviceHost implements DeviceHost {
     };
   }
 
-  /** Near its time limit a rented host drains: no new lease is placed on it. */
+  /** Near its time limit a rented host drains: no new lease is placed on it (no Resume undoes it). */
   pool(): DeviceHostPoolInfo | null {
-    return this.draining() ? { draining: true, warm: false, idleSince: null } : null;
+    return this.draining() ? { draining: true, drainReason: "deadline", warm: false, idleSince: null } : null;
   }
 
   draining(): boolean {
@@ -428,6 +429,7 @@ export class BoxDeviceHost implements DeviceHost {
         this.step("tool:expo-device-hub", "Installing the device tools", "running", 15);
         this.setDetail("Installing the device tools…");
         const env = { ...remoteEnv(probe), TOOLS: layout.tools };
+        await writeBoxToolLocks(link, layout.tools);
         const result = await execRemote(
           link,
           { command: "/bin/sh", args: ["-c", INSTALL_TOOLS_SCRIPT], env },

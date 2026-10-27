@@ -15,6 +15,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import type { BoxConnection, BoxExecOptions } from "../../../boxes/contracts.ts";
 import { BOX_DEVICES_DIR, DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
+import { BOX_TOOLS_LOCK, lockPins, NPM_CI_SCRIPT } from "../../toolchain/npm-tools.ts";
 
 /** The detached `orq-agent` process id of the hub. */
 export const HUB_PROC_ID = "orq-devices-hub";
@@ -142,15 +143,20 @@ export const DEVICE_TOOL_PACKAGES: readonly string[] = Object.entries(DEVICE_TOO
 
 /**
  * Install the pinned tools into `$TOOLS` the way the cache-warming workflow does
- * (`DEVICE_TOOLS_STEP_SCRIPT`), so a restored cache and an install look the same. `$TOOLS` comes
- * from the env; the packages are this build's constants.
+ * (`DEVICE_TOOLS_STEP_SCRIPT`), so a restored cache and an install look the same: from the shipped
+ * lockfile {@link writeBoxToolLocks} put there, `npm ci --ignore-scripts` (no lifecycle script runs),
+ * then the explicit native prebuilds. `$TOOLS` comes from the env; the rest is constant.
  */
 export const INSTALL_TOOLS_SCRIPT = `set -eu
-mkdir -p "$TOOLS"
 cd "$TOOLS"
-[ -f package.json ] || printf '{ "private": true }\\n' > package.json
-npm install --no-audit --no-fund --save-exact ${DEVICE_TOOL_PACKAGES.map((spec) => `'${spec}'`).join(" ")}
-`;
+${NPM_CI_SCRIPT}`;
+
+/** Put the shipped `package.json` + `package-lock.json` of both tools into the box's tools dir (before {@link INSTALL_TOOLS_SCRIPT}). */
+export async function writeBoxToolLocks(link: Pick<BoxConnection, "writeFile">, tools: string): Promise<void> {
+  if (!BOX_TOOLS_LOCK || !lockPins(BOX_TOOLS_LOCK, DEVICE_TOOL_VERSIONS)) throw new Error("This build ships no lockfile for the pinned device tools.");
+  await link.writeFile(posix.join(tools, "package.json"), BOX_TOOLS_LOCK.packageJson, { mkdirs: true, mode: 0o644 });
+  await link.writeFile(posix.join(tools, "package-lock.json"), BOX_TOOLS_LOCK.packageLock, { mkdirs: true, mode: 0o644 });
+}
 
 /** The installed version of a tool from its `package.json` text, or null. */
 export function installedToolVersion(packageJson: string | null): string | null {

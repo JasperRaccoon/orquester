@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ANIMATIONS_OFF_SCRIPT, CLOSE_SYSTEM_DIALOGS_SCRIPT, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
+import { ANIMATIONS_OFF_SCRIPT, CLOSE_SYSTEM_DIALOGS_SCRIPT, CUTOUT_OVERLAY, fixDisplayCutout, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
+import type { ExecFn } from "./exec.ts";
 
 function clock() {
   let t = 0;
@@ -40,4 +41,28 @@ test("dialogs a loaded first boot raised are closed: before the snapshot is save
   assert.equal(CLOSE_SYSTEM_DIALOGS_SCRIPT, "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
   // An older snapshot may still hold a "System UI isn't responding" dialog: each lease boot closes it too.
   assert.ok(LEASE_BOOT_SCRIPT.startsWith(ANIMATIONS_OFF_SCRIPT) && LEASE_BOOT_SCRIPT.endsWith(`; ${CLOSE_SYSTEM_DIALOGS_SCRIPT}`));
+});
+
+test("cutout: the pixel spec of the device emulation overlay is replaced by a dp one, as root, then adbd unroots", async () => {
+  const calls: string[] = [];
+  let spec = "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left";
+  const exec: ExecFn = async (_adb, args) => {
+    const command = args.slice(2).join(" ");
+    calls.push(command);
+    if (command === "shell dumpsys display") return { exitCode: 0, stdout: `mCutout cutoutSpec={${spec}} x`, stderr: "" };
+    if (command === "shell cmd overlay list") return { exitCode: 0, stdout: "android\n[x] com.android.internal.emulation.pixel_9\n[ ] com.android.internal.emulation.pixel_8\n", stderr: "" };
+    if (command.startsWith("shell cmd overlay enable com.android.shell:OrqCutout")) spec = "m 221 33 @left @dp";
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const how = await fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal });
+  assert.equal(how, "fixed");
+  assert.deepEqual(calls.slice(2, 4), ["root", "wait-for-device"]);
+  assert.ok(calls.includes("shell cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 'm 221.524 32.952 a 16 16 0 0 0 -32 0 16 16 0 0 0 32 0 z @left @dp'"));
+  assert.ok(calls.includes("shell cmd overlay disable com.android.internal.emulation.pixel_9"));
+  assert.ok(!calls.some((call) => call.includes("pixel_8")));
+  assert.ok(calls.indexOf("unroot") > calls.indexOf(`shell cmd overlay enable ${CUTOUT_OVERLAY}`));
+  // Already in dp (or none): nothing to do.
+  calls.length = 0;
+  assert.equal(await fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal }), "kept");
+  assert.deepEqual(calls, ["shell dumpsys display"]);
 });

@@ -1,15 +1,23 @@
 /**
  * Pinned npm tools under `devicesToolsDir` (devices spec §5): `<root>/<name>@<version>` is an npm
  * prefix holding exactly that version. An install goes to a staging dir with the daemon's own
- * Node and npm, runs its post-install step (the hub's scrcpy-server jar), writes the
- * `.install-complete` sentinel, then renames into place; a dir without the sentinel is not
- * installed. One lock per tool; versions other than the current and the previous one are pruned.
+ * Node and npm: the tool's shipped lockfile (`locks/<name>/`, every transitive dependency pinned
+ * with its integrity hash) is installed with `npm ci --ignore-scripts` (no package lifecycle
+ * script runs), then the explicit build steps ({@link NATIVE_PREBUILDS}) and the post-install step
+ * (the hub's scrcpy-server jar) run, the `.install-complete` sentinel is written, and the dir is
+ * renamed into place; a dir without the sentinel is not installed. One lock per tool; versions
+ * other than the current and the previous one are pruned. Box hosts install both tools from
+ * `locks/box-tools/` the same way ({@link BOX_TOOLS_LOCK}).
+ *
+ * Regenerate a lock after a version bump (`tool-versions.json`): in an empty dir with the
+ * package.json below, `npm install --package-lock-only --ignore-scripts`.
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { type ExecFn, lastLine } from "../android/exec.ts";
 import type { DownloadFn, PinnedDownload } from "./download.ts";
@@ -35,6 +43,69 @@ export const TOOL_ENTRY: Readonly<Record<string, { entry: string; bin: string }>
   "expo-device-hub": { entry: "node_modules/expo-device-hub/dist/server/cli.mjs", bin: "node_modules/.bin/expo-device-hub" },
   "agent-device": { entry: "node_modules/agent-device/bin/agent-device.mjs", bin: "node_modules/.bin/agent-device" }
 };
+
+/** A shipped `package.json` + `package-lock.json` pair. */
+export interface ToolLock {
+  packageJson: string;
+  packageLock: string;
+}
+
+const LOCKS_DIR = fileURLToPath(new URL("./locks/", import.meta.url));
+
+function readLock(dir: string): ToolLock | null {
+  try {
+    return { packageJson: readFileSync(join(LOCKS_DIR, dir, "package.json"), "utf8"), packageLock: readFileSync(join(LOCKS_DIR, dir, "package-lock.json"), "utf8") };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a lock pins exactly these top-level `name@version`s. */
+export function lockPins(lock: ToolLock, pins: Readonly<Record<string, string>>): boolean {
+  try {
+    const pkg = JSON.parse(lock.packageJson) as { dependencies?: Record<string, string> };
+    const locked = JSON.parse(lock.packageLock) as { packages?: Record<string, { version?: string }> };
+    return Object.entries(pins).every(([name, version]) => pkg.dependencies?.[name] === version && locked.packages?.[`node_modules/${name}`]?.version === version);
+  } catch {
+    return false;
+  }
+}
+
+/** The shipped lock of `name@version`, or null when this build ships none for that version. */
+export function toolLock(name: string, version: string): ToolLock | null {
+  const lock = /^[a-z0-9-]+$/.test(name) ? readLock(name) : null;
+  return lock && lockPins(lock, { [name]: version }) ? lock : null;
+}
+
+/** Both pinned tools in one npm prefix (a box's tools dir: what the device-tools cache holds). */
+export const BOX_TOOLS_LOCK: ToolLock | null = readLock("box-tools");
+
+/**
+ * Native builds lifecycle scripts would have run, run explicitly after `npm ci --ignore-scripts`:
+ * package dir → the command in it. node-datachannel (the hub's WebRTC publisher only, loaded
+ * lazily) fetches its prebuilt N-API binary; a failure only leaves WebRTC to the hub's own repair.
+ */
+export const NATIVE_PREBUILDS: Readonly<Record<string, { script: string; args: readonly string[] }>> = {
+  "node_modules/node-datachannel": { script: "node_modules/prebuild-install/bin.js", args: ["-r", "napi"] }
+};
+
+/** `npm ci` flags of every pinned install: the lockfile only, no lifecycle scripts. */
+export const NPM_CI_ARGS: readonly string[] = ["ci", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"];
+
+/**
+ * POSIX shell run in an npm prefix holding a shipped `package.json` + `package-lock.json` (a box's
+ * tools dir): `npm ci --ignore-scripts`, then {@link NATIVE_PREBUILDS} (best effort). Constant text.
+ */
+export const NPM_CI_SCRIPT = `npm ${NPM_CI_ARGS.join(" ")}
+prefix=$(pwd)
+${Object.entries(NATIVE_PREBUILDS)
+  .map(
+    ([pkg, step]) => `if [ -f '${pkg}/package.json' ] && [ -f '${step.script}' ]; then
+  (cd '${pkg}' && node "$prefix/${step.script}" ${step.args.join(" ")}) || echo "warning: the prebuilt binary of ${pkg.replace("node_modules/", "")} was not installed" >&2
+fi`
+  )
+  .join("\n")}
+`;
 
 export function toolDir(root: string, name: string, version: string): string {
   return join(root, `${name}@${version}`);
@@ -65,6 +136,8 @@ export interface NpmInstallDeps {
   downloads: string;
   /** Tests: the pinned jar instead of {@link SCRCPY_SERVER}. */
   scrcpy?: PinnedDownload;
+  /** Tests: the lock to install instead of the shipped one ({@link toolLock}). */
+  lock?: ToolLock;
 }
 
 /** Copy the verified scrcpy-server jar into a hub install (downloaded once into `downloads`). */
@@ -99,19 +172,25 @@ export async function installNpmTool(
       await seedScrcpyServer(dir, deps, signal);
       if (isToolInstalled(root, name, version)) return dir;
     }
+    const lock = deps.lock ?? toolLock(name, version);
+    if (!lock) throw new Error(`This build ships no lockfile for ${name}@${version}.`);
     const staging = join(root, `.staging-${name}@${version}-${randomUUID().slice(0, 8)}`);
     await mkdir(staging, { recursive: true });
     try {
-      await writeFile(join(staging, "package.json"), `${JSON.stringify({ name: "orquester-device-tool", private: true }, null, 2)}\n`);
-      const result = await deps.exec(
-        deps.nodePath,
-        [deps.npmCli, "install", "--prefix", staging, "--no-audit", "--no-fund", "--save-exact", "--loglevel=error", `${name}@${version}`],
-        { env: deps.env, cwd: staging, signal, timeoutMs: 15 * 60_000, ...(onLine ? { onLine } : {}) }
-      );
+      await writeFile(join(staging, "package.json"), lock.packageJson);
+      await writeFile(join(staging, "package-lock.json"), lock.packageLock);
+      const result = await deps.exec(deps.nodePath, [deps.npmCli, ...NPM_CI_ARGS, "--prefix", staging], {
+        env: deps.env,
+        cwd: staging,
+        signal,
+        timeoutMs: 15 * 60_000,
+        ...(onLine ? { onLine } : {})
+      });
       signal.throwIfAborted();
       if (result.exitCode !== 0) throw new Error(`npm could not install ${name}@${version}: ${lastLine(result) || `exit ${result.exitCode}`}`);
       const entry = TOOL_ENTRY[name];
       if (entry && !existsSync(join(staging, entry.entry))) throw new Error(`${name}@${version} installed without ${entry.entry}.`);
+      await runNativePrebuilds(staging, deps, signal, onLine);
       if (name === "expo-device-hub") await seedScrcpyServer(staging, deps, signal);
       await writeFile(join(staging, INSTALL_SENTINEL), `${JSON.stringify({ name, version, installedAt: new Date().toISOString() })}\n`);
       await rm(dir, { recursive: true, force: true });
@@ -122,6 +201,17 @@ export async function installNpmTool(
     await pruneToolVersions(root, name, version).catch(() => undefined);
     return dir;
   });
+}
+
+/** The explicit build steps of {@link NATIVE_PREBUILDS} present in `prefix` (best effort: a failure is reported, not thrown). */
+export async function runNativePrebuilds(prefix: string, deps: Pick<NpmInstallDeps, "exec" | "nodePath" | "env">, signal: AbortSignal, onLine?: (line: string) => void): Promise<void> {
+  for (const [pkg, step] of Object.entries(NATIVE_PREBUILDS)) {
+    const dir = join(prefix, pkg);
+    const script = join(prefix, step.script);
+    if (!existsSync(join(dir, "package.json")) || !existsSync(script)) continue;
+    const result = await deps.exec(deps.nodePath, [script, ...step.args], { env: deps.env, cwd: dir, signal, timeoutMs: 5 * 60_000, ...(onLine ? { onLine } : {}) });
+    if (result.exitCode !== 0) onLine?.(`warning: the prebuilt binary of ${pkg.replace("node_modules/", "")} was not installed (${lastLine(result) || `exit ${result.exitCode}`}); the hub fetches it when WebRTC is first used.`);
+  }
 }
 
 /** Remove every `<name>@*` except `current` and the most recently installed other one; staging leftovers go too. */

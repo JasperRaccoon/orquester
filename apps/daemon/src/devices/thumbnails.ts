@@ -2,15 +2,17 @@
  * Lease thumbnails for the fleet view (phase 2 spec §2.9, §2.11: ≈1 fps JPEGs, ~20 kbit/s per card,
  * never video): the daemon asks the host's hub for a screenshot (serve-emu or serve-sim
  * `POST …/api/screenshot?device=`, with the hub token), shrinks it to the asked width and
- * re-encodes it as JPEG with the in-tree encoder (`screenshot-image.ts`). One capture per lease
- * per {@link THUMBNAIL_CACHE_MS}: concurrent viewers share it.
+ * re-encodes it as JPEG with the in-tree encoder (`screenshot-image.ts`) in the image workers
+ * (`image-pool.ts`: off the event loop; a lease's queued frame gives way to its newer one). One
+ * capture per lease per {@link THUMBNAIL_CACHE_MS}: concurrent viewers share it.
  */
 
-import { decodePng, downscale, encodeJpeg } from "./screenshot-image.ts";
+import { deviceImages, ImagePoolBusyError, type ImageWorkerPool } from "./image-pool.ts";
+
+export { thumbnailJpeg } from "./screenshot-image.ts";
 
 /** A thumbnail is reused for this long. */
 export const THUMBNAIL_CACHE_MS = 1_000;
-const THUMBNAIL_JPEG_QUALITY = 60;
 const HUB_TIMEOUT_MS = 10_000;
 
 /** Where a lease's screen is captured. */
@@ -26,14 +28,6 @@ export interface ThumbnailSource {
 /** The hub answered no usable screenshot. */
 export class ThumbnailError extends Error {}
 
-/** A PNG (or a JPEG passed through) as a JPEG at most `width` px wide (integer-factor box downscale; never upscaled). */
-export function thumbnailJpeg(image: Buffer, width: number): Buffer {
-  if (image[0] === 0xff && image[1] === 0xd8) return image;
-  const decoded = decodePng(image);
-  const factor = Math.max(1, Math.ceil(decoded.width / Math.max(1, width)));
-  return encodeJpeg(downscale(decoded, factor), THUMBNAIL_JPEG_QUALITY);
-}
-
 interface Entry {
   at: number;
   width: number;
@@ -43,14 +37,14 @@ interface Entry {
 export class DeviceThumbnails {
   private readonly entries = new Map<string, Entry>();
 
-  constructor(private readonly deps: { now(): number; fetch?: typeof fetch; cacheMs?: number }) {}
+  constructor(private readonly deps: { now(): number; fetch?: typeof fetch; cacheMs?: number; images?: Pick<ImageWorkerPool, "thumbnail"> }) {}
 
   /** The lease's thumbnail: the cached one (same width, younger than the cache time), else a new capture. */
   get(leaseId: string, source: ThumbnailSource, width: number): Promise<Buffer> {
     const now = this.deps.now();
     const cached = this.entries.get(leaseId);
     if (cached && cached.width === width && now - cached.at < (this.deps.cacheMs ?? THUMBNAIL_CACHE_MS)) return cached.done;
-    const done = this.capture(source, width);
+    const done = this.capture(leaseId, source, width);
     const entry: Entry = { at: now, width, done };
     this.entries.set(leaseId, entry);
     // A failed capture is not reused.
@@ -64,7 +58,7 @@ export class DeviceThumbnails {
     this.entries.delete(leaseId);
   }
 
-  private async capture(source: ThumbnailSource, width: number): Promise<Buffer> {
+  private async capture(leaseId: string, source: ThumbnailSource, width: number): Promise<Buffer> {
     const url = `${source.origin.replace(/\/$/, "")}/vendor/${source.streamKind}/api/screenshot?device=${encodeURIComponent(source.deviceParam)}`;
     const response = await (this.deps.fetch ?? fetch)(url, {
       method: "POST",
@@ -77,8 +71,9 @@ export class DeviceThumbnails {
     if (!response.ok) throw new ThumbnailError(`The device hub answered ${response.status} for the screenshot.`);
     const bytes = Buffer.from(await response.arrayBuffer());
     try {
-      return thumbnailJpeg(bytes, width);
-    } catch {
+      return await (this.deps.images ?? deviceImages).thumbnail(leaseId, bytes, width);
+    } catch (error) {
+      if (error instanceof ImagePoolBusyError) throw new ThumbnailError("Too many thumbnails are being made right now; the next one follows shortly.");
       throw new ThumbnailError("The device hub's screenshot is not an image this build can read.");
     }
   }

@@ -31,8 +31,8 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `action-log.ts` | Per-lease ring buffer of `DeviceActionEntry` (last 200, memory only). |
 | `screenshots.ts` | Last 20 screenshots per lease on disk (`deviceRef.screenshotId`), dropped when the chat closes. |
 | `pool.ts` | `choosePlacement` (phase 1 rules: named hosts, setup, off) and the pure phase 2 scheduler `decidePool` (placement local-first/best-fit/starting hosts, queue with deadlines, scale up within `maxHosts`/`maxHourlyUsd` and the standing approval or an approved card, warm minimum, idle/drain teardown, Android ≤ 16 per host). |
-| `pool-actor.ts` | `DevicePool`: runs `decidePool` on every host/lease/settings change and at queue deadlines; rents through the factories' `provision` (one at a time per platform), destroys idle/drained rented hosts, learns capacity per provider+size, drained ids, cache warms (`cache-warm` jobs; miss → once a day; weekly refresh), publishes `devices.pool`. Spend comes from the box records (`hosts/box/rental.ts` `deviceHostSpend`). Persisted in `device-pool.json` (`DevicePoolStore`). |
-| `thumbnails.ts` | Lease thumbnails for the fleet view: the hub's screenshot → downscaled JPEG, ≤ 1 s cache per lease. |
+| `pool-actor.ts` | `DevicePool`: runs `decidePool` on every host/lease/settings change and at queue deadlines; rents through the factories' `provision` (one at a time per platform), destroys idle/drained rented hosts (the ONE idle teardown of rented hosts, `pool.idleTeardownMinutes`; `ios.idleTeardownMinutes` is read into it), learns capacity per provider+size, drained ids, cache warms (`cache-warm` jobs; miss → once a day; weekly refresh; a run in flight at a restart is polled again from its persisted `lastRunId`), publishes `devices.pool`. Spend comes from the box records (`hosts/box/rental.ts` `deviceHostSpend`). Persisted in `device-pool.json` (`DevicePoolStore`). |
+| `thumbnails.ts` | Lease thumbnails for the fleet view: the hub's screenshot → downscaled JPEG (in the image workers), ≤ 1 s cache per lease. |
 | `service.ts` | `DeviceService`: hosts, settings, leases, setup jobs, action log, the agent tools' operations. |
 | `tools-port.ts` | `DeviceToolsPort` and `runDeviceTool` (principal → thread, `DeviceError` → outcome). |
 | `http-routes.ts` | `deviceRoutes` on both transports (`user-action` refuses agent and external principals); the hub proxy route on remote only (raw bodies, `?token=` accepted). |
@@ -45,9 +45,12 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `agent-device.ts` | The agent-device runner: pinned `--config`/`--session`/device flags before the command, no shell, an allowlisted environment (no daemon secrets, no `AGENT_DEVICE_*`), caps; typed text never in argv (`fill --text-stdin`; `type` and `wait` text as a one-step `batch --steps-file /dev/stdin`); `--json` refusals → `DeviceError`. Fixtures: `fixtures/agent-device/`. |
 | `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs, `restartApp` (foreground app → `open <app> --relaunch`; the home screen is refused); `DeviceHost.performAction` / `installApp` answer first. |
 | `screenshot-image.ts` | PNG decode, downscale and baseline JPEG encode: screenshots fit `DEVICE_SCREENSHOT_MAX_BASE64_CHARS`. |
+| `image-pool.ts`, `image-worker.ts` | `deviceImages`: `screenshot-image.ts` run in ≤ 2 worker threads (thumbnails and agent screenshots off the event loop): queue cap 32, a lease's queued thumbnail replaced by its newer one, screenshots ahead of thumbnails, 30 s job deadline. The `.ts` entry loads through the inherited `--import tsx`. |
 | `hosts/vphone/` | Phase 3 research hosts (`vphone:<boxId>`, kind `byo`): `factory.ts` adopts BYO Macs with "Use for device simulators" and `settings.research.vphoneHosts[boxId].enabled`; `readiness.ts` (checks with fix commands; never changes SIP/AMFI), `cli.ts` (vphone-cli over `BoxConnection.exec`), `host.ts` (clone/launch/forward/stop/delete per lease, token in env and a 0600 record), `bridge.ts` (loopback serve-sim endpoints ↔ `/v1/host/screen`, `screen.screenshot` (MJPEG and `POST /api/screenshot?device=`, the fleet thumbnail), `/v1/events`), `agent-actions.ts` + `snapshot.ts` (`performAction` → vphoned RPCs), `testing.ts` (fake vphoned, fake Mac link). |
-| `hosts/box-host.ts` | Box device hosts: rented Macs (box purpose `device-host`, its `devices` setup step is this factory's preparer) and own Macs marked for devices (`byo`); adoption at start, `provision`/`provisionQuote` (spend rules), idle teardown, drain near the deadline. |
+| `hosts/box-host.ts` | Box device hosts: rented Macs (box purpose `device-host`, its `devices` setup step is this factory's preparer) and own Macs marked for devices (`byo`); adoption at start, `provision`/`provisionQuote` (spend rules), drain near the deadline (`pool.drainReason: "deadline"`: the fleet reads "Ending soon (deadline)", Resume is refused), failed rented hosts destroyed, idle own Macs' helpers stopped (idle rented hosts are the pool's). |
 | `hosts/box/host.ts` | `BoxDeviceHost`: prepare over `BoxConnection` (probe, pinned tools, detached hub, agent-device daemon, forwards, 0600 `--config`, simslim), runner warm-up, simulators per lease (from the pool, or slimmed while shut down), `capacity` from RAM and `simslim top`. |
+| `hosts/box/android-host.ts` | `BoxAndroidHost`: Android emulators on a Linux box (a rented `linux` device-host box, or an own Linux machine marked for devices with `kvm`), the local Android modules run through `android-executor.ts`: probe (KVM direct/`sg`, Node, ffmpeg, Java, sudo; no KVM fails at once), ffmpeg via apt, tools from the lockfile, SDK/image/AVDs (kept when the cache restored them), the first profile's `orq-golden` (the cache's, or made here trying GPU modes in order), detached hub + agent-device forwarded, 0600 `--config`; leases from `orq-golden` (cold when it does not load); reattach from `android-host.json` in the box; capacity `min(vCPU/2, memory, 16, own machine's cap)`; `cacheState()`. |
+| `hosts/box/android-executor.ts`, `android-remote.ts` | The box `DeviceExecutor` (exec, `setsid` detached processes with logs, files, `/proc`, `curl` downloads); the probe, ffmpeg install, box AVD/golden state (cache vs made here), capacity, the Linux rental spec (`pool.androidSize`, default `blacksmith-16vcpu-ubuntu-2404`). `android-testing.ts`: a fake Linux box over `localBoxConnection()`. |
 | `hosts/box/remote.ts`, `simctl.ts`, `rental.ts`, `agent-device-config.ts` | Box layout and the commands run there; `simctl` parsing, profile → device type, simulator names (`orq-<leaseId>`, `orq-pool-*`, `orq-poolprep-*`), the boot-frame heuristic; rental spec and approval; the agent-device config file. `testing.ts`: `FakeMacBox` (simslim emulated with `{ simslim: true }`). |
 | `hosts/box/simslim.ts`, `simslim-capacity.ts`, `sim-pool.ts` | simslim (pin and install script in `boxes/github/device-cache.ts`): the Orquester slim profile, command builders, `--json` parsers (fixtures: `fixtures/simslim/`), the iOS 18.5 gate, the device-set decision (default set, `orq-*` names: serve-sim reads only the default set); capacity math; the pre-slimmed pool (N per profile, one refill at a time in the boot slot, preempted by lease boots). `simslim.it.ts` generates the Mac integration run's script. |
 
@@ -68,13 +71,14 @@ Facts and flags come from the spike (`docs/superpowers/research/2026-10-27-devic
 | File | What it is |
 |---|---|
 | `toolchain/index.ts` | `DeviceToolchain`: tool and SDK status, `ensureTool`, `ensureAndroidSdk`, `ensureSystemImage`, `ensureAvd`; the appdir's `layout` and private `env`. |
-| `toolchain/npm-tools.ts` | `<tools>/<name>@<version>`: staging dir, `.install-complete`, rename, per-tool lock (`lock.ts`), prune to current + previous; the hub's scrcpy-server v4.0 jar pre-seeded (pinned SHA-256). |
+| `toolchain/npm-tools.ts` | `<tools>/<name>@<version>`: the shipped lockfile (`locks/<name>/`, `locks/box-tools/` for boxes) installed with `npm ci --ignore-scripts`, node-datachannel's prebuilt binary fetched explicitly; staging dir, `.install-complete`, rename, per-tool lock (`lock.ts`: atomic pid file), prune to current + previous; the hub's scrcpy-server v4.0 jar pre-seeded (pinned SHA-256). |
 | `toolchain/android-sdk.ts` | cmdline-tools (pinned URL + SHA-256), `sdkmanager --licenses` (the owner's Install click accepts), packages, AVD creation + markers (`orq-avd.json`, `orq-golden.json`). |
 | `toolchain/download.ts` | Pinned, checksummed downloads (`<dest>.part` → rename). |
-| `android/env.ts` | `androidLayout` (every path under `devicesDir`) and `buildAndroidEnv` (allowlisted daemon env + `ANDROID_*`, `XDG_RUNTIME_DIR`, `TMPDIR`, `HOME`, hub and agent-device state dirs, private `ANDROID_ADB_SERVER_PORT` 16000–19999 from the appdir). |
-| `android/avd-config.ts` | Per-profile framebuffer (≈720 px across, the real aspect; foldable hinges and display regions scaled) and the `config.ini` patch (avdmanager placeholders, 2 GB, 2 cores, `swangle_indirect`, no cameras/audio, keyboard). |
-| `android/emulator.ts` | Flags, port allocation (5554–5682, above adb's 5555–5585 scan first), detached launch (direct or `sg kvm -c`), QEMU pid lookup, `sys.boot_completed` wait, `adb emu kill` → SIGTERM → SIGKILL. |
-| `android/golden.ts` | The golden snapshot, made lazily on a profile's first open: cold writable boot, CPU settle (≤ 5 min), guest settings, agent-device helper APKs, `emu kill` saves `default_boot`. |
+| `android/executor.ts` | `DeviceExecutor`: where the Android tooling runs (exec, detached processes with logs, text files, `/proc` liveness, ports, downloads); `LOCAL_EXECUTOR` here, `hosts/box/android-executor.ts` in a box. Every module below takes one (absent: local). |
+| `android/env.ts` | `androidLayout` (every path under `devicesDir`; `androidLayoutAt(root)` for a box) and `buildAndroidEnv` (allowlisted daemon env + `ANDROID_*`, `XDG_RUNTIME_DIR`, `TMPDIR`, `HOME`, hub and agent-device state dirs, private `ANDROID_ADB_SERVER_PORT` 16000–19999 from the appdir). |
+| `android/avd-config.ts` | Per-profile framebuffer (≈720 px across, the device's real aspect, orientation and dp size; foldable hinges and display regions scaled), the `config.ini` patch (avdmanager placeholders, 2 GB, 2 cores, `swangle_indirect`, no cameras/audio, keyboard), `cutoutSpecInDp` (the system image's pixel cutout re-expressed in dp). |
+| `android/emulator.ts` | Flags (GPU mode, named snapshot, cold fallback), port allocation (5554–5682, above adb's 5555–5585 scan first), detached launch (direct or `sg kvm -c`), QEMU pid lookup, `sys.boot_completed` wait, `adb emu kill` → SIGTERM → SIGKILL, only to a verified emulator (marker, `qemu-system*`, recorded start time). |
+| `android/golden.ts` | The golden snapshot, made lazily on a profile's first open: cold writable boot, CPU settle (≤ 5 min), guest settings, the dp display cutout (`fixDisplayCutout`: a fabricated overlay as root), agent-device helper APKs, `emu kill` saves `default_boot` (box hosts: `adb emu avd snapshot save orq-golden`). |
 | `android/hub.ts`, `hub-launcher.mjs` | The supervised hub (detached; token from its 0600 `server-<port>.json`, redacted from its log), backoff, capture-session recycling. |
 | `android/agent-device-daemon.ts` | Starts agent-device's daemon (`devices --json`), writes the 0600 `--config` (`daemonBaseUrl`, `daemonAuthToken`). |
 | `android/state.ts` | `hub.json`: hub and emulator pids; `planReattach` (keep / reap / forget). |
@@ -91,6 +95,17 @@ daemon's appdir or ports):
 cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/integration.it.ts /var/lib/orquester/tmp/devices-local-it/app [profile]
 ```
 
+The Linux box host with real emulators, this machine as the box (`localBoxConnection()`): prepare,
+`ORQ_IT_DEVICES` concurrent leases, `sys.boot_completed`, the display cutout (dumpsys + a
+screenshot in `<root>/logs`), hub `/api/devices` with and without the token, agent-device
+`snapshot -i`, a restart (reattach), release, teardown, nothing left running (~3 min with an SDK:
+~2.5 min golden snapshot; the same script, bundled with esbuild, ran on a Blacksmith runner):
+
+```sh
+cd apps/daemon && ORQ_IT_SDK=/var/lib/orquester/tmp/devices-local-it/app/daemon/devices/android-sdk ORQ_IT_DEVICES=2 \
+  TSX_DISABLE_CACHE=1 node --import tsx src/devices/hosts/box/android-integration.it.ts /var/lib/orquester/tmp/boxandroid-local-it/devices /var/lib/orquester/tmp/boxandroid-local-it/app
+```
+
 ## Rules
 
 - The service exists only while the plugin is on (`wiring.ts`); turning it off releases every
@@ -104,6 +119,10 @@ cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/inte
   Open, or `open_device`'s spend card: one per host).
 - Every unnamed open queues in the pool (`pool-actor.ts`); the lease is recorded only after a
   synchronous capacity re-check on the placed host (no over-placement).
+- The panel's Open (`POST` leases, `openQueued`) never blocks on that queue: while placement waits
+  it answers a stand-in lease (`starting`, `hostId: "pool"`, the wait as its progress, memory
+  only) that becomes the placed lease (same id) or `lost` with the reason; Release withdraws it.
+  `open_device` keeps waiting (`beginOpen`).
 - Leases whose device vanished from the host's `listDevices` (two lists in a row; on host changes
   and every 5 min) become `lost`.
 - Secrets (hub and agent-device tokens) stay in host-side files; never in summaries, events,

@@ -106,7 +106,15 @@ export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
     };
   }
   const pool = value.pool;
-  if (isRecord(pool)) host.pool = { draining: pool.draining === true, warm: pool.warm === true, idleSince: strOrNull(pool.idleSince) };
+  if (isRecord(pool)) {
+    const draining = pool.draining === true;
+    host.pool = {
+      draining,
+      ...(draining ? { drainReason: pool.drainReason === "deadline" ? ("deadline" as const) : ("owner" as const) } : {}),
+      warm: pool.warm === true,
+      idleSince: strOrNull(pool.idleSince)
+    };
+  }
   if (value.research === true) host.research = true;
   if (str(value.notice)) host.notice = value.notice;
   const stream = value.stream;

@@ -3,7 +3,8 @@
  * PNG when its base64 fits the cap, else re-encoded as JPEG and halved until it does (as
  * `html-preview`'s `MAX_SCREENSHOT_BASE64_CHARS`). No image library ships with the daemon, so this
  * holds a small PNG decoder (8-bit, non-interlaced) and a baseline JPEG encoder (4:4:4, the
- * standard tables).
+ * standard tables). The daemon runs these in its image workers (`image-pool.ts`), never on the
+ * event loop.
  */
 
 import { inflateSync } from "node:zlib";
@@ -173,6 +174,17 @@ export function fitScreenshot(png: Buffer, maxBase64Chars: number): FittedScreen
     const jpeg = encodeJpeg(scaled, 80);
     if (base64Length(jpeg.length) <= maxBase64Chars || factor >= 16) return { mimeType: "image/jpeg", data: jpeg, width: scaled.width, height: scaled.height };
   }
+}
+
+/** The fleet view's thumbnail quality. */
+export const THUMBNAIL_JPEG_QUALITY = 60;
+
+/** A PNG (or a JPEG passed through) as a JPEG at most `width` px wide (integer-factor box downscale; never upscaled). */
+export function thumbnailJpeg(image: Buffer, width: number): Buffer {
+  if (image[0] === 0xff && image[1] === 0xd8) return image;
+  const decoded = decodePng(image);
+  const factor = Math.max(1, Math.ceil(decoded.width / Math.max(1, width)));
+  return encodeJpeg(downscale(decoded, factor), THUMBNAIL_JPEG_QUALITY);
 }
 
 // ---------------------------------------------------------------------------
