@@ -13,7 +13,7 @@ import type { DeviceProfile } from "@orquester/api";
 
 import type { DeviceHostProgress } from "../host.ts";
 import { avdName } from "./avd-config.ts";
-import { type EmulatorLaunch, findQemuPid, type KvmMode, serialOf, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
+import { type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
 import { type ExecFn, lastLine } from "./exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
 import { delay, isProcessAlive } from "./procs.ts";
@@ -57,11 +57,13 @@ export interface GoldenDeps {
   /** A console/gRPC port pair reserved for this boot; `release` frees it. */
   reservePorts(): Promise<{ consolePort: number; grpcPort: number; release(): void }>;
   /** Record the running golden boot (orphan reaping after a crash), and forget it. */
-  track(record: { serial: string; pid: number; pgid: number; consolePort: number; grpcPort: number; logPath: string }): Promise<void>;
+  track(record: { serial: string; pid: number; pgid: number; consolePort: number; grpcPort: number; logPath: string; startTicks?: number }): Promise<void>;
   untrack(serial: string): Promise<void>;
   /** agent-device's helper APKs to pre-install (best effort; paths where the emulator runs). */
   helperApks: readonly string[];
   logger: Pick<Console, "info" | "warn" | "error">;
+  /** This host's process marker: only processes carrying it are ever signalled. */
+  marker: ProcessMarker;
   /** Where it runs (absent: this machine). */
   executor?: DeviceExecutor;
   /** The GPU mode to boot and snapshot with (absent: the emulator module's default). */
@@ -128,6 +130,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
   let pid: number | null = null;
   let pgid: number | null = null;
   let saved = false;
+  let startTicks: number | null = null;
   const started = Date.now();
   try {
     report("Cold-booting the emulator", 5);
@@ -141,7 +144,8 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
       }
     }
     if (pid === null) throw new Error(`the emulator did not start (see ${logPath})`);
-    await deps.track({ serial, pid, pgid, consolePort: ports.consolePort, grpcPort: ports.grpcPort, logPath });
+    startTicks = (await x.procStat(pid))?.startTicks ?? null;
+    await deps.track({ serial, pid, pgid, consolePort: ports.consolePort, grpcPort: ports.grpcPort, logPath, ...(startTicks !== null ? { startTicks } : {}) });
     const qemu = pid;
     await waitForBootCompleted({ exec: deps.exec, adb, env: deps.env, serial, alive: () => isProcessAlive(qemu, x), signal, timeoutMs: deps.bootTimeoutMs ?? 10 * 60_000 });
     deps.logger.info(`[devices] golden ${profile.id}: booted in ${Math.round((Date.now() - started) / 1000)} s`);
@@ -173,7 +177,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
       const save = await deps.exec(adb, ["-s", serial, "emu", "avd", "snapshot", "save", deps.snapshotName], { env: deps.env, signal, timeoutMs: 180_000 });
       if (save.exitCode !== 0 || /KO/.test(save.stdout)) throw new Error(`saving the ${deps.snapshotName} snapshot failed: ${lastLine(save) || `exit ${save.exitCode}`}`);
     }
-    const how = await stopEmulator({ exec: deps.exec, adb, env: deps.env, serial, pid: qemu, pgid, graceMs: 180_000, executor: x });
+    const how = await stopEmulator({ exec: deps.exec, adb, env: deps.env, serial, pid: qemu, pgid, marker: deps.marker, startTicks, graceMs: 180_000, executor: x });
     // A named snapshot is already saved: how the emulator stopped does not matter.
     if ((!deps.snapshotName && how !== "emu-kill") || !(await x.exists(goldenSnapshotFile(deps.avdHome, profile.id, deps.snapshotName)))) {
       throw new Error(`the snapshot was not saved (the emulator stopped by ${how}; see ${logPath})`);
@@ -181,8 +185,8 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
     deps.logger.info(`[devices] golden ${profile.id}: saved after ${Math.round((Date.now() - started) / 1000)} s in total`);
     saved = true;
   } finally {
-    if (!saved && pid !== null) await stopEmulator({ exec: deps.exec, adb, env: deps.env, serial, pid, pgid, graceMs: 5_000, executor: x }).catch(() => undefined);
-    else if (!saved && pgid !== null) await x.signal(pgid, pgid, "SIGKILL").catch(() => false);
+    if (!saved && pid !== null) await stopEmulator({ exec: deps.exec, adb, env: deps.env, serial, pid, pgid, marker: deps.marker, startTicks, graceMs: 5_000, executor: x }).catch(() => undefined);
+    else if (!saved && pgid !== null) await signalLauncher(x, pgid, deps.marker, "SIGKILL").catch(() => false);
     await deps.untrack(serial).catch(() => undefined);
     ports.release();
   }

@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 import type { ExecFn } from "./exec.ts";
 import { type DeviceExecutor, isLocalPortFree, LOCAL_EXECUTOR, pickLocalFreePort } from "./executor.ts";
-import { delay, descendantsOf, isProcessAlive, waitForExit } from "./procs.ts";
+import { delay, descendantsOf, type ProcStat } from "./procs.ts";
 
 /** The GPU mode every AVD is configured, snapshotted and booted with (spikes §2: fastest without a GPU). */
 export const EMULATOR_GPU_MODE = "swangle_indirect";
@@ -174,6 +174,31 @@ export async function waitForBootCompleted(deps: BootWaitDeps): Promise<void> {
   }
 }
 
+/** What marks a process as one of this host's: `KEY=value` in its environment (`env.ts` `appdirMarker`). */
+export interface ProcessMarker {
+  key: string;
+  value: string;
+}
+
+/**
+ * The emulator's QEMU process `pid` as this host started it, or null: alive, `qemu-system*`, its
+ * environment carries `marker`, and (when recorded) it started at `startTicks`. A pid that fails
+ * any of these may have been reused by another process: it is never signalled.
+ */
+export async function verifyEmulator(
+  executor: Pick<DeviceExecutor, "procStat" | "environ">,
+  pid: number,
+  marker: ProcessMarker,
+  startTicks?: number | null
+): Promise<ProcStat | null> {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const stat = await executor.procStat(pid);
+  if (!stat || stat.state === "Z" || stat.state === "X" || !stat.comm.startsWith("qemu-system")) return null;
+  if (startTicks !== undefined && startTicks !== null && stat.startTicks !== startTicks) return null;
+  const env = await executor.environ(pid);
+  return env?.get(marker.key) === marker.value ? stat : null;
+}
+
 export interface StopEmulatorDeps {
   exec: ExecFn;
   adb: string;
@@ -181,28 +206,65 @@ export interface StopEmulatorDeps {
   serial: string;
   pid: number;
   pgid: number | null;
+  /** This host's marker: only a process carrying it is signalled. */
+  marker: ProcessMarker;
+  /** The recorded start time of `pid` (absent: an older record, checked by marker and name only). */
+  startTicks?: number | null;
   /** How long `emu kill` may take (a golden boot saves its snapshot then: seconds). */
   graceMs?: number;
   /** Where it runs (absent: this machine). */
   executor?: DeviceExecutor;
 }
 
-/** `adb emu kill` → SIGTERM → SIGKILL (to its process group). Resolves how it ended. */
+/**
+ * `adb emu kill` → SIGTERM → SIGKILL. Every signal goes only to the verified emulator
+ * ({@link verifyEmulator}, checked again before each one): its process group while the emulator is
+ * still in it, else the pid alone; the launcher's group afterwards only while a process of it still
+ * carries the marker. Resolves how it ended.
+ */
 export async function stopEmulator(deps: StopEmulatorDeps): Promise<"gone" | "emu-kill" | "sigterm" | "sigkill"> {
   const x = deps.executor ?? LOCAL_EXECUTOR;
-  // A pid that is gone is never signalled (nor its group: the ids may be reused by now).
-  if (!(await isProcessAlive(deps.pid, x))) return "gone";
+  const first = await verifyEmulator(x, deps.pid, deps.marker, deps.startTicks);
+  if (!first) return "gone";
+  // From here on the identity includes the start time (read now for an older record): a pid reused later never matches.
+  const identity = deps.startTicks ?? first.startTicks ?? null;
+  const ours = () => verifyEmulator(x, deps.pid, deps.marker, identity);
+  const gone = async (ms: number): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (!(await ours())) return true;
+      await delay(200);
+    }
+    return !(await ours());
+  };
+  const signal = async (name: NodeJS.Signals): Promise<void> => {
+    const stat = await ours();
+    if (!stat) return;
+    await x.signal(deps.pgid !== null && stat.pgrp === deps.pgid ? deps.pgid : null, deps.pid, name);
+  };
   await deps.exec(deps.adb, ["-s", deps.serial, "emu", "kill"], { env: deps.env, timeoutMs: 10_000 }).catch(() => undefined);
-  if (await waitForExit(deps.pid, deps.graceMs ?? 15_000, 200, x)) return finish("emu-kill");
-  await x.signal(deps.pgid, deps.pid, "SIGTERM");
-  if (await waitForExit(deps.pid, 10_000, 200, x)) return finish("sigterm");
-  await x.signal(deps.pgid, deps.pid, "SIGKILL");
-  await waitForExit(deps.pid, 5_000, 200, x);
+  if (await gone(deps.graceMs ?? 15_000)) return finish("emu-kill");
+  await signal("SIGTERM");
+  if (await gone(10_000)) return finish("sigterm");
+  await signal("SIGKILL");
+  await gone(5_000);
   return finish("sigkill");
 
   async function finish<T>(how: T): Promise<T> {
     // The launcher (or `sg`) and any helper left in the group follow the emulator.
-    if (deps.pgid !== null && deps.pgid > 1 && deps.pgid !== deps.pid) await x.signal(deps.pgid, -1, "SIGTERM").catch(() => false);
+    if (deps.pgid !== null && deps.pgid !== deps.pid) await signalLauncher(x, deps.pgid, deps.marker, "SIGTERM").catch(() => false);
     return how;
   }
+}
+
+/**
+ * Signal a launcher's process group, only while a process of it still carries this host's marker
+ * (the group id may belong to someone else by now). False when nothing was signalled.
+ */
+export async function signalLauncher(executor: Pick<DeviceExecutor, "procStats" | "environ" | "signal">, pgid: number, marker: ProcessMarker, signal: NodeJS.Signals): Promise<boolean> {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false;
+  for (const member of (await executor.procStats()).filter((stat) => stat.pgrp === pgid)) {
+    if ((await executor.environ(member.pid).catch(() => null))?.get(marker.key) === marker.value) return executor.signal(pgid, -1, signal);
+  }
+  return false;
 }

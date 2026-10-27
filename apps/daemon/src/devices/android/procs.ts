@@ -23,6 +23,8 @@ export interface ProcStat {
   pgrp: number;
   /** utime + stime, in clock ticks. */
   cpuTicks: number;
+  /** When it started, in clock ticks after boot (field 22): a pid's identity across reuse. */
+  startTicks?: number;
 }
 
 /** `/proc/<pid>/stat` (the comm may hold spaces and parentheses: split after the last `)`). */
@@ -35,10 +37,19 @@ export function parseProcStat(text: string): ProcStat | null {
     .slice(close + 1)
     .trim()
     .split(/\s+/);
-  // rest[0] = state (field 3), rest[1] = ppid (4), rest[2] = pgrp (5), rest[11] = utime (14), rest[12] = stime (15)
+  // rest[0] = state (field 3), rest[1] = ppid (4), rest[2] = pgrp (5), rest[11] = utime (14), rest[12] = stime (15), rest[19] = starttime (22)
   const nums = [rest[1], rest[2], rest[11], rest[12]].map(Number);
   if (!Number.isInteger(pid) || rest.length < 13 || nums.some((n) => !Number.isFinite(n))) return null;
-  return { pid, comm: text.slice(open + 1, close), state: rest[0]!, ppid: nums[0]!, pgrp: nums[1]!, cpuTicks: nums[2]! + nums[3]! };
+  const start = Number(rest[19]);
+  return {
+    pid,
+    comm: text.slice(open + 1, close),
+    state: rest[0]!,
+    ppid: nums[0]!,
+    pgrp: nums[1]!,
+    cpuTicks: nums[2]! + nums[3]!,
+    ...(rest.length >= 20 && Number.isInteger(start) && start >= 0 ? { startTicks: start } : {})
+  };
 }
 
 export async function readProcStat(pid: number): Promise<ProcStat | null> {

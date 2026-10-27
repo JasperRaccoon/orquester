@@ -51,11 +51,14 @@ import {
   type KvmMode,
   serialOf,
   spawnEmulator,
+  signalLauncher,
   stopEmulator,
+  verifyEmulator,
   waitForBootCompleted
 } from "../android/emulator.ts";
 import { appdirMarker } from "../android/env.ts";
 import { execFile, type ExecFn, lastLine } from "../android/exec.ts";
+import { LOCAL_EXECUTOR } from "../android/executor.ts";
 import { createGoldenSnapshot, LEASE_BOOT_SCRIPT } from "../android/golden.ts";
 import { HUB_LAUNCHER, HubSupervisor } from "../android/hub.ts";
 import { delay, isProcessAlive, listProcStats, processMatches, readMemAvailable, signalGroup, waitForExit } from "../android/procs.ts";
@@ -221,7 +224,7 @@ export class LocalAndroidHost implements DeviceHost {
     const state = await readHostState(this.layout.stateFile);
     this.stateExtra = state.extra;
     const ours = new Set<number>();
-    for (const emulator of state.emulators) if (await processMatches(emulator.pid, this.marker)) ours.add(emulator.pid);
+    for (const emulator of state.emulators) if (await verifyEmulator(LOCAL_EXECUTOR, emulator.pid, this.marker, emulator.startTicks)) ours.add(emulator.pid);
     if (state.hub && (await processMatches(state.hub.pid, this.marker, [HUB_LAUNCHER]))) ours.add(state.hub.pid);
     const live = new Set(this.ctx.activeLeases(this.id).map((lease) => lease.id));
     const plan = planReattach(state, ours, live);
@@ -508,6 +511,7 @@ export class LocalAndroidHost implements DeviceHost {
             await this.persistState();
           },
           helperApks: await this.helperApks(),
+          marker: this.marker,
           logger: this.deps.logger
         },
         signal,
@@ -627,8 +631,9 @@ export class LocalAndroidHost implements DeviceHost {
       } catch (error) {
         if (signal.aborted) throw new DeviceError("CANCELLED", "The device was released before it finished starting.");
         if (error instanceof DeviceError) throw error;
+        // The details (paths, emulator output) go to the daemon log; the agent gets what to do next.
         this.deps.logger.warn(`[devices] preparing ${profile.id} failed: ${errorText(error)}`);
-        throw new DeviceError("UNAVAILABLE", `Preparing ${profile.label} for first use failed (${errorText(error)}). Try again, or ask the owner to check Settings → Devices.`);
+        throw new DeviceError("UNAVAILABLE", `Preparing ${profile.label} for first use failed. Try again; if it keeps failing, ask the owner to check Settings → Devices (the daemon log has the details).`);
       }
     }
     signal.throwIfAborted();
@@ -652,10 +657,12 @@ export class LocalAndroidHost implements DeviceHost {
         }
       }
       if (pid === null) throw new Error(`the emulator exited at start: ${await this.logTail(logPath)}`);
+      const startTicks = (await LOCAL_EXECUTOR.procStat(pid))?.startTicks;
       record = {
         serial,
         pid,
         pgid,
+        ...(startTicks !== undefined ? { startTicks } : {}),
         consolePort: ports.consolePort,
         grpcPort: ports.grpcPort,
         profile: profile.id,
@@ -684,13 +691,14 @@ export class LocalAndroidHost implements DeviceHost {
     } catch (error) {
       ports.release();
       if (record) await this.stopRecord(record).catch(() => undefined);
-      else if (pgid !== null) signalGroup(pgid, pgid, "SIGKILL");
+      else if (pgid !== null) await signalLauncher(LOCAL_EXECUTOR, pgid, this.marker, "SIGKILL").catch(() => false);
       this.changed();
       if (signal.aborted) throw new DeviceError("CANCELLED", "The device was released before it finished starting.");
       if (error instanceof DeviceError) throw error;
+      // The details (the log path, emulator output) go to the daemon log only.
       const reason = error instanceof Error ? error.message : String(error);
-      this.deps.logger.warn(`[devices] ${profile.id} on ${serial} did not boot: ${reason}`);
-      throw new DeviceError("UNAVAILABLE", `${profile.label} did not start (${reason}). See ${logPath}.`);
+      this.deps.logger.warn(`[devices] ${profile.id} on ${serial} did not boot: ${reason} (log: ${logPath})`);
+      throw new DeviceError("UNAVAILABLE", bootFailedMessage(profile.label));
     }
     return this.bootResult(record);
   }
@@ -732,7 +740,16 @@ export class LocalAndroidHost implements DeviceHost {
   }
 
   private async stopRecord(record: EmulatorRecord): Promise<void> {
-    const how = await stopEmulator({ exec: this.exec, adb: join(this.layout.sdk, "platform-tools", "adb"), env: this.env, serial: record.serial, pid: record.pid, pgid: record.pgid });
+    const how = await stopEmulator({
+      exec: this.exec,
+      adb: join(this.layout.sdk, "platform-tools", "adb"),
+      env: this.env,
+      serial: record.serial,
+      pid: record.pid,
+      pgid: record.pgid,
+      marker: this.marker,
+      startTicks: record.startTicks ?? null
+    });
     if (how === "sigkill") this.deps.logger.warn(`[devices] ${record.serial} needed SIGKILL to stop`);
     if (this.emulators.get(record.serial) === record) this.emulators.delete(record.serial);
     if (this.viewers.delete(record.serial)) this.hub.setViewers([...this.viewers.values()].reduce((sum, n) => sum + n, 0));
@@ -840,6 +857,11 @@ export class LocalAndroidHost implements DeviceHost {
       if (info && now - info.mtimeMs > UPLOAD_MAX_AGE_MS) await rm(join(this.layout.uploads, entry), { recursive: true, force: true });
     }
   }
+}
+
+/** What an agent or the panel reads when an emulator did not boot (no host paths or emulator output). */
+export function bootFailedMessage(label: string): string {
+  return `${label} did not start. Try opening it again; if it keeps failing, ask the owner to check Settings → Devices (the daemon log has the details).`;
 }
 
 function errorText(error: unknown): string {

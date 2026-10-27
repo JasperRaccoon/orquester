@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { allocateEmulatorPorts, consolePortCandidates, consolePortOf, emulatorArgs, grpcPortFor, kvmCommand, serialOf, shellQuote } from "./emulator.ts";
+import { allocateEmulatorPorts, consolePortCandidates, consolePortOf, emulatorArgs, grpcPortFor, kvmCommand, serialOf, shellQuote, signalLauncher, stopEmulator } from "./emulator.ts";
+import type { ExecFn } from "./exec.ts";
+import type { DeviceExecutor } from "./executor.ts";
 
 test("flags: a lease boots read-only from the snapshot without saving; a golden boot is cold and writable", () => {
   const lease = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570 });
@@ -73,4 +75,60 @@ test("flags: a box lease boots its named snapshot with the snapshot's GPU mode, 
   const golden = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5554, grpcPort: 8554, golden: true, snapshot: "orq-golden" });
   assert.equal(golden.includes("-read-only"), false);
   assert.deepEqual(golden.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+});
+
+/** A fake machine: process table, environments, and every signal sent. */
+function fakeMachine(procs: { pid: number; comm: string; pgrp: number; startTicks: number; env: Record<string, string> }[]) {
+  const signals: string[] = [];
+  const table = new Map(procs.map((proc) => [proc.pid, proc]));
+  const executor = {
+    procStat: async (pid: number) => {
+      const proc = table.get(pid);
+      return proc ? { pid, comm: proc.comm, state: "S", ppid: 1, pgrp: proc.pgrp, cpuTicks: 0, startTicks: proc.startTicks } : null;
+    },
+    procStats: async () => [...table.values()].map((proc) => ({ pid: proc.pid, comm: proc.comm, state: "S", ppid: 1, pgrp: proc.pgrp, cpuTicks: 0, startTicks: proc.startTicks })),
+    environ: async (pid: number) => (table.has(pid) ? new Map(Object.entries(table.get(pid)!.env)) : null),
+    signal: async (pgid: number | null, pid: number, signal: NodeJS.Signals) => {
+      signals.push(`${signal} ${pgid ?? "-"} ${pid}`);
+      // The emulator dies on any signal to it or its group.
+      for (const proc of [...table.values()]) if (proc.pid === pid || (pgid !== null && proc.pgrp === pgid)) table.delete(proc.pid);
+      return true;
+    }
+  } as unknown as DeviceExecutor;
+  return { executor, signals, table };
+}
+
+test("stop: a reused pid (another program, another appdir, or a later start) is never signalled", async () => {
+  const marker = { key: "ANDROID_AVD_HOME", value: "/app/avd" };
+  const ours = { key: "ANDROID_AVD_HOME", value: "/app/avd" };
+  const execs: string[][] = [];
+  const exec: ExecFn = async (_command, args) => (execs.push([...args]), { exitCode: 0, stdout: "", stderr: "" });
+  const base = { exec, adb: "adb", env: {}, serial: "emulator-5586", pid: 4242, pgid: 4240, marker, graceMs: 50 };
+  for (const proc of [
+    { pid: 4242, comm: "bash", pgrp: 4240, startTicks: 100, env: { [ours.key]: ours.value } },
+    { pid: 4242, comm: "qemu-system-x86", pgrp: 4240, startTicks: 100, env: { [ours.key]: "/other/avd" } },
+    { pid: 4242, comm: "qemu-system-x86", pgrp: 4240, startTicks: 999, env: { [ours.key]: ours.value } }
+  ]) {
+    const machine = fakeMachine([proc]);
+    assert.equal(await stopEmulator({ ...base, startTicks: 100, executor: machine.executor }), "gone");
+    assert.deepEqual(machine.signals, []);
+  }
+  assert.deepEqual(execs, [], "not even adb emu kill");
+});
+
+test("stop: our emulator gets emu kill, then SIGTERM to its group; the launcher's group only while it carries the marker", async () => {
+  const marker = { key: "ANDROID_AVD_HOME", value: "/app/avd" };
+  const env = { [marker.key]: marker.value };
+  const machine = fakeMachine([
+    { pid: 4242, comm: "qemu-system-x86", pgrp: 4240, startTicks: 100, env },
+    { pid: 4240, comm: "sg", pgrp: 4240, startTicks: 90, env }
+  ]);
+  const exec: ExecFn = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  const how = await stopEmulator({ exec, adb: "adb", env: {}, serial: "emulator-5586", pid: 4242, pgid: 4240, marker, startTicks: 100, graceMs: 50, executor: machine.executor });
+  assert.equal(how, "sigterm");
+  assert.deepEqual(machine.signals, ["SIGTERM 4240 4242"]);
+  // A launcher group now held by a foreign process is left alone.
+  const foreign = fakeMachine([{ pid: 4300, comm: "vim", pgrp: 4240, startTicks: 5, env: {} }]);
+  assert.equal(await signalLauncher(foreign.executor, 4240, marker, "SIGKILL"), false);
+  assert.deepEqual(foreign.signals, []);
 });
