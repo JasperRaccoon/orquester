@@ -5,8 +5,9 @@
  * (`http-routes.ts`, `ws-routes.ts`) authenticate, find the host, its loopback hub origin and
  * token, and hand the request here with the hub path. This module owns:
  *
- * - the allowlists: only the paths the Device panel uses (device list, serve-sim helper streams
- *   and input socket, serve-sim grid start and screenshot, serve-emu socket, screenshot and fold);
+ * - the allowlists: only the paths the Device panel uses (device list, serve-sim helper streams,
+ *   input socket and screenshot, serve-emu socket, screenshot and fold); serve-sim's grid start is
+ *   the box host's own call (`hosts/box/host.ts`), never a client's;
  *   everything else 404, a method off the path's list 405;
  * - the device check: a `?device=` (or a helper path's UDID) must name a device leased on the host;
  * - headers: only an allowlist goes upstream (no cookie, authorization, dpop, forwarding or
@@ -88,8 +89,8 @@ const READ = ["GET", "HEAD"] as const;
 export const HUB_HTTP_ROUTES: readonly HttpRoute[] = [
   { pattern: /^\/api\/devices$/, methods: READ, device: "none" },
   { pattern: /^\/vendor\/serve-sim\/helper\/([^/]+)\/(?:stream\.mjpeg|stream\.avcc)$/, methods: READ, device: "path", stream: true },
-  { pattern: /^\/vendor\/serve-sim\/grid\/api\/start$/, methods: ["POST"], device: "none" },
-  { pattern: /^\/vendor\/serve-sim\/api\/screenshot$/, methods: ["POST"], device: "none" },
+  // serve-sim screenshots the first booted simulator when `device` is missing: always name a leased one.
+  { pattern: /^\/vendor\/serve-sim\/api\/screenshot$/, methods: ["POST"], device: "query" },
   // serve-emu answers its screenshot to POST only (the panel's poll for browsers without WebCodecs).
   { pattern: /^\/vendor\/serve-emu\/api\/screenshot$/, methods: [...READ, "POST"], device: "query" },
   { pattern: /^\/vendor\/serve-emu\/api\/fold$/, methods: [...READ, "POST"], device: "query", input: true }

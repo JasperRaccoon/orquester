@@ -694,15 +694,22 @@ const LEASES = "/api/devices/leases";
 export const DEVICE_HUB_ROUTE_PATTERN = `${HOSTS}/:hostId/hub/*`;
 /** A kept screenshot's route. */
 export const DEVICE_SCREENSHOT_ROUTE_PATTERN = `${LEASES}/:leaseId/screenshots/:screenshotId`;
-/**
- * Routes that also accept the bearer as `?token=` (an `<img>`, a media element or a fetch the
- * browser starts cannot send a header); the daemon redacts it from logs and never forwards it.
- */
 /** A lease's downscaled JPEG thumbnail (the fleet view's ~1 fps cards). */
 export const DEVICE_THUMBNAIL_ROUTE_PATTERN = `${LEASES}/:leaseId/thumbnail`;
 /** Thumbnail widths (`?w=`): default, and the allowed range (px; never upscaled). */
 export const DEVICE_THUMBNAIL_WIDTH = { default: 320, min: 64, max: 720 } as const;
-export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
+/**
+ * The image routes that also accept the bearer as `?token=` on GET/HEAD (an `<img>` cannot send a
+ * header); the daemon redacts it from logs and never forwards it. Everything the app fetches
+ * itself (hub streams, screenshots, fold, input) sends `Authorization`; WebSockets check their own
+ * `?token=` after the upgrade (`ws-routes.ts`).
+ */
+export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
+
+/** Whether a request may authenticate with `?token=`: a GET/HEAD of a {@link DEVICE_QUERY_TOKEN_ROUTES} route. */
+export function deviceQueryTokenAllowed(method: string, routePath: string | undefined): boolean {
+  return (method === "GET" || method === "HEAD") && routePath !== undefined && DEVICE_QUERY_TOKEN_ROUTES.includes(routePath);
+}
 
 /**
  * Every devices route, on both transports (bearer on HTTP). Hub streams need HTTP: the desktop

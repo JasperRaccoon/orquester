@@ -91,7 +91,7 @@ import {
   BROWSER_FRAME_TYPE_JPEG,
   DESKTOP_CHANNEL,
   DESKTOP_WS_PREFIXES,
-  DEVICE_QUERY_TOKEN_ROUTES,
+  deviceQueryTokenAllowed,
   DEVICE_WS_PREFIXES,
   MAX_INITIAL_COMMAND,
   SECRET_REQUEST_EVENT_TYPE,
@@ -2263,9 +2263,9 @@ export function createServer(
     // above. Only a live session or API token
     // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    // Devices: the hub proxy's media and a kept screenshot load from `<img>`/`<video>` the same way
-    // (matched route patterns only, never a prefix).
-    const queryTokenRoute = url === "/api/fs/download" || (routePath !== undefined && DEVICE_QUERY_TOKEN_ROUTES.includes(routePath));
+    // Devices: a kept screenshot and a lease thumbnail load from `<img>` the same way (GET/HEAD of
+    // matched route patterns only, never a prefix; the hub proxy and every POST need the header).
+    const queryTokenRoute = url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
