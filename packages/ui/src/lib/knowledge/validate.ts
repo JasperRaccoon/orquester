@@ -206,10 +206,13 @@ function unitSimilarity(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
 }
 
-/** A similarity-cluster reference (`{ label, size }`); null when it is not an object. */
+/**
+ * A similarity-cluster reference (`{ label, size }`); null when it is not an object or its size is
+ * not a whole number of one or more (no cluster to name: "a cluster of 0 entries").
+ */
 export function parseKnowledgeClusterRef(value: unknown): { label: string | null; size: number } | null {
-  if (!isRecord(value)) return null;
-  return { label: typeof value.label === "string" && value.label.trim() !== "" ? value.label : null, size: count(value.size) };
+  if (!isRecord(value) || typeof value.size !== "number" || !Number.isInteger(value.size) || value.size < 1) return null;
+  return { label: typeof value.label === "string" && value.label.trim() !== "" ? value.label : null, size: value.size };
 }
 
 function parseAttributes(value: unknown): KnowledgeConcept["attributes"] {
@@ -402,6 +405,8 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
     const seen = new Set<string>([concept.id]);
     detail.similarConcepts = similar.filter((item) => !seen.has(item.concept.id) && (seen.add(item.concept.id), true));
   }
+  // Every visible entry id (newest first), where `entries` holds the newest 50 in full.
+  if (Array.isArray(value.entryIds)) detail.entryIds = [...new Set(strings(value.entryIds).filter((id) => id !== ""))];
   return detail;
 }
 

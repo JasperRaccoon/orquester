@@ -82,9 +82,15 @@ describe("phase 2 wire validation", () => {
       const read = parseKnowledgeItemResponse(entryItem({ novelty: { newConcepts: [ref("t-a"), 7, ref("t-a")], cluster: { label: "Paywalls", size: 12 } } }));
       assert.ok(read?.kind === "entry");
       assert.deepEqual(read.entry.novelty, { newConcepts: [ref("t-a")], cluster: { label: "Paywalls", size: 12 } });
-      const repaired = parseKnowledgeItemResponse(entryItem({ novelty: { newConcepts: "x", cluster: { label: " ", size: -3 } } }));
+      const repaired = parseKnowledgeItemResponse(entryItem({ novelty: { newConcepts: "x", cluster: { label: " ", size: 3 } } }));
       assert.ok(repaired?.kind === "entry");
-      assert.deepEqual(repaired.entry.novelty, { newConcepts: [], cluster: { label: null, size: 0 } });
+      assert.deepEqual(repaired.entry.novelty, { newConcepts: [], cluster: { label: null, size: 3 } });
+      // A cluster without a whole size of one or more is no cluster ("a cluster of 0 entries").
+      for (const size of [-3, 0, 2.5, Number.NaN, "12", undefined]) {
+        const odd = parseKnowledgeItemResponse(entryItem({ novelty: { newConcepts: [], cluster: { label: "Paywalls", size } } }));
+        assert.ok(odd?.kind === "entry");
+        assert.equal(odd.entry.novelty?.cluster, null, `size ${String(size)}`);
+      }
       const noCluster = parseKnowledgeItemResponse(entryItem({ novelty: { newConcepts: [], cluster: "big" } }));
       assert.ok(noCluster?.kind === "entry");
       assert.deepEqual(noCluster.entry.novelty, { newConcepts: [], cluster: null });
@@ -114,6 +120,16 @@ describe("phase 2 wire validation", () => {
         { concept: ref("t-near"), similarity: 0.83 },
         { concept: ref("t-far"), similarity: 1 }
       ]);
+    });
+
+    it("reads every visible entry id of a concept, each once, absent from an older daemon", () => {
+      const older = parseKnowledgeItemResponse(conceptItem({}));
+      assert.ok(older?.kind === "concept" && !("entryIds" in older.concept));
+      const read = parseKnowledgeItemResponse(conceptItem({ entryIds: ["ke_b", "ke_a", 7, "", null, "ke_b", "ke_c"] }));
+      assert.ok(read?.kind === "concept");
+      assert.deepEqual(read.concept.entryIds, ["ke_b", "ke_a", "ke_c"], "in the daemon's order (newest first)");
+      const broken = parseKnowledgeItemResponse(conceptItem({ entryIds: "ke_a" }));
+      assert.ok(broken?.kind === "concept" && !("entryIds" in broken.concept), "not a list: as from an older daemon");
     });
   });
 
@@ -190,17 +206,27 @@ describe("phase 2 wire validation", () => {
           { a: A, source: "graph" },
           { a: A, b: B, similarity: "close", source: "new-kind", pairs: "x", note: "  " }
         ],
-        bridges: [{ entry: { title: "no id" } }, { entry: B, clusters: [{ label: 5, size: 2 }, "x"], concepts: [ref("t-a"), ref("t-a")] }],
-        singleSource: [{ concept: ref("r-1") }, { concept: ref("r-1"), entry: A, cluster: "x" }],
+        bridges: [
+          { entry: { title: "no id" } },
+          { entry: B, clusters: [{ label: 5, size: 2 }, "x", { label: "Empty", size: 0 }, { label: "Half", size: 1.5 }, { label: "None" }], concepts: [ref("t-a"), ref("t-a")] }
+        ],
+        singleSource: [
+          { concept: ref("r-1") },
+          { concept: ref("r-1"), entry: A, cluster: "x" },
+          { concept: ref("r-2"), entry: A, cluster: { label: "Negative", size: -4 } }
+        ],
         gaps: [{ a: A, b: B }, { a: A, b: B, similarity: 0.9, queued: "yes" }],
         totals: { contradictions: "many", bridges: 0, singleSource: -1 }
       });
       assert.ok(parsed);
       assert.deepEqual(parsed.contradictions, [{ a: A, b: B, similarity: null, source: "graph", pairs: [], note: null }]);
       assert.deepEqual(parsed.bridges, [{ entry: B, clusters: [{ label: null, size: 2 }], concepts: [ref("t-a")] }]);
-      assert.deepEqual(parsed.singleSource, [{ concept: ref("r-1"), entry: A, cluster: null }]);
+      assert.deepEqual(parsed.singleSource, [
+        { concept: ref("r-1"), entry: A, cluster: null },
+        { concept: ref("r-2"), entry: A, cluster: null }
+      ]);
       assert.deepEqual(parsed.gaps, [{ a: A, b: B, similarity: 0.9, queued: false }], "a gap needs its similarity");
-      assert.deepEqual(parsed.totals, { contradictions: 1, bridges: 1, singleSource: 1, gaps: 1 });
+      assert.deepEqual(parsed.totals, { contradictions: 1, bridges: 1, singleSource: 2, gaps: 1 });
     });
 
     it("reads a missing list as empty, and refuses a broken envelope", () => {

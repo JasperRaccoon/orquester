@@ -57,38 +57,15 @@ export function reasonTitle(reason: KnowledgeRelatedReason): string | undefined 
   return undefined;
 }
 
-function sharedConcepts(item: KnowledgeSimilarEntry): number {
-  const reason = item.reasons.find((r) => r.kind === "concepts");
-  return reason?.kind === "concepts" ? reason.shared : 0;
-}
-
-function time(iso: string): number {
-  const at = Date.parse(iso);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-
-/** The spec's order: similarity desc (none last), shared concepts desc, saved desc, then id. */
-function compareSimilar(a: KnowledgeSimilarEntry, b: KnowledgeSimilarEntry): number {
-  if (a.similarity !== b.similarity) {
-    if (a.similarity === null) return 1;
-    if (b.similarity === null) return -1;
-    return b.similarity - a.similarity;
-  }
-  const shared = sharedConcepts(b) - sharedConcepts(a);
-  if (shared !== 0) return shared;
-  const saved = time(b.entry.savedAt) - time(a.entry.savedAt);
-  if (saved !== 0 && !Number.isNaN(saved)) return saved;
-  return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;
-}
-
 interface SimilarSection {
   items: KnowledgeSimilarEntry[];
 }
 
 /**
- * What the "Similar" section lists: the daemon's `similar` (each entry once, never the entry
- * itself, reasons meaning first, in the spec's order, at most {@link SIMILAR_MAX}); from a daemon
- * without it, the concept-related entries, as they came.
+ * What the "Similar" section lists: the daemon's `similar` in the daemon's order (its hybrid ranking
+ * of meaning, shared concepts and more, which the UI cannot rebuild: each entry once, never the entry
+ * itself, reasons meaning first, at most {@link SIMILAR_MAX}); from a daemon without it, the
+ * concept-related entries, as they came (that daemon's own order).
  */
 export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "related" | "similar">): SimilarSection {
   const self = detail.entry.id;
@@ -103,9 +80,8 @@ export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "rel
   }
   const items = detail.similar
     .filter((item) => once(item.entry.id))
-    .map((item) => ({ ...item, reasons: [...item.reasons].sort((a, b) => REASON_ORDER[a.kind] - REASON_ORDER[b.kind]) }))
-    .sort(compareSimilar)
-    .slice(0, SIMILAR_MAX);
+    .slice(0, SIMILAR_MAX)
+    .map((item) => ({ ...item, reasons: [...item.reasons].sort((a, b) => REASON_ORDER[a.kind] - REASON_ORDER[b.kind]) }));
   return { items };
 }
 
@@ -153,16 +129,16 @@ export function clusterText(cluster: { label: string | null; size: number }): st
 // ---------------------------------------------------------------------------
 
 /**
- * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it, else the only
- * one kept into it (a merge list that names its concepts differently); null when none is in effect.
+ * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it; null when none
+ * is in effect. Never another merge into it: a stale panel would undo the wrong one, and the daemon
+ * then keeps that one from merging again for good.
  */
 export function findConceptMerge<M extends Pick<KnowledgeConceptMerge, "id" | "into" | "merged">>(
   merges: readonly M[],
   intoId: string,
   mergedId: string
 ): M | null {
-  const into = merges.filter((m) => m.into.id === intoId);
-  return into.find((m) => m.merged.some((c) => c.id === mergedId)) ?? (into.length === 1 ? into[0]! : null);
+  return merges.find((m) => m.into.id === intoId && m.merged.some((c) => c.id === mergedId)) ?? null;
 }
 
 /** The undo confirmation's text. */

@@ -31,20 +31,21 @@ function detail(overrides: Partial<KnowledgeEntryDetail> = {}): KnowledgeEntryDe
 }
 
 describe("the similar section", () => {
-  it("orders by similarity (none last), then shared concepts, then newest, then id; meaning first in each", () => {
+  it("keeps the daemon's ranking (its hybrid of meaning, shared concepts and more), meaning first in each item's reasons", () => {
     const concepts = (shared: number) => ({ kind: "concepts" as const, concepts: [], shared });
+    // Ranked by the daemon: a strongly shared entry with no similarity may rank above closer ones.
     const items = [
-      similar("ke_bbbbbbbbbbb1", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-01T00:00:00Z" }),
-      similar("ke_bbbbbbbbbbb2", { similarity: 0.8, reasons: [{ kind: "author", value: "x" }, { kind: "meaning", similarity: 0.8 }] }),
-      similar("ke_bbbbbbbbbbb3", { similarity: 0.95, reasons: [{ kind: "meaning", similarity: 0.95 }] }),
       similar("ke_bbbbbbbbbbb4", { similarity: null, reasons: [concepts(3)] }),
-      similar("ke_bbbbbbbbbbb5", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" }),
-      similar("ke_bbbbbbbbbbb6", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" })
+      similar("ke_bbbbbbbbbbb2", { similarity: 0.8, reasons: [{ kind: "author", value: "x" }, { kind: "meaning", similarity: 0.8 }] }),
+      similar("ke_bbbbbbbbbbb1", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-01T00:00:00Z" }),
+      similar("ke_bbbbbbbbbbb3", { similarity: 0.95, reasons: [{ kind: "meaning", similarity: 0.95 }] }),
+      similar("ke_bbbbbbbbbbb6", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" }),
+      similar("ke_bbbbbbbbbbb5", { similarity: null, reasons: [concepts(1)] }, { savedAt: "2026-10-05T00:00:00Z" })
     ];
     const { items: ordered } = similarSection(detail({ similar: items }));
     assert.deepEqual(
       ordered.map((i) => i.entry.id.slice(-1)),
-      ["3", "2", "4", "5", "6", "1"]
+      ["4", "2", "1", "3", "6", "5"]
     );
     assert.deepEqual(ordered[1]!.reasons.map((r) => r.kind), ["meaning", "author"]);
   });
@@ -174,12 +175,14 @@ describe("disagreements, distinctive concepts and concept merges (phase 2)", () 
     assert.equal(clusterText({ label: null, size: 1 }), "a cluster of 1 entry");
   });
 
-  it("finds the merge that folded a concept in: the one listing it, else the only one into the concept", () => {
+  it("finds the merge that folded a concept in: only one into it that lists it", () => {
     const merge = (id: string, into: string, merged: string[]) => ({ id, into: ref(into), merged: merged.map(ref) });
     const merges = [merge("m1", "Pricing", ["Prices"]), merge("m2", "Pricing", ["Price page"]), merge("m3", "Other", ["Prices"])];
     assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Price page").id)?.id, "m2");
     assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Unknown").id), null, "two merges into it, neither lists it");
-    assert.equal(findConceptMerge([merge("m1", "Pricing", [])], ref("Pricing").id, ref("Renamed").id)?.id, "m1", "the only one into it");
+    // A stale panel's concept: the only merge into it is another one, which must never be undone in its place.
+    assert.equal(findConceptMerge([merge("m1", "Pricing", ["Plans"])], ref("Pricing").id, ref("Prices").id), null, "the only one into it lists another");
+    assert.equal(findConceptMerge([merge("m1", "Pricing", [])], ref("Pricing").id, ref("Renamed").id), null, "the only one into it lists none");
     assert.equal(findConceptMerge(merges, ref("Gone").id, ref("Prices").id), null);
     assert.match(undoMergeMessage({ name: "Pricing" }, { name: "Prices" }), /^“Prices” becomes a concept of its own again.*“Pricing”.*not merged automatically again\.$/);
   });

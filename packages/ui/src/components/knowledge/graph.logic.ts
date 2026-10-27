@@ -269,13 +269,44 @@ export function drawnEntryIds(entryIds: readonly string[], graph: Pick<Knowledge
   return [...new Set(entryIds)].filter((id) => drawn.has(id));
 }
 
+/** A concept's entries to mark on the Similarity layer ("Show its entries in Similarity"). */
+export interface ConceptMarks {
+  id: string;
+  name: string;
+  /** Each once, newest first. */
+  entryIds: readonly string[];
+  /** When `entryIds` are only the newest this many of a concept's entries (a capped list), else null (all of them). */
+  newest: number | null;
+}
+
+/** Entries a concept detail lists in full (the newest), and ids it lists at most (`entryIds`). */
+const CONCEPT_ENTRIES_MAX = 50;
+const CONCEPT_ENTRY_IDS_MAX = 2_000;
+
+/**
+ * The entries of a concept the panel has read: every visible one from `entryIds`, or from an older
+ * daemon without it the entries it details (the newest 50 at most). A list at its cap says so.
+ */
+export function conceptMarksOf(detail: {
+  concept: Pick<KnowledgeConceptRef, "id" | "name">;
+  entries: readonly { id: string }[];
+  entryIds?: readonly string[];
+}): ConceptMarks {
+  const ids = [...new Set(detail.entryIds ?? detail.entries.map((e) => e.id))];
+  const cap = detail.entryIds ? CONCEPT_ENTRY_IDS_MAX : CONCEPT_ENTRIES_MAX;
+  return { id: detail.concept.id, name: detail.concept.name, entryIds: ids, newest: ids.length >= cap ? ids.length : null };
+}
+
 /** What the Similarity layer says while a concept's entries are marked: how many of them it draws. */
-export function conceptMarksText(concept: { name: string; entryIds: readonly string[] }, drawn: number): string {
+export function conceptMarksText(concept: { name: string; entryIds: readonly string[]; newest?: number | null }, drawn: number): string {
   const total = new Set(concept.entryIds).size;
   const of = `behind “${concept.name}”`;
-  if (drawn === 0) return total === 1 ? `The entry ${of} is not drawn here.` : `None of the ${total.toLocaleString("en-US")} entries ${of} is drawn here.`;
-  if (drawn >= total) return total === 1 ? `Marked the entry ${of}.` : `Marked the ${total.toLocaleString("en-US")} entries ${of}.`;
-  return `Marked ${drawn.toLocaleString("en-US")} of the ${total.toLocaleString("en-US")} entries ${of} (the rest are not drawn).`;
+  // A capped list ("the 50 newest") never claims to be every entry.
+  const entries = concept.newest != null ? "newest entries" : "entries";
+  const count = total.toLocaleString("en-US");
+  if (drawn === 0) return total === 1 ? `The entry ${of} is not drawn here.` : `None of the ${count} ${entries} ${of} is drawn here.`;
+  if (drawn >= total) return total === 1 ? `Marked the entry ${of}.` : `Marked the ${count} ${entries} ${of}.`;
+  return `Marked ${drawn.toLocaleString("en-US")} of the ${count} ${entries} ${of} (the rest are not drawn).`;
 }
 
 /** Which entries a legend line stands for. */

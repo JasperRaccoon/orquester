@@ -48,9 +48,9 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
       <span className="min-w-0 truncate tabular-nums">{knowledgeCountsText(status)}</span>
       <span className="flex-1" />
       {relink && (
-        <span data-knowledge-relink title={relink.detail} className="inline-flex shrink-0 items-center gap-1.5 tabular-nums text-neutral-400">
-          <RefreshCw size={11} aria-hidden />
-          {relink.label}
+        <span data-knowledge-relink title={relink.detail} className="inline-flex min-w-0 items-center gap-1.5 tabular-nums text-neutral-400">
+          <RefreshCw size={11} aria-hidden className="shrink-0" />
+          <span className="min-w-0 truncate">{relink.label}</span>
         </span>
       )}
       <span
@@ -73,7 +73,8 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.round(view.progress * 100)}
-          className="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-neutral-800"
+          // On a phone (~360 px) the re-linking takes its place: the label still says linking runs.
+          className={cn("h-1 w-24 shrink-0 overflow-hidden rounded-full bg-neutral-800", relink && "max-md:hidden")}
         >
           <span className="block h-full rounded-full bg-neutral-300" style={{ width: `${Math.round(view.progress * 100)}%` }} />
         </span>
