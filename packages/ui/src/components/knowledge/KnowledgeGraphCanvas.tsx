@@ -1,5 +1,5 @@
 // The Knowledge view's graph canvas: Cytoscape (bundled, canvas renderer), laid
-// out with fCoSE in a worker (`graph-layout.worker.ts`). Loaded with the first
+// out by a force simulation in a worker (`graph-layout.worker.ts`). Loaded with the first
 // graph the Knowledge view shows, so neither library is in the app's main bundle.
 
 import React, { useEffect, useRef, useState } from "react";
@@ -11,7 +11,7 @@ import { IconButton } from "../ui";
 import { cn } from "../../lib/cn";
 import type { CanvasNode } from "./graph.logic";
 import { knowledgeColorProperty } from "./knowledge.logic";
-import { DeferredFit, FIT_PADDING, Layouts, type LayoutWorkerLike } from "./graph-layout";
+import { DeferredFit, FIT_PADDING, Layouts, seedPositions, warmStart, type LayoutWorkerLike } from "./graph-layout";
 import LayoutWorker from "./graph-layout.worker.ts?worker";
 
 export interface KnowledgeGraphCanvasProps {
@@ -138,6 +138,8 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const layoutsRef = useRef<Layouts | null>(null);
+  /** Where the last finished layout (and any drag since) put each concept: the next one starts there. */
+  const placedRef = useRef(new Map<string, { x: number; y: number }>());
   const fitRef = useRef(new DeferredFit());
   const [arranging, setArranging] = useState(false);
   const [layoutError, setLayoutError] = useState<string | null>(null);
@@ -168,6 +170,9 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
     });
     cy.on("mouseover", "node", (event) => event.target.addClass("hover"));
     cy.on("mouseout", "node", (event) => event.target.removeClass("hover"));
+    cy.on("dragfree", "node", (event) => {
+      if (placedRef.current.has(event.target.id())) placedRef.current.set(event.target.id(), { ...event.target.position() });
+    });
 
     // Theme changes (light/dark, scheme) restyle in place.
     const observer = new MutationObserver(() => {
@@ -228,10 +233,21 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       return;
     }
     topologyRef.current = key;
+    const request = { nodes: nodes.map((n) => ({ id: n.id, size: n.size })), edges: edges.map((e) => ({ source: e.from, target: e.to })) };
+    // The same graph grown (entries being linked): start from where it is, keep the viewport, and
+    // show it meanwhile, new concepts beside their neighbours. Another graph is laid out afresh.
+    const initial = warmStart(request.nodes.map((n) => n.id), placedRef.current);
+    if (!initial) placedRef.current = new Map();
+    const seeds = initial ? seedPositions(request.nodes, request.edges, initial) : null;
     cy.batch(() => {
       cy.elements().remove();
       cy.add(elementsOf(nodes, edges, palette));
-      for (const node of nodes) cy.getElementById(node.id).scratch("_kgColors", node.colors);
+      for (const node of nodes) {
+        const element = cy.getElementById(node.id);
+        element.scratch("_kgColors", node.colors);
+        const at = seeds?.[node.id];
+        if (at) element.position(at);
+      }
     });
     const layouts = layoutsRef.current;
     layouts?.cancel();
@@ -240,25 +256,31 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       setArranging(false);
       return;
     }
-    setArranging(true);
+    if (!initial) setArranging(true);
     layouts.run(
-      { nodes: nodes.map((n) => ({ id: n.id, size: n.size })), edges: edges.map((e) => ({ source: e.from, target: e.to })) },
+      initial ? { ...request, initial } : request,
       (positions) => {
         if (cyRef.current !== cy) return;
-        cy.batch(() => {
-          cy.nodes().forEach((n) => {
-            const at = positions[n.id()];
-            if (at) n.position(at);
+        placedRef.current = new Map(Object.entries(positions));
+        if (initial && !big) cy.layout({ name: "preset", positions, fit: false, animate: true, animationDuration: 300 }).run();
+        else {
+          cy.batch(() => {
+            cy.nodes().forEach((n) => {
+              const at = positions[n.id()];
+              if (at) n.position(at);
+            });
           });
-        });
-        fitRef.current.fit(cy);
+        }
+        if (!initial) fitRef.current.fit(cy);
         setArranging(false);
       },
       (message) => {
         if (cyRef.current !== cy) return;
-        // Something is better than nothing: a grid.
-        cy.layout({ name: "grid", fit: false }).run();
-        fitRef.current.fit(cy);
+        // Something is better than nothing: a grid (a warm start keeps its seeds).
+        if (!initial) {
+          cy.layout({ name: "grid", fit: false }).run();
+          fitRef.current.fit(cy);
+        }
         setLayoutError(message);
         setArranging(false);
       }

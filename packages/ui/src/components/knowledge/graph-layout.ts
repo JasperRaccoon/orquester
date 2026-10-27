@@ -1,95 +1,238 @@
-/// <reference path="../../types/cytoscape-fcose.d.ts" />
-// The graph's layout: fCoSE on a headless Cytoscape, so it can run in a worker
-// (`graph-layout.worker.ts`) while the canvas stays responsive. A few thousand
-// concepts take seconds to arrange; the main thread runs it only where no
-// worker can.
+// The graph's layout: a force simulation (d3-force), run in a worker
+// (`graph-layout.worker.ts`) so the canvas stays responsive. Concepts repel,
+// links pull their ends together, and a weak pull to the centre keeps unlinked
+// concepts in a halo round the rest; a last pass moves apart any dots still
+// touching. The spread-out look of Obsidian's graph view, with no overlaps.
+// A graph that grew (entries still being linked) starts from where its dots
+// already are, so the picture settles instead of jumping.
 
-import cytoscape from "cytoscape";
-import fcose from "cytoscape-fcose";
-
-cytoscape.use(fcose);
+import { forceLink, forceManyBody, forceSimulation, forceX, forceY, type SimulationLinkDatum, type SimulationNodeDatum } from "d3-force";
 
 export interface LayoutRequest {
   id: number;
   nodes: { id: string; size: number }[];
   edges: { source: string; target: string }[];
+  /** Where the concepts already shown are (`warmStart`): the layout starts from there. */
+  initial?: Positions;
 }
 
 export type LayoutResponse =
   | { id: number; positions: Record<string, { x: number; y: number }> }
   | { id: number; error: string };
 
-function options(count: number): cytoscape.LayoutOptions {
-  return {
-    name: "fcose",
-    // The spectral pass alone arranges 2,000 concepts in about 2 s; the force pass
-    // on top costs ~10 s at 500 (measured headless), so only small graphs get it.
-    quality: count > 150 ? "draft" : "default",
-    randomize: true,
-    animate: false,
-    fit: false,
-    nodeDimensionsIncludeLabels: false,
-    packComponents: true,
-    nodeRepulsion: () => 6500,
-    idealEdgeLength: () => 70,
-    numIter: 2500
-  } as cytoscape.LayoutOptions;
+interface Body extends SimulationNodeDatum {
+  id: string;
+  /** Radius. */
+  r: number;
 }
 
-/** Positions for every node of `request`. */
-export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string, { x: number; y: number }> {
-  const ids = new Set(request.nodes.map((n) => n.id));
-  const cy = cytoscape({
-    headless: true,
-    styleEnabled: true,
-    style: [{ selector: "node", style: { width: "data(size)", height: "data(size)" } }],
-    elements: [
-      ...request.nodes.map((n) => ({ group: "nodes" as const, data: { id: n.id, size: n.size } })),
-      ...request.edges
-        .filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target)
-        .map((e, i) => ({ group: "edges" as const, data: { id: `l${i}`, source: e.source, target: e.target } }))
-    ]
-  });
-  cy.layout(options(request.nodes.length)).run();
-  const positions: Record<string, { x: number; y: number }> = {};
-  cy.nodes().forEach((n) => {
-    const { x, y } = n.position();
-    positions[n.id()] = { x, y };
-  });
-  cy.destroy();
-  return spread(positions, request.nodes);
-}
-
-/** Room each concept gets, in multiples of the mean diameter. */
-const SPACING = 2.4;
+/** Clear space kept between two dots, beyond their radii. */
+export const LAYOUT_GAP = 4;
+/** Rest length of a link, beyond the radii of its ends. */
+const LINK_GAP = 24;
+/** Pull towards the centre: what keeps unlinked concepts and small clusters near the rest. */
+const GRAVITY = 0.06;
+/**
+ * Ticks of the simulation. Barnes–Hut with a coarse `THETA` keeps a tick
+ * cheap; the simulation's collision force would cost more than the rest
+ * together, so `separate` does that job once at the end.
+ */
+const TICKS = 160;
+const THETA = 1.2;
+/**
+ * How hot a warm start begins (a fresh layout starts at 1): enough to fit the
+ * new concepts in, not to reshuffle. On a 2,000-concept graph gaining 49, the
+ * others move 2% of its width on average (a fresh layout: 44%).
+ */
+const WARM_ALPHA = 0.15;
+/** Where the simulation counts as cooled: a fresh layout gets there in `TICKS`, a warm one sooner. */
+const ALPHA_MIN = 0.001;
 
 /**
- * The spectral pass packs a big graph into a fixed area, so its concepts
- * overlap: scale it about its centre until each has room. Never shrinks.
+ * Positions for every node of `request`. Deterministic: the same request gets
+ * the same picture. With `initial`, the concepts it places start there.
  */
-function spread(
-  positions: Record<string, { x: number; y: number }>,
-  nodes: readonly { size: number }[]
-): Record<string, { x: number; y: number }> {
-  const points = Object.values(positions);
-  if (points.length < 2) return positions;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const { x, y } of points) {
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
+export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string, { x: number; y: number }> {
+  const warm = request.initial && request.nodes.some((n) => request.initial![n.id]);
+  const seeds = warm ? seedPositions(request.nodes, request.edges, request.initial!) : null;
+  const bodies: Body[] = request.nodes.map((n) => {
+    const at = seeds?.[n.id];
+    return at ? { id: n.id, r: n.size / 2, x: at.x, y: at.y } : { id: n.id, r: n.size / 2 };
+  });
+  const ids = new Set(bodies.map((b) => b.id));
+  const seen = new Set<string>();
+  const links: SimulationLinkDatum<Body>[] = [];
+  for (const { source, target } of request.edges) {
+    if (source === target || !ids.has(source) || !ids.has(target)) continue;
+    const key = source < target ? `${source}\u0000${target}` : `${target}\u0000${source}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    links.push({ source, target });
   }
-  const side = Math.sqrt(Math.max(1, (maxX - minX) * (maxY - minY)));
-  const meanSize = nodes.reduce((sum, n) => sum + n.size, 0) / Math.max(1, nodes.length);
-  const wanted = Math.sqrt(points.length) * meanSize * SPACING;
-  const scale = wanted / side;
-  if (!(scale > 1)) return positions;
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-  const out: Record<string, { x: number; y: number }> = {};
-  for (const [id, { x, y }] of Object.entries(positions)) out[id] = { x: cx + (x - cx) * scale, y: cy + (y - cy) * scale };
+  forceSimulation(bodies)
+    .randomSource(lcg(1))
+    .alphaDecay(1 - Math.pow(ALPHA_MIN, 1 / TICKS))
+    .force("charge", forceManyBody<Body>().strength((b) => -40 - b.r * 6).theta(THETA))
+    .force(
+      "link",
+      forceLink<Body, SimulationLinkDatum<Body>>(links)
+        .id((b) => b.id)
+        .distance((l) => (l.source as Body).r + (l.target as Body).r + LINK_GAP)
+    )
+    .force("x", forceX<Body>(0).strength(GRAVITY))
+    .force("y", forceY<Body>(0).strength(GRAVITY))
+    .alpha(warm ? WARM_ALPHA : 1)
+    .stop()
+    .tick(warm ? Math.ceil((TICKS * Math.log(ALPHA_MIN / WARM_ALPHA)) / Math.log(ALPHA_MIN)) : TICKS);
+  separate(bodies);
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const b of bodies) positions[b.id] = { x: b.x ?? 0, y: b.y ?? 0 };
+  return positions;
+}
+
+/**
+ * Where a relayout of `ids` starts: the placed positions of those concepts,
+ * when the graph mostly stayed the same (at least half of the new graph was
+ * placed, and at least half of what was placed is still in it: entries being
+ * linked). Null for a different graph (another filter or focus), which reads
+ * better laid out afresh.
+ */
+export function warmStart(ids: readonly string[], placed: ReadonlyMap<string, { x: number; y: number }>): Positions | null {
+  const out: Positions = {};
+  let kept = 0;
+  for (const id of ids) {
+    const at = placed.get(id);
+    if (!at) continue;
+    out[id] = { x: at.x, y: at.y };
+    kept += 1;
+  }
+  return kept > 0 && kept * 2 >= ids.length && kept * 2 >= placed.size ? out : null;
+}
+
+/**
+ * A start for every node: its `placed` position, else beside the placed
+ * neighbours it links to (rounds out from the placed part, so chains of new
+ * concepts follow), else on the halo round the graph where unlinked concepts
+ * settle.
+ */
+export function seedPositions(
+  nodes: readonly { id: string; size: number }[],
+  edges: readonly { source: string; target: string }[],
+  placed: Positions
+): Positions {
+  const out: Positions = {};
+  for (const n of nodes) {
+    const at = placed[n.id];
+    if (at) out[n.id] = { x: at.x, y: at.y };
+  }
+  const neighbours = new Map<string, string[]>();
+  for (const { source, target } of edges) {
+    if (source === target) continue;
+    (neighbours.get(source) ?? neighbours.set(source, []).get(source)!).push(target);
+    (neighbours.get(target) ?? neighbours.set(target, []).get(target)!).push(source);
+  }
+  const direction = (id: string) => {
+    const angle = (hash(id) / 4294967296) * 2 * Math.PI;
+    return { x: Math.cos(angle), y: Math.sin(angle) };
+  };
+  let pending = nodes.filter((n) => !out[n.id]);
+  while (pending.length > 0) {
+    const round: [string, { x: number; y: number }][] = [];
+    const rest: typeof pending = [];
+    for (const n of pending) {
+      const near = (neighbours.get(n.id) ?? []).flatMap((id) => (out[id] ? [out[id]] : []));
+      if (near.length === 0) {
+        rest.push(n);
+        continue;
+      }
+      const away = direction(n.id);
+      const reach = n.size / 2 + LINK_GAP;
+      round.push([
+        n.id,
+        {
+          x: near.reduce((sum, p) => sum + p.x, 0) / near.length + away.x * reach,
+          y: near.reduce((sum, p) => sum + p.y, 0) / near.length + away.y * reach
+        }
+      ]);
+    }
+    if (round.length === 0) break;
+    for (const [id, at] of round) out[id] = at;
+    pending = rest;
+  }
+  const points = Object.values(out);
+  const cx = points.reduce((sum, p) => sum + p.x, 0) / Math.max(1, points.length);
+  const cy = points.reduce((sum, p) => sum + p.y, 0) / Math.max(1, points.length);
+  const radius = points.reduce((max, p) => Math.max(max, Math.hypot(p.x - cx, p.y - cy)), 0) + LINK_GAP;
+  for (const n of pending) {
+    const away = direction(n.id);
+    out[n.id] = { x: cx + away.x * radius, y: cy + away.y * radius };
+  }
   return out;
+}
+
+/**
+ * Moves apart every two dots closer than their radii and `LAYOUT_GAP`, half
+ * each way, until none are (or a pass budget runs out). The simulation leaves
+ * few such pairs, so a spatial hash finds them in linear time.
+ */
+function separate(bodies: Body[], passes = 50): void {
+  const maxR = bodies.reduce((max, b) => Math.max(max, b.r), 0);
+  const cell = 2 * maxR + LAYOUT_GAP;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const grid = new Map<string, Body[]>();
+    for (const b of bodies) {
+      const key = `${Math.floor(b.x! / cell)},${Math.floor(b.y! / cell)}`;
+      const bucket = grid.get(key);
+      if (bucket) bucket.push(b);
+      else grid.set(key, [b]);
+    }
+    let moved = false;
+    for (const a of bodies) {
+      const cx = Math.floor(a.x! / cell);
+      const cy = Math.floor(a.y! / cell);
+      for (let dx = -1; dx <= 1; dx += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (const b of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
+            if (b === a || b.id < a.id) continue;
+            const min = a.r + b.r + LAYOUT_GAP;
+            let ex = b.x! - a.x!;
+            let ey = b.y! - a.y!;
+            let d = Math.hypot(ex, ey);
+            if (d >= min) continue;
+            if (d === 0) {
+              // Coincident: split them along a direction fixed by their ids.
+              const angle = (hash(a.id + b.id) / 4294967296) * 2 * Math.PI;
+              ex = Math.cos(angle);
+              ey = Math.sin(angle);
+              d = 1;
+            }
+            const push = (min - d) / 2 / d;
+            a.x! -= ex * push;
+            a.y! -= ey * push;
+            b.x! += ex * push;
+            b.y! += ey * push;
+            moved = true;
+          }
+        }
+      }
+    }
+    if (!moved) return;
+  }
+}
+
+/** A seeded generator in [0, 1), for the simulation's jiggle. */
+function lcg(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function hash(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  return h >>> 0;
 }
 
 export type Positions = Record<string, { x: number; y: number }>;
