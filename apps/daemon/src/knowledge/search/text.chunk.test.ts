@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CHUNKER_VERSION, CHUNK_TOKEN_BUDGET, type TextSpan, chunkBody, estimateTokens } from "./text.ts";
+import {
+  CHUNKER_VERSION,
+  CHUNK_TOKEN_BUDGET,
+  EMBEDDING_INPUT_VERSION,
+  HEADER_TOKEN_BUDGET,
+  type TextSpan,
+  chunkBody,
+  embeddingHeader,
+  estimateTextTokens,
+  estimateTokens
+} from "./text.ts";
 
 // The chunker (retrieval spec P0.3): word windows with overlap, capped by an estimate of
 // multilingual-e5-small tokens so token-dense text is never truncated by the model; spans are
@@ -102,4 +112,32 @@ test("token estimates: prose is cheap, ids and symbols cost more, CJK a token a 
   assert.equal(estimateTokens("付费墙测试"), 1 + 5);
   assert.ok(estimateTokens("∑∫∂√∞") >= 5);
   assert.ok(estimateTokens("Тест") < 3.5);
+});
+
+test("a long title and byline are cut so header + prefix + chunk fits the model's 512 tokens", () => {
+  assert.notEqual(EMBEDDING_INPUT_VERSION, "ctx-v1", "headers changed: cached vectors are recomputed");
+  // Unchanged for an ordinary entry.
+  const plain = { title: "Cloudflare case study", author: "Kevin", handle: "kev", kind: "note" };
+  assert.equal(embeddingHeader(plain), "Cloudflare case study · by Kevin @kev · note");
+
+  const title = "付费墙测试显示年度订阅的转化率更高我们在抖音上投放广告并优化了落地页".repeat(7).slice(0, 200);
+  const author = "María José Fernández de la Cruz y Montenegro, Growth Lead at Example Corporation International ".repeat(2).slice(0, 120);
+  const header = embeddingHeader({ title, author, handle: "mariajose_growth", kind: "article" });
+  assert.ok(estimateTextTokens(header) <= HEADER_TOKEN_BUDGET, `${estimateTextTokens(header)} > ${HEADER_TOKEN_BUDGET}`);
+  const [cutTitle, byline, kind] = header.split(" · ");
+  assert.ok(cutTitle!.length > 20 && title.startsWith(cutTitle!), "the title keeps its start, cut on a character");
+  assert.ok(byline!.startsWith("by María José Fernández") && author.startsWith(byline!.slice(3).trimEnd()), "the byline keeps its start");
+  assert.equal(kind, "article");
+  // Header, chunk and the passage overhead (2 special tokens, "passage: ", the blank line) within 512.
+  for (const body of ["付费墙测试显示年度订阅的转化率更高。".repeat(200), "Las páginas de alternativas convierten bien. ".repeat(200)]) {
+    for (const span of chunkBody(body)) assert.ok(estimateTextTokens(header) + spanCost(body, span) + 6 <= 512);
+  }
+  // A title alone may take the whole budget; a kind of any length is cut too.
+  const alone = embeddingHeader({ title: title.repeat(5), author: null, handle: null, kind: "x".repeat(300) });
+  assert.ok(estimateTextTokens(alone) <= HEADER_TOKEN_BUDGET);
+  assert.ok(alone.split(" · ")[0]!.length > 40);
+  // A cut never splits a surrogate pair.
+  const emoji = embeddingHeader({ title: "🚀".repeat(400), author: null, handle: null, kind: "note" });
+  assert.ok(estimateTextTokens(emoji) <= HEADER_TOKEN_BUDGET);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(emoji));
 });

@@ -43,19 +43,69 @@ export interface TextSpan {
  * Bumped whenever {@link embeddingHeader} or {@link embeddingPassage} changes: part of the vector
  * cache key, so cached vectors are recomputed.
  */
-export const EMBEDDING_INPUT_VERSION = "ctx-v1";
+export const EMBEDDING_INPUT_VERSION = "ctx-v2";
+
+/**
+ * The most {@link estimateTokens} an {@link embeddingHeader} takes: what e5's 512 leaves beside a
+ * chunk's {@link CHUNK_TOKEN_BUDGET} and the passage overhead (two special tokens, "passage: ",
+ * the blank line: ~6), so header + prefix + chunk is never truncated.
+ */
+export const HEADER_TOKEN_BUDGET = 96;
+/** A header's byline ("by" author @handle) and kind are cut to these first; the title takes the rest. */
+const HEADER_WHO_TOKENS = 24;
+const HEADER_KIND_TOKENS = 8;
+const HEADER_SEPARATOR = " · ";
+
+/** {@link estimateTokens} of a text: the sum over its whitespace-separated words. */
+export function estimateTextTokens(text: string): number {
+  let tokens = 0;
+  for (const match of text.matchAll(/\S+/g)) tokens += estimateTokens(match[0]);
+  return tokens;
+}
+
+/** The longest start of `text`, cut on a word or code point boundary, whose estimate is within `budget`. */
+function capTokens(text: string, budget: number): string {
+  if (estimateTextTokens(text) <= budget) return text;
+  let used = 0;
+  let end = 0;
+  for (const match of text.matchAll(/\S+/g)) {
+    const word = match[0];
+    const cost = estimateTokens(word);
+    if (used + cost <= budget) {
+      used += cost;
+      end = match.index! + word.length;
+      continue;
+    }
+    // Cut inside the word: its longest start that fits what is left (every character costs at
+    // least a quarter token, so no more than 4 a token are tried).
+    let prefix = "";
+    for (const char of [...word].slice(0, Math.max(0, Math.ceil((budget - used) * 4)))) {
+      if (used + estimateTokens(prefix + char) > budget) break;
+      prefix += char;
+    }
+    if (prefix.length > 0) end = match.index! + prefix.length;
+    break;
+  }
+  return text.slice(0, end).trimEnd();
+}
 
 /**
  * The context line embedded with every chunk of an entry (retrieval spec, "Contextual chunks"):
  * title, author and handle, kind — so a chunk deep in a long article still carries what the
- * article is. Collections are left out on purpose: relabelling never re-embeds.
+ * article is. Collections are left out on purpose: relabelling never re-embeds. Capped at
+ * {@link HEADER_TOKEN_BUDGET} estimated tokens: a long byline and kind are cut first to a share
+ * of it, then the title to what is left.
  */
 export function embeddingHeader(meta: { title: string; author: string | null; handle: string | null; kind: string }): string {
   const handle = meta.handle ? `@${meta.handle.trim().replace(/^@+/, "")}` : "";
-  const who = [meta.author?.replace(/\s+/g, " ").trim() ?? "", handle].filter((part) => part.length > 0 && part !== "@").join(" ");
-  return [meta.title.replace(/\s+/g, " ").trim(), who ? `by ${who}` : "", meta.kind.replace(/\s+/g, " ").trim()]
-    .filter((part) => part.length > 0)
-    .join(" · ");
+  const who = capTokens(
+    [meta.author?.replace(/\s+/g, " ").trim() ?? "", handle].filter((part) => part.length > 0 && part !== "@").join(" "),
+    HEADER_WHO_TOKENS
+  );
+  const rest = [who ? `by ${who}` : "", capTokens(meta.kind.replace(/\s+/g, " ").trim(), HEADER_KIND_TOKENS)].filter((part) => part.length > 0);
+  const restTokens = rest.length > 0 ? estimateTextTokens(HEADER_SEPARATOR + rest.join(HEADER_SEPARATOR)) : 0;
+  const title = capTokens(meta.title.replace(/\s+/g, " ").trim(), HEADER_TOKEN_BUDGET - restTokens);
+  return [title, ...rest].filter((part) => part.length > 0).join(HEADER_SEPARATOR);
 }
 
 /** One chunk as it is embedded: the entry's {@link embeddingHeader}, a blank line, the chunk text. */
@@ -70,8 +120,8 @@ const CHUNK_WORDS = 180;
 const CHUNK_OVERLAP = 40;
 /**
  * The token budget of a chunk's text, by {@link estimateTokens}: e5's 512 less its two special
- * tokens, the "passage: " prefix and the blank line (~6), and ~96 for the entry's
- * {@link embeddingHeader} (a long title and byline), so header + prefix + chunk stays within 512.
+ * tokens, the "passage: " prefix and the blank line (~6), and {@link HEADER_TOKEN_BUDGET} (96) for
+ * the entry's {@link embeddingHeader}, so header + prefix + chunk stays within 512.
  */
 export const CHUNK_TOKEN_BUDGET = 410;
 /** The overlap's share of the budget (as 40 of 180 words). */
