@@ -220,6 +220,10 @@ interface PairRound {
   pool: WorkerPool<WorkerCandidate>;
   /** Task id → what it asks. */
   tasks: Map<string, RoundItem>;
+  /** Answers being recorded (then their files removed): awaited before the round's inbox is harvested. */
+  recordings: Set<Promise<void>>;
+  /** Tasks whose answer was recorded: the harvest never records them again. */
+  recorded: Set<string>;
   ending: boolean;
   /** Resolves once the round's chats ended and its inbox was cleaned. */
   ended: Promise<void>;
@@ -1273,7 +1277,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       onEvent: (event) => this.onPairPoolEvent(round, event),
       ...(this.opts.logger ? { logger: this.opts.logger } : {})
     });
-    round = { id, broker, pool, tasks, ending: false, ended: Promise.resolve() };
+    round = { id, broker, pool, tasks, recordings: new Set(), recorded: new Set(), ending: false, ended: Promise.resolve() };
     this.pairRound = round;
     broker.events.on("answered", ({ taskId, answer }) => {
       const item = tasks.get(taskId);
@@ -1286,9 +1290,14 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         if (accepted !== null) recording = item.source.record(item.payload, accepted);
       }
       if (recording) {
-        void recording
-          .then(() => removePairCheckTask(this.pairInboxDir, taskId))
-          .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a round answer could not be recorded", { error: String(error) }));
+        const done: Promise<void> = recording
+          .then(() => {
+            round.recorded.add(taskId);
+            return removePairCheckTask(this.pairInboxDir, taskId);
+          })
+          .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a round answer could not be recorded", { error: String(error) }))
+          .finally(() => round.recordings.delete(done));
+        round.recordings.add(done);
       }
       const counts = broker.counts();
       if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
@@ -1326,8 +1335,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     round.ended = settled
       .then(async () => {
         round.broker.dispose();
+        // Answers still being recorded finish first; the harvest then records only what they did not.
+        while (round.recordings.size > 0) await Promise.allSettled([...round.recordings]);
         await this.pairChecks.flush();
-        await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources());
+        await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources(), round.recorded);
       })
       .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: ending a pair-check round failed", { error: String(error) }))
       .finally(() => {

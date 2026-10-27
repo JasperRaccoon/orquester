@@ -666,15 +666,17 @@ export async function removePairCheckTask(inboxDir: string, taskId: string): Pro
 }
 
 /**
- * Before a round (no broker on the inbox): records every answered task (an answer written just
- * before a restart) — a pair check in `checks`, another step's in its source — and removes every
- * task file, answered or not: an item still worth asking is written again. Answers how many answers
- * were recorded.
+ * Before a round and after one (no broker on the inbox): records every answered task (an answer
+ * written just before a restart, or one the round did not record) — a pair check in `checks`,
+ * another step's in its source — except the tasks in `recorded` (the round recorded them already),
+ * and removes every task file, answered or not: an item still worth asking is written again.
+ * Answers how many answers were recorded.
  */
 export async function harvestPairCheckInbox(
   inboxDir: string,
   checks: Pick<KnowledgePairChecks, "record">,
-  sources: ReadonlyMap<string, Pick<KnowledgeRoundTaskSource, "validate" | "record">> = new Map()
+  sources: ReadonlyMap<string, Pick<KnowledgeRoundTaskSource, "validate" | "record">> = new Map(),
+  recorded: ReadonlySet<string> = new Set()
 ): Promise<number> {
   let names: string[];
   try {
@@ -682,13 +684,17 @@ export async function harvestPairCheckInbox(
   } catch {
     return 0;
   }
-  let recorded = 0;
+  let count = 0;
   for (const name of names) {
     if (!name.endsWith(".task.json")) {
       if (name.endsWith(".tmp")) await rm(join(inboxDir, INBOX_DIR, name), { force: true });
       continue;
     }
     const id = name.slice(0, -".task.json".length);
+    if (recorded.has(id)) {
+      await removePairCheckTask(inboxDir, id);
+      continue;
+    }
     try {
       const raw = JSON.parse(await readFile(join(inboxDir, INBOX_DIR, name), "utf8")) as Record<string, unknown>;
       const envelope = readEnvelope(raw, id);
@@ -699,18 +705,18 @@ export async function harvestPairCheckInbox(
         const accepted = acceptedRoundAnswer(source, raw.payload, answer.answer);
         if (accepted !== null) {
           await source.record(raw.payload, accepted);
-          recorded += 1;
+          count += 1;
         }
       }
       const parsed = envelope?.step === PAIR_CHECK_STEP && typeof answer.answer === "string" ? parsePairCheckAnswer(answer.answer) : null;
       if (pair && parsed) {
         await checks.record(pair, parsed.verdict, parsed.note);
-        recorded += 1;
+        count += 1;
       }
     } catch {
       // Unanswered, or unreadable: nothing to record.
     }
     await removePairCheckTask(inboxDir, id);
   }
-  return recorded;
+  return count;
 }

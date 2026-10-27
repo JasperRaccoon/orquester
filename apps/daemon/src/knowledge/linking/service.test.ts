@@ -1408,4 +1408,47 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     assert.equal(asked.length, 3, "each item once");
     await h.service.stop();
   });
+
+  it("an answer still being recorded when its round ends is recorded once, not again by the round's harvest", async () => {
+    const graph = fakeGraphView();
+    const listeners = new Set<() => void>();
+    const records: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let recording!: () => void;
+    const firstRecording = new Promise<void>((resolve) => (recording = resolve));
+    const source: KnowledgeRoundTaskSource = {
+      step: "round-test",
+      async tasks() {
+        return records.length > 0 ? [] : [{ label: "round-test slow", system: 'Answer {"ok": true}.', user: "Item slow", payload: { item: "slow" } }];
+      },
+      validate: (value) => ((value as { ok?: unknown } | null)?.ok === true ? null : 'Answer {"ok": true}.'),
+      async record(payload) {
+        records.push((payload as { item: string }).item);
+        if (records.length === 1) {
+          recording();
+          await gate; // a slow write: the round ends meanwhile (this was its last task)
+        }
+      },
+      onWork(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    };
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [source] } });
+    graph.ready([ID(1), ID(2)]);
+    await h.service.start();
+    for (const id of [ID(1), ID(2)]) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    for (const listener of listeners) listener(); // the source has work: a round once linking is idle
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await firstRecording;
+    // The round's chats end and its inbox is harvested while the answer is still being recorded.
+    await flushAsync(50);
+    assert.deepEqual(records, ["slow"], "the harvest waits for the recording instead of recording the answer again");
+    release();
+    await h.service.pairChecksIdle();
+    assert.deepEqual(records, ["slow"]);
+    await h.service.stop();
+  });
 });
