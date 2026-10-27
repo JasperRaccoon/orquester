@@ -556,7 +556,7 @@ export class DeviceService implements DeviceToolsPort {
           const quote = factory!.provisionQuote?.(request.platform) ?? null;
           if ((quote === null || quote.needsApproval) && !request.rentalApproved) {
             const what = quote ? `a ${quote.providerLabel} host (${quote.sizeLabel})` : "a device host";
-            throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Opening this device rents ${what}, which needs the owner's approval.`);
+            throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Opening this device rents ${what}, which needs the owner's approval. Call open_device again to ask them.`);
           }
           await factory!.provision!({ platform: request.platform, threadId: request.threadId, approved: request.rentalApproved }, signal);
           continue;
