@@ -114,10 +114,13 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const boxRows = chat.filter((tool) => groups.get(tool.name) === "boxes");
   const knowledgeRows = chat.filter((tool) => groups.get(tool.name) === "knowledge");
   const workerRows = knowledgeRows.filter((tool) => tool.name.startsWith("knowledge_worker_"));
-  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool));
+  const deviceRows = chat.filter((tool) => groups.get(tool.name) === "devices");
+  const baseRows = chat.filter((tool) => !boxRows.includes(tool) && !knowledgeRows.includes(tool) && !deviceRows.includes(tool));
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 6_144, `box tools: ${added(boxRows)} bytes`);
   assert.ok(added(knowledgeRows.filter((tool) => !workerRows.includes(tool))) <= 4_608, "knowledge tools exceed 4.5 KiB");
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
+  assert.deepEqual(deviceRows.map((tool) => tool.name), ["list_devices", "open_device", "device_action", "device_install", "close_device"]);
+  assert.ok(added(deviceRows) <= 6_144, `device tools: ${added(deviceRows)} bytes`);
 });

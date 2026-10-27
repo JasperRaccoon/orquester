@@ -24,7 +24,8 @@ from the 72-tool 2.x surface).
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
 these 42 tools plus four chat-only ones (`html_preview`, `html_render`, `request_secret`,
-`push_secret_files`). Every
+`push_secret_files`), and — while their plugins allow — the plugin families: temporary boxes,
+the knowledge base, and devices (§15). Every
 tool has a **tier** — Read, Act or Admin — and a **toolset** (a group label only: every chat gets
 every tool, and nothing switches one on or off); in a chat the tier decides what runs without
 asking and what needs the user's approval card. **An external client is full trust:** for you the tier is information only (`_meta` on every
@@ -2361,6 +2362,53 @@ and one the user opens is listed here.
 
 ---
 
+## 15. Devices (chat-only)
+
+The "Device simulators" plugin (Settings → Plugins) gives agent chats iOS simulators and Android
+emulators: Android emulators on the daemon's host (Linux with KVM), iPhones and iPads on rented
+macOS boxes ("Mac device hosts"). The owner watches the same device live in the chat's **Device
+panel** and can take control at any moment. These 5 tools are **chat-only** (external MCP clients
+do not get them) and are advertised to a chat only while the plugin is on, Settings → Devices lets
+agents use devices, and at least one platform is enabled. Design:
+`docs/superpowers/specs/2026-10-27-devices-phase-1-core.md` §9.
+
+| Tool | Tier | Input | Returns |
+|---|---|---|---|
+| `list_devices` | Read | — | `{platforms: [{platform, enabled, ready, detail?}], hosts: [{id, kind, label, platforms, status, capacity: "used/total", missing?}], profiles: [{id, platform, name, form, os}], my_devices: [Lease], busy: [{device, platform, name, chat?}]}` |
+| `open_device` | Act (a `devices` **spend** card when it must rent a host the owner did not pre-approve) | `platform` (`"ios"` \| `"android"`), `profile?`, `app?` (bundle id / package to launch), `fresh?` | `Lease` + `ready`, `quick_start` (6 lines); after 9 minutes still booting: `ready: false`, `progress`, a note to check `list_devices` |
+| `device_action` | Read for `snapshot`, `screenshot`, `logs`, `wait`; Act otherwise | `device?`, `action`, and the action's fields (below) | `{device, action, summary, result?, screenshot?: {width, height, mime_type}, note?}`; `screenshot` also returns an MCP image block |
+| `device_install` | Act | `device?`, `path` (a build inside the chat's project; relative = from the chat's cwd) | `{device, app, summary}` |
+| `close_device` | Act | `device?`, `shutdown?` | `{closed: true, device}` |
+
+- **Lease** is `{device, lease_id, platform, name, os, state: "starting" | "ready" | "suspended" |
+  "lost", controller: "agent" | "user", screen?: {width, height}, starting?, error?}`. `device` is
+  the key `<hostId>/<deviceId>` (`local/emulator-5554`, `box:ab12cd/<UDID>`), or the lease id while
+  it starts. Every tool's `device` takes either; omitted, it is the chat's only device.
+- **Profiles**: Android `pixel-9`, `pixel-tablet`, `pixel-fold` (Android 15); iOS
+  `iphone-17-pro`, `iphone-17-pro-max`, `ipad-pro-13`, `iphone-duo` (iOS 26).
+- **Leases** are exclusive: a chat holds at most 3 devices (`DEVICE_LEASE_LIMIT`), another chat's
+  device is never reachable (`DEVICE_NOT_LEASED`). A lease ends with `close_device`, the user's
+  Release, the chat closing, or an hour with no agent or viewer activity.
+- **`device_action` actions**: `snapshot` (an accessibility tree with `@eN` refs — prefer refs to
+  coordinates), `tap` / `long_press` (`ref` or `x`,`y` in points; `duration_ms`), `fill` (`ref`,
+  `text`), `type` (`text`), `press` (`key`: `home`, `back`, `enter`, `app_switch`, `volume_up`,
+  `volume_down`, `lock`), `swipe` (`direction`, or `from` and `to`), `scroll` (`direction`, `ref?`),
+  `open_app` / `close_app` (`app`), `open_url` (`url`), `screenshot`, `logs` (`seconds` ≤ 60),
+  `rotate` (`orientation`), `appearance` (`light` | `dark`), `location` (`lat`, `lon`),
+  `permissions` (`app`, `permission`, `grant`: `grant` | `revoke`), `wait` (`text` or `ref`,
+  `timeout_ms` ≤ 60 000). Input actions return the new snapshot's diff.
+- **Control handoff**: when the user touches the device it switches to them; input actions then
+  fail `DEVICE_CONTROLLED_BY_USER` (wait, or ask them to give control back) while read-only ones
+  still run.
+- **`deviceRef`**: results carry `{device, leaseId?, screenshotId?}` so the chat row shows the
+  device and a screenshot thumbnail (the image itself is not kept in the transcript).
+- **Errors**: `DEVICES_DISABLED`, `DEVICE_NOT_LEASED` (call `open_device`), `DEVICE_LOST` (its host
+  or device is gone: call `open_device` again), `DEVICE_CONTROLLED_BY_USER`, `DEVICE_CAPACITY` (every
+  host is full; names the leases), `DEVICE_LEASE_LIMIT`, `PLATFORM_NOT_READY` (off, or not set up —
+  names the missing readiness items; the owner fixes it in Settings → Devices).
+
+---
+
 *Design references: `docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md` (the unified
 catalog, tiers, approval cards, toolsets, the conversation protocol; §11 is the migration above) and
 `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`. Implementation:
@@ -2368,5 +2416,6 @@ catalog, tiers, approval cards, toolsets, the conversation protocol; §11 is the
 runner of a tool), `gate/` (tiers, scope and the turn policy), `server.ts` (this server: the mount,
 the instructions and the external audience), `daemon-api.ts` (the in-process client), `views.ts`,
 `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/` (one module per family:
-`tools/workflows.ts` for §12, `tools/agent-profile.ts` for §13, `tools/desktops.ts` for §14). The
+`tools/workflows.ts` for §12, `tools/agent-profile.ts` for §13, `tools/desktops.ts` for §14,
+`tools/devices.ts` for §15, over `apps/daemon/src/devices/`). The
 in-chat transport is `apps/daemon/src/session-tools/` (its README).*
