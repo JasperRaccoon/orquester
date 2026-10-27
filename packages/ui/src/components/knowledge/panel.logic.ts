@@ -20,7 +20,7 @@ import { formatKnowledgeDate, knowledgeErrorText } from "./knowledge.logic";
 /** Entries the "Similar" section lists at most (the daemon's own cap). */
 export const SIMILAR_MAX = 8;
 
-const REASON_ORDER: Record<KnowledgeRelatedReason["kind"], number> = { meaning: 0, concepts: 1, author: 2 };
+const REASON_ORDER: Record<KnowledgeRelatedReason["kind"], number> = { contradicts: 0, meaning: 1, concepts: 2, author: 3 };
 
 /** A 0..1 similarity as a whole percentage ("91"). */
 export function similarityPercent(similarity: number): number {
@@ -43,6 +43,8 @@ export function reasonLabel(reason: KnowledgeRelatedReason): string {
     }
     case "author":
       return "Same author";
+    case "contradicts":
+      return "Disagrees";
   }
 }
 

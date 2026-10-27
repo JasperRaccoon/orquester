@@ -172,6 +172,27 @@ export interface KnowledgeLinkingPort {
   entriesChanged(change: KnowledgeEntryChange): void;
 }
 
+/**
+ * An LLM pair check of two entries (phase 2 spec, "Contradictions"): written by the linking side
+ * (`linking/pair-checks.ts`), read by insights and similar entries. `a` < `b` (sorted ids).
+ */
+export interface KnowledgePairCheck {
+  a: string;
+  b: string;
+  verdict: "contradicts" | "consistent" | "unrelated";
+  /** One line from the checker: what they disagree on (or why not). */
+  note: string | null;
+  checkedAt: string;
+}
+
+export interface KnowledgePairChecksPort {
+  /** The latest check of every pair still current (both entries unchanged since). */
+  all(): readonly KnowledgePairCheck[];
+  get(a: string, b: string): KnowledgePairCheck | null;
+  /** Called after checks are added or dropped. */
+  onChange(listener: () => void): () => void;
+}
+
 // ---------------------------------------------------------------------------
 // visibility
 // ---------------------------------------------------------------------------

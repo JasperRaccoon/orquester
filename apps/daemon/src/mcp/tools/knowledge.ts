@@ -315,6 +315,7 @@ function windowFooter(start: number, end: number, length: number, from: number):
 function reasonText(reason: KnowledgeRelatedReason): string {
   if (reason.kind === "meaning") return `meaning ${reason.similarity.toFixed(2)}`;
   if (reason.kind === "author") return "same author";
+  if (reason.kind === "contradicts") return reason.note ? `disagrees: ${reason.note}` : "disagrees";
   const named = reason.concepts.slice(0, 3).map((concept) => label(concept.name));
   if (named.length === 0) return `shares ${reason.shared} concept${reason.shared === 1 ? "" : "s"}`;
   const more = reason.shared - named.length;

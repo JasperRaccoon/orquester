@@ -285,6 +285,11 @@ export interface KnowledgeSaveResult {
    * Absent from an older daemon.
    */
   similar?: { entryId: string; title: string; similarity: number; citation: string }[];
+  /**
+   * The similarity cluster a `saved` entry joins, by its nearest embedded neighbours (phase 2 spec,
+   * "Novelty"); null when none or not embedded within the save's wait. Absent from an older daemon.
+   */
+  cluster?: { label: string | null; size: number } | null;
 }
 
 export interface KnowledgeSaveResponse {
@@ -353,14 +358,43 @@ export interface KnowledgeConceptDetail {
   collections: string[];
   entries: KnowledgeEntrySummary[];
   neighbors: { edge: KnowledgeEdge; concept: KnowledgeConceptRef }[];
+  /** Concepts merged into this one as duplicates (phase 2 spec, "Concept merges"). Absent from an older daemon. */
+  mergedFrom?: KnowledgeConceptRef[];
+  /** Other concepts of the same type close in meaning but below the merge bar, closest first, up to 5. Absent from an older daemon. */
+  similarConcepts?: { concept: KnowledgeConceptRef; similarity: number }[];
+}
+
+/** One automatic concept merge (phase 2 spec, "Concept merges"). */
+export interface KnowledgeConceptMerge {
+  /** Stable id of the merge (undo with DELETE `knowledgeRoutes.conceptMerge(id)`). */
+  id: string;
+  /** The concept kept. */
+  into: KnowledgeConceptRef;
+  /** The concepts folded into it. */
+  merged: KnowledgeConceptRef[];
+  /** Lowest pairwise similarity of the names that justified it. */
+  similarity: number;
+  createdAt: string;
+}
+
+export interface KnowledgeConceptMergesResponse {
+  merges: KnowledgeConceptMerge[];
 }
 
 /** Why another entry is shown next to this one (labelled in the UI, spec "Similar entries"). */
 export type KnowledgeRelatedReason =
   /** Close in meaning (embeddings). */
   | { kind: "meaning"; similarity: number }
-  /** Shares concepts from linking (up to 3 named). */
-  | { kind: "concepts"; concepts: KnowledgeConceptRef[]; shared: number }
+  /**
+   * Shares concepts from linking (up to 3 named). `distinctive`: those of them that few entries
+   * have (phase 2 spec, "Hybrid similarity"); absent from an older daemon.
+   */
+  | { kind: "concepts"; concepts: KnowledgeConceptRef[]; shared: number; distinctive?: KnowledgeConceptRef[] }
+  /**
+   * The two entries disagree (phase 2 spec, "Contradictions"): `graph` when a concept of one
+   * contradicts a concept of the other in the concept graph, `checked` when an LLM pair check said so.
+   */
+  | { kind: "contradicts"; source: "graph" | "checked"; pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[]; note: string | null }
   /** Same author or handle. */
   | { kind: "author"; value: string };
 
@@ -387,7 +421,19 @@ export interface KnowledgeEntryDetail {
    * `duplicate` threshold), closest first, up to 3. Absent from an older daemon.
    */
   possibleDuplicates?: KnowledgeSimilarEntry[];
+  /**
+   * What this entry adds (phase 2 spec, "Novelty"): its concepts no other visible entry has, and the
+   * similarity cluster it sits in. Absent from an older daemon, or before the entry has vectors.
+   */
+  novelty?: KnowledgeNovelty;
   citation: string;
+}
+
+export interface KnowledgeNovelty {
+  /** Concepts linked only to this entry among visible entries (up to 8). */
+  newConcepts: KnowledgeConceptRef[];
+  /** The similarity-graph cluster the entry falls in (null: none yet, or a singleton). */
+  cluster: { label: string | null; size: number } | null;
 }
 
 /** GET /api/knowledge/items/:id — an entry id (`ke_…`) or a concept id. */
@@ -559,14 +605,20 @@ export interface KnowledgeSimilarityEdge {
   similarity: number;
   /** Part of the maximum spanning forest (keeps every component connected); the rest are k-NN edges. */
   tree: boolean;
+  /** Concepts the two entries share (phase 2 spec, "Hybrid similarity"). Absent from an older daemon. */
+  sharedConcepts?: number;
+  /** True when the two entries contradict each other (phase 2 spec, "Contradictions"). Absent from an older daemon. */
+  contradicts?: boolean;
 }
 
 export interface KnowledgeSimilarityCluster {
   id: number;
   /** Entries in it. */
   size: number;
-  /** The most common concept among its linked entries, else its most distinctive title words; null for singletons. */
+  /** Its most distinctive topic concept, else its most distinctive title words; null for singletons. */
   label: string | null;
+  /** Its most distinctive concepts, best first, up to 5 (phase 2 spec, "Cross navigation"). Absent from an older daemon. */
+  concepts?: KnowledgeConceptRef[];
 }
 
 export interface KnowledgeSimilarityGraphResponse {
@@ -578,6 +630,63 @@ export interface KnowledgeSimilarityGraphResponse {
   truncated: boolean;
   /** Visible entries, and how many of them have vectors (only those can be drawn). */
   totals: { entries: number; embedded: number };
+}
+
+// ---------------------------------------------------------------------------
+// Insights (phase 2 spec, "Insights")
+// ---------------------------------------------------------------------------
+
+export interface KnowledgeInsightsQuery {
+  /** Comma-separated collection ids or names (`unfiled` for entries in none); default every visible one. */
+  collections?: string;
+  /** Up to this many items per list (1–50, default 20). */
+  limit?: number;
+}
+
+export interface KnowledgeContradiction {
+  a: KnowledgeEntrySummary;
+  b: KnowledgeEntrySummary;
+  /** Similarity of the two entries; null when either has no vectors. */
+  similarity: number | null;
+  source: "graph" | "checked";
+  /** The contradicting concept pairs (graph), possibly empty for `checked`. */
+  pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[];
+  /** The checker's one-line explanation, or the graph edge's context; null when none. */
+  note: string | null;
+}
+
+export interface KnowledgeBridge {
+  entry: KnowledgeEntrySummary;
+  /** The similarity clusters it links (its own first). */
+  clusters: { label: string | null; size: number }[];
+  /** The concepts that tie it to the other clusters. */
+  concepts: KnowledgeConceptRef[];
+}
+
+export interface KnowledgeSingleSource {
+  concept: KnowledgeConceptRef;
+  /** The only visible entry behind it. */
+  entry: KnowledgeEntrySummary;
+  /** The entry's cluster, when it has one. */
+  cluster: { label: string | null; size: number } | null;
+}
+
+export interface KnowledgeLinkGap {
+  a: KnowledgeEntrySummary;
+  b: KnowledgeEntrySummary;
+  similarity: number;
+  /** True when both are queued for re-linking. */
+  queued: boolean;
+}
+
+/** GET /api/knowledge/insights */
+export interface KnowledgeInsightsResponse {
+  contradictions: KnowledgeContradiction[];
+  bridges: KnowledgeBridge[];
+  singleSource: KnowledgeSingleSource[];
+  gaps: KnowledgeLinkGap[];
+  /** Totals before `limit`. */
+  totals: { contradictions: number; bridges: number; singleSource: number; gaps: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +767,13 @@ export interface KnowledgeStatus {
    * it (search then ranks on text only, and nothing gets embedded). Absent from a daemon that predates it.
    */
   embeddingModelReady?: boolean;
+  /**
+   * Automatic re-linking (phase 2 spec, "Re-linking"): entries still to re-link with neighbour
+   * context or as link gaps; null when nothing is left. Absent from an older daemon.
+   */
+  relink?: { pending: number; done: number; total: number } | null;
+  /** Automatic concept merges in effect (phase 2 spec). Absent from an older daemon. */
+  conceptMerges?: number;
 }
 
 export interface KnowledgeRebuildEstimate {
@@ -836,6 +952,9 @@ export const knowledgeRoutes = {
   item: (id: string): string => `/api/knowledge/items/${enc(id)}`,
   graph: "/api/knowledge/graph",
   similarityGraph: "/api/knowledge/similarity-graph",
+  insights: "/api/knowledge/insights",
+  conceptMerges: "/api/knowledge/concepts/merges",
+  conceptMerge: (id: string): string => `/api/knowledge/concepts/merges/${enc(id)}`,
   search: "/api/knowledge/search",
   facets: "/api/knowledge/facets",
   save: "/api/knowledge/save",
