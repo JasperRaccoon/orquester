@@ -17,9 +17,10 @@ import { EMULATOR_GPU_MODE } from "./emulator.ts";
 /**
  * Bump when the patch below changes: AVDs and golden snapshots made before are made again (lazily,
  * on the profile's next open). 2: every framebuffer keeps its device's real aspect and dp size, and
- * golden snapshots carry the device's display cutout in dp ({@link cutoutSpecInDp}).
+ * golden snapshots carry the device's display cutout in dp ({@link cutoutSpecInDp}). 3: with its
+ * rect approximation and fill, so the camera hole is drawn whole.
  */
-export const AVD_CONFIG_VERSION = 2;
+export const AVD_CONFIG_VERSION = 3;
 
 export interface AvdHardware {
   /** `avdmanager create avd --device`. */

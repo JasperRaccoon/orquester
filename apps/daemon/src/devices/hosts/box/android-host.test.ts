@@ -180,6 +180,12 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     await host.release(h.leases[0]!);
     assert.equal(await waitForExit(pidA, 5_000), true);
     assert.equal(host.capacity().used, 1);
+    // A lost lease naming a serial a golden boot holds now leaves that emulator running.
+    const recordB = (host as unknown as { emulators: Map<string, { leaseId: string | null; golden: boolean }> }).emulators.get(b!.deviceId)!;
+    Object.assign(recordB, { leaseId: null, golden: true });
+    await host.release({ ...lease("lost-one"), deviceId: b!.deviceId, state: "lost" });
+    assert.equal(await isProcessAlive(await pidOf(b!.deviceId)), true);
+    Object.assign(recordB, { leaseId: "lease-b", golden: false });
     await host.teardown();
     assert.equal(host.capacity().used, 0);
   });

@@ -769,8 +769,10 @@ export class LocalAndroidHost implements DeviceHost {
   async release(lease: StoredDeviceLease, _options: { shutdown: boolean }): Promise<void> {
     // Every lease's emulator is a read-only instance made for it: it always goes.
     if (lease.deviceId === null) return;
+    // Only the emulator booted for THIS lease: a lost lease's serial may name a golden boot or
+    // another lease's emulator now (console ports are reused).
     const record = this.emulators.get(lease.deviceId);
-    if (!record || (record.leaseId !== null && record.leaseId !== lease.id)) return;
+    if (!record || record.golden || record.leaseId !== lease.id) return;
     await this.stopRecord(record);
   }
 

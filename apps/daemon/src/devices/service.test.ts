@@ -174,6 +174,20 @@ test("open_device answers `starting` when the boot outlasts the wait, and the bo
   }
 });
 
+test("a boot that fails reads as its failure, not as a release", async () => {
+  const host = new FakeDeviceHost();
+  host.bootImpl = async () => {
+    throw new DeviceError("UNAVAILABLE", "Preparing Pixel 9 for first use failed.");
+  };
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: ANDROID_ON });
+  try {
+    await assert.rejects(t.service.toolOpen("t1", { platform: "android" }, signal()), (error: DeviceError) => error.code === "UNAVAILABLE" && /first use failed/.test(error.message));
+    assert.deepEqual(t.service.leaseSummaries({ threadId: "t1" }), []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("controller handoff and actions: the user's input takes control, agent input is refused, reads still run", async () => {
   const host = new FakeDeviceHost();
   const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: ANDROID_ON });

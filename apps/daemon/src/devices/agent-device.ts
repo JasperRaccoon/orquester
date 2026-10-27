@@ -17,7 +17,9 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { StoredDeviceLease } from "@orquester/config";
 
@@ -259,6 +261,21 @@ export function createAgentDeviceClient(deps: AgentDeviceDeps): AgentDeviceClien
   };
 }
 
+/**
+ * `stdin` as an unlinked 0600 file, open for reading. Not a pipe: Node's pipes are socketpairs, and
+ * opening `/dev/stdin` on a socket fails (ENXIO) — `batch --steps-file /dev/stdin` reads it that way.
+ */
+function stdinFile(text: string): number {
+  const dir = mkdtempSync(join(tmpdir(), "orq-agent-device-"));
+  try {
+    const path = join(dir, "stdin");
+    writeFileSync(path, text, { mode: 0o600 });
+    return openSync(path, "r");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Spawn without a shell, bounded by the timeout, the abort and the output caps. */
 export function runProcess(executable: string, argv: readonly string[], env: Record<string, string>, label: string, options: AgentDeviceRunOptions): Promise<AgentDeviceResult> {
   return new Promise((resolve, reject) => {
@@ -266,7 +283,18 @@ export function runProcess(executable: string, argv: readonly string[], env: Rec
       reject(new DeviceError("CANCELLED", "The request was cancelled."));
       return;
     }
-    const child = spawn(executable, [...argv], { env, shell: false, stdio: [options.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"] });
+    let stdinFd: number | null = null;
+    let child: ReturnType<typeof spawn>;
+    try {
+      stdinFd = options.stdin !== undefined ? stdinFile(options.stdin) : null;
+      child = spawn(executable, [...argv], { env, shell: false, stdio: [stdinFd ?? "ignore", "pipe", "pipe"] });
+    } catch (error) {
+      reject(new DeviceError("UNAVAILABLE", `agent-device could not start (${(error as NodeJS.ErrnoException).code ?? "error"}).`));
+      return;
+    } finally {
+      // The child holds its own copy.
+      if (stdinFd !== null) closeSync(stdinFd);
+    }
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let outBytes = 0;
@@ -297,10 +325,6 @@ export function runProcess(executable: string, argv: readonly string[], env: Rec
       err.push(chunk.subarray(0, STDERR_CAP - errBytes));
       errBytes += Math.min(chunk.length, STDERR_CAP - errBytes);
     });
-    if (options.stdin !== undefined) {
-      child.stdin!.on("error", () => undefined);
-      child.stdin!.end(options.stdin);
-    }
     const finish = (exitCode: number) => {
       if (settled) return;
       settled = true;

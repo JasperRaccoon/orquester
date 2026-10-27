@@ -190,6 +190,23 @@ test("restart: reattach to an emulator a live lease holds, reap one no lease hol
   });
 });
 
+test("release: a lost lease whose serial now names a golden boot leaves that emulator running", async () => {
+  await withHost({}, async ({ appDir, host }) => {
+    const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
+    const golden = await fakeEmulator(appDir, avd.avd);
+    try {
+      // The golden boot took the console port the lost lease's emulator had (emulator-5588).
+      const emulators = (host as unknown as { emulators: Map<string, unknown> }).emulators;
+      emulators.set("emulator-5588", { serial: "emulator-5588", pid: golden.pid!, pgid: golden.pid!, consolePort: 5588, grpcPort: 8570, profile: "pixel-9", avd: "orq-pixel-9", leaseId: null, golden: true, startedAt: "", logPath: "" });
+      await host.release({ ...lease("lost-one", "emulator-5588"), state: "lost" }, { shutdown: true });
+      assert.equal(await isProcessAlive(golden.pid!), true);
+      assert.equal(emulators.has("emulator-5588"), true);
+    } finally {
+      golden.kill("SIGKILL");
+    }
+  });
+});
+
 test("teardown (plugin off): every emulator stops, then the hub, agent-device and the adb server; no boot starts after", async () => {
   await withHost({}, async ({ appDir, host, leases, emulators, exec }) => {
     const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
