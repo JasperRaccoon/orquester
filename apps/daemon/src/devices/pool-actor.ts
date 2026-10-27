@@ -11,8 +11,9 @@
  *   follow once it resolves. A host the factory adds while renting takes the pending one's place.
  *   A failed rental fails the requests it was for, and holds back rentals ahead of demand for
  *   {@link RENTAL_BACKOFF_MS}.
- * - **Scale down.** `destroy()` on idle and drained rented hosts; hosts kept for `minWarmHosts` (or
- *   drained) are reported to the factories (`keepWarm`) so their own idle teardown spares them.
+ * - **Scale down.** `destroy()` on idle and drained rented hosts (the one idle teardown of rented
+ *   hosts: `pool.idleTeardownMinutes`; the factories only clean up failed ones), sparing the
+ *   platform's `minWarmHosts`.
  * - **Spend.** Read from `deps.spend` (the box records: the factories' own source), never counted
  *   twice.
  * - **Learned capacity.** A host the pool rented reports its capacity once ready: recorded per
@@ -21,7 +22,8 @@
  * - **Cache warming.** `warmCaches` dispatches the box provider's cache run per OS, tracked as a
  *   `cache-warm` {@link DeviceSetupJob}; a pool host's cache miss warms at most once a day; while the
  *   pool may rent without asking, caches older than {@link CACHE_REFRESH_MS} are refreshed
- *   (the provider evicts caches unused for 7 days).
+ *   (the provider evicts caches unused for 7 days). A run's id is persisted when dispatched
+ *   (`cache.<os>.lastRunId`, no conclusion yet): after a restart its polling resumes.
  *
  * Every change is published as a {@link DevicePoolSummary} (`devices.pool`) when it differs.
  * Ticks run on every host or lease change (`kick`), at each queue deadline, and every
@@ -46,7 +48,7 @@ import {
 import type { DevicePoolCacheState } from "@orquester/config";
 
 import { DeviceError, isDeviceError } from "./errors.ts";
-import type { DeviceHost, DeviceHostFactory, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
+import type { DeviceHost, DeviceHostFactory, DeviceHostProgress, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
 import {
   decidePool,
   hostCap,
@@ -101,6 +103,14 @@ export interface PoolAcquireRequest {
   rentalApproved: boolean;
 }
 
+/** What a queued request hears while it waits (the panel's booting steps). */
+export interface PoolWaitHooks {
+  /** It waits in the queue (called again when its reason, host or estimate changes). */
+  onQueued?(queued: PoolQueued): void;
+  /** A host the pool rents for it reports progress (`rent-host`, `prepare-host`, …). */
+  onProgress?(progress: DeviceHostProgress): void;
+}
+
 /** A placed request: its host, and the slot held until the lease exists. */
 export interface PoolAcquired {
   host: DeviceHost;
@@ -142,6 +152,7 @@ interface Waiter {
   queued: PoolQueued | null;
   signal: AbortSignal;
   onAbort: () => void;
+  hooks: PoolWaitHooks;
 }
 
 interface PendingRental {
@@ -214,6 +225,7 @@ export class DevicePool {
       void this.deps.store.persist();
     }
     for (const id of present) this.seen.add(id);
+    this.resumeCacheRuns();
     if (this.deps.timers !== false) {
       this.tickTimer = setInterval(() => this.tick(), POOL_TICK_MS);
       this.tickTimer.unref?.();
@@ -252,7 +264,7 @@ export class DevicePool {
    * Queue a lease request: resolves once a host has a slot for it (reserved until `done()`), or
    * rejects with a {@link PoolRefusal}.
    */
-  acquire(input: PoolAcquireRequest, signal: AbortSignal): Promise<PoolAcquired> {
+  acquire(input: PoolAcquireRequest, signal: AbortSignal, hooks: PoolWaitHooks = {}): Promise<PoolAcquired> {
     if (!this.started || this.stopped) return Promise.reject(new PoolRefusal("stopped", input.platform));
     if (signal.aborted) return Promise.reject(new PoolRefusal("cancelled", input.platform));
     const request: PoolRequest = { id: this.newId(), requestedAt: this.deps.now(), ...input };
@@ -263,6 +275,7 @@ export class DevicePool {
         reject,
         queued: null,
         signal,
+        hooks,
         onAbort: () => {
           if (!this.waiters.has(request.id)) return;
           this.finish(waiter, new PoolRefusal("cancelled", request.platform));
@@ -331,6 +344,7 @@ export class DevicePool {
     const since = this.idleSince.get(host.id);
     return {
       draining,
+      ...(draining ? { drainReason: "owner" as const } : {}),
       warm: this.lastDecision?.warmHostIds.includes(host.id) ?? false,
       idleSince: since !== undefined && this.deps.leasesOn(host.id) === 0 ? new Date(since).toISOString() : null
     };
@@ -354,6 +368,43 @@ export class DevicePool {
     const job = await this.startCacheRun(warmer, platform);
     if (job.state === "failed") return { started: false, message: job.error, job: structuredClone(job) };
     return { started: true, message: `Building the ${DEVICE_PLATFORM_LABELS[platform]} device caches (a few minutes; billed by the box provider).`, job: structuredClone(job) };
+  }
+
+  /**
+   * Cache runs dispatched before a restart and not concluded (`lastRunId` with no
+   * `lastConclusion`): tracked again as running jobs and polled now.
+   */
+  private resumeCacheRuns(): void {
+    const now = this.deps.now();
+    for (const platform of DEVICE_PLATFORMS) {
+      const cache = this.deps.store.state().cache[DEVICE_CACHE_OS[platform]];
+      if (!cache?.lastRunId || cache.lastConclusion !== null || this.cacheRuns.has(platform)) continue;
+      const startedAt = parseMs(cache.lastWarmAt) ?? now;
+      const job: DeviceSetupJob = {
+        id: this.newId(),
+        kind: "cache-warm",
+        url: null,
+        platform,
+        hostId: "pool",
+        state: "running",
+        steps: [
+          { id: "dispatch", label: `Start the ${DEVICE_PLATFORM_LABELS[platform]} cache run`, state: "done", detail: "Resumed after Orquester restarted." },
+          { id: "run", label: "Build and save the caches", state: "running", detail: null }
+        ],
+        percent: null,
+        logLine: "Reading the run",
+        error: null,
+        startedAt: new Date(startedAt).toISOString(),
+        finishedAt: null
+      };
+      const run: CacheRun = { job, runId: cache.lastRunId, timer: null, startedAt };
+      this.cacheRuns.set(platform, run);
+      this.cacheAttemptAt.set(platform, startedAt);
+      this.deps.logger.info(`[devices] resuming the ${DEVICE_PLATFORM_LABELS[platform]} cache run ${cache.lastRunId}`);
+      const warmer = this.deps.cacheWarmer?.() ?? null;
+      if (warmer) void this.pollCacheRun(warmer, platform, run);
+      else this.scheduleCachePoll(platform, run);
+    }
   }
 
   cacheJobs(): DeviceSetupJob[] {
@@ -398,7 +449,7 @@ export class DevicePool {
       cache.lastConclusion = null;
       if (trigger === "miss") cache.lastAutoWarmAt = cache.lastWarmAt;
       void this.deps.store.persist();
-      this.scheduleCachePoll(warmer, platform, run);
+      this.scheduleCachePoll(platform, run);
     } catch (error) {
       this.finishCacheRun(run, "failed", `The cache run could not start: ${errorText(error)}`);
     }
@@ -406,10 +457,28 @@ export class DevicePool {
     return job;
   }
 
-  private scheduleCachePoll(warmer: DeviceCacheWarmer, platform: DevicePlatform, run: CacheRun): void {
+  /** The next poll, with the box service's warmer as it is then (it may come and go). */
+  private scheduleCachePoll(platform: DevicePlatform, run: CacheRun): void {
     if (this.stopped || this.deps.timers === false) return;
-    run.timer = setTimeout(() => void this.pollCacheRun(warmer, platform, run), this.deps.cachePollMs ?? CACHE_POLL_MS);
+    run.timer = setTimeout(() => {
+      const warmer = this.deps.cacheWarmer?.() ?? null;
+      if (warmer) {
+        void this.pollCacheRun(warmer, platform, run);
+        return;
+      }
+      if (this.giveUpCacheRun(run)) this.publish();
+      else this.scheduleCachePoll(platform, run);
+    }, this.deps.cachePollMs ?? CACHE_POLL_MS);
     run.timer.unref?.();
+  }
+
+  /** A run past {@link CACHE_POLL_LIMIT_MS} is failed (and concluded, so a restart does not resume it). */
+  private giveUpCacheRun(run: CacheRun): boolean {
+    if (this.deps.now() - run.startedAt <= CACHE_POLL_LIMIT_MS) return false;
+    this.cacheState(run.job.platform).lastConclusion = "timed-out";
+    void this.deps.store.persist();
+    this.finishCacheRun(run, "failed", "The cache run did not finish in 3 hours.");
+    return true;
   }
 
   /** Read a cache run's state once (the timer calls it; tests too). */
@@ -430,11 +499,7 @@ export class DevicePool {
     } catch (error) {
       run.job.logLine = `Could not read the run: ${errorText(error)}`;
     }
-    if (this.deps.now() - run.startedAt > CACHE_POLL_LIMIT_MS) {
-      this.finishCacheRun(run, "failed", "The cache run did not finish in 3 hours.");
-    } else {
-      this.scheduleCachePoll(warmer, platform, run);
-    }
+    if (!this.giveUpCacheRun(run)) this.scheduleCachePoll(platform, run);
     this.publish();
   }
 
@@ -522,11 +587,6 @@ export class DevicePool {
   private spent(): { todayUsd: number; monthUsd: number; committedUsd: number } {
     const spend = this.deps.spend?.() ?? { todayUsd: 0, monthUsd: 0 };
     return { todayUsd: spend.todayUsd, monthUsd: spend.monthUsd, committedUsd: spend.committedUsd ?? 0 };
-  }
-
-  /** The pool keeps this host (warm minimum, or draining it itself): a factory's idle teardown spares it. */
-  keepWarm(hostId: string): boolean {
-    return (this.lastDecision?.warmHostIds.includes(hostId) ?? false) || this.isDraining(hostId);
   }
 
   private offer(platform: DevicePlatform): PoolRentalOffer | null {
@@ -681,7 +741,10 @@ export class DevicePool {
     }
     for (const queued of decision.queue) {
       const waiter = this.waiters.get(queued.requestId);
-      if (waiter) waiter.queued = queued;
+      if (!waiter) continue;
+      const before = waiter.queued;
+      waiter.queued = queued;
+      if (before?.reason !== queued.reason || before.hostId !== queued.hostId || before.etaSeconds !== queued.etaSeconds) waiter.hooks.onQueued?.(queued);
     }
     for (const up of decision.scaleUp) {
       // Right after a failed rental, nothing is rented ahead of demand.
@@ -705,8 +768,12 @@ export class DevicePool {
     this.pending.set(rental.id, rental);
     const threadId = requestIds.map((id) => this.waiters.get(id)?.request.threadId).find((id) => id !== undefined) ?? "";
     this.deps.logger.info(`[devices] renting a ${DEVICE_PLATFORM_LABELS[platform]} pool host (${offer.provider} ${offer.size})`);
+    // The rental's progress reaches the requests it is for (their booting steps).
+    const onProgress = (progress: DeviceHostProgress) => {
+      for (const id of requestIds) this.waiters.get(id)?.hooks.onProgress?.(progress);
+    };
     factory
-      .provision({ platform, approved: true, threadId }, this.abort.signal)
+      .provision({ platform, approved: true, threadId, onProgress }, this.abort.signal)
       .then((host) => {
         const state = this.deps.store.state();
         // A factory renting one at a time may answer an earlier rental's host: recorded once.

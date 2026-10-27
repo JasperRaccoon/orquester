@@ -49,9 +49,13 @@ export interface DevicesIosSettings {
   size: string;
   /** A Mac host's time limit. */
   lifetimeMinutes: number;
-  /** A Mac host with no lease for this long is destroyed. */
+  /**
+   * Superseded by `pool.idleTeardownMinutes` (the pool tears down every idle rented host). Kept
+   * for older builds: a file that has only this one carries it into `pool` when read, and a patch
+   * naming it sets `pool.idleTeardownMinutes` too.
+   */
   idleTeardownMinutes: number;
-  /** Simulators one Mac host runs at once (phase 2 computes it with simslim). */
+  /** The most simulators one Mac host runs at once; a host runs fewer when its memory is short (simslim `top`). */
   maxSimulatorsPerHost: number;
   /**
    * Superseded by `pool.rentWithoutAsking` (one switch for every platform's rentals). Kept for
@@ -86,7 +90,10 @@ export interface DevicePoolSettings {
   maxHourlyUsd: number;
   /** Ready hosts kept warm per platform. */
   minWarmHosts: { android: number; ios: number };
-  /** A pool host with no lease for this long is destroyed. */
+  /**
+   * A rented device host (Mac or Linux, any platform) with no device for this long is destroyed,
+   * unless kept warm (`minWarmHosts`); an own Mac's device helpers stop after this long.
+   */
   idleTeardownMinutes: number;
   /** How long a request above the caps waits for room before `DEVICE_CAPACITY`. */
   capacityWaitSeconds: number;
@@ -164,7 +171,7 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     size: "blacksmith-6vcpu-macos-26",
     lifetimeMinutes: 240,
     idleTeardownMinutes: 20,
-    maxSimulatorsPerHost: 3,
+    maxSimulatorsPerHost: 8,
     rentWithoutAsking: false,
     monthlyCapUsd: 100,
     profiles: [...DEFAULT_IOS_DEVICE_PROFILE_IDS]
@@ -318,7 +325,10 @@ export const devicesSettingsSchema = z
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
-/** A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` existed: its Mac switch and cap become the pool's. */
+/**
+ * A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` / `pool.idleTeardownMinutes`
+ * existed: its Mac switch, cap and idle teardown become the pool's.
+ */
 function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, unknown> {
   const ios = isPlainRecord(record.ios) ? record.ios : null;
   if (!ios) return record;
@@ -330,6 +340,10 @@ function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, 
   }
   if (typeof pool.monthlyCapUsd !== "number" && typeof ios.monthlyCapUsd === "number") {
     pool.monthlyCapUsd = ios.monthlyCapUsd;
+    changed = true;
+  }
+  if (typeof pool.idleTeardownMinutes !== "number" && typeof ios.idleTeardownMinutes === "number") {
+    pool.idleTeardownMinutes = ios.idleTeardownMinutes;
     changed = true;
   }
   return changed ? { ...record, pool } : record;
@@ -391,11 +405,12 @@ export type DevicesSettingsPatch = {
  * re-read through the schema. Keys the patch does not name — unknown ones included — are kept.
  */
 export function mergeDevicesSettings(current: DevicesSettings, patch: DevicesSettingsPatch): DevicesSettings {
-  // An older client's Mac switch / cap sets the one pool switch / cap too (unless the patch names those).
-  if (patch.ios && (patch.ios.rentWithoutAsking !== undefined || patch.ios.monthlyCapUsd !== undefined)) {
+  // An older client's Mac switch / cap / idle teardown sets the pool's too (unless the patch names those).
+  if (patch.ios && (patch.ios.rentWithoutAsking !== undefined || patch.ios.monthlyCapUsd !== undefined || patch.ios.idleTeardownMinutes !== undefined)) {
     const pool = { ...patch.pool };
     if (patch.ios.rentWithoutAsking !== undefined && pool.rentWithoutAsking === undefined) pool.rentWithoutAsking = patch.ios.rentWithoutAsking;
     if (patch.ios.monthlyCapUsd !== undefined && pool.monthlyCapUsd === undefined) pool.monthlyCapUsd = patch.ios.monthlyCapUsd;
+    if (patch.ios.idleTeardownMinutes !== undefined && pool.idleTeardownMinutes === undefined) pool.idleTeardownMinutes = patch.ios.idleTeardownMinutes;
     patch = { ...patch, pool };
   }
   return readDevicesSettings(mergeObject(structuredClone(current) as unknown as Record<string, unknown>, patch as Record<string, unknown>));
@@ -546,6 +561,7 @@ export const devicePoolCacheSchema = z
     lastWarmAt: z.string().nullable().default(null),
     /** The last warm a cache miss dispatched (at most one a day). */
     lastAutoWarmAt: z.string().nullable().default(null),
+    /** The last dispatched run's id; with no `lastConclusion` yet it is in flight (polled again after a restart). */
     lastRunId: z.string().nullable().default(null),
     /** `success`, `failure`, … once the last run completed; null while unknown. */
     lastConclusion: z.string().nullable().default(null)

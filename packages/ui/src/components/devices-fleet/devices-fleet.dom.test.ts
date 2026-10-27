@@ -15,7 +15,7 @@ import { DEVICES_PLUGIN_ID, type DevicesStateResponse, type PluginInfo, type Ses
 
 import type { ApiClient } from "../../lib/api-client";
 import { knowledgePlugin } from "../../lib/knowledge/fixtures.test-helpers";
-import { fleetFixture } from "./fixtures.test-helpers";
+import { fixtureLease, fleetFixture } from "./fixtures.test-helpers";
 import type { ThumbnailDeps } from "./thumbnail-poller";
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
@@ -268,6 +268,33 @@ describe("the Devices fleet view", () => {
     await click(buttonNamed("Destroy host")!);
     await act(settle);
     assert.ok(api.calls.includes("destroy:box:bs-mac-1"));
+  });
+
+  it("a host drained near its deadline reads Ending soon (deadline), with Resume off and the reason", async () => {
+    const fleet = fleetFixture(Date.now());
+    const hosts = fleet.hosts.map((host) => (host.id === "box:bs-linux-3" ? { ...host, pool: { draining: true, drainReason: "deadline" as const, warm: false, idleSince: null } } : host));
+    const api = await connect(stateOf(fleet, { hosts }));
+    await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
+    const card = document.querySelector('[data-host-id="box:bs-linux-3"]')!;
+    assert.match(card.textContent ?? "", /Ending soon \(deadline\)/);
+    const resume = [...card.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Resume")!;
+    assert.ok(resume, "Resume still shows");
+    assert.equal(resume.disabled, true);
+    assert.match(card.querySelector("[data-resume-blocked]")?.getAttribute("title") ?? "", /Can't resume: near its time limit/);
+    await click(resume);
+    await act(settle);
+    assert.ok(!api.calls.some((call) => call.startsWith("drain:")), "no request");
+  });
+
+  it("a panel Open still waiting for a host groups under Waiting for a device host", async () => {
+    const fleet = fleetFixture(Date.now());
+    const waiting = fixtureLease("queued-1", { hostId: "pool", threadId: "chat-9", state: "starting", deviceId: null, key: null, progress: { step: "queue", label: "Waiting for a free Android device", startedAt: new Date().toISOString() } });
+    await connect(stateOf(fleet, { leases: [...fleet.leases, waiting] }));
+    await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
+    const header = document.querySelector('[data-unknown-host="pool"]');
+    assert.ok(header);
+    assert.match(header.textContent ?? "", /Waiting for a device host/);
+    assert.doesNotMatch(header.textContent ?? "", /no longer listed/);
   });
 
   it("explains how agents get devices when none is leased", async () => {

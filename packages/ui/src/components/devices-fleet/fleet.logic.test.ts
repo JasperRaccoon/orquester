@@ -17,6 +17,7 @@ import {
   hostCost,
   hostKindLabel,
   hostStatusView,
+  resumeBlockedReason,
   lastAction,
   leaseCostShare,
   leaseStateNote,
@@ -85,6 +86,9 @@ describe("hosts", () => {
     const view = (over: Parameters<typeof fixtureHost>[0]) => hostStatusView(fixtureHost(over));
     assert.deepEqual(view({}), { key: "ready", label: "Ready", tone: "ok", detail: null });
     assert.equal(view({ kind: "box", pool: { draining: true, warm: false, idleSince: null } }).key, "draining");
+    const deadline = view({ kind: "box", pool: { draining: true, drainReason: "deadline", warm: false, idleSince: null } });
+    assert.deepEqual([deadline.key, deadline.label], ["draining", "Ending soon (deadline)"]);
+    assert.match(deadline.detail ?? "", /time limit/);
     assert.deepEqual(view({ kind: "box", status: "starting", statusDetail: "Restoring caches" }), {
       key: "provisioning",
       label: "Provisioning",
@@ -112,6 +116,10 @@ describe("hosts", () => {
     assert.equal(canDestroy(fixtureBoxHost("s", { status: "stopping" })), false);
     assert.equal(canDrain(fixtureBoxHost("f", { status: "failed" })), false);
     assert.equal(canWarmCaches(fixtureBoxHost("x", { pool: undefined })), false);
+    // Resume is off (with the reason) only for a host drained near its deadline.
+    assert.equal(resumeBlockedReason(fixtureBoxHost("o", { pool: { draining: true, drainReason: "owner", warm: false, idleSince: null } })), null);
+    assert.equal(resumeBlockedReason(fixtureBoxHost("n")), null);
+    assert.match(resumeBlockedReason(fixtureBoxHost("d", { pool: { draining: true, drainReason: "deadline", warm: false, idleSince: null } })) ?? "", /^Can't resume: near its time limit/);
   });
 });
 

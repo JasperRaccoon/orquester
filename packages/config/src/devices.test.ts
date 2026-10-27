@@ -201,6 +201,17 @@ test("rent without asking: one pool switch; a legacy Mac switch is adopted on re
   assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true }, pool: { rentWithoutAsking: false } }).pool.rentWithoutAsking, false);
 });
 
+test("idle teardown: the pool's one setting; a legacy Mac idle teardown is adopted on read and mirrored from patches", () => {
+  assert.equal(readDevicesSettings({ ios: { idleTeardownMinutes: 45 } }).pool.idleTeardownMinutes, 45);
+  // A file that already has the pool's keeps it; an out-of-range legacy value is clamped like any.
+  assert.equal(readDevicesSettings({ ios: { idleTeardownMinutes: 45 }, pool: { idleTeardownMinutes: 15 } }).pool.idleTeardownMinutes, 15);
+  assert.equal(readDevicesSettings({ ios: { idleTeardownMinutes: 1 } }).pool.idleTeardownMinutes, 5);
+  const merged = mergeDevicesSettings(defaultDevicesSettings(), { ios: { idleTeardownMinutes: 30 } });
+  assert.equal(merged.pool.idleTeardownMinutes, 30);
+  assert.equal(merged.ios.idleTeardownMinutes, 30);
+  assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { idleTeardownMinutes: 30 }, pool: { idleTeardownMinutes: 10 } }).pool.idleTeardownMinutes, 10);
+});
+
 test("pool settings: the monthly cap defaults, clamps and falls back alone", () => {
   assert.equal(readDevicesSettings({}).pool.monthlyCapUsd, 100);
   assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: -5 } }).pool.monthlyCapUsd, 0);

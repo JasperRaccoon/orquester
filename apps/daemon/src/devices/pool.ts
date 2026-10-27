@@ -122,8 +122,10 @@ export function choosePlacement(input: PlacementInput): Placement {
 // Waiting: a request no host can take waits until `capacityWaitSeconds` after it was made, then
 //   fails `DEVICE_CAPACITY` (`budget` when `maxHourlyUsd` was what blocked a rental); at once when
 //   no host could ever free a slot. One waiting on a starting host waits up to `hostWaitSeconds`.
-// Scale down: a drained rented host with no lease goes; a ready rented host idle for
-//   `idleTeardownMinutes` goes unless it is one of the platform's `minWarmHosts`.
+// Scale down (the only idle teardown of rented hosts): a drained rented host with no lease goes; a
+//   ready rented host idle for `idleTeardownMinutes` goes unless it is one of the platform's
+//   `minWarmHosts`; one that is not ready (unreachable, needs setup) and has no lease goes after
+//   the same time (it bills either way). Failed hosts are their factory's to clean up.
 // Android hosts never run more than {@link ANDROID_HOST_HARD_CAP} devices (spike §3).
 
 /** No host runs more Android emulators than this (the 17th aborts and may take others down; spike §3). */
@@ -482,6 +484,14 @@ export function decidePool(input: PoolInput): PoolDecision {
     }
   }
   const idleMs = pool.idleTeardownMinutes * 60_000;
+  const settled = new Set<DeviceHostStatus>(["ready", "starting", "installing", "failed", "stopping"]);
+  for (const host of poolHosts) {
+    const since = host.idleSince ?? host.startedAt ?? now;
+    if (host.destroyable && !host.pending && !gone.has(host.id) && !settled.has(host.status) && host.used === 0 && !busy.has(host.id) && now - since >= idleMs) {
+      decision.scaleDown.push({ hostId: host.id, reason: "idle" });
+      gone.add(host.id);
+    }
+  }
   for (const platform of PLATFORMS) {
     const keep = mode === "local-only" ? 0 : pool.minWarmHosts[platform];
     const up = poolHosts.filter((host) => host.platforms.includes(platform) && !host.draining && !gone.has(host.id) && (host.status === "ready" || isStarting(host)));

@@ -195,10 +195,18 @@ export interface DeviceHostBoxInfo {
   deadlineAt: string | null;
 }
 
+export type DeviceHostDrainReason = "owner" | "deadline";
+
 /** Phase 2: a pool host's place in the fleet. */
 export interface DeviceHostPoolInfo {
   /** Being drained: no new leases, destroyed once empty. */
   draining: boolean;
+  /**
+   * Why it drains: the owner's Drain (Resume takes it back), or `deadline` — it is near its time
+   * limit (`box.deadlineAt`), which no Resume undoes. Absent when not draining (and from older
+   * daemons: read as the owner's).
+   */
+  drainReason?: DeviceHostDrainReason;
   /** Kept warm by `minWarmHosts`. */
   warm: boolean;
   /** Since when it has had no lease (idle teardown counts from here); null while in use. */
@@ -323,12 +331,20 @@ export interface DeviceLeaseProgress {
   startedAt: string;
 }
 
+/**
+ * The `hostId` of a panel Open still waiting for a host (the pool's queue, a host being rented or
+ * started, a setup): the lease is `starting` with the wait as its progress, and becomes the placed
+ * lease (same id) — or `lost` with the reason when it cannot be placed.
+ */
+export const DEVICE_QUEUED_HOST_ID = "pool";
+
 export interface DeviceLeaseSummary {
   id: string;
   /** `<hostId>/<deviceId>`; null while the host has not assigned the device yet (`starting`). */
   key: string | null;
   /** The chat that holds it (`sessionId`). */
   threadId: string;
+  /** Its host; {@link DEVICE_QUEUED_HOST_ID} while a panel Open waits for one. */
   hostId: string;
   /** Null while `starting` (see `key`). */
   deviceId: string | null;
