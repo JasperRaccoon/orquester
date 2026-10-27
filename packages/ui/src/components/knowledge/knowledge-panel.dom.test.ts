@@ -10,21 +10,25 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement, useState } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import type {
-  KnowledgeConceptDetail,
-  KnowledgeConceptMerge,
-  KnowledgeEntryDetail,
-  KnowledgeItemResponse,
-  KnowledgeMergeRequest,
-  UpdateKnowledgeEntryRequest
+import {
+  KNOWLEDGE_CHANGED_EVENT,
+  KNOWLEDGE_CHANNEL,
+  type KnowledgeConceptDetail,
+  type KnowledgeConceptMerge,
+  type KnowledgeEntryDetail,
+  type KnowledgeItemResponse,
+  type KnowledgeMergeRequest,
+  type UpdateKnowledgeEntryRequest
 } from "@orquester/api";
 
-import { collection, collections, entry, summary } from "../../lib/knowledge/fixtures.test-helpers";
+import { collection, collections, entry, event, status, summary } from "../../lib/knowledge/fixtures.test-helpers";
 import type { KnowledgeSelection } from "./KnowledgePanel";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
+let applyKnowledgeEvent: typeof import("../../lib/knowledge/store").applyKnowledgeEvent;
+let knowledgeStore: typeof import("../../lib/knowledge/store").knowledgeStore;
 let setPlainTextBody: typeof import("./panel.logic").setPlainTextBody;
 let KnowledgePanel: typeof import("./KnowledgePanel").KnowledgePanel;
 
@@ -66,7 +70,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ resetKnowledge } = await import("../../lib/knowledge/store"));
+  ({ resetKnowledge, applyKnowledgeEvent, knowledgeStore } = await import("../../lib/knowledge/store"));
   ({ setPlainTextBody } = await import("./panel.logic"));
   ({ KnowledgePanel } = await import("./KnowledgePanel"));
 });
@@ -132,7 +136,8 @@ describe("the entry panel", () => {
   const api = {
     connection: { id: "c1" },
     getKnowledgeStatus: async () => {
-      throw new Error("unused");
+      calls.push("status");
+      return status({ conceptMerges: merges.length });
     },
     listKnowledgeCollections: async () => collections(COLLECTIONS),
     createKnowledgeCollection: async () => ({}),
@@ -497,8 +502,13 @@ describe("the entry panel", () => {
 
       await click(buttonNamed("Undo merge", dialog));
       await settle();
-      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges", "undo:cm_prices"], "the merge into this concept that lists it");
-      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2, "read again after the undo");
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges", "undo:cm_prices", "status"], "the merge into this concept that lists it, then the status");
+      assert.equal(knowledgeStore.getState().status?.conceptMerges, 2, "the merges count moved");
+      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 1, "nothing refetched locally");
+      // The daemon's knowledge.changed { graph } reads the concept again.
+      await act(async () => applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { graph: true })));
+      await settle();
+      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2, "read again after the daemon's graph event");
       assert.equal(mergedRow("tactic-prices"), null, "no longer merged");
       assert.ok(mergedRow("tactic-plans"));
       assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]'), null);

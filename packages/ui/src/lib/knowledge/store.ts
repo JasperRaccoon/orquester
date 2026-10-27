@@ -301,9 +301,17 @@ export interface KnowledgeConceptMergeApi extends KnowledgeApi {
   undoKnowledgeConceptMerge(id: string): Promise<unknown>;
 }
 
-/** Undo one automatic concept merge: the graph (and every panel showing a concept) reads again. */
-export function undoKnowledgeConceptMerge(api: KnowledgeConceptMergeApi, id: string): Promise<void> {
-  return mutate(api, () => api.undoKnowledgeConceptMerge(id), { graph: true });
+/**
+ * Undo one automatic concept merge, then read the status (Settings → Plugins shows its merges count).
+ * No local graph bump and no collections read: the daemon's `knowledge.changed { graph }` reloads the
+ * graph and every panel showing a concept, and the collections did not change.
+ */
+export async function undoKnowledgeConceptMerge(api: KnowledgeConceptMergeApi, id: string): Promise<void> {
+  adopt(api);
+  const gen = generation;
+  await api.undoKnowledgeConceptMerge(id);
+  if (gen !== generation) return;
+  await loadKnowledgeStatus(api).catch(() => undefined);
 }
 
 // ---------------------------------------------------------------------------
