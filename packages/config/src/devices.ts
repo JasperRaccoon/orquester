@@ -55,7 +55,7 @@ export interface DevicesIosSettings {
    * naming it sets `pool.idleTeardownMinutes` too.
    */
   idleTeardownMinutes: number;
-  /** Simulators one Mac host runs at once (phase 2 computes it with simslim). */
+  /** The most simulators one Mac host runs at once; a host runs fewer when its memory is short (simslim `top`). */
   maxSimulatorsPerHost: number;
   /**
    * Superseded by `pool.rentWithoutAsking` (one switch for every platform's rentals). Kept for
@@ -171,7 +171,7 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     size: "blacksmith-6vcpu-macos-26",
     lifetimeMinutes: 240,
     idleTeardownMinutes: 20,
-    maxSimulatorsPerHost: 3,
+    maxSimulatorsPerHost: 8,
     rentWithoutAsking: false,
     monthlyCapUsd: 100,
     profiles: [...DEFAULT_IOS_DEVICE_PROFILE_IDS]

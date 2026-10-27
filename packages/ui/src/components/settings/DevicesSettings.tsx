@@ -590,7 +590,7 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
               patch={(value) => ({ pool: { idleTeardownMinutes: value } })}
             />
           </SettingRow>
-          <SettingRow label="Simulators per host" description="Beyond this a second host is rented.">
+          <SettingRow label="Simulators per host" description="At most; a host runs fewer when its memory is short. Beyond that a second host is rented.">
             <NumberField
               id="ios.maxSimulatorsPerHost"
               label="Simulators per host"
