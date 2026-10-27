@@ -17,7 +17,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -128,6 +128,7 @@ export class VphoneDeviceHost implements DeviceHost {
   private watchedLink: VphoneBoxLink | null = null;
   private reattached = false;
   private sweeping: Promise<void> | null = null;
+  private sweepAgain = false;
 
   constructor(private readonly deps: VphoneHostDeps) {
     this.id = vphoneHostId(deps.boxId);
@@ -523,33 +524,49 @@ export class VphoneDeviceHost implements DeviceHost {
     this.machines.delete(name);
     try {
       await mkdir(this.deps.stateDir, { recursive: true, mode: 0o700 });
+      // Written whole (a sweep may read it at any time).
       const path = this.recordPath(name);
-      await writeFile(path, JSON.stringify({ name, procId, released: true }), { mode: 0o600 });
-      await chmod(path, 0o600).catch(() => undefined);
+      const temp = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temp, JSON.stringify({ name, procId, released: true }), { mode: 0o600 });
+      await rename(temp, path);
     } catch (error) {
       this.deps.logger.warn(`[devices] remembering released research iPhone ${name} failed`, errorText(error));
     }
     this.emit();
   }
 
-  /** Delete the clones of released leases that could not be deleted then (offline, not probed, a failed delete). */
+  /**
+   * Delete the clones of released leases that could not be deleted then (offline, not probed, a
+   * failed delete). One sweep at a time; a probe during a sweep runs one more after it.
+   */
   private sweepReleased(link: VphoneBoxLink, cli: VphoneCli): Promise<void> {
-    this.sweeping ??= (async () => {
-      const files = await readdir(this.deps.stateDir).catch(() => [] as string[]);
-      const leased = new Set(this.deps.activeLeases().map((lease) => lease.deviceId));
-      for (const file of files) {
-        if (!file.endsWith(".json")) continue;
-        const name = file.slice(0, -".json".length);
-        if (!this.isOurs(name) || this.machines.has(name) || leased.has(name)) continue;
-        const raw = asRecord(JSON.parse(await readFile(this.recordPath(name), "utf8").catch(() => "null")) as unknown);
-        if (raw?.released !== true) continue;
-        const procId = typeof raw.procId === "string" ? raw.procId : `vphone-${name}`;
-        await this.teardown(link, cli, { name, procId, forward: null, process: null }, true);
-      }
+    if (this.sweeping) {
+      this.sweepAgain = true;
+      return this.sweeping;
+    }
+    this.sweeping = (async () => {
+      do {
+        this.sweepAgain = false;
+        await this.sweepOnce(link, cli);
+      } while (this.sweepAgain && !this.disposed);
     })().finally(() => {
       this.sweeping = null;
     });
     return this.sweeping;
+  }
+
+  private async sweepOnce(link: VphoneBoxLink, cli: VphoneCli): Promise<void> {
+    const files = await readdir(this.deps.stateDir).catch(() => [] as string[]);
+    const leased = new Set(this.deps.activeLeases().map((lease) => lease.deviceId));
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const name = file.slice(0, -".json".length);
+      if (!this.isOurs(name) || this.machines.has(name) || leased.has(name)) continue;
+      const raw = asRecord(JSON.parse(await readFile(this.recordPath(name), "utf8").catch(() => "null")) as unknown);
+      if (raw?.released !== true) continue;
+      const procId = typeof raw.procId === "string" ? raw.procId : `vphone-${name}`;
+      await this.teardown(link, cli, { name, procId, forward: null, process: null }, true);
+    }
   }
 
   async run(): Promise<never> {

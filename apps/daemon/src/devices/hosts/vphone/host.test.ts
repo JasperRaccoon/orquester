@@ -192,7 +192,7 @@ test("released while the Mac is offline, or a delete that failed: a tombstone (n
   const record = join(dir, "state", "orq-lease8.json");
   await writeFile(record, JSON.stringify({ name: "orq-lease8", leaseId: "lease8", boxPort: 1, token: "t".repeat(64), procId: "vphone-orq-lease8", osVersion: "iOS 26.1" }));
   let deleteWorks = false;
-  const { host, mac } = await setup(
+  const { host, mac, logs } = await setup(
     {
       answer: (command, args) => {
         if (command !== VPHONE_CLI_PATH) return undefined;
@@ -215,9 +215,9 @@ test("released while the Mac is offline, or a delete that failed: a tombstone (n
   // Back online: the next check tries; the delete fails while the machine is still there, so the tombstone stays.
   mac.setConnected(true);
   await host.refreshReadiness();
-  await until(() => cliCalls(mac, before).includes("vm delete orq-lease8 --force"));
-  await until(async () => JSON.parse(await readFile(record, "utf8")).released === true && cliCalls(mac, before).includes("vm info orq-lease8 --json"));
-  assert.ok(await stat(record));
+  await until(() => logs.some((line) => line.includes("deleting research iPhone orq-lease8 failed; retrying on the next check")));
+  await until(async () => JSON.parse(await readFile(record, "utf8")).released === true);
+  assert.deepEqual(JSON.parse(await readFile(record, "utf8")), { name: "orq-lease8", procId: "vphone-orq-lease8", released: true });
 
   // The next check deletes it, and the tombstone goes.
   deleteWorks = true;
