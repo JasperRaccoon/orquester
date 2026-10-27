@@ -337,7 +337,12 @@ export const knowledgePairCheckRecordSchema = z
     hashB: z.string().min(1),
     verdict: z.enum(KNOWLEDGE_PAIR_CHECK_VERDICTS),
     note: z.string().nullable().catch(null),
-    checkedAt: z.string()
+    checkedAt: z.string(),
+    /**
+     * The version of the input the check was asked on (the daemon's `PAIR_CHECK_INPUT_VERSION`);
+     * absent: 1 (each body's opening only). A check on an older input may be asked again.
+     */
+    inputVersion: z.number().int().min(1).optional().catch(undefined)
   })
   .passthrough();
 export type KnowledgePairCheckRecord = z.infer<typeof knowledgePairCheckRecordSchema>;

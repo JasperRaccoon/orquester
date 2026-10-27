@@ -131,6 +131,7 @@ import {
   KnowledgePairChecks,
   PAIR_CHECK_MAX_PER_RUN,
   PAIR_CHECK_STEP,
+  PAIR_CHECK_V1_BODY_CHARS,
   pairCheckCandidates,
   pairCheckItemKey,
   parsePairCheckAnswer,
@@ -574,7 +575,9 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   async pairChecksIdle(): Promise<void> {
     await this.orphansClosing;
     while (this.pairRound || this.pairStarting) {
-      if (this.pairRound) await this.pairRound.ended;
+      // A round's `ended` is only its end once it is ending (before, an already settled promise:
+      // awaiting it in this loop would starve the round itself of the event loop).
+      if (this.pairRound?.ending) await this.pairRound.ended;
       else await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
@@ -1245,6 +1248,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       this.pairRoundDue = false;
       await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources());
       const store = this.opts.store;
+      // Entries of checks on an older input that saw a cut body: such a check is asked again once.
+      const longBodies = new Set<string>();
+      for (const id of this.pairChecks.recheckEntryIds()) {
+        const entry = await store.getEntry(id).catch(() => null);
+        if (entry && entry.body.trim().length > PAIR_CHECK_V1_BODY_CHARS) longBodies.add(id);
+      }
       const candidates = await pairCheckCandidates({
         ids: store.listMeta().filter((meta) => meta.linkState === "linked").map((meta) => meta.id),
         view,
@@ -1254,7 +1263,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           return meta ? { kind: meta.kind, title: meta.title, author: meta.author, handle: meta.handle } : null;
         },
         // A pair rounds gave up on (no acceptable answer in several rounds) is not asked again.
-        isChecked: (pair) => this.pairChecks.isChecked(pair) || this.pairChecks.gaveUp(pairCheckItemKey(pair)),
+        isChecked: (pair) => this.pairChecks.isChecked(pair, (id) => longBodies.has(id)) || this.pairChecks.gaveUp(pairCheckItemKey(pair)),
         limit: PAIR_CHECK_MAX_PER_RUN
       });
       if (!this.idleForPairChecks()) return;
@@ -1262,7 +1271,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         const [a, b] = await Promise.all([store.getEntry(candidate.a), store.getEntry(candidate.b)]);
         if (!a || !b || a.contentHash !== candidate.hashA || b.contentHash !== candidate.hashB) continue;
         const pair: PairKey = { a: candidate.a, b: candidate.b, hashA: candidate.hashA, hashB: candidate.hashB };
-        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, { a, b }, this.opts.clock.now()), {
+        const sides = { a: { ...a, concepts: view.conceptsOf(a.id) }, b: { ...b, concepts: view.conceptsOf(b.id) }, focus: candidate.focus };
+        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, sides, this.opts.clock.now()), {
           kind: "pair",
           pair,
           key: pairCheckItemKey(pair),

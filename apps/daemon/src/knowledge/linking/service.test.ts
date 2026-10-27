@@ -26,6 +26,7 @@ import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } fr
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
 import { MAX_REFUSALS } from "./inbox.ts";
+import { PAIR_CHECK_BODY_CHARS, PAIR_CHECK_INPUT_VERSION } from "./pair-checks.ts";
 import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
 import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
 
@@ -1371,6 +1372,60 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     await h.service.pairChecksIdle();
     assert.equal(h.service.pairChecks.all().length, 1);
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check").length, 1, "each pair is checked once per pair of content hashes");
+    await h.service.stop();
+  });
+
+  it("a consistent check on input version 1 that saw a cut body is asked again once, with excerpts, and recorded on the current version", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    const ids = [ID(1), ID(2), ID(3)];
+    graph.ready(ids);
+    graph.concepts.set(ID(3), [{ id: "tool-x", type: "Tool", name: "X" }]);
+    const bodies: Record<string, string> = {
+      [ID(1)]: Array.from({ length: 100 }, (_, i) => `Step ${i}: filler line number ${i} about phones.`).join("\n") + "\nUse Gmail specifically, never Outlook.",
+      [ID(2)]: "make an outlook/proton email for the account",
+      [ID(3)]: "body of 3"
+    };
+    assert.ok(bodies[ID(1)]!.length > PAIR_CHECK_BODY_CHARS, "longer than the old cut, and excerpted now");
+    const hash = (id: string) => createHash("sha256").update(bodies[id]!).digest("hex");
+    const v1 = (a: string, b: string) => ({ a, b, hashA: hash(a), hashB: hash(b), verdict: "consistent", note: "Same playbook.", checkedAt: "t" });
+    await mkdir(dirname(knowledgePairChecksPath(h.appdir)), { recursive: true });
+    await writeFile(knowledgePairChecksPath(h.appdir), JSON.stringify({ version: 1, checks: [v1(ID(1), ID(2))] }));
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, bodies[id]!));
+    const pairInputs = () => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check");
+    const reasked = new Promise<void>((resolve) => {
+      const off = h.service.pairChecks.onChange(() => {
+        if (h.service.pairChecks.get(ID(1), ID(2))?.note !== "Both say the same.") return;
+        off();
+        resolve();
+      });
+    });
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    // The gap entries are re-linked first; then linking is idle and the round runs.
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    await reasked;
+    await h.service.pairChecksIdle();
+    const asked = pairInputs();
+    assert.equal(asked.length, 1, "the version-1 check of the cut body is asked again");
+    assert.ok(asked[0]!.input.includes("Use Gmail specifically, never Outlook."), "with the passage that bears on the other entry");
+    assert.ok(asked[0]!.input.includes("(Excerpts chosen for relevance to the other entry"));
+    await h.service.pairChecks.flush();
+    const file = JSON.parse(await readFile(knowledgePairChecksPath(h.appdir), "utf8")) as { checks: { a: string; b: string; inputVersion?: number; note: string }[] };
+    assert.deepEqual(
+      file.checks.map((c) => [c.a, c.b, c.inputVersion, c.note]),
+      [[ID(1), ID(2), PAIR_CHECK_INPUT_VERSION, "Both say the same."]]
+    );
+
+    // The next rounds (gap re-links, an edit elsewhere) do not ask it again.
+    h.service.entriesChanged(await h.store.put(ID(3), "body of 3, edited"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    await flushAsync(20);
+    await h.service.pairChecksIdle();
+    assert.equal(pairInputs().filter((i) => i.input.includes(`(${ID(1)})`) && i.input.includes(`(${ID(2)})`)).length, 1, "asked again once");
     await h.service.stop();
   });
 });
