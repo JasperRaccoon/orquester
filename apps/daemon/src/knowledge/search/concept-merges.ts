@@ -6,7 +6,10 @@
  * every load (`KnowledgeGraph.setConceptMerges`), since myKG rewrites its output on every run.
  *
  * - the rule: {@link conceptMergeRefusal} (type, similarity, lexical guard, numbers, negation,
- *   lists, Person) and {@link planConceptMerges} (transitive per type, the kept concept);
+ *   lists, Person) and {@link planConceptMerges} (transitive per type, the kept concept), plus the
+ *   deterministic Person rule ({@link personHandlePairs}: a handle equal to another Person's name or
+ *   handle) and the pairs LLM checks confirmed (`concept-merge-checks.ts`; merges `source: "checked"`,
+ *   the answers kept in the file's `checks`);
  * - the file: read tolerant (`@orquester/config` `parseKnowledgeConceptMergesFile`), written atomically;
  * - {@link KnowledgeConceptMerges}: plans after every complete vector computation, applies the
  *   overlay, lists and undoes merges (an undone merge is never made again), and answers similar
