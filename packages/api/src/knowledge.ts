@@ -165,8 +165,10 @@ export interface KnowledgeEntriesQuery {
   cursor?: string;
   limit?: number;
   /**
-   * Comma-separated {@link KnowledgeSearchFilters} on the query string (`kinds`, `authors`, `years`), and
-   * ISO bounds (`postedAfter`, `postedBefore`, `savedAfter`, `savedBefore`); same meaning as in search.
+   * {@link KnowledgeSearchFilters} lists on the query string (`kinds`, `authors`, `years`): comma-separated,
+   * or a JSON array of strings (a value starting with "[") when a value itself holds a comma — see
+   * {@link encodeKnowledgeFilterList}. Plus ISO bounds (`postedAfter`, `postedBefore`, `savedAfter`,
+   * `savedBefore`); same meaning as in search.
    */
   kinds?: string;
   authors?: string;
@@ -651,6 +653,11 @@ export interface KnowledgeStatus {
   workers: KnowledgeWorkerView[];
   tokens: { week: { in: number; out: number }; total: { in: number; out: number } };
   lastError: { message: string; at: string } | null;
+  /**
+   * Whether the embedding model is installed and loadable: false while an install still has to fetch
+   * it (search then ranks on text only, and nothing gets embedded). Absent from a daemon that predates it.
+   */
+  embeddingModelReady?: boolean;
 }
 
 export interface KnowledgeRebuildEstimate {
@@ -868,3 +875,12 @@ export type KnowledgeErrorCode =
   | "KNOWLEDGE_BUSY"
   /** An unexpected failure (500). */
   | "KNOWLEDGE_ERROR";
+
+/**
+ * A filter list as sent on the entries route's query string: comma-separated, or a JSON array when a
+ * value holds a comma (so "Smith, John" stays one author). Undefined for an empty list.
+ */
+export function encodeKnowledgeFilterList(values: readonly string[] | undefined): string | undefined {
+  if (!values || values.length === 0) return undefined;
+  return values.some((value) => value.includes(",") || value.trimStart().startsWith("[")) ? JSON.stringify(values) : values.join(",");
+}
