@@ -63,7 +63,9 @@ export type BoxProviderId =
   | "jarvislabs"
   | "tensordock"
   // macOS through GitHub Actions
-  | "blacksmith";
+  | "blacksmith"
+  // The owner's own machines, paired once (free; never destroyed by Orquester)
+  | "byo";
 
 export const BOX_PROVIDER_IDS: readonly BoxProviderId[] = [
   "hetzner",
@@ -87,14 +89,28 @@ export const BOX_PROVIDER_IDS: readonly BoxProviderId[] = [
   "massed",
   "jarvislabs",
   "tensordock",
-  "blacksmith"
+  "blacksmith",
+  "byo"
 ];
 
 export function isBoxProviderId(value: unknown): value is BoxProviderId {
   return typeof value === "string" && (BOX_PROVIDER_IDS as readonly string[]).includes(value);
 }
 
-export type BoxPurpose = "project" | "temporary";
+/**
+ * - `project` / `temporary` — see above. A bring-your-own (`byo`) machine takes the purpose of its
+ *   current use: a project placed on it, or the agent chat it is lent to.
+ * - `machine` — a bring-your-own machine that is paired and not in use (or still pairing).
+ */
+export type BoxPurpose = "project" | "temporary" | "machine";
+
+/** The provider id of the owner's own machines (Devices phase 3 §2.1). */
+export const BYO_PROVIDER_ID = "byo" satisfies BoxProviderId;
+/** The kinds a bring-your-own machine can be. */
+export type ByoMachineKind = "linux" | "macos";
+export const BYO_MACHINE_KINDS: readonly ByoMachineKind[] = ["linux", "macos"];
+/** How long a pairing command works. */
+export const BYO_PAIRING_TTL_MINUTES = 30;
 
 /**
  * - `provisioning` — being created and set up (see `setup`).
@@ -103,15 +119,19 @@ export type BoxPurpose = "project" | "temporary";
  * - `destroying` — a destroy call is in flight.
  * - `destroy-failed` — the provider refused or failed the destroy; it may still bill. Retry is offered.
  * - `destroyed` — gone (see `destroyedReason`). Terminal.
+ * - `pairing` — bring-your-own machines: waiting for the owner to run the pairing command.
+ * - `offline` — bring-your-own machines: paired, `orq-agent` not connected right now. Never destroyed for it.
  */
-export type BoxState = "provisioning" | "ready" | "unreachable" | "destroying" | "destroy-failed" | "destroyed";
+export type BoxState = "provisioning" | "ready" | "unreachable" | "destroying" | "destroy-failed" | "destroyed" | "pairing" | "offline";
 export const BOX_STATES: readonly BoxState[] = [
   "provisioning",
   "ready",
   "unreachable",
   "destroying",
   "destroy-failed",
-  "destroyed"
+  "destroyed",
+  "pairing",
+  "offline"
 ];
 
 /**
@@ -222,6 +242,21 @@ export interface BoxSummary {
   /** Temporary boxes: the agent's short purpose ("build the engine on macOS"). */
   purposeNote: string | null;
   setup: BoxSetupStep[];
+  /**
+   * Whether the owner marked this machine for device simulators (Settings, per bring-your-own
+   * machine). Absent: not a bring-your-own machine, or never set.
+   */
+  deviceHost?: boolean;
+  /** Bring-your-own machines only (`provider: "byo"`). */
+  byo?: BoxByoInfo;
+}
+
+/** What a bring-your-own machine's row shows. */
+export interface BoxByoInfo {
+  /** The owner's name for the machine. */
+  name: string;
+  /** While `pairing`: when the current pairing command stops working (null: none issued, or it was used). */
+  pairingExpiresAt: string | null;
 }
 
 export interface BoxesTotals {
@@ -617,6 +652,26 @@ export const boxRoutes = {
   /** REMOTE WebSocket, box-authenticated by its `hello` message (`box-protocol.ts`). */
   connect: "/api/boxes/connect",
   /**
+   * Bring-your-own machines: `POST` `AddByoMachineRequest` → `ByoPairingResponse` (a `pairing` box
+   * record and its one-time command).
+   */
+  byoMachines: "/api/boxes/byo",
+  /**
+   * `PATCH` `UpdateByoMachineRequest` → `BoxResponse`; `DELETE` → `RemoveByoMachineResponse`: removes
+   * the machine (cancels a pairing; a connected machine's `orq-agent` uninstalls its service and
+   * exits; its credential is revoked). 409 `BOX_IN_USE` while a project or a chat uses it.
+   */
+  byoMachine: (id: string): string => `/api/boxes/byo/${encodeURIComponent(id)}`,
+  /** `POST` → `ByoPairingResponse`: a new pairing command for a `pairing` machine (the old one stops working). */
+  byoPairing: (id: string): string => `/api/boxes/byo/${encodeURIComponent(id)}/pairing`,
+  /**
+   * REMOTE, NOT behind the daemon's user auth: `GET` → the pairing script (`text/x-shellscript`) for
+   * a one-time pairing code. The code is spent by the first fetch and expires after
+   * `BYO_PAIRING_TTL_MINUTES`; failures are rate-limited per client. Answers 404 for any code that
+   * is not live.
+   */
+  pair: (code: string): string => `/api/boxes/pair/${encodeURIComponent(code)}`,
+  /**
    * SOCKET-ONLY (registered on the unix-socket app alone, never on the remote transport):
    * `POST` `BoxInternalTokenRequest` → the daemon's `AgentTokenGrant` (an access token, never a
    * refresh token), for the agent host at spawn time and on Codex refresh requests. Refusals:
@@ -659,6 +714,34 @@ export interface BoxInternalTokenRequest {
   rejectedAccessToken?: string;
 }
 
+/** Body of `POST boxRoutes.byoMachines`. */
+export interface AddByoMachineRequest {
+  kind: ByoMachineKind;
+  /** 1–60 characters, shown in lists and on approval cards. */
+  name: string;
+}
+
+/** Body of `PATCH boxRoutes.byoMachine(id)`: the fields to change. */
+export interface UpdateByoMachineRequest {
+  name?: string;
+  /** "Use for device simulators". */
+  deviceHost?: boolean;
+}
+
+/** `DELETE boxRoutes.byoMachine(id)`. */
+export interface RemoveByoMachineResponse {
+  /** False when the machine was not connected: run `orq-agent uninstall-service` on it by hand. */
+  uninstalled: boolean;
+}
+
+/** A pairing command, shown once (only a hash of its code is kept). */
+export interface ByoPairingResponse {
+  box: BoxSummary;
+  /** `curl -fsSL <daemon>/api/boxes/pair/<code> | sh`. */
+  command: string;
+  expiresAt: string;
+}
+
 /** The `/events` channel box changes go out on. */
 export const BOXES_CHANNEL = "boxes";
 /** Payload: `BoxesResponse`. */
@@ -684,4 +767,6 @@ export type BoxErrorCode =
   | "BOX_CONFIG_CHANGE_NOT_FOUND"
   | "BOX_CONFIG_CHANGE_DECIDED"
   /** 410: the box is destroyed (or being destroyed); a box project's files, terminals and git are gone. */
-  | "BOX_DESTROYED";
+  | "BOX_DESTROYED"
+  /** 409: a bring-your-own machine is used by a project or a chat (release it first). */
+  | "BOX_IN_USE";

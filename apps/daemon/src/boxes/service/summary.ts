@@ -49,9 +49,18 @@ export const SETUP_STEP_LABELS: Readonly<Record<BoxSetupStepId, string>> = {
   ready: "Ready"
 };
 
-/** The steps a box runs: all of them for a project box, create/connect/ready for a temporary one. */
+/**
+ * The steps a box runs: all of them for a project box, create/connect/ready for a temporary one,
+ * none for an idle bring-your-own machine (pairing is its state, not a setup).
+ */
 export function setupStepIds(purpose: BoxPurpose): BoxSetupStepId[] {
+  if (purpose === "machine") return [];
   return purpose === "temporary" ? ["create", "connect", "ready"] : [...BOX_SETUP_STEP_IDS];
+}
+
+/** A record's purpose as the API names it (an unknown one reads as `project`, as before `machine` existed). */
+export function purposeOf(record: Pick<StoredBox, "purpose">): BoxPurpose {
+  return record.purpose === "temporary" || record.purpose === "machine" ? record.purpose : "project";
 }
 
 export function initialSetup(purpose: BoxPurpose): BoxSetupStep[] {
@@ -122,7 +131,8 @@ export function boxesTotals(records: readonly StoredBox[], now: number): BoxesTo
   let hourlyUsd = 0;
   let month = 0;
   for (const record of records) {
-    if (isActiveRecord(record)) {
+    // An idle machine of the owner's is not a box running for anything.
+    if (isActiveRecord(record) && record.purpose !== "machine") {
       activeCount += 1;
       hourlyUsd += record.hourlyUsd ?? 0;
     }
@@ -136,7 +146,7 @@ function roundUsd(value: number): number {
 }
 
 function setupOf(record: StoredBox): BoxSetupStep[] {
-  const purpose: BoxPurpose = record.purpose === "temporary" ? "temporary" : "project";
+  const purpose = purposeOf(record);
   const stored = new Map((record.setup ?? []).map((step) => [step.id, step]));
   return setupStepIds(purpose).map((id) => {
     const step = stored.get(id);
@@ -170,7 +180,7 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
   const adapter = options.providers.get(record.provider);
   return {
     id: record.id,
-    purpose: record.purpose === "temporary" ? "temporary" : "project",
+    purpose: purposeOf(record),
     kind: record.kind,
     provider: record.provider,
     providerLabel: adapter?.label ?? record.provider,
@@ -196,6 +206,15 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
     project: projectRef(record),
     threadId: record.threadId ?? null,
     purposeNote: record.purposeNote ?? null,
-    setup: setupOf(record)
+    setup: setupOf(record),
+    ...(typeof record.deviceHost === "boolean" ? { deviceHost: record.deviceHost } : {}),
+    ...(record.provider === "byo"
+      ? {
+          byo: {
+            name: record.machineName ?? record.name,
+            pairingExpiresAt: record.state === "pairing" && record.pairingCodeHash ? (record.pairingExpiresAt ?? null) : null
+          }
+        }
+      : {})
   };
 }

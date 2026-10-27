@@ -30,6 +30,7 @@ import {
 
 import type { BoxProviderAdapter, BoxProviderRegistry, BuildBootstrap, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
 import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
+import { byoOffers } from "../providers/byo.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
 import type { BoxSetupLog } from "./box-exec.ts";
 import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
@@ -133,6 +134,8 @@ export interface BoxSettingsDeps {
   logger: Pick<Console, "warn" | "error">;
   /** Provider settings changed (credentials, Windows image, Blacksmith steps). */
   providersChanged(): void;
+  /** Whether a box's `orq-agent` is connected now (bring-your-own machines are offered only then). Absent: never. */
+  connected?: (boxId: string) => boolean;
 }
 
 const BLACKSMITH_STEPS: readonly { id: BlacksmithSetupStepId; label: string }[] = [
@@ -231,7 +234,10 @@ export class BoxSettings implements BoxConnectivity {
     let status: BoxProviderInfo["status"];
     let error = settings.error ?? null;
     let hint: string | null = null;
-    if (adapter.id === "blacksmith") {
+    if (adapter.id === "byo") {
+      // Nothing to connect: the owner's machines are there whenever the plugin is on.
+      status = "connected";
+    } else if (adapter.id === "blacksmith") {
       const steps = this.blacksmithSteps();
       const failed = steps.find((step) => step.state === "failed");
       status = this.blacksmithReady() ? "connected" : failed ? "error" : "not-configured";
@@ -272,6 +278,7 @@ export class BoxSettings implements BoxConnectivity {
     if (adapter.id === "blacksmith") {
       throw new BoxError(409, "BOX_UNSUPPORTED", "Blacksmith is set up through its own steps (a Git hosting account and an org).");
     }
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines need no credentials: add one with Add your machine.");
     const raw = body && typeof body === "object" && typeof body.credentials === "object" && body.credentials !== null ? body.credentials : null;
     if (!raw) throw new BoxError(400, "BOX_INVALID_REQUEST", "Send `credentials`: field id → value.");
     const credentials: Record<string, string> = {};
@@ -346,6 +353,7 @@ export class BoxSettings implements BoxConnectivity {
   /** Forget a provider's credentials. Refused while a box of it may still exist (it could not be destroyed without them). */
   async deleteCredentials(id: string): Promise<BoxProviderInfo> {
     const adapter = this.adapter(id);
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines have no credentials: remove a machine from its row.");
     const live = this.deps.store.list().filter((record) => record.provider === adapter.id && isActiveRecord(record));
     if (live.length > 0) {
       throw new BoxError(
@@ -367,6 +375,7 @@ export class BoxSettings implements BoxConnectivity {
 
   /** Whether the provider can rent boxes now. */
   configured(id: BoxProviderId): boolean {
+    if (id === "byo") return true;
     if (id === "blacksmith") return this.blacksmithReady();
     return this.deps.store.providerCredentials(id) !== null && this.deps.store.providerSettings(id).status !== "error";
   }
@@ -398,6 +407,11 @@ export class BoxSettings implements BoxConnectivity {
     const boxKind = kind as BoxKind;
     if (!adapter.kinds.includes(boxKind)) {
       throw new BoxError(400, "BOX_UNSUPPORTED", `${adapter.label} does not rent ${BOX_KIND_LABELS[boxKind]} boxes.`);
+    }
+    if (adapter.id === "byo") {
+      // The machines free right now (never cached: they come and go with their connections).
+      const offers = byoOffers(this.deps.store.list(), boxKind, (boxId) => this.deps.connected?.(boxId) ?? false);
+      return { provider: adapter.id, kind: boxKind, ...offers, fetchedAt: new Date(this.deps.clock.now()).toISOString() };
     }
     const key = `${adapter.id}\u0000${boxKind}`;
     const cached = this.offersCache.get(key);
@@ -462,11 +476,21 @@ export class BoxSettings implements BoxConnectivity {
   async kinds(): Promise<BoxKindAvailability[]> {
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
-        const renting = [...this.deps.providers.values()].filter((adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id));
+        // The owner's machines count only while one of the kind is free, and come after every
+        // rented provider: they are never the default pick unless nothing else is connected.
+        const freeMachine = (adapter: BoxProviderAdapter) =>
+          adapter.id !== "byo" || byoOffers(this.deps.store.list(), kind, (boxId) => this.deps.connected?.(boxId) ?? false).sizes.length > 0;
+        const renting = [...this.deps.providers.values()].filter(
+          (adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id) && freeMachine(adapter)
+        );
         const blocked = renting.map((adapter) => this.kindBlocker(adapter, kind));
         const usable = renting.filter((_adapter, index) => blocked[index] === null);
         const priced = await Promise.all(usable.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
-        priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
+        priced.sort(
+          (a, b) =>
+            Number(a.adapter.id === "byo") - Number(b.adapter.id === "byo") ||
+            (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY)
+        );
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
         // A kind caps lifetimes only when every provider does: Blacksmith's Linux runners (5 days)
         // next to clouds without a cap must not put a deadline on every Linux box. A box still
@@ -755,6 +779,18 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   route(provider?: BoxProviderId): ConnectRoute {
+    if (provider === "byo") {
+      // The owner's machine dials the configured URL as it is: in Tailscale mode it must already be
+      // on the tailnet (Orquester never joins someone's own machine to it with an ephemeral key).
+      if (this.mode() === "tailscale") {
+        const daemonUrl = this.deps.store.connection().tailscaleDaemonUrl ?? null;
+        if (!daemonUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Set the daemon's tailnet URL in Connection first.");
+        return { mode: "tailscale", daemonUrl, tailscale: null };
+      }
+      const publicUrl = this.publicUrl();
+      if (!publicUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Your machine has no way to reach this daemon: set its public URL (or Tailscale) in Connection.");
+      return { mode: "public-url", daemonUrl: publicUrl, tailscale: null };
+    }
     if (provider === "blacksmith") {
       const route = this.blacksmithRoute();
       // The runner joins the tailnet itself (federated identity): no auth key is minted for it.
