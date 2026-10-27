@@ -448,6 +448,17 @@ describe("codex — account failures carry a structured reason (workflows §5.4)
     );
   });
 
+  it("a terminal serverOverloaded (\"Selected model is at capacity\") is overloaded, never while retrying", () => {
+    const payloads = run([
+      ["error", errorFrame("serverOverloaded", true)],
+      ["error", errorFrame("serverOverloaded", false)]
+    ]);
+    assert.deepEqual(
+      payloads.map((payload) => (payload as { reason?: string }).reason),
+      [undefined, "overloaded"]
+    );
+  });
+
   // No capture holds a retry exhaustion either. The `codexErrorInfo` shape is
   // the generated protocol's `responseTooManyFailedAttempts {httpStatusCode}`;
   // the cases are T3 Code's (MIT) `CodexAdapterV2.test.ts` "exhausted-429" /
