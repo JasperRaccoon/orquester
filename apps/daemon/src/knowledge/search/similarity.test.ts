@@ -324,6 +324,16 @@ test("graph: cached until the index generation, the graph revision or the drawn 
   assert.equal(renamed.nodes.find((n) => n.id === ke("p1"))!.title, "Renamed");
 });
 
+test("graph: an entry deleted while the graph is computed is left out with its edges", async () => {
+  const s = graphFixture();
+  const pending = s.similarity.graph({ k: 2 }, s.seoOnly);
+  s.store.remove(ke("p1"));
+  const g = await pending;
+  assert.ok(!g.nodes.some((n) => n.id === ke("p1")));
+  assert.ok(g.edges.length > 0);
+  for (const edge of g.edges) assert.ok(edge.from !== ke("p1") && edge.to !== ke("p1"));
+});
+
 test("graph: no index or no model answers the visible total and nothing drawn", async () => {
   const s = graphFixture();
   s.index.model = null;

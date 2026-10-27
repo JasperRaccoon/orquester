@@ -386,9 +386,10 @@ export class KnowledgeSimilarity {
     }
     const built = await structure;
 
+    // An entry deleted or moved out of view while the graph was computed is left out, with its edges.
     const nodes = built.ids.flatMap((id, i) => {
       const meta = this.store.getMeta(id);
-      if (!meta) return [];
+      if (!meta || !entryInScope(meta, scope)) return [];
       return [
         {
           id,
@@ -403,9 +404,10 @@ export class KnowledgeSimilarity {
         }
       ];
     });
+    const drawn = nodes.length === built.ids.length ? null : new Set(nodes.map((node) => node.id));
     return {
       nodes,
-      edges: built.edges.map((edge) => ({ ...edge })),
+      edges: built.edges.filter((edge) => !drawn || (drawn.has(edge.from) && drawn.has(edge.to))).map((edge) => ({ ...edge })),
       clusters: built.clusters.map((cluster) => ({ ...cluster })),
       truncated: embedded.length > limit,
       totals: { entries: visible.length, embedded: embedded.length }
