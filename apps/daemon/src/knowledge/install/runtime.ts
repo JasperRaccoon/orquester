@@ -2,7 +2,9 @@
  * {@link KnowledgeRuntimePort} over `PluginsService`: the active runtime is
  * the Knowledge Graph plugin's `current` version from plugins.json, once its
  * files are confirmed in place (the manifest the installer writes after the
- * smoke test, the mykg entry point, the venv's python, the model files). It
+ * smoke test, the mykg entry point, the venv's python), with
+ * `embeddingModelReady` saying whether the pinned model's files are there too
+ * (a runtime installed with an older model links but searches on text). It
  * follows every `plugins.changed` (installs, rollbacks, removals) and tells
  * its listeners when the active runtime changes. Whether the plugin is on is
  * not its business (see `KnowledgeSettingsPort.enabled`).
@@ -11,7 +13,7 @@ import { KNOWLEDGE_GRAPH_PLUGIN_ID, type PluginInfo, type PluginsResponse } from
 import { knowledgeRuntimeDir } from "@orquester/config";
 import type { EventEmitter } from "node:events";
 import type { KnowledgeRuntime, KnowledgeRuntimePort } from "../ports.ts";
-import { knowledgeRuntimeOf, knowledgeRuntimeReady } from "./installer.ts";
+import { knowledgeModelReady, knowledgeMykgReady, knowledgeRuntimeOf } from "./installer.ts";
 import { EMBEDDING_MODEL, type EmbeddingModelSpec } from "./pins.ts";
 
 export interface KnowledgeRuntimeTrackerOptions {
@@ -77,8 +79,12 @@ export class KnowledgeRuntimeTracker implements KnowledgeRuntimePort {
   private refresh(version: string | null): Promise<void> {
     const run = this.queue.then(async () => {
       const model = this.options.model ?? EMBEDDING_MODEL;
-      const ready = version !== null && (await knowledgeRuntimeReady(this.runtimeDir, version, { model }));
-      const next = ready ? knowledgeRuntimeOf(this.runtimeDir, version, model) : null;
+      // myKG alone makes a runtime (linking runs); without the model's files search runs on text
+      // until an update check brings them.
+      const installed = version !== null && (await knowledgeMykgReady(this.runtimeDir, version));
+      const next = installed
+        ? knowledgeRuntimeOf(this.runtimeDir, version, model, await knowledgeModelReady(this.runtimeDir, version, model))
+        : null;
       if (JSON.stringify(next) === JSON.stringify(this.active)) return;
       this.active = next;
       for (const listener of [...this.listeners]) {
