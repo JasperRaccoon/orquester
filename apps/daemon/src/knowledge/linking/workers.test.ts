@@ -137,6 +137,35 @@ describe("WorkerPool", () => {
     assert.equal(h.pool.size, 0);
   });
 
+  it("reads each chat's usage BEFORE stopping it (stopping deletes the chat and its usage): tokens are counted", async () => {
+    const h = await harness({ concurrency: 1, budget: { tasks: 2, tokens: 1_000_000 } });
+    await h.addTasks(3);
+    await drain(h, 3);
+    const tokens = h.events.filter((e) => e.kind === "tokens");
+    assert.deepEqual(
+      tokens.map((e) => e.kind === "tokens" && [e.sessionId, e.in, e.out]),
+      [
+        ["w1", 2000, 200],
+        ["w2", 1000, 100]
+      ]
+    );
+    for (const session of h.port.sessions) {
+      const usage = h.port.calls.indexOf(`usage:${session.id}`);
+      const stop = h.port.calls.indexOf(`stop:${session.id}`);
+      assert.ok(usage >= 0 && usage < stop, `usage read before stop for ${session.id}: ${h.port.calls.join(", ")}`);
+    }
+  });
+
+  it("stop() and a limit also count the chat's tokens before closing it", async () => {
+    const h = await harness({ concurrency: 1, accounts: ["a1", "a2"], behaviour: { a1: { limitAfter: 1 } } });
+    await h.addTasks(3);
+    await untilAnswered(h, 2);
+    await flushAsync(10); // the second chat records its answer once its submit returns
+    await h.pool.stop();
+    const counted = h.events.filter((e) => e.kind === "tokens").map((e) => e.kind === "tokens" && e.sessionId);
+    assert.deepEqual(counted, ["w1", "w2"], "the limited chat and the one stop() ended both count");
+  });
+
   it("a usage limit cools the account down and fails over to another account", async () => {
     const h = await harness({
       concurrency: 1,

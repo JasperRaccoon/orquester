@@ -144,12 +144,19 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
     this.limited.set(candidate.accountId, until);
   }
 
+  /** `usage` and `stop` calls in order (`usage:<id>`, `stop:<id>`). */
+  readonly calls: string[] = [];
+
+  /** Like the daemon's port: a stopped chat's tab is deleted, and its turns' usage with it. */
   async usage(sessionId: string): Promise<{ in: number; out: number }> {
+    this.calls.push(`usage:${sessionId}`);
     const session = this.sessions.find((s) => s.id === sessionId);
-    return { in: 1000 * (session?.answered.length ?? 0), out: 100 * (session?.answered.length ?? 0) };
+    if (!session || session.stopped) return { in: 0, out: 0 };
+    return { in: 1000 * session.answered.length, out: 100 * session.answered.length };
   }
 
   async stop(sessionId: string, options: { interrupt: boolean }): Promise<void> {
+    this.calls.push(`stop:${sessionId}`);
     const session = this.sessions.find((s) => s.id === sessionId);
     if (session && !session.stopped) session.stopped = { ...options };
     this.running.delete(sessionId);
