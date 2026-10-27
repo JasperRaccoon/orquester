@@ -605,6 +605,82 @@ function compactShell(script: string): string {
     .join("\n");
 }
 
+/** What a bring-your-own machine's pairing script needs (`service/byo.ts`). */
+interface ByoPairingScriptInput {
+  boxId: string;
+  daemonUrl: string;
+  /** The single-use bootstrap token minted when the pairing code was spent. */
+  bootstrapToken: string;
+  kind: "linux" | "macos";
+  /** The owner's name for the machine (only shown in the script's messages). */
+  name: string;
+}
+
+/** Where a bring-your-own machine keeps `orq-agent` when the pairing script runs as its user. */
+const BYO_MACOS_AGENT_PATH = '$HOME/Library/Application Support/Orquester/orq-agent';
+const BYO_LINUX_ROOT_AGENT_PATH = "/usr/local/bin/orq-agent";
+const BYO_LINUX_USER_AGENT_PATH = "$HOME/.local/bin/orq-agent";
+
+/**
+ * The script `curl -fsSL <daemon>/api/boxes/pair/<code> | sh` runs on the owner's own machine: the
+ * POSIX bootstrap's pieces (token file, platform, download), then `orq-agent` installed where its
+ * user can update it — macOS `~/Library/Application Support/Orquester/orq-agent`; Linux
+ * `/usr/local/bin/orq-agent` as root, else `~/.local/bin/orq-agent`, linked into `/usr/local/bin`
+ * with sudo when sudo is there (the service runs the real file, which the user can replace on
+ * updates) — and `orq-agent install-service`: a LaunchAgent in the user's GUI session on macOS, a
+ * systemd (user) service on Linux. The bootstrap token goes into a 0600 file in the data dir and
+ * is exchanged for the machine's credential (also 0600) on its first connect. No tailnet join:
+ * the machine dials the configured URL as it is.
+ */
+export function byoPairingScript(input: ByoPairingScriptInput): string {
+  const daemonUrl = normalizeDaemonUrl(input.daemonUrl);
+  if (!BOX_ID_PATTERN.test(input.boxId)) throw new Error("Invalid box id for a bootstrap");
+  if (!SECRET_PATTERN.test(input.bootstrapToken)) throw new Error("Invalid bootstrap token format");
+  const os = input.kind === "macos" ? "darwin" : "linux";
+  const osLabel = input.kind === "macos" ? "macOS" : "Linux";
+  // Only printed: keep it to plain characters so it can sit in single quotes.
+  const name = input.name.replace(/[^\p{L}\p{N} ._()+-]/gu, "").slice(0, 60) || "this machine";
+  return [
+    posix.header(
+      `# Orquester: pair this machine as a bring-your-own ${osLabel} box (Ephemeral AI VMs).
+# Downloads orq-agent from the Orquester daemon, installs it for this user and starts
+# it as a service. The one-time token stays in a mode-0600 file; never in argv or output.`,
+      { daemonUrl, boxId: input.boxId }
+    ),
+    posix.dataDir({ tailscale: false, fromEnv: false }),
+    posixSecretsPrologue({ kind: "literal", token: input.bootstrapToken, tailscaleAuthKey: null }, false),
+    "",
+    posix.platform(false),
+    `[ "$OS" = ${os} ] || { rm -f "$TF"; die "this pairing command is for a ${osLabel} machine, but this one runs $OS"; }`,
+    input.kind === "macos"
+      ? `[ "$ROOT" = 0 ] || { rm -f "$TF"; die "run the pairing command as the user who stays logged in (not with sudo): orq-agent runs in that user's session"; }`
+      : "",
+    posix.fetch(),
+    posix.agent(),
+    `case "$OS" in
+  darwin) T="${BYO_MACOS_AGENT_PATH}" ;;
+  *) if [ "$ROOT" = 1 ]; then T=${BYO_LINUX_ROOT_AGENT_PATH}; else T="${BYO_LINUX_USER_AGENT_PATH}"; fi ;;
+esac
+(umask 022 && mkdir -p "$(dirname "$T")")
+cp "$B" "$T.new" && chmod 755 "$T.new" && mv -f "$T.new" "$T" || die "could not install orq-agent at $T"
+rm -f "$B"
+say "installed orq-agent at $T"
+if [ "$OS" = linux ] && [ "$ROOT" = 0 ] && command -v sudo >/dev/null 2>&1; then
+  if sudo -p 'orq-bootstrap: sudo password to link orq-agent into /usr/local/bin: ' ln -sf "$T" ${BYO_LINUX_ROOT_AGENT_PATH} </dev/null 2>/dev/null; then
+    say "linked ${BYO_LINUX_ROOT_AGENT_PATH}"
+  else
+    say "orq-agent stays in $T (no sudo)"
+  fi
+fi
+${ORQ_AGENT_ENV.bootstrapTokenFile}=$TF
+export ${ORQ_AGENT_ENV.bootstrapTokenFile}
+say "installing the orq-agent service"
+"$T" install-service || die "orq-agent install-service failed"
+say ${shQuote(`done: this machine connects to Orquester as "${name}". Remove it in Orquester (Settings → Plugins → Ephemeral AI VMs) to uninstall.`)}
+`
+  ].join("\n");
+}
+
 /** Build every bootstrap variant for one box (`BuildBootstrap`, contracts.ts). Throws on invalid input. */
 export const buildBootstrap: BuildBootstrap = (input: BootstrapInput): BoxBootstrap => {
   const { daemonUrl } = validateInput(input);

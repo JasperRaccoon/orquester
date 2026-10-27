@@ -61,6 +61,8 @@ type SysInfo struct {
 	AgentPath  string   `json:"agentPath"`
 	DataDir    string   `json:"dataDir"`
 	Container  bool     `json:"container"`
+	// KVM: Linux, /dev/kvm opens read-write for the account processes run as.
+	KVM bool `json:"kvm"`
 }
 
 type PathMap struct {

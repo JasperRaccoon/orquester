@@ -97,7 +97,9 @@ const deliveries: Record<string, Delivery> = {
         box_id: BOX_ID,
         lifetime_minutes: String(BLACKSMITH_MAX_LIFETIME_MINUTES),
         daemon_url: b.env.ORQ_DAEMON_URL,
-        runner: blacksmithRunnerLabel(BLACKSMITH_SIZES.at(-1)!.id, BLACKSMITH_IMAGES.at(-1)!.id)
+        runner: blacksmithRunnerLabel(BLACKSMITH_SIZES.at(-1)!.id, BLACKSMITH_IMAGES.at(-1)!.id),
+        os: "macos",
+        prepare: "devices"
       }),
     limit: 65_535,
     source: "GitHub workflow_dispatch: 'The maximum payload for inputs is 65,535 characters'"

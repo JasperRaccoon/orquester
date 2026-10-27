@@ -16,11 +16,12 @@ import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/pan
 import { AgentChatView } from "../agent-chat";
 import { ChatLoadingScreen } from "../agent-chat/ChatLoadingScreen";
 import { SecretFilesProjectBar } from "../secret-files/SecretFilesProjectBar";
-import { activeChatSessionIdFor, setActiveChatTab } from "../../lib/agent-chat-active-tab";
+import { activeChatSessionIdFor, holdActiveChatTab, setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
   tabSession,
   useActiveTabId,
+  serverViewOpen,
   useAppStore,
   useCurrentContext,
   useGridTracks,
@@ -31,6 +32,8 @@ import {
 
 // The Knowledge view (and its graph library) loads the first time it opens, never with the app.
 const KnowledgeView = React.lazy(() => import("../knowledge/KnowledgeView"));
+// The Devices fleet view likewise.
+const DevicesFleetView = React.lazy(() => import("../devices-fleet/DevicesFleetView"));
 // Every other tab but the agent chat loads with the first tab of its kind: the
 // terminal (xterm), the file browser (CodeMirror, the PDF and Parquet
 // viewers), the workflow editor (React Flow), the remote desktop (noVNC)… An
@@ -100,18 +103,41 @@ function isUniform(weights: number[]): boolean {
 }
 
 /**
- * Main panel: the current project's tabs (or the landing view), or the
- * server-level Knowledge view over them while it is open. The project side
- * stays mounted under the Knowledge view, only hidden and inactive, so leaving
- * it finds every terminal and chat as it was.
+ * Main panel: the current project's tabs (or the landing view), or a
+ * server-level view (Knowledge, the Devices fleet) over them while one is
+ * open. The project side stays mounted under it, only hidden and inactive, so
+ * leaving it finds every terminal and chat as it was.
  */
 export const MainView: React.FC = () => {
-  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
+  const serverView = useAppStore(serverViewOpen);
   return (
     <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
-      <ProjectMain hidden={knowledgeOpen} />
+      <ProjectMain hidden={serverView} />
       <KnowledgeMain />
+      <DevicesFleetMain />
     </main>
+  );
+};
+
+/**
+ * The Devices fleet view, mounted only while it shows: closing it stops every
+ * thumbnail poll, and its state lives in the devices store anyway.
+ */
+const DevicesFleetMain: React.FC = () => {
+  const open = useAppStore((s) => s.devicesFleetOpen);
+  const connectionId = useAppStore((s) => s.activeConnectionId);
+  const closeDevicesFleet = useAppStore((s) => s.closeDevicesFleet);
+  // A phone's Back goes back to the project, like leaving any full-screen layer.
+  useBackClose(open, closeDevicesFleet);
+  if (!open) return null;
+  return (
+    <div className="flex min-h-0 w-full flex-1 flex-col">
+      <LazyBoundary>
+        <React.Suspense fallback={<LoadingPane label="Opening the device fleet…" />}>
+          <DevicesFleetView key={connectionId ?? ""} />
+        </React.Suspense>
+      </LazyBoundary>
+    </div>
   );
 };
 
@@ -147,7 +173,7 @@ const KnowledgeMain: React.FC = () => {
  * mounted (terminal output streams stay open): tab view shows only the active
  * one, grid view lays them all out at once. Both modes share one render tree —
  * only classes/styles change — so toggling never tears a terminal (xterm +
- * output stream) down. `hidden` (the Knowledge view is showing) hides it the
+ * output stream) down. `hidden` (a server-level view is showing) hides it the
  * same way, with no tab active or showing.
  */
 const ProjectMain: React.FC<{ hidden: boolean }> = ({ hidden }) => {
@@ -178,9 +204,7 @@ const ProjectMain: React.FC<{ hidden: boolean }> = ({ hidden }) => {
     () => (hidden ? null : activeChatSessionIdFor(tabs, activeId)),
     [hidden, tabs, activeId]
   );
-  React.useEffect(() => {
-    setActiveChatTab(activeChatSessionId);
-  }, [activeChatSessionId]);
+  React.useEffect(() => holdActiveChatTab(activeChatSessionId), [activeChatSessionId]);
   // Unmounting the whole main view (signing out, switching daemon) leaves no
   // visible chat tab, so nothing should keep the keyboard.
   React.useEffect(() => () => setActiveChatTab(null), []);

@@ -304,7 +304,7 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
       const launched = await manifestOf(w, "claude");
       // boxes: the box tools are advertised only while a box can be rented (none in this world);
       // the knowledge tools only while the Knowledge Graph plugin is on (not wired in this world).
-      assert.deepEqual(launched.tools, catalogFor("chat").filter((tool) => tool.toolset !== "boxes" && tool.toolset !== "knowledge").map((tool) => tool.name));
+      assert.deepEqual(launched.tools, catalogFor("chat").filter((tool) => tool.toolset !== "boxes" && tool.toolset !== "knowledge" && tool.toolset !== "devices").map((tool) => tool.name));
       assert.equal(launched.tools.includes("request_toolset"), false);
       refused(await w.uncarded("claude", "request_toolset", { toolset: "agent-profile-editing", reason: "x" }), "TOOL_NOT_FOUND");
 
@@ -898,7 +898,7 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       const manifest = await manifestOf(w, "wf");
       const admin = catalogFor("chat").filter((tool) => tool.tier === "admin").map((tool) => tool.name);
       assert.deepEqual(manifest.tools.filter((name) => admin.includes(name)), [], "no Admin tool advertised");
-      assert.deepEqual(manifest.tools, catalogFor("chat").filter((tool) => tool.tier !== "admin" && tool.toolset !== "boxes" && tool.toolset !== "knowledge").map((tool) => tool.name));
+      assert.deepEqual(manifest.tools, catalogFor("chat").filter((tool) => tool.tier !== "admin" && tool.toolset !== "boxes" && tool.toolset !== "knowledge" && tool.toolset !== "devices").map((tool) => tool.name));
       assert.equal(manifest.tools.includes("request_toolset"), false);
       assert.ok(manifest.tools.includes("create_session"));
       w.host.userTurn("wf", "Do the nightly work.");

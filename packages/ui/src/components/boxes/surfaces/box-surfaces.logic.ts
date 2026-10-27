@@ -197,6 +197,11 @@ export function projectBoxBadge(info: ProjectBoxInfo, now: number, setupStep: st
         title: withReason([identity, info.stateReason ?? "Reconnecting to the VM…"]),
         strike: false
       };
+    // The owner's own machine (`byo`): away until its orq-agent dials in again.
+    case "offline":
+      return { text: "Offline", detail: null, tone: "warn", title: withReason([identity, info.stateReason]), strike: false };
+    case "pairing":
+      return { text: "Pairing…", detail: null, tone: "info", title: withReason([identity, info.stateReason]), strike: false };
     case "destroying":
       return { text: "Destroying…", detail: null, tone: "neutral", title: withReason([identity, info.stateReason]), strike: false };
     case "destroy-failed":
@@ -253,6 +258,10 @@ export function agentCardBoxBadge(info: ProjectBoxInfo, now: number): BoxBadgeMo
       return plain("VM setting up", "info");
     case "unreachable":
       return { ...plain("VM unreachable", "warn"), title: withReason([identity, info.stateReason ?? "Reconnecting to the VM…"]) };
+    case "offline":
+      return plain("Machine offline", "warn");
+    case "pairing":
+      return plain("Machine pairing", "info");
     case "destroying":
       return plain("VM destroying…", "neutral");
     case "destroy-failed":
@@ -268,7 +277,8 @@ export function agentCardBoxBadge(info: ProjectBoxInfo, now: number): BoxBadgeMo
 
 /** An archived box project keeps its box running (§8.11): its row says so. Null when nothing bills. */
 export function archivedBoxNote(info: ProjectBoxInfo | null | undefined): string | null {
-  if (!info || info.state === "destroyed") return null;
+  // The owner's own machine bills nothing.
+  if (!info || info.state === "destroyed" || info.provider === "byo") return null;
   return "still billing";
 }
 
@@ -287,6 +297,9 @@ export function boxProjectMenu(info: ProjectBoxInfo | null | undefined): BoxProj
   if (!info) return { retryDestroy: false, deleteNote: null };
   if (info.state === "destroyed") {
     return { retryDestroy: false, deleteNote: "Its VM is already gone; this removes the project, its chats and records." };
+  }
+  if (info.provider === "byo") {
+    return { retryDestroy: false, deleteNote: "Your machine is given back for other work; the project's files stay on it." };
   }
   return {
     retryDestroy: info.state === "destroy-failed",
@@ -327,6 +340,16 @@ export function boxChatGate(info: ProjectBoxInfo | null | undefined, setupStep: 
       return {
         blockedReason: null,
         notice: { tone: "warn", title: "Reconnecting to the VM…", text: info.stateReason ?? "Messages are delivered once it is back." }
+      };
+    case "offline":
+      return {
+        blockedReason: null,
+        notice: { tone: "warn", title: "Your machine is offline", text: "Messages are delivered once its orq-agent connects again." }
+      };
+    case "pairing":
+      return {
+        blockedReason: "The machine is not paired yet.",
+        notice: { tone: "info", title: "Waiting for the machine to pair", text: info.stateReason ?? "Run its pairing command on the machine." }
       };
     case "provisioning":
       return {
@@ -492,7 +515,9 @@ const TEMP_STATE_TEXT: Record<BoxSummary["state"], string> = {
   unreachable: "Reconnecting…",
   destroying: "Destroying…",
   "destroy-failed": "Destroy failed",
-  destroyed: "Destroyed"
+  destroyed: "Destroyed",
+  pairing: "Pairing…",
+  offline: "Offline"
 };
 
 const TEMP_STATE_TONE: Record<BoxSummary["state"], BoxTone> = {
@@ -501,7 +526,9 @@ const TEMP_STATE_TONE: Record<BoxSummary["state"], BoxTone> = {
   unreachable: "warn",
   destroying: "neutral",
   "destroy-failed": "danger",
-  destroyed: "neutral"
+  destroyed: "neutral",
+  pairing: "info",
+  offline: "warn"
 };
 
 export function temporaryBoxCard(box: BoxSummary, now: number): TemporaryBoxCardModel {

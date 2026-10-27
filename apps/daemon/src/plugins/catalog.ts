@@ -3,6 +3,7 @@
 // there is no generic plugin runtime.
 
 import {
+  DEVICES_PLUGIN_ID,
   EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   KNOWLEDGE_GRAPH_PLUGIN_ID,
@@ -72,6 +73,17 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     provider: "Community",
     scope: "global",
     updates: true
+  },
+  {
+    // Part of Orquester; the device service (apps/daemon/src/devices) runs only while it's on. Its
+    // tools (Android SDK, expo-device-hub, agent-device) install from Settings → Devices.
+    id: DEVICES_PLUGIN_ID,
+    name: "Device simulators",
+    description: "Run iOS simulators and Android emulators next to your chats; agents drive them and you watch live.",
+    source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
+    provider: "Orquester",
+    scope: "global",
+    updates: false
   }
 ];
 

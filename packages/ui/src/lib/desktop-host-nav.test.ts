@@ -40,6 +40,13 @@ describe("desktop notification navigation", () => {
     assert.equal(viewingSessionId(), "c1");
   });
 
+  it("sees no tab while the Devices fleet view covers it", () => {
+    useAppStore.setState({ devicesFleetOpen: true });
+    assert.equal(viewingSessionId(), null);
+    useAppStore.setState({ devicesFleetOpen: false });
+    assert.equal(viewingSessionId(), "c1");
+  });
+
   it("opens a session through the session deep link", () => {
     openNotificationTarget({ kind: "session", sessionId: "c2" });
     assert.deepEqual(takeSessionDeepLink(), { sessionId: "c2" });

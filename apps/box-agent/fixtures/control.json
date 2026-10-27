@@ -28,7 +28,8 @@
         ],
         "agentPath": "/usr/local/bin/orq-agent",
         "dataDir": "/var/lib/orq-agent",
-        "container": false
+        "container": false,
+        "kvm": true
       },
       "procs": []
     },
@@ -59,7 +60,8 @@
         "gpus": [],
         "agentPath": "C:\\orq\\bin\\orq-agent.exe",
         "dataDir": "C:\\orq\\agent",
-        "container": false
+        "container": false,
+        "kvm": false
       },
       "procs": [
         {
@@ -130,7 +132,8 @@
         ],
         "agentPath": "/usr/local/bin/orq-agent",
         "dataDir": "/var/lib/orq-agent",
-        "container": false
+        "container": false,
+        "kvm": false
       },
       "procs": []
     }

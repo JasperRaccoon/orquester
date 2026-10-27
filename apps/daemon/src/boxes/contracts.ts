@@ -224,6 +224,11 @@ export interface ProviderCreateRequest {
   /** Windows: an administrator password to set where the provider asks for one. */
   windowsPassword: string | null;
   lifetimeMinutes: number | null;
+  /**
+   * What the provider prepares before `orq-agent` starts, where it can (Blacksmith: `devices`
+   * restores the device caches for a device host). Absent: `none`.
+   */
+  prepare?: "none" | "devices";
 }
 
 export type ProviderInstanceState = "pending" | "running" | "stopped" | "gone" | "error";

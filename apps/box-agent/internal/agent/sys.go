@@ -65,6 +65,7 @@ func detectSysInfo(a *Agent) wire.SysInfo {
 		Container: detectContainer(),
 		Tmux:      detectTmux(),
 		Docker:    detectDocker(),
+		KVM:       detectKVM(a.work),
 	}
 	info.Hostname, _ = os.Hostname()
 	if exe, err := os.Executable(); err == nil {

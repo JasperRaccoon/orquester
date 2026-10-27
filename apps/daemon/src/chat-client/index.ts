@@ -6,6 +6,7 @@ import type { AgentChatService } from "../agent-chat/service.ts";
 import { InjectDaemonApi, type LivePath } from "../mcp/daemon-api.ts";
 import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 import type { BoxRegistry } from "../boxes/contracts.ts";
+import type { DeviceToolsPort } from "../devices/tools-port.ts";
 
 export type { DaemonApi } from "../mcp/daemon-api.ts";
 export { ToolError, expectOk } from "../mcp/errors.ts";
@@ -39,6 +40,8 @@ interface InternalDaemonApiOptions {
   boxes?: TemporaryBoxTools | null;
   // boxes: which paths live in a box project, for the file reads (absent: all host).
   boxRegistry?: () => BoxRegistry | undefined;
+  // Devices: the device service behind the device MCP tools (null while the plugin is off).
+  devices?: () => DeviceToolsPort | null;
 }
 
 /**
@@ -55,8 +58,8 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     broadcaster: opts.broadcaster,
     fsRoot: opts.fsRoot,
     workspacesDir: opts.workspacesDir,
-    // boxes: passed through when wired.
-    ...(opts.boxes ? { boxes: opts.boxes } : {}),
-    ...(opts.boxRegistry ? { boxRegistry: opts.boxRegistry } : {})
+    boxes: opts.boxes,
+    boxRegistry: opts.boxRegistry,
+    devices: opts.devices
   });
 }

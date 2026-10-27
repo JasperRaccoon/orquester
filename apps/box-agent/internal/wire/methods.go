@@ -245,6 +245,9 @@ type UpdateParams struct {
 
 type ShutdownParams struct {
 	Reason string `json:"reason"`
+	// Uninstall: the owner removed this bring-your-own machine, so orq-agent also deletes its
+	// credentials and removes the service install-service set up, instead of only exiting.
+	Uninstall bool `json:"uninstall,omitempty"`
 }
 
 type TokenGetParams struct {

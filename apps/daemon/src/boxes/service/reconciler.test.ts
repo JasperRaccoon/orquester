@@ -291,3 +291,34 @@ test("busy boxes and providers whose listing failed are not judged", () => {
   );
   assert.deepEqual(actions, []);
 });
+
+test("bring-your-own machines are never destroyed, marked gone or unreachable; only a chat's expired lease is released", () => {
+  const machine = (id: string, extra: Partial<StoredBox> = {}) =>
+    box(id, { provider: "byo", purpose: "machine", region: "own", size: "machine", providerRef: undefined, ...extra });
+  const past = new Date(NOW - 60_000).toISOString();
+  const records = [
+    machine(A, { state: "ready" }),
+    machine(B, { state: "offline", deadlineAt: past }),
+    machine("cccccccccccc", { state: "pairing" }),
+    machine("dddddddddddd", { purpose: "temporary", threadId: "chat", deadlineAt: past }),
+    machine("eeeeeeeeeeee", { purpose: "project", state: "provisioning" }),
+    machine("ffffffffffff", { purpose: "project", state: "ready" })
+  ];
+  // Disconnected for long, an (impossible) empty byo listing, and gone statuses: none of it touches a machine.
+  const decision = decideReconcile(
+    input({
+      records,
+      listings: new Map([["byo", []]]),
+      statuses: new Map(records.map((record) => [record.id, { state: "gone", detail: null, publicIp: null, hourlyUsd: null } as ProviderInstanceStatus])),
+      connected: () => false,
+      disconnectedSince: () => NOW - 10 * UNREACHABLE_AFTER_MS
+    })
+  );
+  assert.deepEqual(decision.actions, [
+    { kind: "release", boxId: "dddddddddddd", reason: "time-limit" },
+    { kind: "resume", boxId: "eeeeeeeeeeee" }
+  ]);
+  // With the plugin off an interrupted setup waits; a busy machine is not judged at all.
+  const off = decideReconcile(input({ records, resumeAllowed: false, busy: (id) => id === "dddddddddddd" }));
+  assert.deepEqual(off.actions, []);
+});

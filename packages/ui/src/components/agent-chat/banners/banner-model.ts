@@ -258,6 +258,9 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
     // boxes: a temporary box (Ephemeral AI VMs §13.2).
     case "boxes":
       return "Approving rents this machine from the provider shown, billed to your account at about the price shown until it is destroyed: by the agent, at its time limit, or when this chat closes.";
+    // devices: a device host for the device an agent opens (devices spec §6.3).
+    case "devices":
+      return "Approving rents this device host from the provider shown, billed to your account at about the price shown. Every chat's devices share it; it is destroyed once idle, at its time limit, or from Settings → Devices.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }

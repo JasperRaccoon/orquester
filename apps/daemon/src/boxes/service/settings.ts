@@ -28,6 +28,8 @@ import {
 } from "@orquester/api";
 
 import type { BoxProviderAdapter, BoxProviderRegistry, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
+import { byoOffers } from "../providers/byo.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
 import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
 import { BoxError, errorLine } from "./errors.ts";
@@ -38,6 +40,8 @@ import { isActiveRecord } from "./summary.ts";
 /** How long a provider's offers are reused. */
 export const OFFERS_TTL_MS = 10 * 60_000;
 const PROVIDER_CALL_TIMEOUT_MS = 30_000;
+/** A device-cache dispatch may first re-commit the workflows and wait for GitHub to index them. */
+const DEVICE_CACHE_CALL_TIMEOUT_MS = 120_000;
 const MAX_CREDENTIAL_CHARS = 16 * 1024;
 
 export interface TailscaleCredentials extends TailscaleSecrets {
@@ -77,8 +81,15 @@ export interface BlacksmithSetupDriver {
     org: string,
     options: { daemonUrl: string; tailscale?: BlacksmithTailnetJoin | null; signal: AbortSignal }
   ): Promise<{ repo: string; workflowFile: string }>;
-  /** The credentials the Blacksmith adapter takes for this setup. */
-  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string }): ProviderCredentials;
+  /**
+   * The credentials the Blacksmith adapter takes for this setup. `tailscale`: the identity runs
+   * join the tailnet with now (the adapter re-commits the workflow when its template changed).
+   */
+  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string; tailscale?: BlacksmithTailnetJoin | null }): ProviderCredentials;
+  /** Start the device-cache workflow for one OS (Devices phase 2); resolves its run. */
+  dispatchDeviceCacheWarm(credentials: ProviderCredentials, request: DeviceCacheWarmRequest, signal: AbortSignal): Promise<DeviceCacheWarmRun>;
+  /** A device-cache run's state. */
+  deviceCacheWarmStatus(credentials: ProviderCredentials, runId: string, signal: AbortSignal): Promise<DeviceCacheWarmStatus>;
 }
 
 export type BlacksmithCheck = { ok: true; message?: string } | { ok: false; message: string; actionUrl: string | null };
@@ -119,6 +130,8 @@ export interface BoxSettingsDeps {
   logger: Pick<Console, "warn" | "error">;
   /** Provider settings changed (credentials, Blacksmith steps). */
   providersChanged(): void;
+  /** Whether a box's `orq-agent` is connected now (bring-your-own machines are offered only then). Absent: never. */
+  connected?: (boxId: string) => boolean;
 }
 
 const BLACKSMITH_STEPS: readonly { id: BlacksmithSetupStepId; label: string }[] = [
@@ -216,7 +229,10 @@ export class BoxSettings implements BoxConnectivity {
     let status: BoxProviderInfo["status"];
     let error = settings.error ?? null;
     let hint: string | null = null;
-    if (adapter.id === "blacksmith") {
+    if (adapter.id === "byo") {
+      // Nothing to connect: the owner's machines are there whenever the plugin is on.
+      status = "connected";
+    } else if (adapter.id === "blacksmith") {
       const steps = this.blacksmithSteps();
       const failed = steps.find((step) => step.state === "failed");
       status = this.blacksmithReady() ? "connected" : failed ? "error" : "not-configured";
@@ -251,6 +267,7 @@ export class BoxSettings implements BoxConnectivity {
     if (adapter.id === "blacksmith") {
       throw new BoxError(409, "BOX_UNSUPPORTED", "Blacksmith is set up through its own steps (a Git hosting account and an org).");
     }
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines need no credentials: add one with Add your machine.");
     const raw = body && typeof body === "object" && typeof body.credentials === "object" && body.credentials !== null ? body.credentials : null;
     if (!raw) throw new BoxError(400, "BOX_INVALID_REQUEST", "Send `credentials`: field id → value.");
     const credentials: Record<string, string> = {};
@@ -325,6 +342,7 @@ export class BoxSettings implements BoxConnectivity {
   /** Forget a provider's credentials. Refused while a box of it may still exist (it could not be destroyed without them). */
   async deleteCredentials(id: string): Promise<BoxProviderInfo> {
     const adapter = this.adapter(id);
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines have no credentials: remove a machine from its row.");
     const live = this.deps.store.list().filter((record) => record.provider === adapter.id && isActiveRecord(record));
     if (live.length > 0) {
       throw new BoxError(
@@ -346,6 +364,7 @@ export class BoxSettings implements BoxConnectivity {
 
   /** Whether the provider can rent boxes now. */
   configured(id: BoxProviderId): boolean {
+    if (id === "byo") return true;
     if (id === "blacksmith") return this.blacksmithReady();
     return this.deps.store.providerCredentials(id) !== null && this.deps.store.providerSettings(id).status !== "error";
   }
@@ -357,7 +376,13 @@ export class BoxSettings implements BoxConnectivity {
     if (!driver || !setup.gitAccountId || !setup.org || !setup.repo || !setup.workflowFile) return null;
     const token = await this.deps.accounts.token(setup.gitAccountId);
     if (!token) return null;
-    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile });
+    let tailscale: BlacksmithTailnetJoin | null = null;
+    try {
+      tailscale = this.blacksmithRoute().join;
+    } catch {
+      // No route: creates fail on it before they need the workflow.
+    }
+    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile, tailscale });
   }
 
   // ---- offers and kinds --------------------------------------------------------------------------
@@ -371,6 +396,11 @@ export class BoxSettings implements BoxConnectivity {
     const boxKind = kind as BoxKind;
     if (!adapter.kinds.includes(boxKind)) {
       throw new BoxError(400, "BOX_UNSUPPORTED", `${adapter.label} does not rent ${BOX_KIND_LABELS[boxKind]} boxes.`);
+    }
+    if (adapter.id === "byo") {
+      // The machines free right now (never cached: they come and go with their connections).
+      const offers = byoOffers(this.deps.store.list(), boxKind, (boxId) => this.deps.connected?.(boxId) ?? false);
+      return { provider: adapter.id, kind: boxKind, ...offers, fetchedAt: new Date(this.deps.clock.now()).toISOString() };
     }
     const key = `${adapter.id}\u0000${boxKind}`;
     const cached = this.offersCache.get(key);
@@ -426,11 +456,25 @@ export class BoxSettings implements BoxConnectivity {
   async kinds(): Promise<BoxKindAvailability[]> {
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
-        const renting = [...this.deps.providers.values()].filter((adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id));
+        // The owner's machines count only while one of the kind is free, and come after every
+        // rented provider: they are never the default pick unless nothing else is connected.
+        const freeMachine = (adapter: BoxProviderAdapter) =>
+          adapter.id !== "byo" || byoOffers(this.deps.store.list(), kind, (boxId) => this.deps.connected?.(boxId) ?? false).sizes.length > 0;
+        const renting = [...this.deps.providers.values()].filter(
+          (adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id) && freeMachine(adapter)
+        );
         const priced = await Promise.all(renting.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
-        priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
+        priced.sort(
+          (a, b) =>
+            Number(a.adapter.id === "byo") - Number(b.adapter.id === "byo") ||
+            (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY)
+        );
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
-        const lifetimes = renting.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
+        // A kind caps lifetimes only when every provider does: Blacksmith's Linux runners (5 days)
+        // next to clouds without a cap must not put a deadline on every Linux box. A box still
+        // gets its own provider's maximum (placement).
+        const caps = renting.map((adapter) => adapter.maxLifetimeMinutes);
+        const lifetimes = caps.every((value) => value !== null) ? (caps as number[]) : [];
         // macOS runners route differently: a kind is blocked only when none of its providers has a route.
         const routeProblems = renting.map((adapter) => this.routeProblem(adapter.id));
         const routeProblem = routeProblems.every((problem) => problem !== null) ? (routeProblems[0] ?? null) : null;
@@ -650,6 +694,18 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   route(provider?: BoxProviderId): ConnectRoute {
+    if (provider === "byo") {
+      // The owner's machine dials the configured URL as it is: in Tailscale mode it must already be
+      // on the tailnet (Orquester never joins someone's own machine to it with an ephemeral key).
+      if (this.mode() === "tailscale") {
+        const daemonUrl = this.deps.store.connection().tailscaleDaemonUrl ?? null;
+        if (!daemonUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Set the daemon's tailnet URL in Connection first.");
+        return { mode: "tailscale", daemonUrl, tailscale: null };
+      }
+      const publicUrl = this.publicUrl();
+      if (!publicUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Your machine has no way to reach this daemon: set its public URL (or Tailscale) in Connection.");
+      return { mode: "public-url", daemonUrl: publicUrl, tailscale: null };
+    }
     if (provider === "blacksmith") {
       const route = this.blacksmithRoute();
       // The runner joins the tailnet itself (federated identity): no auth key is minted for it.
@@ -697,6 +753,38 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   // ---- Blacksmith ---------------------------------------------------------------------------------
+
+  /**
+   * Start the Blacksmith device-cache workflow (Devices phase 2 §2 goal 6): builds and saves the
+   * device caches of `request.os` that are missing. Resolves the run id for {@link deviceCacheWarmStatus}.
+   */
+  async dispatchDeviceCacheWarm(request: DeviceCacheWarmRequest): Promise<DeviceCacheWarmRun> {
+    if (request?.os !== "macos" && request?.os !== "linux") throw new BoxError(400, "BOX_INVALID_REQUEST", '`os` must be "macos" or "linux".');
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.dispatchDeviceCacheWarm(credentials, request, AbortSignal.timeout(DEVICE_CACHE_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not start the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  /** A device-cache run's state (`queued` → `running` → `completed`, `conclusion: "success"` when the caches exist). */
+  async deviceCacheWarmStatus(runId: string): Promise<DeviceCacheWarmStatus> {
+    if (typeof runId !== "string" || !/^\d{1,20}$/.test(runId)) throw new BoxError(400, "BOX_INVALID_REQUEST", "`runId` must be a workflow run id.");
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.deviceCacheWarmStatus(credentials, runId, AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not read the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  private async blacksmithCalls(): Promise<{ driver: BlacksmithSetupDriver; credentials: ProviderCredentials }> {
+    const driver = this.deps.blacksmith;
+    const credentials = await this.credentials("blacksmith");
+    if (!driver || !credentials) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", "Finish the Blacksmith setup steps first.");
+    return { driver, credentials };
+  }
 
   blacksmithReady(): boolean {
     const setup = this.deps.store.blacksmith();

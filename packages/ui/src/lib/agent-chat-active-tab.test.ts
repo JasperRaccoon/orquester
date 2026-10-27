@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { activeChatSessionIdFor, activeChatTab, dismissWhenChatTabLeaves, isActiveChatTab, releaseActiveChatTab, setActiveChatTab, subscribeActiveChatTab } from "./agent-chat-active-tab.ts";
+import { activeChatSessionIdFor, activeChatTab, dismissWhenChatTabLeaves, holdActiveChatTab, isActiveChatTab, releaseActiveChatTab, setActiveChatTab, subscribeActiveChatTab } from "./agent-chat-active-tab.ts";
 
 test("only the published tab is active; every other mounted tab is not", () => {
   setActiveChatTab("a");
@@ -93,4 +93,22 @@ test("a popover subscribed while its unfocused grid cell is being activated stay
   setActiveChatTab("s3");
   assert.equal(dismissed, 1, "and an unsubscribed popover hears nothing");
   setActiveChatTab(null);
+});
+
+test("the shell's hold takes the claim back from a view that releases it while still on screen", () => {
+  const stop = holdActiveChatTab("a");
+  assert.equal(activeChatTab(), "a");
+  // React StrictMode (development) unmounts a freshly mounted chat view once: its cleanup releases.
+  releaseActiveChatTab("a");
+  assert.equal(activeChatTab(), "a");
+  // The shell moves on: the old hold is stopped first, so it never fights the new tab.
+  stop();
+  const next = holdActiveChatTab("b");
+  releaseActiveChatTab("a");
+  assert.equal(activeChatTab(), "b");
+  next();
+  // No chat on screen: nothing to hold.
+  const none = holdActiveChatTab(null);
+  assert.equal(activeChatTab(), null);
+  none();
 });

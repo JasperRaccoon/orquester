@@ -53,5 +53,7 @@ export function redactUrlTokens(url: string): string {
     .replace(/(token%3D)[^&]*/gi, "$1[redacted]")
     // An agent page's signed URL (`agent-chat/visual-urls.ts`): a capability
     // for its lifetime, so it stays out of the logs like a token.
-    .replace(/([?&]sig=)[^&]*/gi, "$1[redacted]");
+    .replace(/([?&]sig=)[^&]*/gi, "$1[redacted]")
+    // A bring-your-own machine's one-time pairing code (`boxRoutes.pair`).
+    .replace(/(\/api\/boxes\/pair\/)[^/?#]*/gi, "$1[redacted]");
 }

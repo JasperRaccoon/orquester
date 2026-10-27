@@ -5,7 +5,13 @@ import { BLACKSMITH_ADAPTER } from "../providers/blacksmith.ts";
 import { createBlacksmithSetupDriver } from "./blacksmith-setup.ts";
 import { BLACKSMITH_APP_INSTALL_URL } from "./control-repo.ts";
 import { FakeGithub, type FakeGithubOptions } from "./fake-github.ts";
-import { BLACKSMITH_WORKFLOW_FILE, BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate } from "./workflow-template.ts";
+import {
+  BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH,
+  BLACKSMITH_WORKFLOW_FILE,
+  BLACKSMITH_WORKFLOW_PATH,
+  blacksmithDeviceCacheWorkflowTemplate,
+  blacksmithWorkflowTemplate
+} from "./workflow-template.ts";
 
 const TOKEN = "ghp_TESTTOKEN0123456789";
 const signal = new AbortController().signal;
@@ -119,6 +125,7 @@ test("ensureControlRepo creates the private repo, commits the workflow, waits un
   const repo = github.repos.get("Org/orquester-macos-boxes")!;
   assert.equal(repo.private, true);
   assert.equal(repo.files.get(BLACKSMITH_WORKFLOW_PATH)!.content, blacksmithWorkflowTemplate());
+  assert.equal(repo.files.get(BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH)!.content, blacksmithDeviceCacheWorkflowTemplate());
   assert.equal(github.calls.filter((entry) => entry.path.endsWith(`/actions/workflows/${BLACKSMITH_WORKFLOW_FILE}`)).length, 3);
 
   const writes = github.calls.filter((entry) => entry.method === "PUT" || entry.method === "POST").length;
@@ -137,6 +144,20 @@ test("ensureControlRepo over the tailnet commits the workflow that joins it with
   assert.equal(content, blacksmithWorkflowTemplate({ tailscale }));
   assert.match(content, /uses: tailscale\/github-action@v4/);
   assert.match(content, /oauth-client-id: "kJ2x7CNTRL"/);
+
+  // The adapter re-commits from the same template at create: the join travels in its credentials.
+  const credentials = driver.adapterCredentials({ token: TOKEN, org: "Org", repo: "Org/orquester-macos-boxes", workflowFile: BLACKSMITH_WORKFLOW_FILE, tailscale });
+  assert.deepEqual(credentials, {
+    githubToken: TOKEN,
+    org: "Org",
+    repo: "Org/orquester-macos-boxes",
+    tailscaleClientId: "kJ2x7CNTRL",
+    tailscaleAudience: "api.tailscale.com/kJ2x7CNTRL"
+  });
+  const run = await drive(t, driver.dispatchDeviceCacheWarm(credentials, { os: "linux" }, signal));
+  assert.equal(github.runs.get(Number(run.runId))!.workflowFile, "orquester-device-cache.yml");
+  assert.equal(github.repos.get("Org/orquester-macos-boxes")!.files.get(BLACKSMITH_WORKFLOW_PATH)!.content, content, "the join is kept");
+  assert.equal((await driver.deviceCacheWarmStatus(credentials, run.runId, signal)).state, "queued");
 });
 
 test("ensureControlRepo refuses a daemon URL the workflow cannot use, before touching GitHub", async () => {
