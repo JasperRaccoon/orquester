@@ -170,6 +170,28 @@ test("HTTP: a hub without a token gets no authorization header; a POST body stre
   assert.equal(seen.body, JSON.stringify({ format: "jpeg" }));
 });
 
+test("HTTP: the fold route — reading is watching, a POST is the user's input; the panel's URL (with ?token=) works", async (t) => {
+  const { base, svc, lease, hub } = await setup(t);
+  const device = lease.deviceId!;
+  // The panel's URL: `deviceMediaUrl` adds the bearer as ?token=, `deviceFoldUrl` the device.
+  const url = `${base}${deviceRoutes.hub("local", "vendor/serve-emu/api/fold")}?token=client-bearer&device=${device}`;
+  const read = await fetch(url);
+  assert.equal(read.status, 200);
+  assert.equal(hub.requests.at(-1)!.url, `/vendor/serve-emu/api/fold?device=${device}`, "the client's token never reaches the hub");
+  assert.equal(svc.service.lease(lease.id)!.controller, "agent", "reading the posture leaves control alone");
+
+  const posted = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ posture: "closed" }) });
+  assert.equal(posted.status, 200);
+  const seen = hub.requests.at(-1)!;
+  assert.deepEqual([seen.method, seen.body, seen.headers.authorization], ["POST", JSON.stringify({ posture: "closed" }), "Bearer hub-secret"]);
+  assert.equal(svc.service.lease(lease.id)!.controller, "user", "folding takes control");
+
+  const status = async (method: string, path: string) => (await fetch(`${base}${deviceRoutes.hub("local", path)}`, { method })).status;
+  assert.equal(await status("DELETE", `vendor/serve-emu/api/fold?device=${device}`), 405);
+  assert.equal(await status("POST", "vendor/serve-emu/api/fold"), 400);
+  assert.equal(await status("POST", "vendor/serve-emu/api/fold?device=emulator-9999"), 404);
+});
+
 test("HTTP: a fold is the user's input (control switches); watching an MJPEG stream repeats the still frame and counts the viewer", async (t) => {
   const { base, svc, lease, host } = await setup(t);
   assert.equal(svc.service.lease(lease.id)!.controller, "agent");
