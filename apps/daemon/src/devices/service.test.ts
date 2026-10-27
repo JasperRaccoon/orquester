@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DEVICES_ACTION_EVENT, DEVICES_LEASE_CLOSED_EVENT, DEVICES_LEASE_EVENT, type DeviceLeaseEventPayload } from "@orquester/api";
+import { DEVICES_ACTION_EVENT, DEVICES_LEASE_CLOSED_EVENT, DEVICES_LEASE_EVENT, DEVICES_POOL_EVENT, type DeviceLeaseEventPayload } from "@orquester/api";
 
 import { DeviceError } from "./errors.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
@@ -54,7 +54,7 @@ test("open → ready lease on the local host; list, release and the events they 
     const closed = await t.service.toolClose("t1", { device: "local/dev-1", shutdown: true });
     assert.equal(closed.lease.state, "released");
     assert.deepEqual(host.released.map((entry) => entry.shutdown), [true]);
-    assert.equal(t.events.at(-2)!.type, DEVICES_LEASE_CLOSED_EVENT);
+    assert.equal(t.events.filter((event) => event.type !== DEVICES_POOL_EVENT).at(-2)!.type, DEVICES_LEASE_CLOSED_EVENT);
     assert.deepEqual(t.service.leaseSummaries(), []);
   } finally {
     await t.cleanup();
@@ -64,7 +64,7 @@ test("open → ready lease on the local host; list, release and the events they 
 test("limits: the chat's lease cap, a full host, a platform that is off or not set up", async () => {
   const host = new FakeDeviceHost();
   host.total = 2;
-  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { ...ANDROID_ON, maxLeasesPerChat: 1 } });
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { ...ANDROID_ON, maxLeasesPerChat: 1, pool: { capacityWaitSeconds: 0 } } });
   try {
     await t.service.toolOpen("t1", { platform: "android" }, signal());
     assert.equal(await codeOf(t.service.toolOpen("t1", { platform: "android" }, signal())), "DEVICE_LEASE_LIMIT");

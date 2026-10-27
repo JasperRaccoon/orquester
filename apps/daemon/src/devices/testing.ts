@@ -16,7 +16,7 @@ import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } fr
 import type { DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostState, DeviceRentalQuote } from "./host.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService, type DeviceServiceDeps } from "./service.ts";
-import { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
+import { DeviceLeaseStore, DevicePoolStore, DeviceSettingsStore } from "./store.ts";
 
 /** A host whose state, capacity and boots the test sets. */
 export class FakeDeviceHost implements DeviceHost {
@@ -104,19 +104,39 @@ export class FakeDeviceHost implements DeviceHost {
     return null;
   }
 
+  /** Devices booted and not shut down (what `listDevices` answers), by id. */
+  running = new Map<string, DeviceSummary>();
+  /** What `listDevices` does; default: the running devices. */
+  listImpl: () => Promise<DeviceSummary[]> = async () => [...this.running.values()];
+
   async listDevices(): Promise<DeviceSummary[]> {
-    return [];
+    return this.listImpl();
   }
 
   async boot(request: DeviceBootRequest, signal: AbortSignal): Promise<DeviceBootResult> {
     this.booted.push(request);
-    return this.bootImpl(request, signal);
+    const result = await this.bootImpl(request, signal);
+    this.running.set(result.deviceId, {
+      key: `${this.id}/${result.deviceId}`,
+      hostId: this.id,
+      id: result.deviceId,
+      platform: request.profile.platform,
+      name: result.name,
+      osVersion: result.osVersion,
+      profile: request.profile.id,
+      booted: true,
+      leaseId: request.leaseId
+    });
+    return result;
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(deviceId: string): Promise<void> {
+    this.running.delete(deviceId);
+  }
 
   async release(lease: StoredDeviceLease, options: { shutdown: boolean }): Promise<void> {
     this.released.push({ lease, shutdown: options.shutdown });
+    if (options.shutdown && lease.deviceId) this.running.delete(lease.deviceId);
   }
 
   async run(command: "simctl" | "adb", args: readonly string[]): Promise<DeviceCommandResult> {
@@ -226,6 +246,7 @@ export async function startTestDeviceService(
   const service = new DeviceService({
     settingsStore: new DeviceSettingsStore({ file: join(dir, "devices.json"), logger: quiet }),
     leaseStore: new DeviceLeaseStore({ file: join(dir, "device-leases.json"), logger: quiet }),
+    poolStore: new DevicePoolStore({ file: join(dir, "device-pool.json"), logger: quiet }),
     factories: options.factories,
     actions,
     screenshots: new DeviceScreenshots(join(dir, "screenshots"), quiet),

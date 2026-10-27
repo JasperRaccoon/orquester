@@ -119,7 +119,7 @@ export interface DevicePoolDeps {
   now(): number;
   id?(): string;
   logger: Pick<Console, "info" | "warn" | "error">;
-  /** Run timers (default true; tests call `tick()`). */
+  /** Run the periodic tick and cache polls (default true; tests call `tick()` / `pollCacheRun`). Queue deadlines always run. */
   timers?: boolean;
   /** Overrides {@link CACHE_POLL_MS} (tests). */
   cachePollMs?: number;
@@ -329,18 +329,19 @@ export class DevicePool {
   // -------------------------------------------------------------------------
 
   /**
-   * Start (or join) the cache-warm runs: `platform`'s, or every enabled platform's (both when none
-   * is). Throws when the box service is unavailable.
+   * "Warm caches" for a platform: dispatch its cache run, or report the one already running.
+   * Throws when the box service is unavailable.
    */
-  async warmCaches(platform?: DevicePlatform): Promise<DeviceSetupJob[]> {
+  async warmCaches(platform: DevicePlatform): Promise<{ started: boolean; message: string | null; job: DeviceSetupJob }> {
     const warmer = this.deps.cacheWarmer?.() ?? null;
     if (!warmer) throw new DeviceError("UNAVAILABLE", "Warming device caches needs Ephemeral AI VMs on, with Blacksmith set up.");
-    const settings = this.deps.settings();
-    let platforms: DevicePlatform[] = platform ? [platform] : DEVICE_PLATFORMS.filter((entry) => (entry === "android" ? settings.android.enabled : settings.ios.enabled));
-    if (platforms.length === 0) platforms = [...DEVICE_PLATFORMS];
-    const jobs: DeviceSetupJob[] = [];
-    for (const entry of platforms) jobs.push(await this.startCacheRun(warmer, entry));
-    return jobs.map((job) => structuredClone(job));
+    const running = this.cacheRuns.get(platform);
+    if (running?.job.state === "running") {
+      return { started: false, message: `A ${DEVICE_PLATFORM_LABELS[platform]} cache run is already running.`, job: structuredClone(running.job) };
+    }
+    const job = await this.startCacheRun(warmer, platform);
+    if (job.state === "failed") return { started: false, message: job.error, job: structuredClone(job) };
+    return { started: true, message: `Building the ${DEVICE_PLATFORM_LABELS[platform]} device caches (a few minutes; billed by the box provider).`, job: structuredClone(job) };
   }
 
   cacheJobs(): DeviceSetupJob[] {
@@ -791,7 +792,7 @@ export class DevicePool {
   private scheduleDeadline(decision: PoolDecision, now: number): void {
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
     this.deadlineTimer = null;
-    if (this.deps.timers === false) return;
+    // Always armed (even with `timers: false`): a queued request must not outlive its deadline.
     const next = Math.min(...decision.queue.map((entry) => entry.deadlineAt));
     if (!Number.isFinite(next)) return;
     this.deadlineTimer = setTimeout(() => this.tick(), Math.max(10, next - now + 10));
