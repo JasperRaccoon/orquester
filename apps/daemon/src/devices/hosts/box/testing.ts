@@ -12,7 +12,7 @@ import type { BoxDetachedProcInfo, BoxSysInfo } from "@orquester/api";
 
 import type { BoxConnection, BoxExecOptions, BoxHostForward, BoxProcess } from "../../../boxes/contracts.ts";
 import { localSysInfo } from "../../../boxes/testing.ts";
-import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
+import { DEVICE_TOOL_VERSIONS, SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE } from "../../../boxes/github/device-cache.ts";
 import { AGENT_DEVICE_START_SCRIPT, HUB_PROC_ID, INSTALL_TOOLS_SCRIPT, PROBE_SCRIPT } from "./remote.ts";
 import { FRAME_SIZE_SCRIPT } from "./simctl.ts";
 
@@ -55,7 +55,15 @@ interface FakeSim {
   name: string;
   state: "Shutdown" | "Booted";
   runtimeId: string;
+  /** simslim's overrides applied. */
+  slim?: boolean;
 }
+
+/** The fake Mac's RAM (a Blacksmith 6 vCPU M4: 24 GB). */
+export const FAKE_MAC_MEM_BYTES = 24 * 1024 ** 3;
+/** What `simslim top` measures for a booted simulator. */
+export const FAKE_SLIM_SIM_BYTES = 0.9 * 1024 ** 3;
+export const FAKE_STOCK_SIM_BYTES = 3.8 * 1024 ** 3;
 
 class FakeProcess extends EventEmitter implements BoxProcess {
   readonly stdin = new Writable({ write: (_chunk, _encoding, done) => done() });
@@ -105,6 +113,8 @@ export interface FakeMacBoxOptions {
   nodeVersion?: string | null;
   /** Successive screenshot sizes (bytes) `simctl io screenshot` answers; the last repeats. */
   frames?: number[];
+  /** simslim installs and runs (default: the Mac is "unsupported", simulators boot stock). */
+  simslim?: boolean;
 }
 
 export class FakeMacBox {
@@ -126,8 +136,10 @@ export class FakeMacBox {
   frames: number[];
   vm: boolean;
   nodeVersion: string | null;
-  /** Make the next `simctl <verb>` fail. */
+  /** Make the next `simctl <verb>` (or `simslim <verb>`) fail. */
   failNext: string | null = null;
+  /** Hold every `simslim on` until released (tests of preemption); null: answer at once. */
+  holdSlim: Promise<void> | null = null;
   private readonly status = new EventEmitter();
   private nextPid = 5000;
   private nextUdid = 1;
@@ -194,8 +206,51 @@ export class FakeMacBox {
       }
       case "delete":
         return this.sims.delete(rest[0]!) ? { code: 0 } : { code: 1, stderr: "Invalid device" };
+      case "rename": {
+        const sim = this.sims.get(rest[0]!);
+        if (!sim) return { code: 1, stderr: "Invalid device" };
+        sim.name = rest[1]!;
+        return { code: 0 };
+      }
       default:
         return { code: 0 };
+    }
+  }
+
+  private simslim(args: string[]): { code: number; stdout?: string; stderr?: string } {
+    const [verb, udid, ...rest] = args;
+    if (this.failNext === `simslim ${verb}`) {
+      this.failNext = null;
+      return { code: 1, stderr: `simslim ${verb} failed` };
+    }
+    const sim = udid ? this.sims.get(udid) : undefined;
+    switch (verb) {
+      case "on":
+        if (!sim) return { code: 1, stderr: `no simulator with udid ${udid}` };
+        sim.slim = true;
+        if (!rest.includes("--no-reboot")) sim.state = rest.includes("--preserve-boot-state") && sim.state === "Shutdown" ? "Shutdown" : "Booted";
+        return { code: 0, stdout: "Done.\n" };
+      case "verify":
+        if (!sim || sim.state !== "Booted") return { code: 1, stderr: "simulator must be booted" };
+        return { code: sim.slim ? 0 : 1, stdout: JSON.stringify({ udid, ok: sim.slim === true, ...(sim.slim ? {} : { missing: ["com.apple.Spotlight"] }) }) };
+      case "top": {
+        const sims = [...this.sims.values()]
+          .filter((entry) => entry.state === "Booted")
+          .map((entry) => ({
+            udid: entry.udid,
+            name: entry.name,
+            state: "Booted",
+            platform: "iOS",
+            osVersion: "27.0",
+            set: "default",
+            managedDisabled: entry.slim ? 170 : 0,
+            managedTotal: 176,
+            memory: { processes: entry.slim ? 70 : 258, bytes: entry.slim ? FAKE_SLIM_SIM_BYTES : FAKE_STOCK_SIM_BYTES, cpu: 1.5 }
+          }));
+        return { code: 0, stdout: JSON.stringify({ sims: sims.length ? sims : null, totalBytes: sims.reduce((total, entry) => total + entry.memory.bytes, 0) }) };
+      }
+      default:
+        return { code: 2, stderr: `unknown command ${verb}` };
     }
   }
 
@@ -238,6 +293,9 @@ export class FakeMacBox {
           box.hub = { proc: hubProc, pid: hubProc.pid, running: true };
           setImmediate(() => box.files.set(`${stateDir}/server-${box.hubPort}.json`, JSON.stringify({ pid: hubProc.pid, port: box.hubPort, url: "x", token: box.hubToken })));
           return hubProc;
+        } else if (script === SIMSLIM_INSTALL_SCRIPT) {
+          box.log.push("simslim-install");
+          proc.finish(0, box.options.simslim ? `simslim ${SIMSLIM_RELEASE.version}\n` : "simslim-unsupported test Mac\n");
         } else if (script === FRAME_SIZE_SCRIPT) {
           box.log.push(`frame ${args[3]}`);
           const size = box.frames.length > 1 ? box.frames.shift()! : (box.frames[0] ?? 0);
@@ -258,6 +316,27 @@ export class FakeMacBox {
         box.log.push("agent-device-start");
         box.agentRunning = true;
         proc.finish(0, `${JSON.stringify({ httpPort: box.agentPort, token: box.agentToken })}\n`);
+        return proc;
+      }
+      if (options.command.endsWith("/simslim")) {
+        const at = args.findIndex((arg) => !arg.startsWith("-"));
+        const shown: string[] = [];
+        for (let i = at; i < args.length; i += 1) {
+          if (args[i] === "--profile") i += 1;
+          else shown.push(args[i]!);
+        }
+        box.log.push(`simslim ${shown.join(" ")}`);
+        const answer = () => {
+          const result = box.simslim(args.slice(at));
+          proc.finish(result.code, result.stdout ?? "", result.stderr ?? "");
+        };
+        if (args[at] === "on" && box.holdSlim) void box.holdSlim.then(() => (proc.killed ? undefined : answer()));
+        else answer();
+        return proc;
+      }
+      if (options.command === "/usr/sbin/sysctl") {
+        box.log.push("sysctl hw.memsize");
+        proc.finish(0, `${FAKE_MAC_MEM_BYTES}\n`);
         return proc;
       }
       if (args[0]?.endsWith("agent-device.mjs")) {

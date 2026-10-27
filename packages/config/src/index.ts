@@ -337,6 +337,11 @@ export function deviceLeasesPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "device-leases.json");
 }
 
+/** The device pool's record (`device-pool.json`): spend, rented hosts, learned capacity, drains, cache warms. */
+export function devicePoolPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "device-pool.json");
+}
+
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
 export function desktopsRuntimeDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops");

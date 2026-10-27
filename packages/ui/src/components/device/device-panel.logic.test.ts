@@ -19,6 +19,7 @@ import {
   leaseName,
   leaseStateLabel,
   leaseSubtitle,
+  lostDeviceText,
   NO_TRANSPORT_MESSAGE,
   nextRotation,
   pickerGroups,
@@ -77,6 +78,10 @@ describe("lease words", () => {
     assert.equal(leaseStateLabel({ state: "starting" }), "Starting…");
     assert.equal(leaseStateLabel({ state: "starting", progress: { step: "rent-host", label: "Renting Mac host", startedAt: "x" } }), "Renting Mac host…");
     assert.equal(leaseStateLabel({ state: "lost", error: "box destroyed" }), "Lost — box destroyed");
+    // The daemon's reasons are sentences: one full stop, not two.
+    assert.equal(lostDeviceText("Its host is gone."), "Its host is gone. Open a fresh one to keep going.");
+    assert.equal(lostDeviceText("box destroyed"), "box destroyed. Open a fresh one to keep going.");
+    assert.equal(lostDeviceText(null), "Its host or emulator stopped. Open a fresh one to keep going.");
     assert.equal(leaseStateLabel({ state: "ready" }), "Ready");
     assert.equal(controllerLabel({ state: "ready", controller: "user" }), "You have control");
     assert.equal(controllerLabel({ state: "ready", controller: "agent" }, "Claude"), "Claude is controlling");

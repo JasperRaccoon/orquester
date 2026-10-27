@@ -206,6 +206,39 @@ test("execute: a lost session is reopened on the foreground app and the action r
   );
 });
 
+test("execute: input that leaves the session's app (agent-device's Android guard) succeeded: the session ends and the next action reopens one", async () => {
+  let clicks = 0;
+  const agent = new ScriptedAgentDevice((command) => {
+    if (command === "click") return clicks++ === 0 ? result("click-escaped") : ok({ x: 360, y: 600 });
+    if (command === "close") return ok({ message: "Closed" });
+    // After the close, the first call finds no session (`home3`); `open` starts one.
+    if (command === "snapshot" && !agent.calls.some((call) => call.command === "open")) return result("home3");
+    return ok({ nodes: [] });
+  });
+  const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
+  const ctx = { host: new FakeDeviceHost(), lease: lease() };
+  const tapped = await executor.execute(ctx, { action: "tap", x: 180, y: 300 }, signal);
+  assert.equal(tapped.log.summary, "Tapped (180, 300)");
+  assert.deepEqual(tapped.log.point, { x: 180, y: 300 });
+  assert.match(tapped.text!, /com\.google\.android\.apps\.nexuslauncher is in front now \(not com\.android\.settings\)\. Refs expired/);
+  // Not the bare `close <app>`: the app keeps running.
+  assert.deepEqual(agent.calls.map((call) => [call.command, ...call.args].join(" ")), ["click 360 600 --settle", "close"]);
+
+  await executor.execute(ctx, { action: "snapshot" }, signal);
+  assert.deepEqual(agent.calls.slice(2).map((call) => [call.command, ...call.args].join(" ")), ["snapshot -i", "open", "snapshot -i"]);
+
+  // A permission dialog over the app is still an error.
+  const dialog: AgentDeviceResult = {
+    exitCode: 1,
+    stdout: "",
+    stderr: "",
+    json: { success: false, error: { code: "COMMAND_FAILED", message: "press 1 opened an Android permission dialog", details: { expectedPackage: "com.example", foregroundPackage: "com.google.android.permissioncontroller", permissionDialog: true } } }
+  };
+  const blocked = createDeviceActionExecutor({ agentDevice: new ScriptedAgentDevice(() => dialog), logger: quiet });
+  const refused = await blocked.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "tap", x: 1, y: 2 }, signal).catch((error: unknown) => error);
+  assert.ok(isDeviceError(refused));
+});
+
 test("execute: host-tool actions (close_app, open_url, logs, emulator rotation) run through DeviceHost.run", async () => {
   const host = new FakeDeviceHost();
   host.runImpl = async (_tool, args) => {

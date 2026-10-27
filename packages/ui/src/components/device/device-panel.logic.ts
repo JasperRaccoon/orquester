@@ -36,6 +36,13 @@ export function leaseStateLabel(lease: Pick<DeviceLeaseSummary, "state" | "error
   }
 }
 
+/** The lost card's line: the lease's reason (the daemon's are sentences: "Its host is gone."), then what to do. */
+export function lostDeviceText(error: string | null | undefined): string {
+  const reason = error?.trim();
+  if (!reason) return "Its host or emulator stopped. Open a fresh one to keep going.";
+  return `${reason}${/[.!?…]$/.test(reason) ? "" : "."} Open a fresh one to keep going.`;
+}
+
 /** Who drives it now, as the controller pill says it. */
 export function controllerLabel(lease: Pick<DeviceLeaseSummary, "controller" | "state">, agentName = "The agent"): string | null {
   if (lease.state !== "ready") return null;
@@ -397,7 +404,7 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
         badge = "Host starting";
       } else {
         note = `No Mac host — opening an iPhone rents one${hourly(input.macHourlyUsd)}`;
-        badge = input.settings?.ios.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
+        badge = input.settings?.pool.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
       }
     }
     if (!reason && full) reason = fullReason;

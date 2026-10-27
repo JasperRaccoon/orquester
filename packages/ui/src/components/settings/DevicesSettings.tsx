@@ -587,7 +587,7 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
               patch={(value) => ({ ios: { idleTeardownMinutes: value } })}
             />
           </SettingRow>
-          <SettingRow label="Simulators per host" description="Beyond this a second host is rented.">
+          <SettingRow label="Simulators per host" description="At most; a host runs fewer when its memory is short. Beyond that a second host is rented.">
             <NumberField
               id="ios.maxSimulatorsPerHost"
               label="Simulators per host"
@@ -599,35 +599,13 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
             />
           </SettingRow>
           <SettingRow
-            label="Rent Mac hosts without asking"
+            label="Renting Mac hosts"
             description={
-              ios.rentWithoutAsking
-                ? "No approval card while this month's estimate stays under the cap."
-                : "The first iPhone or iPad an agent opens asks you in its chat before renting."
+              settings.pool.rentWithoutAsking
+                ? `Without asking, up to $${settings.pool.monthlyCapUsd} a month (Fleet below: one switch and cap for every device host).`
+                : "The first iPhone or iPad an agent opens asks you in its chat before renting. “Rent device hosts without asking” under Fleet changes that."
             }
-          >
-            <SettingSwitch
-              id="ios.rentWithoutAsking"
-              label="Rent Mac hosts without asking"
-              checked={ios.rentWithoutAsking}
-              disabled={rentDisabled}
-              ctx={ctx}
-              patch={(on) => ({ ios: { rentWithoutAsking: on } })}
-            />
-          </SettingRow>
-          <SettingRow label="Monthly cap" description="Above it, renting asks again.">
-            <NumberField
-              id="ios.monthlyCapUsd"
-              label="Monthly cap in US dollars"
-              prefix="$"
-              integer={false}
-              value={ios.monthlyCapUsd}
-              limits={DEVICES_SETTINGS_LIMITS.monthlyCapUsd}
-              disabled={rentDisabled || !ios.rentWithoutAsking}
-              ctx={ctx}
-              patch={(value) => ({ ios: { monthlyCapUsd: value } })}
-            />
-          </SettingRow>
+          />
           <ProfilesRow platform="ios" settings={settings} ctx={ctx} />
         </>
       )}
@@ -838,13 +816,26 @@ const FleetSection: React.FC<{ settings: DevicesSettingsValue; ctx: SaveContext 
               patch={(value) => ({ pool: { capacityWaitSeconds: value } })}
             />
           </SettingRow>
-          <SettingRow label="Rent device hosts without asking" description="Within the caps, no approval card.">
+          <SettingRow label="Rent device hosts without asking" description="Mac and Linux hosts alike: within the caps, no approval card.">
             <SettingSwitch
               id="pool.rentWithoutAsking"
               label="Rent device hosts without asking"
               checked={pool.rentWithoutAsking}
               ctx={ctx}
               patch={(on) => ({ pool: { rentWithoutAsking: on } })}
+            />
+          </SettingRow>
+          <SettingRow label="Monthly cap" description="This month's device-host spend, plus what running hosts are committed to, plus a new host's whole time limit. Above it, renting asks again.">
+            <NumberField
+              id="pool.monthlyCapUsd"
+              label="Monthly cap in US dollars"
+              prefix="$"
+              integer={false}
+              value={pool.monthlyCapUsd}
+              limits={L.monthlyCapUsd}
+              disabled={!pool.rentWithoutAsking}
+              ctx={ctx}
+              patch={(value) => ({ pool: { monthlyCapUsd: value } })}
             />
           </SettingRow>
         </div>

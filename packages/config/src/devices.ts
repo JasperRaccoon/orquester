@@ -51,11 +51,15 @@ export interface DevicesIosSettings {
   lifetimeMinutes: number;
   /** A Mac host with no lease for this long is destroyed. */
   idleTeardownMinutes: number;
-  /** Simulators one Mac host runs at once (phase 2 computes it with simslim). */
+  /** The most simulators one Mac host runs at once; a host runs fewer when its memory is short (simslim `top`). */
   maxSimulatorsPerHost: number;
-  /** "Rent Mac hosts without asking": no spend card while the month's estimate stays under the cap. */
+  /**
+   * Superseded by `pool.rentWithoutAsking` (one switch for every platform's rentals). Kept for
+   * older builds: a file that has only this one carries it into `pool` when read, and a patch
+   * naming it sets `pool.rentWithoutAsking` too.
+   */
   rentWithoutAsking: boolean;
-  /** The month's cap for renting without asking, in USD. */
+  /** Superseded by `pool.monthlyCapUsd` (kept and mirrored like `rentWithoutAsking`). */
   monthlyCapUsd: number;
   profiles: string[];
 }
@@ -86,8 +90,16 @@ export interface DevicePoolSettings {
   idleTeardownMinutes: number;
   /** How long a request above the caps waits for room before `DEVICE_CAPACITY`. */
   capacityWaitSeconds: number;
-  /** "Rent device hosts without asking": within the caps, no spend card. */
+  /**
+   * "Rent device hosts without asking": the ONE standing approval for renting device hosts of any
+   * platform (Mac and Linux): within the caps, no spend card.
+   */
   rentWithoutAsking: boolean;
+  /**
+   * The month's cap for renting without asking, in USD: this month's device-host spend + what
+   * running hosts are committed to + the new host's whole lifetime must stay within it.
+   */
+  monthlyCapUsd: number;
 }
 
 /**
@@ -152,7 +164,7 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     size: "blacksmith-6vcpu-macos-26",
     lifetimeMinutes: 240,
     idleTeardownMinutes: 20,
-    maxSimulatorsPerHost: 3,
+    maxSimulatorsPerHost: 8,
     rentWithoutAsking: false,
     monthlyCapUsd: 100,
     profiles: [...DEFAULT_IOS_DEVICE_PROFILE_IDS]
@@ -170,7 +182,8 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     minWarmHosts: { android: 0, ios: 0 },
     idleTeardownMinutes: 20,
     capacityWaitSeconds: 120,
-    rentWithoutAsking: false
+    rentWithoutAsking: false,
+    monthlyCapUsd: 100
   },
   research: { vphoneHosts: {} }
 }) as DevicesSettings;
@@ -257,7 +270,8 @@ const poolSchema = z
       .catch({ ...D.pool.minWarmHosts }),
     idleTeardownMinutes: intIn(L.idleTeardownMinutes, D.pool.idleTeardownMinutes),
     capacityWaitSeconds: intIn(L.capacityWaitSeconds, D.pool.capacityWaitSeconds),
-    rentWithoutAsking: bool(D.pool.rentWithoutAsking)
+    rentWithoutAsking: bool(D.pool.rentWithoutAsking),
+    monthlyCapUsd: numberIn(L.monthlyCapUsd, D.pool.monthlyCapUsd)
   })
   .passthrough();
 
@@ -302,9 +316,28 @@ export const devicesSettingsSchema = z
   })
   .passthrough();
 
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` existed: its Mac switch and cap become the pool's. */
+function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, unknown> {
+  const ios = isPlainRecord(record.ios) ? record.ios : null;
+  if (!ios) return record;
+  const pool = isPlainRecord(record.pool) ? { ...record.pool } : {};
+  let changed = false;
+  if (typeof pool.rentWithoutAsking !== "boolean" && ios.rentWithoutAsking === true) {
+    pool.rentWithoutAsking = true;
+    changed = true;
+  }
+  if (typeof pool.monthlyCapUsd !== "number" && typeof ios.monthlyCapUsd === "number") {
+    pool.monthlyCapUsd = ios.monthlyCapUsd;
+    changed = true;
+  }
+  return changed ? { ...record, pool } : record;
+}
+
 /** Any value → valid settings, field by field (unknown keys kept). Never throws. */
 export function readDevicesSettings(value: unknown): DevicesSettings {
-  const record = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const record = isPlainRecord(value) ? adoptLegacyRentSwitch(value) : {};
   return devicesSettingsSchema.parse(record) as DevicesSettings;
 }
 
@@ -358,6 +391,13 @@ export type DevicesSettingsPatch = {
  * re-read through the schema. Keys the patch does not name — unknown ones included — are kept.
  */
 export function mergeDevicesSettings(current: DevicesSettings, patch: DevicesSettingsPatch): DevicesSettings {
+  // An older client's Mac switch / cap sets the one pool switch / cap too (unless the patch names those).
+  if (patch.ios && (patch.ios.rentWithoutAsking !== undefined || patch.ios.monthlyCapUsd !== undefined)) {
+    const pool = { ...patch.pool };
+    if (patch.ios.rentWithoutAsking !== undefined && pool.rentWithoutAsking === undefined) pool.rentWithoutAsking = patch.ios.rentWithoutAsking;
+    if (patch.ios.monthlyCapUsd !== undefined && pool.monthlyCapUsd === undefined) pool.monthlyCapUsd = patch.ios.monthlyCapUsd;
+    patch = { ...patch, pool };
+  }
   return readDevicesSettings(mergeObject(structuredClone(current) as unknown as Record<string, unknown>, patch as Record<string, unknown>));
 }
 
@@ -463,4 +503,136 @@ export function parseDeviceLeasesFile(raw: unknown): DeviceLeasesFile {
 /** The on-disk JSON: live records first, then the rejected ones as found. */
 export function serializeDeviceLeasesFile(file: DeviceLeasesFile): Record<string, unknown> {
   return { ...file.extra, version: DEVICE_LEASES_VERSION, leases: [...file.leases, ...file.rejected] };
+}
+
+// ---------------------------------------------------------------------------
+// The device pool's own record (`device-pool.json`, phase 2 §4)
+// ---------------------------------------------------------------------------
+
+export const DEVICE_POOL_STATE_VERSION = 1;
+
+/** The capacity measured on a ready pool host, per platform + provider + size (the scheduler plans new hosts with it). */
+export const deviceLearnedCapacitySchema = z
+  .object({
+    platform: z.string().min(1),
+    provider: z.string().min(1),
+    size: z.string().min(1),
+    capacity: z.number().int().min(1).max(64),
+    measuredAt: z.string(),
+    samples: z.number().int().min(1).default(1)
+  })
+  .passthrough();
+export type DeviceLearnedCapacity = z.infer<typeof deviceLearnedCapacitySchema>;
+
+/** A host the pool rented: what it was rented as (provider, size, price), for learned capacity. */
+export const devicePoolRentalSchema = z
+  .object({
+    hostId: z.string().min(1),
+    platform: z.string().min(1),
+    provider: z.string().min(1),
+    size: z.string().min(1),
+    hourlyUsd: z.number().finite().min(0).nullable().default(null),
+    rentedAt: z.string(),
+    /** Its capacity was learned already. */
+    measured: z.boolean().default(false)
+  })
+  .passthrough();
+export type DevicePoolRental = z.infer<typeof devicePoolRentalSchema>;
+
+/** One OS's device caches (`orquester-device-cache.yml` runs). */
+export const devicePoolCacheSchema = z
+  .object({
+    /** The last dispatched warm run (any trigger). */
+    lastWarmAt: z.string().nullable().default(null),
+    /** The last warm a cache miss dispatched (at most one a day). */
+    lastAutoWarmAt: z.string().nullable().default(null),
+    lastRunId: z.string().nullable().default(null),
+    /** `success`, `failure`, … once the last run completed; null while unknown. */
+    lastConclusion: z.string().nullable().default(null)
+  })
+  .passthrough();
+export type DevicePoolCacheState = z.infer<typeof devicePoolCacheSchema>;
+
+/**
+ * `device-pool.json`: the hosts the pool rented, learned capacities, drained host ids and
+ * cache-warm state (spend is not kept here: the box records are its one source). Tolerant like
+ * `devices.json`: each section falls back alone, unknown keys and entries are kept on rewrite.
+ */
+export interface DevicePoolState {
+  rentals: DevicePoolRental[];
+  learnedCapacity: DeviceLearnedCapacity[];
+  drainingHostIds: string[];
+  cache: { linux?: DevicePoolCacheState; macos?: DevicePoolCacheState } & Record<string, unknown>;
+}
+
+export interface DevicePoolStateFile {
+  version: typeof DEVICE_POOL_STATE_VERSION;
+  state: DevicePoolState;
+  /** Entries of `rentals` / `learnedCapacity` this build cannot read, kept verbatim. */
+  rejected: { rentals: unknown[]; learnedCapacity: unknown[] };
+  /** Every top-level key this build does not use, as found. */
+  extra: Record<string, unknown>;
+}
+
+export function createDefaultDevicePoolState(): DevicePoolState {
+  return { rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} };
+}
+
+export function createDefaultDevicePoolStateFile(): DevicePoolStateFile {
+  return { version: DEVICE_POOL_STATE_VERSION, state: createDefaultDevicePoolState(), rejected: { rentals: [], learnedCapacity: [] }, extra: {} };
+}
+
+function entries<T>(value: unknown, schema: z.ZodType<T, z.ZodTypeDef, unknown>): { ok: T[]; rejected: unknown[] } {
+  const ok: T[] = [];
+  const rejected: unknown[] = [];
+  for (const entry of Array.isArray(value) ? value : []) {
+    const parsed = schema.safeParse(entry);
+    if (parsed.success) ok.push(parsed.data);
+    else rejected.push(entry);
+  }
+  return { ok, rejected };
+}
+
+const POOL_KEYS = ["version", "rentals", "learnedCapacity", "drainingHostIds", "cache"];
+
+/** Tolerant read of `device-pool.json`; the OUTER shape throws (not an object, another version), like the other device stores. */
+export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Not a device pool file (the file is not a JSON object)");
+  const record = raw as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== DEVICE_POOL_STATE_VERSION) {
+    throw new Error(`Not a version-${DEVICE_POOL_STATE_VERSION} device pool file (version ${JSON.stringify(record.version)})`);
+  }
+  const rentals = entries(record.rentals, devicePoolRentalSchema);
+  const learned = entries(record.learnedCapacity, deviceLearnedCapacitySchema);
+  const cacheRaw = record.cache !== null && typeof record.cache === "object" && !Array.isArray(record.cache) ? (record.cache as Record<string, unknown>) : {};
+  const cache: DevicePoolState["cache"] = { ...cacheRaw };
+  for (const os of ["linux", "macos"] as const) {
+    if (cacheRaw[os] === undefined) continue;
+    const parsed = devicePoolCacheSchema.safeParse(cacheRaw[os]);
+    if (parsed.success) cache[os] = parsed.data;
+    else delete cache[os];
+  }
+  const draining = Array.isArray(record.drainingHostIds) ? record.drainingHostIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  return {
+    version: DEVICE_POOL_STATE_VERSION,
+    state: {
+      rentals: rentals.ok,
+      learnedCapacity: learned.ok,
+      drainingHostIds: [...new Set(draining)],
+      cache
+    },
+    rejected: { rentals: rentals.rejected, learnedCapacity: learned.rejected },
+    extra: Object.fromEntries(Object.entries(record).filter(([key]) => !POOL_KEYS.includes(key)))
+  };
+}
+
+export function serializeDevicePoolStateFile(file: DevicePoolStateFile): Record<string, unknown> {
+  return {
+    ...file.extra,
+    version: DEVICE_POOL_STATE_VERSION,
+    rentals: [...file.state.rentals, ...file.rejected.rentals],
+    learnedCapacity: [...file.state.learnedCapacity, ...file.rejected.learnedCapacity],
+    drainingHostIds: file.state.drainingHostIds,
+    cache: file.state.cache
+  };
 }

@@ -521,6 +521,7 @@ export const DEVICE_ACTION_LOG_LIMIT = 200;
 // ---------------------------------------------------------------------------
 
 export type DeviceSetupJobState = "running" | "done" | "failed" | "cancelled";
+export type DeviceSetupJobKind = "setup" | "cache-warm";
 export type DeviceSetupStepState = "pending" | "running" | "done" | "failed" | "skipped";
 
 export interface DeviceSetupStep {
@@ -531,9 +532,17 @@ export interface DeviceSetupStep {
   detail: string | null;
 }
 
-/** An install or repair (Settings → Devices "Install all", or an agent's first request). */
+/**
+ * An install or repair (Settings → Devices "Install all", or an agent's first request), or —
+ * `kind: "cache-warm"` — a device-cache warm run on the box provider (POST {@link deviceRoutes.cacheWarm};
+ * listed in {@link DevicePoolSummary.cacheJobs}, never in `setupJobs`).
+ */
 export interface DeviceSetupJob {
   id: string;
+  /** Absent: `setup`. */
+  kind?: DeviceSetupJobKind;
+  /** A cache-warm run's page on the provider (GitHub Actions), when known. */
+  url?: string | null;
   platform: DevicePlatform;
   hostId: string;
   state: DeviceSetupJobState;
@@ -551,6 +560,74 @@ export interface DeviceSetupJob {
 // Phase 2: the pool
 // ---------------------------------------------------------------------------
 
+/** Why a queued lease request waits. */
+export type DevicePoolWaitReason =
+  /** A host that is starting (or being rented for it) will have a slot. */
+  | "host-starting"
+  /** Every host is full and no more may be rented (`maxHosts`, or none can be rented). */
+  | "capacity"
+  /** Renting another host would exceed `maxHourlyUsd`. */
+  | "budget";
+
+/** One lease request waiting for room (the fleet view's queue). */
+export interface DevicePoolWaiter {
+  id: string;
+  threadId: string;
+  platform: DevicePlatform;
+  profile: string;
+  requestedAt: string;
+  /** When it fails `DEVICE_CAPACITY` if still without room (`capacityWaitSeconds`); waits on a starting host are not cut short. */
+  deadlineAt: string;
+  reason: DevicePoolWaitReason;
+  /** The host it waits for, when one is starting for it. */
+  hostId: string | null;
+  /** Estimated seconds until it gets a device; null when unknown (it waits for a release). */
+  etaSeconds: number | null;
+}
+
+/** One platform's slice of the pool. */
+export interface DevicePoolPlatformSummary {
+  platform: DevicePlatform;
+  /** Rented pool hosts of the platform (starting, ready, draining). */
+  hosts: number;
+  /** Of those, still starting (being rented or prepared). */
+  starting: number;
+  /** Ready pool hosts' slots (draining hosts count their leases only). */
+  capacity: DeviceCapacity;
+  /** This host's slots for the platform; null when it runs none. */
+  local: DeviceCapacity | null;
+  queue: number;
+  /** `pool.minWarmHosts` of the platform. */
+  minWarmHosts: number;
+  /** Devices a newly rented host is planned with (learned, else the default for the size). */
+  perHostCapacity: number;
+}
+
+/** Spend on rented device hosts, accrued from their $/h while they run (UTC days and months). */
+export interface DevicePoolSpend {
+  /** `YYYY-MM-DD` (UTC). */
+  day: string;
+  todayUsd: number;
+  /** `YYYY-MM` (UTC). */
+  month: string;
+  monthUsd: number;
+  /** What running device hosts are committed to until their time limit (counted against the cap). */
+  committedUsd?: number;
+  /** `pool.monthlyCapUsd`: renting without asking stops at it (month spend + committed + the new host's lifetime). */
+  monthlyCapUsd: number;
+  /** `pool.maxHourlyUsd`: the hard cap on the pool's summed $/h. */
+  maxHourlyUsd: number;
+}
+
+/** A capacity measured on a ready pool host (devices per host for a provider and size). */
+export interface DevicePoolLearnedCapacity {
+  platform: DevicePlatform;
+  provider: string;
+  size: string;
+  capacity: number;
+  measuredAt: string;
+}
+
 export interface DevicePoolSummary {
   /** Pool hosts (rented), not counting this host. */
   hosts: number;
@@ -559,6 +636,23 @@ export interface DevicePoolSummary {
   hourlyUsd: number;
   /** Lease requests waiting for room. */
   queue: number;
+  // Phase 2 additions (absent from an older daemon):
+  /** Leased share of the ready pool slots, 0–1 (0 with no slots). */
+  utilization?: number;
+  /** Rented pool host ids (see `DeviceHostSummary.pool` for each one's role). */
+  hostIds?: string[];
+  /** Pool hosts being drained (no new leases; destroyed once empty). */
+  drainingHostIds?: string[];
+  platforms?: DevicePoolPlatformSummary[];
+  spend?: DevicePoolSpend;
+  /** The queued requests, oldest first. */
+  waiting?: DevicePoolWaiter[];
+  learnedCapacity?: DevicePoolLearnedCapacity[];
+  /** Cache-warm runs (`kind: "cache-warm"`), one per platform at most: running or last finished. */
+  cacheJobs?: DeviceSetupJob[];
+  /** When each platform's caches were last warmed (ISO); null: never from this daemon. */
+  cacheWarmedAt?: Partial<Record<DevicePlatform, string | null>>;
+  updatedAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +698,11 @@ export const DEVICE_SCREENSHOT_ROUTE_PATTERN = `${LEASES}/:leaseId/screenshots/:
  * Routes that also accept the bearer as `?token=` (an `<img>`, a media element or a fetch the
  * browser starts cannot send a header); the daemon redacts it from logs and never forwards it.
  */
-export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN];
+/** A lease's downscaled JPEG thumbnail (the fleet view's ~1 fps cards). */
+export const DEVICE_THUMBNAIL_ROUTE_PATTERN = `${LEASES}/:leaseId/thumbnail`;
+/** Thumbnail widths (`?w=`): default, and the allowed range (px; never upscaled). */
+export const DEVICE_THUMBNAIL_WIDTH = { default: 320, min: 64, max: 720 } as const;
+export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
 
 /**
  * Every devices route, on both transports (bearer on HTTP). Hub streams need HTTP: the desktop
@@ -644,12 +742,20 @@ export const deviceRoutes = {
    * the appearance, power off). The user takes control first; the action log shows it as theirs.
    */
   userAction: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/user-action`,
+  /**
+   * GET → `image/jpeg` (`no-store`): the leased device's screen now, at most `width` px wide
+   * ({@link DEVICE_THUMBNAIL_WIDTH}); the daemon takes it from the hub and caches it ≤ 1 s per lease.
+   * Accepts `?token=` ({@link DEVICE_QUERY_TOKEN_ROUTES}).
+   */
+  thumbnail: (leaseId: string, width: number = DEVICE_THUMBNAIL_WIDTH.default): string => `${LEASES}/${enc(leaseId)}/thumbnail?w=${Math.round(width)}`,
   /** GET → the image (`image/png` or `image/jpeg`) a `deviceRef` names. */
   screenshot: (leaseId: string, screenshotId: string): string => `${LEASES}/${enc(leaseId)}/screenshots/${enc(screenshotId)}`,
   /** GET / PUT ({@link DevicesSettingsPatch}) → {@link DevicesSettingsResponse}. */
   settings: "/api/devices/settings",
   /** POST {@link DeviceSetupRequest} starts (or joins) the platform's setup job; GET → {@link DeviceSetupResponse}. */
   setup: (platform: DevicePlatform): string => `/api/devices/setup/${platform}`,
+  /** GET → {@link DevicePoolResponse}. */
+  pool: "/api/devices/pool",
   /** The hub proxy: `path` is the hub's own path (`api/devices`, `vendor/serve-emu/ws`, …). */
   hub: (hostId: string, path: string): string => `${HOSTS}/${enc(hostId)}/hub/${path.replace(/^\/+/, "")}`,
   /** The WebSocket relay to a hub path (append `?token=` on HTTP; see `ApiClient.deviceSocketUrl`). */
@@ -730,6 +836,11 @@ export interface DeviceHostResponse {
   host: DeviceHostSummary;
 }
 
+/** GET {@link deviceRoutes.pool}. */
+export interface DevicePoolResponse {
+  pool: DevicePoolSummary;
+}
+
 /** POST {@link deviceRoutes.cacheWarm}: the platform whose pool-host caches to build and save. */
 export interface DeviceCacheWarmRequest {
   platform: DevicePlatform;
@@ -791,7 +902,7 @@ export const DEVICES_ACTION_EVENT = "devices.action";
 export const DEVICES_SETUP_EVENT = "devices.setup";
 /** {@link DevicesSettingsResponse}: the settings changed. */
 export const DEVICES_SETTINGS_EVENT = "devices.settings";
-/** {@link DevicePoolSummary}: the pool changed (phase 2). */
+/** {@link DevicePoolSummary} (the payload IS the summary): the pool changed (phase 2). */
 export const DEVICES_POOL_EVENT = "devices.pool";
 
 export type DevicesEventType =
@@ -880,6 +991,18 @@ export function parseDeviceOpenRequest(value: unknown): DeviceParseResult<Device
   return { ok: true, value: out };
 }
 
+/** The body of PUT {@link deviceRoutes.hostDrain}. */
+export function parseDeviceHostDrainRequest(value: unknown): DeviceParseResult<DeviceHostDrainRequest> {
+  if (!isRecord(value) || typeof value.draining !== "boolean") return { ok: false, message: "`draining` must be true or false." };
+  return { ok: true, value: { draining: value.draining } };
+}
+
+/** The body of POST {@link deviceRoutes.cacheWarm}. */
+export function parseDeviceCacheWarmRequest(value: unknown): DeviceParseResult<DeviceCacheWarmRequest> {
+  if (!isRecord(value) || !isDevicePlatform(value.platform)) return { ok: false, message: "`platform` must be ios or android." };
+  return { ok: true, value: { platform: value.platform } };
+}
+
 /** The body of PUT {@link deviceRoutes.controller}. */
 export function parseDeviceControllerRequest(value: unknown): DeviceParseResult<DeviceControllerRequest> {
   if (!isRecord(value) || !isDeviceController(value.controller)) return { ok: false, message: "`controller` must be agent or user." };
@@ -957,7 +1080,8 @@ const SETTINGS_RULES: Readonly<Record<string, Readonly<Record<string, FieldRule>
     maxHourlyUsd: { kind: "number", ...L.maxHourlyUsd },
     idleTeardownMinutes: { kind: "int", ...L.idleTeardownMinutes },
     capacityWaitSeconds: { kind: "int", ...L.capacityWaitSeconds },
-    rentWithoutAsking: { kind: "boolean" }
+    rentWithoutAsking: { kind: "boolean" },
+    monthlyCapUsd: { kind: "number", ...L.monthlyCapUsd }
   }
 };
 const TOP_RULES: Readonly<Record<string, FieldRule>> = {

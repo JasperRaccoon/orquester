@@ -8,8 +8,9 @@
  *   handle (its key `<hostId>/<deviceId>`, or the lease id) among the calling chat's own leases only.
  * - **Control.** The user watches in the Device panel and may take over: input actions then fail
  *   `DEVICE_CONTROLLED_BY_USER`; read-only ones (snapshot, screenshot, logs, wait) still run.
- * - **Spend.** `open_device` raises a `devices` spend card only when it must rent a Mac host the
- *   owner did not pre-approve (its `scope` asks the daemon for the plan; the card pins what it rents).
+ * - **Spend.** `open_device` raises a `devices` spend card only when it must rent a device host the
+ *   owner's standing approval does not cover (its `scope` asks the daemon's pool for the plan; the
+ *   card shows the host's $/h and the pool's caps, and pins what it rents: one card per host).
  * - **Results** carry a `deviceRef` (`{device, leaseId?, screenshotId?, name?, action?, summary?}`)
  *   kept through slimming, so the chat row shows the device, its words ("Tapped “Search”") and a
  *   screenshot thumbnail after a reload, without the image in the transcript.
@@ -235,6 +236,19 @@ const openDevice = defineTool({
           { label: "Worst case", value: worst !== null ? money(worst) : "unknown" }
         ]
       },
+      ...(rental.caps
+        ? [
+            {
+              kind: "fields" as const,
+              title: "Device pool caps",
+              rows: [
+                { label: "Rented hosts", value: `${rental.caps.hosts} of ${rental.caps.maxHosts}` },
+                { label: "Pool price", value: `${money(rental.caps.hourlyUsd)}/h of ${money(rental.caps.maxHourlyUsd)}/h` },
+                { label: "This month", value: `${money(rental.caps.monthSpentUsd)} spent or committed, of ${money(rental.caps.monthlyCapUsd)} without asking` }
+              ]
+            }
+          ]
+        : []),
       {
         kind: "warning",
         level: "caution",

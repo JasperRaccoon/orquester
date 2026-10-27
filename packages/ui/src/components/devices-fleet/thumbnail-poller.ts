@@ -1,6 +1,6 @@
 /**
- * A fleet card's thumbnail (devices phase 2 §2.9, §2.11): about one screenshot a second through
- * the hub proxy, never video, and only while the card is on screen and the page is visible.
+ * A fleet card's thumbnail (devices phase 2 §2.9, §2.11): about one small JPEG a second from the
+ * daemon's lease thumbnail route (`deviceRoutes.thumbnail`: the hub's screenshot, downscaled), never video, and only while the card is on screen and the page is visible.
  *
  * One request at a time: the next starts an interval after the previous one started (later when
  * the capture itself took longer). A failure keeps the last frame and retries with a growing
@@ -34,7 +34,7 @@ export interface ThumbnailSnapshot {
 }
 
 export interface ThumbnailDeps {
-  fetch: (url: string, init: { method: "POST"; cache: "no-store"; headers: Record<string, string>; signal: AbortSignal }) => Promise<Pick<Response, "ok" | "status" | "blob">>;
+  fetch: (url: string, init: { method: "GET"; cache: "no-store"; headers: Record<string, string>; signal: AbortSignal }) => Promise<Pick<Response, "ok" | "status" | "blob">>;
   setTimeout: (callback: () => void, ms: number) => unknown;
   clearTimeout: (handle: unknown) => void;
   now: () => number;
@@ -184,7 +184,7 @@ export class ThumbnailPoller {
     this.lastStartAt = this.deps.now();
     let failedStatus: number | null | undefined;
     try {
-      const response = await this.deps.fetch(url, { method: "POST", cache: "no-store", headers: { ...this.headers }, signal: request.signal });
+      const response = await this.deps.fetch(url, { method: "GET", cache: "no-store", headers: { ...this.headers }, signal: request.signal });
       if (this.request !== request) return;
       if (!response.ok) {
         failedStatus = response.status;

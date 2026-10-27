@@ -9,14 +9,23 @@ import type { DeviceProfile, DeviceSummary } from "@orquester/api";
 export const ORQ_SIM_PREFIX = "orq-";
 /** The scratch simulator that warms agent-device's XCTest runner. */
 export const WARM_SIM_NAME = "orq-warm-runner";
+/** A pool simulator being made (created, slimmed): deleted as a leftover if the daemon stops meanwhile. */
+export const POOL_PREP_SIM_PREFIX = "orq-poolprep-";
+/** A ready pool simulator: `orq-pool-<profileId>.<n>`, slim and shut down; renamed `orq-<leaseId>` when leased. */
+export const POOL_SIM_PREFIX = "orq-pool-";
 
 export function leaseSimulatorName(leaseId: string): string {
   return `${ORQ_SIM_PREFIX}${leaseId}`;
 }
 
-/** The lease id an Orquester simulator was made for, or null (not ours, or the warm-up one). */
+/** Whether a simulator is one of the pool's (ready or being made), not a lease's. */
+export function isPoolSimulator(name: string): boolean {
+  return name.startsWith(POOL_SIM_PREFIX) || name.startsWith(POOL_PREP_SIM_PREFIX);
+}
+
+/** The lease id an Orquester simulator was made for, or null (not ours, the warm-up one, or a pool one). */
 export function leaseIdOfSimulator(name: string): string | null {
-  if (!name.startsWith(ORQ_SIM_PREFIX) || name === WARM_SIM_NAME) return null;
+  if (!name.startsWith(ORQ_SIM_PREFIX) || name === WARM_SIM_NAME || isPoolSimulator(name)) return null;
   const id = name.slice(ORQ_SIM_PREFIX.length);
   return id.length > 0 ? id : null;
 }
@@ -163,9 +172,9 @@ export function parseSimDevices(stdout: string): SimDevice[] {
   return devices;
 }
 
-/** A simulator as `listDevices` shows it (the warm-up simulator is left out). */
+/** A simulator as `listDevices` shows it (the warm-up and pool simulators are left out). */
 export function simDeviceSummary(hostId: string, device: SimDevice, profileOf: (leaseId: string) => string | null): DeviceSummary | null {
-  if (device.name === WARM_SIM_NAME) return null;
+  if (device.name === WARM_SIM_NAME || isPoolSimulator(device.name)) return null;
   const leaseId = leaseIdOfSimulator(device.name);
   return {
     key: `${hostId}/${device.udid}`,

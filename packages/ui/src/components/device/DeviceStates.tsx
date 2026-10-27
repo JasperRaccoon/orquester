@@ -9,7 +9,7 @@ import { AlertTriangle, Check, CircleDashed, Loader2, Plus, Settings2, Smartphon
 import type { DeviceFormFactor, DeviceLeaseSummary, DevicePlatform, DeviceProfile } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
-import type { BootStep, PickerGroup } from "./device-panel.logic";
+import { lostDeviceText, type BootStep, type PickerGroup } from "./device-panel.logic";
 
 // ---------------------------------------------------------------------------
 // Glyphs and small pieces
@@ -365,11 +365,7 @@ export function DeviceGone(props: {
         <div className="min-w-0 text-[12px] leading-relaxed text-neutral-300">
           <p className="font-medium text-neutral-100">{lost ? "This device is gone" : "Can't reach this device's host"}</p>
           <p className="text-neutral-400">
-            {lost
-              ? props.lease.error
-                ? `${props.lease.error}. Open a fresh one to keep going.`
-                : "Its host or emulator stopped. Open a fresh one to keep going."
-              : "The device keeps running; it comes back when the host does."}
+            {lost ? lostDeviceText(props.lease.error) : "The device keeps running; it comes back when the host does."}
           </p>
         </div>
       </div>
