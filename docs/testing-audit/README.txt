@@ -1,27 +1,26 @@
 TEST SUITE CLEANUP — FINAL INTEGRATION REPORT
 
-The repository-wide cleanup is implemented. The integrated source passes the
-full measured suite, typechecks, the changed-files gate and the web/desktop
-production build. A second official pnpm test confirmation also passes; performance-results.json
-records the measurements and delivery.json records Git integration.
-The final post-e866 integration also passes the complete suite and build. Earlier
-area reports are phase records: their pending-validation notes are superseded by
-validation-results.json and this final report, not claims of additional runs.
+The repository-wide cleanup is implemented. Final integrated source passes the
+full default suite, all workspace typechecks, the changed-files gate, the complete
+production build and explicit pinned real-model checks. performance-results.json
+records measurements; delivery.json records integration. Earlier area reports
+are phase records: their pending notes are superseded by validation-results.json
+and this report, not claims of additional runs.
 
 SCOPE AND COUNTING
 
 All initial tests and incoming tests were read with their production owners.
-Remote knowledge-retrieval, Devices, performance and MCP schema changes were merged and
+Remote knowledge-retrieval, Devices, performance, MCP schema and unlike-search changes were merged and
 re-audited rather than overwriting either feature work or the cleanup.
 
-Latest upstream comparison: e866b62bd0d197200683dcdd61e38d1302235b4e.
+Latest upstream comparison: b1c975af002cbc27d37296dc04f4aa81fc76881f.
                     Upstream       Final        Change
 Test/check/Go files     1,091       1,080           -11
-Test source LOC       297,223     291,740        -5,483
-Source declarations    11,542      11,175          -367
+Test source LOC       297,278     291,774        -5,504
+Source declarations    11,543      11,176          -367
 
-Effective outcomes across all 11,542 upstream declarations/families:
-KEEP 9,816; DELETE 188; REWRITE 1,003; OPTIMIZE 278; CONSOLIDATE 257.
+Effective outcomes across all 11,543 upstream declarations/families:
+KEEP 9,815; DELETE 188; REWRITE 1,005; OPTIMIZE 278; CONSOLIDATE 257.
 A parameterized family counts once; mixed deleted/retained vectors are REWRITE.
 CONSOLIDATE counts donors and surviving owners, not 257 deleted tests. Runtime
 Node counts differ because nested/parameterized cases expand and root-sensitive
@@ -39,7 +38,7 @@ TEST-BY-TEST EVIDENCE
 - effective-dispositions.jsonl.gz: every latest-upstream declaration, disposition
   and evidence report; effective-summary.json has the totals (zero missing).
 - surviving-protection-index.jsonl.gz: every final declaration, source owners and
-  evidence reports (11,175 mapped; zero unmapped or DELETE-only survivors).
+  evidence reports (11,176 mapped; zero unmapped or DELETE-only survivors).
   Of these, 168 renamed/new/consolidated declarations use direct evidence reports
   instead of baseline sourceOwners; they are intentionally not baseline identities.
 - standalone-dispositions.json: all 125 standalone scenarios and their evidence.
@@ -53,7 +52,9 @@ TEST-BY-TEST EVIDENCE
   incoming-* covers retrieval integration; devices-* covers Devices integration;
   dead-seams-* and final-aliases-* cover final seam/caller reviews; perf-* covers
   the ee5c3249 changes. incoming-schema-refs.* records final e866b62b consolidation.
-  schema-effective-summary.json preserves the previous counts and exact delta.
+  schema-effective-summary.json and unlike-effective-summary.json preserve phase
+  counts and exact deltas. incoming-unlike.* records the final search fix and
+  literal-vector/real-model test rewrites.
   final-review.md records independent integration
   review and the TMPDIR portability correction.
 
@@ -102,11 +103,23 @@ The final incoming MCP fix constructs equivalent fresh schemas so supported clie
 receive inline array/object shapes. Its two new tests were consolidated into the
 existing actual chat/external tools-list owner; both schema-reference mutants
 failed at the intended public wire assertion and both restored controls passed.
+The later search fix keeps original-target similarity eligibility and applies
+unlike steering to ordering. Its narrow-cone regression now uses four literal
+3D vectors and independent expected candidate IDs, replacing a generated model
+and a second query as oracle. The real-model case requires the known repost in
+both outputs before checking downward rank; duplicate exclusion coverage was
+removed. The old subtractive target and a missing-penalty mutant each fail their
+intended public assertion. Set preservation is asserted only for the bounded
+fixture: candidate/page caps may legitimately change returned sets at scale.
 No product behavior was changed merely to preserve an invalid test.
 
 MEASURED PERFORMANCE
 
-Final post-e866 full pnpm test: 518.834 s; 11,410 Node pass, zero failures,
+Final post-b1c full pnpm test: 527.857 s (8.8 minutes); 11,411 Node pass,
+zero failures, 32 existing skips, plus Go and standalone checks. Frozen source
+hashes stayed unchanged. No separate b1c full-suite baseline was timed.
+
+Prior post-e866 full pnpm test: 518.834 s; 11,410 Node pass, zero failures,
 32 existing skips, plus successful Go and standalone checks. There is no separate
 e866 full-suite baseline: the matching comparison below is explicitly pre-schema.
 
@@ -172,8 +185,8 @@ PASS: focused controls, mutation experiments and static/caller/diff reviews.
 The pre-schema second official pnpm test passed in 522.517 s with the same 11,410 pass /
 32 skip / zero failure Node totals; source hashes remained unchanged. Its 1.616 s
 spread from the first final run reinforces the limits on the global speed claim.
-The final post-schema changed gate, full pnpm check, production build and full
-pnpm test also passed. Native modules and source hashes were verified unchanged.
+The final post-schema and post-unlike changed gates, full pnpm check, production
+build and full pnpm test also passed. Native modules and source hashes were verified unchanged.
 Exact command/results and artifact hashes are in validation-results.json; exact
 focused command lists and mutant failure witnesses are in subsystem ledgers.
 
@@ -193,14 +206,20 @@ No partial/interrupted invocation is counted as a passing gate. Subsequent clean
 changed/full gates passed. Final source hashes were unchanged during measured
 validation; test mutants were restored and verified before final gates.
 
-Real Android/iOS SDK/emulators/KVM, macOS/GPU, live provider/paid hosts and optional
-large model downloads were not exercised. Thirty-two existing final skips remain:
+Real Android/iOS SDK/emulators/KVM, macOS/GPU, live provider/paid hosts and the
+optional full Python/runtime installation were not exercised. The pinned embedding
+model was downloaded into owned temporary storage, all five files matched their
+pinned sizes/SHA-256 values, and the five actual-model/evaluation/tokenizer tests
+passed in 3.832 s with zero skips. No download was added to the default test gate.
+Thirty-two existing final skips remain:
 11 root/permission-sensitive cases, four missing box-Chrome cases, ten missing
 desktop-server cases, and seven archive/audio/runtime/model cases. These paths
-are not claimed as validated by the default gate. The real bsdtar archive checks were additionally run using an owned
+are not claimed as validated by the default gate. Three model cases were
+additionally verified with the explicit opt-in above. Real bsdtar archive checks
+were also run using an owned
 portable extraction outside PATH defaults (8/8, including 18 hostile archives),
-without changing the standard timing environment. No live daemon/dev server or
-deployment was launched and the daemon was not restarted. No separate lint script
+without changing the standard timing environment. This work launched no live daemon/dev server or
+deployment, and did not restart the live daemon. No separate lint script
 exists; typechecks, Go vet, builds, tests and git diff --check are the actual gates.
 
 BASELINE FIXTURE SAFETY INCIDENT

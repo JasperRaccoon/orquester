@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeVisibility } from "@orquester/api";
+import type { KnowledgeVectorThresholds } from "../ports.ts";
 import { KnowledgeError } from "../store/errors.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
@@ -318,12 +319,17 @@ const invalid = (error: unknown) => error instanceof KnowledgeError && error.cod
 const notFound = (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_NOT_FOUND";
 
 /** External model answers are fixed geometric fixtures; the real index and ranking remain in use. */
-async function geometricSearch(t: TestContext, entries: { id: string; title: string; body: string; vector: number[] }[]) {
+async function geometricSearch(
+  t: TestContext,
+  entries: { id: string; title: string; body: string; vector: number[] }[],
+  thresholds: KnowledgeVectorThresholds = { minimum: 0.1, good: 0.5, strong: 0.7, duplicate: 0.95 }
+) {
   const store = new FakeStore();
   for (const entry of entries) store.put(entry.id, entry.body, [], { title: entry.title }, true);
-  const embedder = new FakeEmbedder({ dimensions: 2, groups: [], thresholds: { minimum: 0.1, good: 0.5, strong: 0.7, duplicate: 0.95 } });
+  const dimensions = entries[0]!.vector.length;
+  const embedder = new FakeEmbedder({ dimensions, groups: [], thresholds });
   embedder.embed = async (texts, kind = "passage") => texts.map((text) => {
-    if (kind === "query") return Float32Array.from([1, 0]);
+    if (kind === "query") return Float32Array.from({ length: dimensions }, (_, dimension) => dimension === 0 ? 1 : 0);
     const entry = entries.find((candidate) => text.includes(candidate.title));
     assert.ok(entry, `unexpected passage: ${text}`);
     return Float32Array.from(entry.vector);
@@ -423,6 +429,22 @@ test("query by example ranks toward positive and away from negative examples, ex
   assert.ok(!entryIds((await search.search({ query: "needle", unlike: [a] }, ALL)).hits).includes(a));
   await assert.rejects(search.search({ similarTo: Array.from({ length: 11 }, () => like) }, ALL), invalid);
   await assert.rejects(search.search({ query: "   ", similarTo: [] }, ALL), invalid);
+});
+
+test("query by example with unlike, on a model whose vectors sit in a narrow cone: unlike never empties it or changes what matches", async (t) => {
+  const like = "ke_likeseedaaaa";
+  const unlike = "ke_zunlikeseed1";
+  const a = "ke_candidateaa1";
+  const b = "ke_candidatebb1";
+  // Both candidates have cosine 0.91 to the positive example, above the supplied 0.9 floor.
+  const { search } = await geometricSearch(t, [
+    { id: like, title: "Positive fixture", body: "source", vector: [0.3, 0, 0.9539392014] },
+    { id: unlike, title: "Negative fixture", body: "avoid", vector: [-0.3, 0, 0.9539392014] },
+    { id: a, title: "Candidate Alpha", body: "first", vector: [0, 0.3, 0.9539392014] },
+    { id: b, title: "Candidate Beta", body: "second", vector: [0, -0.3, 0.9539392014] }
+  ], { minimum: 0.9, good: 0.93, strong: 0.96, duplicate: 0.995 });
+  const steered = await search.search({ similarTo: [like], unlike: [unlike], limit: 25 }, ALL);
+  assert.deepEqual(entryIds(steered.hits).sort(), [a, b]);
 });
 
 test("query by example without vectors falls back to BM25 over the examples' titles and openings", async (t) => {

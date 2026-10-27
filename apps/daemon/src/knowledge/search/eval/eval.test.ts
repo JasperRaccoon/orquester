@@ -79,4 +79,16 @@ test("the pinned model: recall@5 ≥ 0.8 on the evaluation set, and thresholds t
   assert.ok(calibration.unmatched.max < strong + 0.02, "a non-answer is far into strong");
   assert.ok(calibration.duplicates.min >= duplicate, "a near-copy is not a duplicate");
   assert.ok(Math.max(calibration.sameTopic.max, calibration.otherTopic.max) < duplicate, "related entries count as duplicates");
+
+  // "Less like this" on this model's narrow cone (any two entries score 0.73–0.99): it reorders a
+  // search by example, never empties it, and moves the unlike entry's repost down.
+  const like = await evalSearch.entries({ similarTo: ["ke_tiktok_posting"], limit: 25 });
+  const steered = await evalSearch.entries({ similarTo: ["ke_tiktok_posting"], unlike: ["ke_tiktok_hooks"], limit: 25 });
+  t.diagnostic(`more like ke_tiktok_posting: ${like.join(", ")}`);
+  t.diagnostic(`… less like ke_tiktok_hooks: ${steered.join(", ")}`);
+  const likeRank = like.indexOf("ke_tiktok_hooks_repost");
+  const steeredRank = steered.indexOf("ke_tiktok_hooks_repost");
+  assert.ok(likeRank >= 0, "the repost is like the example");
+  assert.ok(steeredRank >= 0, "the known matching repost remains available");
+  assert.ok(steeredRank > likeRank, "the unlike entry's repost moves down");
 });

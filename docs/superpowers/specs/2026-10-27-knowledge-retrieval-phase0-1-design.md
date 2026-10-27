@@ -143,9 +143,13 @@ Request/response: see contracts. Semantics:
   date bounds compare `YYYY-MM-DD` prefixes when either side is a bare date, else full ISO strings.
 - **Candidates.** Each signal list keeps up to 100 candidates (was 50). Signals: `keyword` (BM25),
   `meaning` (vector), `concept` (one-hop expansion; unchanged seeds), `similar` (query-by-example).
-- **Query by example.** Target = normalize(mean(entryVector(similarTo)) − 0.5 · mean(entryVector(unlike)))
-  (no subtraction without `unlike`). Search the index with it (minimum = model `minimum`),
-  excluding the examples and the unlike ids. If no example has vectors, fall back to BM25 over the
+- **Query by example.** Target = normalize(mean(entryVector(similarTo))). Search the index with it
+  (minimum = model `minimum`), excluding the examples and the unlike ids. With `unlike`, reorder
+  those matches by s′(target) − max(0, s′(away) − s′(target)), away = normalize(mean(entryVector(
+  unlike))), where s′ rescales a similarity from [minimum, 1] to [0, 1] (below minimum → 0): only
+  entries closer to the unlike ones than to the examples drop, so the examples' topic stays on top. Steering the order, not the target:
+  a sentence model puts all texts in a narrow cone (e5 scores any two entries 0.73–0.99), so
+  subtracting a vector from the target drops every entry below `minimum`. If no example has vectors, fall back to BM25 over the
   examples' titles and first 60 body words. With `query` too, the `similar` list is fused with the
   others (weight 1). Without `query`, only `similar` (plus nothing else) ranks.
 - **Fusion** stays RRF (k = 60, weights keyword 1, meaning 1, similar 1, concept-expansion 0.5).

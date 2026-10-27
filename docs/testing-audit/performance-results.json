@@ -1037,7 +1037,7 @@
     "max_rss_kb is a maximum child-process RSS measurement, not aggregate peak suite memory.",
     "The baseline completed with four known root-sensitive fixture failures; the final suite passed.",
     "Original 5000-entry fixture IDs yielded only 2340 distinct records; corrected fixtures assert all 5,000. The first 1,000 original IDs yielded 470 distinct values.",
-    "No hosted CI job, live provider, paid host, real Android/iOS device or optional model artifact download was measured."
+    "No hosted CI job, live provider, paid host, real Android/iOS device was measured; the pinned embedding model was provisioned and verified separately, outside timed default-suite runs."
   ],
   "candidateSource": {
     "headAtMeasurement": "b659841b45d59f6b5ddefda63c778c54a855672f",
@@ -1992,5 +1992,488 @@
       }
     ],
     "comparisonLimit": "Previous baseline/matching/official measurements precede the final five-file MCP schema fix and its consolidation. No new upstream e866 whole-suite baseline was timed; the prior matching comparison remains explicitly scoped to ee5/9b. No global or CI speedup is inferred from this integration run."
-  }
+  },
+  "realModelDiagnostic": {
+    "result": "PASS",
+    "tests": 5,
+    "skip": 0,
+    "runnerMilliseconds": 3831.846866,
+    "defaultGateUnchanged": true,
+    "resources": {
+      "model": "Xenova/multilingual-e5-small",
+      "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+      "modelDir": "/tmp/orquester-test-audit/pinned-model",
+      "downloadSeconds": 0.8934416439988127,
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 658,
+          "sha256": "cb99455288675345e1a4f411438d5d0adbba5fbd3a67ea4fb03c015433b996c1"
+        },
+        {
+          "path": "tokenizer.json",
+          "bytes": 17082730,
+          "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "bytes": 443,
+          "sha256": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "bytes": 167,
+          "sha256": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7"
+        },
+        {
+          "path": "onnx/model_quantized.onnx",
+          "bytes": 118308185,
+          "sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+        }
+      ]
+    }
+  },
+  "postUnlikeFinal": {
+    "status": "PASS",
+    "command": [
+      "pnpm",
+      "test"
+    ],
+    "headAtMeasurement": "1dc6d954a9194098dc0e9ec01c823efe9824ccd9",
+    "pendingMerge": "b1c975af002cbc27d37296dc04f4aa81fc76881f",
+    "wall_seconds": 527.8574780259987,
+    "user_seconds": 1237.250221,
+    "system_seconds": 200.471852,
+    "max_rss_kb": 701784,
+    "exit_code": 0,
+    "node": "v24.22.1",
+    "cpus": 4,
+    "unchangedSource": true,
+    "sourceFiles": 4641,
+    "sourceHashMapSha256": "115bdf8c909aebeaea168bface1022335d8a4505842b3368fe16de610c53fe4c",
+    "envPolicy": "Identical ORQ_* stripping/reporter and package worker/cache defaults as previous matching and official runs",
+    "referenceCommit": "b1c975af002cbc27d37296dc04f4aa81fc76881f",
+    "totals": {
+      "tests": 11443,
+      "failed": 0,
+      "passed": 11411,
+      "cancelled": 0,
+      "skipped": 32,
+      "todo": 0
+    },
+    "packageSummaries": [
+      {
+        "event": "test:summary",
+        "duration_ms": 2706.669186,
+        "counts": {
+          "tests": 156,
+          "failed": 0,
+          "passed": 156,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 148,
+          "suites": 5
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 6318.555646,
+        "counts": {
+          "tests": 694,
+          "failed": 0,
+          "passed": 694,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 490,
+          "suites": 73
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 4727.315122,
+        "counts": {
+          "tests": 3,
+          "failed": 0,
+          "passed": 3,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 0
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 353625.780894,
+        "counts": {
+          "tests": 7599,
+          "failed": 0,
+          "passed": 7567,
+          "cancelled": 0,
+          "skipped": 32,
+          "todo": 0,
+          "topLevel": 5327,
+          "suites": 655
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 144130.661431,
+        "counts": {
+          "tests": 2924,
+          "failed": 0,
+          "passed": 2924,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1241,
+          "suites": 577
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1159.509752,
+        "counts": {
+          "tests": 38,
+          "failed": 0,
+          "passed": 38,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 20,
+          "suites": 12
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 98.892949,
+        "counts": {
+          "tests": 7,
+          "failed": 0,
+          "passed": 7,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1240.958581,
+        "counts": {
+          "tests": 22,
+          "failed": 0,
+          "passed": 22,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 22,
+          "suites": 0
+        },
+        "success": true,
+        "phase": "post-unlike-final"
+      }
+    ],
+    "slowestFiles": [
+      {
+        "path": "apps/daemon/src/html-preview/browser.test.ts",
+        "nodeHarnessMs": 32174.588418,
+        "counts": {
+          "tests": 28,
+          "failed": 0,
+          "passed": 28,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 5
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/lifecycle.test.ts",
+        "nodeHarnessMs": 14134.189025,
+        "counts": {
+          "tests": 85,
+          "failed": 0,
+          "passed": 85,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 85,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/devices/hosts/box/android-host.test.ts",
+        "nodeHarnessMs": 8781.520916,
+        "counts": {
+          "tests": 9,
+          "failed": 0,
+          "passed": 9,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/knowledge/search/search.perf.test.ts",
+        "nodeHarnessMs": 8729.533015,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 0
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.history.test.ts",
+        "nodeHarnessMs": 8403.118403,
+        "counts": {
+          "tests": 36,
+          "failed": 0,
+          "passed": 36,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 8
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.reload.test.ts",
+        "nodeHarnessMs": 8341.269819,
+        "counts": {
+          "tests": 32,
+          "failed": 0,
+          "passed": 32,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.test.ts",
+        "nodeHarnessMs": 7680.474027,
+        "counts": {
+          "tests": 41,
+          "failed": 0,
+          "passed": 41,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 7,
+          "suites": 8
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/codex/session.test.ts",
+        "nodeHarnessMs": 7478.498221,
+        "counts": {
+          "tests": 118,
+          "failed": 0,
+          "passed": 118,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 34,
+          "suites": 34
+        }
+      },
+      {
+        "path": "apps/daemon/src/workflows/sandbox/sandbox.test.ts",
+        "nodeHarnessMs": 7186.885724,
+        "counts": {
+          "tests": 21,
+          "failed": 0,
+          "passed": 21,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-profile/adapters/codex/index.test.ts",
+        "nodeHarnessMs": 7138.525055,
+        "counts": {
+          "tests": 31,
+          "failed": 0,
+          "passed": 31,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 7
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/host-teardown.test.ts",
+        "nodeHarnessMs": 7120.487894,
+        "counts": {
+          "tests": 5,
+          "failed": 0,
+          "passed": 5,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 0
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.device-cache.test.ts",
+        "nodeHarnessMs": 7050.331145,
+        "counts": {
+          "tests": 14,
+          "failed": 0,
+          "passed": 14,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+        "nodeHarnessMs": 6244.470474,
+        "counts": {
+          "tests": 17,
+          "failed": 0,
+          "passed": 17,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 2,
+          "suites": 2
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/support/lifeline.test.ts",
+        "nodeHarnessMs": 5956.414562,
+        "counts": {
+          "tests": 9,
+          "failed": 0,
+          "passed": 9,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "packages/ui/src/components/main/knowledge-main.dom.test.ts",
+        "nodeHarnessMs": 5647.891921,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/checkpoints/service.test.ts",
+        "nodeHarnessMs": 5561.678265,
+        "counts": {
+          "tests": 30,
+          "failed": 0,
+          "passed": 30,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 30,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/session-profiles/integration.test.ts",
+        "nodeHarnessMs": 5454.494928,
+        "counts": {
+          "tests": 8,
+          "failed": 0,
+          "passed": 8,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/knowledge/search/similarity.perf.test.ts",
+        "nodeHarnessMs": 5199.68331,
+        "counts": {
+          "tests": 2,
+          "failed": 0,
+          "passed": 2,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 2,
+          "suites": 0
+        }
+      },
+      {
+        "path": "packages/ui/src/components/knowledge/knowledge-view.dom.test.ts",
+        "nodeHarnessMs": 4913.762593,
+        "counts": {
+          "tests": 16,
+          "failed": 0,
+          "passed": 16,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/session-replay.test.ts",
+        "nodeHarnessMs": 4811.057395,
+        "counts": {
+          "tests": 6,
+          "failed": 0,
+          "passed": 6,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 0
+        }
+      }
+    ],
+    "comparisonLimit": "No separate b1c upstream full-suite baseline was timed. Earlier matching comparison remains explicitly scoped to ee5/9b. One new independently specified search regression is now exercised; the real model was separately verified with explicit opt-in. No overall or CI speedup is inferred from cross-feature timing differences."
+  },
+  "timingEventsPolicy": "Full case events retain latest measured upstream, its matching cleanup, and final integrated source. Intermediate confirmation runs retain complete resources, package counts and slow-file summaries in this JSON without duplicating every case event."
 }

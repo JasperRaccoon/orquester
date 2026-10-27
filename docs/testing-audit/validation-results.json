@@ -1,5 +1,5 @@
 {
-  "sourceReference": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+  "sourceReference": "b1c975af002cbc27d37296dc04f4aa81fc76881f",
   "gates": [
     {
       "command": "pnpm check",
@@ -60,9 +60,9 @@
     "Real Android/iOS SDK or emulator/KVM workflows",
     "macOS/GPU hardware",
     "Live providers/paid hosts",
-    "Optional large model downloads",
     "Hosted CI timing",
-    "Live daemon/deployment"
+    "Live daemon/deployment",
+    "Optional full Python/myKG runtime installation"
   ],
   "finalNodeSkips": 32,
   "secondOfficialConfirmation": {
@@ -84,10 +84,10 @@
     "installedBytes": 9375904,
     "installedMode": "0o755",
     "installedSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
-    "runningOriginalBytes": 9375904,
-    "runningOriginalSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
-    "byteEqualToOriginalProcess": true,
-    "syntheticTokenExists": false
+    "syntheticTokenExists": false,
+    "runningExecutableBytes": 9375904,
+    "runningExecutableSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
+    "installedMatchesRunningExecutable": true
   },
   "postSchemaGates": [
     {
@@ -135,6 +135,52 @@
       "sourceHashesUnchanged": true,
       "headAtMeasurement": "4c10170dcf661c6458176e8772ea528e6d8cf274",
       "pendingMerge": "e866b62bd0d197200683dcdd61e38d1302235b4e"
+    }
+  ],
+  "postUnlikeFocused": "incoming-unlike.json rootValidation: deterministic controls and both intended mutants restored; five pinned real-model tests passed without skips",
+  "postUnlikeGates": [
+    {
+      "command": "pnpm check:changed --no-cache --base 1dc6d954",
+      "result": "PASS",
+      "scope": "Three affected search/evaluation test files and dependent typechecks",
+      "typecheckSeconds": 4.7,
+      "testSeconds": 9.2
+    },
+    {
+      "command": "pnpm check",
+      "result": "PASS",
+      "scope": "All workspace packages, including Go vet"
+    },
+    {
+      "command": "pnpm build",
+      "result": "PASS",
+      "scope": "All builds and Linux x64 AppImage; Node-native modules restored",
+      "artifact": {
+        "path": "apps/desktop/release/Orquester-0.0.0.AppImage",
+        "bytes": 572207209,
+        "sha256": "067905bbe911fc7f1ba8e3a5cbb2589ede8d570a050e1899beae2fe9b36db229"
+      }
+    },
+    {
+      "command": "node scripts/ensure-node-native.mjs",
+      "result": "PASS",
+      "scope": "Explicit verification after final build"
+    },
+    {
+      "command": "pnpm test",
+      "result": "PASS",
+      "wallSeconds": 527.8574780259987,
+      "nodeTotals": {
+        "tests": 11443,
+        "failed": 0,
+        "passed": 11411,
+        "cancelled": 0,
+        "skipped": 32,
+        "todo": 0
+      },
+      "sourceHashesUnchanged": true,
+      "headAtMeasurement": "1dc6d954a9194098dc0e9ec01c823efe9824ccd9",
+      "pendingMerge": "b1c975af002cbc27d37296dc04f4aa81fc76881f"
     }
   ]
 }
