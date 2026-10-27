@@ -1,13 +1,14 @@
 // The Knowledge view's bottom bar: entry, concept and collection counts, and
 // the linking state (idle, queued, "Linking N entries…" with progress, paused
-// with the reason, or idle with "N entries could not be linked").
+// with the reason, or idle with "N entries could not be linked"), and the
+// automatic re-linking ("Re-linking 37/126") while entries are left to it.
 
 import React, { useEffect, useState } from "react";
-import { AlertTriangle, CircleCheck, Clock, Loader2, PauseCircle } from "lucide-react";
+import { AlertTriangle, CircleCheck, Clock, Loader2, PauseCircle, RefreshCw } from "lucide-react";
 import type { KnowledgeStatus } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
-import { knowledgeCountsText, linkingView } from "./knowledge.logic";
+import { knowledgeCountsText, linkingView, relinkView } from "./knowledge.logic";
 
 /** A display tick while a countdown is shown (not a wait). */
 function useSecondTick(on: boolean): number {
@@ -25,6 +26,7 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
   const now = useSecondTick(status.linking.state === "queued");
   const runs = status.lastRun ? [status.lastRun, ...status.recentRuns] : status.recentRuns;
   const view = linkingView(status.linking, runs, now, status.failedEntries);
+  const relink = relinkView(status.relink);
   const icon =
     view.tone === "running" ? (
       <Loader2 size={12} className="motion-safe:animate-spin" />
@@ -45,6 +47,12 @@ export const KnowledgeStatusBar: React.FC<{ status: KnowledgeStatus }> = ({ stat
     >
       <span className="min-w-0 truncate tabular-nums">{knowledgeCountsText(status)}</span>
       <span className="flex-1" />
+      {relink && (
+        <span data-knowledge-relink title={relink.detail} className="inline-flex shrink-0 items-center gap-1.5 tabular-nums text-neutral-400">
+          <RefreshCw size={11} aria-hidden />
+          {relink.label}
+        </span>
+      )}
       <span
         title={view.detail ?? undefined}
         className={cn(

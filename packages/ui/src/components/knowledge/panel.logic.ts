@@ -4,6 +4,8 @@
 
 import {
   knowledgeMergeKeep,
+  type KnowledgeConceptMerge,
+  type KnowledgeConceptRef,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
@@ -107,6 +109,67 @@ export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "rel
     .sort(compareSimilar)
     .slice(0, SIMILAR_MAX);
   return { items, fallback: false };
+}
+
+/** The distinctive concepts of a "concepts" reason (few entries have them): none for another reason or an older daemon. */
+export function distinctiveConcepts(reason: KnowledgeRelatedReason): KnowledgeConceptRef[] {
+  return reason.kind === "concepts" ? (reason.distinctive ?? []) : [];
+}
+
+export interface Disagreement {
+  entry: KnowledgeEntrySummary;
+  source: "graph" | "checked";
+  pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[];
+  note: string | null;
+}
+
+/**
+ * The "Disagrees with" section (phase 2 spec, "Contradictions"): the similar entries carrying a
+ * `contradicts` reason, each once and never the entry itself, in the daemon's order.
+ */
+export function disagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "similar">): Disagreement[] {
+  const seen = new Set<string>([detail.entry.id]);
+  const out: Disagreement[] = [];
+  for (const item of detail.similar ?? []) {
+    const reason = item.reasons.find((r) => r.kind === "contradicts");
+    if (reason?.kind !== "contradicts" || seen.has(item.entry.id)) continue;
+    seen.add(item.entry.id);
+    out.push({ entry: item.entry, source: reason.source, pairs: reason.pairs, note: reason.note });
+  }
+  return out;
+}
+
+/** Where a contradiction was found, in words. */
+export function contradictionSourceText(source: "graph" | "checked"): string {
+  return source === "checked" ? "Checked by an agent" : "From the concept graph";
+}
+
+/** A similarity cluster in words: "“Paywalls” (12 entries)", or "a cluster of 12 entries" without a label. */
+export function clusterText(cluster: { label: string | null; size: number }): string {
+  const size = `${cluster.size.toLocaleString("en-US")} ${cluster.size === 1 ? "entry" : "entries"}`;
+  return cluster.label ? `“${cluster.label}” (${size})` : `a cluster of ${size}`;
+}
+
+// ---------------------------------------------------------------------------
+// Concept merges (phase 2 spec, "Concept merges")
+// ---------------------------------------------------------------------------
+
+/**
+ * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it, else the only
+ * one kept into it (a merge list that names its concepts differently); null when none is in effect.
+ */
+export function findConceptMerge<M extends Pick<KnowledgeConceptMerge, "id" | "into" | "merged">>(
+  merges: readonly M[],
+  intoId: string,
+  mergedId: string
+): M | null {
+  const into = merges.filter((m) => m.into.id === intoId);
+  return into.find((m) => m.merged.some((c) => c.id === mergedId)) ?? (into.length === 1 ? into[0]! : null);
+}
+
+/** The undo confirmation's text. */
+export function undoMergeMessage(concept: Pick<KnowledgeConceptRef, "name">, merged: Pick<KnowledgeConceptRef, "name">): string {
+  return `“${merged.name}” becomes a concept of its own again, with its own entries and links (and so does any other concept merged into “${concept.name}” in the same step). They are not merged automatically again.`;
 }
 
 // ---------------------------------------------------------------------------

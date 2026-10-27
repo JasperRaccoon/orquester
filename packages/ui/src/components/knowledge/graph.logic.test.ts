@@ -5,8 +5,12 @@ import type { KnowledgeColor, KnowledgeSimilarityGraphResponse, KnowledgeSimilar
 
 import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
+  canvasEdgeClasses,
   clusterColors,
   collectionLegend,
+  conceptMarksText,
+  contradictingEdgeCount,
+  drawnEntryIds,
   focusFor,
   graphQueryOf,
   graphScopeKey,
@@ -291,5 +295,52 @@ describe("the similarity layer", () => {
     assert.equal(similarityNote({ ...SIM, truncated: true, totals: { entries: 3000, embedded: 2500 } }), "Showing the 6 most recent of 2,500 entries. 500 entries are still being embedded.");
     assert.equal(similarityNote({ ...SIM, totals: { entries: 7, embedded: 6 } }), "1 entry is still being embedded.");
     assert.equal(similarityNote({ nodes: [], truncated: false, totals: { entries: 7, embedded: 0 } }), null, "the empty state says it");
+  });
+});
+
+describe("cross-graph navigation and contradictions (phase 2)", () => {
+  const concept = (id: string) => ({ id, name: `Name ${id}`, type: "Tactic" });
+
+  it("draws the edges of entries that disagree in the destructive colour, whatever their variant", () => {
+    const graph = {
+      edges: [
+        { from: "a", to: "b", similarity: 0.92, tree: true, contradicts: true },
+        { from: "a", to: "c", similarity: 0.81, tree: false, contradicts: true },
+        { from: "d", to: "e", similarity: 0.88, tree: true, contradicts: false },
+        { from: "e", to: "f", similarity: 0.7, tree: false }
+      ]
+    };
+    const edges = similarityCanvasEdges(graph);
+    assert.deepEqual(
+      edges.map((e) => [e.id, e.variant, e.contradicts ?? false]),
+      [
+        ["s:a|b", "tree", true],
+        ["s:a|c", "knn", true],
+        ["s:d|e", "tree", false],
+        ["s:e|f", "knn", false]
+      ]
+    );
+    assert.deepEqual(edges.map(canvasEdgeClasses), ["tree contradicts", "knn contradicts", "tree", "knn"], "the canvas class that carries the colour");
+    assert.equal(canvasEdgeClasses({}), "", "a concept edge has none");
+    assert.equal(contradictingEdgeCount(graph), 2);
+    assert.equal(contradictingEdgeCount(SIM), 0, "an older daemon marks none");
+  });
+
+  it("gives a cluster's legend line its top concepts, absent from an older daemon", () => {
+    const withConcepts = { ...SIM, clusters: [{ ...SIM.clusters[0]!, concepts: [concept("t-1"), concept("t-2")] }, { ...SIM.clusters[1]!, concepts: [] }, SIM.clusters[2]!] };
+    const items = similarityLegend(withConcepts).items;
+    assert.deepEqual(items[0]!.concepts, [concept("t-1"), concept("t-2")]);
+    assert.equal("concepts" in items[1]!, false, "an empty list adds nothing");
+    assert.ok(similarityLegend(SIM).items.every((item) => !("concepts" in item)));
+  });
+
+  it("marks a concept's entries that the similarity layer draws, and says how many", () => {
+    assert.deepEqual(drawnEntryIds(["c", "zz", "a", "c"], SIM), ["c", "a"], "drawn ones only, each once, in the concept's order");
+    assert.deepEqual(drawnEntryIds(["a"], null), [], "nothing before the graph is read");
+    const pricing = (ids: string[]) => ({ name: "Pricing", entryIds: ids });
+    assert.equal(conceptMarksText(pricing(["a", "b"]), 2), "Marked the 2 entries behind “Pricing”.");
+    assert.equal(conceptMarksText(pricing(["a"]), 1), "Marked the entry behind “Pricing”.");
+    assert.equal(conceptMarksText(pricing(["a", "b", "zz"]), 2), "Marked 2 of the 3 entries behind “Pricing” (the rest are not drawn).");
+    assert.equal(conceptMarksText(pricing(["zz", "yy"]), 0), "None of the 2 entries behind “Pricing” is drawn here.");
   });
 });

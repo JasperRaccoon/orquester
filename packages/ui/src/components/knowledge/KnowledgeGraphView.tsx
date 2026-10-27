@@ -2,13 +2,17 @@
 // filter chips above one canvas. The Concepts layer shows concepts coloured by collection: the
 // full graph is the overview; when it is truncated, a selection or search hit shows that item's
 // neighbourhood instead. The Similarity layer shows the entries themselves, joined by meaning
-// (nearest neighbours and a spanning forest) and coloured by cluster or collection.
+// (nearest neighbours and a spanning forest) and coloured by cluster or collection, with the
+// pairs that disagree drawn in the destructive colour. The two layers lead into each other: a
+// cluster's top concept opens in the Concepts layer, and a selected concept's entries are marked
+// in the Similarity layer.
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, Settings, Share2, Sparkles, Waypoints } from "lucide-react";
 import type {
   KnowledgeCollectionView,
   KnowledgeColor,
+  KnowledgeConceptRef,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeSearchHit,
@@ -28,6 +32,9 @@ import { CollectionChip, Centered, ErrorLine, PHONE_CHIP, PHONE_CHIP_ROW, TOOLBA
 import {
   canvasNodes,
   collectionLegend,
+  conceptMarksText,
+  contradictingEdgeCount,
+  drawnEntryIds,
   focusFor,
   graphQueryOf,
   graphScopeKey,
@@ -208,6 +215,15 @@ export interface KnowledgeGraphViewProps {
   onQueryChange?: (query: KnowledgeQuery) => void;
   /** "Show all N results": the List view with the same query (the line is hidden without it). */
   onOpenInList?: () => void;
+  /** The selected concept's entries, once the panel has read it ("Show its entries in Similarity"). */
+  selectedConcept?: SelectedConcept | null;
+}
+
+/** A concept the panel has read: its name and the entries behind it. */
+export interface SelectedConcept {
+  id: string;
+  name: string;
+  entryIds: readonly string[];
 }
 
 const NO_IDS: ReadonlySet<string> = new Set();
@@ -227,7 +243,8 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   toolbarEnd,
   query: sharedQuery,
   onQueryChange,
-  onOpenInList
+  onOpenInList,
+  selectedConcept = null
 }) => {
   const openSettings = useAppStore((s) => s.openSettings);
 
@@ -246,10 +263,24 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   };
   /** The legend line whose entries are marked. */
   const [picked, setPicked] = useState<string | null>(null);
+  /** A concept's entries marked on the Similarity layer ("Show its entries in Similarity"). */
+  const [conceptMarks, setConceptMarks] = useState<SelectedConcept | null>(null);
   const chooseLayer = (next: GraphLayer) => {
     sessionLayer = next;
     setLayerChoice(next);
     setPicked(null);
+    setConceptMarks(null);
+  };
+  // Cross navigation (phase 2 spec): a cluster's concept opens in the Concepts layer, through the
+  // selection (the panel opens it; the canvas moves to its neighbourhood when it is not shown)…
+  const openConcept = (concept: KnowledgeConceptRef) => {
+    chooseLayer("concepts");
+    onSelect({ kind: "concept", id: concept.id });
+  };
+  // …and a selected concept's entries are marked on the Similarity layer.
+  const showConceptEntries = (concept: SelectedConcept) => {
+    chooseLayer("similarity");
+    setConceptMarks(concept);
   };
 
   // --- Concepts layer ---
@@ -333,6 +364,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   useEffect(() => {
     setFocus(null);
     setPicked(null);
+    setConceptMarks(null);
   }, [filterKey]);
 
   const colorOf = useMemo(() => new Map<string, KnowledgeColor>(collections.map((c) => [c.id, c.color])), [collections]);
@@ -364,11 +396,19 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
     for (const hit of hits ?? []) if (hit.kind === "concept") ids.add(hit.concept.id);
     return ids;
   }, [selection?.kind, entryConceptIds, hits]);
+  const markedConceptIds = useMemo(() => (conceptMarks ? drawnEntryIds(conceptMarks.entryIds, similarity) : []), [conceptMarks, similarity]);
   const similarityHighlights = useMemo(() => {
     const ids = new Set<string>(pickedIds);
+    for (const id of markedConceptIds) ids.add(id);
     for (const hit of hits ?? []) if (hit.kind === "entry") ids.add(hit.entry.id);
     return ids;
-  }, [pickedIds, hits]);
+  }, [pickedIds, markedConceptIds, hits]);
+  const contradictions = useMemo(() => (similarity ? contradictingEdgeCount(similarity) : 0), [similarity]);
+  // "Show its entries in Similarity": the selected concept, once the panel has read it.
+  const offerConceptEntries =
+    selection?.kind === "concept" && selectedConcept !== null && selectedConcept.id === selection.id && selectedConcept.entryIds.length > 0 && supported === true
+      ? selectedConcept
+      : null;
 
   const onCanvasIds = useMemo(
     () => new Set(layer === "concepts" ? (graph?.nodes.map((n) => n.id) ?? []) : (similarity?.nodes.map((n) => n.id) ?? [])),
@@ -595,6 +635,27 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
                       )}
                     </span>
                   )}
+                  {layer === "concepts" && offerConceptEntries && (
+                    <button
+                      type="button"
+                      onClick={() => showConceptEntries(offerConceptEntries)}
+                      className="pointer-events-auto inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border border-neutral-700 bg-neutral-900/90 px-3 py-1 text-[11.5px] font-medium text-neutral-200 shadow-sm hover:border-neutral-500"
+                    >
+                      <Sparkles size={12} className="shrink-0" />
+                      <span className="truncate">Show its entries in Similarity</span>
+                    </button>
+                  )}
+                  {layer === "similarity" && conceptMarks && similarity && (
+                    <span
+                      role="status"
+                      className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/90 px-3 py-1 text-[11.5px] text-neutral-400 shadow-sm"
+                    >
+                      <span className="min-w-0 truncate">{conceptMarksText(conceptMarks, markedConceptIds.length)}</span>
+                      <button type="button" className="shrink-0 font-medium text-neutral-200 hover:underline" onClick={() => setConceptMarks(null)}>
+                        Clear
+                      </button>
+                    </span>
+                  )}
                   {current.status === "loading" && <Loader2 size={14} className="mt-1 text-neutral-500 motion-safe:animate-spin" />}
                   {current.status === "error" && (
                     <span className="pointer-events-auto rounded-full border border-danger-900/60 bg-neutral-900/90 px-3 py-1 text-[11.5px] text-danger">
@@ -604,7 +665,15 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
                 </div>
                 {layer === "similarity" && similarity && (
                   <div className="flex max-h-[calc(100%-1.5rem)] shrink-0">
-                    <SimilarityLegend colorBy={colorBy} onColorBy={setColorBy} legend={legend} picked={pickedItem ? pickedItem.key : null} onPick={setPicked} />
+                    <SimilarityLegend
+                      colorBy={colorBy}
+                      onColorBy={setColorBy}
+                      legend={legend}
+                      picked={pickedItem ? pickedItem.key : null}
+                      onPick={setPicked}
+                      onConcept={openConcept}
+                      contradictions={contradictions}
+                    />
                   </div>
                 )}
               </div>
