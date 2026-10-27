@@ -13,8 +13,9 @@
  *    Tactic of each (not shared) names the same subject in {@link PAIR_CHECK_ALTERNATIVE_WORDS}+
  *    words ("Outlook/Proton email for TikTok account" / "Create TikTok accounts with a fresh Gmail");
  * 3. close (≥ `good`) and sharing a concept of a claim-like type ({@link PAIR_CHECK_TYPES}).
- * Meta entries never take part: a `synthesis`, or an entry linked to both concepts of a
- * `contradicts` edge (it reports the disagreement, it takes no side).
+ * Meta entries are left out: a `synthesis` never takes part, and an entry linked to both concepts
+ * of a `contradicts` edge is not paired through that edge (it reports the disagreement, it takes no
+ * side).
  *
  * The same rounds answer the tasks of `KnowledgeRoundTaskSource`s (concept merge checks, cluster
  * names): {@link writeRoundTask} writes them into this inbox with their payload, and
@@ -294,8 +295,11 @@ export const PAIR_CHECK_ALTERNATIVE_NEIGHBOURS = 6;
 /** … and a Tool or Tactic of each, not shared, names the same subject: at least this many content words in common. */
 export const PAIR_CHECK_ALTERNATIVE_WORDS = 2;
 const ALTERNATIVE_TYPES: ReadonlySet<string> = new Set(["Tool", "Tactic"]);
-/** Concept types whose negation reads as opposite advice. */
-const NEGATION_TYPES: ReadonlySet<string> = new Set([...PAIR_CHECK_TYPES, "Tool"]);
+/**
+ * Concept types whose negation reads as opposite advice. Not Rule or Guideline: those are named
+ * after what they forbid ("Hidden Features" / "No hidden, dormant, or undocumented features").
+ */
+const NEGATION_TYPES: ReadonlySet<string> = new Set(["Tactic", "Tool", "Metric", "Result"]);
 /** Words that turn advice around ("Never one trial per IP"); the rest of the names must overlap this much. */
 const NEGATION_WORDS: ReadonlySet<string> = new Set(["not", "no", "never", "avoid", "without", "dont", "don", "cannot", "cant", "stop", "against", "non", "nor"]);
 const NEGATION_MIN_JACCARD = 0.5;
@@ -316,10 +320,15 @@ function contentWords(name: string): Set<string> {
   return new Set(nameWords(name).filter((w) => w.length >= 3 && !GLUE_WORDS.has(w) && !NEGATION_WORDS.has(w) && !/^\d+$/.test(w)));
 }
 
-/** Whether one name is the other turned around: exactly one negates, and the rest overlaps (Jaccard ≥ 0.5). */
+/**
+ * Whether one name is the other turned around: exactly one negates, and the rest overlaps (Jaccard
+ * ≥ 0.5). What a name says in parentheses is a clarification ("One strong page per claim (no
+ * thousands of thin pages)"), not part of it.
+ */
 export function negatedNames(x: string, y: string): boolean {
-  const wx = nameWords(x);
-  const wy = nameWords(y);
+  const bare = (name: string): string => name.replace(/\([^)]*\)/g, " ");
+  const wx = nameWords(bare(x));
+  const wy = nameWords(bare(y));
   const nx = wx.some((w) => NEGATION_WORDS.has(w));
   const ny = wy.some((w) => NEGATION_WORDS.has(w));
   if (nx === ny) return false;
@@ -335,9 +344,9 @@ const authorKey = (value: string): string => normalizeAuthor(value);
 
 /**
  * New candidate pairs (see the module header), tier by tier in {@link PAIR_CHECK_REASONS} order,
- * closest first within a tier; meta entries (kind {@link PAIR_CHECK_META_KINDS}, or linked to both
- * concepts of a `contradicts` edge: they quote both sides) never take part. Yields to the event loop
- * on large sets.
+ * closest first within a tier; meta entries left out (a {@link PAIR_CHECK_META_KINDS} kind never
+ * takes part; an entry linked to both concepts of a `contradicts` edge is not paired through it).
+ * Yields to the event loop on large sets.
  */
 export async function pairCheckCandidates(options: PairCheckCandidatesOptions): Promise<PairCandidate[]> {
   const index = options.view.vectors();
@@ -349,6 +358,7 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     since = performance.now();
   };
   const conceptsOf = new Map<string, readonly KnowledgeConceptRef[]>();
+  const conceptIdsOf = new Map<string, ReadonlySet<string>>();
   const entriesOfConcept = new Map<string, string[]>();
   const contradicting = new Map<string, readonly string[]>();
   const contradictingOf = (concept: string): readonly string[] => {
@@ -361,11 +371,9 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     const info = options.entryOf?.(id) ?? null;
     if (info && PAIR_CHECK_META_KINDS.has(info.kind)) continue;
     const concepts = options.view.conceptsOf(id);
-    const own = new Set(concepts.map((concept) => concept.id));
-    // Linked to both sides of a `contradicts` edge: it reports the disagreement, it does not take a side.
-    if (concepts.some((concept) => contradictingOf(concept.id).some((other) => own.has(other)))) continue;
     ids.push(id);
     conceptsOf.set(id, concepts);
+    conceptIdsOf.set(id, new Set(concepts.map((concept) => concept.id)));
     for (const concept of concepts) {
       const list = entriesOfConcept.get(concept.id);
       if (list) list.push(id);
@@ -412,11 +420,13 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     found.set(key, { ...pair, similarity: sim, reason });
   };
 
-  // Joined by a `contradicts` edge between their concepts (any similarity).
+  // Joined by a `contradicts` edge between their concepts (any similarity); an entry linked to both
+  // concepts of the edge reports that disagreement rather than taking a side: not for this edge.
   for (const [concept, entries] of entriesOfConcept) {
     for (const other of contradictingOf(concept)) {
       for (const a of entries) {
-        for (const b of entriesOfConcept.get(other) ?? []) if (a !== b) consider(a, b, similarity(a, b), "contradicts");
+        if (conceptIdsOf.get(a)!.has(other)) continue;
+        for (const b of entriesOfConcept.get(other) ?? []) if (a !== b && !conceptIdsOf.get(b)!.has(concept)) consider(a, b, similarity(a, b), "contradicts");
       }
     }
     await breathe();

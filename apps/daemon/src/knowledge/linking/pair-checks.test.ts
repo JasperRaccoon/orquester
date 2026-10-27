@@ -7,6 +7,7 @@ import type { KnowledgeConceptRef } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import {
+  negatedNames,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
@@ -164,7 +165,7 @@ describe("pair-check candidates", () => {
     assert.deepEqual(capped.map((c) => c.reason), ["contradicts", "shared"], "the cap keeps the first tiers");
   });
 
-  it("meta entries are never checked: a synthesis, or an entry linked to both sides of a `contradicts` edge", async () => {
+  it("meta entries: a synthesis is never checked; an entry linked to both sides of a `contradicts` edge is not paired through it", async () => {
     const { view, hashOf } = setup();
     const quoting: KnowledgeConceptRef[] = [ref("Tactic", "t-48h"), ref("Tactic", "t-72h"), ref("Tactic", "t1")];
     const index = view.vectors() as FakeVectorIndex;
@@ -183,8 +184,26 @@ describe("pair-check candidates", () => {
       limit: 30,
       entryOf: (id) => ({ kind: kinds[id] ?? "note", author: null, handle: null })
     });
-    assert.ok(all.every((c) => c.a !== "ke_q" && c.b !== "ke_q" && c.a !== "ke_s" && c.b !== "ke_s"), JSON.stringify(all));
-    assert.deepEqual(all.map((c) => [c.a, c.b]), [["ke_a", "ke_d"], ["ke_a", "ke_b"]]);
+    assert.ok(all.every((c) => c.a !== "ke_s" && c.b !== "ke_s"), JSON.stringify(all));
+    assert.deepEqual(
+      all.map((c) => [c.a, c.b, c.reason]),
+      [
+        ["ke_a", "ke_d", "contradicts"],
+        ["ke_a", "ke_q", "shared"],
+        ["ke_a", "ke_b", "shared"],
+        ["ke_b", "ke_q", "shared"]
+      ],
+      "ke_q quotes both sides: never paired through that edge, still through a shared claim"
+    );
+  });
+
+  it("a negated name: one negates, the rest overlaps; parentheses are clarifications", () => {
+    assert.equal(negatedNames("One trial per IP", "Use IP reputation as an input, never one-trial-per-IP"), true, "a live pair");
+    assert.equal(negatedNames("Post daily", "Never post at night on weekends"), false, "too little in common");
+    assert.equal(negatedNames("One trial per IP", "Never one trial per IP"), true);
+    assert.equal(negatedNames("Offer a free trial", "Do not offer a free trial"), true);
+    assert.equal(negatedNames("Allow OAI-SearchBot", "Allow OAI-SearchBot (and don't block it at the CDN)"), false);
+    assert.equal(negatedNames("Avoid free VPNs", "Never use free VPNs"), false, "both negate");
   });
 
   it("opposite advice: a concept and its negation; different values for the same decision between near neighbours by different authors", async () => {

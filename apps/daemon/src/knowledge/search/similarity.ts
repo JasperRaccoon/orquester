@@ -35,6 +35,7 @@ import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex,
 import { type WeightedEdge, communities } from "./communities.ts";
 import { type KnowledgeContradictionFound, findContradictions, pairKeyOf } from "./contradictions.ts";
 import { normalizeAuthor } from "./filters.ts";
+import type { KnowledgeClusterLabelsPort } from "./cluster-labels.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
@@ -257,6 +258,8 @@ export class KnowledgeSimilarity {
    */
   private readonly latest = new Map<string, { seq: number; structure: GraphStructure }>();
   private seq = 0;
+  /** LLM topic names for clusters ({@link connectClusterLabels}); null: the concept labels only. */
+  private clusterNames: KnowledgeClusterLabelsPort | null = null;
 
   constructor(options: KnowledgeSimilarityOptions) {
     this.store = options.store;
@@ -265,6 +268,14 @@ export class KnowledgeSimilarity {
     this.summary = options.summary;
     this.pairChecks = options.pairChecks ?? (() => null);
     this.pairChecksRevision = options.pairChecksRevision ?? (() => 0);
+  }
+
+  /**
+   * Clusters of 3+ entries take the LLM's topic name from `port` when it has one (else their concept
+   * label, as without it), and ask it for the ones it lacks (`cluster-labels.ts`). Null disconnects.
+   */
+  connectClusterLabels(port: KnowledgeClusterLabelsPort | null): void {
+    this.clusterNames = port;
   }
 
   /** The index with its model's thresholds, or null while embeddings are unavailable. */
@@ -588,6 +599,7 @@ export class KnowledgeSimilarity {
       vectors.index.generation(),
       this.knowledgeGraph.revision(),
       this.pairChecksRevision(),
+      this.clusterNames?.revision() ?? null,
       fingerprint.digest("base64")
     ]);
 
@@ -772,10 +784,26 @@ export class KnowledgeSimilarity {
     });
     await pause();
     const named = clusterLabels(groups, drawn, concepts);
+    // LLM topic names where there are some (`connectClusterLabels`); the rest are asked for.
+    const names = this.clusterNames;
+    const membersOf = (group: readonly number[]): string[] => [...group].sort((x, y) => degree[y]! - degree[x]! || x - y).map((i) => drawn[i]!.id);
+    const hidden = (entryId: string): boolean => {
+      const meta = this.store.getMeta(entryId);
+      return meta !== null && meta !== undefined && !entryInScope(meta, scope);
+    };
+    const unnamed: string[][] = [];
     const clusters: KnowledgeSimilarityCluster[] = groups.map((group, id) => {
-      const { label, concepts: top } = named[id]!;
+      const { concepts: top } = named[id]!;
+      let label = named[id]!.label;
+      if (names) {
+        const members = membersOf(group);
+        const topic = names.labelFor(members, hidden);
+        if (topic !== null) label = topic;
+        else unnamed.push(members);
+      }
       return top.length > 0 ? { id, size: group.length, label, concepts: top } : { id, size: group.length, label };
     });
+    if (names && unnamed.length > 0) names.request(unnamed);
 
     return {
       ids: drawn.map((meta) => meta.id),

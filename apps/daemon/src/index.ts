@@ -1522,7 +1522,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Linking (built when the knowledge base first opens, after `knowledge.start()` below): the myKG
     // run queue, answered by unattended Claude Code chats it starts through the daemon's own API with
     // the workflow Agent block's account selection, failover and shared cooldowns.
-    linking: ({ store, graph, runtime, settings, graphView }) => {
+    linking: ({ store, graph, runtime, settings, graphView, roundTasks }) => {
       const api = services.internalApi;
       if (!api) throw new Error("the daemon's in-process API does not exist yet");
       const workers = createDaemonWorkerSessions({
@@ -1536,7 +1536,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         ensureProfile: () => ensureKnowledgeIndexerProfile(sessionProfiles),
         logger: console
       });
-      return new KnowledgeLinkingService({ appdir: paths.baseDir, runtime, settings, store, graph, workers, clock: realClock, logger: console, graphView });
+      return new KnowledgeLinkingService({ appdir: paths.baseDir, runtime, settings, store, graph, workers, clock: realClock, logger: console, graphView, roundTasks });
     },
     // `services` is read per call: the refresher is built below.
     toolsChanged: () => {
