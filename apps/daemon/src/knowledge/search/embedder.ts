@@ -4,6 +4,28 @@ import type * as Ort from "onnxruntime-node";
 import type { KnowledgeRuntimePort } from "../ports.ts";
 
 /**
+ * Cosine-similarity cut-offs for one model (retrieval spec, "Similarity thresholds"). Models
+ * differ: an unrelated pair scores ~0.1 on all-MiniLM-L6-v2 but ~0.7 on multilingual-e5-small,
+ * so every threshold search uses comes from the model, never a constant.
+ */
+export interface KnowledgeSimilarityThresholds {
+  /** Below this a chunk is not a semantic match at all. */
+  minimum: number;
+  /** At or above: a "good" match band. */
+  good: number;
+  /** At or above: a "strong" match band. */
+  strong: number;
+  /** Entry-to-entry at or above: a possible duplicate (reposts, near-copies). */
+  duplicate: number;
+}
+
+/**
+ * What a text is embedded as. Asymmetric models (the e5 family) prefix them differently
+ * ("query: " / "passage: "); symmetric ones ignore it.
+ */
+export type KnowledgeEmbedKind = "query" | "passage";
+
+/**
  * Sentence embeddings, local and on CPU. Vectors are L2-normalized, so a dot product is the
  * cosine similarity. Tests inject a fake.
  */
@@ -11,8 +33,13 @@ export interface KnowledgeEmbedder {
   /** Cache key: vectors from another model are never mixed in. */
   readonly modelId: string;
   readonly dimensions: number;
-  embed(texts: readonly string[]): Promise<Float32Array[]>;
+  readonly thresholds: KnowledgeSimilarityThresholds;
+  /** `kind` defaults to "passage". */
+  embed(texts: readonly string[], kind?: KnowledgeEmbedKind): Promise<Float32Array[]>;
 }
+
+/** all-MiniLM-L6-v2's cut-offs (the model shipped before the retrieval spec). */
+export const MINILM_THRESHOLDS: KnowledgeSimilarityThresholds = { minimum: 0.25, good: 0.4, strong: 0.55, duplicate: 0.92 };
 
 /** The embedder to use right now (null while the runtime is not installed). */
 export interface KnowledgeEmbedderSource {
@@ -28,6 +55,8 @@ export interface OnnxEmbedderOptions {
   dimensions: number;
   /** Tokens per input, special tokens included (all-MiniLM-L6-v2 was trained on 256). */
   maxTokens?: number;
+  /** The model's cut-offs (all-MiniLM-L6-v2's by default). */
+  thresholds?: KnowledgeSimilarityThresholds;
   /** ONNX intra-op threads; small so search never starves the daemon. */
   threads?: number;
   batchSize?: number;
@@ -59,6 +88,7 @@ export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
   private readonly maxTokens: number;
   private readonly threads: number;
   private readonly batchSize: number;
+  readonly thresholds: KnowledgeSimilarityThresholds;
   private loading: Promise<Loaded> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private disposed = false;
@@ -70,6 +100,7 @@ export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
     this.maxTokens = Math.max(8, options.maxTokens ?? 256);
     this.threads = Math.max(1, options.threads ?? 2);
     this.batchSize = Math.max(1, options.batchSize ?? 16);
+    this.thresholds = options.thresholds ?? MINILM_THRESHOLDS;
   }
 
   /** Load the model now (optional; `embed` loads on demand). */
@@ -77,7 +108,8 @@ export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
     return this.load().then(() => undefined);
   }
 
-  embed(texts: readonly string[]): Promise<Float32Array[]> {
+  // `kind` is unused by all-MiniLM-L6-v2 (a symmetric model).
+  embed(texts: readonly string[], _kind: KnowledgeEmbedKind = "passage"): Promise<Float32Array[]> {
     // One inference at a time per model: bounded CPU, predictable latency.
     const run = this.queue.then(() => this.embedNow(texts));
     this.queue = run.catch(() => undefined);

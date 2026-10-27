@@ -29,6 +29,20 @@ export const KNOWLEDGE_COLLECTION_NAME_MAX = 60;
 export const KNOWLEDGE_COLLECTION_DESCRIPTION_MAX = 200;
 export const KNOWLEDGE_SEARCH_DEFAULT_LIMIT = 8;
 export const KNOWLEDGE_SEARCH_MAX_LIMIT = 25;
+/** Entries one search can page through (all pages together). */
+export const KNOWLEDGE_SEARCH_MAX_RESULTS = 200;
+/** Example entries in `similarTo` / `unlike`. */
+export const KNOWLEDGE_SIMILAR_MAX_EXAMPLES = 10;
+/** Values in one filter list (`kinds`, `authors`). */
+export const KNOWLEDGE_FILTER_MAX_VALUES = 20;
+/** Values per facet (the most frequent first). */
+export const KNOWLEDGE_FACET_MAX_VALUES = 30;
+/** Entries in one similarity graph before it is truncated to the most recent. */
+export const KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES = 2_000;
+export const KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_NODES = 1_000;
+/** Nearest neighbours drawn per entry in the similarity graph (1..KNOWLEDGE_SIMILARITY_GRAPH_MAX_K). */
+export const KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_K = 3;
+export const KNOWLEDGE_SIMILARITY_GRAPH_MAX_K = 8;
 /** Concepts returned by one graph request before it is truncated to the most connected. */
 export const KNOWLEDGE_GRAPH_MAX_NODES = 2_000;
 export const KNOWLEDGE_CONCURRENCY_MIN = 1;
@@ -148,6 +162,17 @@ export interface KnowledgeEntriesQuery {
   /** Newest first. */
   cursor?: string;
   limit?: number;
+  /**
+   * Comma-separated {@link KnowledgeSearchFilters} on the query string (`kinds`, `authors`, `years`), and
+   * ISO bounds (`postedAfter`, `postedBefore`, `savedAfter`, `savedBefore`); same meaning as in search.
+   */
+  kinds?: string;
+  authors?: string;
+  years?: string;
+  postedAfter?: string;
+  postedBefore?: string;
+  savedAfter?: string;
+  savedBefore?: string;
 }
 
 export interface KnowledgeEntriesResponse {
@@ -201,6 +226,13 @@ export interface KnowledgeSaveResult {
   title: string;
   collections: string[];
   citation: string;
+  /**
+   * A `saved` entry's possible duplicates already in the knowledge base (similar in meaning at or
+   * above the model's `duplicate` threshold, any collection the caller can see), closest first, up
+   * to 3. Empty when none, or when the entry could not be embedded within the save's wait.
+   * Absent from an older daemon.
+   */
+  similar?: { entryId: string; title: string; similarity: number; citation: string }[];
 }
 
 export interface KnowledgeSaveResponse {
@@ -271,11 +303,38 @@ export interface KnowledgeConceptDetail {
   neighbors: { edge: KnowledgeEdge; concept: KnowledgeConceptRef }[];
 }
 
+/** Why another entry is shown next to this one (labelled in the UI, spec "Similar entries"). */
+export type KnowledgeRelatedReason =
+  /** Close in meaning (embeddings). */
+  | { kind: "meaning"; similarity: number }
+  /** Shares concepts from linking (up to 3 named). */
+  | { kind: "concepts"; concepts: KnowledgeConceptRef[]; shared: number }
+  /** Same author or handle. */
+  | { kind: "author"; value: string };
+
+export interface KnowledgeSimilarEntry {
+  entry: KnowledgeEntrySummary;
+  /** Cosine similarity of the two entries' mean vectors; null when either has no vectors yet. */
+  similarity: number | null;
+  /** At least one reason; meaning first when present. */
+  reasons: KnowledgeRelatedReason[];
+}
+
 export interface KnowledgeEntryDetail {
   entry: KnowledgeEntry;
   concepts: KnowledgeConceptRef[];
   /** Other visible entries sharing concepts with this one, most shared first. */
   related: KnowledgeEntrySummary[];
+  /**
+   * Visible entries related by meaning, shared concepts or author, best first, each with its
+   * reasons (up to 8). Absent from a daemon that predates the retrieval spec.
+   */
+  similar?: KnowledgeSimilarEntry[];
+  /**
+   * Visible entries so close in meaning they may be the same content (similarity ≥ the model's
+   * `duplicate` threshold), closest first, up to 3. Absent from an older daemon.
+   */
+  possibleDuplicates?: KnowledgeSimilarEntry[];
   citation: string;
 }
 
@@ -288,29 +347,185 @@ export type KnowledgeItemResponse =
 // Search
 // ---------------------------------------------------------------------------
 
+/**
+ * Metadata filters, applied while ranking (like visibility). Every list matches any of its values
+ * (case-insensitive); different fields must all match. Date bounds are inclusive ISO dates or
+ * date-times compared on the first 10 characters (YYYY-MM-DD) when either side is a bare date; an
+ * entry with no `postedAt` never passes a `posted…` bound.
+ */
+export interface KnowledgeSearchFilters {
+  /** Entry kinds ("thread", "article", …). */
+  kinds?: string[];
+  /** Author display names or handles (with or without "@"). */
+  authors?: string[];
+  /** Years ("2026") of `postedAt`, else `savedAt` — the same rule as the `years` facet. */
+  years?: string[];
+  postedAfter?: string;
+  postedBefore?: string;
+  savedAfter?: string;
+  savedBefore?: string;
+}
+
+/**
+ * - `relevance` — best match first (the default).
+ * - `recent` — best match first with a recency boost (newer `postedAt`, else `savedAt`, ranks higher).
+ * - `newest` — every match, newest saved first.
+ */
+export type KnowledgeSearchSort = "relevance" | "recent" | "newest";
+
 export interface KnowledgeSearchRequest {
-  query: string;
+  /** Words to search by meaning and keywords. At least one of `query` and `similarTo`. */
+  query?: string;
   /** Narrow to these (ids or names); always intersected with what the caller can see. */
   collections?: string[];
   limit?: number;
   /** The calling chat (set by the daemon for tool calls). */
   sessionId?: string;
+  filters?: KnowledgeSearchFilters;
+  /** "More like these" entry ids (visible ones; ≤ KNOWLEDGE_SIMILAR_MAX_EXAMPLES). Never returned themselves. */
+  similarTo?: string[];
+  /** "Less like these" entry ids, with `similarTo` (≤ KNOWLEDGE_SIMILAR_MAX_EXAMPLES). Never returned themselves. */
+  unlike?: string[];
+  sort?: KnowledgeSearchSort;
+  /** Spread near-identical results apart (maximal marginal relevance). Default true. */
+  diverse?: boolean;
+  /** The previous page's `nextCursor`; the rest of the request must be the same. */
+  cursor?: string;
+  /** Also count kinds, authors, collections and years over every match. */
+  facets?: boolean;
+}
+
+/** Which signals found an entry. */
+export type KnowledgeMatchSignal = "keyword" | "meaning" | "concept" | "similar";
+
+/** How strong a hit is, from the model's thresholds and keyword coverage (spec "Match bands"). */
+export type KnowledgeMatchBand = "strong" | "good" | "weak";
+
+export interface KnowledgeEntryMatch {
+  band: KnowledgeMatchBand;
+  /** At least one; in this order when several. */
+  via: KnowledgeMatchSignal[];
+  /** Query words found in the entry (lowercased as typed, for highlighting). */
+  terms: string[];
+  /** The best-matching chunk: character offsets into the body, its index and the entry's chunk count. Null when no chunk matched by meaning. */
+  passage: { start: number; end: number; chunk: number; chunks: number } | null;
+  /** Concepts through which the graph expansion found it (up to 3). */
+  concepts: KnowledgeConceptRef[];
 }
 
 export type KnowledgeSearchHit =
-  | { kind: "entry"; score: number; entry: KnowledgeEntrySummary }
+  | {
+      kind: "entry";
+      score: number;
+      entry: KnowledgeEntrySummary;
+      /** Absent from a daemon that predates the retrieval spec. */
+      match?: KnowledgeEntryMatch;
+    }
   | {
       kind: "concept";
       score: number;
       concept: KnowledgeConceptRef & { description: string | null };
       /** Up to 3 visible entries behind it, best first. */
       entryIds: string[];
+      /** The same entries with their titles (absent from an older daemon). */
+      entries?: { id: string; title: string }[];
     };
+
+export interface KnowledgeFacetCount {
+  /** The value to filter by (a kind, an author's handle or name, a collection id, a year). */
+  value: string;
+  /** How to show it ("Om Patel (@om_patel5)", a collection's name, "2026"). */
+  label: string;
+  count: number;
+}
+
+/** Counts over a set of entries, most frequent first, up to KNOWLEDGE_FACET_MAX_VALUES each. */
+export interface KnowledgeFacets {
+  kinds: KnowledgeFacetCount[];
+  authors: KnowledgeFacetCount[];
+  /** Visible collections only; Unfiled as value "unfiled" for callers that see it. */
+  collections: KnowledgeFacetCount[];
+  /** By `postedAt`, else `savedAt`, newest year first. */
+  years: KnowledgeFacetCount[];
+}
 
 export interface KnowledgeSearchResponse {
   hits: KnowledgeSearchHit[];
   /** The collection ids the search ran over. */
   searched: string[];
+  /** Entries matching in all (every page; capped at KNOWLEDGE_SEARCH_MAX_RESULTS). Absent from an older daemon. */
+  total?: number;
+  /** Pass as `cursor` for the next page; null on the last. Absent from an older daemon. */
+  nextCursor?: string | null;
+  /** With `facets: true`. */
+  facets?: KnowledgeFacets;
+}
+
+/** POST /api/knowledge/facets: counts over every visible entry the narrowing and filters keep. */
+export interface KnowledgeFacetsRequest {
+  collections?: string[];
+  filters?: KnowledgeSearchFilters;
+  sessionId?: string;
+}
+
+export interface KnowledgeFacetsResponse {
+  facets: KnowledgeFacets;
+  total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Similarity graph (spec "Similarity layer")
+// ---------------------------------------------------------------------------
+
+export interface KnowledgeSimilarityGraphQuery {
+  /** Comma-separated collection ids; absent = every visible collection. */
+  collections?: string;
+  /** Neighbours per entry, 1..KNOWLEDGE_SIMILARITY_GRAPH_MAX_K (default KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_K). */
+  k?: number;
+  /** Most recent embedded entries kept, 1..KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES. */
+  limit?: number;
+}
+
+export interface KnowledgeSimilarityNode {
+  /** The entry id. */
+  id: string;
+  title: string;
+  kind: string;
+  author: string | null;
+  handle: string | null;
+  savedAt: string;
+  /** Visible collections. */
+  collections: string[];
+  /** Index into `clusters`. */
+  cluster: number;
+  degree: number;
+}
+
+export interface KnowledgeSimilarityEdge {
+  from: string;
+  to: string;
+  similarity: number;
+  /** Part of the maximum spanning forest (keeps every component connected); the rest are k-NN edges. */
+  tree: boolean;
+}
+
+export interface KnowledgeSimilarityCluster {
+  id: number;
+  /** Entries in it. */
+  size: number;
+  /** The most common concept among its linked entries, else its most distinctive title words; null for singletons. */
+  label: string | null;
+}
+
+export interface KnowledgeSimilarityGraphResponse {
+  nodes: KnowledgeSimilarityNode[];
+  edges: KnowledgeSimilarityEdge[];
+  /** Largest first; a cluster = entries joined by edges at or above the model's `good` threshold. */
+  clusters: KnowledgeSimilarityCluster[];
+  /** True when more embedded entries were visible than `limit` (the most recent were kept). */
+  truncated: boolean;
+  /** Visible entries, and how many of them have vectors (only those can be drawn). */
+  totals: { entries: number; embedded: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +776,9 @@ export const knowledgeRoutes = {
   entry: (id: string): string => `/api/knowledge/entries/${enc(id)}`,
   item: (id: string): string => `/api/knowledge/items/${enc(id)}`,
   graph: "/api/knowledge/graph",
+  similarityGraph: "/api/knowledge/similarity-graph",
   search: "/api/knowledge/search",
+  facets: "/api/knowledge/facets",
   save: "/api/knowledge/save",
   rebuild: "/api/knowledge/rebuild",
   rebuildEstimate: "/api/knowledge/rebuild/estimate",

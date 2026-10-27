@@ -102,6 +102,53 @@ export interface KnowledgeGraphPort {
   conceptTypes(): ReadonlyMap<string, number>;
 }
 
+/** Cosine cut-offs of the model behind a {@link KnowledgeVectorIndex} (`search/embedder.ts` restates it). */
+export interface KnowledgeVectorThresholds {
+  minimum: number;
+  good: number;
+  strong: number;
+  duplicate: number;
+}
+
+/** One entry's best-matching chunk for a query vector. */
+export interface KnowledgeVectorHit {
+  entryId: string;
+  /** Cosine similarity of the best chunk (vectors are L2-normalized). */
+  score: number;
+  /** Index of the best chunk, and how many the entry has. */
+  chunk: number;
+  chunks: number;
+  /** The best chunk's character range in the entry body. */
+  span: { start: number; end: number };
+}
+
+/**
+ * Vector storage and nearest-neighbour search over entry chunks (retrieval spec docs/superpowers/
+ * specs/2026-10-27-knowledge-retrieval-phase0-1-design.md, "The vector index port"). The
+ * in-process implementation (`search/vector-index.ts`) is the only one today; a Qdrant-backed one
+ * can implement the same port later. Every call is synchronous except embedding a query, so a
+ * caller can scope with a predicate while ranking (spec goal: visibility inside search).
+ */
+export interface KnowledgeVectorIndex {
+  /** The model the current vectors come from; null while no embedder is usable. */
+  modelId(): string | null;
+  /** That model's cut-offs; null while no embedder is usable. */
+  thresholds(): KnowledgeVectorThresholds | null;
+  /** Embed search text as a query; null when embeddings are unavailable (callers fall back to text). */
+  embedQuery(text: string): Promise<Float32Array | null>;
+  /**
+   * Best chunk per entry, cosine ≥ `minimum` (default: the model's `minimum`), best first, at most
+   * `limit`; only entries `accept` passes are scored.
+   */
+  search(query: Float32Array, accept: (entryId: string) => boolean, limit: number, minimum?: number): KnowledgeVectorHit[];
+  /** The L2-normalized mean of an entry's chunk vectors; null when it has none (yet). */
+  entryVector(entryId: string): Float32Array | null;
+  /** Entries that have vectors from the current model. */
+  embeddedIds(): string[];
+  /** Bumped whenever any entry's vectors change: a cache key for derived views (similarity graph). */
+  generation(): number;
+}
+
 // ---------------------------------------------------------------------------
 // linking/
 // ---------------------------------------------------------------------------

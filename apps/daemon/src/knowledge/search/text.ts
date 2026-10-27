@@ -39,6 +39,30 @@ export interface TextSpan {
   end: number;
 }
 
+/**
+ * Bumped whenever {@link embeddingHeader} or {@link embeddingPassage} changes: part of the vector
+ * cache key, so cached vectors are recomputed.
+ */
+export const EMBEDDING_INPUT_VERSION = "ctx-v1";
+
+/**
+ * The context line embedded with every chunk of an entry (retrieval spec, "Contextual chunks"):
+ * title, author and handle, kind — so a chunk deep in a long article still carries what the
+ * article is. Collections are left out on purpose: relabelling never re-embeds.
+ */
+export function embeddingHeader(meta: { title: string; author: string | null; handle: string | null; kind: string }): string {
+  const handle = meta.handle ? `@${meta.handle.trim().replace(/^@+/, "")}` : "";
+  const who = [meta.author?.replace(/\s+/g, " ").trim() ?? "", handle].filter((part) => part.length > 0 && part !== "@").join(" ");
+  return [meta.title.replace(/\s+/g, " ").trim(), who ? `by ${who}` : "", meta.kind.replace(/\s+/g, " ").trim()]
+    .filter((part) => part.length > 0)
+    .join(" · ");
+}
+
+/** One chunk as it is embedded: the entry's {@link embeddingHeader}, a blank line, the chunk text. */
+export function embeddingPassage(header: string, chunk: string): string {
+  return header.length > 0 ? `${header}\n\n${chunk}` : chunk;
+}
+
 /** Bumped whenever {@link chunkBody} changes, so cached vectors are recomputed. */
 export const CHUNKER_VERSION = "words-180-40-v1";
 /** ~256 MiniLM tokens of English prose. */
