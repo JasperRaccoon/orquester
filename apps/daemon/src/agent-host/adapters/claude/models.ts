@@ -251,6 +251,15 @@ function selectionBooleanOption(
   return typeof value === "boolean" ? value : undefined;
 }
 
+/**
+ * Whether `model` came from the live catalogue, so a missing descriptor means
+ * "not supported". A fallback alias carries no capabilities at all: its
+ * `null` means "unknown", and the selection is passed through to the CLI.
+ */
+export function hasKnownCapabilities(model: ProviderModel | undefined): model is ProviderModel {
+  return model !== undefined && !FALLBACK_CLAUDE_MODELS.includes(model);
+}
+
 /** The SDK's `EffortLevel` union — anything else is dropped, never passed on. */
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
@@ -262,10 +271,10 @@ export function resolveEffortLevel(
   if (requested === undefined || !EFFORT_LEVELS.has(requested)) {
     return undefined;
   }
-  if (model === undefined) {
-    // No catalogue entry to check against (a probe that failed): pass the
-    // level through and let the CLI reject it rather than silently dropping
-    // the user's choice.
+  if (!hasKnownCapabilities(model)) {
+    // No catalogue entry to check against (a probe that failed, or a session
+    // started on the fallback aliases): pass the level through and let the CLI
+    // reject it rather than silently dropping the user's choice.
     return requested as "low" | "medium" | "high" | "xhigh" | "max";
   }
   const descriptor = model.capabilities?.optionDescriptors?.find(
@@ -292,8 +301,11 @@ export function resolveBooleanOption(
   if (requested === undefined) {
     return undefined;
   }
-  const descriptor = model?.capabilities?.optionDescriptors?.find((entry) => entry.id === id);
-  if (model !== undefined && (descriptor === undefined || descriptor.type !== "boolean")) {
+  if (!hasKnownCapabilities(model)) {
+    return requested;
+  }
+  const descriptor = model.capabilities?.optionDescriptors?.find((entry) => entry.id === id);
+  if (descriptor === undefined || descriptor.type !== "boolean") {
     return undefined;
   }
   return requested;

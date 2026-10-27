@@ -163,7 +163,7 @@ export interface UpdateKnowledgeEntryRequest {
   handle?: string | null;
   url?: string | null;
   postedAt?: string | null;
-  /** Collection ids. Changing only these never queues a linking run. */
+  /** Collection ids or names. Changing only these never queues a linking run. */
   collections?: string[];
 }
 

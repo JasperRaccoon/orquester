@@ -68,7 +68,7 @@ No dynamic `import()` either.
 | `desktops` | `get_desktops`, `control_desktop` (2) |
 | `secret-files` | `secret_files_status`, `push_secret_files` (2) |
 | `boxes` | the temporary-box tools (8), advertised only while a box can be rented |
-| `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_collections`, `knowledge_worker_next_task`, `knowledge_worker_submit` (6), advertised only while the Knowledge Graph plugin is on — search and get only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
+| `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_collections`, `knowledge_worker_next_task`, `knowledge_worker_submit` (8), advertised only while the Knowledge Graph plugin is on — search, get, update and delete only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
 
 46 chat tools (the 42 external ones plus `html_preview`, `html_render`, `request_secret`, `push_secret_files`), **all
 advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`

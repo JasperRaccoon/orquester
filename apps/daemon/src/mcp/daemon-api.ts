@@ -30,7 +30,7 @@ import {
 
 export type { DeviceCallOptions };
 
-export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
+export type DaemonMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
 
 /**

@@ -569,6 +569,8 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   knowledge_search: "Searched the knowledge base",
   knowledge_get: "Read a knowledge entry",
   knowledge_save: "Saved to the knowledge base",
+  knowledge_update: "Edited a knowledge entry",
+  knowledge_delete: "Deleted knowledge entries",
   knowledge_collections: "Listed knowledge collections",
   knowledge_worker_next_task: "Took an indexing task",
   knowledge_worker_submit: "Submitted an indexing answer",

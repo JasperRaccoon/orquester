@@ -9,9 +9,9 @@ const worker = self as unknown as {
 };
 
 worker.onmessage = (event) => {
-  const { id, nodes, edges } = event.data;
+  const { id, ...request } = event.data;
   try {
-    worker.postMessage({ id, positions: computeLayout({ nodes, edges }) });
+    worker.postMessage({ id, positions: computeLayout(request) });
   } catch (error) {
     worker.postMessage({ id, error: error instanceof Error ? error.message : String(error) });
   }

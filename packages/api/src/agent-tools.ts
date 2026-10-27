@@ -175,8 +175,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     ]
   },
   // Knowledge Graph: advertised only while the plugin is on (`session-tools/manifest.ts`); search and
-  // get only to a chat that sees a collection; the two worker tools only to the plugin's own
-  // indexing sessions, which get nothing else. Saving raises no card (it must stay fast).
+  // get, update and delete only to a chat that sees a collection; the two worker tools only to the
+  // plugin's own indexing sessions, which get nothing else. Saving, editing and deleting raise no card.
   {
     id: "knowledge",
     label: "Knowledge base",
@@ -184,6 +184,8 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("knowledge_search"),
       read("knowledge_get"),
       act("knowledge_save"),
+      act("knowledge_update"),
+      act("knowledge_delete"),
       read("knowledge_collections"),
       act("knowledge_worker_next_task"),
       act("knowledge_worker_submit")

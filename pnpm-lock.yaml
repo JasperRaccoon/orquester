@@ -375,9 +375,9 @@ importers:
       cytoscape:
         specifier: 3.34.3
         version: 3.34.3
-      cytoscape-fcose:
-        specifier: 2.2.0
-        version: 2.2.0(cytoscape@3.34.3)
+      d3-force:
+        specifier: 3.0.0
+        version: 3.0.0
       dompurify:
         specifier: ^3.4.17
         version: 3.4.17
@@ -436,6 +436,9 @@ importers:
         specifier: ^5.0.14
         version: 5.0.14(@types/react@18.3.31)(react@18.3.1)(use-sync-external-store@1.7.0(react@18.3.1))
     devDependencies:
+      '@types/d3-force':
+        specifier: 3.0.10
+        version: 3.0.10
       '@types/jsdom':
         specifier: ^21.1.7
         version: 21.1.7
