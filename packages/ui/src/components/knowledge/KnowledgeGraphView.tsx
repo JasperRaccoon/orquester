@@ -389,7 +389,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
   // its error instead of the empty state.
   const noEntries = status.entries === 0 && !(current.status === "error" && !current.graph);
   const unlinked = layer === "concepts" && graph !== null && graph.nodes.length === 0 && filter.length === 0 && focus === null;
-  const empty = layer === "similarity" && similarity ? similarityEmptyState(similarity, status.installed) : null;
+  const empty = layer === "similarity" && similarity ? similarityEmptyState(similarity, status.embeddingModelReady) : null;
   const note = layer === "concepts" ? (graph ? truncationNote(graph, focus !== null) : null) : similarity && !empty ? similarityNote(similarity) : null;
   const canvasShown = canvasLayer === layer && !unlinked && !empty;
   // The canvas (and Cytoscape with it) loads the first time there is something to draw; after
@@ -448,7 +448,10 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
           </>
         ) : (
           <>
-            <p className="text-neutral-300">Install the Knowledge runtime to see similarity</p>
+            <p className="text-neutral-300">The embedding model is still being downloaded</p>
+            <p className="max-w-sm text-xs leading-relaxed text-neutral-500">
+              Entries appear here once it is installed and their meaning has been computed. Search matches the words meanwhile.
+            </p>
             <Button size="sm" variant="outline" onClick={() => openSettings("plugins")}>
               <Settings size={13} /> Open Plugins
             </Button>

@@ -352,18 +352,21 @@ export function similaritySearchSummary(hits: readonly KnowledgeSearchHit[], onC
 }
 
 /** Why the similarity layer has nothing to draw. */
-export type SimilarityEmpty = "no-entries" | "computing" | "install";
+export type SimilarityEmpty = "no-entries" | "computing" | "model-missing";
 
 /**
  * The similarity layer's empty state, or null when it has entries to draw: no
- * entries in the collections shown; or entries but none embedded yet
- * ("Embeddings are being computed…" while the runtime that computes them is
- * installed, else a pointer to install it).
+ * entries in the collections shown; or entries but none embedded yet — the
+ * embedding model still has to be fetched (`status.embeddingModelReady` false),
+ * else "Embeddings are being computed…" (also when an older daemon does not say).
  */
-export function similarityEmptyState(graph: Pick<KnowledgeSimilarityGraphResponse, "nodes" | "totals">, runtimeInstalled: boolean): SimilarityEmpty | null {
+export function similarityEmptyState(
+  graph: Pick<KnowledgeSimilarityGraphResponse, "nodes" | "totals">,
+  embeddingModelReady: boolean | undefined
+): SimilarityEmpty | null {
   if (graph.nodes.length > 0) return null;
   if (graph.totals.entries === 0) return "no-entries";
-  return runtimeInstalled ? "computing" : "install";
+  return embeddingModelReady === false ? "model-missing" : "computing";
 }
 
 /** The note shown when the similarity layer holds part of the entries (truncated, or some not embedded yet). */

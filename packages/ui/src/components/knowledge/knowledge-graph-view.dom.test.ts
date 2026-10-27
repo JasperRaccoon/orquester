@@ -150,6 +150,7 @@ describe("the Graph view", () => {
     opts: {
       api?: Record<string, unknown> | null;
       installed?: boolean;
+      embeddingModelReady?: boolean;
       query?: KnowledgeQuery;
       onQueryChange?: (query: KnowledgeQuery) => void;
       onOpenInList?: () => void;
@@ -157,7 +158,7 @@ describe("the Graph view", () => {
   ) => {
     const props = {
       api: (opts.api === null ? null : api(opts.api)) as never,
-      status: status({ installed: opts.installed ?? true }),
+      status: status({ installed: opts.installed ?? true, ...(opts.embeddingModelReady !== undefined ? { embeddingModelReady: opts.embeddingModelReady } : {}) }),
       collections: [collection()],
       filter: [],
       onFilter: () => undefined,
@@ -288,7 +289,7 @@ describe("the Graph view", () => {
     assert.equal(similarityReads.length, before + 1);
   });
 
-  it("says embeddings are being computed, or that the runtime is needed, when nothing is embedded", async () => {
+  it("says embeddings are being computed, or that the embedding model is still being downloaded, when nothing is embedded", async () => {
     const waiting = { ...SIMILARITY, nodes: [], edges: [], clusters: [], truncated: false, totals: { entries: 3, embedded: 0 } };
     await show({ api: { getKnowledgeSimilarityGraph: async () => waiting } });
     await click(layerRadio("Similarity")!);
@@ -297,8 +298,11 @@ describe("the Graph view", () => {
 
     act(() => root.unmount());
     root = createRoot(doc().body.appendChild(doc().createElement("div")));
-    await show({ api: { getKnowledgeSimilarityGraph: async () => waiting }, installed: false });
-    assert.match(text(), /Install the Knowledge runtime to see similarity/);
+    await show({ api: { getKnowledgeSimilarityGraph: async () => waiting }, embeddingModelReady: false });
+    assert.match(text(), /The embedding model is still being downloaded/);
+    assert.match(text(), /Search matches the words meanwhile/);
+    assert.doesNotMatch(text(), /Embeddings are being computed/);
+    assert.equal(doc().querySelector(".animate-spin, .motion-safe\\:animate-spin"), null, "no spinner while the model is missing");
     const open = [...doc().querySelectorAll("button")].find((b) => b.textContent?.includes("Open Plugins"))!;
     await click(open);
     assert.equal(useAppStore.getState().settingsSection, "plugins");

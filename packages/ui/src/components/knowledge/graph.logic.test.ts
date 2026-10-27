@@ -244,13 +244,17 @@ describe("the similarity layer", () => {
     assert.deepEqual([...legendMemberIds(SIM, { kind: "unfiled" }, known)], ["d", "e"]);
   });
 
-  it("chooses the empty state: nothing saved, embeddings being computed, or no runtime", () => {
+  it("chooses the empty state: nothing saved, embeddings being computed, or the embedding model still to fetch", () => {
     assert.equal(similarityEmptyState(SIM, true), null);
+    assert.equal(similarityEmptyState(SIM, false), null);
     const none = { nodes: [], totals: { entries: 0, embedded: 0 } };
     assert.equal(similarityEmptyState(none, true), "no-entries");
+    assert.equal(similarityEmptyState(none, false), "no-entries");
     const waiting = { nodes: [], totals: { entries: 4, embedded: 0 } };
     assert.equal(similarityEmptyState(waiting, true), "computing");
-    assert.equal(similarityEmptyState(waiting, false), "install");
+    assert.equal(similarityEmptyState(waiting, false), "model-missing");
+    // An older daemon does not say: as before.
+    assert.equal(similarityEmptyState(waiting, undefined), "computing");
   });
 
   it("says when it holds part of the entries", () => {
