@@ -340,9 +340,9 @@ export class BoxDeviceHost implements DeviceHost {
     };
   }
 
-  /** Near its time limit a rented host drains: no new lease is placed on it. */
+  /** Near its time limit a rented host drains: no new lease is placed on it (no Resume undoes it). */
   pool(): DeviceHostPoolInfo | null {
-    return this.draining() ? { draining: true, warm: false, idleSince: null } : null;
+    return this.draining() ? { draining: true, drainReason: "deadline", warm: false, idleSince: null } : null;
   }
 
   draining(): boolean {

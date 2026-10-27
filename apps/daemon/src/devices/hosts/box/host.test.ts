@@ -300,7 +300,7 @@ describe("BoxDeviceHost", () => {
 
   it("drains near its box's time limit", () => {
     const host = makeHost({ record: () => boxRecord({ deadlineAt: "2026-10-27T11:10:00.000Z" }) });
-    assert.deepEqual(host.pool(), { draining: true, warm: false, idleSince: null });
+    assert.deepEqual(host.pool(), { draining: true, drainReason: "deadline", warm: false, idleSince: null });
     assert.equal(makeHost().pool(), null);
   });
 });

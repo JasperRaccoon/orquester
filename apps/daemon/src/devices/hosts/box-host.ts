@@ -5,11 +5,13 @@
  * - **Rented** (`kind: "box"`): a box with purpose `device-host` (`threadId: null`) the factory
  *   rents in `provision` from Settings → Devices (provider, size, lifetime). The box's `devices`
  *   setup step runs this factory's preparer (`BoxService.setDeviceHostPreparer`): the box is ready
- *   only once the host is. A rented host with no lease for `ios.idleTeardownMinutes` is destroyed;
- *   one near its time limit drains (no new lease).
+ *   only once the host is. Near its time limit a rented host drains (no new lease; the pool
+ *   destroys it once empty); a failed one with no lease is destroyed at once. Idle teardown is the
+ *   pool's alone (`pool-actor.ts`, `pool.idleTeardownMinutes`).
  * - **Your own Mac** (`kind: "byo"`): a bring-your-own machine the owner marked "Use for device
- *   simulators" (`BoxSummary.deviceHost`). Prepared when it connects; never destroyed — when idle,
- *   its helpers (hub, agent-device daemon) stop, and start again with the next lease.
+ *   simulators" (`BoxSummary.deviceHost`). Prepared when it connects; never destroyed — idle for
+ *   `pool.idleTeardownMinutes`, its helpers (hub, agent-device daemon) stop, and start again with
+ *   the next lease.
  *
  * `start` adds a host for every such box already recorded (a restart reattaches: the hub and the
  * agent-device daemon keep running in the box and are found again). A box whose link drops makes
@@ -37,14 +39,14 @@ export interface BoxHostDeps {
   boxes: () => Pick<DaemonBoxes, "service" | "registry" | "hub"> | null;
   toolchain: DeviceToolchain;
   logger: Pick<Console, "info" | "warn" | "error">;
-  /** Tests: the clock, the idle sweep, waits and HTTP. */
+  /** Tests: the clock, the sweep, waits and HTTP. */
   now?: () => number;
   idleSweep?: boolean;
   timing?: Partial<BoxHostTiming>;
   fetch?: typeof fetch;
 }
 
-/** The idle sweep's period. */
+/** The sweep's period (failed rented hosts, idle own Macs' helpers). */
 const IDLE_SWEEP_MS = 60_000;
 
 /** What kind of device host a box record is, or null when it is none. */
@@ -69,7 +71,10 @@ export function deviceHostLabel(record: StoredBox): string {
 export interface BoxHostFactory extends DeviceHostFactory {
   /** The host of a box (tests, the integration run). */
   host(boxId: string): BoxDeviceHost | undefined;
-  /** Destroy or stop idle hosts now (tests drive it; a timer runs it every minute). */
+  /**
+   * Destroy failed rented hosts and stop idle own Macs' helpers now (tests drive it; a timer runs
+   * it every minute). Idle rented hosts are the pool's to tear down.
+   */
   sweepIdle(): Promise<void>;
 }
 
@@ -328,10 +333,8 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const at = now();
     for (const host of [...hosts.values()]) {
       const leases = ctx.activeLeases(host.id).length;
-      const status = host.state().status;
-      // A rented host bills whatever its state: with no lease it is idle (only one still being
-      // rented and prepared is not), and a failed one goes at once. The pool's warm hosts stay.
-      if (host.kind === "box" && leases === 0 && status === "failed") {
+      // A failed rented host bills for nothing: it goes at once.
+      if (host.kind === "box" && leases === 0 && host.state().status === "failed") {
         idleSince.delete(host.boxId);
         logger.info(`[devices] ${host.label} failed: destroying it`);
         await deps
@@ -340,25 +343,17 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
           .catch((error) => logger.warn(`[devices] destroying failed ${host.id} failed`, error instanceof Error ? error.message : String(error)));
         continue;
       }
-      const notIdle = host.kind === "box" ? status === "starting" || status === "installing" : !host.isReady();
-      if (leases > 0 || notIdle || ctx.keepWarm?.(host.id) === true) {
+      // Idle rented hosts are the pool's (`pool.idleTeardownMinutes`, warm hosts kept).
+      if (host.kind !== "byo" || leases > 0 || !host.isReady()) {
         idleSince.delete(host.boxId);
         continue;
       }
       const since = idleSince.get(host.boxId) ?? at;
       idleSince.set(host.boxId, since);
-      if (at - since < current.ios.idleTeardownMinutes * 60_000) continue;
+      if (at - since < current.pool.idleTeardownMinutes * 60_000) continue;
       idleSince.delete(host.boxId);
-      if (host.kind === "byo") {
-        logger.info(`[devices] ${host.label} is idle: stopping its device helpers`);
-        await host.stopHelpers().catch((error) => logger.warn(`[devices] stopping ${host.id}'s helpers failed`, error instanceof Error ? error.message : String(error)));
-        continue;
-      }
-      logger.info(`[devices] ${host.label} had no device for ${current.ios.idleTeardownMinutes} min: destroying it`);
-      await deps
-        .boxes()
-        ?.service.destroyBox(host.boxId, "deleted", `Idle: no device for ${current.ios.idleTeardownMinutes} min (Settings → Devices).`)
-        .catch((error) => logger.warn(`[devices] destroying idle ${host.id} failed`, error instanceof Error ? error.message : String(error)));
+      logger.info(`[devices] ${host.label} is idle: stopping its device helpers`);
+      await host.stopHelpers().catch((error) => logger.warn(`[devices] stopping ${host.id}'s helpers failed`, error instanceof Error ? error.message : String(error)));
     }
   };
 

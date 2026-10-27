@@ -34,7 +34,8 @@ import type { StoredDeviceLease } from "@orquester/config";
 import { agentDeviceData, AgentDeviceError, agentDeviceSession, type AgentDeviceClient } from "./agent-device.ts";
 import { DeviceError, isDeviceError } from "./errors.ts";
 import type { DeviceActionOutcome, DeviceHost, DeviceRect } from "./host.ts";
-import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS, fitScreenshot } from "./screenshot-image.ts";
+import { deviceImages } from "./image-pool.ts";
+import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 
 export interface DeviceActionContext {
   host: DeviceHost;
@@ -607,7 +608,7 @@ export function createDeviceActionExecutor(deps: DeviceActionExecutorDeps): Devi
           const path = join(dir, "screen.png");
           const data = await call(ctx, "screenshot", [path], signal, { timeoutMs: 45_000 });
           const png = await readFile(typeof data.path === "string" && data.path.startsWith(dir) ? data.path : path);
-          const fitted = fitScreenshot(png, DEVICE_SCREENSHOT_MAX_BASE64_CHARS);
+          const fitted = await deviceImages.fit(png, DEVICE_SCREENSHOT_MAX_BASE64_CHARS);
           return { image: fitted, text: `Screenshot ${fitted.width}×${fitted.height}${fitted.mimeType === "image/jpeg" ? " (JPEG, scaled to fit)" : ""}.` };
         } catch (error) {
           if (isDeviceError(error)) throw error;

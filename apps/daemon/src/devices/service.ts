@@ -25,6 +25,7 @@ import {
   DEFAULT_DEVICE_PROFILE,
   DEVICE_ERROR_CODES,
   DEVICE_PLATFORM_LABELS,
+  DEVICE_QUEUED_HOST_ID,
   DEVICE_PLATFORMS,
   DEVICE_PROFILES,
   DEVICES_ACTION_EVENT,
@@ -47,6 +48,7 @@ import {
   type DeviceCacheWarmResponse,
   type DevicePlatform,
   type DevicePoolSummary,
+  type DevicePoolWaitReason,
   type DeviceProfile,
   type DeviceSetupJob,
   type DevicesEventType,
@@ -89,7 +91,7 @@ import {
 } from "./leases.ts";
 import { choosePlacement, hostCap, type PlacementHost } from "./pool.ts";
 import { DeviceThumbnails, ThumbnailError } from "./thumbnails.ts";
-import { DevicePool, PoolRefusal, type DeviceCacheWarmer, type PoolAcquired } from "./pool-actor.ts";
+import { DevicePool, PoolRefusal, type DeviceCacheWarmer, type PoolAcquired, type PoolWaitHooks } from "./pool-actor.ts";
 import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 import type { DeviceScreenshots } from "./screenshots.ts";
 import { DevicePoolStore, type DeviceLeaseStore, type DeviceSettingsStore } from "./store.ts";
@@ -170,6 +172,20 @@ export interface OpenLeaseRequest {
   rentalApproved: boolean;
 }
 
+/** How {@link DeviceService.beginOpen} hears that placement waits (the panel's queued Open). */
+interface OpenWait {
+  /** The lease's id (the stand-in's, which the placed lease keeps). */
+  leaseId?: string;
+  /** Placement waits (queue, a host starting or rented, a setup), with what it waits for. */
+  onWait?: (step: string, label: string) => void;
+}
+
+/** A panel Open waiting for a host: its stand-in lease (`hostId` {@link DEVICE_QUEUED_HOST_ID}). */
+interface WaitingOpen {
+  lease: DeviceLeaseSummary;
+  abort: AbortController;
+}
+
 /** A lease being opened: its record now, and the boot finishing. */
 export interface OpeningLease {
   lease: DeviceLeaseSummary;
@@ -189,6 +205,8 @@ export class DeviceService implements DeviceToolsPort {
   private readonly launchNotes = new Map<string, string>();
   /** Opens in flight, by lease id: aborting one cancels its boot (the lease was released). */
   private readonly opening = new Map<string, AbortController>();
+  /** Panel Opens still waiting for a host, by lease id (memory only: a restart ends the wait). */
+  private readonly waitingOpens = new Map<string, WaitingOpen>();
   private readonly setups = new Map<DevicePlatform, SetupRun>();
   private readonly unsubscribers: (() => void)[] = [];
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -245,8 +263,7 @@ export class DeviceService implements DeviceToolsPort {
       activeLeases: (hostId) => this.leases.filter((lease) => lease.hostId === hostId && isLiveLease(lease)),
       addHost: (host) => this.hosts.add(host),
       removeHost: (hostId) => this.hosts.remove(hostId),
-      logger: this.logger,
-      keepWarm: (hostId) => this.pool.keepWarm(hostId)
+      logger: this.logger
     };
     for (const factory of this.deps.factories) {
       await factory.start(ctx).catch((error) => this.logger.error(`[devices] the ${factory.kind} host factory failed to start`, errorText(error)));
@@ -275,6 +292,8 @@ export class DeviceService implements DeviceToolsPort {
     await this.pool.stop();
     for (const run of this.setups.values()) run.abort.abort();
     for (const abort of this.opening.values()) abort.abort();
+    for (const waiting of this.waitingOpens.values()) waiting.abort.abort();
+    this.waitingOpens.clear();
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
     for (const factory of this.deps.factories) {
       await factory.stop().catch((error) => this.logger.warn(`[devices] the ${factory.kind} host factory failed to stop`, errorText(error)));
@@ -346,9 +365,15 @@ export class DeviceService implements DeviceToolsPort {
     return this.hosts.list().map((host) => {
       const summary = deviceHostSummary(host);
       const leased = this.leases.filter((lease) => lease.hostId === host.id && isLiveLease(lease)).length;
-      // The pool's view (drained by the owner, kept warm, idle since) over what the host reports.
+      // The pool's view (drained by the owner, kept warm, idle since) over what the host reports
+      // (drained near its deadline: that reason wins, no Resume undoes it).
       const pool = this.pool.poolInfo(host);
-      const merged = pool || summary.pool ? { ...summary.pool, ...pool, draining: pool?.draining === true || summary.pool?.draining === true } : null;
+      const deadline = summary.pool?.draining === true && summary.pool.drainReason === "deadline";
+      const draining = pool?.draining === true || summary.pool?.draining === true;
+      const merged =
+        pool || summary.pool
+          ? { ...summary.pool, ...pool, draining, ...(draining ? { drainReason: deadline ? ("deadline" as const) : (pool?.drainReason ?? summary.pool?.drainReason ?? "owner") } : {}) }
+          : null;
       return { ...summary, capacity: { ...summary.capacity, used: Math.max(summary.capacity.used, leased) }, ...(merged ? { pool: merged as NonNullable<DeviceHostSummary["pool"]> } : {}) };
     });
   }
@@ -365,15 +390,19 @@ export class DeviceService implements DeviceToolsPort {
 
   /** Leases as the wire shows them (live and lost), oldest first; `threadId` narrows to one chat's. */
   leaseSummaries(filter: { threadId?: string } = {}): DeviceLeaseSummary[] {
-    return this.leases
+    const stored = this.leases.flatMap((lease) => this.summary(lease) ?? []);
+    // Panel Opens still waiting for a host show too (their stand-ins).
+    const waiting = [...this.waitingOpens.values()].map((entry) => structuredClone(entry.lease));
+    return [...stored, ...waiting]
       .filter((lease) => filter.threadId === undefined || lease.threadId === filter.threadId)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .flatMap((lease) => this.summary(lease) ?? []);
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   lease(leaseId: string): DeviceLeaseSummary | undefined {
     const lease = this.leases.find((entry) => entry.id === leaseId);
-    return lease ? (this.summary(lease) ?? undefined) : undefined;
+    if (lease) return this.summary(lease) ?? undefined;
+    const waiting = this.waitingOpens.get(leaseId);
+    return waiting ? structuredClone(waiting.lease) : undefined;
   }
 
   setupJobs(): DeviceSetupJob[] {
@@ -486,7 +515,7 @@ export class DeviceService implements DeviceToolsPort {
    * consented to by enabling the platform, renting a host when allowed), record the `starting`
    * lease, then boot. Resolves as soon as the lease exists; `done` follows the boot.
    */
-  async beginOpen(request: OpenLeaseRequest, signal: AbortSignal): Promise<OpeningLease> {
+  async beginOpen(request: OpenLeaseRequest, signal: AbortSignal, wait: OpenWait = {}): Promise<OpeningLease> {
     this.assertRunning();
     if (this.deps.threadExists && !this.deps.threadExists(request.threadId)) {
       throw new DeviceError("INVALID_ARGUMENT", "There is no such chat to lease a device to.");
@@ -503,13 +532,18 @@ export class DeviceService implements DeviceToolsPort {
     const refused = checkAcquire(this.leases, request, limits);
     if (refused) throw refused;
 
-    let placed = await this.place(request, profile, signal);
+    let placed = await this.place(request, profile, signal, wait.onWait);
     // Atomic with the lease's record (no await in between): the host must still have a slot —
     // its capacity may have shrunk, or another open landed there while this one waited.
     for (let round = 1; !this.hostHasRoom(placed); round += 1) {
       placed.done();
       if (round >= PLACEMENT_ROUNDS) throw this.capacityError(request.platform);
-      placed = await this.place(request, profile, signal);
+      placed = await this.place(request, profile, signal, wait.onWait);
+    }
+    // Released (or the chat closed) while it waited: no lease.
+    if (signal.aborted) {
+      placed.done();
+      throw new DeviceError("CANCELLED", "The request was cancelled.");
     }
     const host = placed.host;
     // Placement may have waited: check again right before the lease exists (no await in between).
@@ -519,7 +553,7 @@ export class DeviceService implements DeviceToolsPort {
       throw late;
     }
     const lease = newLease({
-      id: this.newId(),
+      id: wait.leaseId ?? this.newId(),
       threadId: request.threadId,
       hostId: host.id,
       platform: request.platform,
@@ -529,6 +563,8 @@ export class DeviceService implements DeviceToolsPort {
       openedBy: request.openedBy,
       now: this.iso()
     });
+    // The placed lease takes its stand-in's place (same id).
+    if (wait.leaseId !== undefined) this.waitingOpens.delete(wait.leaseId);
     this.leases.push(lease);
     // The lease holds the slot now: the pool's reservation goes.
     placed.done();
@@ -552,6 +588,81 @@ export class DeviceService implements DeviceToolsPort {
   async openLease(request: OpenLeaseRequest, signal: AbortSignal): Promise<DeviceLeaseSummary> {
     const opening = await this.beginOpen(request, signal);
     return opening.done;
+  }
+
+  /**
+   * The panel's Open: answers once the lease exists — or, as soon as placement has to wait (the
+   * pool's queue, a host being rented or started, a setup), at once with a stand-in lease
+   * (`starting`, `hostId` {@link DEVICE_QUEUED_HOST_ID}, the wait as its progress) that
+   * `devices.lease` events carry on: it becomes the placed lease (same id), or `lost` with the
+   * reason when placement fails. Releasing the stand-in ends the wait. Refusals that need no wait
+   * (limits, a platform off) still answer as errors. The agent's `open_device` keeps waiting.
+   */
+  async openQueued(request: OpenLeaseRequest): Promise<DeviceLeaseSummary> {
+    const leaseId = this.newId();
+    const abort = new AbortController();
+    let markWaiting: () => void = () => undefined;
+    const waiting = new Promise<"waiting">((resolve) => {
+      markWaiting = () => resolve("waiting");
+    });
+    let settled = false;
+    const onWait = (step: string, label: string): void => {
+      if (settled && !this.waitingOpens.has(leaseId)) return;
+      const now = this.iso();
+      const existing = this.waitingOpens.get(leaseId);
+      if (existing) {
+        if (existing.lease.progress?.step === step && existing.lease.progress.label === label) return;
+        existing.lease.progress = { step, label, startedAt: now };
+      } else {
+        const profile = this.resolveProfile(request.platform, request.profile);
+        this.waitingOpens.set(leaseId, {
+          abort,
+          lease: {
+            id: leaseId,
+            key: null,
+            threadId: request.threadId,
+            hostId: DEVICE_QUEUED_HOST_ID,
+            deviceId: null,
+            platform: request.platform,
+            profile: profile.id,
+            name: profile.label,
+            osVersion: profile.os,
+            state: "starting",
+            controller: request.openedBy,
+            openedBy: request.openedBy,
+            createdAt: now,
+            lastUsedAt: now,
+            progress: { step, label, startedAt: now }
+          }
+        });
+      }
+      this.deps.publish(DEVICES_LEASE_EVENT, { lease: structuredClone(this.waitingOpens.get(leaseId)!.lease) });
+      markWaiting();
+    };
+    const opening = this.beginOpen(request, abort.signal, { leaseId, onWait });
+    const first = await Promise.race([opening, waiting]).finally(() => {
+      settled = true;
+    });
+    if (first !== "waiting") {
+      first.done.catch(() => undefined);
+      return first.lease;
+    }
+    opening.then(
+      (opened) => opened.done.catch(() => undefined),
+      (error: unknown) => this.waitingOpenFailed(leaseId, error)
+    );
+    return this.lease(leaseId) ?? structuredClone(this.waitingOpens.get(leaseId)!.lease);
+  }
+
+  /** A waiting panel Open could not be placed: its stand-in reads `lost` with the reason (Retry or Release in the panel). */
+  private waitingOpenFailed(leaseId: string, error: unknown): void {
+    const waiting = this.waitingOpens.get(leaseId);
+    // Released (or the service stopped) while it waited: nothing to show.
+    if (!waiting || waiting.abort.signal.aborted || this.stopping) return;
+    if (!isDeviceError(error)) this.logger.error(`[devices] opening ${waiting.lease.name} failed`, errorText(error));
+    const { progress: _progress, ...lease } = waiting.lease;
+    waiting.lease = { ...lease, state: "lost", error: isDeviceError(error) ? error.message : "The device could not be opened. Try again.", lastUsedAt: this.iso() };
+    this.deps.publish(DEVICES_LEASE_EVENT, { lease: structuredClone(waiting.lease) });
   }
 
   private async boot(lease: StoredDeviceLease, host: DeviceHost, profile: DeviceProfile, request: OpenLeaseRequest, signal: AbortSignal): Promise<DeviceLeaseSummary> {
@@ -599,7 +710,8 @@ export class DeviceService implements DeviceToolsPort {
    * can fix itself) or refuses (off, not ready), and otherwise queues in the pool, which places it
    * (local first, best fit, a starting host's slot, a rented one) or refuses it after its wait.
    */
-  private async place(request: OpenLeaseRequest, profile: DeviceProfile, signal: AbortSignal): Promise<PoolAcquired> {
+  private async place(request: OpenLeaseRequest, profile: DeviceProfile, signal: AbortSignal, onWait?: OpenWait["onWait"]): Promise<PoolAcquired> {
+    const label = DEVICE_PLATFORM_LABELS[request.platform];
     for (let round = 0; round < PLACEMENT_ROUNDS; round += 1) {
       if (signal.aborted) throw new DeviceError("CANCELLED", "The request was cancelled.");
       const named = request.hostId !== undefined;
@@ -612,26 +724,28 @@ export class DeviceService implements DeviceToolsPort {
       });
       switch (placement.kind) {
         case "host": {
-          if (!named) return this.acquire(request, profile, signal);
+          if (!named) return this.acquire(request, profile, signal, onWait);
           const host = this.hosts.get(placement.hostId);
           if (host) return { host, reserved: false, done: () => undefined };
           continue;
         }
         case "wait":
-          if (!named) return this.acquire(request, profile, signal);
+          if (!named) return this.acquire(request, profile, signal, onWait);
+          onWait?.("prepare-host", `Waiting for ${this.hosts.get(placement.hostId)?.label ?? "the host"} to start`);
           await this.waitForHost(placement.hostId, signal);
           continue;
         case "setup": {
           const run = this.setups.get(request.platform);
           const setup = run?.job.state === "running" ? run : this.runSetup(this.hosts.get(placement.hostId)!, request.platform, placement.actions);
+          onWait?.("prepare-host", `Setting up ${label}`);
           await setup.done;
           if (setup.job.state !== "done") throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Setting up ${DEVICE_PLATFORM_LABELS[request.platform]} failed: ${setup.job.error ?? "unknown error"}. Ask the owner to check Settings → Devices.`);
           continue;
         }
         case "provision":
-          return this.acquire(request, profile, signal);
+          return this.acquire(request, profile, signal, onWait);
         case "full": {
-          if (!named) return this.acquire(request, profile, signal);
+          if (!named) return this.acquire(request, profile, signal, onWait);
           throw this.capacityError(request.platform, placement.hostIds);
         }
         case "not-ready": {
@@ -649,9 +763,18 @@ export class DeviceService implements DeviceToolsPort {
   }
 
   /** Queue in the pool; its refusal worded for the agent or the panel. */
-  private async acquire(request: OpenLeaseRequest, profile: DeviceProfile, signal: AbortSignal): Promise<PoolAcquired> {
+  private async acquire(request: OpenLeaseRequest, profile: DeviceProfile, signal: AbortSignal, onWait?: OpenWait["onWait"]): Promise<PoolAcquired> {
+    const hooks: PoolWaitHooks = onWait
+      ? {
+          onQueued: (queued) => {
+            const wait = waitProgress(request.platform, queued.reason, queued.hostId !== null ? (this.hosts.get(queued.hostId)?.label ?? null) : null, queued.etaSeconds);
+            onWait(wait.step, wait.label);
+          },
+          onProgress: (progress) => onWait(progress.step, progress.label)
+        }
+      : {};
     try {
-      return await this.pool.acquire({ threadId: request.threadId, platform: request.platform, profile: profile.id, rentalApproved: request.rentalApproved }, signal);
+      return await this.pool.acquire({ threadId: request.threadId, platform: request.platform, profile: profile.id, rentalApproved: request.rentalApproved }, signal, hooks);
     } catch (error) {
       if (!(error instanceof PoolRefusal)) throw error;
       const label = DEVICE_PLATFORM_LABELS[request.platform];
@@ -760,6 +883,17 @@ export class DeviceService implements DeviceToolsPort {
    * off with `shutdown`). Resolves the released lease, or null when there was none.
    */
   async releaseLease(leaseId: string, reason: DeviceLeaseCloseReason, options: { shutdown?: boolean } = {}): Promise<DeviceLeaseSummary | null> {
+    const waiting = this.waitingOpens.get(leaseId);
+    if (waiting) {
+      // A panel Open still waiting for a host: the wait ends (its pool request is withdrawn).
+      this.waitingOpens.delete(leaseId);
+      waiting.abort.abort();
+      const released: DeviceLeaseSummary = { ...waiting.lease, state: "released", lastUsedAt: this.iso() };
+      delete released.progress;
+      this.deps.publish(DEVICES_LEASE_EVENT, { lease: released });
+      this.deps.publish(DEVICES_LEASE_CLOSED_EVENT, { leaseId, threadId: released.threadId, reason });
+      return released;
+    }
     const lease = this.leases.find((entry) => entry.id === leaseId);
     if (!lease) return null;
     this.leases = this.leases.filter((entry) => entry.id !== leaseId);
@@ -786,6 +920,7 @@ export class DeviceService implements DeviceToolsPort {
 
   /** Every lease ends (the plugin was turned off: nothing may keep running). */
   async releaseAll(reason: DeviceLeaseCloseReason): Promise<void> {
+    for (const leaseId of [...this.waitingOpens.keys()]) await this.releaseLease(leaseId, reason);
     for (const lease of [...this.leases]) await this.releaseLease(lease.id, reason, { shutdown: true });
   }
 
@@ -805,7 +940,12 @@ export class DeviceService implements DeviceToolsPort {
   /** The fleet view's Drain (`draining: true`) and Undrain: no new lease on the host; a rented one is destroyed once empty. */
   setHostDraining(hostId: string, draining: boolean): DeviceHostSummary {
     this.assertRunning();
-    if (!this.hosts.get(hostId)) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
+    const host = this.hosts.get(hostId);
+    if (!host) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
+    const own = host.pool?.() ?? null;
+    if (!draining && own?.draining === true && own.drainReason === "deadline") {
+      throw new DeviceError("INVALID_ARGUMENT", `${host.label} is ending soon: it is near its time limit, so it takes no new devices and cannot be resumed. It is destroyed once its devices end.`);
+    }
     if (draining) this.pool.drain(hostId);
     else this.pool.undrain(hostId);
     this.publishHosts();
@@ -916,6 +1056,9 @@ export class DeviceService implements DeviceToolsPort {
 
   /** A chat closed: every lease it holds ends, and its kept screenshots go. */
   async releaseThread(threadId: string, reason: DeviceLeaseCloseReason = "chat-closed"): Promise<void> {
+    for (const waiting of [...this.waitingOpens.values()].filter((entry) => entry.lease.threadId === threadId)) {
+      await this.releaseLease(waiting.lease.id, reason);
+    }
     for (const lease of this.leases.filter((entry) => entry.threadId === threadId)) {
       await this.releaseLease(lease.id, reason, { shutdown: true });
     }
@@ -1290,6 +1433,22 @@ export class DeviceService implements DeviceToolsPort {
 
   private newId(): string {
     return this.deps.id?.() ?? randomUUID();
+  }
+}
+
+/** A queued pool request's wait as a booting step. */
+function waitProgress(platform: DevicePlatform, reason: DevicePoolWaitReason, hostLabel: string | null, etaSeconds: number | null): { step: string; label: string } {
+  const eta = etaSeconds !== null && etaSeconds > 0 ? ` (about ${Math.max(1, Math.round(etaSeconds / 60))} min)` : "";
+  const label = DEVICE_PLATFORM_LABELS[platform];
+  switch (reason) {
+    case "host-starting":
+      return hostLabel !== null
+        ? { step: "prepare-host", label: `Waiting for ${hostLabel} to start${eta}` }
+        : { step: "rent-host", label: `Renting a host for ${label}${eta}` };
+    case "budget":
+      return { step: "queue", label: `Waiting for room under the device pool's hourly cap` };
+    case "capacity":
+      return { step: "queue", label: `Waiting for a free ${label} device${eta}` };
   }
 }
 

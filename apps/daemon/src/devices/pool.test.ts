@@ -285,5 +285,6 @@ test("decidePool: a platform switched off fails its queued requests; platforms a
     ["ios", "demand", ["i1"]],
     ["android", "demand", ["a1"]]
   ]);
-  assert.equal(mixed.perHostCapacity.ios, 3);
+  // A new Mac host is planned with `ios.maxSimulatorsPerHost` (nothing learned yet).
+  assert.equal(mixed.perHostCapacity.ios, defaultDevicesSettings().ios.maxSimulatorsPerHost);
 });

@@ -7,13 +7,13 @@
 import React from "react";
 import { Ban, Flame, HardDrive, Laptop, Loader2, Play, Server, Trash2 } from "lucide-react";
 
-import type { DeviceHostSummary } from "@orquester/api";
+import { DEVICE_QUEUED_HOST_ID, type DeviceHostSummary } from "@orquester/api";
 
 import { formatCountdown, formatHourlyRate, formatUsd } from "../../lib/boxes/format";
 import { cn } from "../../lib/cn";
 import { Button, ConfirmDialog } from "../ui";
 import { destroyHost, setHostDraining, warmHostCaches, type FleetApi } from "./actions";
-import { canDestroy, canDrain, canWarmCaches, formatUptime, hostCost, hostKindLabel, hostStatusView, meterFill, msSince } from "./fleet.logic";
+import { canDestroy, canDrain, canWarmCaches, formatUptime, hostCost, hostKindLabel, hostStatusView, meterFill, msSince, resumeBlockedReason } from "./fleet.logic";
 import { Meter, Stat, StatusPill, TONE_TEXT } from "./parts";
 
 type Busy = "drain" | "destroy" | "warm" | null;
@@ -38,6 +38,8 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
   const status = hostStatusView(host);
   const cost = hostCost(host, now);
   const draining = host.pool?.draining === true;
+  // Drained near its deadline: Resume shows, off, with the reason.
+  const resumeBlocked = draining ? resumeBlockedReason(host) : null;
   const uptime = host.box ? formatUptime(msSince(host.box.startedAt, now)) : null;
   const deadline = host.box ? formatCountdown(host.box.deadlineAt, now) : null;
   const fill = meterFill(host.capacity.used, host.capacity.total);
@@ -68,16 +70,20 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
         {api && (canDrain(host) || canWarmCaches(host) || canDestroy(host)) ? (
           <div className="-ml-2 flex w-full shrink-0 flex-wrap items-center gap-1 sm:ml-0 sm:w-auto">
             {canDrain(host) ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busy !== null}
-                onClick={() => void run("drain", () => setHostDraining(api, host, !draining))}
-                title={draining ? "Take new devices on this host again" : "Stop placing new devices here; it is destroyed once empty"}
-              >
-                {busy === "drain" ? <Loader2 size={13} aria-hidden className="animate-spin" /> : draining ? <Play size={13} aria-hidden /> : <Ban size={13} aria-hidden />}
-                {draining ? "Resume" : "Drain"}
-              </Button>
+              // A disabled button shows no tooltip: its wrapper carries the reason.
+              <span className="inline-flex" title={resumeBlocked ?? undefined} data-resume-blocked={resumeBlocked !== null ? "" : undefined}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy !== null || resumeBlocked !== null}
+                  onClick={() => void run("drain", () => setHostDraining(api, host, !draining))}
+                  title={draining ? "Take new devices on this host again" : "Stop placing new devices here; it is destroyed once empty"}
+                  {...(resumeBlocked !== null ? { "aria-label": `Resume (${resumeBlocked})` } : {})}
+                >
+                  {busy === "drain" ? <Loader2 size={13} aria-hidden className="animate-spin" /> : draining ? <Play size={13} aria-hidden /> : <Ban size={13} aria-hidden />}
+                  {draining ? "Resume" : "Drain"}
+                </Button>
+              </span>
             ) : null}
             {canWarmCaches(host) ? (
               <Button
@@ -157,12 +163,19 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
   );
 };
 
-/** The header of a group whose host the list does not know (a lease that outlived it). */
+/**
+ * The header of a group whose host the list does not know: devices still waiting for a host (a
+ * panel Open in the pool's queue), or a lease that outlived its host.
+ */
 export const UnknownHostCard: React.FC<{ hostId: string }> = ({ hostId }) => (
-  <div className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-800 px-3 py-2.5 text-xs text-neutral-500">
+  <div className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-800 px-3 py-2.5 text-xs text-neutral-500" data-unknown-host={hostId}>
     <Server size={14} aria-hidden className="shrink-0" />
-    <span className="truncate">
-      Host <span className="font-mono text-neutral-400">{hostId}</span> is no longer listed
-    </span>
+    {hostId === DEVICE_QUEUED_HOST_ID ? (
+      <span className="truncate">Waiting for a device host</span>
+    ) : (
+      <span className="truncate">
+        Host <span className="font-mono text-neutral-400">{hostId}</span> is no longer listed
+      </span>
+    )}
   </div>
 );
