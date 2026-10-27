@@ -288,3 +288,43 @@ test("start: a lease whose boot a restart interrupted is lost; one of a closed c
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a host whose link drops suspends its ready leases; they resume when it is ready again", async () => {
+  const host = new FakeDeviceHost("box:mac1", "box", ["ios"], "Mac host");
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [host])], settings: { ios: { enabled: true } } });
+  try {
+    const opened = await t.service.toolOpen("t1", { platform: "ios" }, signal());
+    assert.equal(opened.lease.state, "ready");
+    host.status = { status: "unreachable", detail: "Reconnecting to the host…" };
+    host.changed();
+    assert.equal(t.service.lease(opened.lease.id)?.state, "suspended");
+    assert.equal(await codeOf(t.service.toolAction("t1", undefined, { action: "snapshot" }, signal())), "UNAVAILABLE");
+    host.status = { status: "ready", detail: null };
+    host.changed();
+    assert.equal(t.service.lease(opened.lease.id)?.state, "ready");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a lease waiting for a starting host sits through its progress lines and goes on when it is ready", async () => {
+  const host = new FakeDeviceHost("box:mac1", "box", ["ios"], "Mac host");
+  host.status = { status: "starting", detail: "Preparing: installing the device tools…" };
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("box", ["ios"], [host])], settings: { ios: { enabled: true } } });
+  try {
+    const opening = t.service.openLease({ threadId: "t1", platform: "ios", openedBy: "user", rentalApproved: true }, signal());
+    // More progress lines than placement has rounds: none of them is a new status.
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+      host.status = { status: "starting", detail: `Preparing: step ${i}` };
+      host.changed();
+    }
+    host.status = { status: "ready", detail: null };
+    host.changed();
+    const lease = await opening;
+    assert.equal(lease.state, "ready");
+    assert.equal(lease.hostId, "box:mac1");
+  } finally {
+    await t.cleanup();
+  }
+});
