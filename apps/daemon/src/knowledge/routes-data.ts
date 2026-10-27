@@ -16,6 +16,8 @@ import {
   type KnowledgeCollection,
   type KnowledgeCollectionView,
   type KnowledgeCollectionsResponse,
+  type KnowledgeConceptMerge,
+  type KnowledgeConceptMergesResponse,
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
   type KnowledgeFacetsResponse,
@@ -32,7 +34,7 @@ import type { KnowledgeLinkingPort, KnowledgeSettingsPort, KnowledgeVisibilityPo
 import { computeKnowledgeFacets } from "./search/facets.ts";
 import { entryMatchesFilter, parseKnowledgeFilters } from "./search/filters.ts";
 import type { KnowledgeSearch } from "./search/search.ts";
-import { entryInScope } from "./search/visibility.ts";
+import { entryInScope, type KnowledgeScope } from "./search/visibility.ts";
 import { KnowledgeError, type KnowledgeLogger, knowledgeFrameworkError } from "./store/errors.ts";
 import type { KnowledgeStore } from "./store/store.ts";
 
@@ -59,6 +61,15 @@ export interface KnowledgeDataRoutesDeps {
   /** Agent Profiles that include each collection id (`knowledgeCollections`), by collection id. */
   profilesForCollection(): Promise<Map<string, { id: string; name: string }[]>>;
   logger?: KnowledgeLogger;
+  /** Automatic concept merges (`search/concept-merges.ts`), read per request; absent: none to list or undo. */
+  conceptMerges?: KnowledgeConceptMergesRoutePort | null;
+}
+
+/** What the concept merge routes need (`KnowledgeConceptMerges` satisfies it). */
+export interface KnowledgeConceptMergesRoutePort {
+  list(scope: KnowledgeScope): KnowledgeConceptMerge[];
+  /** False when the scope sees no such merge. */
+  undo(id: string, scope: KnowledgeScope): Promise<boolean>;
 }
 
 /** A save can carry KNOWLEDGE_SAVE_MAX_ENTRIES bodies of KNOWLEDGE_ENTRY_MAX_BYTES, JSON-escaped. */
@@ -580,6 +591,30 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
         createdCollections: outcome.createdCollections,
         linking: linking.state === "running" ? "running" : linking.state === "queued" || linking.state === "paused" ? "queued" : "not-needed"
       };
+    })
+  );
+
+  // --- concept merges (phase 2 spec, "Concept merges") ---------------------
+
+  app.get(
+    knowledgeRoutes.conceptMerges,
+    handle(async (request): Promise<KnowledgeConceptMergesResponse> => {
+      const query = parse(sessionQuerySchema, request.query, "query");
+      const scope = deps.search.scope(await visibilityOf(request, query.sessionId));
+      return { merges: deps.conceptMerges?.list(scope) ?? [] };
+    })
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    `${knowledgeRoutes.conceptMerge("")}:id`,
+    handle(async (request, reply) => {
+      const query = parse(sessionQuerySchema, request.query, "query");
+      const scope = deps.search.scope(await visibilityOf(request, query.sessionId));
+      const id = (request.params as { id: string }).id;
+      // Undone: the concepts come apart in the graph and are never merged again.
+      if (!(await deps.conceptMerges?.undo(id, scope))) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such concept merge.");
+      changed({ graph: true });
+      return reply.code(204).send();
     })
   );
 }

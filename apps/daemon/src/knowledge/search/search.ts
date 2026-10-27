@@ -606,7 +606,14 @@ export class KnowledgeSearch {
       .sort(newestFirst)
       .slice(0, CONCEPT_ENTRIES_LIMIT)
       .map((m) => this.summary(m, scope));
-    return { concept: view.concept, collections: view.collections, entries, neighbors: view.neighbors };
+    return {
+      concept: view.concept,
+      collections: view.collections,
+      entries,
+      neighbors: view.neighbors,
+      mergedFrom: view.mergedFrom,
+      similarConcepts: view.similarConcepts
+    };
   }
 
   /** `collections` is the contract's comma-separated list of ids (or `unfiled`). */
