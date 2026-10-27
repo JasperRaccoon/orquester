@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { KnowledgeEntryDetail, KnowledgeSimilarEntry } from "@orquester/api";
+import type { KnowledgeEntryDetail, KnowledgeRelatedReason, KnowledgeSimilarEntry } from "@orquester/api";
 
 import { entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
   clusterText,
   contradictionSourceText,
   disagreements,
+  distinctiveChips,
   distinctiveConcepts,
   entryPanelIds,
   findConceptMerge,
@@ -168,6 +169,16 @@ describe("disagreements, distinctive concepts and concept merges (phase 2)", () 
     assert.deepEqual(distinctiveConcepts({ kind: "concepts", concepts: [ref("A"), ref("B")], shared: 2, distinctive: [ref("B")] }), [ref("B")]);
     assert.deepEqual(distinctiveConcepts({ kind: "concepts", concepts: [ref("A")], shared: 1 }), []);
     assert.deepEqual(distinctiveConcepts({ kind: "meaning", similarity: 0.9 }), []);
+    // A name repeated among a reason's concepts carries its type, in the chip text and the distinctive chips.
+    const channel = { id: "channel-tiktok", name: "TikTok", type: "Channel" };
+    const app = { id: "app-tiktok", name: "tiktok", type: "App" };
+    const location = { id: "permission-location", name: "Location", type: "Permission" };
+    const repeated: KnowledgeRelatedReason = { kind: "concepts", concepts: [channel, location, app], shared: 3, distinctive: [app] };
+    assert.equal(reasonLabel(repeated), "Concepts: TikTok (Channel), Location, tiktok (App)");
+    assert.deepEqual(distinctiveChips(repeated), [{ concept: app, label: "tiktok (App)" }]);
+    assert.deepEqual(distinctiveChips({ kind: "concepts", concepts: [channel], shared: 2, distinctive: [app] }), [{ concept: app, label: "tiktok (App)" }]);
+    assert.deepEqual(distinctiveChips({ kind: "concepts", concepts: [location], shared: 2, distinctive: [app] }), [{ concept: app, label: "tiktok" }]);
+    assert.equal(reasonLabel({ kind: "concepts", concepts: [channel, location], shared: 2 }), "Concepts: TikTok, Location");
   });
 
   it("describes a cluster with or without its label", () => {

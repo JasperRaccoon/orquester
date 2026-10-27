@@ -17,7 +17,7 @@ import {
   clusterText,
   contradictionSourceText,
   disagreements,
-  distinctiveConcepts,
+  distinctiveChips,
   duplicateText,
   isPlainTextBody,
   keepDuplicatePair,
@@ -326,7 +326,7 @@ export const SimilarEntries: React.FC<{
                         >
                           {reasonLabel(reason)}
                         </span>
-                        {distinctiveConcepts(reason).map((concept) => (
+                        {distinctiveChips(reason).map(({ concept, label }) => (
                           <span
                             key={`distinctive:${concept.id}`}
                             data-knowledge-distinctive={concept.id}
@@ -334,7 +334,7 @@ export const SimilarEntries: React.FC<{
                             className="inline-flex max-w-full items-center gap-0.5 truncate rounded-full border border-info/40 px-1.5 py-px text-[10.5px] text-info"
                           >
                             <Gem size={9} aria-hidden className="shrink-0" />
-                            <span className="truncate">{concept.name}</span>
+                            <span className="truncate">{label}</span>
                           </span>
                         ))}
                       </React.Fragment>
