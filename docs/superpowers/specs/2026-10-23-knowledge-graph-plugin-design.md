@@ -271,6 +271,15 @@ calling session's visible collections on the server.
   entry's ID, its collections, whether it was a duplicate, and "linking
   queued". Act tier, with no approval card, because saving must stay fast.
   Bulk import is a single call with many items.
+- `knowledge_update(id, title?, body?, kind?, author?, handle?, url?,
+  postedAt?, collections?)`: edits one visible entry in place through the
+  Knowledge tab's own edit route. Only the fields passed change; `collections`
+  (names or IDs) replaces the set; `null` clears a metadata field. A changed
+  text or title queues linking again. Act tier, no card.
+- `knowledge_delete(ids[])`: deletes visible entries through the Knowledge
+  tab's delete route, reporting each ID as deleted or not. Act tier, no card;
+  the description limits it to what the user asked to remove or the agent's
+  own mistaken saves. Update and delete are advertised with search and get.
 - `knowledge_collections()`: every collection's name, description and entry
   count, for choosing where to save. Read tier.
 

@@ -118,6 +118,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 6_144, `box tools: ${added(boxRows)} bytes`);
-  assert.ok(added(knowledgeRows.filter((tool) => !workerRows.includes(tool))) <= 4_608, "knowledge tools exceed 4.5 KiB");
+  // Six user tools since knowledge_update and knowledge_delete: the boxes family's ceiling.
+  assert.ok(added(knowledgeRows.filter((tool) => !workerRows.includes(tool))) <= 6_144, "knowledge tools exceed 6 KiB");
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
 });

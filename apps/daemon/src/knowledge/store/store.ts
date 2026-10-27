@@ -531,7 +531,8 @@ export class KnowledgeStore implements KnowledgeStorePort {
       if (request.collections !== undefined) {
         collections = [];
         for (const ref of request.collections) {
-          const collection = this.getCollection(ref);
+          // By id (the Knowledge tab) or by name (an agent's knowledge_update), as saving resolves them.
+          const collection = this.resolveCollection(ref);
           if (!collection) {
             throw new KnowledgeError(
               "KNOWLEDGE_UNKNOWN_COLLECTION",

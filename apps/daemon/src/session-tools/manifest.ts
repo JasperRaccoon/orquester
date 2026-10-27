@@ -72,8 +72,8 @@ export interface ManifestKnowledge {
 
 /** The two tools only a knowledge worker session is advertised. */
 export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next_task", "knowledge_worker_submit"];
-/** The knowledge tools a chat that sees no collection is not advertised (saving and listing collections stay). */
-export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get"];
+/** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
+export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete"];
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
 function alwaysAdmin(tool: AnyOrquesterTool): boolean {
@@ -84,7 +84,7 @@ function alwaysAdmin(tool: AnyOrquesterTool): boolean {
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
  * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
  * chat pays for tools it cannot use. Knowledge Graph: the `knowledge` toolset only while the plugin
- * is on, without `knowledge_search`/`knowledge_get` for a chat that sees no collection, and never
+ * is on, without the entry tools ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never
  * the worker tools; a worker session gets ONLY the worker tools.
  */
 function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false, knowledge?: ManifestKnowledge): string[] {

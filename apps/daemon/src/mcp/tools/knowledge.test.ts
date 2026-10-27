@@ -223,6 +223,79 @@ test("knowledge_save: inputs mirror the contract — at least one collection, bo
   assert.deepEqual(errorOf(off), { code: "KNOWLEDGE_DISABLED", message: "The Knowledge Graph plugin is off." });
 });
 
+test("knowledge_update: PATCHes only the fields passed (null clears, no @, collections once), names the session, answers what changed and the citation; no card", async () => {
+  const entry = meta({ title: "Playbook v2", author: null, handle: null, linkState: "pending" });
+  const detail: KnowledgeEntryDetail = { entry: { ...entry, body: "Organic only." }, concepts: [], related: [], citation: entry.citation };
+  const api = withCollections(new FakeDaemonApi()).on("PATCH", knowledgeRoutes.entry("ke_aaaaaaaaaaaa"), { status: 200, body: detail });
+  for (const who of [caller(), caller({ workflowOwned: true, runtimeMode: "full-access" })]) {
+    const r = await run(api, "knowledge_update", { id: "ke_aaaaaaaaaaaa", title: " Playbook v2 ", body: "Organic only.", author: null, handle: "@@claude", url: null, collections: ["SEO", "Ads", "SEO"] }, who);
+    assert.equal(r.isError, undefined, textOf(r));
+    assert.equal(r.structuredContent, undefined, "a text result: no card");
+    const out = textOf(r);
+    assert.ok(out.startsWith("Updated title, body, author, handle, url, collections."), out);
+    for (const value of ["ke_aaaaaaaaaaaa", "SEO", "Ads", "linking pending", "Title: Playbook v2", `cite: ${entry.citation}`]) assert.ok(out.includes(value), value);
+    assert.ok(!out.includes("Organic only."), "the body is not echoed back");
+  }
+  const patch = api.calls.find((call) => call.method === "PATCH")!;
+  assert.deepEqual(patch.query, { sessionId: "chat-1" });
+  assert.deepEqual(patch.body, { title: "Playbook v2", body: "Organic only.", author: null, handle: "claude", url: null, collections: ["SEO", "Ads"] });
+});
+
+test("knowledge_update: an id, at least one change and the save limits; the daemon's refusals pass through", async () => {
+  const api = withCollections(new FakeDaemonApi()).on("PATCH", knowledgeRoutes.entry("ke_hidden000000"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." } });
+  for (const args of [
+    { title: "t" },
+    { id: "kc_seo0000000", title: "t" },
+    { id: "ke_aaaaaaaaaaaa" },
+    { id: "ke_aaaaaaaaaaaa", collections: [] },
+    { id: "ke_aaaaaaaaaaaa", body: "   " },
+    { id: "ke_aaaaaaaaaaaa", body: "x".repeat(KNOWLEDGE_ENTRY_MAX_BYTES + 1) },
+    { id: "ke_aaaaaaaaaaaa", title: null },
+    { id: "ke_aaaaaaaaaaaa", kind: "k".repeat(KNOWLEDGE_KIND_MAX + 1) },
+    { id: "ke_aaaaaaaaaaaa", tags: ["x"] }
+  ]) {
+    assert.equal(errorOf(await run(api, "knowledge_update", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 80));
+  }
+  assert.ok(!api.calls.some((call) => call.method === "PATCH"), "nothing invalid reaches the daemon");
+  const hidden = await run(api, "knowledge_update", { id: "ke_hidden000000", title: "t" });
+  assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
+});
+
+test("knowledge_delete: reads then deletes each id once, with the session; reports each deleted or not; nothing deleted is the daemon's refusal", async () => {
+  const found = (id: string, title: string): KnowledgeEntryDetail => {
+    const entry = meta({ id, title });
+    return { entry: { ...entry, body: "b" }, concepts: [], related: [], citation: entry.citation };
+  };
+  const notFound = { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." } };
+  const api = new FakeDaemonApi()
+    .on("GET", knowledgeRoutes.entry("ke_aaaaaaaaaaaa"), { status: 200, body: found("ke_aaaaaaaaaaaa", "Old playbook") })
+    .on("GET", knowledgeRoutes.entry("ke_hidden000000"), notFound)
+    .on("DELETE", knowledgeRoutes.entry("ke_aaaaaaaaaaaa"), { status: 204, body: null });
+  const r = await run(api, "knowledge_delete", { ids: ["ke_aaaaaaaaaaaa", "ke_hidden000000", "ke_aaaaaaaaaaaa"] });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(r.structuredContent, undefined, "a text result: no card");
+  const out = textOf(r);
+  assert.ok(out.startsWith("Deleted 1 entry; 1 not deleted."), out);
+  assert.match(out, /- deleted ke_aaaaaaaaaaaa "Old playbook"/);
+  assert.match(out, /- not deleted ke_hidden000000: No such entry\./);
+  assert.deepEqual(
+    api.calls.map((call) => [call.method, call.path, call.query]),
+    [
+      ["GET", knowledgeRoutes.entry("ke_aaaaaaaaaaaa"), { sessionId: "chat-1" }],
+      ["DELETE", knowledgeRoutes.entry("ke_aaaaaaaaaaaa"), { sessionId: "chat-1" }],
+      ["GET", knowledgeRoutes.entry("ke_hidden000000"), { sessionId: "chat-1" }]
+    ],
+    "a hidden entry is never deleted, and a repeated id is deleted once"
+  );
+
+  const none = await run(api, "knowledge_delete", { ids: ["ke_hidden000000"] });
+  assert.equal(none.isError, true);
+  assert.deepEqual(errorOf(none), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
+  for (const args of [{ ids: [] }, { ids: ["nope"] }, { ids: Array.from({ length: 51 }, () => "ke_aaaaaaaaaaaa") }, { id: "ke_aaaaaaaaaaaa" }]) {
+    assert.equal(errorOf(await run(api, "knowledge_delete", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
+  }
+});
+
 test("knowledge_collections: every collection by name, count and description", async () => {
   const api = withCollections(new FakeDaemonApi());
   const out = textOf(await run(api, "knowledge_collections", {}));

@@ -429,3 +429,61 @@ test("knowledge tools end to end: save from Global and profile chats, visibility
   // The run's worker chats are refused once it is over.
   assert.equal(await h.refusal(h.workers.sessions[0]!.id, "knowledge_worker_next_task", {}), "KNOWLEDGE_NOT_A_WORKER");
 });
+
+test("knowledge_update and knowledge_delete end to end: edits by collection name, clearing a field, visibility, per-id delete outcomes, and who is advertised them", async (t) => {
+  const h = await harness(t);
+  const make = async (name: string) => {
+    const res = await h.user("POST", knowledgeRoutes.collections, { name, description: `${name} notes.` });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    return res.body as KnowledgeCollectionView;
+  };
+  await make("SEO");
+  const ads = await make("Ads");
+  const adsOnly = await h.profiles.create({ name: "Ads only", settings: { knowledgeCollections: [ads.id] } });
+  const plain = await h.profiles.create({ name: "Plain" });
+  await h.knowledge.settled();
+  h.sessions.set("global", { profileId: null });
+  h.sessions.set("ads-chat", { profileId: adsOnly.id });
+  h.sessions.set("plain-chat", { profileId: plain.id });
+
+  const saved = await h.text("global", "knowledge_save", {
+    entries: [
+      { body: "Playbook v1: boost proven posts with paid reach.", title: "Playbook v1", author: "Claude", handle: "claude", collections: ["SEO"] },
+      { body: "Cap the daily budget while a campaign learns.", title: "Learning phase", collections: ["Ads"] },
+      { body: "Search pages answer the question in the first 100 words.", title: "Answer first", collections: ["SEO"] }
+    ]
+  });
+  const [playbookId, learningId, answerId] = savedIds(saved);
+  assert.ok(playbookId && learningId && answerId, saved);
+
+  // An edit in place: collections by name (any case), text, title; the next read shows it.
+  const edited = await h.text("global", "knowledge_update", { id: playbookId, title: "Playbook v2", body: "Playbook v2: organic only.", collections: ["seo", "Ads"] });
+  assert.match(edited, /^Updated title, body, collections\.\n/);
+  assert.match(edited, /in SEO, Ads/);
+  assert.match(edited, /cite: \[Playbook v2 · @claude\]\(orquester-knowledge:entry\/ke_/, "the citation carries the new title");
+  const read = await h.text("ads-chat", "knowledge_get", { id: playbookId! });
+  assert.ok(read.endsWith("Playbook v2: organic only."), read);
+  assert.match(read, /Claude \(@claude\)/);
+  assert.ok((await h.text("global", "knowledge_search", { query: "organic only playbook" })).includes(playbookId!), "the new text is searchable");
+  // null clears a metadata field.
+  await h.text("global", "knowledge_update", { id: playbookId, author: null, handle: null });
+  assert.doesNotMatch((await h.text("global", "knowledge_get", { id: playbookId! })).split("\n")[1]!, /Claude|@claude/);
+  assert.equal(await h.refusal("global", "knowledge_update", { id: playbookId, collections: ["Nope"] }), "KNOWLEDGE_UNKNOWN_COLLECTION");
+  assert.equal(await h.refusal("global", "knowledge_update", { id: playbookId }), "INVALID_ARGUMENT");
+
+  // A chat edits and deletes only what it can see: an SEO-only entry is unknown to the Ads chat.
+  assert.equal(await h.refusal("ads-chat", "knowledge_update", { id: answerId, title: "x" }), "KNOWLEDGE_NOT_FOUND");
+  assert.equal(await h.refusal("ads-chat", "knowledge_delete", { ids: [answerId] }), "KNOWLEDGE_NOT_FOUND");
+  const mixed = await h.text("ads-chat", "knowledge_delete", { ids: [learningId, answerId, learningId] });
+  assert.match(mixed, /^Deleted 1 entry; 1 not deleted\./);
+  assert.ok(mixed.includes(`- deleted ${learningId} "Learning phase"`), mixed);
+  assert.ok(mixed.includes(`- not deleted ${answerId}: No such entry.`), mixed);
+  assert.equal(await h.refusal("global", "knowledge_get", { id: learningId! }), "KNOWLEDGE_NOT_FOUND");
+  assert.ok((await h.text("global", "knowledge_get", { id: answerId! })).endsWith("Search pages answer the question in the first 100 words."), "the hidden entry is untouched");
+
+  // Advertised with search and get: to a chat that sees a collection, not to one that sees none.
+  const globalTools = await h.toolsOf("global");
+  for (const name of ["knowledge_update", "knowledge_delete"]) assert.ok(globalTools.includes(name), name);
+  const plainTools = await h.toolsOf("plain-chat");
+  assert.ok(plainTools.includes("knowledge_save") && !plainTools.includes("knowledge_update") && !plainTools.includes("knowledge_delete"));
+});

@@ -2,18 +2,20 @@
  * Catalog family `knowledge` (Knowledge Graph plugin spec
  * docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md, "Agent tools", "Citations"):
  * the shared knowledge base for in-chat agents — `knowledge_search`, `knowledge_get`,
- * `knowledge_save`, `knowledge_collections` — and the two tools of the plugin's own indexing
- * sessions, `knowledge_worker_next_task` and `knowledge_worker_submit`. Chat-only.
+ * `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_collections` — and the two
+ * tools of the plugin's own indexing sessions, `knowledge_worker_next_task` and
+ * `knowledge_worker_submit`. Chat-only.
  *
  * - **Gating** is the manifest's (`session-tools/manifest.ts`): the family only while the plugin is
- *   on; search and get only to a chat that sees a collection; the worker tools only — and alone —
- *   to a worker session. The routes enforce the same on the server (visibility, `KNOWLEDGE_NOT_A_WORKER`),
- *   and every refusal they answer comes back here as a clean tool error.
+ *   on; search, get, update and delete only to a chat that sees a collection; the worker tools
+ *   only — and alone — to a worker session. The routes enforce the same on the server (visibility,
+ *   `KNOWLEDGE_NOT_A_WORKER`), and every refusal they answer comes back here as a clean tool error.
  * - **Visibility** is resolved by the daemon from the calling session: every request names it
  *   (`sessionId` in the body or the query) besides carrying the call's agent principal.
  * - **Results are compact text** (spec "Light on tokens"): one line per hit, collections by name,
  *   a one-line snippet and the entry's ready-made citation; full text only through `knowledge_get`.
- * - **No card**: saving is Act and must stay fast; it changes only the knowledge base.
+ * - **No card**: saving, editing and deleting are Act; they change only the knowledge base, and
+ *   saving must stay fast. Editing and deleting reach the same routes as the Knowledge tab.
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
@@ -42,12 +44,13 @@ import {
   type KnowledgeSearchResponse,
   type KnowledgeWorkerNextResponse,
   type KnowledgeWorkerSubmitRequest,
-  type KnowledgeWorkerSubmitResponse
+  type KnowledgeWorkerSubmitResponse,
+  type UpdateKnowledgeEntryRequest
 } from "@orquester/api";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { closedWorld, defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ToolCaller } from "../catalog/contract.ts";
-import type { DaemonApi } from "../daemon-api.ts";
+import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ToolCaller } from "../catalog/contract.ts";
+import type { DaemonApi, DaemonMethod } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { capText, clipText } from "../result.ts";
 
@@ -80,6 +83,8 @@ const KNOWLEDGE_NEW_COLLECTIONS_MAX = 10;
 const KNOWLEDGE_WORKER_ANSWER_MAX_CHARS = 2_000_000;
 /** A collection reference: a name (≤ 60) or an id. */
 const COLLECTION_REF_MAX = 64;
+/** Entries one `knowledge_delete` call removes. */
+const KNOWLEDGE_DELETE_MAX_IDS = 50;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,7 +101,7 @@ const knowledgeScope = (reads: ScopeClaim["reads"], writes: boolean): ScopeClaim
 
 const text = (body: string): CallToolResult => ({ content: [{ type: "text", text: body }] });
 
-async function call<T>(api: DaemonApi, method: "GET" | "POST", path: string, opts: { body?: unknown; query?: Record<string, string> } = {}): Promise<T> {
+async function call<T>(api: DaemonApi, method: DaemonMethod, path: string, opts: { body?: unknown; query?: Record<string, string> } = {}): Promise<T> {
   const res = await api.request(method, path, opts);
   if (res.status >= 400) throw daemonError(res);
   return res.body as T;
@@ -258,6 +263,26 @@ export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<s
   return lines.join("\n");
 }
 
+/** The edit answer: what changed, the entry as it is now, its citation (relinking shows in the head). */
+export function renderUpdate(detail: KnowledgeEntryDetail, changed: readonly string[], names: ReadonlyMap<string, string>): string {
+  const entry = detail.entry;
+  return [`Updated ${changed.join(", ")}.`, `entry ${entryHead(entry, names)}`, `Title: ${oneLine(entry.title)}`, `cite: ${detail.citation}`].join("\n");
+}
+
+/** One id of a delete call: deleted (with what it was), or refused (with the daemon's words). */
+export type KnowledgeDeleteOutcome = { id: string; deleted: true; title: string } | { id: string; deleted: false; message: string };
+
+/** The delete answer: what was deleted, what was not and why. */
+export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): string {
+  const deleted = outcomes.filter((outcome) => outcome.deleted).length;
+  const failed = outcomes.length - deleted;
+  const lines = [`Deleted ${deleted} entr${deleted === 1 ? "y" : "ies"}${failed > 0 ? `; ${failed} not deleted` : ""}. Their cite links no longer resolve.`];
+  for (const outcome of outcomes) {
+    lines.push(outcome.deleted ? `- deleted ${outcome.id} "${clipText(oneLine(outcome.title), NAME_CHARS)}"` : `- not deleted ${outcome.id}: ${clipText(oneLine(outcome.message), DESCRIPTION_CHARS)}`);
+  }
+  return lines.join("\n");
+}
+
 /** Every collection, one line each. */
 export function renderCollections(response: KnowledgeCollectionsResponse): string {
   const lines = [`${response.collections.length} collection${response.collections.length === 1 ? "" : "s"}, ${response.totalEntries} entries (${response.unfiledCount} unfiled).`];
@@ -286,26 +311,30 @@ export function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
 
 const collectionRef = z.string().trim().min(1).max(COLLECTION_REF_MAX);
 const optionalText = (max: number) => z.string().trim().min(1).max(max).optional();
+/** An edit's metadata field: a new value, or null to clear it. */
+const clearableText = (max: number) => z.string().trim().min(1).max(max).nullable().optional();
+/** An entry id, as citations carry it. */
+const entryId = z.string().trim().regex(/^ke_[a-z0-9]{12}$/, "an entry id looks like ke_ and 12 letters or digits");
+
+const entryBody = z
+  .string()
+  .min(1)
+  .refine((value) => value.trim() !== "", "body is empty")
+  .refine((value) => Buffer.byteLength(value, "utf8") <= KNOWLEDGE_ENTRY_MAX_BYTES, `body is over ${KNOWLEDGE_ENTRY_MAX_BYTES} bytes: split it`);
+const entryHandle = z
+  .string()
+  .trim()
+  .min(1)
+  // The "@" is dropped before the store counts it.
+  .refine((value) => value.replace(/^@+/, "").length <= HANDLE_MAX_CHARS, `a handle is at most ${HANDLE_MAX_CHARS} characters`);
 
 const saveItem = z
   .object({
-    body: z
-      .string()
-      .min(1)
-      .refine((value) => value.trim() !== "", "body is empty")
-      .refine((value) => Buffer.byteLength(value, "utf8") <= KNOWLEDGE_ENTRY_MAX_BYTES, `body is over ${KNOWLEDGE_ENTRY_MAX_BYTES} bytes: split it`)
-      .describe("The text, verbatim, site chrome removed."),
+    body: entryBody.describe("The text, verbatim, site chrome removed."),
     title: optionalText(KNOWLEDGE_TITLE_MAX).describe("Short and descriptive."),
     kind: optionalText(KIND_MAX_CHARS).describe('"post", "thread", "article", "note", "case study"…'),
     author: optionalText(AUTHOR_MAX_CHARS),
-    handle: z
-      .string()
-      .trim()
-      .min(1)
-      // The "@" is dropped before the store counts it.
-      .refine((value) => value.replace(/^@+/, "").length <= HANDLE_MAX_CHARS, `a handle is at most ${HANDLE_MAX_CHARS} characters`)
-      .optional()
-      .describe("Without the @."),
+    handle: entryHandle.optional().describe("Without the @."),
     url: optionalText(URL_MAX_CHARS),
     postedAt: optionalText(40).describe("ISO date of the original, when shown."),
     collections: z.array(collectionRef).min(1).max(KNOWLEDGE_COLLECTIONS_MAX).describe("Names (or ids); at least one.")
@@ -332,6 +361,32 @@ export function toSaveItem(item: z.infer<typeof saveItem>): KnowledgeSaveItem {
     ...(item.url !== undefined ? { url: item.url } : {}),
     ...(item.postedAt !== undefined ? { postedAt: item.postedAt } : {})
   };
+}
+
+const updateFields = {
+  title: optionalText(KNOWLEDGE_TITLE_MAX),
+  body: entryBody.optional().describe("The whole new text (replaces it)."),
+  kind: optionalText(KIND_MAX_CHARS),
+  author: clearableText(AUTHOR_MAX_CHARS),
+  handle: entryHandle.nullable().optional(),
+  url: clearableText(URL_MAX_CHARS),
+  postedAt: clearableText(40),
+  collections: z.array(collectionRef).min(1).max(KNOWLEDGE_COLLECTIONS_MAX).optional().describe("The new set, replacing the old: names or ids.")
+};
+type UpdateFields = z.infer<z.ZodObject<typeof updateFields>>;
+
+/** An edit as the route takes it: only the fields passed, a handle without its "@", collections once each. */
+export function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
+  const request: UpdateKnowledgeEntryRequest = {};
+  if (fields.title !== undefined) request.title = fields.title;
+  if (fields.body !== undefined) request.body = fields.body;
+  if (fields.kind !== undefined) request.kind = fields.kind;
+  if (fields.author !== undefined) request.author = fields.author;
+  if (fields.handle !== undefined) request.handle = fields.handle === null ? null : fields.handle.replace(/^@+/, "");
+  if (fields.url !== undefined) request.url = fields.url;
+  if (fields.postedAt !== undefined) request.postedAt = fields.postedAt;
+  if (fields.collections !== undefined) request.collections = [...new Set(fields.collections)];
+  return request;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +472,63 @@ const knowledgeSave = defineTool({
   }
 });
 
+const knowledgeUpdate = defineTool({
+  name: "knowledge_update",
+  title: "Edit a knowledge entry",
+  description:
+    "Edit one entry in place (id from knowledge_search). Only the fields you pass change; collections replaces the set; null clears author, handle, url or postedAt. Correct an entry with this, not a second save. Keep saved posts verbatim unless the user asks. A changed text or title is linked again.",
+  input: { id: entryId.describe("The entry's id (ke_…)."), ...updateFields },
+  audiences: ["chat"],
+  toolset: "knowledge",
+  tier: "act",
+  scope: async () => knowledgeScope("none", true),
+  annotations: closedWorld(MUTATING),
+  resultKind: "text",
+  async run(args, { api, caller }: CallContext) {
+    const sessionId = sessionIdOf(caller, "knowledge_update");
+    const { id, ...fields } = args;
+    const body = toUpdateRequest(fields);
+    const changed = Object.keys(body);
+    if (changed.length === 0) throw new ToolError("INVALID_ARGUMENT", "Nothing to change: pass at least one field besides id.");
+    const detail = await call<KnowledgeEntryDetail>(api, "PATCH", knowledgeRoutes.entry(id), { body, query: { sessionId } });
+    return text(renderUpdate(detail, changed, await collectionNames(api)));
+  }
+});
+
+const knowledgeDelete = defineTool({
+  name: "knowledge_delete",
+  title: "Delete knowledge entries",
+  description:
+    "Delete entries for good (ids from knowledge_search). There is no undo: delete only what the user asked to remove, or entries you saved by mistake. Each id is reported deleted or not, with the reason.",
+  input: { ids: z.array(entryId).min(1).max(KNOWLEDGE_DELETE_MAX_IDS).describe("Entry ids (ke_…).") },
+  audiences: ["chat"],
+  toolset: "knowledge",
+  tier: "act",
+  scope: async () => knowledgeScope("none", true),
+  annotations: closedWorld(DESTRUCTIVE),
+  resultKind: "text",
+  async run(args, { api, caller }: CallContext) {
+    const sessionId = sessionIdOf(caller, "knowledge_delete");
+    const outcomes: KnowledgeDeleteOutcome[] = [];
+    let firstError: ToolError | null = null;
+    for (const id of new Set(args.ids)) {
+      try {
+        // Read first: the answer names what was deleted, and a hidden entry is refused like an unknown one.
+        const detail = await call<KnowledgeEntryDetail>(api, "GET", knowledgeRoutes.entry(id), { query: { sessionId } });
+        await call<unknown>(api, "DELETE", knowledgeRoutes.entry(id), { query: { sessionId } });
+        outcomes.push({ id, deleted: true, title: detail.entry.title });
+      } catch (error) {
+        if (!(error instanceof ToolError)) throw error;
+        firstError ??= error;
+        outcomes.push({ id, deleted: false, message: error.message });
+      }
+    }
+    // Nothing deleted: the daemon's own refusal (plugin off, no such entry) as a clean error.
+    if (firstError && outcomes.every((outcome) => !outcome.deleted)) throw firstError;
+    return text(renderDelete(outcomes));
+  }
+});
+
 const knowledgeCollections = defineTool({
   name: "knowledge_collections",
   title: "List knowledge collections",
@@ -483,4 +595,4 @@ const workerSubmit = defineTool({
 });
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeCollections, workerNextTask, workerSubmit];
+export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeUpdate, knowledgeDelete, knowledgeCollections, workerNextTask, workerSubmit];

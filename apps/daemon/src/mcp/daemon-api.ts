@@ -14,7 +14,7 @@ import { mintPrincipalToken } from "./principal.ts";
 import type { BoxExecRequest, BoxExecResult, BoxForwardResult, BoxJobOutput, BoxTransferResult } from "../boxes/temporary/contract.ts";
 import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 
-export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
+export type DaemonMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
 
 /**
