@@ -65,6 +65,14 @@ conversions of Apple Inc.'s published AR assets; they are not covered by this
 licence, and `sources.json` beside them records each source URL, checksum and
 conversion.
 
+The device stream client (`packages/ui/src/components/device/stream/**`) adapts
+T3 Code's `packages/client-runtime/src/device/stream.ts`, `avcConfig.ts` (with
+its tests) and `frame.ts`: the avcc envelope demuxer, the SPS reorder-metadata
+repair, SEMU packet and Annex-B parsing, the decoder handling, serve-sim and
+serve-emu input encoding, the HID and Android key tables and text chunking.
+Each adapted file carries the same `// Adapted from T3 Code (MIT, Copyright 2026
+T3 Tools Inc.): <path>` header.
+
 T3 Code is distributed under the MIT licence, reproduced in full below.
 
 ```
