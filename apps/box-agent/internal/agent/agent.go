@@ -371,10 +371,14 @@ func (a *Agent) stopWith(code int, restart bool) {
 	})
 }
 
-// shutdown ends orq-agent for good: detached processes are killed.
-func (a *Agent) shutdown(reason string) {
+// shutdown ends orq-agent for good: detached processes are killed. With `uninstall` (the owner
+// removed this machine) its credentials and service go too, so nothing starts it again.
+func (a *Agent) shutdown(reason string, uninstall bool) {
 	a.log.Printf("shutting down: %s", reason)
 	a.procs.killAll()
+	if uninstall {
+		a.uninstall()
+	}
 	a.stopWith(0, false)
 }
 
@@ -620,7 +624,7 @@ func (a *Agent) handleReject(m *wire.Reject) {
 	a.log.Printf("daemon rejected the connection: %s", m.Code)
 	switch m.Code {
 	case "BOX_DESTROYED":
-		a.shutdown("the daemon reports this box destroyed")
+		a.shutdown("the daemon reports this box destroyed", false)
 	case "AGENT_OUTDATED":
 		if m.UpgradeURL != "" {
 			go func() {

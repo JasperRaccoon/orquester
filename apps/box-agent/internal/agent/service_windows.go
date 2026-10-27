@@ -3,21 +3,29 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
 const windowsServiceName = "OrqAgent"
 
-// InstallService registers orq-agent as an automatic Windows service
-// (LocalSystem) that restarts on failure, and starts it.
-func InstallService(cfg Config) error {
-	if err := writeServiceEnv(cfg); err != nil {
-		return err
-	}
+// detectServiceManager: the service control manager needs no detection.
+func detectServiceManager(*serviceFacts) {}
+
+// startDetached is unused on Windows: install-service always registers a service.
+func startDetached([]string, string) error {
+	return errors.New("background start is not used on Windows")
+}
+
+// installWindowsService registers orq-agent as an automatic Windows service
+// (LocalSystem) that restarts on failure, and starts it. install-service has
+// written agent.env already.
+func installWindowsService(cfg Config) error {
 	exe, err := executablePath()
 	if err != nil {
 		return err
@@ -67,6 +75,29 @@ func InstallService(cfg Config) error {
 		return fmt.Errorf("setting recovery actions: %w", err)
 	}
 	return s.Start()
+}
+
+// uninstallWindowsService deletes and stops the service; none installed is not an error.
+func uninstallWindowsService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connecting to the service manager: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(windowsServiceName)
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("opening the service: %w", err)
+	}
+	defer s.Close()
+	// Delete first: the service goes once stopped, and stopping it may end this very process.
+	if err := s.Delete(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+		return fmt.Errorf("deleting the service: %w", err)
+	}
+	_, _ = s.Control(svc.Stop)
+	return nil
 }
 
 type serviceHandler struct {

@@ -365,8 +365,12 @@ export interface BoxHostToBoxMethods {
   "agent.ensurePaths": [{ paths: string[] }, void];
   /** Replace the executable with the build at `url` (sha256-checked) and restart; the connection drops and returns. */
   "agent.update": [{ url: string; sha256: string }, void];
-  /** Exit for good (the box is being destroyed, or the macOS job should end successfully). */
-  "agent.shutdown": [{ reason: string }, void];
+  /**
+   * Exit for good (the box is being destroyed, or the macOS job should end successfully).
+   * `uninstall` (a bring-your-own machine being removed): first remove the stored credential and
+   * the installed service (`orq-agent uninstall-service`), so nothing starts it again.
+   */
+  "agent.shutdown": [{ reason: string; uninstall?: boolean }, void];
 }
 
 /** Core box → host methods. */

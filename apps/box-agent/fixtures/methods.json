@@ -265,6 +265,12 @@
         "params": {
           "reason": "destroyed"
         }
+      },
+      {
+        "params": {
+          "reason": "removed",
+          "uninstall": true
+        }
       }
     ]
   },
