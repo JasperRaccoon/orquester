@@ -7,7 +7,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { KnowledgeSearchRequest } from "@orquester/api";
+import type { KnowledgeSearchRequest, KnowledgeSimilarityGraphResponse } from "@orquester/api";
 import type { KnowledgeEmbedder } from "../embedder.ts";
 import { KnowledgeGraph } from "../graph.ts";
 import { KnowledgeSearch } from "../search.ts";
@@ -56,6 +56,8 @@ export interface EvalSearch {
   rank(query: string, limit?: number): Promise<string[]>;
   /** Entry hits of any search request (visibility "all"), best first. */
   entries(request: KnowledgeSearchRequest): Promise<string[]>;
+  /** The similarity graph over every entry (visibility "all"). */
+  similarityGraph(query?: { k?: number; limit?: number }): Promise<KnowledgeSimilarityGraphResponse>;
   close(): Promise<void>;
 }
 
@@ -90,6 +92,9 @@ export async function openEvalSearch(entries: readonly EvalEntry[], embedder: Kn
     async entries(request) {
       const response = await search.search(request, { kind: "all" });
       return response.hits.flatMap((hit) => (hit.kind === "entry" ? [hit.entry.id] : []));
+    },
+    similarityGraph(query = {}) {
+      return search.similarity.graph(query, search.scope({ kind: "all" }));
     },
     close
   };

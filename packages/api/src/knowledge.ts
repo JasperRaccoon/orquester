@@ -615,7 +615,7 @@ export interface KnowledgeSimilarityCluster {
   id: number;
   /** Entries in it. */
   size: number;
-  /** Its most distinctive topic concept, else its most distinctive title words; null for singletons. */
+  /** Its most distinctive topic concept (never a person or organization), else its most distinctive title words; null for singletons. */
   label: string | null;
   /** Its most distinctive concepts, best first, up to 5 (phase 2 spec, "Cross navigation"). Absent from an older daemon. */
   concepts?: KnowledgeConceptRef[];
@@ -624,7 +624,7 @@ export interface KnowledgeSimilarityCluster {
 export interface KnowledgeSimilarityGraphResponse {
   nodes: KnowledgeSimilarityNode[];
   edges: KnowledgeSimilarityEdge[];
-  /** Largest first; a cluster = entries joined by edges at or above the model's `good` threshold. */
+  /** Largest first; a cluster = a community of closely similar entries (modularity over each entry's nearest neighbours). */
   clusters: KnowledgeSimilarityCluster[];
   /** True when more embedded entries were visible than `limit` (the most recent were kept). */
   truncated: boolean;
