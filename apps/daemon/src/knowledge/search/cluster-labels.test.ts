@@ -177,6 +177,7 @@ test("similarity: a cluster takes the LLM label when there is one (scoped: only 
     store,
     graph,
     index: () => index,
+    body: (id) => store.entries.get(id)?.body ?? null,
     summary: (meta, scope) => ({ ...meta, collections: visibleCollections(meta, scope), snippet: "", linkCount: 0, citation: knowledgeCitation(meta) })
   });
   const scope = (visibility: KnowledgeVisibility) => knowledgeScope(visibility, ["kc_seo", "kc_ads"]);
