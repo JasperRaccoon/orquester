@@ -507,13 +507,14 @@ export class BoxAndroidHost implements DeviceHost {
   }
 
   private async installFfmpeg(probe: AndroidBoxProbe, signal: AbortSignal): Promise<void> {
+    // Missing ffmpeg is fixable (by the owner without sudo): the host needs setup, it has not failed.
+    this.working = "ffmpeg";
     if (!probe.sudo) {
       throw new DeviceError(
         DEVICE_ERROR_CODES.PLATFORM_NOT_READY,
         `${this.label} needs ffmpeg with libx264 to stream emulators: install it there (sudo apt install ffmpeg), then try again.`
       );
     }
-    this.working = "ffmpeg";
     this.step("ffmpeg", "Installing ffmpeg", "running", 8);
     this.setDetail("Installing ffmpeg…");
     const result = await this.x.exec("/bin/sh", ["-c", FFMPEG_INSTALL_SCRIPT], {
