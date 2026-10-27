@@ -234,6 +234,23 @@ test("teardown (plugin off): every emulator stops, then the hub, agent-device an
   });
 });
 
+test("teardown while the services are still starting: agent-device never starts after it", async () => {
+  await withHost({}, async ({ host }) => {
+    const calls: string[] = [];
+    let hubStarted!: () => void;
+    const hubStarting = new Promise<void>((resolve) => (hubStarted = resolve));
+    const fakes = host as unknown as { hub: Record<string, unknown>; agentDevice: Record<string, unknown>; startServices(): Promise<void> };
+    Object.assign(fakes.hub, { start: async () => (calls.push("hub.start"), hubStarting), stop: async () => void calls.push("hub.stop") });
+    Object.assign(fakes.agentDevice, { ensure: async () => void calls.push("agentDevice.ensure"), stop: async () => void calls.push("agentDevice.stop") });
+    const starting = fakes.startServices();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const tearingDown = host.teardown();
+    hubStarted();
+    await Promise.all([starting, tearingDown]);
+    assert.deepEqual(calls, ["hub.start", "hub.stop", "agentDevice.stop"]);
+  });
+});
+
 test("uploads land in their own 0700 dir with a safe name", async () => {
   await withHost({}, async ({ host }) => {
     const { path } = await host.uploadFile(Readable.from([Buffer.from("apk")]), "../../evil app.apk");
