@@ -97,6 +97,13 @@ export interface KnowledgeStorePort {
   /** The directory myKG reads; the store keeps one `<entryId>.md` per entry in sync. */
   readonly mykgInputDir: string;
   setLinkState(ids: readonly string[], state: KnowledgeLinkState): Promise<void>;
+  /**
+   * The linking-context version an entry was last linked with (phase 2 spec, "Context version";
+   * frontmatter `linkContext`); null when none is recorded (linked before neighbour context).
+   */
+  linkContext(id: string): number | null;
+  /** Records the linking-context version of linked entries (no change event: nothing to re-link). */
+  setLinkContext(ids: readonly string[], version: number): Promise<void>;
   onChange(listener: (change: KnowledgeEntryChange) => void): () => void;
 }
 

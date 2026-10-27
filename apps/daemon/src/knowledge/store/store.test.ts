@@ -200,6 +200,30 @@ test("dedup: same URL, same normalized text, near-identical text; new collection
   assert.equal(fourth.results[0]!.status, "saved");
 });
 
+test("linkContext: absent reads null; recorded in the frontmatter, it survives edits and a reopen; no change event", async (t) => {
+  const { appdir, open } = await setup(t);
+  const { store, changes } = await open();
+  const { results } = await store.save({ entries: [{ body: POST, title: "Alt pages", collections: ["SEO"] }], newCollections: [{ name: "SEO", description: "Search" }] });
+  const id = results[0]!.entryId;
+  assert.equal(store.linkContext(id), null, "an entry linked before neighbour context has none");
+  assert.equal(store.linkContext("ke_000000000000"), null);
+  changes.length = 0;
+  await store.setLinkContext([id, "ke_000000000000"], 1);
+  assert.equal(store.linkContext(id), 1);
+  assert.deepEqual(changes, [], "nothing to re-link or re-index");
+  const path = join(knowledgeEntriesDir(appdir), `${id}.md`);
+  assert.match(await readFile(path, "utf8"), /\nlinkContext: 1\n/);
+  await store.updateEntry(id, { title: "Alternatives pages" });
+  assert.equal(store.linkContext(id), 1, "a rewrite carries it");
+  const reopened = (await open()).store;
+  assert.equal(reopened.linkContext(id), 1);
+  // A value this build cannot read (a hand edit) reads as none; the file still loads.
+  await writeFile(path, (await readFile(path, "utf8")).replace("linkContext: 1", "linkContext: soon"));
+  const third = (await open()).store;
+  assert.equal(third.getMeta(id)?.title, "Alternatives pages");
+  assert.equal(third.linkContext(id), null);
+});
+
 test("url normalization", () => {
   assert.equal(normalizeKnowledgeUrl("https://twitter.com/a/status/1?s=20"), "https://x.com/i/status/1");
   assert.equal(normalizeKnowledgeUrl("http://www.Example.com/Path/?utm_medium=x&b=2&a=1#frag"), "https://example.com/Path?a=1&b=2");

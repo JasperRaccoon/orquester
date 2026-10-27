@@ -39,14 +39,16 @@ import { profileKnowledgeCollections, profilesForCollection } from "../session-p
 import type { SessionProfileStore } from "../session-profiles/store.ts";
 import type { ManifestKnowledge } from "../session-tools/manifest.ts";
 import { KnowledgeRuntimeTracker, type KnowledgeRuntimeTrackerOptions } from "./install/runtime.ts";
+import type { KnowledgeLinkGraphView } from "./linking/context.ts";
 import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
-import type { KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
+import type { KnowledgePairChecksPort, KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
 import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
+import { knowledgeScope } from "./search/visibility.ts";
 import { registerKnowledgeSettingsRoutes } from "./settings-routes.ts";
 import { KnowledgeSettingsService, type KnowledgeSettingsAccounts, type KnowledgeSettingsPlugins } from "./settings.ts";
 import { KnowledgeError } from "./store/errors.ts";
@@ -63,8 +65,14 @@ export interface KnowledgePublisher {
   publish(channel: string, type: string, payload: unknown): void;
 }
 
-/** What the service runs of the linking module. `KnowledgeLinkingService` is it. */
-export type KnowledgeLinking = KnowledgeLinkingRouteService & Pick<KnowledgeLinkingService, "start" | "stop" | "status" | "entriesChanged" | "events">;
+/**
+ * What the service runs of the linking module. `KnowledgeLinkingService` is it. `pairChecks` and
+ * `gapQueued` are phase 2's seams for insights (the spec's "Shared seams").
+ */
+export type KnowledgeLinking = KnowledgeLinkingRouteService &
+  Pick<KnowledgeLinkingService, "start" | "stop" | "status" | "entriesChanged" | "events" | "gapQueued"> & {
+    readonly pairChecks: KnowledgePairChecksPort;
+  };
 
 /** Builds the linking module once, with the opening's store and graph (`KnowledgeLinkingOptions`). */
 export type KnowledgeLinkingFactory = (ports: {
@@ -72,6 +80,8 @@ export type KnowledgeLinkingFactory = (ports: {
   graph: KnowledgeGraph;
   runtime: KnowledgeRuntimePort;
   settings: KnowledgeSettingsPort;
+  /** Search and the concept graph as phase 2 linking reads them (`linkGraphView`). */
+  graphView: KnowledgeLinkGraphView;
 }) => KnowledgeLinking;
 
 /** An embedder source over a runtime (the gated one: null while the plugin is off). */
@@ -130,9 +140,34 @@ type ProfilesByCollection = Map<string, { id: string; name: string }[]>;
 
 const NO_TOKENS: KnowledgeStatus["tokens"] = { week: { in: 0, out: 0 }, total: { in: 0, out: 0 } };
 
+/** Pair checks while no linking module checks pairs: none, and never a change. */
+const NO_PAIR_CHECKS: KnowledgePairChecksPort = {
+  all: () => [],
+  get: () => null,
+  onChange: () => () => {}
+};
+
+/**
+ * What phase 2 linking reads of search and the concept graph (`linking/context.ts`): the vector
+ * index of the moment, an entry's concepts, and the concepts a `contradicts` edge joins (unscoped:
+ * linking sees every entry).
+ */
+export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, graph: KnowledgeGraph, search: Pick<KnowledgeSearch, "vectorIndex">): KnowledgeLinkGraphView {
+  return {
+    vectors: () => search.vectorIndex(),
+    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId),
+    contradicting: (conceptId) => {
+      const scope = knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
+      const view = graph.concept(conceptId, scope);
+      return view ? view.neighbors.filter((neighbor) => neighbor.edge.type === "contradicts").map((neighbor) => neighbor.concept.id) : [];
+    }
+  };
+}
+
 /** Linking when none is built (tests) or building it failed: paused, with the reason; ignores changes. */
 class NoLinking implements KnowledgeLinking {
   readonly events = new EventEmitter<{ status: [] }>();
+  readonly pairChecks = NO_PAIR_CHECKS;
 
   constructor(
     private readonly settings: KnowledgeSettingsPort,
@@ -142,6 +177,10 @@ class NoLinking implements KnowledgeLinking {
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   entriesChanged(): void {}
+
+  gapQueued(): ReadonlySet<string> {
+    return new Set();
+  }
 
   status(): KnowledgeLinkingState {
     if (!this.settings.enabled()) return { state: "paused", reason: "plugin-off", message: "The Knowledge Graph plugin is off.", resumesAt: null, pendingEntries: 0 };
@@ -291,6 +330,19 @@ export class KnowledgeService {
     return this.opening?.linking ?? null;
   }
 
+  /**
+   * The LLM pair checks linking recorded (phase 2 spec, "Pair checks"), for insights: none until the
+   * knowledge base opened or without linking. Read it per use: the opening's linking can be replaced.
+   */
+  pairChecks(): KnowledgePairChecksPort {
+    return this.opening?.linking.pairChecks ?? NO_PAIR_CHECKS;
+  }
+
+  /** Entries link gaps queued for re-linking (an insights gap's `queued`): none until the knowledge base opened. */
+  gapQueued(): ReadonlySet<string> {
+    return this.opening?.linking.gapQueued() ?? new Set();
+  }
+
   /** The open knowledge base, opening it first if the plugin is on. Throws the refusal the routes answer. */
   private async ready(): Promise<Opening> {
     if (this.opening === null) await this.openIfEnabled();
@@ -332,7 +384,7 @@ export class KnowledgeService {
     const search = new KnowledgeSearch({ store, graph, embedders, indexDir: knowledgeIndexDir(appdir), logger: this.logger });
     // Text indexing runs in the background; queries wait for it.
     void search.start().catch((error) => this.logger.warn("knowledge: indexing the entries failed", error));
-    const linking = this.buildLinking(store, graph);
+    const linking = this.buildLinking(store, graph, search);
     // The merge overlay is read and applied before linking loads the graph; concept vectors and
     // merge planning follow every load in the background.
     const conceptMerges = new KnowledgeConceptMerges({
@@ -383,11 +435,11 @@ export class KnowledgeService {
     this.publishStatus();
   }
 
-  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph): KnowledgeLinking {
+  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph, search: KnowledgeSearch): KnowledgeLinking {
     const factory = this.options.linking;
     if (!factory) return new NoLinking(this.settings, "Graph linking is not available in this build.");
     try {
-      return factory({ store, graph, runtime: this.runtime, settings: this.settings });
+      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`knowledge: the linking module could not be built (${message})`);

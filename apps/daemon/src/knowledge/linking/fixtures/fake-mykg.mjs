@@ -4,7 +4,8 @@
 // `--append-with-grow-schema`, the input mirror, `pipeline_state.json` (top-level status always
 // "running"), `pass2_progress.json`, task files written temp + rename and answered through
 // `<id>.answer.json` + `<id>.done` (an answered task is reused, never asked again), one Pass 2 task
-// per input file (`batch_per_file`), and `output/nodes.jsonl` / `output/edges.jsonl`.
+// per input file (`batch_per_file`) whose prompt ends like myKG's (`DOCUMENT\n========\n<the file>`,
+// `pass2.py` `_build_extraction_prompt`), and `output/nodes.jsonl` / `output/edges.jsonl`.
 //
 // Ingest follows myKG's own bookkeeping (verified against the installed 0.4.10, `step_ingest.py`,
 // `orchestrator.py`, `step_pass2.py`): `intermediate/file_manifest.json` is the corpus. A full run
@@ -166,7 +167,7 @@ async function main() {
   await Promise.all(
     todo.map(async (name, index) => {
       const body = readFileSync(join(mirror, name), "utf8");
-      const result = await complete("pass2", control.pass2System ?? "PASS2-SYSTEM", `FILE ${name}\n${body}`, `pass2 batch ${index + 1}`);
+      const result = await complete("pass2", control.pass2System ?? "PASS2-SYSTEM", `SCHEMA\n======\nFILE ${name}\n\nDOCUMENT\n========\n${body}`, `pass2 batch ${index + 1}`);
       if ((control.failFiles ?? []).includes(name)) failedChunks.push({ filename: name, chunk_idx: 0, reason: "blank_response" });
       writeFileSync(join(shardDir, `${name}.json`), JSON.stringify({ sha: sha(body), result }));
       progress.completed += 1;
