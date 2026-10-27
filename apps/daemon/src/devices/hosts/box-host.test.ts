@@ -191,7 +191,12 @@ describe("box device host factory", () => {
     assert.deepEqual(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: true })), { kind: "byo", platform: "ios" });
     assert.equal(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: false })), null);
     // Own Linux machines with KVM wait for the phase 2 Android driver.
-    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: true })), null);
+    // Linux: rented device hosts run Android; an own Linux machine only with a usable /dev/kvm.
+    assert.deepEqual(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: true })), { kind: "byo", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: false })), null);
+    assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux" })), null);
+    assert.deepEqual(deviceHostOfRecord(record("d", { kind: "linux" })), { kind: "box", platform: "android" });
+    assert.equal(deviceHostOfRecord(record("d", { kind: "windows" })), null);
   });
 
   it("adopts rented device hosts and own Macs at start, and follows their boxes", async () => {
@@ -250,7 +255,17 @@ describe("box device host factory", () => {
     // A device host that ran 17 h this month ($81.6) leaves no room for 4 h more ($19.2) under $100.
     boxes.records.set("old", record("old", { state: "destroyed", providerRef: { runId: 1 }, createdAt: new Date(T0 - 17 * 3_600_000).toISOString(), destroyedAt: new Date(T0).toISOString() }));
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
-    assert.equal(factory.provisionQuote!("android"), null);
+    // Android: a Blacksmith Linux runner of `pool.androidSize` (default 16 vCPU).
+    assert.deepEqual(factory.provisionQuote!("android"), {
+      platform: "android",
+      provider: "blacksmith",
+      providerLabel: "Blacksmith",
+      size: "16vcpu",
+      sizeLabel: "16 vCPU x64 · 64 GB",
+      hourlyUsd: 1.92,
+      lifetimeMinutes: 240,
+      needsApproval: false
+    });
     boxes.configured = false;
     assert.equal(factory.provisionQuote!("ios"), null);
   });
