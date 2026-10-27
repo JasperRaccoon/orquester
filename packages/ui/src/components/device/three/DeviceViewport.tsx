@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState }
 import { cn } from "../../../lib/cn";
 import { resolveDeviceModelId } from "./model.ts";
 import { resolveDeviceShape } from "./shapeProfile.ts";
-import { deviceScreenAspect, type Size } from "./flat.ts";
+import { deviceScreenAspect, flatViewPoint, type Size } from "./flat.ts";
 import type { DeviceOrientation, DevicePlatform, DeviceScreenSize } from "./types.ts";
 import type { DeviceViewerFailure } from "./mountDeviceViewer.ts";
 import type { DeviceViewerBindings } from "./DeviceCanvas.tsx";
@@ -59,6 +59,12 @@ export interface DeviceViewportHandle {
   readonly resetView: () => void;
   /** End any touch or gesture in progress (focus loss, control handover). */
   readonly cancelInput: () => void;
+  /**
+   * Where a point on the screen as seen (0..1, the `onTouch` space) shows now, in CSS pixels from
+   * the viewport's top-left; null before a frame, or when the 3D scene cannot project (foldables).
+   * For drawing over the device (the Device panel's agent overlay).
+   */
+  readonly projectPoint: (x: number, y: number) => { x: number; y: number } | null;
 }
 
 let webgl2: boolean | null = null;
@@ -132,11 +138,15 @@ export const DeviceViewport = forwardRef<DeviceViewportHandle, DeviceViewportPro
     const frameListener = useRef<(() => void) | null>(null);
     const reset = useRef<(() => void) | null>(null);
     const cancel = useRef<(() => void) | null>(null);
+    const project = useRef<((x: number, y: number) => { x: number; y: number } | null) | null>(null);
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const show3dRef = useRef(false);
     const bindings = useMemo<DeviceViewerBindings>(
       () => ({
         onFrameListener: (listener) => (frameListener.current = listener),
         onResetReady: (listener) => (reset.current = listener),
         onInputCancel: (listener) => (cancel.current = listener),
+        onProjectReady: (listener) => (project.current = listener),
       }),
       [],
     );
@@ -154,6 +164,21 @@ export const DeviceViewport = forwardRef<DeviceViewportHandle, DeviceViewportPro
         },
         resetView: () => reset.current?.(),
         cancelInput: () => cancel.current?.(),
+        projectPoint(x, y) {
+          const root = rootRef.current;
+          if (!root) return null;
+          const box = root.getBoundingClientRect();
+          // Client rects are scaled by CSS zoom and transforms; the overlay is laid out in CSS px.
+          const sx = box.width > 0 ? root.offsetWidth / box.width : 1;
+          const sy = box.height > 0 ? root.offsetHeight / box.height : 1;
+          if (show3dRef.current) {
+            const seen = project.current?.(x, y);
+            return seen ? { x: seen.x * root.offsetWidth, y: seen.y * root.offsetHeight } : null;
+          }
+          const screen = root.querySelector<HTMLElement>("[data-device-flat-screen]");
+          const seen = screen ? flatViewPoint(screen.getBoundingClientRect(), box, x, y) : null;
+          return seen ? { x: seen.x * sx, y: seen.y * sy } : null;
+        },
       }),
       [],
     );
@@ -161,9 +186,10 @@ export const DeviceViewport = forwardRef<DeviceViewportHandle, DeviceViewportPro
       setCanvasFrame(canvasSize(source));
     }, [source]);
 
+    show3dRef.current = show3d;
     const onUnavailable = (next: DeviceViewerFailure) => setFailure(next);
     return (
-      <div className={cn("relative h-full w-full min-h-0 min-w-0", props.className)}>
+      <div ref={rootRef} className={cn("relative h-full w-full min-h-0 min-w-0", props.className)}>
         {show3d && isDuo && props.duo ? (
           <DeviceDuoViewport
             source={source}

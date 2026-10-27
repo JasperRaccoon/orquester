@@ -8,6 +8,10 @@ export interface DeviceViewerBindings {
   readonly onFrameListener: (listener: (() => void) | null) => void;
   readonly onResetReady: (reset: (() => void) | null) => void;
   readonly onInputCancel: (cancel: (() => void) | null) => void;
+  /** The 3D viewer's screen-to-canvas projection while one is mounted (`DeviceViewportHandle.projectPoint`). */
+  readonly onProjectReady?: (
+    project: ((x: number, y: number) => { x: number; y: number } | null) | null,
+  ) => void;
 }
 
 const point = (event: ReactPointerEvent<HTMLCanvasElement>) => {

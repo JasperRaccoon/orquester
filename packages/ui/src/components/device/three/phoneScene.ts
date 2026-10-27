@@ -210,12 +210,20 @@ export function createPhoneScene(
     SCREEN_HEIGHT,
     () => activeLayout,
   );
+  const viewPoint = createDisplayViewPoint(
+    display,
+    orientation,
+    screenWidth,
+    SCREEN_HEIGHT,
+    () => activeLayout,
+  );
   return {
     root,
     orientation,
     width,
     height,
     screenPoint,
+    viewPoint,
     setDisplay(nextTexture: Texture, nextLayout: PhoneDisplayLayout) {
       activeLayout = nextLayout;
       screenMaterial.map = nextTexture;
@@ -294,5 +302,42 @@ export function createDisplayProjection(
     if (rotation === Math.PI / 2) return { x: 1 - v, y: 1 - u };
     if (rotation === Math.PI) return { x: 1 - u, y: v };
     return { x: u, y: 1 - v };
+  };
+}
+
+/**
+ * The inverse of {@link createDisplayProjection}: a point on the screen as the user sees it (0..1,
+ * top-left 0,0, in its current orientation) to where it shows in the camera's view (0..1 over the
+ * canvas, top-left 0,0), for drawing over the 3D device (the Device panel's agent overlay).
+ */
+export function createDisplayViewPoint(
+  display: Mesh,
+  orientation: Group,
+  width: number,
+  height: number,
+  getLayout: () => PhoneDisplayLayout,
+) {
+  const point = new Vector3();
+  display.geometry.computeBoundingBox();
+  const z = display.position.z + (display.geometry.boundingBox?.max.z ?? 0);
+  return (x: number, y: number, camera: Camera): { x: number; y: number } | null => {
+    if (![x, y].every(Number.isFinite)) return null;
+    const { rotation } = getLayout();
+    // Undo the per-rotation mapping `createDisplayProjection` applies to (u, v).
+    const [u, v] =
+      rotation === -Math.PI / 2
+        ? [y, x]
+        : rotation === Math.PI / 2
+          ? [1 - y, 1 - x]
+          : rotation === Math.PI
+            ? [1 - x, y]
+            : [x, 1 - y];
+    orientation.updateWorldMatrix(true, true);
+    camera.updateMatrixWorld(true);
+    point.set(u * width - width / 2, v * height - height / 2, z);
+    orientation.localToWorld(point);
+    point.project(camera);
+    if (![point.x, point.y].every(Number.isFinite)) return null;
+    return { x: (point.x + 1) / 2, y: (1 - point.y) / 2 };
   };
 }

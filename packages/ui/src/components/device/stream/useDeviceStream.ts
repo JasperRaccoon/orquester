@@ -18,6 +18,7 @@ import { ServeSimMjpegSession } from "./serveSimMjpeg.ts";
 import {
   DeviceStreamError,
   type DeviceButton,
+  type DeviceOrientation,
   type DevicePlatform,
   type DeviceScreenConfig,
   type DeviceStreamState,
@@ -81,6 +82,8 @@ export interface DeviceStreamHandle {
   sendKey(event: KeyboardEventLike, phase: KeyPhase): boolean;
   /** Android: chunked text; iOS: US-layout keystrokes (printable ASCII only). */
   sendText(text: string): boolean;
+  /** iOS: turn the simulator (serve-sim's orientation message); false on Android or before input is ready. */
+  sendOrientation(orientation: DeviceOrientation): boolean;
 }
 
 const IOS_BUTTONS: Record<DeviceButton, ServeSimButton | null> = {
@@ -287,6 +290,11 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     [platform]
   );
 
+  const sendOrientation = useCallback(
+    (orientation: DeviceOrientation): boolean => (platform === "ios" ? (channels.current.sim?.sendOrientation(orientation) ?? false) : false),
+    [platform]
+  );
+
   return {
     canvas,
     // Before the connect effect runs (or while capabilities are probed) an enabled stream is connecting.
@@ -299,6 +307,7 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     sendTouch,
     sendButton,
     sendKey,
-    sendText
+    sendText,
+    sendOrientation
   };
 }

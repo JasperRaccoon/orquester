@@ -153,6 +153,16 @@ test("deviceRef: kept through slimming, read back only from a marked session-too
   assert.equal(deviceToolReferenceOfActivityData({ result }), undefined);
 });
 
+test("deviceRef: the row's words (name, action, summary) are kept only when valid", () => {
+  assert.deepEqual(
+    readDeviceToolReference({ device: "local/e", leaseId: "l1", name: " Pixel 9 ", action: "tap", summary: "Tapped @e7 “Search”" }),
+    { device: "local/e", leaseId: "l1", name: "Pixel 9", action: "tap", summary: "Tapped @e7 “Search”" }
+  );
+  assert.deepEqual(readDeviceToolReference({ device: "local/e", name: "Pixel\n9", action: "hack", summary: "x".repeat(201) }), { device: "local/e" });
+  assert.deepEqual(readDeviceToolReference({ device: "local/e", name: "", summary: "a\u0007b", action: 3 }), { device: "local/e" });
+  assert.deepEqual(readDeviceToolReference({ device: "local/e", name: "n".repeat(121) }), { device: "local/e" });
+});
+
 test("contracts other modules gained: the devices toolset, the device-host box purpose and setup step", () => {
   const devices = TOOLSETS.find((toolset) => toolset.id === "devices");
   assert.deepEqual(

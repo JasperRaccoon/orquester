@@ -22,6 +22,7 @@
 
 import { isToolLifecycleItemType, type ToolApprovalReference } from "@orquester/api/agent-chat";
 
+import { deviceToolRowLabel, type DeviceNameResolver } from "../devices/chat-rows.logic";
 import type { ToolGroupSummaryKind, WorkLogEntry } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -571,7 +572,8 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   knowledge_collections: "Listed knowledge collections",
   knowledge_worker_next_task: "Took an indexing task",
   knowledge_worker_submit: "Submitted an indexing answer",
-  // devices (Device simulators plugin; a row's own words — "Tapped @e7" — come from its deviceRef later)
+  // devices (Device simulators plugin): the generic words; a row with a
+  // `deviceRef` reads as what it did ("Tapped “Search”", `chat-rows.logic.ts`)
   list_devices: "Listed devices",
   open_device: "Opened a device",
   device_action: "Used a device",
@@ -692,24 +694,30 @@ export function sessionToolLabel(name: string): string {
  * secret's name and how the request ended (never the value, which the row
  * does not hold); for a call an approval card gated, how the card ended.
  */
-export function sessionToolEntryLabel(entry: WorkLogEntry & { sessionTool: string }): string {
+export function sessionToolEntryLabel(
+  entry: WorkLogEntry & { sessionTool: string },
+  resolveDeviceName?: DeviceNameResolver
+): string {
   const secret = entry.secretRequest;
   if (secret !== undefined) {
     return `Requested a secret: ${secret.name} · ${SECRET_OUTCOME_WORDS[secret.outcome]}`;
   }
+  // A device tool's row reads as what it did to which device (devices spec
+  // §10.3: "Opened Pixel 9", "Tapped “Search”"), from its `deviceRef`.
+  const base = deviceToolRowLabel(entry.sessionTool, entry.deviceLink, resolveDeviceName) ?? sessionToolLabel(entry.sessionTool);
   // A call that went through an Orquester card or a grant (unified MCP §7.1):
   // its tool's label, then how the card ended.
   const approval = entry.toolApproval;
   if (approval !== undefined) {
-    return `${sessionToolLabel(entry.sessionTool)} · ${toolApprovalOutcomeText(approval)}`;
+    return `${base} · ${toolApprovalOutcomeText(approval)}`;
   }
-  return sessionToolLabel(entry.sessionTool);
+  return base;
 }
 
 /** The label a settled single-tool row shows. *T3: `MessagesTimeline.logic.ts:46-53`.* */
-export function singleToolCallLabel(entry: WorkLogEntry): string {
+export function singleToolCallLabel(entry: WorkLogEntry, resolveDeviceName?: DeviceNameResolver): string {
   if (entry.sessionTool !== undefined) {
-    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool });
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName);
   }
   const command = entry.command?.trim();
   if (command) {
@@ -724,11 +732,11 @@ export function singleToolCallLabel(entry: WorkLogEntry): string {
  * headed like its call's (its command, else its title), else by its own
  * summary, "Tool output".*
  */
-export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: string): string {
+export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: string, resolveDeviceName?: DeviceNameResolver): string {
   // A session tool's detail is its raw arguments (Claude's `tool: {…}`): its
   // own label reads better (design 2026-10-14 §1.5).
   if (entry.sessionTool !== undefined) {
-    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool });
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool }, resolveDeviceName);
   }
   if (entry.command) {
     return entry.command;

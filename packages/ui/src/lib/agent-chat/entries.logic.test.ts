@@ -782,6 +782,35 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     assert.equal(unmarked.threadLink, undefined);
   });
 
+  it("links a device tool's row to the device its result names (deviceRef), with the action's words", () => {
+    const deviceRef = { device: "local/emulator-5554", leaseId: "l1", screenshotId: "s1" };
+    const result = { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ action: "tap", summary: "Tapped @e7 “Search”", deviceRef }) }] };
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: 'mcp__orquester__device_action: {"action":"tap","ref":"@e7"}',
+        data: { toolName: "mcp__orquester__device_action", sessionTool: { name: "device_action" }, result }
+      })
+    );
+    assert.deepEqual(entry.deviceLink, { ...deviceRef, action: "tap", summary: "Tapped @e7 “Search”" });
+    assert.equal(workEntryDisplayLabel(entry), "Tapped “Search”");
+    // A slimmed row keeps the reference alone.
+    const slimmed = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        data: { toolName: "mcp__orquester__device_action", sessionTool: { name: "device_action", references: { deviceRef: { ...deviceRef, name: "Pixel 9", action: "screenshot" } } } }
+      })
+    );
+    assert.equal(workEntryDisplayLabel(slimmed), "Took a screenshot of Pixel 9");
+    // An unmarked row links nowhere.
+    const unmarked = workLogEntryFromActivity(
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", data: { toolName: "mcp__orquester__device_action", result } })
+    );
+    assert.equal(unmarked.deviceLink, undefined);
+  });
+
   it("labels the visual-replies tools in words: a preview, and a render while it runs or when it failed", () => {
     for (const [name, label, status] of [
       ["html_preview", "Previewed HTML", "completed"],

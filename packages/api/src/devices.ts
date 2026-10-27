@@ -933,6 +933,12 @@ export interface DeviceToolReference {
   device: string;
   leaseId?: string;
   screenshotId?: string;
+  /** The device's display name ("Pixel 9"), for the row's words. */
+  name?: string;
+  /** `device_action`: the action it ran. */
+  action?: DeviceActionKind;
+  /** `device_action`: the action-log summary, one line ("Tapped @e7 “Search”"). */
+  summary?: string;
 }
 
 const REF_PART = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,299}$/;
@@ -945,7 +951,23 @@ export function readDeviceToolReference(value: unknown): DeviceToolReference | u
   const out: DeviceToolReference = { device };
   if (typeof leaseId === "string" && REF_PART.test(leaseId)) out.leaseId = leaseId;
   if (typeof screenshotId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(screenshotId)) out.screenshotId = screenshotId;
+  const name = oneLine(value.name, DEVICE_REF_NAME_MAX);
+  if (name !== undefined) out.name = name;
+  if (isDeviceActionKind(value.action)) out.action = value.action;
+  const summary = oneLine(value.summary, DEVICE_REF_SUMMARY_MAX);
+  if (summary !== undefined) out.summary = summary;
   return out;
+}
+
+const DEVICE_REF_NAME_MAX = 120;
+const DEVICE_REF_SUMMARY_MAX = 200;
+
+/** A short one-line text a provider relayed, or undefined (control characters or line breaks: refused). */
+function oneLine(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  if (/[\u0000-\u001f\u007f\u2028\u2029]/.test(value)) return undefined;
+  const text = value.trim();
+  return text.length > 0 && text.length <= max ? text : undefined;
 }
 
 /** The device a session-tool row links to, or undefined (only rows the host marked as its own session tool's). */

@@ -45,6 +45,11 @@ export interface PhoneViewer {
     y: number,
     captured?: boolean,
   ) => { x: number; y: number } | null;
+  /**
+   * Where a point on the screen as seen (0..1) shows in the canvas (0..1), or null when this
+   * device's scene cannot say (the foldables) or the point is off-screen.
+   */
+  readonly projectPoint: (x: number, y: number) => { x: number; y: number } | null;
   readonly orbit: (deltaX: number, deltaY: number) => void;
   readonly setInteractionActive: (active: boolean, mode: "touch" | "orbit") => void;
   readonly resetPose: () => void;
@@ -418,6 +423,11 @@ export function createPhoneViewer(options: {
       if (disposed) return null;
       applyPose();
       return phone.screenPoint(x, y, camera, captured);
+    },
+    projectPoint(x, y) {
+      if (disposed || !("viewPoint" in phone)) return null;
+      applyPose();
+      return phone.viewPoint(x, y, camera);
     },
     orbit(deltaX, deltaY) {
       if (disposed) return;

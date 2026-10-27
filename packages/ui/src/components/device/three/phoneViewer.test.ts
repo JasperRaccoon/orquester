@@ -185,3 +185,16 @@ it("folds a foldable model to the reported hinge angle; a slab model ignores it"
   assert.equal(onUnavailable.mock.callCount(), 0);
   viewer.dispose();
 });
+
+it("projects screen points into the canvas for the overlay, inverse of screenPoint", () => {
+  const { viewer } = fixture();
+  viewer.setScreen({ width: 1206, height: 2622, orientation: "portrait" });
+  const center = viewer.projectPoint(0.5, 0.5);
+  assert.ok(center, "the screen's centre is in view");
+  assert.ok(Math.abs(center.x - 0.5) < 0.05 && Math.abs(center.y - 0.5) < 0.1);
+  const corner = viewer.projectPoint(0.1, 0.9)!;
+  const back = viewer.screenPoint(corner.x, corner.y)!;
+  assert.ok(Math.abs(back.x - 0.1) < 0.01 && Math.abs(back.y - 0.9) < 0.01);
+  viewer.dispose();
+  assert.equal(viewer.projectPoint(0.5, 0.5), null);
+});

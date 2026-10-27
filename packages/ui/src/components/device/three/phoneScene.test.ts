@@ -100,3 +100,33 @@ describe("3D phone input", () => {
       texture.dispose();
     });
 });
+
+describe("3D phone overlay projection", () => {
+  for (const orientation of orientations)
+    it(`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`, () => {
+      const texture = new Texture();
+      const layout = phoneDisplayLayout({ width: 540, height: 1200, orientation }, 540, 1200);
+      const phone = createPhoneScene(texture, layout, IOS_PHONE_SHAPE);
+      const camera = new PerspectiveCamera(32, 1, 0.1, 30);
+      camera.position.z = 6;
+      camera.updateMatrixWorld(true);
+      phone.root.rotation.set(0.15, -0.25, 0, "YXZ");
+      phone.orientation.rotation.z = layout.rotation;
+      phone.root.updateMatrixWorld(true);
+      for (const [x, y] of [
+        [0.5, 0.5],
+        [0.2, 0.8],
+        [0.9, 0.1],
+      ] as const) {
+        const seen = phone.viewPoint(x, y, camera);
+        assert.ok(seen, "a point on the screen is in view");
+        assert.ok(seen.x > 0 && seen.x < 1 && seen.y > 0 && seen.y < 1);
+        const back = phone.screenPoint(seen.x, seen.y, camera);
+        closeTo(back?.x, x);
+        closeTo(back?.y, y);
+      }
+      assert.equal(phone.viewPoint(Number.NaN, 0.5, camera), null);
+      phone.dispose();
+      texture.dispose();
+    });
+});
