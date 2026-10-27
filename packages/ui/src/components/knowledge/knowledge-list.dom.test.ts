@@ -80,6 +80,9 @@ describe("the List view", () => {
   let facetCalls: KnowledgeFacetsRequest[];
   let selected: string[];
   let current: KnowledgeQuery;
+  /** The harness' query setter and whether the list is mounted (as KnowledgeView switches views). */
+  let setOutside: (query: KnowledgeQuery) => void;
+  let setListShown: (shown: boolean) => void;
 
   const fakeApi = (overrides: Record<string, unknown> = {}) => ({
     listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}): Promise<KnowledgeEntriesResponse> => (
@@ -134,7 +137,11 @@ describe("the List view", () => {
   const show = async (api: Record<string, unknown> = {}, initial: Partial<KnowledgeQuery> = {}) => {
     const Harness = () => {
       const [query, setQuery] = useState<KnowledgeQuery>({ ...EMPTY, ...initial });
+      const [shown, setShown] = useState(true);
       current = query;
+      setOutside = setQuery;
+      setListShown = setShown;
+      if (!shown) return null;
       return createElement(KnowledgeListView, {
         api: fakeApi(api) as never,
         collections: collections(),
@@ -221,6 +228,43 @@ describe("the List view", () => {
       await click([...sort.querySelectorAll("button")].find((b) => b.textContent === "Newest")!);
       assert.equal(searches[searches.length - 1]?.sort, "newest");
       assert.equal(searches[searches.length - 1]?.cursor, undefined, "a new sort starts over");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("keeps words typed just before leaving the view", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await show();
+      await type("seo");
+      await tick(100);
+      // Off to the Graph view within the wait: the words reach the query anyway.
+      await act(async () => setListShown(false));
+      await settle();
+      assert.equal(current.text, "seo");
+      await act(async () => setListShown(true));
+      await settle();
+      assert.equal(input().value, "seo");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("never mixes words typed just before \"More like this\" into its example query", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await show();
+      await type("tips");
+      await tick(100);
+      // "More like this" from the panel within the wait: an example query, without the words.
+      await act(async () => setOutside({ ...EMPTY, similarTo: ["ke_seed0000000"] }));
+      await settle();
+      await tick(300);
+      assert.deepEqual(current.similarTo, ["ke_seed0000000"]);
+      assert.equal(current.text, "", "the pending words did not join the example query");
+      assert.equal(input().value, "", "the box follows the new query");
+      assert.ok(searches.every((req) => !(req.similarTo && req.query)), "no search mixed them");
     } finally {
       mock.timers.reset();
     }

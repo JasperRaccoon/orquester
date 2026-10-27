@@ -184,6 +184,9 @@ const ExampleChip: React.FC<{ label: string; title: string | null | undefined; o
   );
 };
 
+/** What identifies a query's examples ("More like" / "less like" ids). */
+const examplesKey = (query: KnowledgeQuery) => `${query.similarTo.join(",")}|${query.unlike.join(",")}`;
+
 export interface KnowledgeQueryBarProps {
   api: KnowledgeFacetsApi | null;
   /** "all", "unfiled" or a collection id: the facets' narrowing. */
@@ -202,28 +205,46 @@ export interface KnowledgeQueryBarProps {
 export const KnowledgeQueryBar: React.FC<KnowledgeQueryBarProps> = ({ api, collection, query, onQueryChange, titleOf, onFocusResults, inputRef, resultsId }) => {
   // The box answers every keystroke; the query (and so the search) follows 250 ms after the last.
   const [text, setText] = useState(query.text);
+  const textRef = useRef(text);
+  textRef.current = text;
   const sent = useRef(query.text);
   const queryRef = useRef(query);
   queryRef.current = query;
   const onChangeRef = useRef(onQueryChange);
   onChangeRef.current = onQueryChange;
+  /** The examples the box's words were typed against: words still pending never join other examples. */
+  const typedFor = useRef(examplesKey(query));
 
-  // The query changed from elsewhere ("More like this", "Clear", another view): the box follows.
+  // The query changed from elsewhere ("More like this", "Clear", another view): the box follows,
+  // dropping words not sent yet when the examples changed (they were typed for another search).
+  const examplesNow = examplesKey(query);
   useEffect(() => {
-    if (query.text !== sent.current) {
+    const moved = examplesNow !== typedFor.current;
+    typedFor.current = examplesNow;
+    if (query.text !== sent.current || (moved && textRef.current !== sent.current)) {
       sent.current = query.text;
       setText(query.text);
     }
-  }, [query.text]);
+  }, [query.text, examplesNow]);
+
+  /** Send the words not sent yet, unless the query moved on meanwhile (other words or examples). */
+  const flush = useRef(() => {
+    const pending = textRef.current;
+    if (pending === sent.current) return;
+    const current = queryRef.current;
+    if (current.text !== sent.current || examplesKey(current) !== typedFor.current) return;
+    sent.current = pending;
+    onChangeRef.current({ ...current, text: pending });
+  }).current;
 
   useEffect(() => {
     if (text === sent.current) return;
-    const timer = setTimeout(() => {
-      sent.current = text;
-      onChangeRef.current({ ...queryRef.current, text });
-    }, SEARCH_DEBOUNCE_MS);
+    const timer = setTimeout(flush, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [text]);
+  }, [text, flush]);
+
+  // Leaving (to the Graph view) within the wait keeps the words typed.
+  useEffect(() => flush, [flush]);
 
   const commit = (next: string) => {
     setText(next);
