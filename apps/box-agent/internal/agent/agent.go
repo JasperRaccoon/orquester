@@ -232,6 +232,9 @@ type Agent struct {
 	controlPath string
 	statsPrev   cpuSample
 	client      *http.Client
+
+	// uninstallHook replaces uninstall (tests); nil runs uninstall.
+	uninstallHook func()
 }
 
 // New prepares an agent (data dir, credentials, sys info).
@@ -377,7 +380,11 @@ func (a *Agent) shutdown(reason string, uninstall bool) {
 	a.log.Printf("shutting down: %s", reason)
 	a.procs.killAll()
 	if uninstall {
-		a.uninstall()
+		if a.uninstallHook != nil {
+			a.uninstallHook()
+		} else {
+			a.uninstall()
+		}
 	}
 	a.stopWith(0, false)
 }
@@ -624,7 +631,9 @@ func (a *Agent) handleReject(m *wire.Reject) {
 	a.log.Printf("daemon rejected the connection: %s", m.Code)
 	switch m.Code {
 	case "BOX_DESTROYED":
-		a.shutdown("the daemon reports this box destroyed", false)
+		// The box is gone for good: its credential is dead and the service would only start
+		// orq-agent again to be refused once more. Uninstall it, so nothing starts it again.
+		a.shutdown("the daemon reports this box destroyed", true)
 	case "AGENT_OUTDATED":
 		if m.UpgradeURL != "" {
 			go func() {

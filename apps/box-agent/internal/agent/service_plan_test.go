@@ -123,10 +123,11 @@ func TestLaunchAgentPlist(t *testing.T) {
 	}
 	got := plistValue(t, root.Nodes[0])
 	want := map[string]any{
-		"Label":             "dev.orquester.agent",
-		"ProgramArguments":  []any{exe, "run", "--data-dir", home + "/.orq-agent"},
-		"RunAtLoad":         true,
-		"KeepAlive":         true,
+		"Label":            "dev.orquester.agent",
+		"ProgramArguments": []any{exe, "run", "--data-dir", home + "/.orq-agent"},
+		"RunAtLoad":        true,
+		// Restarted after a failure only: an exit 0 (shut down, box destroyed) stays down.
+		"KeepAlive":         map[string]any{"SuccessfulExit": false},
 		"ProcessType":       "Interactive",
 		"StandardOutPath":   home + "/Library/Logs/Orquester/orq-agent.log",
 		"StandardErrorPath": home + "/Library/Logs/Orquester/orq-agent.err.log",

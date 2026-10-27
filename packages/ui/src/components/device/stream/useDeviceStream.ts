@@ -42,6 +42,11 @@ export interface DeviceStreamUrls {
   readonly mjpeg?: string;
   /** Android: screenshot URL for browsers that can't decode H.264. */
   readonly screenshot?: string;
+  /**
+   * Sent with every fetched URL (iOS video, Android screenshots): the transport's auth headers.
+   * The WebSocket URLs carry their own token.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export interface UseDeviceStreamOptions {
@@ -148,6 +153,9 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     };
   }, [needsCaps]);
 
+  // A new credential is a new connection; an equal one (a re-render's fresh object) is not.
+  const authKey = JSON.stringify(urls.headers ?? {});
+
   const transport: DeviceTransport | null =
     (fallback?.video === urls.video ? fallback.transport : null) ??
     options.transport ??
@@ -157,6 +165,8 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     if (!enabled || !canvas || !transport) return;
     let open = true;
     const deps = latest.current.deps;
+    const headers = latest.current.urls.headers;
+    const auth = headers ? { headers } : {};
     const onWarning = (message: string) => {
       if (open) latest.current.onWarning?.(message);
     };
@@ -192,7 +202,7 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     if (platform === "android") {
       if (transport === "screenshots") {
         if (urls.screenshot) {
-          next.video = new ScreenshotPollSession({ ...common, url: urls.screenshot, onVideoSize: onAndroidSize });
+          next.video = new ScreenshotPollSession({ ...common, ...auth, url: urls.screenshot, onVideoSize: onAndroidSize });
         } else {
           setState("error");
           setError(new DeviceStreamError("unsupported", "This browser can't decode the device's video stream.", true));
@@ -212,8 +222,8 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     } else {
       next.video =
         transport === "serve-sim-h264"
-          ? new ServeSimH264Session({ ...common, url: serveSimStreamUrl(urls.video, "stream.avcc") })
-          : new ServeSimMjpegSession({ ...common, url: urls.mjpeg ?? serveSimStreamUrl(urls.video, "stream.mjpeg") });
+          ? new ServeSimH264Session({ ...common, ...auth, url: serveSimStreamUrl(urls.video, "stream.avcc") })
+          : new ServeSimMjpegSession({ ...common, ...auth, url: urls.mjpeg ?? serveSimStreamUrl(urls.video, "stream.mjpeg") });
       if (urls.input) {
         next.sim = new ServeSimInputSocket({
           url: urls.input,
@@ -247,7 +257,7 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
       setState("closed");
       setInputReady(false);
     };
-  }, [enabled, canvas, transport, platform, urls.video, urls.input, urls.mjpeg, urls.screenshot]);
+  }, [enabled, canvas, transport, platform, urls.video, urls.input, urls.mjpeg, urls.screenshot, authKey]);
 
   const sendTouch = useCallback((phase: TouchPhase, x: number, y: number) => {
     channels.current.throttle?.push(phase, x, y);

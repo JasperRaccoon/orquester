@@ -91,7 +91,7 @@ import {
   BROWSER_FRAME_TYPE_JPEG,
   DESKTOP_CHANNEL,
   DESKTOP_WS_PREFIXES,
-  DEVICE_QUERY_TOKEN_ROUTES,
+  deviceQueryTokenAllowed,
   DEVICE_WS_PREFIXES,
   MAX_INITIAL_COMMAND,
   SECRET_REQUEST_EVENT_TYPE,
@@ -2136,6 +2136,11 @@ export function createServer(
       }
     }
   });
+  // @fastify/websocket first, before any child context exists (see the WebSocket routes below):
+  // Fastify copies a hook added later onto every existing child, so its preClose hook ran once per
+  // child — `wss.close(cb)` each time, a `close` listener each (MaxListenersExceededWarning at
+  // shutdown past ten). `websocket-plugin.test.ts` holds it to one close.
+  void app.register(websocketPlugin);
 
   const throttle = new LoginThrottle();
   // Password guesses (login, verify) have their own count: a valid bearer's success on the same
@@ -2263,9 +2268,9 @@ export function createServer(
     // above. Only a live session or API token
     // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    // Devices: the hub proxy's media and a kept screenshot load from `<img>`/`<video>` the same way
-    // (matched route patterns only, never a prefix).
-    const queryTokenRoute = url === "/api/fs/download" || (routePath !== undefined && DEVICE_QUERY_TOKEN_ROUTES.includes(routePath));
+    // Devices: a kept screenshot and a lease thumbnail load from `<img>` the same way (GET/HEAD of
+    // matched route patterns only, never a prefix; the hub proxy and every POST need the header).
+    const queryTokenRoute = url === "/api/fs/download" || deviceQueryTokenAllowed(request.method, routePath);
     const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
@@ -5126,15 +5131,13 @@ export function createServer(
   // ~6-connections-per-origin cap (which otherwise froze input/resize once more
   // than ~4 terminals were open).
   //
-  // @fastify/websocket is registered ONCE, here at the root, for all three WS
-  // routes. Each registration hooks its own listener on the Node server's
-  // `upgrade` event, so registering it per route scope (as this once did) made
-  // every WebSocket handshake fire N listeners: the first assigned the socket
-  // and routed, the other N-1 threw ERR_HTTP_SOCKET_ASSIGNED — two spurious
-  // "websocket upgrade failed" warnings per connection, burying real ones. The
-  // routes stay in encapsulated child contexts only so they are declared after
-  // the plugin has loaded (avvio loads plugins in registration order).
-  void app.register(websocketPlugin);
+  // @fastify/websocket is registered ONCE, at the root right after the app is made (above), for
+  // every WS route. Each registration hooks its own listener on the Node server's `upgrade` event,
+  // so registering it per route scope (as this once did) made every WebSocket handshake fire N
+  // listeners: the first assigned the socket and routed, the other N-1 threw
+  // ERR_HTTP_SOCKET_ASSIGNED — two spurious "websocket upgrade failed" warnings per connection,
+  // burying real ones. The routes stay in encapsulated child contexts only so they are declared
+  // after the plugin has loaded (avvio loads plugins in registration order).
   // boxes: config-change, stats and "Run in box" routes on both transports; the box connect
   // WebSocket and orq-agent downloads (box-authenticated) on the remote one, after the WebSocket
   // plugin; the agent host's token and sync routes on the unix socket only.

@@ -280,7 +280,8 @@ const api = {
   connection: { id: "harness" },
   transportKind: scene === "no-transport" ? "unix" : "http",
   deviceSocketUrl: (path: string) => (scene === "no-transport" ? null : `ws://harness.invalid${path}?token=t`),
-  deviceMediaUrl: (path: string) => (scene === "no-transport" ? null : `${location.origin}${path}?token=t`),
+  deviceHttpRequest: (path: string) => (scene === "no-transport" ? null : { url: `${location.origin}${path}`, headers: { Authorization: "Bearer t" } }),
+  deviceImageUrl: (path: string) => (scene === "no-transport" ? null : `${location.origin}${path}?token=t`),
   devicesState: async () => ({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings, setupJobs: [] }),
   deviceLeaseActions: async (leaseId: string) => ({ leaseId, actions: actions.filter((entry) => entry.leaseId === leaseId) }),
   setDeviceController: async (leaseId: string, controller: "agent" | "user") => {

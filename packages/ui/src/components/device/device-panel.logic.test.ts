@@ -9,7 +9,7 @@ import {
   bootSteps,
   controllerLabel,
   controllerPill,
-  deviceFoldUrl,
+  deviceFoldRequest,
   deviceKeyOf,
   devicePanelView,
   deviceStreamUrls,
@@ -191,25 +191,28 @@ describe("controller handoff rules", () => {
 describe("stream URLs", () => {
   const api = {
     deviceSocketUrl: (path: string) => `ws://d.test${path}?token=t`,
-    deviceMediaUrl: (path: string) => `http://d.test${path}?token=t`
+    deviceHttpRequest: (path: string) => ({ url: `http://d.test${path}`, headers: { Authorization: "Bearer t" } })
   };
-  it("Android: the serve-emu socket and screenshot route with the device", () => {
+  const auth = { Authorization: "Bearer t" };
+  it("Android: the serve-emu socket (token in the URL) and the fetched screenshot route (bearer header) with the device", () => {
     assert.deepEqual(deviceStreamUrls(api, lease()), {
       video: "ws://d.test/ws-device/local/vendor/serve-emu/ws?token=t&device=emulator-5554",
-      screenshot: "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?token=t&device=emulator-5554"
+      screenshot: "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?device=emulator-5554",
+      headers: auth
     });
-    assert.equal(deviceFoldUrl(api, lease()), "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/fold?token=t&device=emulator-5554");
+    assert.deepEqual(deviceFoldRequest(api, lease()), { url: "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/fold?device=emulator-5554", headers: auth });
   });
   it("iOS: serve-sim stream.avcc and the input socket", () => {
     const ios = lease({ platform: "ios", hostId: "box:b1", stream: { kind: "serve-sim", deviceParam: "UD ID" } });
     assert.deepEqual(deviceStreamUrls(api, ios), {
-      video: "http://d.test/api/devices/hosts/box%3Ab1/hub/vendor/serve-sim/helper/UD%20ID/stream.avcc?token=t",
-      input: "ws://d.test/ws-device/box%3Ab1/vendor/serve-sim/helper/ws?token=t&device=UD+ID"
+      video: "http://d.test/api/devices/hosts/box%3Ab1/hub/vendor/serve-sim/helper/UD%20ID/stream.avcc",
+      input: "ws://d.test/ws-device/box%3Ab1/vendor/serve-sim/helper/ws?token=t&device=UD+ID",
+      headers: auth
     });
-    assert.equal(deviceFoldUrl(api, ios), null);
+    assert.equal(deviceFoldRequest(api, ios), null);
   });
   it("null off HTTP or without a stream", () => {
-    const off = { deviceSocketUrl: () => null, deviceMediaUrl: () => null };
+    const off = { deviceSocketUrl: () => null, deviceHttpRequest: () => null };
     assert.equal(deviceStreamUrls(off, lease()), null);
     assert.equal(deviceStreamUrls(api, lease({ stream: undefined })), null);
   });

@@ -53,6 +53,24 @@ test("settings: a missing file reads the defaults; an update is written atomical
   });
 });
 
+test("settings: vphone host entries this build does not read survive an update, unless the patch names them", async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, "devices.json");
+    await writeFile(file, JSON.stringify({ version: 1, settings: { research: { vphoneHosts: { box1: { enabled: true }, "odd key": { enabled: true }, box2: "later-shape" } } } }));
+    const store = new DeviceSettingsStore({ file, logger: quiet });
+    assert.deepEqual(Object.keys((await store.load()).research.vphoneHosts), ["box1"]);
+    await store.update({ ios: { enabled: true } });
+    let written = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(written.settings.research.vphoneHosts["odd key"], { enabled: true });
+    assert.equal(written.settings.research.vphoneHosts.box2, "later-shape");
+    // A patch that sets box2 replaces the kept value.
+    await store.update({ research: { vphoneHosts: { box2: { enabled: true } } } });
+    written = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(written.settings.research.vphoneHosts.box2.enabled, true);
+    assert.deepEqual(written.settings.research.vphoneHosts["odd key"], { enabled: true });
+  });
+});
+
 test("settings: a corrupt file is moved aside and the store refuses updates until restart", async () => {
   await withDir(async (dir) => {
     const file = join(dir, "devices.json");

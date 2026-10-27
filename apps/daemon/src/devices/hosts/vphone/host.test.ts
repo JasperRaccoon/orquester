@@ -46,7 +46,7 @@ function lease(id: string, deviceId: string | null): StoredDeviceLease {
   };
 }
 
-async function setup(options: FakeMacOptions = {}, settings: Partial<DevicesVphoneHostSettings> = {}, leases: StoredDeviceLease[] = [], existingDir?: string) {
+async function setup(options: FakeMacOptions = {}, settings: Partial<DevicesVphoneHostSettings> = {}, leases: StoredDeviceLease[] = [], existingDir?: string, probe = true) {
   const dir = existingDir ?? (await mkdtemp(join(tmpdir(), "orq-vphone-")));
   dirs.push(dir);
   const mac = new FakeMacLink({ ...options, vphoned: { rpc: RPC, unhealthyFirst: 2, ...options.vphoned } });
@@ -65,9 +65,19 @@ async function setup(options: FakeMacOptions = {}, settings: Partial<DevicesVpho
     timing: { healthIntervalMs: 5, healthTimeoutMs: 10_000, launchTimeoutMs: 10_000 }
   });
   cleanups.push(() => host.dispose(), () => mac.close());
-  await host.start();
-  await host.refreshReadiness();
+  if (probe) {
+    await host.start();
+    await host.refreshReadiness();
+  }
   return { host, mac, logs, dir };
+}
+
+async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("timed out waiting");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 const cliCalls = (mac: FakeMacLink, from = 0) => mac.execs.slice(from).filter((exec) => exec.command === VPHONE_CLI_PATH).map((exec) => exec.args.join(" "));
@@ -165,6 +175,56 @@ test("agent actions and installs go to the VM's vphoned; release stops and delet
   assert.equal(mac.execs.length, count);
 });
 
+test("a release before the first probe finds vphone-cli first and deletes the clone", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-vphone-"));
+  await mkdir(join(dir, "state"), { recursive: true });
+  const record = join(dir, "state", "orq-lease7.json");
+  await writeFile(record, JSON.stringify({ name: "orq-lease7", leaseId: "lease7", boxPort: 1, token: "t".repeat(64), procId: "vphone-orq-lease7", osVersion: "iOS 26.1" }));
+  const { host, mac } = await setup({}, {}, [], dir, false);
+  await host.release(lease("lease7", "orq-lease7"), { shutdown: true });
+  assert.deepEqual(cliCalls(mac).filter((call) => / orq-lease7/.test(call)), ["vm stop orq-lease7", "vm delete orq-lease7 --force"]);
+  await assert.rejects(stat(record), "deleted: the record goes");
+});
+
+test("released while the Mac is offline, or a delete that failed: a tombstone (no token) until the next check deletes the clone", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-vphone-"));
+  await mkdir(join(dir, "state"), { recursive: true });
+  const record = join(dir, "state", "orq-lease8.json");
+  await writeFile(record, JSON.stringify({ name: "orq-lease8", leaseId: "lease8", boxPort: 1, token: "t".repeat(64), procId: "vphone-orq-lease8", osVersion: "iOS 26.1" }));
+  let deleteWorks = false;
+  const { host, mac, logs } = await setup(
+    {
+      answer: (command, args) => {
+        if (command !== VPHONE_CLI_PATH) return undefined;
+        if (args.join(" ") === "vm delete orq-lease8 --force" && !deleteWorks) return { exitCode: 1, stderr: "error: machine is busy\n" };
+        if (args.join(" ") === "vm info orq-lease8 --json") return deleteWorks ? { exitCode: 1, stderr: "not found\n" } : { stdout: JSON.stringify({ name: "orq-lease8" }) };
+        return undefined;
+      }
+    },
+    {},
+    [],
+    dir
+  );
+  mac.setConnected(false);
+  const before = mac.execs.length;
+  await host.release(lease("lease8", "orq-lease8"), { shutdown: true });
+  assert.equal(mac.execs.length, before, "offline: nothing runs on the Mac");
+  assert.deepEqual(JSON.parse(await readFile(record, "utf8")), { name: "orq-lease8", procId: "vphone-orq-lease8", released: true });
+  assert.equal((await stat(record)).mode & 0o777, 0o600);
+
+  // Back online: the next check tries; the delete fails while the machine is still there, so the tombstone stays.
+  mac.setConnected(true);
+  await host.refreshReadiness();
+  await until(() => logs.some((line) => line.includes("deleting research iPhone orq-lease8 failed; retrying on the next check")));
+  await until(async () => JSON.parse(await readFile(record, "utf8")).released === true);
+  assert.deepEqual(JSON.parse(await readFile(record, "utf8")), { name: "orq-lease8", procId: "vphone-orq-lease8", released: true });
+
+  // The next check deletes it, and the tombstone goes.
+  deleteWorks = true;
+  await host.refreshReadiness();
+  await until(async () => !(await stat(record).then(() => true, () => false)));
+});
+
 test("a failed clone: it is deleted, the error is readable and carries no token", async () => {
   const { host, mac } = await setup({
     answer: (command, args) => (command === VPHONE_CLI_PATH && args[1] === "create" ? { exitCode: 1, stderr: "error: template 3f2a91c0d4e7 is busy\n" } : undefined)
@@ -228,6 +288,26 @@ test("the template setup job runs vphone-cli through sudo -n and turns stage ban
   assert.ok(progress.some((step) => step.logLine === "downloading 10%"));
   assert.equal(progress.at(-1)?.state, "done");
   assert.equal(host.readiness().ready, true);
+});
+
+test("the template job refuses an IPSW source vphone-cli could read as an option, before anything runs", async () => {
+  const { host, mac } = await setup(
+    {
+      sys: { canElevate: true },
+      answer: (command, args) => {
+        if (command === VPHONE_CLI_PATH && args.join(" ") === "vm template list --json") return { stdout: JSON.stringify({ templates: [] }) };
+        if (command === VPHONE_CLI_PATH && args.join(" ") === "vm list --json") return { stdout: "[]" };
+        return undefined;
+      }
+    },
+    { iphoneSource: "--help", cloudosSource: "https://example.test/cloudOS.ipsw" }
+  );
+  assert.equal(host.readiness().checks.find((check) => check.id === "template")?.fixActionId, "vphone-template");
+  await assert.rejects(
+    host.ensureReady(new AbortController().signal, () => undefined, ["vphone-template"]),
+    (error) => isDeviceError(error) && /absolute path on the Mac or an https:\/\/ URL/.test(error.message)
+  );
+  assert.ok(!mac.execs.some((exec) => exec.command === "/usr/bin/sudo"));
 });
 
 test("after a restart the host reattaches to a running VM from its record", async () => {

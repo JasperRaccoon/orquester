@@ -166,7 +166,12 @@ export class DeviceSettingsStore extends TolerantJsonStore {
    */
   async update(patch: DevicesSettingsPatch): Promise<DevicesSettings> {
     if (this.readOnlyReason !== null) throw new Error(`Device settings cannot be saved: ${this.readOnlyReason}.`);
-    this.file_ = { ...this.file_, settings: mergeDevicesSettings(this.file_.settings, patch) };
+    // A machine the patch names (set or forgotten) is no longer one of the entries kept verbatim.
+    const dropped = this.file_.droppedVphoneHosts;
+    const named = patch.research?.vphoneHosts;
+    const keep = dropped && named ? Object.fromEntries(Object.entries(dropped).filter(([key]) => !Object.hasOwn(named, key))) : dropped;
+    const { droppedVphoneHosts: _previous, ...file } = this.file_;
+    this.file_ = { ...file, settings: mergeDevicesSettings(this.file_.settings, patch), ...(keep && Object.keys(keep).length > 0 ? { droppedVphoneHosts: keep } : {}) };
     await this.queueWrite(() => serializeDevicesSettingsFile(this.file_));
     return this.settings();
   }

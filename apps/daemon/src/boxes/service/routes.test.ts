@@ -475,6 +475,10 @@ test("your machines: add, flag, new command, remove; a project placed on one kee
     method === "agent.ensurePaths" ? Promise.reject(new Error("permission denied")) : request(method as never, params as never, options as never)) as typeof connection.request;
   h.hub.connect(id, connection);
   await until(h.service, id, () => h.service.registry.get(id)?.state === "ready");
+  // Flagged for device simulators: the device service's, never offered to a chat or a project.
+  const flaggedOffers = (await h.inject({ method: "GET", url: "/api/boxes/providers/byo/offers?kind=linux" })).json();
+  assert.deepEqual(flaggedOffers.sizes, []);
+  await h.inject({ method: "PATCH", url: `/api/boxes/byo/${id}`, payload: { deviceHost: false } });
   const kinds = (await h.inject({ method: "GET", url: "/api/boxes/kinds" })).json() as BoxKindsResponse;
   assert.deepEqual(kinds.kinds.find((entry) => entry.kind === "linux")?.providers, ["byo"]);
   const offers = (await h.inject({ method: "GET", url: "/api/boxes/providers/byo/offers?kind=linux" })).json();

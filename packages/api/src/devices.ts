@@ -18,7 +18,7 @@ import {
   DEVICES_SETTINGS_LIMITS,
   DEVICES_VPHONE_HOST_KEY,
   DEVICES_VPHONE_HOSTS_MAX,
-  DEVICES_VPHONE_SOURCE_MAX,
+  isVphoneSource,
   type DevicesSettings,
   type DevicesSettingsPatch,
   type DevicesVphoneHostSettings
@@ -710,15 +710,22 @@ const LEASES = "/api/devices/leases";
 export const DEVICE_HUB_ROUTE_PATTERN = `${HOSTS}/:hostId/hub/*`;
 /** A kept screenshot's route. */
 export const DEVICE_SCREENSHOT_ROUTE_PATTERN = `${LEASES}/:leaseId/screenshots/:screenshotId`;
-/**
- * Routes that also accept the bearer as `?token=` (an `<img>`, a media element or a fetch the
- * browser starts cannot send a header); the daemon redacts it from logs and never forwards it.
- */
 /** A lease's downscaled JPEG thumbnail (the fleet view's ~1 fps cards). */
 export const DEVICE_THUMBNAIL_ROUTE_PATTERN = `${LEASES}/:leaseId/thumbnail`;
 /** Thumbnail widths (`?w=`): default, and the allowed range (px; never upscaled). */
 export const DEVICE_THUMBNAIL_WIDTH = { default: 320, min: 64, max: 720 } as const;
-export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
+/**
+ * The image routes that also accept the bearer as `?token=` on GET/HEAD (an `<img>` cannot send a
+ * header); the daemon redacts it from logs and never forwards it. Everything the app fetches
+ * itself (hub streams, screenshots, fold, input) sends `Authorization`; WebSockets check their own
+ * `?token=` after the upgrade (`ws-routes.ts`).
+ */
+export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
+
+/** Whether a request may authenticate with `?token=`: a GET/HEAD of a {@link DEVICE_QUERY_TOKEN_ROUTES} route. */
+export function deviceQueryTokenAllowed(method: string, routePath: string | undefined): boolean {
+  return (method === "GET" || method === "HEAD") && routePath !== undefined && DEVICE_QUERY_TOKEN_ROUTES.includes(routePath);
+}
 
 /**
  * Every devices route, on both transports (bearer on HTTP). Hub streams need HTTP: the desktop
@@ -1153,8 +1160,8 @@ function parseResearchPatch(value: unknown): DeviceParseResult<NonNullable<Devic
           if (typeof fieldValue !== "boolean") return { ok: false, message: `\`${path}.enabled\` must be true or false.` };
           parsed.enabled = fieldValue;
         } else if (name === "iphoneSource" || name === "cloudosSource") {
-          const ok = fieldValue === null || (typeof fieldValue === "string" && fieldValue.trim().length > 0 && fieldValue.length <= DEVICES_VPHONE_SOURCE_MAX && !/[\u0000-\u001f]/.test(fieldValue));
-          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be a path or URL, or null.` };
+          const ok = fieldValue === null || (typeof fieldValue === "string" && isVphoneSource(fieldValue.trim()));
+          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be an absolute path on the Mac or an https:// URL, or null.` };
           parsed[name] = fieldValue === null ? null : (fieldValue as string).trim();
         } else {
           return { ok: false, message: `Unknown setting \`${path}.${name}\`.` };

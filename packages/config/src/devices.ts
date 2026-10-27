@@ -135,6 +135,22 @@ export const DEVICES_VPHONE_HOSTS_MAX = 64;
 /** Longest IPSW source (path or URL). */
 export const DEVICES_VPHONE_SOURCE_MAX = 2000;
 
+/**
+ * An IPSW source vphone-cli may be given (it reaches `sudo -n vphone-cli vm create … --iphone-source
+ * <it>`): an absolute path on the Mac or an `https://` URL — never something that starts with `-`
+ * (read as an option) or holds control characters.
+ */
+export function isVphoneSource(value: string): boolean {
+  if (value.length === 0 || value.length > DEVICES_VPHONE_SOURCE_MAX || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  if (value.startsWith("/")) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname !== "" && value.toLowerCase().startsWith("https://");
+  } catch {
+    return false;
+  }
+}
+
 export interface DevicesSettings {
   android: DevicesAndroidSettings;
   ios: DevicesIosSettings;
@@ -284,7 +300,7 @@ const poolSchema = z
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
-const vphoneSource = z.string().trim().min(1).max(DEVICES_VPHONE_SOURCE_MAX).nullable().catch(null);
+const vphoneSource = z.string().trim().refine(isVphoneSource).nullable().catch(null);
 const vphoneHostSchema = z
   .object({
     enabled: bool(false),
@@ -293,15 +309,26 @@ const vphoneHostSchema = z
   })
   .passthrough();
 
-// Entries keyed by something that is not a box id, or that are not objects (a patch's `null`), are dropped.
+/**
+ * `research.vphoneHosts` split: the entries this build reads (a box-id key, an object, within
+ * {@link DEVICES_VPHONE_HOSTS_MAX}) and the rest, as found (a file's are written back verbatim:
+ * {@link DevicesSettingsFile.droppedVphoneHosts}).
+ */
+function splitVphoneHosts(value: unknown): { kept: [string, Record<string, unknown>][]; dropped: Record<string, unknown> } {
+  const kept: [string, Record<string, unknown>][] = [];
+  const dropped: Record<string, unknown> = {};
+  if (!isPlainObject(value)) return { kept, dropped };
+  for (const [key, entry] of Object.entries(value)) {
+    if (kept.length < DEVICES_VPHONE_HOSTS_MAX && DEVICES_VPHONE_HOST_KEY.test(key) && isPlainObject(entry)) kept.push([key, entry]);
+    else dropped[key] = entry;
+  }
+  return { kept, dropped };
+}
+
+// Entries keyed by something that is not a box id, that are not objects (a patch's `null`), or past the max are not read.
 const vphoneHostsSchema = z.unknown().transform((value) => {
   const out: Record<string, DevicesVphoneHostSettings> = {};
-  if (!isPlainObject(value)) return out;
-  for (const [key, entry] of Object.entries(value)) {
-    if (Object.keys(out).length >= DEVICES_VPHONE_HOSTS_MAX) break;
-    if (!DEVICES_VPHONE_HOST_KEY.test(key) || !isPlainObject(entry)) continue;
-    out[key] = vphoneHostSchema.parse(entry) as DevicesVphoneHostSettings;
-  }
+  for (const [key, entry] of splitVphoneHosts(value).kept) out[key] = vphoneHostSchema.parse(entry) as DevicesVphoneHostSettings;
   return out;
 });
 
@@ -361,6 +388,8 @@ export interface DevicesSettingsFile {
   settings: DevicesSettings;
   /** Every top-level key but `version` and `settings`, kept verbatim. */
   extra: Record<string, unknown>;
+  /** `settings.research.vphoneHosts` entries this build does not read, kept verbatim for the rewrite. */
+  droppedVphoneHosts?: Record<string, unknown>;
 }
 
 export function createDefaultDevicesSettingsFile(): DevicesSettingsFile {
@@ -381,11 +410,27 @@ export function parseDevicesSettingsFile(raw: unknown): DevicesSettingsFile {
     throw new Error(`Not a version-${DEVICES_SETTINGS_VERSION} devices settings file (version ${JSON.stringify(record.version)})`);
   }
   const extra = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "version" && key !== "settings"));
-  return { version: DEVICES_SETTINGS_VERSION, settings: readDevicesSettings(record.settings), extra };
+  const research = isPlainRecord(record.settings) && isPlainRecord(record.settings.research) ? record.settings.research : null;
+  const dropped = splitVphoneHosts(research?.vphoneHosts).dropped;
+  return {
+    version: DEVICES_SETTINGS_VERSION,
+    settings: readDevicesSettings(record.settings),
+    extra,
+    ...(Object.keys(dropped).length > 0 ? { droppedVphoneHosts: dropped } : {})
+  };
 }
 
 export function serializeDevicesSettingsFile(file: DevicesSettingsFile): Record<string, unknown> {
-  return { ...file.extra, version: DEVICES_SETTINGS_VERSION, settings: file.settings };
+  const dropped = file.droppedVphoneHosts ?? {};
+  const settings =
+    Object.keys(dropped).length === 0
+      ? file.settings
+      : { ...file.settings, research: { ...file.settings.research, vphoneHosts: { ...file.settings.research.vphoneHosts, ...omitKeys(dropped, file.settings.research.vphoneHosts) } } };
+  return { ...file.extra, version: DEVICES_SETTINGS_VERSION, settings };
+}
+
+function omitKeys(record: Record<string, unknown>, keys: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !Object.hasOwn(keys, key)));
 }
 
 /** A partial update of the settings: each section's fields optional, `pool.minWarmHosts` too. */

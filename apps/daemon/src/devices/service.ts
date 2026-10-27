@@ -1201,7 +1201,8 @@ export class DeviceService implements DeviceToolsPort {
     const enabledPlatforms = platforms.filter((entry) => entry.enabled).map((entry) => entry.platform);
     return {
       hosts,
-      profiles: DEVICE_PROFILES.filter((profile) => enabledPlatforms.includes(profile.platform)),
+      // The profiles Settings → Devices offers (the panel's picker shows the same ones).
+      profiles: enabledPlatforms.flatMap((platform) => this.offeredProfiles(platform)),
       platforms,
       mine: this.leaseSummaries({ threadId }),
       busy: this.leases
@@ -1216,16 +1217,20 @@ export class DeviceService implements DeviceToolsPort {
     if (!this.provisioner(platform)) return { rental: null };
     const placement = choosePlacement({ platform, hosts: this.placementHosts(), settings: this.settings(), canProvision: true });
     if (placement.kind === "disabled" || placement.kind === "setup" || placement.kind === "not-ready") return { rental: null };
-    return { rental: this.pool.planRental(platform, threadId, DEFAULT_DEVICE_PROFILE[platform]) };
+    const offered = this.offeredProfiles(platform);
+    const profile = offered.some((entry) => entry.id === DEFAULT_DEVICE_PROFILE[platform]) ? DEFAULT_DEVICE_PROFILE[platform] : (offered[0]?.id ?? DEFAULT_DEVICE_PROFILE[platform]);
+    return { rental: this.pool.planRental(platform, threadId, profile) };
   }
 
   async toolOpen(threadId: string, input: DeviceToolOpenInput, signal: AbortSignal): Promise<DeviceToolOpenResult> {
     this.assertAgentsAllowed();
+    // A platform that is off answers as such (`beginOpen`); otherwise only an offered profile opens.
+    const profile = this.settings()[input.platform].enabled ? this.agentProfile(input.platform, input.profile) : input.profile;
     const opening = await this.beginOpen(
       {
         threadId,
         platform: input.platform,
-        ...(input.profile !== undefined ? { profile: input.profile } : {}),
+        ...(profile !== undefined ? { profile } : {}),
         ...(input.app !== undefined ? { app: input.app } : {}),
         ...(input.fresh !== undefined ? { fresh: input.fresh } : {}),
         openedBy: "agent",
@@ -1342,6 +1347,32 @@ export class DeviceService implements DeviceToolsPort {
     const rel = relative(root, real);
     if (rel.startsWith("..") || isAbsolute(rel)) throw new DeviceError("INVALID_ARGUMENT", "`path` must be inside this chat's project.");
     return real;
+  }
+
+  /** The profiles Settings → Devices offers on `platform` (`settings.<platform>.profiles`), in catalog order. */
+  private offeredProfiles(platform: DevicePlatform): DeviceProfile[] {
+    const offered = this.settings()[platform].profiles;
+    return DEVICE_PROFILES.filter((profile) => profile.platform === platform && offered.includes(profile.id));
+  }
+
+  /**
+   * The profile an agent's `open_device` opens: the one it named, when Settings → Devices offers it
+   * (as the panel's picker); none named, the platform's default when offered, else the first offered.
+   */
+  private agentProfile(platform: DevicePlatform, id: string | undefined): string {
+    const offered = this.offeredProfiles(platform);
+    const label = DEVICE_PLATFORM_LABELS[platform];
+    const how = `The owner can enable more in Settings → Devices → ${label} → Profiles.`;
+    if (offered.length === 0) throw new DeviceError("PLATFORM_NOT_READY", `No ${label} profile is enabled in Settings → Devices. ${how}`);
+    if (id === undefined) return offered.some((profile) => profile.id === DEFAULT_DEVICE_PROFILE[platform]) ? DEFAULT_DEVICE_PROFILE[platform] : offered[0]!.id;
+    const profile = this.resolveProfile(platform, id);
+    if (!offered.some((entry) => entry.id === profile.id)) {
+      throw new DeviceError(
+        "INVALID_ARGUMENT",
+        `${profile.label} (${profile.id}) is not enabled in Settings → Devices. Enabled ${label} profiles: ${offered.map((entry) => entry.id).join(", ")}. ${how}`
+      );
+    }
+    return profile.id;
   }
 
   private resolveProfile(platform: DevicePlatform, id: string | undefined): DeviceProfile {

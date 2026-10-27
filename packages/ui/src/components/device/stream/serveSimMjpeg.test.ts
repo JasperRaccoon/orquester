@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { ServeSimMjpegSession } from "./serveSimMjpeg.ts";
 import { fakeCanvas, fakeImageBitmaps, fakeStreamingFetch, settle, testDeps } from "./testing/fakes.ts";
 
-const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.mjpeg?token=t";
+const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.mjpeg";
 const enc = new TextEncoder();
 const part = (n: number) => {
   const body = Uint8Array.from([0xff, 0xd8, n, 0xff, 0xd9]);
@@ -30,6 +30,7 @@ function setup(contentType = "multipart/x-mixed-replace; boundary=frame") {
   const painted: number[] = [];
   const session = new ServeSimMjpegSession({
     url: URL,
+    headers: { Authorization: "Bearer t" },
     canvas,
     deps: testDeps({ fetch: http.fetch, createImageBitmap: bitmaps.createImageBitmap }),
     onFrame: () => painted.push(canvas.width - 400)
@@ -42,6 +43,8 @@ describe("ServeSimMjpegSession", () => {
   it("paints each part and reports live with the mjpeg decoder", async () => {
     const t = setup();
     await settle();
+    assert.equal(t.request().url, URL);
+    assert.equal(new Headers(t.request().init?.headers).get("authorization"), "Bearer t", "the bearer rides as a header");
     t.request().push(part(1));
     await settle();
     t.request().push(part(2));

@@ -10,7 +10,7 @@ import { hashSecret } from "../hub/auth.ts";
 import { byoAdapter } from "../providers/byo.ts";
 import { localBoxConnection } from "../testing.ts";
 import { BoxError } from "./errors.ts";
-import { PAIRING_TTL_MS, PairingThrottle } from "./byo.ts";
+import { PAIRING_TTL_MS, PairingThrottle, pairingThrottleKey } from "./byo.ts";
 import { testBoxService, testClock } from "./testing.ts";
 
 async function tempDir(t: test.TestContext): Promise<string> {
@@ -115,6 +115,31 @@ test("an expired, unknown or malformed code answers the same 404; failures are t
   assert.ok(other.ok);
 });
 
+test("pairing throttle: IPv6 by /64, IPv4-mapped as IPv4; bounded and pruned in window order", () => {
+  assert.equal(pairingThrottleKey("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+  assert.equal(pairingThrottleKey("2001:0db8:0001:0002:ffff:ffff:ffff:ffff"), "2001:db8:1:2::/64");
+  assert.equal(pairingThrottleKey("2001:db8::1"), "2001:db8:0:0::/64");
+  assert.equal(pairingThrottleKey("fe80::1%eth0"), "fe80:0:0:0::/64");
+  assert.equal(pairingThrottleKey("::ffff:192.0.2.1"), "192.0.2.1");
+  assert.equal(pairingThrottleKey("192.0.2.1"), "192.0.2.1");
+
+  let now = 0;
+  const throttle = new PairingThrottle(() => now);
+  // One /64 is one client: rotating the interface id does not reset its count.
+  for (let i = 0; i < PairingThrottle.MAX_FAILURES; i++) throttle.recordFailure(`2001:db8:1:2::${(i + 1).toString(16)}`);
+  assert.ok(throttle.retryAfterMs("2001:db8:1:2:dead:beef:0:1") > 0);
+  assert.equal(throttle.retryAfterMs("2001:db8:1:3::1"), 0);
+
+  // Bounded: a flood of new clients evicts the oldest windows, never grows past the cap.
+  for (let i = 0; i < PairingThrottle.MAX_CLIENTS + 500; i++) throttle.recordFailure(`10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+  assert.equal(throttle.size, PairingThrottle.MAX_CLIENTS);
+  assert.equal(throttle.retryAfterMs("2001:db8:1:2::1"), 0, "the oldest window was evicted");
+  // Ended windows leave on the next check.
+  now += PairingThrottle.WINDOW_MS + 1;
+  throttle.recordFailure("198.51.100.7");
+  assert.equal(throttle.size, 1);
+});
+
 test("with the plugin off a valid code is refused (404) and stays unspent", async (t) => {
   const { service, setEnabled } = await setup(t);
   const pairing = await service.byo.add({ kind: "linux", name: "Box" });
@@ -175,6 +200,19 @@ test("a chat borrows an idle machine (provider byo) and destroying it gives it b
   assert.equal(back.deadlineAt, null);
   assert.ok(connection.calls.some((call) => call.method === "proc.list"), "the chat's background jobs are looked for");
   assert.equal(service.registry.get(id)?.destroyedAt ?? null, null);
+});
+
+test("a machine used for device simulators is never lent to a chat or a project", async (t) => {
+  const { service, hub } = await setup(t);
+  const pairing = await service.byo.add({ kind: "linux", name: "Box" });
+  const id = pairing.box.id;
+  hub.connect(id, localBoxConnection({ boxId: id }));
+  await until(service, id, () => service.registry.get(id)?.state === "ready");
+  await service.byo.update(id, { deviceHost: true });
+  await assert.rejects(service.createTemporaryBox({ threadId: "chat-1", kind: "linux", provider: "byo", lifetimeMinutes: 10, purposeNote: "x" }));
+  await assert.rejects(service.byo.leaseProject(id, { workspace: "w", name: "p" } as never), (error: BoxError) => error.code === "BOX_IN_USE");
+  await assert.rejects(service.byo.leaseTemporary(id, { threadId: "chat-1", purposeNote: "x", lifetimeMinutes: 10 }), (error: BoxError) => error.code === "BOX_IN_USE");
+  assert.equal(service.registry.get(id)?.purpose, "machine");
 });
 
 test("a chat's lease past its time limit is released by the reconciler", async (t) => {

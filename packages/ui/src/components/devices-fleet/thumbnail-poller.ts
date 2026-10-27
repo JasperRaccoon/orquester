@@ -34,7 +34,7 @@ export interface ThumbnailSnapshot {
 }
 
 export interface ThumbnailDeps {
-  fetch: (url: string, init: { method: "GET"; cache: "no-store"; signal: AbortSignal }) => Promise<Pick<Response, "ok" | "status" | "blob">>;
+  fetch: (url: string, init: { method: "GET"; cache: "no-store"; headers: Record<string, string>; signal: AbortSignal }) => Promise<Pick<Response, "ok" | "status" | "blob">>;
   setTimeout: (callback: () => void, ms: number) => unknown;
   clearTimeout: (handle: unknown) => void;
   now: () => number;
@@ -69,10 +69,17 @@ export function thumbnailErrorText(status: number | null): string {
   return `The host answered ${status}`;
 }
 
+function sameHeaders(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => b[key] === a[key]);
+}
+
 export const OFF_SNAPSHOT: ThumbnailSnapshot = Object.freeze({ status: "off", src: null, error: null, frameAt: null });
 
 export class ThumbnailPoller {
   private url: string | null = null;
+  /** Sent with every request: the transport's auth headers (never a `?token=` in the URL). */
+  private headers: Readonly<Record<string, string>> = {};
   private onScreen = false;
   private pageVisible = true;
   private disposed = false;
@@ -96,11 +103,12 @@ export class ThumbnailPoller {
     return !this.disposed && this.url !== null && this.onScreen && this.pageVisible;
   }
 
-  /** A different URL is a different device: its frames start over. */
-  setUrl(url: string | null): void {
-    if (this.disposed || url === this.url) return;
+  /** A different URL is a different device (and new headers a new credential): its frames start over. */
+  setUrl(url: string | null, headers: Readonly<Record<string, string>> = {}): void {
+    if (this.disposed || (url === this.url && sameHeaders(headers, this.headers))) return;
     this.stop();
     this.url = url;
+    this.headers = { ...headers };
     this.failures = 0;
     this.lastStartAt = null;
     this.revokeSrc(null);
@@ -176,7 +184,7 @@ export class ThumbnailPoller {
     this.lastStartAt = this.deps.now();
     let failedStatus: number | null | undefined;
     try {
-      const response = await this.deps.fetch(url, { method: "GET", cache: "no-store", signal: request.signal });
+      const response = await this.deps.fetch(url, { method: "GET", cache: "no-store", headers: { ...this.headers }, signal: request.signal });
       if (this.request !== request) return;
       if (!response.ok) {
         failedStatus = response.status;

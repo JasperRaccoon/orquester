@@ -367,6 +367,14 @@ function serverFieldFromBody(body: unknown): string | null {
   return null;
 }
 
+/** A device request the caller sends with `fetch` (see {@link ApiClient.deviceHttpRequest}). */
+export interface DeviceHttpRequest {
+  /** Absolute URL, without credentials. */
+  url: string;
+  /** The transport's auth headers (`Authorization`), `{}` without a credential. */
+  headers: Record<string, string>;
+}
+
 /**
  * ApiClient is the "server manager": it owns the active {@link UiConnection}
  * and its {@link Transporter}, and exposes typed daemon endpoints to the
@@ -1028,22 +1036,31 @@ export class ApiClient {
   }
 
   /**
-   * Authenticated http(s):// URL for a device media path an `<img>` or a fetch the browser starts
-   * loads (`deviceRoutes.hub(...)` MJPEG, `deviceRoutes.screenshot(...)`), or null off HTTP. The
-   * daemon accepts `?token=` on exactly those routes and never forwards it.
+   * Authenticated http(s):// URL for a device image an `<img>` loads (`deviceRoutes.screenshot(...)`,
+   * a kept screenshot), or null off HTTP. The bearer rides as ?token= because an `<img>` cannot send
+   * a header; the daemon accepts `?token=` on exactly those GET image routes and never forwards it.
+   * Anything this app fetches itself goes through {@link deviceHttpRequest} instead.
    */
-  /** A lease's downscaled JPEG thumbnail (`deviceRoutes.thumbnail`; GET, `no-store`) as an authenticated media URL, or null off HTTP. */
-  deviceThumbnailUrl(leaseId: string, width?: number): string | null {
-    return this.deviceMediaUrl(deviceRoutes.thumbnail(leaseId, width));
-  }
-
-  deviceMediaUrl(path: string): string | null {
+  deviceImageUrl(path: string): string | null {
     if (this.transportKind !== "http") {
       return null;
     }
     const base = this.connection.endpoint.replace(/\/$/, "");
     const token = this.connection.password ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.connection.password)}` : "";
     return `${base}${path}${token}`;
+  }
+
+  /**
+   * A device path this app fetches itself (hub streams, screenshots, thumbnails, the fold route):
+   * the absolute http(s):// URL — no token in it — and the transport's auth headers to send with
+   * it. Null off HTTP (the desktop app's unix socket shows no live devices).
+   */
+  deviceHttpRequest(path: string): DeviceHttpRequest | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    return { url: `${base}${path}`, headers: this.transporter.authHeaders?.() ?? {} };
   }
 
   // boxes: --- Ephemeral AI VMs (`boxRoutes`; answers are validated by `lib/boxes/store.ts`) ---

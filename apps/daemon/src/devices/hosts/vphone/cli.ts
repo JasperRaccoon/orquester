@@ -16,6 +16,9 @@
  * When only `vphone-launchpad-cli` is installed, every command runs as `vphone-launchpad-cli exec …`.
  */
 
+import { isVphoneSource } from "@orquester/config";
+
+import { DeviceError } from "../../errors.ts";
 import type { DeviceCommandResult } from "../../host.ts";
 import type { BoxConnection } from "../../../boxes/contracts.ts";
 
@@ -273,8 +276,15 @@ export class VphoneCli {
     return this.run(["host", "preflight"], { ...(signal ? { signal } : {}), timeoutMs: 60_000 });
   }
 
-  /** Build a template (and the machine `name` cloned from it) from two IPSWs. Needs root on the Mac. */
+  /**
+   * Build a template (and the machine `name` cloned from it) from two IPSWs. Needs root on the Mac.
+   * Each source must be an absolute path or an https:// URL ({@link isVphoneSource}; the settings
+   * check it too): nothing that `sudo -n vphone-cli` could read as an option.
+   */
   createTemplateArgs(name: string, iphoneSource: string, cloudosSource: string): string[] {
+    for (const [label, source] of [["iPhone", iphoneSource], ["cloudOS", cloudosSource]] as const) {
+      if (!isVphoneSource(source)) throw new DeviceError("INVALID_ARGUMENT", `The ${label} IPSW source must be an absolute path on the Mac or an https:// URL.`);
+    }
     return ["vm", "create", name, "--iphone-source", iphoneSource, "--cloudos-source", cloudosSource, "--skip-first-boot"];
   }
 }

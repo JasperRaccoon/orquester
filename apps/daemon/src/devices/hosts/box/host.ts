@@ -64,6 +64,7 @@ import { boxAgentDeviceConfigPath, removeAgentDeviceConfig, writeAgentDeviceConf
 import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
 import {
   AGENT_DEVICE_START_SCRIPT,
+  archiveListingProblem,
   HUB_PROC_ID,
   INSTALL_TOOLS_SCRIPT,
   IOS_HARDWARE_STREAM_FLAGS,
@@ -1052,8 +1053,10 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   /**
-   * Stream a build into the box's uploads dir. A `.zip`/`.ipa` or tarball is unpacked and the
-   * `.app` inside is what resolves (what `simctl install` takes); otherwise the file itself.
+   * Stream a build into the box's uploads dir (a fresh random directory). A `.zip`/`.ipa` or
+   * tarball is listed first and refused unless every entry stays inside ({@link archiveListingProblem}:
+   * no absolute path, no `..`, no link out), then unpacked into a new `unpacked` directory there,
+   * and the `.app` inside is what resolves (what `simctl install` takes); otherwise the file itself.
    */
   async uploadFile(stream: Readable, name: string, signal?: AbortSignal): Promise<{ path: string }> {
     const link = this.requireLink();
@@ -1062,17 +1065,24 @@ export class BoxDeviceHost implements DeviceHost {
     const file = posix.join(dir, safe);
     await link.writeFile(file, stream, { mkdirs: true, mode: 0o600 });
     signal?.throwIfAborted();
-    const unpack = /\.(zip|ipa)$/i.test(safe)
-      ? ["ditto", "-x", "-k", file, posix.join(dir, "unpacked")]
-      : /\.(tar|tar\.gz|tgz)$/i.test(safe)
-        ? ["/bin/sh", "-c", 'mkdir -p "$2" && tar -xf "$1" -C "$2"', "untar", file, posix.join(dir, "unpacked")]
-        : null;
-    if (!unpack) return { path: file };
-    const unpacked = await execRemote(link, { command: unpack[0]!, args: unpack.slice(1) }, { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs * 2 });
+    const kind = /\.(zip|ipa)$/i.test(safe) ? "zip" : /\.(tar|tar\.gz|tgz)$/i.test(safe) ? "tar" : null;
+    if (!kind) return { path: file };
+    const options = { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs * 2 };
+    const names = await execRemote(link, { command: "bsdtar", args: ["-tf", file] }, options);
+    const verbose = names.exitCode === 0 ? await execRemote(link, { command: "bsdtar", args: ["-tvf", file] }, options) : names;
+    if (names.exitCode !== 0 || verbose.exitCode !== 0) throw new DeviceError("INVALID_ARGUMENT", `${safe} could not be read: ${outputTail(verbose.stderr)}`);
+    const problem = archiveListingProblem(names.stdout, verbose.stdout);
+    if (problem) throw new DeviceError("INVALID_ARGUMENT", `${safe} was refused: ${problem}.`);
+    const target = posix.join(dir, "unpacked");
+    // `mkdir` without `-p`: the directory is new, nothing in it the archive could write through.
+    const made = await execRemote(link, { command: "mkdir", args: ["-m", "700", target] }, options);
+    if (made.exitCode !== 0) throw new DeviceError("UNAVAILABLE", `${safe} could not be unpacked: ${outputTail(made.stderr)}`);
+    const unpack = kind === "zip" ? { command: "ditto", args: ["-x", "-k", file, target] } : { command: "tar", args: ["-xf", file, "-C", target] };
+    const unpacked = await execRemote(link, unpack, options);
     if (unpacked.exitCode !== 0) throw new DeviceError("INVALID_ARGUMENT", `${safe} could not be unpacked: ${outputTail(unpacked.stderr)}`);
-    const found = await execRemote(link, { command: "find", args: [posix.join(dir, "unpacked"), "-maxdepth", "3", "-type", "d", "-name", "*.app", "-print"] }, { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs });
+    const found = await execRemote(link, { command: "find", args: [target, "-maxdepth", "3", "-type", "d", "-name", "*.app", "-print"] }, { ...(signal ? { signal } : {}), timeoutMs: this.timing.commandMs });
     const app = found.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort((a, b) => a.length - b.length)[0];
-    return { path: app ?? posix.join(dir, "unpacked") };
+    return { path: app ?? target };
   }
 
   async destroy(): Promise<void> {

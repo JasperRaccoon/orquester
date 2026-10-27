@@ -10,6 +10,11 @@ import {
   DEFAULT_DEVICE_PROFILE,
   DEVICE_PROFILES,
   DEVICE_TOOL_REFERENCE_KEY,
+  DEVICE_HUB_ROUTE_PATTERN,
+  DEVICE_QUERY_TOKEN_ROUTES,
+  DEVICE_SCREENSHOT_ROUTE_PATTERN,
+  DEVICE_THUMBNAIL_ROUTE_PATTERN,
+  deviceQueryTokenAllowed,
   DEVICES_PLUGIN_ID,
   boxDeviceHostId,
   boxIdOfDeviceHost,
@@ -72,6 +77,22 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.userAction("l/1"), "/api/devices/leases/l%2F1/user-action");
   assert.equal(deviceRoutes.thumbnail("l/1"), "/api/devices/leases/l%2F1/thumbnail?w=320");
   assert.equal(deviceRoutes.thumbnail("l1", 200.4), "/api/devices/leases/l1/thumbnail?w=200");
+});
+
+test("?token= is accepted on GET/HEAD of the image routes only: never the hub proxy, a POST or another route", () => {
+  for (const method of ["GET", "HEAD"]) {
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_SCREENSHOT_ROUTE_PATTERN), true);
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_THUMBNAIL_ROUTE_PATTERN), true);
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_HUB_ROUTE_PATTERN), false);
+  }
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_SCREENSHOT_ROUTE_PATTERN), false);
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_THUMBNAIL_ROUTE_PATTERN), false);
+    assert.equal(deviceQueryTokenAllowed(method, DEVICE_HUB_ROUTE_PATTERN), false);
+  }
+  assert.equal(deviceQueryTokenAllowed("GET", "/api/devices/leases/:leaseId/user-action"), false);
+  assert.equal(deviceQueryTokenAllowed("GET", undefined), false);
+  assert.deepEqual([...DEVICE_QUERY_TOKEN_ROUTES].sort(), [DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN].sort());
 });
 
 test("drain and cache-warm requests", () => {
@@ -166,6 +187,10 @@ test("settings patch: research.vphoneHosts takes per-machine entries field by fi
     { research: { vphoneHosts: { box1: { enabled: "yes" } } } },
     { research: { vphoneHosts: { box1: { iphoneSource: "" } } } },
     { research: { vphoneHosts: { box1: { iphoneSource: "a\nb" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "-rf" } } } },
+    { research: { vphoneHosts: { box1: { cloudosSource: "--help" } } } },
+    { research: { vphoneHosts: { box1: { cloudosSource: "http://example.test/cloudOS.ipsw" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "iPhone.ipsw" } } } },
     { research: { vphoneHosts: { box1: { force: true } } } },
     { research: { vphoneHosts: { box1: 1 } } }
   ]) {

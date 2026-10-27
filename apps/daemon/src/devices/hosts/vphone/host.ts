@@ -17,7 +17,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -127,6 +127,8 @@ export class VphoneDeviceHost implements DeviceHost {
   private unsubscribeLink: (() => void) | null = null;
   private watchedLink: VphoneBoxLink | null = null;
   private reattached = false;
+  private sweeping: Promise<void> | null = null;
+  private sweepAgain = false;
 
   constructor(private readonly deps: VphoneHostDeps) {
     this.id = vphoneHostId(deps.boxId);
@@ -207,6 +209,11 @@ export class VphoneDeviceHost implements DeviceHost {
     if (!this.reattached && probe.cli) {
       this.reattached = true;
       void this.reattach().catch((error) => this.deps.logger.warn(`[devices] reattaching research iPhones on ${this.deps.machineName} failed`, errorText(error)));
+    }
+    if (probe.cli) {
+      void this.sweepReleased(link, new VphoneCli(link, probe.cli)).catch((error) =>
+        this.deps.logger.warn(`[devices] deleting released research iPhones on ${this.deps.machineName} failed`, errorText(error))
+      );
     }
     return this.readiness();
   }
@@ -455,19 +462,29 @@ export class VphoneDeviceHost implements DeviceHost {
     }
   }
 
-  /** A lease's clone is always deleted (`shutdown` or not): research iPhones are made per lease. */
+  /**
+   * A lease's clone is always deleted (`shutdown` or not): research iPhones are made per lease.
+   * Its record stays (as a 0600 tombstone without the token) until `vm delete` worked or the
+   * machine is gone: released while the Mac is offline or before the first probe found vphone-cli,
+   * the clone is deleted on the next probe ({@link sweepReleased}) instead of being orphaned.
+   */
   async release(lease: StoredDeviceLease, _options?: { shutdown: boolean }): Promise<void> {
     const name = lease.deviceId ?? machineNameForLease(lease.id);
     if (!this.isOurs(name)) return;
     const link = this.deps.link();
     const record = this.machines.get(name) ?? (await this.loadRecord(name));
+    const fallback = { name, procId: record?.procId ?? `vphone-${name}`, forward: null, process: null };
     if (!link?.connected) {
-      // The Mac is offline: forget the machine here; the owner deletes it there (`vm delete orq-…`).
-      await this.forget(name, record);
+      await this.markReleased(fallback.name, fallback.procId, record);
       return;
     }
-    const cli = this.cliOrNull(link);
-    await this.teardown(link, cli, record ?? { name, procId: `vphone-${name}`, forward: null, process: null }, true);
+    let cli = this.cliOrNull(link);
+    if (!cli) {
+      // Not probed yet (a release right after a restart): find vphone-cli first.
+      await this.refreshReadiness().catch(() => undefined);
+      cli = this.cliOrNull(link);
+    }
+    await this.teardown(link, cli, record ?? fallback, true);
   }
 
   private async teardown(
@@ -483,11 +500,15 @@ export class VphoneDeviceHost implements DeviceHost {
     else await link.request("proc.signal", { procId: record.procId, signal: "SIGTERM" }).catch(() => undefined);
     await link.request("proc.release", { procId: record.procId }).catch(() => undefined);
     await record.forward?.close().catch(() => undefined);
+    let gone = !created;
     if (cli && created) {
       const deleted = await cli.delete(name).catch((error: unknown) => ({ exitCode: -1, stdout: "", stderr: errorText(error) }) satisfies DeviceCommandResult);
-      if (deleted.exitCode !== 0) this.deps.logger.warn(`[devices] deleting research iPhone ${name} failed`, lastLine(deleted));
+      // A failed delete of a machine that is not there (any more) is done too.
+      gone = deleted.exitCode === 0 || (await cli.machineInfo(name).catch(() => undefined)) === null;
+      if (!gone) this.deps.logger.warn(`[devices] deleting research iPhone ${name} failed; retrying on the next check`, lastLine(deleted));
     }
-    await this.forget(name, null);
+    if (gone) await this.forget(name, null);
+    else await this.markReleased(name, record.procId, null);
   }
 
   private async forget(name: string, record: Pick<VphoneMachineRecord, "forward"> | null): Promise<void> {
@@ -495,6 +516,57 @@ export class VphoneDeviceHost implements DeviceHost {
     this.machines.delete(name);
     await rm(this.recordPath(name), { force: true }).catch(() => undefined);
     this.emit();
+  }
+
+  /** Released, its clone not deleted yet: keep a tombstone (no token) for {@link sweepReleased}. */
+  private async markReleased(name: string, procId: string, record: Pick<VphoneMachineRecord, "forward"> | null): Promise<void> {
+    await record?.forward?.close().catch(() => undefined);
+    this.machines.delete(name);
+    try {
+      await mkdir(this.deps.stateDir, { recursive: true, mode: 0o700 });
+      // Written whole (a sweep may read it at any time).
+      const path = this.recordPath(name);
+      const temp = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temp, JSON.stringify({ name, procId, released: true }), { mode: 0o600 });
+      await rename(temp, path);
+    } catch (error) {
+      this.deps.logger.warn(`[devices] remembering released research iPhone ${name} failed`, errorText(error));
+    }
+    this.emit();
+  }
+
+  /**
+   * Delete the clones of released leases that could not be deleted then (offline, not probed, a
+   * failed delete). One sweep at a time; a probe during a sweep runs one more after it.
+   */
+  private sweepReleased(link: VphoneBoxLink, cli: VphoneCli): Promise<void> {
+    if (this.sweeping) {
+      this.sweepAgain = true;
+      return this.sweeping;
+    }
+    this.sweeping = (async () => {
+      do {
+        this.sweepAgain = false;
+        await this.sweepOnce(link, cli);
+      } while (this.sweepAgain && !this.disposed);
+    })().finally(() => {
+      this.sweeping = null;
+    });
+    return this.sweeping;
+  }
+
+  private async sweepOnce(link: VphoneBoxLink, cli: VphoneCli): Promise<void> {
+    const files = await readdir(this.deps.stateDir).catch(() => [] as string[]);
+    const leased = new Set(this.deps.activeLeases().map((lease) => lease.deviceId));
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const name = file.slice(0, -".json".length);
+      if (!this.isOurs(name) || this.machines.has(name) || leased.has(name)) continue;
+      const raw = asRecord(JSON.parse(await readFile(this.recordPath(name), "utf8").catch(() => "null")) as unknown);
+      if (raw?.released !== true) continue;
+      const procId = typeof raw.procId === "string" ? raw.procId : `vphone-${name}`;
+      await this.teardown(link, cli, { name, procId, forward: null, process: null }, true);
+    }
   }
 
   async run(): Promise<never> {

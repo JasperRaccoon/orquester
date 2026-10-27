@@ -98,7 +98,7 @@ describe("DevicePanel", () => {
       connection: { id: "test" },
       // The desktop app's unix socket: no streams.
       deviceSocketUrl: () => null,
-      deviceMediaUrl: () => null,
+      deviceHttpRequest: () => null,
       deviceLeaseActions: async (leaseId: string) => ({ leaseId, actions: [] }),
       openDeviceLease: async (req: { platform: string; profile?: string }) => {
         calls.push(`open ${req.platform} ${req.profile}`);

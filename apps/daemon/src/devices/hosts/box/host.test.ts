@@ -266,8 +266,24 @@ describe("BoxDeviceHost", () => {
     const { path } = await host.uploadFile(Readable.from([Buffer.from("zip")]), "../Demo App.zip");
     const written = box.log[0]!.replace(/^write /, "");
     assert.match(written, /^\/var\/lib\/orquester\/devices\/uploads\/[0-9a-f-]{36}\/Demo_App\.zip$/);
-    assert.ok(box.log[1]!.startsWith(`ditto -x -k ${written}`));
+    const dir = written.slice(0, written.lastIndexOf("/"));
+    assert.deepEqual(box.log.slice(1, 5), [`bsdtar -tf ${written}`, `bsdtar -tvf ${written}`, `mkdir -m 700 ${dir}/unpacked`, `ditto -x -k ${written} ${dir}/unpacked`]);
     assert.ok(path.endsWith("/unpacked/Payload/Demo.app"));
+  });
+
+  it("refuses an archive with an entry or a link outside it, before unpacking anything", async () => {
+    const host = makeHost();
+    await prepared(host);
+    box.archiveListing = {
+      names: "Payload/\nPayload/Demo.app/evil\n",
+      verbose: "drwxr-xr-x  0 runner staff 0 Oct 27 07:32 Payload/\nlrwxr-xr-x  0 runner staff 0 Oct 27 07:32 Payload/Demo.app/evil -> /Users/runner/.ssh\n"
+    };
+    box.log.length = 0;
+    await assert.rejects(host.uploadFile(Readable.from([Buffer.from("zip")]), "Evil.ipa"), (error) => isDeviceError(error) && error.code === "INVALID_ARGUMENT" && /points outside/.test(error.message));
+    assert.ok(!box.log.some((line) => line.startsWith("ditto") || line.startsWith("mkdir") || line.startsWith("tar")));
+    box.archiveListing = { names: "../../Library/LaunchAgents/x.plist\n", verbose: "-rw-r--r--  0 runner staff 3 Oct 27 07:32 ../../Library/LaunchAgents/x.plist\n" };
+    await assert.rejects(host.uploadFile(Readable.from([Buffer.from("tar")]), "Evil.tar.gz"), (error) => isDeviceError(error) && /points outside/.test(error.message));
+    assert.ok(!box.log.some((line) => line.startsWith("ditto") || line.startsWith("tar")));
   });
 
   it("runs simctl, refuses adb, and reports unreachable while the link is down", async () => {

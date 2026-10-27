@@ -26,12 +26,19 @@ export function parseAndroidFold(payload: unknown): AndroidFoldState | null {
   return { supported, posture: posture as AndroidFoldPosture | null, hingeAngle: hingeAngle as number | null };
 }
 
+/** Where the fold route is: its URL and the transport's auth headers (`ApiClient.deviceHttpRequest`). */
+export interface AndroidFoldTarget {
+  url: string;
+  headers?: Readonly<Record<string, string>>;
+}
+
 /** GET (no posture) or POST the fold route; rejects with the hub's message. */
-export async function requestAndroidFold(url: string, posture?: "closed" | "opened", signal?: AbortSignal): Promise<AndroidFoldState> {
-  const response = await fetch(url, {
+export async function requestAndroidFold(target: AndroidFoldTarget, posture?: "closed" | "opened", signal?: AbortSignal): Promise<AndroidFoldState> {
+  const response = await fetch(target.url, {
     method: posture ? "POST" : "GET",
     cache: "no-store",
-    ...(posture ? { headers: { "content-type": "application/json" }, body: JSON.stringify({ posture }) } : {}),
+    headers: { ...target.headers, ...(posture ? { "content-type": "application/json" } : {}) },
+    ...(posture ? { body: JSON.stringify({ posture }) } : {}),
     ...(signal ? { signal } : {})
   });
   const payload: unknown = await response.json().catch(() => null);

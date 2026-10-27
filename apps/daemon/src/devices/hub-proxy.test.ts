@@ -116,8 +116,12 @@ test("HTTP: allowlisted paths only, methods per path, the device must be leased 
   assert.equal(await status("POST", "vendor/serve-sim/exec-ws", "{}"), 404);
   assert.equal(await status("GET", "vendor/serve-emu/api/devices"), 404);
   assert.equal(await status("GET", "api/devices/../vendor/serve-sim/exec"), 404);
-  assert.equal(await status("POST", "vendor/serve-sim/grid/api/start", "{}"), 200);
-  assert.equal(await status("GET", "vendor/serve-sim/grid/api/start"), 405);
+  // serve-sim's grid start is the box host's own call; clients never reach it.
+  assert.equal(await status("POST", "vendor/serve-sim/grid/api/start", "{}"), 404);
+  // serve-sim screenshots the first booted simulator without `device`: it must name a leased one.
+  assert.equal(await status("POST", "vendor/serve-sim/api/screenshot", "{}"), 400);
+  assert.equal(await status("POST", "vendor/serve-sim/api/screenshot?device=OTHER-UDID", "{}"), 404);
+  assert.equal(await status("POST", `vendor/serve-sim/api/screenshot?device=${device}`, "{}"), 200);
   // serve-emu answers its screenshot to POST (the panel's poll fallback).
   assert.equal(await status("POST", `vendor/serve-emu/api/screenshot?device=${device}`, "{}"), 200);
   assert.equal(await status("POST", "vendor/serve-emu/api/screenshot", "{}"), 400);
@@ -173,7 +177,7 @@ test("HTTP: a hub without a token gets no authorization header; a POST body stre
 test("HTTP: the fold route — reading is watching, a POST is the user's input; the panel's URL (with ?token=) works", async (t) => {
   const { base, svc, lease, hub } = await setup(t);
   const device = lease.deviceId!;
-  // The panel's URL: `deviceMediaUrl` adds the bearer as ?token=, `deviceFoldUrl` the device.
+  // A stray `?token=` on the URL (the panel now sends the bearer as a header) never reaches the hub.
   const url = `${base}${deviceRoutes.hub("local", "vendor/serve-emu/api/fold")}?token=client-bearer&device=${device}`;
   const read = await fetch(url);
   assert.equal(read.status, 200);

@@ -218,7 +218,7 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
     })
   );
 
-  // The fleet view's card image (`?token=` accepted: `DEVICE_QUERY_TOKEN_ROUTES`).
+  // The fleet view's card image (`?token=` accepted on GET: `deviceQueryTokenAllowed`).
   app.get<Params<"leaseId"> & { Querystring: { w?: string } }>(
     DEVICE_THUMBNAIL_ROUTE_PATTERN,
     withService(async (service, request: FastifyRequest<Params<"leaseId"> & { Querystring: { w?: string } }>, reply) => {
@@ -270,8 +270,8 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
 
   if (mode !== "remote") return;
 
-  // The hub proxy (spec §8): the bearer hook already authenticated the request (a `?token=` too:
-  // `<img>` and media requests cannot send a header — `DEVICE_QUERY_TOKEN_ROUTES`); viewing a
+  // The hub proxy (spec §8): the bearer hook already authenticated the request (the
+  // `Authorization` header only: no `?token=` here, `deviceQueryTokenAllowed`); viewing a
   // host's hub needs a live lease on it. Its own scope hands every body through raw, so the proxy
   // can stream it upstream; the proxy owns the allowlists and header rewriting.
   void app.register(async (scope) => {

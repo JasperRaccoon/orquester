@@ -94,7 +94,7 @@ function fakeApi(state: DevicesStateResponse): FakeApi & ApiClient {
       fake.calls.push(`actions:${leaseId}`);
       return { leaseId, actions: fleetFixture(Date.now()).actions[leaseId] ?? [] };
     },
-    deviceMediaUrl: (path: string) => `http://daemon.test${path}${path.includes("?") ? "&" : "?"}token=t`,
+    deviceHttpRequest: (path: string) => ({ url: `http://daemon.test${path}`, headers: { Authorization: "Bearer t" } }),
     async setDeviceHostDraining(hostId: string, draining: boolean) {
       fake.calls.push(`drain:${hostId}:${draining}`);
       return { host: fake.state.hosts.find((host) => host.id === hostId) };
@@ -114,7 +114,7 @@ function fakeApi(state: DevicesStateResponse): FakeApi & ApiClient {
 function thumbnailDeps(fetched: string[]): ThumbnailDeps {
   return {
     fetch: async (url, init) => {
-      fetched.push(`${init.method} ${url}`);
+      fetched.push(`${init.method} ${url} ${init.headers.Authorization ?? "-"}`);
       return { ok: true, status: 200, blob: async () => new Blob([new Uint8Array(4)]) };
     },
     setTimeout: () => 0,
@@ -222,9 +222,11 @@ describe("the Devices fleet view", () => {
     }
     assert.ok(text.includes("no longer listed"), "a lease on an unknown host gets its own group");
 
-    // Each live card polls the daemon's downscaled thumbnail of its lease through the authenticated media URL (GET).
-    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/emulator-5554/thumbnail?w=320&token=t"));
-    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/A1B2-ios-1/thumbnail?w=320&token=t"));
+    // Each live card polls the daemon's downscaled thumbnail of its lease (GET); the bearer rides as
+    // a header, never as `?token=` in a fetched URL.
+    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/emulator-5554/thumbnail?w=320 Bearer t"));
+    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/A1B2-ios-1/thumbnail?w=320 Bearer t"));
+    assert.ok(!fetched.some((line) => line.includes("token=")));
     assert.ok(!fetched.some((line) => line.includes("A1B2-ios-3")), "a starting device has nothing to poll");
     const card = document.querySelector('[data-lease-id="emulator-5554"]')!;
     assert.equal(card.querySelector("img")?.getAttribute("src"), "blob:frame");

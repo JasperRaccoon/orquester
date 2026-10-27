@@ -66,17 +66,43 @@ test("argv: the pinned global flags come before the command; iOS pins a UDID, An
   assert.deepEqual(agentDeviceArgv({ prefix: [], configPath: "/c", session: "s", platform: "ios", deviceId: "UDID", command: "snapshot", args: ["-i"] }).slice(4, 8), ["--platform", "ios", "--udid", "UDID"]);
 });
 
-test("env: inherited AGENT_DEVICE_* variables are scrubbed; the host's additions win", () => {
+test("env: only the allowlisted daemon variables pass, AGENT_DEVICE_* never; the host's additions win", () => {
   const env = agentDeviceEnv(
-    { PATH: "/usr/bin", AGENT_DEVICE_DAEMON_BASE_URL: "http://evil", AGENT_DEVICE_DAEMON_AUTH_TOKEN: "t", AGENT_DEVICE_CONFIG: "/x", HOME: "/home/o" },
-    { ANDROID_ADB_SERVER_PORT: "15037", AGENT_DEVICE_HOME: "/state/ad-home" }
+    {
+      PATH: "/usr/bin",
+      AGENT_DEVICE_DAEMON_BASE_URL: "http://evil",
+      AGENT_DEVICE_DAEMON_AUTH_TOKEN: "t",
+      AGENT_DEVICE_CONFIG: "/x",
+      HOME: "/home/o",
+      LANG: "en_US.UTF-8",
+      TZ: "UTC",
+      ANTHROPIC_API_KEY: "sk-secret",
+      GITHUB_TOKEN: "ghp_secret",
+      ORQUESTER_PASSWORD: "pw",
+      NODE_OPTIONS: "--require /tmp/evil.js"
+    },
+    { ANDROID_ADB_SERVER_PORT: "15037", AGENT_DEVICE_HOME: "/state/ad-home", PATH: "/sdk/platform-tools:/usr/bin" }
   );
-  assert.equal(env.PATH, "/usr/bin");
+  assert.deepEqual(Object.keys(env).sort(), ["AGENT_DEVICE_HOME", "ANDROID_ADB_SERVER_PORT", "ELECTRON_RUN_AS_NODE", "HOME", "LANG", "NO_COLOR", "PATH", "TZ"]);
+  assert.equal(env.PATH, "/sdk/platform-tools:/usr/bin");
+  assert.equal(env.HOME, "/home/o");
   assert.equal(env.ANDROID_ADB_SERVER_PORT, "15037");
   assert.equal(env.AGENT_DEVICE_HOME, "/state/ad-home");
   assert.equal(env.AGENT_DEVICE_DAEMON_BASE_URL, undefined);
   assert.equal(env.AGENT_DEVICE_DAEMON_AUTH_TOKEN, undefined);
   assert.equal(env.AGENT_DEVICE_CONFIG, undefined);
+});
+
+test("batch (type/wait text through stdin): the step's data and the step's own refusal", () => {
+  const ok = { exitCode: 0, stdout: "", stderr: "", json: { success: true, data: { total: 1, executed: 1, results: [{ command: "wait", data: { waitedMs: 120, text: "Done" } }] } } };
+  assert.deepEqual(agentDeviceData(ok, "batch"), { waitedMs: 120, text: "Done" });
+  assert.deepEqual(agentDeviceData({ ...ok, json: { success: true, data: { results: [{ ok: true }] } } }, "batch"), { ok: true });
+  assert.deepEqual(agentDeviceData({ ...ok, json: { success: true, data: {} } }, "batch"), {});
+  // Observed (0.21.31): a one-step batch's refusal keeps the step's code; the prefix goes.
+  const failed = { exitCode: 1, stdout: "", stderr: "", json: { success: false, error: { code: "SESSION_NOT_FOUND", message: "Batch failed at step 1 (type): No active session. Run open first.", details: { step: 1, command: "type" } } } };
+  const error = catchError(() => agentDeviceData(failed, "batch"));
+  assert.equal(error.cliCode, "SESSION_NOT_FOUND");
+  assert.match(error.message, /^No active session/);
 });
 
 test("output: data from real answers; refusals become DeviceErrors that name the next call, without host paths", () => {

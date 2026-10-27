@@ -5,7 +5,7 @@ import Fastify from "fastify";
 
 import {
   DEFAULT_DEVICES_SETTINGS,
-  DEVICE_QUERY_TOKEN_ROUTES,
+  deviceQueryTokenAllowed,
   DEVICE_THUMBNAIL_ROUTE_PATTERN,
   deviceRoutes,
   type DeviceHostResponse,
@@ -255,7 +255,7 @@ test("thumbnail: a ready lease's screen as a no-store JPEG; width checked; unkno
     assert.equal(fetched.length, 1);
     assert.equal((await app.inject({ method: "GET", url: `${deviceRoutes.thumbnail(opened.lease.id).split("?")[0]}?w=5000` })).statusCode, 400);
     assert.equal((await app.inject({ method: "GET", url: deviceRoutes.thumbnail("nope") })).json().code, "DEVICE_NOT_LEASED");
-    assert.ok(DEVICE_QUERY_TOKEN_ROUTES.includes(DEVICE_THUMBNAIL_ROUTE_PATTERN));
+    assert.ok(deviceQueryTokenAllowed("GET", DEVICE_THUMBNAIL_ROUTE_PATTERN));
   } finally {
     await app.close();
     await t.cleanup();

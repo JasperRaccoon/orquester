@@ -246,14 +246,18 @@ export function takeOverToast(agentName: string): string {
 
 /** The part of `ApiClient` the URL builder needs. */
 export interface DeviceUrlApi {
+  /** A WebSocket URL (the bearer as `?token=`: browsers cannot set WebSocket headers). */
   deviceSocketUrl(path: string): string | null;
-  deviceMediaUrl(path: string): string | null;
+  /** A URL this app fetches itself, without credentials, and the transport's auth headers. */
+  deviceHttpRequest(path: string): { url: string; headers: Record<string, string> } | null;
 }
 
 export interface DeviceLeaseStreamUrls {
   video: string;
   input?: string;
   screenshot?: string;
+  /** The auth headers for the fetched URLs (`video` on iOS, `screenshot`); WebSockets carry their own token. */
+  headers: Record<string, string>;
 }
 
 function addQuery(url: string, params: Record<string, string>): string {
@@ -264,7 +268,8 @@ function addQuery(url: string, params: Record<string, string>): string {
 /**
  * Where a ready lease streams (spec §8): Android's serve-emu WebSocket (video + input) and its
  * screenshot route; iOS's serve-sim `stream.avcc` (MJPEG swapped in by the stream client) and its
- * input WebSocket. Null off HTTP or without a stream.
+ * input WebSocket. The fetched URLs carry no token: `headers` authenticates them. Null off HTTP or
+ * without a stream.
  */
 export function deviceStreamUrls(api: DeviceUrlApi, lease: Pick<DeviceLeaseSummary, "hostId" | "stream">): DeviceLeaseStreamUrls | null {
   const stream = lease.stream;
@@ -273,14 +278,14 @@ export function deviceStreamUrls(api: DeviceUrlApi, lease: Pick<DeviceLeaseSumma
   if (stream.kind === "serve-emu") {
     const socket = api.deviceSocketUrl(deviceRoutes.socket(lease.hostId, "vendor/serve-emu/ws"));
     if (!socket) return null;
-    const shot = api.deviceMediaUrl(deviceRoutes.hub(lease.hostId, "vendor/serve-emu/api/screenshot"));
-    return { video: addQuery(socket, device), ...(shot ? { screenshot: addQuery(shot, device) } : {}) };
+    const shot = api.deviceHttpRequest(deviceRoutes.hub(lease.hostId, "vendor/serve-emu/api/screenshot"));
+    return { video: addQuery(socket, device), ...(shot ? { screenshot: addQuery(shot.url, device) } : {}), headers: shot?.headers ?? {} };
   }
   if (stream.kind === "serve-sim") {
-    const video = api.deviceMediaUrl(deviceRoutes.hub(lease.hostId, `vendor/serve-sim/helper/${encodeURIComponent(stream.deviceParam)}/stream.avcc`));
+    const video = api.deviceHttpRequest(deviceRoutes.hub(lease.hostId, `vendor/serve-sim/helper/${encodeURIComponent(stream.deviceParam)}/stream.avcc`));
     const input = api.deviceSocketUrl(deviceRoutes.socket(lease.hostId, "vendor/serve-sim/helper/ws"));
     if (!video) return null;
-    return { video, ...(input ? { input: addQuery(input, device) } : {}) };
+    return { video: video.url, ...(input ? { input: addQuery(input, device) } : {}), headers: video.headers };
   }
   return null;
 }
@@ -310,11 +315,11 @@ export function rotateControl(platform: DevicePlatform, now: { inputReady: boole
   return now.live ? { enabled: true, reason: null } : { enabled: false, reason: "Waiting for video" };
 }
 
-/** The Android fold route (`vendor/serve-emu/api/fold`), or null off HTTP. */
-export function deviceFoldUrl(api: DeviceUrlApi, lease: Pick<DeviceLeaseSummary, "hostId" | "stream">): string | null {
+/** The Android fold route (`vendor/serve-emu/api/fold`) and its auth headers, or null off HTTP. */
+export function deviceFoldRequest(api: DeviceUrlApi, lease: Pick<DeviceLeaseSummary, "hostId" | "stream">): { url: string; headers: Record<string, string> } | null {
   if (lease.stream?.kind !== "serve-emu") return null;
-  const url = api.deviceMediaUrl(deviceRoutes.hub(lease.hostId, "vendor/serve-emu/api/fold"));
-  return url ? addQuery(url, { device: lease.stream.deviceParam }) : null;
+  const target = api.deviceHttpRequest(deviceRoutes.hub(lease.hostId, "vendor/serve-emu/api/fold"));
+  return target ? { url: addQuery(target.url, { device: lease.stream.deviceParam }), headers: target.headers } : null;
 }
 
 // ---------------------------------------------------------------------------
