@@ -682,3 +682,71 @@ test("a kind caps lifetimes only when every provider does (Blacksmith Linux next
   assert.equal(box.provider, "vultr");
   assert.ok(box.deadlineAt);
 });
+
+test("a device-host box runs create, connect, the device service's `devices` step and ready", async (t) => {
+  const base = await tempDir(t, "orq-box-devhost-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+
+  const prepared: string[] = [];
+  service.setDeviceHostPreparer(async ({ boxId, connection, log }) => {
+    assert.equal(connection.boxId, boxId);
+    log("Installing the device tools…");
+    prepared.push(boxId);
+  });
+  const box = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "  iPhone   simulators " });
+  assert.equal(box.purpose, "device-host");
+  assert.equal(box.threadId, null);
+  assert.equal(box.purposeNote, "iPhone simulators");
+  await service.settled();
+  const ready = service.registry.summary(box.id)!;
+  assert.equal(ready.state, "ready");
+  assert.deepEqual(
+    ready.setup.map((step) => [step.id, step.state]),
+    [
+      ["create", "done"],
+      ["connect", "done"],
+      ["devices", "done"],
+      ["ready", "done"]
+    ]
+  );
+  assert.deepEqual(prepared, [box.id]);
+  assert.equal(adapter.creates[0]!.prepare, "devices");
+  assert.match(await service.setupLog(box.id), /\[devices\] Installing the device tools…/);
+
+  // Destroyed with the device service's own reason line.
+  const destroyed = await service.destroyBox(box.id, "deleted", "Idle: no device for 20 min (Settings → Devices).");
+  assert.equal(destroyed.stateReason, "Idle: no device for 20 min (Settings → Devices).");
+});
+
+test("a device-host box whose `devices` step fails is torn down; without a preparer the step is skipped", async (t) => {
+  const base = await tempDir(t, "orq-box-devhost-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+
+  service.setDeviceHostPreparer(async () => {
+    throw new Error("Node.js 22 or newer is missing");
+  });
+  const failed = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "x" });
+  await service.settled();
+  const record = service.registry.get(failed.id)!;
+  assert.equal(record.state, "destroyed");
+  assert.equal(record.destroyedReason, "provisioning-failed");
+  assert.match(String(record.stateReason), /Node\.js 22 or newer is missing/);
+
+  service.setDeviceHostPreparer(null);
+  const skipped = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "x" });
+  await service.settled();
+  const summary = service.registry.summary(skipped.id)!;
+  assert.equal(summary.state, "ready");
+  assert.equal(summary.setup.find((step) => step.id === "devices")?.state, "skipped");
+  await assert.rejects(service.startDeviceHostBox({ kind: "linux", provider: "byo", size: "small", lifetimeMinutes: 60, purposeNote: "x" }), /own machines/);
+});
