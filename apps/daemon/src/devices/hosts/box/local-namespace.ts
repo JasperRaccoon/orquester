@@ -13,7 +13,7 @@ import { localBoxConnection, type LocalBoxConnection } from "../../../boxes/test
 
 export function isolatedDeviceBox(input: { root: string; boxId: string; provider: "blacksmith" | "byo" }): LocalBoxConnection {
   const root = realpathSync(input.root);
-  if (!/^[A-Za-z0-9_./-]+$/.test(root) || ![resolve(tmpdir()), "/var/lib/orquester/tmp"].some((base) => root.startsWith(`${base}${sep}`))) {
+  if (!/^[A-Za-z0-9_./-]+$/.test(root) || ![realpathSync(tmpdir()), "/var/lib/orquester/tmp"].some((base) => root.startsWith(`${base}${sep}`))) {
     throw new Error("A local device box needs a separate throwaway directory under the temporary root");
   }
   const isolatedEnv = {

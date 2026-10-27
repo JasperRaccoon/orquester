@@ -82,6 +82,42 @@ const revertCounts = (rows: readonly AgentChatTimelineRow[]): Record<string, num
     )
   );
 
+describe("simultaneous streamed row updates", () => {
+  const context = messageStreamingContext({
+    head: { session: { status: "running", activeTurnId: "t1" } }, roster: []
+  });
+  const inputFor = (entries: readonly TimelineEntry[]): TimelineRowsInput => baseInput(entries, {
+    latestTurn: { turnId: "t1", state: "running", startedAt: stamp(0), completedAt: null },
+    runningTurnId: "t1", isWorking: true, activeTurnStartedAt: stamp(0), messageStreaming: context
+  });
+  const source = (): ThreadItem[] => [
+    message("user", "go", { id: "prompt", createdAt: stamp(0) }),
+    message("reasoning", "first thought", { id: "first", turnId: "t1", streaming: true, createdAt: stamp(1) }),
+    message("assistant", "Checking", { id: "commentary", turnId: "t1", messageKind: "commentary", createdAt: stamp(2) }),
+    message("reasoning", "second thought", { id: "second", turnId: "t1", streaming: true, createdAt: stamp(3) }),
+    message("assistant", "The answer", { id: "answer", turnId: "t1", streaming: true, createdAt: stamp(4) })
+  ];
+
+  it("updates multiple reasoning groups and the assistant together without mutating their previous rows", () => {
+    const items = source();
+    const timeline = deriveTimelineEntriesFromItems(items);
+    const previous = deriveTimelineRowsWithState(inputFor(timeline.entries));
+    const grown = items.map((item) => item.kind === "message" && item.streaming ? { ...item, text: `${item.text} continued` } : item);
+    const nextInput = inputFor(deriveTimelineEntriesFromItems(grown, timeline).entries);
+    const next = deriveTimelineRowsWithState(nextInput, previous);
+    const text = (projection: TimelineRowsProjection) => {
+      const result: Record<string, string | undefined> = {};
+      for (const row of projection.rows) {
+        if (row.kind === "activity-group") for (const entry of row.entries) result[entry.id] = entry.detail;
+        if (row.kind === "message" && row.id === "answer") result.answer = row.message.text;
+      }
+      return result;
+    };
+    assert.deepEqual(text(next), { first: "first thought continued", second: "second thought continued", answer: "The answer continued" });
+    assert.deepEqual(text(previous), { first: "first thought", second: "second thought", answer: "The answer" });
+  });
+});
+
 describe("activity-group boundaries", () => {
 
   it("hoists an error out of the group rather than hiding it in a summary", () => {
@@ -328,15 +364,17 @@ describe("compaction and changed-files rows", () => {
     ];
     const turns = [turn("t1", "um1")];
 
+    const entries = entriesFrom(items);
     const without = deriveTimelineRowsWithState(
-      baseInput(entriesFrom(items), { turns, supportsConversationRollback: false })
-    ).rows;
-    assert.deepEqual(revertCounts(without), { um1: undefined });
+      baseInput(entries, { turns, supportsConversationRollback: false })
+    );
+    assert.deepEqual(revertCounts(without.rows), { um1: undefined });
 
     // No checkpoint anywhere — a non-git project — and the affordance is
     // there anyway: it is numbered by turn order, never by the checkpoints.
     const with_ = deriveTimelineRowsWithState(
-      baseInput(entriesFrom(items), { turns, supportsConversationRollback: true })
+      baseInput(entries, { turns, supportsConversationRollback: true }),
+      without
     ).rows;
     assert.deepEqual(revertCounts(with_), { um1: 0 });
   });

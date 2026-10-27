@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
@@ -406,6 +406,46 @@ async function rolloutsNewestFirst(sessionsDir: string): Promise<string[]> {
   return files.sort((a, b) => b.mtime - a.mtime).map((f) => f.full);
 }
 
+/** Read newest complete JSONL lines first, without loading a long rollout's history.
+ * Keep an unfinished line as bytes until its start is found, so chunk boundaries
+ * cannot split UTF-8 or turn part of a large JSON record into another record. */
+async function lastCodexRateLimits(path: string): Promise<unknown | null> {
+  const file = await open(path, "r");
+  try {
+    let position = (await file.stat()).size;
+    // Pieces of the line crossing a chunk boundary, newest piece first. Join
+    // once when complete; repeatedly prepending a giant line would be quadratic.
+    const pending: Buffer[] = [];
+    while (position > 0) {
+      const start = Math.max(0, position - 64 * 1024);
+      const buffer = Buffer.alloc(position - start);
+      let filled = 0;
+      while (filled < buffer.length) {
+        const { bytesRead } = await file.read(buffer, filled, buffer.length - filled, start + filled);
+        if (bytesRead === 0) break; // the rollout may have been truncated
+        filled += bytesRead;
+      }
+      position = start;
+      const chunk = buffer.subarray(0, filled);
+      const newline = chunk.indexOf(0x0a);
+      if (newline < 0 && position > 0) {
+        pending.push(chunk);
+        continue;
+      }
+      const split = position > 0 ? newline + 1 : 0;
+      const tail = chunk.subarray(split);
+      const complete = pending.length > 0 ? Buffer.concat([tail, ...pending.reverse()]) : tail;
+      const limits = findLastCodexTokenCount(complete.toString("utf8").split("\n"));
+      if (limits) return limits;
+      pending.length = 0;
+      if (split > 0) pending.push(chunk.subarray(0, split));
+    }
+    return null;
+  } finally {
+    await file.close();
+  }
+}
+
 /** Fallback usage reader: scrape the newest Codex rollout log for a token_count. */
 function createCodexLogScrapeSource(opts: {
   codexHome: string;
@@ -426,13 +466,12 @@ function createCodexLogScrapeSource(opts: {
     // newest-first and use the first that has a real reading.
     const files = await rolloutsNewestFirst(join(codexHome, "sessions"));
     for (const file of files.slice(0, 8)) {
-      let text: string;
+      let rateLimits: unknown;
       try {
-        text = await readFile(file, "utf8");
+        rateLimits = await lastCodexRateLimits(file);
       } catch {
         continue;
       }
-      const rateLimits = findLastCodexTokenCount(text.split("\n"));
       if (!rateLimits) continue;
       const agent = parseCodexUsage(rateLimits, opts.now());
       if (agent.available) return { ...agent, asOf: new Date(opts.now()).toISOString() };

@@ -84,7 +84,7 @@ type AppIconProps = { refId: LazyIconId; size: number | string; fallback: React.
 
 // A chunk that fails to load (offline, or gone after a deploy) leaves the
 // generic icon in place rather than taking the menu or tab down with it.
-const AppIcon = React.lazy(() =>
+const AppIcon = React.lazy<React.ComponentType<AppIconProps>>(() =>
   import("./app-icons").then(
     (module): { default: React.ComponentType<AppIconProps> } => ({ default: module.AppIcon }),
     (): { default: React.ComponentType<AppIconProps> } => ({ default: ({ fallback }: AppIconProps) => <>{fallback}</> })

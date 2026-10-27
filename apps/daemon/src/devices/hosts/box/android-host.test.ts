@@ -113,7 +113,7 @@ const signal = () => AbortSignal.timeout(60_000);
 
 describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
   it("prepares a box the device caches restored: nothing installed, hub and agent-device forwarded, the token in no argv or env", async () => {
-    const h = await harness();
+    const h = await harness({ memAvailableBytes: 4 * 1024 ** 3 });
     const host = h.make();
     const steps: string[] = [];
     await host.prepare(h.box.connection, signal(), (progress) => steps.push(`${progress.step}:${progress.state}`));
@@ -124,8 +124,7 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     assert.ok(steps.includes("tools:skipped") && steps.includes("android-sdk:skipped"));
     // Nothing installed: no npm, sdkmanager, avdmanager or apt.
     assert.ok(!h.box.execs.some((args) => /npm ci|npm install|sdkmanager|avdmanager|apt-get install/.test(args.join(" "))), h.box.execs.map((a) => a.join(" ")).join("\n"));
-    // 16 vCPU: 8 emulators (one per two vCPUs), never more than 16.
-    assert.equal(host.capacity().total <= 8 && host.capacity().total >= 1, true);
+    assert.deepEqual(host.capacity(), { used: 0, total: 0 });
     // The hub, through its forward, wants its token.
     const origin = host.hubOrigin()!;
     const token = host.hubToken()!;
@@ -142,6 +141,11 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     }
     const hubLog = await readFile(join(h.box.root, "logs", "hub.log"), "utf8");
     assert.ok(hubLog.includes("token=<redacted>") && !hubLog.includes(token));
+    await assert.rejects(
+      host.boot({ leaseId: "no-memory", profile, fresh: true }, signal()),
+      { code: "DEVICE_CAPACITY", status: 503 }
+    );
+    assert.deepEqual(await h.box.emulatorArgs(), [], "a refused boot never starts an emulator");
     await host.teardown();
   });
 
@@ -149,6 +153,7 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     const h = await harness({ cacheGpu: "swangle_indirect" });
     const host = h.make();
     await host.prepare(h.box.connection, signal());
+    assert.deepEqual(host.capacity(), { used: 0, total: 8 }, "the fake box's 16 CPUs and 64 GiB provide eight slots");
     const [a, b] = await Promise.all(
       ["lease-a", "lease-b"].map(async (id) => {
         h.leases.push(lease(id));

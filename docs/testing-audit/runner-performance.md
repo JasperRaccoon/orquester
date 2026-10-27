@@ -1,6 +1,6 @@
 # Runner performance review
 
-Decision: **reject the ephemeral Node V8 compile-cache candidate**. The 32-file ABBA experiment found no material improvement, so no runner, worker-count, package gate or production change was introduced.
+Decision: **reject both the ephemeral Node V8 compile-cache candidate and the six-worker default**. The controlled samples found no material improvement, so no runner, worker-count, package gate or production change was introduced.
 
 ## Matching reference profile
 
@@ -36,7 +36,7 @@ A has no `NODE_COMPILE_CACHE`; each B starts with a different empty temporary di
 
 Uncached mean: **12.420074s**. Cached mean: **12.561607s**. Candidate difference: **+0.141533s / +1.14%** (slower), within the observed two-run variation. This supports no performance gain claim and does not establish a meaningful slowdown either. Each cached run generated 1,381 files, about 21.2 MB, and both directories were verified removed. RSS is the maximum individual process, not aggregate worker memory.
 
-The candidate would add cache-directory ownership, cancellation handling and cleanup infrastructure without a measured benefit. It was therefore rejected. No full-suite or hosted-CI speedup is inferred from the sample; no matching full-suite cache experiment was warranted. More concurrency and worker/module pooling remain unproven and were not introduced.
+The candidate would add cache-directory ownership, cancellation handling and cleanup infrastructure without a measured benefit. It was therefore rejected. No full-suite or hosted-CI speedup is inferred from the sample; no matching full-suite cache experiment was warranted. Higher concurrency was subsequently measured in the bounded follow-up below; worker/module pooling was not introduced.
 
 ## Exact commands and artifacts
 
@@ -61,3 +61,30 @@ TSX_DISABLE_CACHE=1 node --import tsx --import ./test/svg-loader.mjs --test --te
 Artifacts under `/tmp/orquester-test-audit/`: `compile-cache-experiment.log`, `compile-cache-sample-results.json`, `compile-cache-frozen-hashes.json`, and `compile-cache-{a1,b1,b2,a2}-{apps-daemon,packages-ui}.{log,time}`. These are diagnostic measurements, not required-gate changes.
 
 Node’s exact-runtime documentation describes compiled-code caching, first-load cost and cleanup; it also notes coverage-precision limitations. No coverage flags are used by these package commands. [Node 24.22.1 module compile cache](https://r2.nodejs.org/docs/latest-v24.x/api/module.html#module-compile-cache).
+
+## Controlled worker-allocation follow-up
+
+Decision: **retain the portable four-worker default**. A later exclusive-slot ABBA experiment compared 4/6/6/4 workers on the same final working source at HEAD `b659841b45d59f6b5ddefda63c778c54a855672f`. This is a separate workload revision from the earlier cache experiment: all 32 sample paths still exist, but final cleanup leaves **390 daemon + 218 UI = 608 tests**. Every variant passed all 608 with zero failures, cancellations, skips or retries.
+
+The fixed workload uses exactly the two package command preambles and file lists printed above, changing only `--test-concurrency=4` to `--test-concurrency=6` for B1/B2. The JSON follow-up records all eight exact command arrays, working directories, per-package wall times and summary counts, plus every sample SHA-256. Packages execute sequentially; Node retains isolated file processes. `TSX_DISABLE_CACHE=1` stays set; no V8 compile cache is enabled. `ORQ_*`, test-concurrency/timeout environment overrides, `NODE_OPTIONS` and cache/coverage environment overrides are removed identically for every variant. The sample contains no listening sockets, fixed-port setup, sleep calls or per-case timeout budgets.
+
+A manifest of **3744 tracked source/package/lock files** was frozen and verified unchanged before and after each variant. Its canonical SHA-256 is `0606c1ab9ba2f67ce865077ec6023d1441f6cd6763179f3a9a685bda0dab8f0a`. No production source or runner configuration changed during the experiment.
+
+| Variant | Workers | Total wall (s) | Child user CPU (s) | Child system CPU (s) | Max single-process RSS (KiB) | Daemon wall (s) | UI wall (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A1 | 4 | 12.323442 | 28.539927 | 3.819329 | 291332 | 6.267710 | 6.053790 |
+| B1 | 6 | 12.223208 | 29.415858 | 3.883053 | 291276 | 6.208774 | 6.012171 |
+| B2 | 6 | 11.956792 | 29.030091 | 3.692616 | 301196 | 6.102037 | 5.852803 |
+| A2 | 4 | 12.054105 | 28.521484 | 3.811843 | 289812 | 6.052681 | 5.999074 |
+
+Four-worker mean wall: **12.188773s**. Six-worker mean wall: **12.090000s**. The sample difference is **0.098774s / 0.81% faster**, smaller than the four-worker 0.269336s and six-worker 0.266416s two-run spreads. This does not establish a material speedup. Mean child CPU (user + system) increased from **32.346292s to 33.010809s**, an increase of **0.664517s / 2.05%**. RSS measures the largest individual process, not total concurrent-worker memory.
+
+The sample favors short assertion bodies and shared imports. It cannot establish six-worker reliability or benefit for the full browser/process/network workload. With no material measured gain, the candidate was rejected without changing the four-worker default or required gates. No full-suite or hosted-CI improvement is claimed.
+
+Executed once, using the existing package commands through a temporary diagnostic driver:
+
+```sh
+python3 /tmp/orquester-test-audit/run-worker-sample.py
+```
+
+Artifacts under `/tmp/orquester-test-audit/`: `worker-experiment.log`, `worker-sample-manifest.json`, `worker-sample-results.json`, and `worker-{a1,b1,b2,a2}-{apps-daemon,packages-ui}.{log,time}`. The temporary driver is diagnostic only; no repository command or test infrastructure was added.

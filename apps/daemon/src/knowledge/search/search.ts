@@ -523,11 +523,12 @@ export class KnowledgeSearch {
     const narrow = query.collection ? this.resolveVisible([query.collection], visibility, true) : null;
     const scope = this.scope(visibility, narrow);
     const after = query.cursor ? decodeCursor(query.cursor) : null;
-    const metas = this.store
+    const matching = this.store
       .listMeta()
-      .filter((meta) => entryInScope(meta, scope) && entryMatchesFilter(meta, filter))
-      .sort(newestFirst)
-      .filter((meta) => !after || newestFirst(meta, after) > 0);
+      .filter((meta) => entryInScope(meta, scope) && entryMatchesFilter(meta, filter));
+    // The cursor is independent of ordering: discard earlier pages before sorting
+    // the remaining entries, and skip the no-op cursor pass on the first page.
+    const metas = (after ? matching.filter((meta) => newestFirst(meta, after) > 0) : matching).sort(newestFirst);
     const page = metas.slice(0, limit);
     const last = page[page.length - 1];
     return {

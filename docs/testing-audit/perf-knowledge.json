@@ -1,0 +1,195 @@
+{
+  "sourceCommit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+  "comparisonCommit": "610d3c53",
+  "scope": "Exact three new/modifiedee5c3249 test identities and two locally rewritten surviving owners that consolidate overlapping paging. Prior unrelated semantic cleanup remains intact.",
+  "status": "IMPLEMENTED; root validation/performance pending",
+  "entries": [
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "line": 149,
+      "name": "semantic candidates are selected within the live collection scope, including multi-chunk entries",
+      "changeKind": "new",
+      "sourceCommit": "ee5c3249",
+      "disposition": "REWRITE",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md; docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md. R1 andR2 retrieval specification: visibility/filter predicate must be applied before vector scoring/top100 candidate selection; current relabels must immediately alter scope.",
+        "realRegression": "Higher-scoring hidden entries exhaust the global vector shortlist, so an authorized semantic-only multi-chunk entry disappears; cached metadata continues returning moved entries.",
+        "independentOracle": "Independently supplied visible/hidden collection membership and literal visible entry ID before relabel, then moved hidden[0] ID afterward. More than documented100 hidden candidates dominate global ranking; full base32 IDs remain distinct.",
+        "stableSeam": "Real KnowledgeSearch.search + constructor-controlled embedder + actual native vector indexing and live store change events.",
+        "refactorResistance": "Observe returned IDs/current visibility. Remove full-response equivalence snapshots and duplicated snippet selection (owned by vector-index/search passage tests); no instance patches or candidate-constant import.",
+        "uniqueProtection": "Existing collection test is text-only and small. Existing vector span test owns best-chunk output but cannot prove KnowledgeSearch passes current scope before candidate truncation; this is the lowest composed semantic-scoping owner."
+      },
+      "action": "Keep128 hidden entries, actual multi-chunk visible document, global omission precondition, scoped ID, explicit collection narrowing and current relabel output. Replace full-response equality by independent returned IDs; remove extra snippet assertion and redundant warm-up query. Empty profile case can stay as cheap distinct no-authorized-collections guard.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 132,
+        "name": "semantic candidates are selected within the live collection scope, including multi-chunk entries"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/search/search.test.ts",
+      "validationStatus": "Implemented; pending root-coordinated test slot. No tests or timing measurements launched by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "line": 716,
+      "name": "entry cursors retain timestamp ties and collection filters across every page",
+      "changeKind": "new",
+      "sourceCommit": "ee5c3249",
+      "disposition": "KEEP",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md; docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md. Entries pagination remains newest savedAt descending with ID tie-breaker, preserves collection/kind filtering, returns every authorized matching entry once and ends cursor; retrieval R3 says cursor paging unchanged.",
+        "realRegression": "Moving cursor filtering ahead of sorting drops/repeats timestamp ties, pages in import order, or admits hidden/different-kind records between matching rows.",
+        "independentOracle": "Literal savedAt fixtures with nonchronological insertion and tiedC/A; independently expected IDs[E,C,A,ALT,CLOUDFLARE], one result perpage and terminal null cursor.",
+        "stableSeam": "KnowledgeSearch.listEntries public query/result/cursor with actual store metadata filtering.",
+        "refactorResistance": "No sort-helper/spies/private kernel assertions; the same independently expected sequence holds for different valid algorithms.",
+        "uniqueProtection": "Prior paging owner covers distinct timestamps and unfiltered pages; prior filter owner covers two thread rows. Neither catches combined collection/kind filters over a timestamp tie. Consolidate their redundant generic paging executions into this stronger owner while retaining details/visibility/filter assertions."
+      },
+      "action": "Keep core unchanged. Remove old three-page unfiltered executions from read-views case and two-page thread-only executions from entry-lists-filter case, preserving those cases remaining distinct transport/data contracts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 613,
+        "name": "entry cursors retain timestamp ties and collection filters across every page"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/search/search.test.ts",
+      "validationStatus": "Implemented; pending root-coordinated test slot. No tests or timing measurements launched by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 470,
+      "name": "a re-run hands workers only the tasks its own process asks for; answered tasks stay cached",
+      "changeKind": "modified",
+      "sourceCommit": "ee5c3249",
+      "disposition": "REWRITE",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md; docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md. Linking restart must discard unanswered inbox files from previous myKG process, preserve completed answers for cache reuse, and hand workers only fresh tasks from current process.",
+        "realRegression": "Retry workers consume stale previous-process task, delete reusable answers, or fail to resume recorded session. Old test also races filesystem completion against fixed virtual-time advance and can hang on late settlement timer.",
+        "independentOracle": "Handwritten myKG inbox/outbox task files, known answered/live/leftover IDs, exact surviving answer bytes and literal failed/resumed run output.",
+        "stableSeam": "Real KnowledgeLinkingService with real temporary session files and public workerNext/idle/status APIs; child/worker/Clock dependency ports isolate external processes.",
+        "refactorResistance": "Retained result assertions do not inspect private collaborators. Synchronization uses real provided Clock scheduling notification before advancing fake time; it is not an asserted timer-call count. Do not restore removed production timing override.",
+        "uniqueProtection": "Inbox unit owns leasing/cache mechanics for one process; only orchestration owner proves process retry clears stale files while keeping answered cache and forwards current task."
+      },
+      "action": "Accept timer-readiness handshake and public idle drain, remove extra.timings override entirely; keep default production settlement behavior and native independently controlled process/clock ports. Validate repeatedly for prior filesystem/timer scheduling variance.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 470,
+        "name": "a re-run hands workers only the tasks its own process asks for; answered tasks stay cached"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Implemented; pending root-coordinated test slot. No tests or timing measurements launched by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "line": 286,
+      "name": "read views: entry lists page newest first; details and items respect visibility",
+      "sourceCommit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+      "changeKind": "local-consolidation",
+      "disposition": "REWRITE",
+      "sixBar": {
+        "independentContract": "Knowledge plugin read views and filesystem-backed data visibility, unfiled access restrictions and item/graph membership;2026-10-23 plugin spec +2026-10-27 retrieval compatibility/safety.",
+        "realRegression": "An unauthorized entry/concept appears in details/items/graph, Unfiled becomes visible to a restricted caller, or hidden data is accepted by item lookup.",
+        "independentOracle": "Literal seeded entry/concept IDs, exact expected visible set and typed not-found/invalid collection errors; no expected data computed through implementation.",
+        "stableSeam": "KnowledgeSearch.listEntries/entryDetail/item/graphView public returned DTOs and errors over actual metadata/graph.",
+        "refactorResistance": "Preserve semantic IDs, visibility/data and errors. Remove duplicated generic page traversal; no sort implementation, cursor bytes or collaborator shape checks.",
+        "uniqueProtection": "New tied cursor owner supersedes only generic paging. These remaining distinct list visibility and full-detail/item/graph view data paths are absent from that cursor owner."
+      },
+      "action": "Move duplicate generic three-page protection to new tied/filtered cursor case; keep unfiled/hidden/details/item/graph behavior unchanged.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 225,
+        "name": "read views: lists, details, items and graphs respect visibility"
+      },
+      "survivingPaginationOwner": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 613,
+        "name": "entry cursors retain timestamp ties and collection filters across every page"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/search/search.test.ts",
+      "validationStatus": "Implemented; pending root-coordinated test slot. No tests launched by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "line": 696,
+      "name": "entry lists take the search filters",
+      "sourceCommit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+      "changeKind": "local-consolidation",
+      "disposition": "REWRITE",
+      "sixBar": {
+        "independentContract": "Retrieval R3: entry lists use same kind/author/date/year normalization as search, combined with caller visibility/collections.",
+        "realRegression": "Entry-list filters return wrong kind/author/date rows or fail to intersect collection and visibility; malformed date is silently accepted.",
+        "independentOracle": "Literal seeded IDs for independent known author/kind/year/date inputs and known collection membership; typed invalid-date refusal.",
+        "stableSeam": "KnowledgeSearch.listEntries public input/result and typed-error boundary.",
+        "refactorResistance": "Preserve semantic IDs, visibility/data and errors. Remove duplicated generic page traversal; no sort implementation, cursor bytes or collaborator shape checks.",
+        "uniqueProtection": "New tied cursor owner supersedes only two-page traversal. This owner still uniquely enumerates independent field normalization and date/kind/author collection intersections at entry-list boundary."
+      },
+      "action": "Remove duplicate two-page thread-only execution now superseded by new combined filter/tie cursor owner; retain actual independent filter normalization/date/kind outputs.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 597,
+        "name": "entry lists take the search filters"
+      },
+      "survivingPaginationOwner": {
+        "path": "apps/daemon/src/knowledge/search/search.test.ts",
+        "line": 613,
+        "name": "entry cursors retain timestamp ties and collection filters across every page"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/search/search.test.ts",
+      "validationStatus": "Implemented; pending root-coordinated test slot. No tests launched by this workstream."
+    }
+  ],
+  "existingOwnersToConsolidate": [
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "name": "read views: entry lists page newest first; details and items respect visibility",
+      "disposition": "REWRITE",
+      "reason": "Move duplicate generic three-page protection to new tied/filtered cursor case; keep unfiled/hidden/details/item/graph behavior unchanged."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/search/search.test.ts",
+      "name": "entry lists take the search filters",
+      "disposition": "REWRITE",
+      "reason": "Remove duplicate two-page thread-only execution now superseded by new combined filter/tie cursor owner; retain actual independent filter normalization/date/kind outputs."
+    }
+  ],
+  "production": [
+    {
+      "path": "apps/daemon/src/knowledge/search/search.ts",
+      "disposition": "KEEP",
+      "reason": "Apply independent cursor tuple predicate before sorting remaining authorized/filter-matching metadata. Algebraically same subset/order, less sort work; retained literal cursor-tie test protects result. No behavior broadening."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/search/search.bench.ts",
+      "disposition": "KEEP",
+      "reason": "Manual development benchmark outside required test discovery, with actual retrieval/index/ranking and immutable production-like O(1) metadata, fixed injective fullbase32 IDs, result digests, CPU/wall medians, cold setup outside measured region and alternating baseline/current pagination calls. Legitimate profiling artifact; no hard-coded speed claims or required CI work. Optional dynamic module is a development comparison input, not a production test hook."
+    }
+  ],
+  "performance": "No new measurement yet. Preserve existing5,000-entry detail/facet and1,001-entry graph fixtures, fixed IDs and literal documented budgets; benchmark is distinct manual retrieval/pagination comparison, not new required coverage.",
+  "counts": {
+    "REWRITE": 4,
+    "KEEP": 1
+  },
+  "testLOCRelativeToPreMergeHEAD": {
+    "added": 95,
+    "removed": 18,
+    "net": 77,
+    "note": "Includes two meaningful new regression scenarios and deterministic settlement synchronization; five older pagination executions consolidated into stronger tied/filtered owner. Prior audits retain their own larger net-negative accounting."
+  },
+  "validation": {
+    "completed": [
+      "Parsed both test files, search owner and manual benchmark with TypeScript AST; no parse diagnostics.",
+      "Resolved/staged only search.test.ts conflict; linking removal of obsolete extra.timings override remains unstaged.",
+      "Scoped working/staged diff checks passed."
+    ],
+    "pending": [
+      "Focused search.test.ts and linking/service.test.ts after root slot release.",
+      "Repeated linking stale-inbox scenario to detect original filesystem/clock race.",
+      "Mutation checks when feasible: post-filtered vector shortlist must fail scoped semantic ID; remove list ID tie-breaker must fail cursor sequence.",
+      "Root check:changed/typecheck/full gate; optional benchmark comparisons remain separately reported and never substituted for suite wallclock."
+    ],
+    "limitation": "No tests or runtime/performance measurements run: parent is measuring an equivalent reference baseline. No speedup or runtime success claimed."
+  },
+  "preservedPriorCleanup": [
+    "Real KnowledgeSearch constructor/native vector index fixtures remain; no test patches vectorIndex.",
+    "Full injective base32 IDs remain in benchmark/new hidden-candidate fixture and existing5,000/1,001-entry performance fixtures.",
+    "Old private warm helper, unsupported field duplicate, deleted embedding call-shape/header inventory remain removed during conflict resolution.",
+    "Linking timing override stays deleted from production and tests; settlement synchronization uses existing Clock port and public idle operation."
+  ]
+}

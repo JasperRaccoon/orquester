@@ -35,7 +35,7 @@ const tempRepo = async (): Promise<string> => {
   return dir;
 };
 
-/** An argv without the `-c` safety options GitService puts in front of every git (asserted on their own below). */
+/** Strip per-invocation safety options before matching native Git commands. */
 const withoutSafetyArgs = (argv: string[]): string[] => {
   let index = 0;
   while (argv[index] === "-c" && /^core\.(fsmonitor|hooksPath)=/.test(argv[index + 1] ?? "")) index += 2;
@@ -77,6 +77,40 @@ const deferred = (): Deferred => {
 };
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("status preserves porcelain branch metadata and paths", async () => {
+  const { git } = fakeGit((args) => args[0] === "rev-parse" ? "true\n" : nul(
+    "# branch.head main",
+    "# branch.upstream origin/main",
+    "# branch.ab +2 -1",
+    "1 .M N... 100644 100644 100644 abc def file with spaces.txt",
+    "2 R. N... 100644 100644 100644 abc def R100 renamed file.txt",
+    "original file.txt",
+    "? untracked.txt"
+  ));
+  assert.deepEqual(await git.status("/repo"), {
+    isRepo: true, branch: "main", detached: false, upstream: "origin/main",
+    ahead: 2, behind: 1, lastFetched: null,
+    files: [
+      { path: "file with spaces.txt", status: "modified", staged: false, unstaged: true },
+      { path: "renamed file.txt", oldPath: "original file.txt", status: "renamed", staged: true, unstaged: false },
+      { path: "untracked.txt", status: "untracked", staged: false, unstaged: true }
+    ]
+  });
+});
+
+test("status retains its empty state for non-repositories and bare repositories", async (t) => {
+  const dir = await tempDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const expected = {
+    isRepo: false, branch: null, detached: false, upstream: null,
+    ahead: 0, behind: 0, lastFetched: null, files: []
+  };
+  const service = new GitService();
+  assert.deepEqual(await service.status(dir), expected);
+  await exec("git", ["init", "--bare", "-q", dir]);
+  assert.deepEqual(await service.status(dir), expected);
+});
 
 test("serializes concurrent git mutations in the same repository", async () => {
   const calls: string[] = [];
@@ -465,21 +499,28 @@ test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
   assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), 524_288);
 });
 
-test("an overflow on a read that did not ask for a cap is still an error", async () => {
-  const git = new GitService({
-    runner: async (_file, args) => {
-      if (withoutSafetyArgs(args)[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
-      throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
-        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-        stdout: "partial",
-        stderr: ""
-      });
-    }
-  });
-  await assert.rejects(git.status("/repo"), (error: unknown) => {
-    assert.ok(error instanceof GitError, `expected a GitError, got ${String(error)}`);
-    return true;
-  });
+test("status failures preserve uncapped overflow and native error details", async () => {
+  for (const [failure, message] of [
+    [Object.assign(new Error("stdout maxBuffer length exceeded"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "partial", stderr: ""
+    }), "stdout maxBuffer length exceeded"],
+    [Object.assign(new Error("status failed"), {
+      code: 128, stderr: "fatal: unable to read index"
+    }), "fatal: unable to read index"]
+  ] as const) {
+    const git = new GitService({
+      runner: async (_file, args) => {
+        if (withoutSafetyArgs(args)[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
+        throw failure;
+      }
+    });
+    await assert.rejects(git.status("/repo"), (error: unknown) => {
+      assert.ok(error instanceof GitError);
+      assert.equal(error.status, 500);
+      assert.equal(error.message, message);
+      return true;
+    });
+  }
 });
 
 test("working diff of a directory that is not a repo is isRepo:false, never an error", async (t) => {

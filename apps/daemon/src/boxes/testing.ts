@@ -316,9 +316,26 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
       const args = tarOptions?.compression === "gzip" ? ["-xzf", "-", "-C", path] : ["-xf", "-", "-C", path];
       const child = spawn("tar", args, { stdio: ["pipe", "ignore", "ignore"] });
       // Listened for before the pipeline: a tar that exits as soon as its input ends is not missed.
-      const exited = new Promise<void>((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)))));
-      await pipeline(tar, child.stdin);
-      await exited;
+      const exited = new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`))));
+      });
+      // tar can finish at the archive's EOF blocks before the producer ends its
+      // stream. As orq-agent does, trust its exit status for a closed stdin,
+      // while still consuming the source and propagating producer failures.
+      const input = new PassThrough();
+      child.stdin.on("error", () => undefined);
+      child.stdin.once("close", () => input.resume());
+      input.pipe(child.stdin);
+      try {
+        await Promise.all([pipeline(tar, input), exited]);
+      } catch (error) {
+        input.destroy();
+        tar.destroy();
+        child.kill("SIGTERM");
+        await exited.catch(() => undefined);
+        throw error;
+      }
     },
     onEvent(name: string, listener: (data: unknown) => void): () => void {
       events.on(name, listener);

@@ -112,12 +112,26 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
        WHERE thread_id = ? AND first_seq < ? AND last_seq >= ?
        ORDER BY ordinal`
     ),
-    // Containing turns first, the newest start among them; else the nearest
-    // turn that started before `seq` (only a revert leaves such a gap).
+    // Start at the newest containing turn through turns_by_first_seq. Sorting
+    // every preceding turn by a containment expression scans the whole thread
+    // even when its newest turn contains the requested history boundary.
     turnOfSeq: db.prepare(
-      `SELECT ${TURN_COLUMNS} FROM turns
-       WHERE thread_id = ? AND first_seq <= ?
-       ORDER BY (last_seq >= ?) DESC, first_seq DESC, ordinal DESC
+      // Force the equality seek too: choosing turns_by_ordinal for ORDER BY
+      // instead walks every newer turn when reading an older history page.
+      `SELECT ${TURN_COLUMNS} FROM turns INDEXED BY turns_by_first_seq
+       WHERE thread_id = ? AND first_seq =
+         (SELECT MAX(first_seq) FROM turns
+          WHERE thread_id = ? AND first_seq <= ? AND last_seq >= ?)
+         AND last_seq >= ?
+       ORDER BY ordinal DESC
+       LIMIT 1`
+    ),
+    // Only a revert leaves a boundary outside all surviving turn ranges.
+    precedingTurnOfSeq: db.prepare(
+      `SELECT ${TURN_COLUMNS} FROM turns INDEXED BY turns_by_first_seq
+       WHERE thread_id = ? AND first_seq =
+         (SELECT MAX(first_seq) FROM turns WHERE thread_id = ? AND first_seq <= ?)
+       ORDER BY ordinal DESC
        LIMIT 1`
     ),
     messageFirstLine: db.prepare(
@@ -328,7 +342,12 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         return null;
       }
       const bound = boundOf(seq);
-      return toIndexedTurn(sql.turnOfSeq.get(threadId, bound, bound));
+      const containing = sql.turnOfSeq.get(threadId, threadId, bound, bound, bound);
+      // A malformed selected row must still be rejected, rather than hidden
+      // by a fallback: only a missing SQL row means no turn contains the seq.
+      return toIndexedTurn(
+        containing === undefined ? sql.precedingTurnOfSeq.get(threadId, threadId, bound) : containing
+      );
     },
 
     /**

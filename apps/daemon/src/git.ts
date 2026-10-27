@@ -216,7 +216,17 @@ export class GitService {
    * 200 the UI's empty state.
    */
   async status(cwd: string): Promise<GitStatusResponse> {
-    if (!(await this.isRepo(cwd))) {
+    let stdout: string;
+    try {
+      // Status already proves this is a work tree. Avoid a second git process on
+      // every successful read (including each watched project's polling loop).
+      ({ stdout } = await this.exec(cwd, ["status", "--porcelain=v2", "--branch", "-z"]));
+    } catch (error) {
+      // Keep the empty state for non-repositories and bare repositories, while
+      // retaining a failed status's original error for a valid work tree. Box
+      // routing errors must propagate without another attempt to contact it.
+      if (!(error instanceof GitError) || error.status !== 500 || error.code) throw error;
+      if (await this.isRepo(cwd)) throw error;
       return {
         isRepo: false,
         branch: null,
@@ -228,8 +238,6 @@ export class GitService {
         files: []
       };
     }
-
-    const { stdout } = await this.exec(cwd, ["status", "--porcelain=v2", "--branch", "-z"]);
 
     let branch: string | null = null;
     let detached = false;

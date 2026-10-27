@@ -1,0 +1,1114 @@
+{
+  "referenceCommit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+  "runner": {
+    "node": "v24.22.1",
+    "pnpm": "10.12.1",
+    "cpuCount": 4,
+    "packagesSequential": true,
+    "nodeTestWorkers": 4,
+    "tsxSharedCacheDisabled": true,
+    "nodeCompileCache": null,
+    "timeoutMs": 600000,
+    "timedRunsDoNotOverlapOtherTestRunsOrBuilds": true,
+    "cacheCondition": "OS and Go caches retained; no clean-install or cold-CI claim. Node-native module compatibility checked before each matching run."
+  },
+  "wholeSuiteMeasurements": {
+    "initial": {
+      "label": "baseline-complete",
+      "commit": "beb7516b10a3c4472399e0f6f2f2b0a187a61186",
+      "wall_seconds": 474.25496007900006,
+      "user_seconds": 1024.031716,
+      "system_seconds": 164.809921,
+      "max_rss_kb": 669064,
+      "commands": [
+        {
+          "command": [
+            "pnpm",
+            "-r",
+            "--workspace-concurrency=1",
+            "--no-bail",
+            "--if-present",
+            "test"
+          ],
+          "seconds": 472.9851554669999,
+          "exit_code": 1
+        },
+        {
+          "command": [
+            "node",
+            "--test",
+            "scripts/ensure-node-native.test.mjs",
+            "scripts/check-changed.test.mjs",
+            "scripts/deploy-public-url.test.mjs",
+            "deploy/lib/remote-update.test.mjs"
+          ],
+          "seconds": 1.2680179680000947,
+          "exit_code": 0
+        }
+      ],
+      "node": "v24.22.1",
+      "cpus": 4
+    },
+    "retrieval-upstream": {
+      "label": "baseline-incoming",
+      "commit": "923b3a51b594ef668483a5bd320af41187899e34",
+      "wall_seconds": 466.96267323400025,
+      "user_seconds": 1063.255789,
+      "system_seconds": 171.392623,
+      "max_rss_kb": 673456,
+      "commands": [
+        {
+          "command": [
+            "pnpm",
+            "-r",
+            "--workspace-concurrency=1",
+            "--no-bail",
+            "--if-present",
+            "test"
+          ],
+          "seconds": 465.84092401399994,
+          "exit_code": 1
+        },
+        {
+          "command": [
+            "node",
+            "--test",
+            "scripts/ensure-node-native.test.mjs",
+            "scripts/check-changed.test.mjs",
+            "scripts/deploy-public-url.test.mjs",
+            "deploy/lib/remote-update.test.mjs"
+          ],
+          "seconds": 1.11994097600018,
+          "exit_code": 0
+        }
+      ],
+      "node": "v24.22.1",
+      "cpus": 4
+    },
+    "devices-upstream": {
+      "label": "devices-baseline",
+      "commit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "wall_seconds": 536.3671662410015,
+      "user_seconds": 1190.733897,
+      "system_seconds": 189.885452,
+      "max_rss_kb": 676824,
+      "commands": [
+        {
+          "command": [
+            "pnpm",
+            "-r",
+            "--workspace-concurrency=1",
+            "--no-bail",
+            "--if-present",
+            "test"
+          ],
+          "seconds": 535.1556369009995,
+          "exit_code": 1
+        },
+        {
+          "command": [
+            "node",
+            "--test",
+            "scripts/ensure-node-native.test.mjs",
+            "scripts/check-changed.test.mjs",
+            "scripts/deploy-public-url.test.mjs",
+            "deploy/lib/remote-update.test.mjs"
+          ],
+          "seconds": 1.2094722719994024,
+          "exit_code": 0
+        }
+      ],
+      "node": "v24.22.1",
+      "cpus": 4
+    },
+    "latest-upstream": {
+      "label": "perf-baseline",
+      "commit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+      "wall_seconds": 528.8150965959994,
+      "user_seconds": 1201.269296,
+      "system_seconds": 190.549161,
+      "max_rss_kb": 686320,
+      "commands": [
+        {
+          "command": [
+            "pnpm",
+            "-r",
+            "--workspace-concurrency=1",
+            "--no-bail",
+            "--if-present",
+            "test"
+          ],
+          "seconds": 527.6847441440004,
+          "exit_code": 1
+        },
+        {
+          "command": [
+            "node",
+            "--test",
+            "scripts/ensure-node-native.test.mjs",
+            "scripts/check-changed.test.mjs",
+            "scripts/deploy-public-url.test.mjs",
+            "deploy/lib/remote-update.test.mjs"
+          ],
+          "seconds": 1.1279395830006251,
+          "exit_code": 0
+        }
+      ],
+      "node": "v24.22.1",
+      "cpus": 4
+    },
+    "final-matched": {
+      "label": "final-matched",
+      "commit": "b659841b45d59f6b5ddefda63c778c54a855672f",
+      "wall_seconds": 524.1334872590014,
+      "user_seconds": 1193.342041,
+      "system_seconds": 196.33213,
+      "max_rss_kb": 664720,
+      "commands": [
+        {
+          "command": [
+            "pnpm",
+            "-r",
+            "--workspace-concurrency=1",
+            "--no-bail",
+            "--if-present",
+            "test"
+          ],
+          "seconds": 522.8052486209999,
+          "exit_code": 0
+        },
+        {
+          "command": [
+            "node",
+            "--test",
+            "scripts/ensure-node-native.test.mjs",
+            "scripts/check-changed.test.mjs",
+            "scripts/deploy-public-url.test.mjs",
+            "deploy/lib/remote-update.test.mjs"
+          ],
+          "seconds": 1.3261993720007013,
+          "exit_code": 0
+        }
+      ],
+      "node": "v24.22.1",
+      "cpus": 4
+    }
+  },
+  "comparison": {
+    "observedSecondsSaved": 4.681609336998008,
+    "observedPercentSaved": 0.8853017561589457,
+    "interpretation": "Small observed difference; not evidence of a robust overall speedup. Corrected performance fixtures also increase meaningful workload, so the suite comparison is not a workload-equivalent algorithm benchmark."
+  },
+  "baselineProfile": {
+    "totals": {
+      "tests": 11828,
+      "passed": 11784,
+      "failed": 4,
+      "cancelled": 0,
+      "skipped": 40,
+      "todo": 0
+    },
+    "packageSummaries": [
+      {
+        "event": "test:summary",
+        "duration_ms": 2650.7804,
+        "counts": {
+          "tests": 160,
+          "failed": 0,
+          "passed": 160,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 152,
+          "suites": 5
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 6385.678767,
+        "counts": {
+          "tests": 716,
+          "failed": 0,
+          "passed": 716,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 509,
+          "suites": 73
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 2873.999311,
+        "counts": {
+          "tests": 4,
+          "failed": 0,
+          "passed": 4,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 4,
+          "suites": 0
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 351284.572011,
+        "counts": {
+          "tests": 7739,
+          "failed": 4,
+          "passed": 7695,
+          "cancelled": 0,
+          "skipped": 40,
+          "todo": 0,
+          "topLevel": 5442,
+          "suites": 661
+        },
+        "success": false
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 142511.217699,
+        "counts": {
+          "tests": 3134,
+          "failed": 0,
+          "passed": 3134,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1311,
+          "suites": 603
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1180.012016,
+        "counts": {
+          "tests": 38,
+          "failed": 0,
+          "passed": 38,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 20,
+          "suites": 12
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 92.795739,
+        "counts": {
+          "tests": 13,
+          "failed": 0,
+          "passed": 13,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1073.587566,
+        "counts": {
+          "tests": 24,
+          "failed": 0,
+          "passed": 24,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 24,
+          "suites": 0
+        },
+        "success": true
+      }
+    ],
+    "slowestFiles": [
+      {
+        "path": "apps/daemon/src/html-preview/browser.test.ts",
+        "nodeHarnessMs": 28115.948826,
+        "counts": {
+          "tests": 28,
+          "failed": 0,
+          "passed": 28,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 5
+        }
+      },
+      {
+        "path": "apps/daemon/src/boxes/github/device-cache.test.ts",
+        "nodeHarnessMs": 20124.972468,
+        "counts": {
+          "tests": 11,
+          "failed": 0,
+          "passed": 11,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 11,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/session-replay.test.ts",
+        "nodeHarnessMs": 18292.91465,
+        "counts": {
+          "tests": 6,
+          "failed": 0,
+          "passed": 6,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/lifecycle.test.ts",
+        "nodeHarnessMs": 14123.497205,
+        "counts": {
+          "tests": 85,
+          "failed": 0,
+          "passed": 85,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 85,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/workflows/sandbox/sandbox.test.ts",
+        "nodeHarnessMs": 12211.287677,
+        "counts": {
+          "tests": 21,
+          "failed": 0,
+          "passed": 21,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/devices/hosts/box/android-host.test.ts",
+        "nodeHarnessMs": 9842.522433,
+        "counts": {
+          "tests": 11,
+          "failed": 0,
+          "passed": 11,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.reload.test.ts",
+        "nodeHarnessMs": 8135.1993,
+        "counts": {
+          "tests": 32,
+          "failed": 0,
+          "passed": 32,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.history.test.ts",
+        "nodeHarnessMs": 8073.043597,
+        "counts": {
+          "tests": 36,
+          "failed": 0,
+          "passed": 36,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 8
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.test.ts",
+        "nodeHarnessMs": 7948.954244,
+        "counts": {
+          "tests": 41,
+          "failed": 0,
+          "passed": 41,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 7,
+          "suites": 8
+        }
+      },
+      {
+        "path": "apps/daemon/src/devices/android/golden.test.ts",
+        "nodeHarnessMs": 7520.137935,
+        "counts": {
+          "tests": 5,
+          "failed": 0,
+          "passed": 5,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/codex/session.test.ts",
+        "nodeHarnessMs": 7059.860692,
+        "counts": {
+          "tests": 118,
+          "failed": 0,
+          "passed": 118,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 34,
+          "suites": 34
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.device-cache.test.ts",
+        "nodeHarnessMs": 7043.499983,
+        "counts": {
+          "tests": 14,
+          "failed": 0,
+          "passed": 14,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/host-teardown.test.ts",
+        "nodeHarnessMs": 6958.75084,
+        "counts": {
+          "tests": 5,
+          "failed": 0,
+          "passed": 5,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-profile/adapters/codex/index.test.ts",
+        "nodeHarnessMs": 6823.309963,
+        "counts": {
+          "tests": 31,
+          "failed": 0,
+          "passed": 31,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 7
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/support/lifeline.test.ts",
+        "nodeHarnessMs": 5899.228341,
+        "counts": {
+          "tests": 9,
+          "failed": 0,
+          "passed": 9,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+        "nodeHarnessMs": 5763.81924,
+        "counts": {
+          "tests": 17,
+          "failed": 0,
+          "passed": 17,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 2,
+          "suites": 2
+        }
+      },
+      {
+        "path": "packages/ui/src/components/main/knowledge-main.dom.test.ts",
+        "nodeHarnessMs": 5347.017223,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/checkpoints/service.test.ts",
+        "nodeHarnessMs": 5153.922914,
+        "counts": {
+          "tests": 31,
+          "failed": 3,
+          "passed": 28,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 31,
+          "suites": 0
+        }
+      },
+      {
+        "path": "packages/ui/src/components/knowledge/knowledge-view.dom.test.ts",
+        "nodeHarnessMs": 4977.987484,
+        "counts": {
+          "tests": 16,
+          "failed": 0,
+          "passed": 16,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/knowledge/search/search.perf.test.ts",
+        "nodeHarnessMs": 4949.550873,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 0
+        }
+      }
+    ]
+  },
+  "finalProfile": {
+    "totals": {
+      "tests": 11442,
+      "passed": 11410,
+      "failed": 0,
+      "cancelled": 0,
+      "skipped": 32,
+      "todo": 0
+    },
+    "packageSummaries": [
+      {
+        "event": "test:summary",
+        "duration_ms": 2445.124109,
+        "counts": {
+          "tests": 156,
+          "failed": 0,
+          "passed": 156,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 148,
+          "suites": 5
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 5790.031972,
+        "counts": {
+          "tests": 694,
+          "failed": 0,
+          "passed": 694,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 490,
+          "suites": 73
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 5067.459226,
+        "counts": {
+          "tests": 3,
+          "failed": 0,
+          "passed": 3,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 0
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 342146.928593,
+        "counts": {
+          "tests": 7598,
+          "failed": 0,
+          "passed": 7566,
+          "cancelled": 0,
+          "skipped": 32,
+          "todo": 0,
+          "topLevel": 5326,
+          "suites": 655
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 140133.339451,
+        "counts": {
+          "tests": 2924,
+          "failed": 0,
+          "passed": 2924,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1241,
+          "suites": 577
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1214.78052,
+        "counts": {
+          "tests": 38,
+          "failed": 0,
+          "passed": 38,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 20,
+          "suites": 12
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 108.28564,
+        "counts": {
+          "tests": 7,
+          "failed": 0,
+          "passed": 7,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        },
+        "success": true
+      },
+      {
+        "event": "test:summary",
+        "duration_ms": 1145.04644,
+        "counts": {
+          "tests": 22,
+          "failed": 0,
+          "passed": 22,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 22,
+          "suites": 0
+        },
+        "success": true
+      }
+    ],
+    "slowestFiles": [
+      {
+        "path": "apps/daemon/src/html-preview/browser.test.ts",
+        "nodeHarnessMs": 32268.649066,
+        "counts": {
+          "tests": 28,
+          "failed": 0,
+          "passed": 28,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 5
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/lifecycle.test.ts",
+        "nodeHarnessMs": 14703.845341,
+        "counts": {
+          "tests": 85,
+          "failed": 0,
+          "passed": 85,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 85,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/knowledge/search/search.perf.test.ts",
+        "nodeHarnessMs": 8729.477662,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/devices/hosts/box/android-host.test.ts",
+        "nodeHarnessMs": 8681.351299,
+        "counts": {
+          "tests": 9,
+          "failed": 0,
+          "passed": 9,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.history.test.ts",
+        "nodeHarnessMs": 8019.176241,
+        "counts": {
+          "tests": 36,
+          "failed": 0,
+          "passed": 36,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 8
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.reload.test.ts",
+        "nodeHarnessMs": 7678.343726,
+        "counts": {
+          "tests": 32,
+          "failed": 0,
+          "passed": 32,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.test.ts",
+        "nodeHarnessMs": 7227.595415,
+        "counts": {
+          "tests": 41,
+          "failed": 0,
+          "passed": 41,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 7,
+          "suites": 8
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/host-teardown.test.ts",
+        "nodeHarnessMs": 7205.680188,
+        "counts": {
+          "tests": 5,
+          "failed": 0,
+          "passed": 5,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 5,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-profile/adapters/codex/index.test.ts",
+        "nodeHarnessMs": 7079.931627,
+        "counts": {
+          "tests": 31,
+          "failed": 0,
+          "passed": 31,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 7
+        }
+      },
+      {
+        "path": "apps/daemon/src/workflows/sandbox/sandbox.test.ts",
+        "nodeHarnessMs": 7063.206961,
+        "counts": {
+          "tests": 21,
+          "failed": 0,
+          "passed": 21,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/codex/session.test.ts",
+        "nodeHarnessMs": 7056.915094,
+        "counts": {
+          "tests": 118,
+          "failed": 0,
+          "passed": 118,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 34,
+          "suites": 34
+        }
+      },
+      {
+        "path": "packages/ui/src/lib/agent-chat/store.device-cache.test.ts",
+        "nodeHarnessMs": 6761.822924,
+        "counts": {
+          "tests": 14,
+          "failed": 0,
+          "passed": 14,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/support/lifeline.test.ts",
+        "nodeHarnessMs": 5995.061039,
+        "counts": {
+          "tests": 9,
+          "failed": 0,
+          "passed": 9,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 3,
+          "suites": 3
+        }
+      },
+      {
+        "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+        "nodeHarnessMs": 5957.592336,
+        "counts": {
+          "tests": 17,
+          "failed": 0,
+          "passed": 17,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 2,
+          "suites": 2
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/checkpoints/service.test.ts",
+        "nodeHarnessMs": 5550.322085,
+        "counts": {
+          "tests": 30,
+          "failed": 0,
+          "passed": 30,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 30,
+          "suites": 0
+        }
+      },
+      {
+        "path": "packages/ui/src/components/main/knowledge-main.dom.test.ts",
+        "nodeHarnessMs": 5247.900513,
+        "counts": {
+          "tests": 1,
+          "failed": 0,
+          "passed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/knowledge/search/similarity.perf.test.ts",
+        "nodeHarnessMs": 5200.197088,
+        "counts": {
+          "tests": 2,
+          "failed": 0,
+          "passed": 2,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 2,
+          "suites": 0
+        }
+      },
+      {
+        "path": "apps/daemon/src/session-profiles/integration.test.ts",
+        "nodeHarnessMs": 5122.865688,
+        "counts": {
+          "tests": 8,
+          "failed": 0,
+          "passed": 8,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "packages/ui/src/components/knowledge/knowledge-view.dom.test.ts",
+        "nodeHarnessMs": 4853.264433,
+        "counts": {
+          "tests": 16,
+          "failed": 0,
+          "passed": 16,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 1,
+          "suites": 1
+        }
+      },
+      {
+        "path": "apps/daemon/src/agent-host/adapters/grok/session-replay.test.ts",
+        "nodeHarnessMs": 4714.912393,
+        "counts": {
+          "tests": 6,
+          "failed": 0,
+          "passed": 6,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0,
+          "topLevel": 6,
+          "suites": 0
+        }
+      }
+    ]
+  },
+  "profileLimits": [
+    "Node per-case/file durations exclude some pre-test imports; whole-run wall/CPU include them.",
+    "max_rss_kb is a maximum child-process RSS measurement, not aggregate peak suite memory.",
+    "The baseline completed with four known root-sensitive fixture failures; the final suite passed.",
+    "Original 5000-entry fixture IDs yielded only 2340 distinct records; corrected fixtures assert all 5,000. The first 1,000 original IDs yielded 470 distinct values.",
+    "No hosted CI job, live provider, paid host, real Android/iOS device or optional model artifact download was measured."
+  ],
+  "candidateSource": {
+    "headAtMeasurement": "b659841b45d59f6b5ddefda63c778c54a855672f",
+    "pendingMerge": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+    "codeAndArtifactFileCount": 4641,
+    "sha256OfSortedSourceHashMap": "e7f8388e4166b38e2a37e216290fed6ed9294e0797dedc862fe7ddc198508c7d",
+    "unchangedDuringMatchedRun": true
+  },
+  "targetedMeasurements": {
+    "grokReplayFile": {
+      "beforeSeconds": 20.04,
+      "afterSeconds": [
+        6.54,
+        6.56,
+        6.73
+      ],
+      "medianAfterSeconds": 6.56,
+      "percentSaved": 67.26546906187625
+    },
+    "jitterBufferFile": {
+      "beforeSeconds": [
+        2.048743,
+        2.103256,
+        2.167384
+      ],
+      "afterSeconds": [
+        1.013662,
+        1.038307,
+        1.118826
+      ],
+      "medianBeforeSeconds": 2.103256,
+      "medianAfterSeconds": 1.038307,
+      "percentSaved": 50.63335133716485
+    },
+    "imageThreeFileBatch": {
+      "beforeSeconds": 2.89,
+      "afterSeconds": [
+        1.64,
+        1.62,
+        1.62
+      ],
+      "percentSaved": 43.94463667820069,
+      "note": "Test deletion/consolidation and leaner independent fixtures included; not production codec speed."
+    },
+    "mjpegFile": {
+      "beforeSeconds": [
+        0.57626,
+        0.58154,
+        0.591762
+      ],
+      "afterSeconds": [
+        0.460048,
+        0.467557,
+        0.480222
+      ],
+      "percentSaved": 19.600199470371766
+    },
+    "goldenCutoutNamedCase": {
+      "beforeSeconds": 7.51292,
+      "afterSeconds": [
+        0.008535528,
+        0.009107727,
+        0.008434827
+      ],
+      "note": "Virtualized fake-device wait; no actual emulator boot speed claim."
+    },
+    "workflowOrphanNamedCase": {
+      "beforeSeconds": 5.06097,
+      "afterSeconds": [
+        0.04892,
+        0.05693
+      ],
+      "note": "Actual orphan termination still observed before virtual parent-only deadline."
+    }
+  },
+  "officialConfirmation": {
+    "status": "pending"
+  }
+}

@@ -53,7 +53,7 @@ const ALPHA_MIN = 0.001;
  * the same picture. With `initial`, the concepts it places start there.
  */
 export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string, { x: number; y: number }> {
-  const warm = request.initial && request.nodes.some((n) => request.initial![n.id]);
+  const warm = request.initial && request.nodes.some((n) => Object.hasOwn(request.initial!, n.id) && request.initial![n.id]);
   const seeds = warm ? seedPositions(request.nodes, request.edges, request.initial!) : null;
   const bodies: Body[] = request.nodes.map((n) => {
     const at = seeds?.[n.id];
@@ -85,9 +85,9 @@ export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string
     .stop()
     .tick(warm ? Math.ceil((TICKS * Math.log(ALPHA_MIN / WARM_ALPHA)) / Math.log(ALPHA_MIN)) : TICKS);
   separate(bodies);
-  const positions: Record<string, { x: number; y: number }> = {};
+  const positions: Record<string, { x: number; y: number }> = Object.create(null);
   for (const b of bodies) positions[b.id] = { x: b.x ?? 0, y: b.y ?? 0 };
-  return positions;
+  return { ...positions };
 }
 
 /**
@@ -98,7 +98,7 @@ export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string
  * better laid out afresh.
  */
 export function warmStart(ids: readonly string[], placed: ReadonlyMap<string, { x: number; y: number }>): Positions | null {
-  const out: Positions = {};
+  const out: Positions = Object.create(null);
   let kept = 0;
   for (const id of ids) {
     const at = placed.get(id);
@@ -106,7 +106,7 @@ export function warmStart(ids: readonly string[], placed: ReadonlyMap<string, { 
     out[id] = { x: at.x, y: at.y };
     kept += 1;
   }
-  return kept > 0 && kept * 2 >= ids.length && kept * 2 >= placed.size ? out : null;
+  return kept > 0 && kept * 2 >= ids.length && kept * 2 >= placed.size ? { ...out } : null;
 }
 
 /**
@@ -120,9 +120,9 @@ export function seedPositions(
   edges: readonly { source: string; target: string }[],
   placed: Positions
 ): Positions {
-  const out: Positions = {};
+  const out: Positions = Object.create(null);
   for (const n of nodes) {
-    const at = placed[n.id];
+    const at = Object.hasOwn(placed, n.id) ? placed[n.id] : undefined;
     if (at) out[n.id] = { x: at.x, y: at.y };
   }
   const neighbours = new Map<string, string[]>();
@@ -135,16 +135,35 @@ export function seedPositions(
     const angle = (hash(id) / 4294967296) * 2 * Math.PI;
     return { x: Math.cos(angle), y: Math.sin(angle) };
   };
-  let pending = nodes.filter((n) => !out[n.id]);
-  while (pending.length > 0) {
+  const pending = nodes.filter((n) => !out[n.id]);
+  // Discover the rounds once. Scanning every remaining node per round makes a
+  // long chain quadratic, and this also runs on the main thread before paint.
+  const unplaced = new Set(pending.map((n) => n.id));
+  const depth = new Map<string, number>();
+  // Only positions stored for real concept IDs seed their neighbours.
+  const queue = [...neighbours.keys()].filter((id) => Boolean(out[id]));
+  for (let i = 0; i < queue.length; i += 1) {
+    const id = queue[i]!;
+    const nextDepth = (depth.get(id) ?? 0) + 1;
+    for (const next of neighbours.get(id) ?? []) {
+      if (!unplaced.has(next) || depth.has(next)) continue;
+      depth.set(next, nextDepth);
+      queue.push(next);
+    }
+  }
+  const rounds: typeof pending[] = [];
+  const unlinked: typeof pending = [];
+  // Keep the original node order within each round: both the returned property
+  // order and the later halo's floating-point sums depend on it.
+  for (const n of pending) {
+    const d = depth.get(n.id);
+    if (d === undefined) unlinked.push(n);
+    else (rounds[d - 1] ??= []).push(n);
+  }
+  for (const batch of rounds) {
     const round: [string, { x: number; y: number }][] = [];
-    const rest: typeof pending = [];
-    for (const n of pending) {
+    for (const n of batch) {
       const near = (neighbours.get(n.id) ?? []).flatMap((id) => (out[id] ? [out[id]] : []));
-      if (near.length === 0) {
-        rest.push(n);
-        continue;
-      }
       const away = direction(n.id);
       const reach = n.size / 2 + LINK_GAP;
       round.push([
@@ -155,19 +174,17 @@ export function seedPositions(
         }
       ]);
     }
-    if (round.length === 0) break;
     for (const [id, at] of round) out[id] = at;
-    pending = rest;
   }
   const points = Object.values(out);
   const cx = points.reduce((sum, p) => sum + p.x, 0) / Math.max(1, points.length);
   const cy = points.reduce((sum, p) => sum + p.y, 0) / Math.max(1, points.length);
   const radius = points.reduce((max, p) => Math.max(max, Math.hypot(p.x - cx, p.y - cy)), 0) + LINK_GAP;
-  for (const n of pending) {
+  for (const n of unlinked) {
     const away = direction(n.id);
     out[n.id] = { x: cx + away.x * radius, y: cy + away.y * radius };
   }
-  return out;
+  return { ...out };
 }
 
 /**

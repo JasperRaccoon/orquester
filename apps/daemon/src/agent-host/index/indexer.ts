@@ -347,6 +347,11 @@ export function createThreadIndexer(input: {
 
   /** Most recently used last (Map insertion order). */
   const resident = new Map<string, ThreadMemory>();
+  // Most appends keep the same turn array and open turn. Do not walk every
+  // historical turn for each streamed chunk just to extend its latest row.
+  // The array identity invalidates the cached FIRST match after any fold
+  // change, including duplicate ids and reverts; weak keys retain no old fold.
+  const openPositions = new WeakMap<readonly Turn[], { turnId: string; index: number }>();
 
   // -------------------------------------------------------------------------
   // Memory
@@ -561,7 +566,13 @@ export function createThreadIndexer(input: {
     if (memory.openTurnId === null) {
       return -1;
     }
-    return memory.turns.findIndex((turn) => turn.turnId === memory.openTurnId);
+    const cached = openPositions.get(memory.turns);
+    if (cached?.turnId === memory.openTurnId) {
+      return cached.index;
+    }
+    const index = memory.turns.findIndex((turn) => turn.turnId === memory.openTurnId);
+    openPositions.set(memory.turns, { turnId: memory.openTurnId, index });
+    return index;
   }
 
   function extendOpen(memory: ThreadMemory, seq: number, end: number): void {

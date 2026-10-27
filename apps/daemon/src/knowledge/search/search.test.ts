@@ -129,6 +129,46 @@ test("the collections filter narrows within visibility; unknown or hidden names 
   assert.equal(limited.hits.length, 1);
 });
 
+test("semantic candidates are selected within the live collection scope, including multi-chunk entries", async (t) => {
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-search-scoped-"));
+  const store = new FakeStore();
+  store.collection(SEO, "SEO");
+  store.collection(SAAS, "SaaS");
+  // More than CANDIDATES hidden entries beat the visible entry by vector similarity. The
+  // visible multi-chunk match must still be returned.
+  const hidden = Array.from({ length: 128 }, (_, i) => `ke_${i.toString(32).padStart(12, "0")}`);
+  for (const id of hidden) store.put(id, "ranking chatgpt", [SAAS], {}, true);
+  const visible = "ke_visibleentry";
+  // The final chunks contain only semantic matches; earlier chunks include filler. Keep
+  // enough prose for the token-budget chunker to emit several pure-semantic chunks.
+  const body = `${"filler ".repeat(280)}${"LLM visibility: answer engines surface sites with fresh FAQs. ".repeat(60)}`;
+  store.put(visible, body, [SEO], { title: "Fresh FAQs" }, true);
+  const search = new KnowledgeSearch({
+    store,
+    graph: new KnowledgeGraph({ entries: store, logger: silentLogger() }),
+    embedders: new FakeEmbedderSource(new FakeEmbedder()),
+    indexDir,
+    logger: silentLogger()
+  });
+  t.after(async () => {
+    await search.stop();
+    await rm(indexDir, { recursive: true, force: true });
+  });
+  await search.start();
+  await search.idle();
+  assert.ok(!entryIds((await search.search({ query: "ranking chatgpt", limit: 25 }, ALL)).hits).includes(visible));
+  const scoped = await search.search({ query: "ranking chatgpt" }, SEO_ONLY);
+  assert.deepEqual(entryIds(scoped.hits), [visible]);
+  assert.deepEqual(entryIds((await search.search({ query: "ranking chatgpt", collections: [SEO] }, ALL)).hits), [visible]);
+  assert.deepEqual((await search.search({ query: "ranking chatgpt" }, { kind: "collections", ids: [] })).hits, []);
+
+  // Relabelling changes metadata without re-embedding: every query must read the current scope.
+  store.entries.get(visible)!.collections = [SAAS];
+  store.entries.get(hidden[0]!)!.collections = [SEO];
+  store.emit({ kind: "relabelled", entryIds: [visible, hidden[0]!] });
+  assert.deepEqual(entryIds((await search.search({ query: "ranking chatgpt" }, SEO_ONLY)).hits), [hidden[0]!]);
+});
+
 test("a new, unlinked entry is searchable by text and meaning as soon as it is indexed", async (t) => {
   const { store, search, embedder } = await setup(t);
   const id = "ke_newnewnewnew";
@@ -182,16 +222,8 @@ test("startup and model arrival fill similar-entry details without a search", as
   assert.ok(arrived.similar?.find((similar) => similar.entry.id === LLM)?.reasons.some((reason) => reason.kind === "meaning"), "model installation fills read views without a query");
 });
 
-test("read views: entry lists page newest first; details and items respect visibility", async (t) => {
+test("read views: lists, details, items and graphs respect visibility", async (t) => {
   const { search } = await setup(t, { embedder: null });
-  const page1 = await search.listEntries({ limit: 2 }, ALL);
-  assert.deepEqual(page1.entries.map((e) => e.id), [UNFILED, ADSPOST]);
-  assert.ok(page1.nextCursor);
-  const page2 = await search.listEntries({ limit: 2, cursor: page1.nextCursor! }, ALL);
-  assert.deepEqual(page2.entries.map((e) => e.id), [BILLING, ALT]);
-  const page3 = await search.listEntries({ limit: 2, cursor: page2.nextCursor! }, ALL);
-  assert.deepEqual(page3.entries.map((e) => e.id), [CLOUDFLARE]);
-  assert.equal(page3.nextCursor, null);
   assert.deepEqual((await search.listEntries({ collection: "unfiled" }, ALL)).entries.map((e) => e.id), [UNFILED]);
   assert.deepEqual((await search.listEntries({}, SEO_ONLY)).entries.map((e) => e.id), [ALT, CLOUDFLARE]);
   await assert.rejects(search.listEntries({ collection: "unfiled" }, SEO_ONLY), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
@@ -575,10 +607,36 @@ test("entry lists take the search filters", async (t) => {
   assert.deepEqual(await ids({ savedAfter: store.entries.get(ADSPOST)!.savedAt }), [UNFILED, ADSPOST]);
   assert.deepEqual(await ids({ kinds: "thread" }, SEO_ONLY), [ALT]);
   assert.deepEqual(await ids({ kinds: "thread", collection: SAAS }), [BILLING]);
-  const page = await search.listEntries({ kinds: "thread", limit: 1 }, ALL);
-  assert.deepEqual(page.entries.map((e) => e.id), [BILLING]);
-  assert.deepEqual((await search.listEntries({ kinds: "thread", limit: 1, cursor: page.nextCursor! }, ALL)).entries.map((e) => e.id), [ALT]);
   await assert.rejects(search.listEntries({ postedBefore: "soon" }, ALL), invalid);
+});
+
+test("entry cursors retain timestamp ties and collection filters across every page", async (t) => {
+  const A = "ke_pageaaaaaaaa";
+  const C = "ke_pageaaaaaaac";
+  const E = "ke_pageaaaaaaae";
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      // Import order differs from save order, and C/A share a timestamp. Hidden entries
+      // and a different kind fall between them in the unfiltered ordering.
+      store.put(C, "Third", [SEO], { savedAt: "2026-10-02T00:00:00.000Z" }, true);
+      store.put("ke_pageaaaaaaab", "Hidden", [SAAS], { savedAt: "2026-10-03T00:00:00.000Z" }, true);
+      store.put(A, "First", [SEO], { savedAt: "2026-10-02T00:00:00.000Z" }, true);
+      store.put("ke_pageaaaaaaad", "Other kind", [SEO], { kind: "post", savedAt: "2026-10-02T00:00:00.000Z" }, true);
+      store.put(E, "Fifth", [SEO], { savedAt: "2026-10-04T00:00:00.000Z" }, true);
+    }
+  });
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 5; page += 1) {
+    const result = await search.listEntries({ collection: SEO, kinds: "note", limit: 1, cursor }, ALL);
+    assert.equal(result.entries.length, 1);
+    ids.push(result.entries[0]!.id);
+    if (page < 4) assert.ok(result.nextCursor);
+    else assert.equal(result.nextCursor, null);
+    cursor = result.nextCursor ?? undefined;
+  }
+  assert.deepEqual(ids, [E, C, A, ALT, CLOUDFLARE]);
 });
 
 test("a title edit re-embeds an entry; a relabel or a postedAt edit does not", async (t) => {

@@ -83,7 +83,7 @@ const record = {
   state: "ready"
 } as StoredBox;
 let factory: FakeHostFactory | null = null;
-const host = new BoxAndroidHost({
+const host: BoxAndroidHost = new BoxAndroidHost({
   boxId: "it-stream-box",
   kind,
   label: "IT Linux stream host",

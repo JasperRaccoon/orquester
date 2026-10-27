@@ -469,7 +469,17 @@ describe("KnowledgeLinkingService — a myKG child left running by the previous 
 describe("KnowledgeLinkingService — tasks a previous myKG process left in the inbox", () => {
   it("a re-run hands workers only the tasks its own process asks for; answered tasks stay cached", async () => {
     const children: FakeChild[] = [];
+    const clock = new FakeClock("2026-10-23T10:00:00.000Z");
+    const settleMs = 120_000;
+    let settlementStarted: (() => void) | null = null;
+    const setTimeout = clock.setTimeout.bind(clock);
+    clock.setTimeout = (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      if (ms === settleMs) settlementStarted?.();
+      return timer;
+    };
     const h = await harness({
+      clock,
       workerMode: "manual",
       spawn: (_file, args) => {
         const child = new FakeChild(args);
@@ -477,6 +487,19 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
         return child as unknown as ChildProcess;
       }
     });
+    const failRun = async (child: FakeChild): Promise<void> => {
+      const settling = new Promise<void>((resolve) => { settlementStarted = resolve; });
+      child.exit(1);
+      const drained = h.service.idle();
+      // The child's close handler reads progress from disk before it asks the
+      // workers to settle. Advance only once that timer exists, or the run has
+      // already drained without workers; filesystem latency cannot move it past
+      // a fixed clock jump and leave idle() waiting on frozen time.
+      await Promise.race([settling, drained]);
+      settlementStarted = null;
+      await clock.advance(settleMs);
+      await drained;
+    };
     await h.service.start();
     h.service.entriesChanged(await h.store.put(ID(1), "one"));
     await h.clock.advance(20_000);
@@ -494,10 +517,8 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
     await writeFile(join(outbox, `${answered}.answer.json`), JSON.stringify({ task_id: answered, answer: "{}" }));
     await writeFile(join(outbox, `${answered}.done`), "");
     const leftover = await writeMykgTask(inbox, { system: "PASS2", user: "FILE old.md", step: "pass2", context: "pass2 batch 1", createdAt: "2026-10-23T10:00:22.000Z" });
-    children[0]!.exit(1);
     // The run waits for its chats to end their turns (they never do here), then records the failure.
-    await h.clock.advance(120_000);
-    await h.service.idle();
+    await failRun(children[0]!);
     assert.equal(lastRun(h)?.outcome, "failed");
 
     // The retry resumes the session with a new process.
@@ -513,9 +534,7 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
     assert.equal(reply.kind, "task");
     assert.equal(reply.kind === "task" && reply.task.taskId, live);
     assert.notEqual(live, leftover);
-    children[1]!.exit(1);
-    await h.clock.advance(120_000);
-    await h.service.idle();
+    await failRun(children[1]!);
     await h.service.stop();
   });
 });

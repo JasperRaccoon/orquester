@@ -11,7 +11,7 @@
 import { execFile } from "node:child_process";
 import { copyFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { ANDROID_SYSTEM_IMAGE, deviceProfile } from "@orquester/api";
 
@@ -124,6 +124,8 @@ export interface FakeLinuxBoxOptions {
   kvm?: "direct" | "sg" | "missing";
   ffmpeg?: "libx264" | "missing";
   cpus?: number;
+  /** The fake box's MemAvailable, independent of the test host's current load (default 64 GiB). */
+  memAvailableBytes?: number;
 }
 
 export interface FakeLinuxBox {
@@ -202,8 +204,9 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
     execs.push([spec.command, ...(spec.args ?? [])]);
     envValues.push(...Object.values(spec.env ?? {}));
     if (spec.command === "/bin/sh" && spec.args?.[1] === ANDROID_PROBE_SCRIPT) return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "probe", probe] });
-    if (spec.command === "cat" && spec.args?.length === 1 && spec.args[0] === "/proc/meminfo") {
-      return exec({ command: "/bin/sh", args: ["-c", "printf 'MemAvailable: 67108864 kB\\n'"] });
+    if (basename(spec.command) === "cat" && spec.args?.length === 1 && spec.args[0] === "/proc/meminfo") {
+      const memory = `MemAvailable: ${Math.floor((options.memAvailableBytes ?? 64 * 1024 ** 3) / 1024)} kB`;
+      return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "memory", memory] });
     }
     return exec(spec);
   };

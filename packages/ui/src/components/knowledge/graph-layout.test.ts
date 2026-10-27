@@ -63,6 +63,20 @@ describe("the warm start", () => {
     });
     assert.equal(warmStart(["x", "y", "z"], placed), null);
   });
+
+  it("returns finite own positions for prototype-named concepts in cold and warm graphs", () => {
+    const ids = ["__proto__", "constructor", "near"];
+    const nodes = ids.map((id) => ({ id, size: 10 }));
+    const edges = [{ source: "__proto__", target: "constructor" }, { source: "constructor", target: "near" }];
+    const placed = new Map([["__proto__", { x: 100, y: 50 }], ["constructor", { x: 200, y: 50 }]]);
+    const initial = warmStart(ids, placed);
+    for (const request of [{ nodes, edges }, { nodes, edges, initial: initial! }]) {
+      const positions = computeLayout(request);
+      assert.deepEqual(Object.keys(positions).sort(), [...ids].sort());
+      for (const { x, y } of Object.values(positions)) assert.ok(Number.isFinite(x) && Number.isFinite(y));
+    }
+    assert.deepEqual(initial, Object.fromEntries(placed), "warm starts retain the supplied positions for every matching ID");
+  });
 });
 
 /** A worker that answers only when told to. */

@@ -88,8 +88,15 @@ func TestServiceDryRunsWriteNothing(t *testing.T) {
 		t.Fatal("dry run revealed the bootstrap credential")
 	}
 	out.Reset()
-	if err := UninstallServiceCommand(ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
-		t.Fatal(err)
+	err := UninstallServiceCommand(ServiceOptions{DataDir: dataDir, DryRun: true}, &out)
+	_, unitErr := os.Stat("/etc/systemd/system/orq-agent.service")
+	if os.Geteuid() != 0 && unitErr == nil {
+		// This temporary HOME owns no user unit; a system installation needs root.
+		if err == nil || !strings.Contains(err.Error(), "system service") || !strings.Contains(err.Error(), "sudo") {
+			t.Fatalf("expected the system-service ownership refusal: %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("uninstall dry run: %v", err)
 	}
 	if pathExists(dataDir) {
 		t.Error("a dry run created the data dir")
