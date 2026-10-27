@@ -326,17 +326,25 @@ function contentWords(name: string): Set<string> {
  * thousands of thin pages)"), not part of it.
  */
 export function negatedNames(x: string, y: string): boolean {
-  const bare = (name: string): string => name.replace(/\([^)]*\)/g, " ");
-  const wx = nameWords(bare(x));
-  const wy = nameWords(bare(y));
-  const nx = wx.some((w) => NEGATION_WORDS.has(w));
-  const ny = wy.some((w) => NEGATION_WORDS.has(w));
-  if (nx === ny) return false;
-  const rx = new Set(wx.filter((w) => !NEGATION_WORDS.has(w) && !GLUE_WORDS.has(w)));
-  const ry = new Set(wy.filter((w) => !NEGATION_WORDS.has(w) && !GLUE_WORDS.has(w)));
+  return negatedWords(negationWords(x), negationWords(y));
+}
+
+/** What {@link negatedNames} reads of a name: whether it negates, and its other words. */
+interface NegationWords {
+  negates: boolean;
+  rest: ReadonlySet<string>;
+}
+
+function negationWords(name: string): NegationWords {
+  const words = nameWords(name.replace(/\([^)]*\)/g, " "));
+  return { negates: words.some((w) => NEGATION_WORDS.has(w)), rest: new Set(words.filter((w) => !NEGATION_WORDS.has(w) && !GLUE_WORDS.has(w))) };
+}
+
+function negatedWords(x: NegationWords, y: NegationWords): boolean {
+  if (x.negates === y.negates) return false;
   let shared = 0;
-  for (const w of rx) if (ry.has(w)) shared += 1;
-  const union = rx.size + ry.size - shared;
+  for (const w of x.rest) if (y.rest.has(w)) shared += 1;
+  const union = x.rest.size + y.rest.size - shared;
   return union > 0 && shared / union >= NEGATION_MIN_JACCARD;
 }
 
@@ -345,15 +353,18 @@ const authorKey = (value: string): string => normalizeAuthor(value);
 /**
  * New candidate pairs (see the module header), tier by tier in {@link PAIR_CHECK_REASONS} order,
  * closest first within a tier; meta entries left out (a {@link PAIR_CHECK_META_KINDS} kind never
- * takes part; an entry linked to both concepts of a `contradicts` edge is not paired through it).
- * Yields to the event loop on large sets.
+ * takes part; an entry linked to both concepts of a `contradicts` edge is not paired through it). Memory stays linear in the entries plus the close pairs (each entry's nearest
+ * neighbours are kept bounded), and it yields to the event loop every {@link YIELD_EVERY_MS} ms.
  */
 export async function pairCheckCandidates(options: PairCheckCandidatesOptions): Promise<PairCandidate[]> {
   const index = options.view.vectors();
   const good = index.thresholds()?.good ?? null;
+  // The yielder pattern (`search/similarity.ts` `yielder`), checked inline in the hot loops: `due()`
+  // is a clock read, `breathe()` one turn of the event loop once the slice is used up.
   let since = performance.now();
+  const due = (): boolean => performance.now() - since >= YIELD_EVERY_MS;
   const breathe = async (): Promise<void> => {
-    if (performance.now() - since < YIELD_EVERY_MS) return;
+    if (!due()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
     since = performance.now();
   };
@@ -425,6 +436,7 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
   for (const [concept, entries] of entriesOfConcept) {
     for (const other of contradictingOf(concept)) {
       for (const a of entries) {
+        if (due()) await breathe();
         if (conceptIdsOf.get(a)!.has(other)) continue;
         for (const b of entriesOfConcept.get(other) ?? []) if (a !== b && !conceptIdsOf.get(b)!.has(concept)) consider(a, b, similarity(a, b), "contradicts");
       }
@@ -433,60 +445,96 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
   }
 
   if (good !== null) {
-    // Every close pair once, and each entry's nearest neighbours (for "alternatives").
-    const rows = [...vectors.keys()];
-    const near = new Map<string, { id: string; sim: number }[]>();
-    const close: { a: string; b: string; sim: number }[] = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      for (let j = i + 1; j < rows.length; j += 1) {
-        const sim = similarity(rows[i]!, rows[j]!);
-        if (sim === null) continue;
-        for (const [x, y] of [[rows[i]!, rows[j]!], [rows[j]!, rows[i]!]] as const) {
-          let list = near.get(x);
-          if (!list) near.set(x, (list = []));
-          list.push({ id: y, sim });
+    // Every close pair once, and each entry's nearest neighbours (for "alternatives"): rows in id
+    // order, so a tie keeps the smaller id; a bounded best-first list per row.
+    const rows = [...vectors.keys()].sort();
+    const rowVectors = rows.map((id) => vectors.get(id)!);
+    const n = rows.length;
+    const keep = PAIR_CHECK_ALTERNATIVE_NEIGHBOURS;
+    const topIndex = new Int32Array(n * keep).fill(-1);
+    const topSim = new Float64Array(n * keep);
+    const topCount = new Int32Array(n);
+    const offer = (node: number, other: number, sim: number): void => {
+      const base = node * keep;
+      let at = topCount[node]!;
+      if (at < keep) topCount[node] = at + 1;
+      else if (sim > topSim[base + keep - 1]!) at = keep - 1;
+      else return;
+      while (at > 0 && topSim[base + at - 1]! < sim) {
+        topSim[base + at] = topSim[base + at - 1]!;
+        topIndex[base + at] = topIndex[base + at - 1]!;
+        at -= 1;
+      }
+      topSim[base + at] = sim;
+      topIndex[base + at] = other;
+    };
+    const closeA: number[] = [];
+    const closeB: number[] = [];
+    const closeSim: number[] = [];
+    for (let i = 0; i < n; i += 1) {
+      const x = rowVectors[i]!;
+      for (let j = i + 1; j < n; j += 1) {
+        const y = rowVectors[j]!;
+        if (x.length !== y.length) continue;
+        let sim = 0;
+        for (let d = 0; d < x.length; d += 1) sim += x[d]! * y[d]!;
+        offer(i, j, sim);
+        offer(j, i, sim);
+        if (sim >= good) {
+          closeA.push(i);
+          closeB.push(j);
+          closeSim.push(sim);
         }
-        if (sim >= good) close.push({ a: rows[i]!, b: rows[j]!, sim });
+        if ((j & 63) === 0 && due()) await breathe();
       }
       await breathe();
     }
-    const nearest = new Map<string, Set<string>>();
-    for (const [id, list] of near) {
-      list.sort((x, y) => y.sim - x.sim || (x.id < y.id ? -1 : 1));
-      nearest.set(id, new Set(list.slice(0, PAIR_CHECK_ALTERNATIVE_NEIGHBOURS).map((n) => n.id)));
-    }
+    const isNearest = (i: number, j: number): boolean => {
+      for (let r = 0; r < topCount[i]!; r += 1) if (topIndex[i * keep + r] === j) return true;
+      return false;
+    };
     const wordsOf = new Map<string, Set<string>>();
     const words = (concept: KnowledgeConceptRef): Set<string> => {
       let set = wordsOf.get(concept.id);
       if (!set) wordsOf.set(concept.id, (set = contentWords(concept.name)));
       return set;
     };
-    let rowsSince = 0;
-    for (const { a, b, sim } of close) {
-      if (++rowsSince % 256 === 0) await breathe();
+    const negationOf = new Map<string, NegationWords>();
+    const negation = (concept: KnowledgeConceptRef): NegationWords => {
+      let found = negationOf.get(concept.id);
+      if (!found) negationOf.set(concept.id, (found = negationWords(concept.name)));
+      return found;
+    };
+    for (let p = 0; p < closeA.length; p += 1) {
+      if (due()) await breathe();
+      const i = closeA[p]!;
+      const j = closeB[p]!;
+      const sim = closeSim[p]!;
+      const a = rows[i]!;
+      const b = rows[j]!;
       const ca = conceptsOf.get(a)!;
       const cb = conceptsOf.get(b)!;
-      const idsA = new Set(ca.map((c) => c.id));
-      const idsB = new Set(cb.map((c) => c.id));
+      const idsA = conceptIdsOf.get(a)!;
+      const idsB = conceptIdsOf.get(b)!;
       // Sharing a claim-like concept.
       if (ca.some((c) => PAIR_CHECK_TYPES.has(c.type) && idsB.has(c.id))) consider(a, b, sim, "shared");
       // A concept and its negation ("One trial per IP" / "Never one trial per IP").
-      let negation = false;
+      let negated = false;
       for (const x of ca) {
-        if (negation || !NEGATION_TYPES.has(x.type) || idsB.has(x.id)) continue;
+        if (negated || !NEGATION_TYPES.has(x.type) || idsB.has(x.id)) continue;
         for (const y of cb) {
-          if (y.type === x.type && !idsA.has(y.id) && negatedNames(x.name, y.name)) {
-            negation = true;
+          if (y.type === x.type && !idsA.has(y.id) && negatedWords(negation(x), negation(y))) {
+            negated = true;
             break;
           }
         }
       }
-      if (negation) consider(a, b, sim, "negation");
+      if (negated) consider(a, b, sim, "negation");
       // Different values for the same decision: nearest neighbours by different authors whose
       // Tools or Tactics (not shared) name the same subject ("Outlook/Proton email for TikTok
       // account" / "Create TikTok accounts with a fresh Gmail"; "ISP proxy with socks5" / "Using
       // residential, mobile or ISP proxies").
-      if (!(nearest.get(a)?.has(b) || nearest.get(b)?.has(a)) || sameAuthor(a, b)) continue;
+      if (!(isNearest(i, j) || isNearest(j, i)) || sameAuthor(a, b)) continue;
       let alternative = false;
       for (const x of ca) {
         if (alternative || !ALTERNATIVE_TYPES.has(x.type) || idsB.has(x.id)) continue;
