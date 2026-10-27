@@ -396,6 +396,18 @@ export class KnowledgeService {
     });
     await conceptMerges.start();
     const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, unsubscribe: [] };
+    // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,
+    // "Shared seams"); the gap set is read on each use, so a linking swapped for NoLinking counts.
+    const connectSearch = (): void =>
+      search.connectLinking({
+        pairChecks: opening.linking.pairChecks,
+        linkGapQueued: (a, b) => {
+          const queued = opening.linking.gapQueued();
+          return queued.has(a) && queued.has(b);
+        }
+      });
+    connectSearch();
+    opening.unsubscribe.push(() => search.connectLinking({}));
     opening.unsubscribe.push(conceptMerges.onChange(() => this.linkingMoved()));
     opening.unsubscribe.push(
       store.onChange((change) => {
@@ -428,6 +440,7 @@ export class KnowledgeService {
     } catch (error) {
       this.logger.error("knowledge: starting linking failed", error);
       opening.linking = new NoLinking(this.settings, `Linking could not start: ${error instanceof Error ? error.message : String(error)}`);
+      connectSearch();
     }
     this.linkingMoved();
     // The collection views read it; profile events then keep it current.

@@ -108,7 +108,7 @@ function recordingLinking(options: { failStart?: boolean } = {}) {
     };
     return linking;
   };
-  return { log, ports, changes, factory, pairChecks };
+  return { log, ports, changes, factory, pairChecks, check };
 }
 
 test("with the plugin off nothing opens: no store directory, no embedder, no linking; data routes 409, settings and status answer", async (t) => {
@@ -275,6 +275,37 @@ test("a knowledge base that cannot open: routes answer 500 KNOWLEDGE_ERROR, the 
   assert.equal(retried.status, 200, JSON.stringify(retried.body));
   assert.deepEqual(linking.log, ["build 1", "start 1"]);
   assert.equal(((await h.inject("GET", knowledgeRoutes.status)).body as unknown as KnowledgeStatus).lastError, null);
+});
+
+test("search reads linking's pair checks and queued gaps: a checked contradiction reaches insights and the entry's similar list", async (t) => {
+  const linking = recordingLinking();
+  const h = await harness(t, { over: { linking: linking.factory } });
+  await h.knowledge.start();
+  h.plugins.set(true);
+  await h.knowledge.settled();
+  const saved = await h.inject("POST", knowledgeRoutes.save, {
+    entries: [
+      { title: "Short trials", body: "A 3-day free trial converts best for a subscription app.", collections: ["Apps"] },
+      { title: "Long trials", body: "A 14-day free trial converts best for a subscription app.", collections: ["Apps"] }
+    ],
+    newCollections: [{ name: "Apps", description: "Apps." }]
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const [a, b] = (saved.body!.results as { entryId: string }[]).map((r) => r.entryId).sort();
+  // The linking module now reports a check of exactly these two.
+  Object.assign(linking.check, { a: a!, b: b! });
+  await h.knowledge.settled();
+
+  const insights = await h.inject("GET", knowledgeRoutes.insights);
+  assert.equal(insights.status, 200, JSON.stringify(insights.body));
+  const contradictions = insights.body!.contradictions as { a: { id: string }; b: { id: string }; source: string; note: string | null }[];
+  assert.deepEqual(
+    contradictions.map((c) => [c.a.id, c.b.id, c.source, c.note].sort()),
+    [[a, b, "checked", "48 h vs 72 h"].sort()]
+  );
+  const item = await h.inject("GET", knowledgeRoutes.item(a!));
+  const similar = ((item.body!.entry as { similar?: { entry: { id: string }; reasons: { kind: string }[] }[] }).similar ?? []);
+  assert.ok(similar.some((s) => s.entry.id === b && s.reasons.some((r) => r.kind === "contradicts")), JSON.stringify(similar));
 });
 
 test("a linking module that cannot be built, or cannot start, leaves linking paused with the error; the data routes still serve", async (t) => {
