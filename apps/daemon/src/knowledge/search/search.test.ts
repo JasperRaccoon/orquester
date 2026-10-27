@@ -21,7 +21,7 @@ const BILLING = "ke_billingbill2";
 const ADSPOST = "ke_adsadsadsads";
 const UNFILED = "ke_unfiledunfil";
 
-async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; indexDir?: string } = {}) {
+async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; indexDir?: string; more?: (store: FakeStore) => void } = {}) {
   const indexDir = options.indexDir ?? (await mkdtemp(join(tmpdir(), "kg-search-")));
   const store = new FakeStore();
   store.collection(SEO, "SEO");
@@ -38,6 +38,7 @@ async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; 
   store.put(BILLING, "Annual billing with a discount lifts cash flow. Stripe makes proration easy.", [SAAS], { title: "Annual billing" }, true);
   store.put(ADSPOST, "Cap the daily budget while a campaign learns; raise spend after 50 conversions.", [ADS], { title: "Ads learning phase" }, true);
   store.put(UNFILED, "Remember to compare pricing tables of competitor tools.", [], { title: "Note to self" }, true);
+  options.more?.(store);
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
   await loadGraph(
     graph,
@@ -185,6 +186,34 @@ test("without a runtime, or when the model fails, search degrades to text and ne
   assert.equal(entryIds((await broken.search.search({ query: "Ranking in ChatGPT" }, ALL)).hits)[0], CLOUDFLARE);
 });
 
+test("entries are embedded after a start without any search, and again at once for a new model", async (t) => {
+  const LLM = "ke_llmllmllmllm";
+  const { search, embedder } = await setup(t, {
+    more: (store) => store.put(LLM, "ChatGPT and LLM answer engines cite the sources they trust.", [SEO], { title: "LLM citations" }, true)
+  });
+  await search.idle();
+  assert.ok(!embedder!.kinds.includes("query"), "no search ran");
+  assert.equal(search.vectorIndex().embeddedIds().length, 6);
+  const detail = (await search.entryDetail(CLOUDFLARE, ALL))!;
+  const neighbour = detail.similar?.find((similar) => similar.entry.id === LLM);
+  assert.ok(neighbour?.reasons.some((reason) => reason.kind === "meaning"), "similar entries by meaning without a search");
+
+  // No model at start; the model arrives (an install or a model repair finishing): backfilled at once.
+  const none = await setup(t, { embedder: null });
+  await none.search.idle();
+  assert.deepEqual(none.search.vectorIndex().embeddedIds(), []);
+  const arriving = new FakeEmbedder();
+  none.embedders.set(arriving);
+  await none.search.idle();
+  assert.equal(none.search.vectorIndex().embeddedIds().length, 5);
+  assert.equal(arriving.texts, 5, "each entry embedded once");
+  assert.ok(!arriving.kinds.includes("query"));
+  // A query afterwards does not embed them again.
+  await none.search.search({ query: "warm up" }, ALL);
+  await none.search.idle();
+  assert.equal(arriving.texts, 6);
+});
+
 test("vectors are cached by content hash and reused across restarts; another model rebuilds", async (t) => {
   const indexDir = await mkdtemp(join(tmpdir(), "kg-search-cache-"));
   t.after(() => rm(indexDir, { recursive: true, force: true }));
@@ -282,7 +311,8 @@ test("a save waits a bounded time for its embeddings (a slow first model load ne
   if (!done) release();
   assert.ok(done, "the save is still waiting for the model after 10 s");
   await indexing;
-  assert.equal(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits)[0], id, "searchable by text already");
+  // (Other entries, embedded at start, may outrank it by meaning: it has no vectors yet.)
+  assert.ok(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits).includes(id), "searchable by text already");
   release();
   await search.idle();
   assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
@@ -640,13 +670,14 @@ test("entry lists take the search filters", async (t) => {
 });
 
 test("embedding: passages carry the entry's context header, queries are embedded as queries", async (t) => {
-  const { search, embedder } = await setup(t);
+  const embedder = new FakeEmbedder();
   const seen: { kind: string; texts: readonly string[] }[] = [];
-  const embed = embedder!.embed.bind(embedder!);
-  embedder!.embed = async (texts, kind = "passage") => {
+  const embed = embedder.embed.bind(embedder);
+  embedder.embed = async (texts, kind = "passage") => {
     seen.push({ kind, texts });
     return embed(texts, kind);
   };
+  const { search } = await setup(t, { embedder });
   await warm(search);
   assert.ok(seen.some((call) => call.kind === "query" && call.texts.join() === "warm up"));
   const passages = seen.filter((call) => call.kind === "passage").flatMap((call) => call.texts);

@@ -695,8 +695,8 @@ export class KnowledgeSearch {
       }
     });
     await Promise.all(workers);
-    // Attach cached vectors now; the rest are embedded by the backfill the first query or save starts.
-    await this.vectors.loadCached();
+    // Attach cached vectors now; the rest are embedded in the background (and again for each new model).
+    await this.vectors.backfillAll();
   }
 
   private async indexText(id: string): Promise<void> {

@@ -180,3 +180,98 @@ test("without an embedder everything is empty and nothing is queued", async (t) 
   assert.deepEqual(index.embeddedIds(), []);
   assert.equal(index.entryVector("ke_adsadsadsads"), null);
 });
+
+test("a model switch while a cache opens never attaches the old model's cached vectors to the new one", async (t) => {
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-vindex-switch-"));
+  t.after(() => rm(indexDir, { recursive: true, force: true }));
+  const a = new FakeEmbedder({ modelId: "fake/a" });
+  const first = await harness(t, { indexDir, embedder: a });
+  await embedAll(first.index, { ke_adsadsadsads: ADS });
+  await first.index.stop();
+
+  // Model a's cache is on disk; the runtime switches to model b (same size) while a's cache opens.
+  const b = new FakeEmbedder({ modelId: "fake/b", groups: [["learning", "phase"]] });
+  const second = await harness(t, { indexDir, embedder: a });
+  second.index.setEntry("ke_adsadsadsads", ADS);
+  const loading = second.index.loadCached();
+  second.embedders.set(b);
+  second.index.backfill();
+  await loading;
+  await second.index.idle();
+  assert.equal(b.texts, 1, "model b embeds the entry itself");
+  const passage = embeddingPassage(embeddingHeader(ADS), ADS.body);
+  assert.notDeepEqual([...a.vector(passage)], [...b.vector(passage)]);
+  assert.deepEqual([...second.index.entryVector("ke_adsadsadsads")!], [...b.vector(passage)]);
+  await second.index.stop();
+
+  // The cache on disk is model b's now, holding b's vectors.
+  const b2 = new FakeEmbedder({ modelId: "fake/b", groups: [["learning", "phase"]] });
+  const third = await harness(t, { indexDir, embedder: b2 });
+  third.index.setEntry("ke_adsadsadsads", ADS);
+  await third.index.loadCached();
+  assert.equal(b2.texts, 0);
+  assert.deepEqual([...third.index.entryVector("ke_adsadsadsads")!], [...b.vector(passage)]);
+});
+
+test("a batch the old model was embedding when the model changed is dropped, never filed or attached", async (t) => {
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-vindex-switch-"));
+  t.after(() => rm(indexDir, { recursive: true, force: true }));
+  const a = new FakeEmbedder({ modelId: "fake/a" });
+  const { index, embedders } = await harness(t, { indexDir, embedder: a });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let started!: () => void;
+  const embedding = new Promise<void>((resolve) => (started = resolve));
+  const embed = a.embed.bind(a);
+  a.embed = async (texts, kind) => {
+    started();
+    await gate;
+    return embed(texts, kind);
+  };
+  index.setEntry("ke_adsadsadsads", ADS);
+  index.backfill();
+  await embedding;
+
+  // Model b arrives and its cache opens while a's batch is in flight.
+  const b = new FakeEmbedder({ modelId: "fake/b", groups: [["learning", "phase"]] });
+  embedders.set(b);
+  await index.loadCached();
+  const generation = index.generation();
+  release();
+  await index.idle();
+  assert.equal(index.generation(), generation, "a's vectors were not attached");
+  assert.equal(index.entryVector("ke_adsadsadsads"), null);
+
+  index.backfill();
+  await index.idle();
+  const passage = embeddingPassage(embeddingHeader(ADS), ADS.body);
+  assert.deepEqual([...index.entryVector("ke_adsadsadsads")!], [...b.vector(passage)]);
+  await index.stop();
+  // Only b's rows were filed: a restart on b reads them without embedding.
+  const b2 = new FakeEmbedder({ modelId: "fake/b", groups: [["learning", "phase"]] });
+  const again = await harness(t, { indexDir, embedder: b2 });
+  again.index.setEntry("ke_adsadsadsads", ADS);
+  await again.index.loadCached();
+  assert.equal(b2.texts, 0);
+  assert.deepEqual([...again.index.entryVector("ke_adsadsadsads")!], [...b.vector(passage)]);
+});
+
+test("backfillAll embeds every tracked entry at once, and again for each new embedder", async (t) => {
+  const { index, embedders } = await harness(t, { embedder: null });
+  index.setEntry("ke_adsadsadsads", ADS);
+  index.setEntry("ke_appappappapp", APP);
+  await index.backfillAll();
+  await index.idle();
+  assert.deepEqual(index.embeddedIds(), []);
+  const arriving = new FakeEmbedder();
+  embedders.set(arriving);
+  await index.idle();
+  assert.deepEqual(index.embeddedIds().sort(), ["ke_adsadsadsads", "ke_appappappapp"]);
+  assert.equal(arriving.texts, 2);
+  // Another change event for the same embedder (a settings toggle): nothing is embedded twice.
+  embedders.set(arriving);
+  await index.idle();
+  index.backfill();
+  await index.idle();
+  assert.equal(arriving.texts, 2);
+});

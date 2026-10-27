@@ -76,12 +76,17 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
   private changes = 0;
 
   private cache: VectorCache | null = null;
-  private cacheOpening: Promise<VectorCache> | null = null;
+  /** The cache being opened, and the embedder it is opened for. */
+  private cacheOpening: { embedder: KnowledgeEmbedder; done: Promise<VectorCache> } | null = null;
   private failedEmbedder: KnowledgeEmbedder | null = null;
   private backfilledModel: string | null = null;
   private readonly embedQueue: string[] = [];
   private readonly embedWaiters = new Map<string, (() => void)[]>();
   private embedWorker: Promise<void> | null = null;
+  /** Set by {@link backfillAll}: every entry is tracked, so a new embedder is backfilled at once. */
+  private entriesLoaded = false;
+  /** The cache load and backfill {@link backfillAll} and embedder changes run, one after another. */
+  private backfilling: Promise<void> | null = null;
 
   constructor(options: InProcessVectorIndexOptions) {
     this.embedders = options.embedders;
@@ -90,13 +95,17 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     this.minSimilarity = options.minSimilarity;
   }
 
-  /** Follow runtime changes: a new embedder is tried afresh and backfilled once. */
+  /**
+   * Follow runtime changes: a new embedder is tried afresh and backfilled once — at once when the
+   * entries are loaded ({@link backfillAll}), else by the first query or save.
+   */
   start(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = this.embedders.onChange(() => {
       this.failedEmbedder = null;
       this.backfilledModel = null;
       this.changes += 1;
+      if (this.entriesLoaded) this.scheduleBackfill();
     });
   }
 
@@ -106,13 +115,42 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.release(this.embedQueue.splice(0));
-    while (this.embedWorker) await this.embedWorker.catch(() => undefined);
+    await this.idle();
     await this.cache?.flush().catch(() => undefined);
   }
 
   /** Resolves once queued embedding has finished (tests, shutdown). */
   async idle(): Promise<void> {
-    while (this.embedWorker) await this.embedWorker.catch(() => undefined);
+    while (this.backfilling || this.embedWorker) {
+      await this.backfilling;
+      await this.embedWorker?.catch(() => undefined);
+    }
+  }
+
+  /**
+   * Every entry is tracked (the start has loaded them): attach cached vectors and embed the rest in
+   * the background, now and whenever the embedder changes — so similar entries, duplicates and the
+   * similarity graph fill without waiting for a search. Resolves once the cached vectors are attached.
+   */
+  backfillAll(): Promise<void> {
+    this.entriesLoaded = true;
+    return this.scheduleBackfill();
+  }
+
+  /** Queue a cache load and a backfill behind the one in flight (never two at once). */
+  private scheduleBackfill(): Promise<void> {
+    const run = (this.backfilling ?? Promise.resolve())
+      .then(async () => {
+        if (this.stopped) return;
+        await this.loadCached();
+        this.backfill();
+      })
+      .catch((error: Error) => this.logger.warn(`knowledge: the embedding backfill could not start (${error.message})`));
+    const tracked = run.finally(() => {
+      if (this.backfilling === tracked) this.backfilling = null;
+    });
+    this.backfilling = tracked;
+    return tracked;
   }
 
   // -------------------------------------------------------------------------
@@ -150,9 +188,10 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
   /** Attach cached vectors to every entry now (reading the cache does not load the model). */
   async loadCached(): Promise<void> {
     const embedder = this.usableEmbedder();
-    if (!embedder) return;
+    if (!embedder || this.stopped) return;
     try {
       const cache = await this.cacheFor(embedder);
+      if (!cache || !this.isCurrent(embedder, cache)) return;
       for (const doc of this.docs.values()) this.attachCached(doc, cache, embedder);
     } catch (error) {
       this.logger.warn(`knowledge: the embedding cache could not be read (${(error as Error).message})`);
@@ -188,10 +227,10 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     clearTimeout(timer);
   }
 
-  /** Embed every entry still missing vectors (once per model; started by the first query or save). */
+  /** Embed every entry still missing vectors (once per model; see {@link backfillAll}; queries ask again). */
   backfill(): void {
     const embedder = this.usableEmbedder();
-    if (!embedder || this.backfilledModel === embedder.modelId) return;
+    if (!embedder || this.stopped || this.backfilledModel === embedder.modelId) return;
     this.backfilledModel = embedder.modelId;
     const missing = [...this.docs.values()].filter((doc) => !doc.vectors || doc.vectorModel !== embedder.modelId).map((doc) => doc.id);
     void this.requestEmbeddings(missing, false).then(() => this.retain());
@@ -302,10 +341,28 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     return cache.modelId === embedder.modelId && cache.dimensions === embedder.dimensions;
   }
 
-  private async cacheFor(embedder: KnowledgeEmbedder): Promise<VectorCache> {
-    if (this.cache && this.cacheMatches(this.cache, embedder)) return this.cache;
-    if (!this.cacheOpening) {
-      this.cacheOpening = (async () => {
+  /** The embedder is still the one to use, and `cache` is its open cache: its vectors may be read, put and flushed. */
+  private isCurrent(embedder: KnowledgeEmbedder, cache: VectorCache): boolean {
+    return !this.stopped && this.usableEmbedder() === embedder && this.cache === cache && this.cacheMatches(cache, embedder);
+  }
+
+  /**
+   * The open cache of `embedder`'s model (opened when needed, one at a time; the cache directory
+   * holds one model's vectors). Null once `embedder` is no longer the one to use: a cache opened
+   * for an older model is never handed out for a newer one.
+   */
+  private async cacheFor(embedder: KnowledgeEmbedder): Promise<VectorCache | null> {
+    for (;;) {
+      if (this.stopped || this.usableEmbedder() !== embedder) return null;
+      if (this.cache && this.cacheMatches(this.cache, embedder)) return this.cache;
+      const opening = this.cacheOpening;
+      if (opening) {
+        // Another model's cache is being opened: wait for it, then look again.
+        if (opening.embedder !== embedder) await opening.done.catch(() => undefined);
+        else await opening.done;
+        continue;
+      }
+      const done = (async () => {
         await this.cache?.flush().catch(() => undefined);
         const cache = await VectorCache.open({
           dir: this.indexDir,
@@ -318,10 +375,10 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
         this.cache = cache;
         return cache;
       })().finally(() => {
-        this.cacheOpening = null;
+        if (this.cacheOpening?.done === done) this.cacheOpening = null;
       });
+      this.cacheOpening = { embedder, done };
     }
-    return this.cacheOpening;
   }
 
   private attachCached(doc: VectorDoc, cache: VectorCache, embedder: KnowledgeEmbedder): boolean {
@@ -392,6 +449,8 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
       }
       try {
         const cache = await this.cacheFor(embedder);
+        // The embedder changed meanwhile: drop the batch (the new embedder's backfill embeds it).
+        if (!cache || !this.isCurrent(embedder, cache)) continue;
         const todo: VectorDoc[] = [];
         for (const id of ids) {
           const doc = this.docs.get(id);
@@ -412,18 +471,22 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
               if (!vector || vector.length !== embedder.dimensions) throw new Error("the model returned a vector of the wrong size");
               rows.set(vector, i * embedder.dimensions);
             }
+            // A batch embedded by a model that is no longer current is dropped, never filed or
+            // attached (the new model's backfill embeds it again).
+            if (!this.isCurrent(embedder, cache)) break;
             // The entry may have been edited meanwhile; only a still-current doc takes the rows.
             if (this.docs.get(doc.id) === doc) this.setVectors(doc, rows, embedder.modelId);
             await cache.put(doc.key, rows);
           }
           sinceFlush += todo.length;
-          if (sinceFlush >= FLUSH_EVERY) {
+          if (sinceFlush >= FLUSH_EVERY && this.isCurrent(embedder, cache)) {
             await cache.flush();
             sinceFlush = 0;
           }
         }
       } catch (error) {
-        this.embedderFailed(embedder, error);
+        // A replaced embedder (released by its source) failing is no news about the current one.
+        if (this.embedders.current() === embedder) this.embedderFailed(embedder, error);
       } finally {
         this.release(ids);
       }
