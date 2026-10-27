@@ -127,8 +127,6 @@ export interface LocalBoxConnectionOptions {
   watch?: boolean;
   /** `setConnected(false)` destroys every open `openChannel` stream, as a dropped link does. */
   dropChannelsOnDisconnect?: boolean;
-  /** Tests: control the tar extractor's input-close and process-exit ordering. */
-  spawnTar?: typeof spawn;
 }
 
 export interface LocalBoxConnection extends BoxConnection {
@@ -316,7 +314,7 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
       await mkdir(path, { recursive: true });
       // As `orq-agent` does: `tar -xf -` as the box user (umask applies), the stream inflated first.
       const args = tarOptions?.compression === "gzip" ? ["-xzf", "-", "-C", path] : ["-xf", "-", "-C", path];
-      const child = (options.spawnTar ?? spawn)("tar", args, { stdio: ["pipe", "ignore", "ignore"] });
+      const child = spawn("tar", args, { stdio: ["pipe", "ignore", "ignore"] });
       // Listened for before the pipeline: a tar that exits as soon as its input ends is not missed.
       const exited = new Promise<void>((resolve, reject) => {
         child.once("error", reject);

@@ -51,8 +51,6 @@ export interface KnowledgeSearchOptions {
   /** `knowledgeIndexDir(appdir)`: the disposable vector cache. */
   indexDir: string;
   logger?: KnowledgeLogger;
-  /** Overrides the model's `minimum` cosine for a chunk to count as a semantic match (tests). */
-  minSimilarity?: number;
 }
 
 export const KNOWLEDGE_ENTRIES_DEFAULT_LIMIT = 50;
@@ -130,8 +128,7 @@ export class KnowledgeSearch {
     this.vectors = new InProcessVectorIndex({
       embedders: options.embedders,
       indexDir: options.indexDir,
-      logger: this.logger,
-      minSimilarity: options.minSimilarity
+      logger: this.logger
     });
     this.similarity = new KnowledgeSimilarity({
       store: this.store,
@@ -746,7 +743,7 @@ function fuse(lists: readonly (readonly [readonly string[], number])[]): Map<str
 }
 
 /** The `recent` sort's boost: 0.5 + 0.5 · 2^(−ageDays/90), age from `postedAt`, else `savedAt`. */
-export function recencyFactor(meta: Pick<KnowledgeEntryMeta, "postedAt" | "savedAt">, now: number): number {
+function recencyFactor(meta: Pick<KnowledgeEntryMeta, "postedAt" | "savedAt">, now: number): number {
   let at = Date.parse(meta.postedAt ?? meta.savedAt);
   if (Number.isNaN(at)) at = Date.parse(meta.savedAt);
   if (Number.isNaN(at)) return 0.5;
@@ -759,7 +756,7 @@ export function recencyFactor(meta: Pick<KnowledgeEntryMeta, "postedAt" | "saved
  * λ·rel − (1−λ)·max cosine to those already picked, rel = rank / best rank. An entry without a
  * vector has similarity 0 to everything. Deterministic: ties keep the ranked order.
  */
-export function mmr<T extends { id: string; rank: number }>(ranked: readonly T[], vectorOf: (id: string) => Float32Array | null): T[] {
+function mmr<T extends { id: string; rank: number }>(ranked: readonly T[], vectorOf: (id: string) => Float32Array | null): T[] {
   const n = ranked.length;
   if (n <= 2) return [...ranked];
   const best = ranked[0]!.rank;
@@ -803,7 +800,7 @@ export function mmr<T extends { id: string; rank: number }>(ranked: readonly T[]
  * The spec's match bands. s = best-chunk cosine (meaning) or cosine to the example target
  * (similar), null without embeddings; c = share of the query's distinct tokens in the entry.
  */
-export function matchBand(
+function matchBand(
   s: number | null,
   c: number,
   via: readonly KnowledgeMatchSignal[],

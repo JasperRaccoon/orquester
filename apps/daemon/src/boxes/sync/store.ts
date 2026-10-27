@@ -28,6 +28,7 @@ import {
 
 export const DECIDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_DECIDED_SETS = 500;
+const DECIDED_STATES: ReadonlySet<string> = new Set(["approved", "denied", "stale"]);
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -127,14 +128,14 @@ export class BoxConfigChangeStore {
   /** Persist (serialized; decided sets past retention are dropped first). */
   save(): Promise<void> {
     const cutoff = this.now().getTime() - DECIDED_RETENTION_MS;
-    const decided = this.sets.filter((set) => set.state !== "pending");
+    const decided = this.sets.filter((set) => DECIDED_STATES.has(set.state));
     const keepDecided = new Set(
       decided
         .filter((set) => Date.parse(set.decidedAt ?? set.createdAt) >= cutoff)
         .sort((a, b) => Date.parse(b.decidedAt ?? b.createdAt) - Date.parse(a.decidedAt ?? a.createdAt))
         .slice(0, MAX_DECIDED_SETS)
     );
-    this.sets = this.sets.filter((set) => set.state === "pending" || keepDecided.has(set));
+    this.sets = this.sets.filter((set) => !DECIDED_STATES.has(set.state) || keepDecided.has(set));
     const value = { ...this.envelope, version: BOX_CONFIG_CHANGES_VERSION, changes: [...this.sets, ...this.unreadable] };
     const write = this.writes.then(() => writeJsonAtomic(this.path, value));
     this.writes = write.catch(() => undefined);

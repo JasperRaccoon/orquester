@@ -18,7 +18,7 @@ import { formatKnowledgeDate, knowledgeErrorText } from "./knowledge.logic";
 // ---------------------------------------------------------------------------
 
 /** Entries the "Similar" section lists at most (the daemon's own cap). */
-export const SIMILAR_MAX = 8;
+const SIMILAR_MAX = 8;
 
 const REASON_ORDER: Record<KnowledgeRelatedReason["kind"], number> = { meaning: 0, concepts: 1, author: 2 };
 
@@ -77,10 +77,8 @@ function compareSimilar(a: KnowledgeSimilarEntry, b: KnowledgeSimilarEntry): num
   return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;
 }
 
-export interface SimilarSection {
+interface SimilarSection {
   items: KnowledgeSimilarEntry[];
-  /** True when the daemon predates similar entries and these are its concept-related ones. */
-  fallback: boolean;
 }
 
 /**
@@ -97,14 +95,14 @@ export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "rel
       .filter((entry) => once(entry.id))
       .slice(0, SIMILAR_MAX)
       .map((entry): KnowledgeSimilarEntry => ({ entry, similarity: null, reasons: [{ kind: "concepts", concepts: [], shared: 0 }] }));
-    return { items, fallback: true };
+    return { items };
   }
   const items = detail.similar
     .filter((item) => once(item.entry.id))
     .map((item) => ({ ...item, reasons: [...item.reasons].sort((a, b) => REASON_ORDER[a.kind] - REASON_ORDER[b.kind]) }))
     .sort(compareSimilar)
     .slice(0, SIMILAR_MAX);
-  return { items, fallback: false };
+  return { items };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +120,7 @@ export function visibleDuplicates(detail: Pick<KnowledgeEntryDetail, "entry" | "
   return (detail.possibleDuplicates ?? []).filter((item) => item.entry.id !== self && !isDuplicatePairKept(self, item.entry.id));
 }
 
-export type MergeSide = Pick<KnowledgeEntryMeta, "id" | "title" | "savedAt" | "collections">;
+type MergeSide = Pick<KnowledgeEntryMeta, "id" | "title" | "savedAt" | "collections">;
 
 export interface KnowledgeMergePlan {
   /** The older entry (by `savedAt`; the same instant keeps the smaller id): the daemon's own rule, `knowledgeMergeKeep`. */
@@ -176,7 +174,7 @@ export function mergeErrorText(error: unknown): string {
 // ---------------------------------------------------------------------------
 
 /** Characters of a body rendered as Markdown before "Show the rest" (a 200 KB body would stall the panel). */
-export const MARKDOWN_BODY_PREVIEW_CHARS = 20_000;
+const MARKDOWN_BODY_PREVIEW_CHARS = 20_000;
 
 /**
  * The start of a long body for the Markdown view: cut at a paragraph (else line) break in the last
@@ -205,7 +203,7 @@ export function markdownBodyPreview(body: string, limit = MARKDOWN_BODY_PREVIEW_
  * one with no backtick in its info string; only a run of the same character, at least as long,
  * with nothing but spaces after it closes it).
  */
-export function openCodeFence(text: string): string | null {
+function openCodeFence(text: string): string | null {
   let open: { char: string; length: number } | null = null;
   for (const line of text.split("\n")) {
     const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -264,19 +262,12 @@ export function keepDuplicatePair(a: string, b: string): void {
   emit();
 }
 
-export function isDuplicatePairKept(a: string, b: string): boolean {
+function isDuplicatePairKept(a: string, b: string): boolean {
   return keptPairs.has(pairKey(a, b));
 }
 
 export function panelSessionVersion(): number {
   return version;
-}
-
-/** Forget the session's choices (tests). */
-export function resetPanelSession(): void {
-  plainText = false;
-  keptPairs.clear();
-  emit();
 }
 
 /** The `ids` an entry panel shows besides its own: a change to any of them makes it stale. */

@@ -50,7 +50,7 @@ export function parseSettingNumber(text: string, limits: NumberLimits, options: 
  * `current` with `id` turned on or off, in {@link DEVICE_PROFILES}' display order (ids it does not
  * know, from another build, are dropped: the daemon refuses them).
  */
-export function toggledProfiles(current: readonly string[], id: string, on: boolean, platform: DevicePlatform): string[] {
+function toggledProfiles(current: readonly string[], id: string, on: boolean, platform: DevicePlatform): string[] {
   const chosen = new Set(current);
   if (on) chosen.add(id);
   else chosen.delete(id);
@@ -155,7 +155,7 @@ export function setupJobView(job: DeviceSetupJob | undefined): SetupJobView | nu
 // ---------------------------------------------------------------------------
 
 /** "45m", "2h 05m", "1d 3h". */
-export function formatUptime(ms: number): string {
+function formatUptime(ms: number): string {
   const minutes = Math.max(0, Math.floor(ms / 60_000));
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);

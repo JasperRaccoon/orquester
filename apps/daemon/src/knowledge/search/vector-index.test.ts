@@ -5,18 +5,18 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { FakeEmbedder, FakeEmbedderSource, silentLogger } from "./test-fakes.ts";
 import { embeddingHeader, embeddingPassage } from "./text.ts";
-import { InProcessVectorIndex, type VectorEntryText, vectorCacheKey } from "./vector-index.ts";
+import { InProcessVectorIndex, type VectorEntryText } from "./vector-index.ts";
 
 const ADS: VectorEntryText = { title: "Ads learning phase", author: "Ana", handle: "ana", kind: "thread", body: "Cap the daily budget while a campaign learns." };
 const APP: VectorEntryText = { title: "Store listing", author: null, handle: null, kind: "note", body: "iOS app store screenshots sell the app." };
 const AI: VectorEntryText = { title: "AI answers", author: null, handle: null, kind: "note", body: "ChatGPT and Perplexity cite original data." };
 
-async function harness(t: TestContext, options: { indexDir?: string; embedder?: FakeEmbedder | null; minSimilarity?: number } = {}) {
+async function harness(t: TestContext, options: { indexDir?: string; embedder?: FakeEmbedder | null } = {}) {
   const indexDir = options.indexDir ?? (await mkdtemp(join(tmpdir(), "kg-vindex-")));
   const embedder = options.embedder === undefined ? new FakeEmbedder() : options.embedder;
   const embedders = new FakeEmbedderSource(embedder);
   const logger = silentLogger();
-  const index = new InProcessVectorIndex({ embedders, indexDir, logger, minSimilarity: options.minSimilarity });
+  const index = new InProcessVectorIndex({ embedders, indexDir, logger });
   index.start();
   t.after(async () => {
     await index.stop();
@@ -31,75 +31,74 @@ async function embedAll(index: InProcessVectorIndex, entries: Record<string, Vec
   await index.idle();
 }
 
-test("the cache key covers the embedding header and the body", () => {
-  const key = vectorCacheKey(embeddingHeader(ADS), ADS.body);
-  assert.match(key, /^[0-9a-f]{64}$/);
-  assert.notEqual(vectorCacheKey(embeddingHeader({ ...ADS, title: "Other" }), ADS.body), key);
-  assert.notEqual(vectorCacheKey(embeddingHeader({ ...ADS, kind: "article" }), ADS.body), key);
-  assert.notEqual(vectorCacheKey(embeddingHeader({ ...ADS, handle: "someone" }), ADS.body), key);
-  assert.notEqual(vectorCacheKey(embeddingHeader(ADS), `${ADS.body}!`), key);
-  // The separator keeps header and body apart.
-  assert.notEqual(vectorCacheKey("a", "b c"), vectorCacheKey("a b", "c"));
-});
-
-test("passages are embedded with their header; queries as queries; mean vectors are normalized and cached", async (t) => {
-  const { index, embedder } = await harness(t);
+test("passages carry context and queries use the query embedding kind", async (t) => {
+  const embedder = new FakeEmbedder({ dimensions: 2, groups: [] });
+  embedder.vector = (text) => Float32Array.from(text.includes("Ads learning phase") ? [1, 0] : [0, 1]);
+  const { index } = await harness(t, { embedder });
   const texts: { kind: string; text: string }[] = [];
-  const embed = embedder!.embed.bind(embedder!);
-  embedder!.embed = async (batch, kind = "passage") => {
+  const embed = embedder.embed.bind(embedder);
+  embedder.embed = async (batch, kind = "passage") => {
     for (const text of batch) texts.push({ kind, text });
     return embed(batch, kind);
   };
   await embedAll(index, { ke_adsadsadsads: ADS, ke_appappappapp: APP });
-  assert.deepEqual(
-    texts.filter((t) => t.kind === "passage").map((t) => t.text).sort(),
-    [embeddingPassage(embeddingHeader(ADS), ADS.body), embeddingPassage(embeddingHeader(APP), APP.body)].sort()
-  );
-  const query = await index.embedQuery("budget");
-  assert.ok(query);
+  const passages = texts.filter((entry) => entry.kind === "passage");
+  assert.equal(passages.length, 2);
+  const ads = passages.find((entry) => entry.text.endsWith(ADS.body))!;
+  const [header, body] = ads.text.split("\n\n");
+  assert.equal(body, ADS.body);
+  for (const context of ["Ads learning phase", "Ana", "@ana", "thread"]) assert.ok(header!.includes(context), context);
+  await index.embedQuery("budget");
   assert.deepEqual(texts.at(-1), { kind: "query", text: "budget" });
-
   const vector = index.entryVector("ke_adsadsadsads")!;
-  assert.deepEqual([...vector], [...embedder!.vector(embeddingPassage(embeddingHeader(ADS), ADS.body))], "one chunk: its own vector");
-  assert.equal(index.entryVector("ke_adsadsadsads"), vector);
+  assert.deepEqual([...vector], [1, 0]);
+  assert.equal(index.entryVector("ke_adsadsadsads"), vector, "mean cached until its vectors change");
   assert.equal(index.entryVector("ke_nosuchentry1"), null);
 });
 
-test("long entries: one row per chunk; the mean of the chunks; hits name the best chunk's span", async (t) => {
-  const { index } = await harness(t, { minSimilarity: 0.3 });
-  const body = `${Array.from({ length: 200 }, (_, i) => `word${i}`).join(" ")} budget campaign spend cpc`;
+test("long entries expose the normalized chunk mean and the best chunk's body span", async (t) => {
+  const embedder = new FakeEmbedder({ dimensions: 2, groups: [] });
+  const emitted: number[][] = [];
+  embedder.vector = (text) => {
+    const vector = text.includes("cpc") ? [0, 1] : [1, 0];
+    emitted.push(vector);
+    return Float32Array.from(vector);
+  };
+  const { index } = await harness(t, { embedder });
+  const body = `${"alpha ".repeat(200)}budget campaign spend cpc`;
   index.setEntry("ke_longlonglong", { ...ADS, body });
-  assert.ok(index.chunkCount("ke_longlonglong") >= 2);
   await index.embedForSave(["ke_longlonglong"]);
   await index.idle();
+  assert.deepEqual(emitted, [[1, 0], [0, 1]], "two independently supplied chunk vectors");
   const mean = index.entryVector("ke_longlonglong")!;
-  assert.ok(Math.abs(mean.reduce((n, x) => n + x * x, 0) - 1) < 1e-5);
-  const [hit] = index.search((await index.embedQuery("cpc budget"))!, () => true, 5);
+  assert.ok(Math.abs(mean[0]! - Math.SQRT1_2) < 1e-6);
+  assert.ok(Math.abs(mean[1]! - Math.SQRT1_2) < 1e-6);
+  const [hit] = index.search(Float32Array.from([0, 1]), () => true, 5);
   assert.ok(hit);
-  assert.equal(hit.chunks, index.chunkCount("ke_longlonglong"));
-  assert.equal(hit.chunk, hit.chunks - 1);
+  assert.equal(hit.chunks, 2);
+  assert.equal(hit.chunk, 1);
+  assert.ok(hit.span.start > 0 && hit.span.end <= body.length);
   assert.match(body.slice(hit.span.start, hit.span.end), /cpc$/);
 });
 
-test("search asks `accept` before scoring, honours the minimum and the limit, best first", async (t) => {
-  const { index } = await harness(t);
+test("search excludes rejected entries before its limit and applies the score floor", async (t) => {
+  const embedder = new FakeEmbedder({ dimensions: 2, groups: [] });
+  embedder.vector = (text) => Float32Array.from(text.includes(ADS.title) ? [1, 0] : text.includes(APP.title) ? [0.6, 0.8] : [0, 1]);
+  const { index } = await harness(t, { embedder });
   await embedAll(index, { ke_adsadsadsads: ADS, ke_appappappapp: APP, ke_aiaiaiaiaiai: AI });
-  const query = (await index.embedQuery("ads budget campaign"))!;
-  const asked: string[] = [];
-  const all = index.search(query, (id) => (asked.push(id), true), 10, -1);
-  assert.deepEqual(asked.sort(), ["ke_adsadsadsads", "ke_aiaiaiaiaiai", "ke_appappappapp"]);
-  assert.equal(all[0]!.entryId, "ke_adsadsadsads");
-  assert.ok(all.every((hit, i) => i === 0 || all[i - 1]!.score >= hit.score));
-  assert.equal(index.search(query, () => true, 1, -1).length, 1);
-  assert.deepEqual(index.search(query, (id) => id !== "ke_adsadsadsads", 10, 0.5), []);
+  const query = Float32Array.from([1, 0]);
+  assert.deepEqual(index.search(query, () => true, 3, -1).map((hit) => hit.entryId), ["ke_adsadsadsads", "ke_appappappapp", "ke_aiaiaiaiaiai"]);
+  assert.deepEqual(index.search(query, () => true, 1).map((hit) => hit.entryId), ["ke_adsadsadsads"]);
+  assert.deepEqual(index.search(query, (id) => id !== "ke_adsadsadsads", 1, 0.5).map((hit) => hit.entryId), ["ke_appappappapp"]);
+  assert.deepEqual(index.search(query, (id) => id !== "ke_adsadsadsads", 10, 0.7), []);
   assert.deepEqual(index.search(new Float32Array(3), () => true, 10), [], "a vector of the wrong size matches nothing");
 });
 
-test("thresholds come from the model; minSimilarity overrides only the minimum", async (t) => {
-  const plain = await harness(t);
-  assert.deepEqual(plain.index.thresholds(), plain.embedder!.thresholds);
-  const custom = await harness(t, { minSimilarity: 0.1, embedder: new FakeEmbedder({ thresholds: { minimum: 0.7, good: 0.8, strong: 0.85, duplicate: 0.95 } }) });
-  assert.deepEqual(custom.index.thresholds(), { minimum: 0.1, good: 0.8, strong: 0.85, duplicate: 0.95 });
+test("thresholds follow the current embedding model", async (t) => {
+  const { index, embedders } = await harness(t);
+  assert.deepEqual(index.thresholds(), { minimum: 0.25, good: 0.4, strong: 0.6, duplicate: 0.92 });
+  embedders.set(new FakeEmbedder({ thresholds: { minimum: 0.7, good: 0.8, strong: 0.85, duplicate: 0.95 } }));
+  assert.deepEqual(index.thresholds(), { minimum: 0.7, good: 0.8, strong: 0.85, duplicate: 0.95 });
 });
 
 test("generation moves on every vector change and only then", async (t) => {

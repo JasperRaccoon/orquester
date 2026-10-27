@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
 import { createThreadStore } from "./index.ts";
@@ -22,8 +22,12 @@ import { createThreadStore } from "./index.ts";
 const eventsPathOf = (root: string, id: string): string =>
   path.join(root, "threads", id, "events.ndjson");
 
+const roots: string[] = [];
+after(async () => { await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))); });
 async function tempRoot(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-store-pos-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-store-pos-"));
+  roots.push(root);
+  return root;
 }
 
 function fixedClock(iso = "2026-01-01T00:00:00.000Z"): Clock {

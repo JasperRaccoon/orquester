@@ -17,7 +17,7 @@ export function multipartBoundary(contentType: string | null | undefined): strin
 }
 
 /** One part larger than this is not a screen frame; the parser throws. */
-export const MAX_MJPEG_PART_BYTES = 32 * 1024 * 1024;
+const MAX_MJPEG_PART_BYTES = 32 * 1024 * 1024;
 
 const CR = 0x0d;
 const LF = 0x0a;

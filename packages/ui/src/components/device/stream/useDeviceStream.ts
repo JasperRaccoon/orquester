@@ -25,7 +25,6 @@ import {
   type DeviceStreamStats,
   type DeviceTransport,
   type DeviceVideoSession,
-  type StreamDeps,
   type TouchPhase
 } from "./types.ts";
 
@@ -54,16 +53,10 @@ export interface UseDeviceStreamOptions {
   readonly urls: DeviceStreamUrls;
   /** Connect only while true (the panel is visible). */
   readonly enabled: boolean;
-  /** Force a transport; otherwise chosen from browser and host capabilities. */
-  readonly transport?: DeviceTransport;
   readonly hostCaps?: HostStreamCaps;
   /** A frame was painted into `canvas` (call the viewport's `notifyFrame()`). Not a render trigger. */
   readonly onFrame?: () => void;
   readonly onWarning?: (message: string) => void;
-  /** Test seam: browser APIs for the sessions. */
-  readonly deps?: Partial<StreamDeps>;
-  /** Test seam: browser capabilities instead of probing WebCodecs. */
-  readonly browserCaps?: BrowserStreamCaps;
 }
 
 export interface DeviceStreamHandle {
@@ -99,12 +92,12 @@ const IOS_BUTTONS: Record<DeviceButton, ServeSimButton | null> = {
 };
 
 /** Swap serve-sim's stream file name, keeping the path prefix and query (auth). */
-export function serveSimStreamUrl(url: string, file: "stream.avcc" | "stream.mjpeg"): string {
+function serveSimStreamUrl(url: string, file: "stream.avcc" | "stream.mjpeg"): string {
   return url.replace(/stream\.(?:avcc|mjpeg)(?=$|[?#])/, file);
 }
 
 /** Set or delete query parameters on an absolute or relative URL. */
-export function withQueryParams(url: string, params: Record<string, string | null>): string {
+function withQueryParams(url: string, params: Record<string, string | null>): string {
   const base = "http://relative.invalid";
   const parsed = new URL(url, base);
   for (const [key, value] of Object.entries(params)) {
@@ -140,8 +133,8 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
   const latest = useRef(options);
   latest.current = options;
 
-  const browserCaps = options.browserCaps ?? probedCaps;
-  const needsCaps = enabled && !options.transport && !options.browserCaps && probedCaps === null;
+  const browserCaps = probedCaps;
+  const needsCaps = enabled && probedCaps === null;
   useEffect(() => {
     if (!needsCaps) return;
     let cancelled = false;
@@ -158,13 +151,11 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
 
   const transport: DeviceTransport | null =
     (fallback?.video === urls.video ? fallback.transport : null) ??
-    options.transport ??
     (browserCaps ? chooseTransport({ platform, hostCaps, browserCaps }) : null);
 
   useEffect(() => {
     if (!enabled || !canvas || !transport) return;
     let open = true;
-    const deps = latest.current.deps;
     const headers = latest.current.urls.headers;
     const auth = headers ? { headers } : {};
     const onWarning = (message: string) => {
@@ -193,7 +184,7 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
     const onInputReady = (ready: boolean) => {
       if (open) setInputReady(ready);
     };
-    const common = { canvas, deps, onFrame, onState, onWarning };
+    const common = { canvas, onFrame, onState, onWarning };
     const next: Channels = { video: null, emu: null, sim: null, throttle: null };
     setState("connecting");
     setError(null);
@@ -227,7 +218,6 @@ export function useDeviceStream(options: UseDeviceStreamOptions): DeviceStreamHa
       if (urls.input) {
         next.sim = new ServeSimInputSocket({
           url: urls.input,
-          deps,
           onWarning,
           onReady: onInputReady,
           onScreenConfig: (config) => {

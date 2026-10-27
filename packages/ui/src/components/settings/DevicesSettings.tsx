@@ -725,7 +725,7 @@ const FleetSection: React.FC<{ settings: DevicesSettingsValue; ctx: SaveContext 
         <Badge>Phase 2</Badge>
       </button>
       {open && (
-        <div className="divide-y divide-neutral-800/80 overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40" data-devices-fleet="">
+        <div className="divide-y divide-neutral-800/80 overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40">
           {poolSummary && (
             <SettingRow
               label="Pool now"

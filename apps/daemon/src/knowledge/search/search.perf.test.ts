@@ -25,7 +25,7 @@ function prng(seed: number): () => number {
 }
 
 const id = (prefix: string, n: number, width: number) =>
-  `${prefix}${n.toString(32).padStart(width, "0").replace(/[0-9]/g, (d) => "abcdefghij"[Number(d)]!)}`;
+  `${prefix}${n.toString(32).padStart(width, "0")}`;
 
 test("hybrid search over 5,000 entries with filters, MMR, facets and paging: p95 under 300 ms", { timeout: 120_000 }, async (t) => {
   const random = prng(42);
@@ -69,8 +69,8 @@ test("hybrid search over 5,000 entries with filters, MMR, facets and paging: p95
     await rm(indexDir, { recursive: true, force: true });
   });
   await search.start();
-  await search.search({ query: "warm up" }, { kind: "all" });
   await search.idle();
+  assert.equal(search.vectorIndex().embeddedIds().length, ENTRIES, "the benchmark must index all 5,000 distinct entries");
 
   const visibilities: KnowledgeVisibility[] = [{ kind: "all" }, { kind: "collections", ids: collections.slice(0, 3) }];
   const timings: number[] = [];
@@ -107,8 +107,5 @@ test("hybrid search over 5,000 entries with filters, MMR, facets and paging: p95
   const p95 = timings[Math.floor(timings.length * 0.95)]!;
   t.diagnostic(`search over ${ENTRIES} entries: p50 ${p50.toFixed(1)} ms, p95 ${p95.toFixed(1)} ms`);
 
-  const graphStarted = performance.now();
-  const whole = search.graphView({}, { kind: "all" });
-  t.diagnostic(`whole graph (${whole.totals.nodes} nodes, truncated ${whole.truncated}): ${(performance.now() - graphStarted).toFixed(1)} ms`);
   assert.ok(p95 < 300, `p95 ${p95.toFixed(1)} ms`);
 });

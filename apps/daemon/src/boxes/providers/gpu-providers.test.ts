@@ -7,10 +7,10 @@ import { GPU_PROVIDER_ADAPTERS } from "./gpu-providers.ts";
 import { callOptions, routedFetch } from "./gpu-testing.ts";
 import { tableHourlyUsd } from "./gpu-price-tables.ts";
 
-test("gpu providers: validate with no credentials answers ok:false without a request", async () => {
+test("gpu providers: validate with no credentials answers ok:false without a request", async (t) => {
   const { fetch, seen } = routedFetch([]);
   for (const adapter of GPU_PROVIDER_ADAPTERS) {
-    const result = await adapter.validate({}, callOptions(fetch));
+    const result = await adapter.validate({}, callOptions(t, fetch));
     assert.equal(result.ok, false, adapter.id);
   }
   assert.equal(seen.length, 0);

@@ -226,12 +226,17 @@ test("wait-for-reset: waits until the earliest reset, then resumes in the same s
   assert.ok(waiting, "the wait is persisted");
 });
 
-test("wait-for-reset refuses a reset beyond maxWaitHours", async () => {
+test("wait-for-reset refuses a reset beyond maxWaitHours measured from the first wait", async () => {
   const sc = new Scenario({ accounts: [account("claude", "a1")], behaviour: () => [] });
-  sc.host.behaviour = () => [{ kind: "limit", resetsAt: limitAt(sc, 10 * HOUR) }];
+  const startedAt = sc.clock.now().getTime();
+  let calls = 0;
+  sc.host.behaviour = () => (++calls <= 2 ? [{ kind: "limit", resetsAt: limitAt(sc, 3 * HOUR) }] : ok("must not get another wait budget"));
   const wf = testWorkflow([agentNode("n1", { whenAllBurnt: { kind: "wait-for-reset", maxWaitHours: 5 } })]);
   const error = errorOf((await sc.run(wf, "n1")).result);
   assert.equal(error.kind, "all_burnt");
+  assert.equal(calls, 2);
+  const elapsed = sc.clock.now().getTime() - startedAt;
+  assert.ok(elapsed >= 3 * HOUR && elapsed < 4 * HOUR, `waited ${elapsed / HOUR} h`);
 });
 
 test("an auth failure skips the account (1 h cooldown, unusable for the run) and fails over", async () => {

@@ -240,7 +240,7 @@ test("validate uses the daemon's saved-prompt catalog and reports malformed or m
 
 test("the list filters by project: the existing project, plus temp workflows of its workspace", async () => {
   const h = await harness();
-  const mine = await createWorkflow(h, { name: "Mine" });
+  const mine = await createWorkflow(h, { name: "Mine", settings: { notify: { onFailure: false, onSuccess: true } } });
   const temp = await createWorkflow(h, { name: "Temp", project: { kind: "temp", workspace: "ws", source: { kind: "empty" } } });
   await createWorkflow(h, { name: "Other", project: { kind: "existing", projectPath: "/w/ws/other" } });
   await createWorkflow(h, { name: "Elsewhere", project: { kind: "temp", workspace: "ws2", source: { kind: "empty" } } });
@@ -252,6 +252,8 @@ test("the list filters by project: the existing project, plus temp workflows of 
   const row = filtered.json().workflows.find((w: { id: string }) => w.id === mine.id);
   assert.equal(row.nodeCount, 2);
   assert.equal(row.errorCount, 0);
+  assert.deepEqual(row.notify, { onFailure: false, onSuccess: true });
+  assert.deepEqual(filtered.json().workflows.find((w: { id: string }) => w.id === temp.id).notify, { onFailure: true, onSuccess: false });
 });
 
 test("block types and the schedule preview", async () => {

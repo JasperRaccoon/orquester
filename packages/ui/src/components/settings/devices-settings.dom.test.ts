@@ -1,7 +1,7 @@
 /**
  * Settings → Devices in a DOM: the Android checklist offers Install all and per-item fixes, a
  * number field validates before it saves, a profile chip saves the whole list, the Mac host rows
- * need the box provider, and the Fleet group starts collapsed.
+ * need the box provider, and Fleet controls save their own settings.
  */
 
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import {
   DEFAULT_DEVICES_SETTINGS,
   DEVICES_PLUGIN_ID,
   type DeviceHostSummary,
+  type DeviceSetupJob,
   type DevicesSettings as DevicesSettingsValue,
   type DevicesStateResponse,
   type PluginInfo
@@ -24,7 +25,9 @@ let createRoot: typeof import("react-dom/client").createRoot;
 let DevicesSettings: typeof import("./DevicesSettings").DevicesSettings;
 let loadDevices: typeof import("../../lib/devices/store").loadDevices;
 let resetDevices: typeof import("../../lib/devices/store").resetDevices;
+let devicesStore: typeof import("../../lib/devices/store").devicesStore;
 let useAppStore: typeof import("../../store/app").useAppStore;
+let takeBoxesSettingsFocus: typeof import("../../lib/boxes/hooks").takeBoxesSettingsFocus;
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "HTMLInputElement", "Element", "Node", "navigator", "KeyboardEvent", "MouseEvent", "FocusEvent", "Event"] as const;
@@ -44,8 +47,9 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ DevicesSettings } = await import("./DevicesSettings"));
-  ({ loadDevices, resetDevices } = await import("../../lib/devices/store"));
+  ({ loadDevices, resetDevices, devicesStore } = await import("../../lib/devices/store"));
   ({ useAppStore } = await import("../../store/app"));
+  ({ takeBoxesSettingsFocus } = await import("../../lib/boxes/hooks"));
 });
 
 after(() => {
@@ -107,6 +111,7 @@ describe("DevicesSettings", () => {
   afterEach(() => {
     act(() => root.unmount());
     useAppStore.setState(initial, true);
+    takeBoxesSettingsFocus();
     resetDevices();
   });
 
@@ -147,7 +152,7 @@ describe("DevicesSettings", () => {
     });
   };
 
-  it("Install all and a single item's Install start the Android setup", async () => {
+  it("starts scoped Android setup and renders progress, failure and completion", async () => {
     await show();
     const all = button("Install all");
     assert.ok(all, "Install all shows while something is missing");
@@ -157,15 +162,27 @@ describe("DevicesSettings", () => {
       ["setup", ["android", {}]],
       ["setup", ["android", { actions: ["install-sdk"] }]]
     ]);
-    assert.match(doc().body.textContent ?? "", /Android SDK licence/);
-    assert.match(doc().body.textContent ?? "", /agent-device/);
+    assert.ok(doc().querySelector('a[href="https://developer.android.com/studio/terms"]'), "setup exposes the SDK licence terms");
+    const job: DeviceSetupJob = {
+      id: "j1", platform: "android", hostId: "local", state: "running", steps: [], percent: 40,
+      logLine: "Downloading the system image", error: null, startedAt: "2026-10-27T10:00:00.000Z", finishedAt: null
+    };
+    await act(async () => devicesStore.setState({ setupJobs: { android: job } }));
+    assert.equal(doc().querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"), "40");
+    assert.match(doc().body.textContent ?? "", /Downloading the system image/);
+    await act(async () => devicesStore.setState({ setupJobs: { android: { ...job, state: "failed", error: "SDK download refused" } } }));
+    assert.match(doc().body.textContent ?? "", /SDK download refused/);
+    await act(async () => devicesStore.setState({ setupJobs: { android: { ...job, state: "done" } } }));
+    assert.equal(doc().querySelector('[role="progressbar"]'), null);
+    assert.doesNotMatch(doc().body.textContent ?? "", /Downloading the system image/);
   });
 
   it("a number field refuses an out-of-range value and saves a valid one", async () => {
     await show();
     const input = doc().querySelector<HTMLInputElement>('input[aria-label="Most devices at once"]')!;
     await type(input, "99");
-    assert.match([...doc().querySelectorAll("[role=alert]")].map((el) => el.textContent).join("|"), /Between 1 and 32/);
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.ok(doc().querySelector('[role="alert"]'));
     assert.deepEqual(calls, []);
     await type(input, "4");
     assert.deepEqual(calls, [["settings", { android: { maxLocalDevices: 4 } }]]);
@@ -180,24 +197,23 @@ describe("DevicesSettings", () => {
 
   it("without the box provider the Mac host controls point to Plugins", async () => {
     await show();
-    assert.ok(button("Set up in Plugins"));
+    await click(button("Set up in Plugins")!);
+    assert.equal(useAppStore.getState().settingsSection, "plugins");
     const lifetime = doc().querySelector<HTMLInputElement>('input[aria-label="Lifetime in minutes"]')!;
     assert.equal(lifetime.disabled, true);
   });
 
-  it("the Fleet group starts collapsed and opens", async () => {
+  it("saves fleet placement and validates Android host lifetime", async () => {
     await show();
-    assert.equal(doc().querySelector("[data-devices-fleet]"), null);
     const toggle = [...doc().querySelectorAll("button")].find((b) => b.textContent?.includes("Fleet (preview)"))!;
     await click(toggle);
-    assert.ok(doc().querySelector("[data-devices-fleet]"));
     await click(button("Pool only")!);
     assert.deepEqual(calls, [["settings", { pool: { placement: "pool-only" } }]]);
     // The Android (Linux) hosts' own time limit, apart from the Mac hosts' Lifetime.
     const lifetime = doc().querySelector<HTMLInputElement>('input[aria-label="Android host lifetime in minutes"]')!;
-    assert.equal(lifetime.value, String(DEFAULT_DEVICES_SETTINGS.pool.androidLifetimeMinutes));
     await type(lifetime, "10");
-    assert.match([...doc().querySelectorAll("[role=alert]")].map((el) => el.textContent).join("|"), /Between 30 and 1440/);
+    assert.equal(lifetime.getAttribute("aria-invalid"), "true");
+    assert.deepEqual(calls, [["settings", { pool: { placement: "pool-only" } }]], "invalid lifetime is not saved");
     await type(lifetime, "90");
     assert.deepEqual(calls.at(-1), ["settings", { pool: { androidLifetimeMinutes: 90 } }]);
   });

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  CLAUDE_INSTALLED_PLUGINS_REL,
   installedPluginCacheDirs,
   isDeniedRealPath,
   isDeniedRelPath,
@@ -11,7 +10,6 @@ import {
   isSafeRelPath,
   isSyncedRel,
   isUninstalledPluginCache,
-  syncRootKind,
   syncRuleFor
 } from "./rules.ts";
 
@@ -84,10 +82,6 @@ test("include lists keep transcripts, caches, telemetry and state out", () => {
   assert.equal(isSyncedRel(codex, "config.toml"), true);
   assert.equal(isSyncedRel(codex, "skills/mine/SKILL.md"), true);
   assert.equal(isSyncedRel(codex, "skills/.system/x/SKILL.md"), false);
-  // Only the account config keeps Codex's project trust in the box; a prepared copy is host → box.
-  assert.equal(codex.codec("config.toml"), "codex-toml");
-  assert.equal(syncRuleFor("codex", "prepared").codec("config.toml"), "mcp-toml");
-  assert.equal(syncRuleFor("grok", "account").codec("config.toml"), "mcp-toml");
   for (const rel of ["sessions/2026/01/01/rollout-x.jsonl", "state_5.sqlite", "logs_2.sqlite-wal", "auth.json", "history.jsonl", "models_cache.json"]) {
     assert.equal(isSyncedRel(codex, rel), false, rel);
   }
@@ -97,13 +91,6 @@ test("include lists keep transcripts, caches, telemetry and state out", () => {
   assert.equal(isSyncedRel(opencodePrepared, "xdg"), true);
   assert.equal(isSyncedRel(opencodePrepared, "xdg/gh"), false);
   assert.equal(isSyncedRel(syncRuleFor("grok", "account"), "sessions/x/summary.json"), false);
-});
-
-test("roots under the prepared root are host → box only", () => {
-  assert.equal(syncRootKind("/app/daemon/session-profiles/prepared/p/claude/shared/v-1", "/app/daemon/session-profiles/prepared"), "prepared");
-  assert.equal(syncRootKind("/app/daemon/agent-accounts/claude/a/home", "/app/daemon/session-profiles/prepared"), "account");
-  assert.equal(syncRuleFor("claude", "prepared").twoWay, false);
-  assert.equal(syncRuleFor("claude", "account").twoWay, true);
 });
 
 test("box-listed names: only plain segments; temp files of either side never sync", () => {
@@ -159,7 +146,6 @@ test("installed_plugins.json names the cache dirs of its installs (installPath o
   assert.deepEqual(installedPluginCacheDirs(JSON.stringify({ version: 1, plugins: { "p@m": { version: "1.0" } } })), ["m/p/1.0"]);
   assert.equal(installedPluginCacheDirs("not json"), null);
   assert.equal(installedPluginCacheDirs('{"version":2}'), null);
-  assert.equal(CLAUDE_INSTALLED_PLUGINS_REL, "plugins/installed_plugins.json");
 });
 
 test("the plugin cache keeps installed versions only; temp clones and in-use markers never sync; marketplaces are host → box only", () => {

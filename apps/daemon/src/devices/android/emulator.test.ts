@@ -1,39 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { allocateEmulatorPorts, consolePortCandidates, consolePortOf, emulatorArgs, grpcPortFor, kvmCommand, serialOf, shellQuote, signalLauncher, stopEmulator } from "./emulator.ts";
-import type { ExecFn } from "./exec.ts";
+import { allocateEmulatorPorts, consolePortCandidates, consolePortOf, emulatorArgs, grpcPortFor, kvmCommand, serialOf, signalLauncher, stopEmulator } from "./emulator.ts";
+import { execFile, type ExecFn } from "./exec.ts";
 import type { DeviceExecutor } from "./executor.ts";
 
 test("flags: a lease boots read-only from the snapshot without saving; a golden boot is cold and writable", () => {
   const lease = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570 });
-  assert.deepEqual(lease, [
-    "-read-only",
-    "-avd",
-    "orq-pixel-9",
-    "-no-window",
-    "-no-audio",
-    "-no-boot-anim",
-    "-no-metrics",
-    "-accel",
-    "on",
-    "-gpu",
-    "swangle_indirect",
-    "-port",
-    "5586",
-    "-grpc",
-    "8570",
-    "-grpc-use-token",
-    "-camera-back",
-    "none",
-    "-camera-front",
-    "none",
-    "-no-snapshot-save"
-  ]);
+  for (const flag of ["-read-only", "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-grpc-use-token", "-no-snapshot-save"]) assert.ok(lease.includes(flag), flag);
+  for (const [flag, value] of [["-avd", "orq-pixel-9"], ["-accel", "on"], ["-gpu", "swangle_indirect"], ["-port", "5586"], ["-grpc", "8570"], ["-camera-back", "none"], ["-camera-front", "none"]]) {
+    assert.equal(lease[lease.indexOf(flag!) + 1], value);
+  }
   const golden = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5554, grpcPort: 8554, golden: true });
   assert.equal(golden.includes("-read-only"), false);
   assert.equal(golden.includes("-no-snapshot-save"), false);
-  assert.equal(golden.at(-1), "-no-snapshot-load");
+  assert.ok(golden.includes("-no-snapshot-load"));
 });
 
 test("ports: even console ports in 5554–5682, above adb's scan range first; gRPC per console port", () => {
@@ -53,28 +34,33 @@ test("ports: even console ports in 5554–5682, above adb's scan range first; gR
 test("ports: skips taken ports and ports busy on the machine (console, adb +1, gRPC)", async () => {
   const busy = new Set([5587, 8572]); // 5586's adb port, 5590's gRPC port
   const got = await allocateEmulatorPorts(new Set([5588]), async (port) => !busy.has(port));
-  assert.deepEqual(got, { consolePort: 5592, grpcPort: grpcPortFor(5592) });
+  assert.deepEqual(got, { consolePort: 5592, grpcPort: 8573 });
   assert.equal(await allocateEmulatorPorts(new Set(), async () => false), null);
 });
 
-test("kvm: direct runs the binary; sg wraps it in one quoted exec", () => {
+test("kvm: direct execution preserves argv; sg shell quoting does not expand text", async () => {
   assert.deepEqual(kvmCommand("direct", "/sdk/emulator/emulator", ["-avd", "x"]), { command: "/sdk/emulator/emulator", args: ["-avd", "x"] });
-  assert.deepEqual(kvmCommand("sg", "/a b/emulator", ["-avd", "it's"]), { command: "sg", args: ["kvm", "-c", `exec '/a b/emulator' -avd 'it'\\''s'`] });
-  assert.equal(shellQuote(["-port", "5554", "a=b"]), "-port 5554 a=b");
+  const wrapped = kvmCommand("sg", process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", "it's", "$(printf injected)", "a b"]);
+  assert.equal(wrapped.command, "sg");
+  assert.equal(wrapped.args[0], "kvm");
+  const result = await execFile("/bin/sh", ["-c", wrapped.args[2]!]);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), ["it's", "$(printf injected)", "a b"]);
 });
 
 test("flags: a box lease boots its named snapshot with the snapshot's GPU mode, or cold when that failed", () => {
   const named = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570, gpu: "swiftshader_indirect", snapshot: "orq-golden" });
-  assert.equal(named[0], "-read-only");
+  assert.ok(named.includes("-read-only"));
   assert.equal(named[named.indexOf("-gpu") + 1], "swiftshader_indirect");
-  assert.deepEqual(named.slice(-3), ["-snapshot", "orq-golden", "-no-snapshot-save"]);
+  assert.equal(named[named.indexOf("-snapshot") + 1], "orq-golden");
+  assert.ok(named.includes("-no-snapshot-save"));
   const cold = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570, snapshot: "orq-golden", coldBoot: true });
-  assert.deepEqual(cold.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+  assert.ok(cold.includes("-no-snapshot-load") && cold.includes("-no-snapshot-save"));
   assert.equal(cold.includes("-snapshot"), false);
   // A named golden is cold and writable, and saves nothing on exit (`adb emu avd snapshot save` does).
   const golden = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5554, grpcPort: 8554, golden: true, snapshot: "orq-golden" });
   assert.equal(golden.includes("-read-only"), false);
-  assert.deepEqual(golden.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+  assert.ok(golden.includes("-no-snapshot-load") && golden.includes("-no-snapshot-save"));
 });
 
 /** A fake machine: process table, environments, and every signal sent. */

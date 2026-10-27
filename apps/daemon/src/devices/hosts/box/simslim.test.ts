@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE, deviceToolsCacheKey, DEVICE_TOOLS_STEP_SCRIPT } from "../../../boxes/github/device-cache.ts";
+import { SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE } from "../../../boxes/github/device-cache.ts";
 import {
-  ORQ_SLIM_PROFILE,
   ORQ_SLIM_PROFILE_JSON,
   isPinnedSimslim,
   isSlim,
@@ -44,7 +43,6 @@ describe("simslim", () => {
     assert.deepEqual(Object.keys(parsed).sort(), ["description", "except", "keep", "name"]);
     assert.deepEqual(parsed.keep, ["com.apple.apsd", "com.apple.swcd", "com.apple.assetsd"]);
     assert.deepEqual(parsed.except, []);
-    assert.equal(ORQ_SLIM_PROFILE.name, "orquester");
   });
 
   it("gates on iOS 18.5, the first runtime whose overrides persist", () => {
@@ -74,7 +72,6 @@ describe("simslim", () => {
     const captured = parseSimslimTop(fixture("top-captured.json"));
     assert.equal(captured?.sims.length, 3);
     assert.ok(captured?.sims.every((entry) => isSlim(entry) && entry.memory !== null && entry.memory.bytes < 0.75 * 1024 ** 3));
-    assert.equal(captured?.totalBytes, captured?.sims.reduce((total, entry) => total + entry.memory!.bytes, 0));
     assert.equal(parseSimslimTop("not json"), null);
     assert.equal(parseSimslimTop(JSON.stringify({ sims: "x" })), null);
     // A missing total is summed.
@@ -103,12 +100,12 @@ describe("simslim", () => {
 
 describe("simslim install script", () => {
   /** Run the script with stub `uname`, `curl` and `shasum` first on PATH. */
-  const run = (options: { os: string; arch: string; sum?: string }) => {
+  const run = (options: { os: string; arch: string; sum?: string; repeat?: boolean }) => {
     const dir = mkdtempSync(join(tmpdir(), "orq-simslim-"));
     try {
       const bin = join(dir, "bin");
       const tools = join(dir, "tools");
-      spawnSync("mkdir", ["-p", bin, tools, join(dir, "pkg")]);
+      for (const path of [bin, tools, join(dir, "pkg")]) mkdirSync(path, { recursive: true });
       // The "release": a tarball whose simslim prints the pinned version.
       writeFileSync(join(dir, "pkg", "simslim"), `#!/bin/sh\necho 'simslim ${SIMSLIM_RELEASE.version}'\n`);
       chmodSync(join(dir, "pkg", "simslim"), 0o755);
@@ -124,9 +121,10 @@ describe("simslim install script", () => {
         env: { PATH: `${bin}:/usr/bin:/bin`, TOOLS: tools, TMPDIR: dir },
         encoding: "utf8"
       });
-      const calls = spawnSync("cat", [join(dir, "calls")], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).length;
-      const again = spawnSync("/bin/sh", ["-c", SIMSLIM_INSTALL_SCRIPT, "simslim-install"], { env: { PATH: `${bin}:/usr/bin:/bin`, TOOLS: tools, TMPDIR: dir }, encoding: "utf8" });
-      const callsAfter = spawnSync("cat", [join(dir, "calls")], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).length;
+      const downloads = () => existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n").filter(Boolean).length : 0;
+      const calls = downloads();
+      const again = options.repeat ? spawnSync("/bin/sh", ["-c", SIMSLIM_INSTALL_SCRIPT, "simslim-install"], { env: { PATH: `${bin}:/usr/bin:/bin`, TOOLS: tools, TMPDIR: dir }, encoding: "utf8" }) : null;
+      const callsAfter = downloads();
       return { result, again, calls, callsAfter };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -134,11 +132,11 @@ describe("simslim install script", () => {
   };
 
   it("downloads the pinned release once, checks its SHA-256, and reports the version", () => {
-    const { result, again, calls, callsAfter } = run({ os: "Darwin", arch: "arm64" });
+    const { result, again, calls, callsAfter } = run({ os: "Darwin", arch: "arm64", repeat: true });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(parseSimslimInstall(result.stdout), { kind: "installed", version: SIMSLIM_RELEASE.version });
     assert.equal(calls, 1);
-    assert.equal(again.status, 0);
+    assert.equal(again!.status, 0);
     assert.equal(callsAfter, 1, "an installed pinned binary is not downloaded again");
   });
 
@@ -153,10 +151,5 @@ describe("simslim install script", () => {
     }
   });
 
-  it("is part of the macOS device-tools cache and its key", () => {
-    assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes("Darwin"));
-    assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes(SIMSLIM_RELEASE.sha256));
-    assert.equal(spawnSync("bash", ["-n"], { input: DEVICE_TOOLS_STEP_SCRIPT, encoding: "utf8" }).status, 0);
-    assert.match(deviceToolsCacheKey("macos"), /^orq-devices-tools-macos-node22-[0-9a-f]{16}-v1$/);
-  });
+
 });

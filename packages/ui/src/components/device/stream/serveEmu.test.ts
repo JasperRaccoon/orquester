@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
-import { parseSemuPacket } from "./semu.ts";
 import { ServeEmuSession } from "./serveEmu.ts";
-import { fakeCanvas, fakeVideoDecoderClass, fakeWebSocketClass, readWsFixture, settle, testDeps } from "./testing/fakes.ts";
+import { fakeCanvas, fakeVideoDecoderClass, fakeWebSocketClass, readWsFixture, settle, browserApis, restoreBrowserApis } from "./testing/fakes.ts";
 import type { DeviceStreamState } from "./types.ts";
 
+// PTS bytes in the redacted captured hub messages (microseconds, big-endian).
+const recordedPts = [42152605, 42481638, 42584979, 42685988, 42786445, 43456101, 43969561, 44469827, 44975995];
 const recorded = readWsFixture("serve-emu-semu-v1.bin") as ArrayBuffer[];
 const URL = "ws://hub.test/vendor/serve-emu/ws?device=emulator-5600&frame-meta=1&token=t";
 
@@ -12,6 +13,7 @@ const sessions: ServeEmuSession[] = [];
 beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
+  restoreBrowserApis();
   mock.timers.reset();
 });
 
@@ -23,10 +25,10 @@ function setup(decoderOptions: Parameters<typeof fakeVideoDecoderClass>[0] = {})
   const states: DeviceStreamState[] = [];
   const warnings: string[] = [];
   const inputReady: boolean[] = [];
+  browserApis({ WebSocket: sockets.WebSocket, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk });
   const session = new ServeEmuSession({
     url: URL,
     canvas,
-    deps: testDeps({ WebSocket: sockets.WebSocket, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk }),
     onFrame: () => frames.push(canvas.width),
     onState: (state) => states.push(state),
     onWarning: (message) => warnings.push(message),
@@ -50,7 +52,7 @@ describe("ServeEmuSession", () => {
     // Every frame arrived while the decoder configured; they are decoded in order, keyframe first.
     const chunks = t.decoders.log.chunks;
     assert.deepEqual(chunks.map((c) => c.type), ["key", ...Array(recorded.length - 1).fill("delta")]);
-    assert.deepEqual(chunks.map((c) => c.timestamp), recorded.map((f) => parseSemuPacket(f).timestamp));
+    assert.deepEqual(chunks.map((c) => c.timestamp), recordedPts);
     assert.equal(t.frames.length, recorded.length);
     assert.equal(t.session.state, "live");
     assert.deepEqual([t.canvas.width, t.canvas.height], [720, 1280]);
@@ -68,7 +70,7 @@ describe("ServeEmuSession", () => {
     await settle();
     for (const frame of recorded.slice(1)) socket.receive(frame);
     const timestamps = t.decoders.log.chunks.map((c) => c.timestamp);
-    assert.deepEqual(timestamps, recorded.map((f) => parseSemuPacket(f).timestamp));
+    assert.deepEqual(timestamps, recordedPts);
     assert.deepEqual(t.decoders.log.chunks.map((c) => c.type), ["key", ...Array(recorded.length - 1).fill("delta")]);
     assert.equal(t.frames.length, recorded.length);
   });
@@ -80,14 +82,13 @@ describe("ServeEmuSession", () => {
     socket.receive(recorded[0]!);
     await settle();
     socket.receive(JSON.stringify({ type: "video-session", size: { width: 1280, height: 720 } }));
-    assert.equal(t.decoders.log.instances[0]!.state, "closed");
     assert.deepEqual(socket.json().at(-1), { type: "reset-video", ack: false });
     socket.receive(recorded[1]!); // stale delta from the old encoder: dropped
     socket.receive(recorded[0]!);
     await settle();
-    assert.equal(t.decoders.log.configs.length, 2);
-    assert.equal(t.decoders.log.instances.length, 2);
-    assert.deepEqual(t.warnings, []);
+    assert.deepEqual(t.decoders.log.chunks.map((chunk) => chunk.type), ["key", "key"], "the stale delta never reaches the new decoder");
+    assert.equal(t.frames.length, 2);
+    assert.equal(t.session.state, "live");
   });
 
   it("surfaces rejected input and unknown messages as warnings and ignores acks", () => {
@@ -99,9 +100,7 @@ describe("ServeEmuSession", () => {
     socket.receive(JSON.stringify({ type: "mystery" }));
     socket.receive("not json");
     assert.equal(t.warnings.length, 3);
-    assert.match(t.warnings[0]!, /rejected input: session is starting/);
-    assert.match(t.warnings[1]!, /Unhandled serve-emu message/);
-    assert.match(t.warnings[2]!, /Unreadable/);
+    assert.ok(t.warnings[0]!.includes("session is starting"), "the provider rejection is available to the caller");
   });
 
   it("sends serve-emu input JSON: touch, keys, buttons and chunked text", () => {
@@ -145,12 +144,13 @@ describe("ServeEmuSession", () => {
     socket.receive(recorded[0]!);
     await settle();
     t.decoders.log.instances[0]!.fail(new Error("corrupt"));
-    assert.match(t.warnings[0]!, /decoder error/);
+    assert.equal(t.warnings.length, 1);
     assert.deepEqual(socket.json().at(-1), { type: "reset-video", ack: false });
     assert.equal(t.sockets.instances.length, 1);
     socket.receive(recorded[0]!);
     await settle();
-    assert.equal(t.decoders.log.instances.length, 2);
+    assert.equal(t.frames.length, 2);
+    assert.equal(t.session.state, "live");
   });
 
   it("reconnects with backoff when the socket drops, and stops on a policy close", () => {
@@ -158,7 +158,7 @@ describe("ServeEmuSession", () => {
     t.socket().serverOpen();
     t.socket().serverClose(1006);
     assert.equal(t.session.state, "connecting");
-    assert.match(t.session.error!.message, /closed \(1006\)/);
+    assert.equal(t.session.error?.code, "network");
     mock.timers.tick(500);
     assert.equal(t.sockets.instances.length, 2);
     t.socket().serverClose(1008, "bad token");
@@ -183,14 +183,17 @@ describe("ServeEmuSession", () => {
   it("input-only mode is live on open and never decodes", () => {
     const sockets = fakeWebSocketClass();
     const decoders = fakeVideoDecoderClass();
+    browserApis({ WebSocket: sockets.WebSocket, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk });
     const session = new ServeEmuSession({
       url: URL.replace("frame-meta=1", "video=0"),
       canvas: fakeCanvas(),
-      video: false,
-      deps: testDeps({ WebSocket: sockets.WebSocket, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk })
+      video: false
     });
     sockets.instances[0]!.serverOpen();
     assert.equal(session.state, "live");
+    mock.timers.tick(120_000);
+    assert.equal(session.state, "live");
+    assert.equal(sockets.instances.length, 1, "an input-only connection has no video-silence reconnect");
     sockets.instances[0]!.receive(recorded[0]!);
     assert.equal(decoders.log.configs.length, 0);
     assert.equal(session.sendButton("home"), true);

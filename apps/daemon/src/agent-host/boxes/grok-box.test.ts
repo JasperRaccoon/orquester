@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -22,12 +22,14 @@ interface Frame {
   params?: Record<string, unknown>;
 }
 
-test("Grok in a box: signed in through grok.com's auth provider, its config overlay in the box, host servers bridged (fixture 02 replayed)", async () => {
+test("Grok in a box: signed in through grok.com's auth provider, its config overlay in the box, host servers bridged (fixture 02 replayed)", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "grok-box-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(join(home, ".local", "bin"), { recursive: true });
   await writeFile(join(home, "sh"), '#!/bin/sh\nprintf "%s" "/usr/bin:/bin"\n', "utf8");
   await chmod(join(home, "sh"), 0o755);
   const appdir = await mkdtemp(join(tmpdir(), "grok-box-appdir-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   // The account's own Claude-compat config, which Grok loads its servers from (host copy).
   const claudeJson = join(appdir, "claude.json");
   await writeFile(
@@ -51,6 +53,7 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
       ]
     }
   });
+  t.after(() => rm(peer.dir, { recursive: true, force: true }));
   await symlink(peer.bin, join(home, ".local", "bin", "grok"));
 
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
@@ -63,6 +66,7 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
   });
   const fake = createFakeContext({
     boxes,
+    tmpDir: () => join(appdir, "tmp"),
     buildEnv: () => ({ PATH: "/host/bin", HOME: "/var/lib/orquester", XAI_API_KEY: "xai-host", GROK_HOME: join(appdir, "grok-home") })
   });
   const adapter = await createGrokAdapter(fake.context);
@@ -75,6 +79,7 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
     tooling: { pathPrepend: [], env: {}, nodeRequire: [] }
   };
   const cwd = await mkdtemp(join(tmpdir(), "grok-box-project-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
   try {
     await adapter.startSession({
       threadId: "t1",

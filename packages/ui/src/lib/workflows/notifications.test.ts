@@ -4,8 +4,6 @@ import { beforeEach, describe, it } from "node:test";
 import type { WorkflowRunSummary } from "@orquester/api";
 
 import {
-  attentionEntryFor,
-  DEFAULT_NOTIFY_PREFS,
   dismissWorkflowAttention,
   dismissWorkflowToasts,
   finishedRunNotice,
@@ -60,35 +58,6 @@ describe("notification rules", () => {
       assert.equal(finishedRunNotice(run({ status }), context), null);
     }
   });
-
-  it("preserves the failure's error, project and test-run identity in its toast", () => {
-    const failed = finishedRunNotice(run(), { prefs: DEFAULT_NOTIFY_PREFS });
-    assert.equal(failed?.tone, "danger");
-    assert.match(failed!.message, /every account is out of usage/);
-    assert.equal(failed?.projectPath, "/w/acme/app");
-    assert.equal(finishedRunNotice(run({ status: "succeeded" }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
-    assert.equal(
-      finishedRunNotice(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS })?.test,
-      true
-    );
-  });
-
-  it("says nothing about a sub-workflow's run", () => {
-    assert.equal(finishedRunNotice(run({ parentRunId: "p" }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
-  });
-
-  it("puts failed runs in the Attention Center, never test runs", () => {
-    const entry = attentionEntryFor(run(), { prefs: DEFAULT_NOTIFY_PREFS });
-    assert.deepEqual(entry, {
-      runId: "run-1",
-      workflowId: "wf",
-      workflowName: "Nightly review",
-      detail: "Review failed: every account is out of usage",
-      at: "2026-09-28T02:12:00.000Z",
-      projectPath: "/w/acme/app"
-    });
-    assert.equal(attentionEntryFor(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
-  });
 });
 
 describe("the notifications store", () => {
@@ -102,12 +71,29 @@ describe("the notifications store", () => {
     observeWorkflowRunEvent(event);
     observeWorkflowRunEvent(event);
     assert.equal(state().toasts.length, 1);
-    assert.equal(state().attention.length, 1);
+    assert.equal(state().toasts[0]?.tone, "danger");
+    assert.equal(state().toasts[0]?.message, "Review failed: every account is out of usage");
+    assert.equal(state().toasts[0]?.projectPath, "/w/acme/app");
+    assert.deepEqual(state().attention, [{
+      runId: "run-1",
+      workflowId: "wf",
+      workflowName: "Nightly review",
+      detail: "Review failed: every account is out of usage",
+      at: "2026-09-28T02:12:00.000Z",
+      projectPath: "/w/acme/app"
+    }]);
     // Other events and malformed payloads are ignored.
     observeWorkflowRunEvent({ type: "workflowRun.updated", payload: { run: run({ id: "run-2" }) } });
     observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: { id: 3 } } });
     observeWorkflowRunEvent({ type: "workflowRun.finished", payload: null });
+    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run({ id: "child", parentRunId: "p" }) } });
+    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run({ id: "success", status: "succeeded" }) } });
     assert.equal(state().toasts.length, 1);
+    assert.equal(state().attention.length, 1);
+    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run({ id: "test", test: true }) } });
+    assert.equal(state().toasts[0]?.runId, "test");
+    assert.equal(state().toasts[0]?.test, true);
+    assert.equal(state().attention.length, 1, "test runs never enter the Attention Center");
   });
 
   it("stays quiet for the run the user is looking at", () => {

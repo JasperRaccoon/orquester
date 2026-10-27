@@ -35,17 +35,7 @@ afterEach(() => {
 });
 
 describe("the LRU", () => {
-  it("evicts the oldest past the limit", () => {
-    const store = new TimelinePositionStore();
-    for (let index = 0; index < 105; index += 1) {
-      store.remember(`s${index}`, position());
-    }
-    assert.equal(JSON.parse(saved.get(storageKey)!).length, 100);
-    assert.equal(store.read("s0"), undefined);
-    assert.ok(store.read("s104"));
-  });
-
-  it("delete-then-set moves an entry to the end so it survives eviction", () => {
+  it("evicts the oldest past the limit while keeping a refreshed entry and the newcomer", () => {
     const store = new TimelinePositionStore();
     store.remember("keep", position());
     for (let index = 0; index < 99; index += 1) {
@@ -56,6 +46,8 @@ describe("the LRU", () => {
     store.remember("one-more", position());
     assert.equal(store.read("keep")?.scrollOffset, 99);
     assert.equal(store.read("s0"), undefined, "the oldest went instead");
+    assert.ok(store.read("one-more"));
+    assert.equal(JSON.parse(saved.get(storageKey)!).length, 100);
   });
 
   it("persists as an ordered array, and replaying it rebuilds the same order", () => {

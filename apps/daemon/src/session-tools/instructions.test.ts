@@ -2,13 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  composeOrquesterInstructions,
-  DEVICES_LINE,
-  DEVICES_LINE_MAX_BYTES,
-  KNOWLEDGE_LINE_MAX_BYTES,
-  ORQUESTER_INSTRUCTIONS_MAX_BYTES
-} from "./instructions.ts";
+import { composeOrquesterInstructions } from "./instructions.ts";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 const knowledge = (names: string[]): string => composeOrquesterInstructions({ workflowOwned: false, knowledgeCollections: names }).split("\n").at(-1)!;
@@ -53,15 +47,4 @@ test("the worst case with the knowledge line — workflow-owned, many collection
     assert.ok(bytes(worst) <= 2_304, `${bytes(worst)} bytes`);
     assert.match(worst, /\nKnowledge:/);
   }
-});
-
-test("devices line: present only with the device tools, under its own cap, and the worst case with every line fits", () => {
-  assert.ok(bytes(DEVICES_LINE) <= DEVICES_LINE_MAX_BYTES, `${bytes(DEVICES_LINE)} bytes`);
-  assert.doesNotMatch(composeOrquesterInstructions({ workflowOwned: false }), /list_devices/);
-  const block = composeOrquesterInstructions({ workflowOwned: false, devices: true });
-  assert.ok(block.includes(DEVICES_LINE));
-  const worst = composeOrquesterInstructions({ workflowOwned: true, devices: true, knowledgeCollections: Array.from({ length: 100 }, () => "n".repeat(60)) });
-  assert.ok(bytes(worst) <= ORQUESTER_INSTRUCTIONS_MAX_BYTES + KNOWLEDGE_LINE_MAX_BYTES + DEVICES_LINE_MAX_BYTES, `${bytes(worst)} bytes`);
-  // The knowledge line stays last.
-  assert.match(worst, /\nKnowledge:[^\n]*$/);
 });

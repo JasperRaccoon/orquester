@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { promises as dns } from "node:dns";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,11 +7,11 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test, { type TestContext } from "node:test";
 import Fastify, { type InjectOptions, type LightMyRequestResponse } from "fastify";
+import { Agent, MockAgent } from "undici";
 import { REPO_ICON_MAX_BYTES, type RepoIdentity, repoIdentityRoutes } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.ts";
-import { FaviconError, type FetchedFavicon } from "./favicon.ts";
-import { registerRepoIdentityRoutes, type RepoIdentityRoutesDeps } from "./routes.ts";
+import { registerRepoIdentityRoutes } from "./routes.ts";
 import { RepoIdentitiesService } from "./service.ts";
 import { testAuthSessions } from "../auth/testing.ts";
 
@@ -23,13 +24,26 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3
 const ICO = Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 9, 9]);
 const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
 
-async function harness(t: TestContext, fetchFavicon?: RepoIdentityRoutesDeps["fetchFavicon"]) {
+type DispatchArgs = Parameters<Agent["dispatch"]>;
+
+async function harness(t: TestContext) {
+  // Intercept native HTTP dispatch after production DNS vetting; no real network is allowed.
+  // MockAgent's own transport keeps the original dispatch, avoiding recursive delegation.
+  const transport = new Agent();
+  transport.dispatch = transport.dispatch.bind(transport);
+  const network = new MockAgent({ agent: transport });
+  network.disableNetConnect();
+  t.after(() => network.close());
+  const lookup = t.mock.method(dns, "lookup", (async (hostname: string) => [
+    { address: hostname === "blocked.example" ? "10.0.0.1" : "93.184.216.34", family: 4 }
+  ]) as unknown as typeof dns.lookup);
+  t.mock.method(Agent.prototype, "dispatch", (options: DispatchArgs[0], handler: DispatchArgs[1]) => network.dispatch(options, handler));
   const root = await mkdtemp(join(tmpdir(), "orquester-repo-identity-routes-"));
   const iconsDir = join(root, "repo-icons");
   const service = new RepoIdentitiesService({ file: join(root, "repo-identities.json"), iconsDir, logger: quiet });
   await service.load();
   const app = Fastify();
-  registerRepoIdentityRoutes(app, { service, ...(fetchFavicon ? { fetchFavicon } : {}) });
+  registerRepoIdentityRoutes(app, { service });
   t.after(async () => {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -37,6 +51,8 @@ async function harness(t: TestContext, fetchFavicon?: RepoIdentityRoutesDeps["fe
   const inject = (options: InjectOptions) => app.inject(options);
   return {
     service,
+    network,
+    lookup,
     inject,
     icons: async () => (await readdir(iconsDir).catch(() => [] as string[])).sort(),
     upload: (body: Buffer | Readable, contentType: string, repoKey = KEY) =>
@@ -91,11 +107,7 @@ test("emoji: one trimmed emoji is stored; anything else is INVALID_EMOJI", async
 });
 
 test("every route validates the repo key", async (t) => {
-  let fetched = 0;
-  const h = await harness(t, async () => {
-    fetched += 1;
-    throw new Error("unreachable");
-  });
+  const h = await harness(t);
   const repoKey = "/etc/passwd";
   const q = `?repoKey=${encodeURIComponent(repoKey)}`;
   refused(await h.inject({ method: "PUT", url: repoIdentityRoutes.label, payload: { repoKey, label: "x" } }), 400, "INVALID_REPO_KEY");
@@ -108,7 +120,7 @@ test("every route validates the repo key", async (t) => {
   refused(await h.inject({ method: "PUT", url: repoIdentityRoutes.label, payload: { label: "x" } }), 400, "INVALID_REPO_KEY");
   refused(await h.inject({ method: "GET", url: repoIdentityRoutes.icon }), 400, "INVALID_REPO_KEY");
   refused(await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}&repoKey=${KEY}` }), 400, "INVALID_REPO_KEY");
-  assert.equal(fetched, 0);
+  assert.equal(h.lookup.mock.calls.length, 0);
   assert.deepEqual(h.service.list(), []);
 });
 
@@ -204,108 +216,77 @@ test("over the cap: a declared length and a streamed body are both 413, and noth
 });
 
 test("favicon: a fetched icon is stored with its source; refusals map to their statuses", async (t) => {
-  const calls: string[] = [];
-  let next: () => Promise<FetchedFavicon> = async () => ({ domain: "acme.com", contentType: "image/x-icon", bytes: ICO });
-  const h = await harness(t, async (domain, options) => {
-    calls.push(domain);
-    assert.ok(options.signal instanceof AbortSignal);
-    return next();
-  });
+  const h = await harness(t);
+  h.network.get("https://www.acme.com").intercept({ path: "/" }).reply(200, '<link rel="icon" href="/favicon.ico">');
+  h.network.get("https://www.acme.com").intercept({ path: "/favicon.ico" }).reply(200, ICO);
   await h.inject({ method: "PUT", url: repoIdentityRoutes.emoji, payload: { repoKey: KEY, emoji: "🦷" } });
 
   const ok = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: " https://www.acme.com/x " } });
   assert.equal(ok.statusCode, 200, ok.body);
-  assert.deepEqual(calls, ["https://www.acme.com/x"]);
   const icon = identityOf(ok)?.icon;
   assert.equal(icon?.kind, "image");
-  assert.deepEqual(icon?.kind === "image" ? [icon.contentType, icon.source] : null, ["image/x-icon", { kind: "favicon", domain: "acme.com" }]);
+  assert.deepEqual(icon?.kind === "image" ? [icon.contentType, icon.source] : null, ["image/x-icon", { kind: "favicon", domain: "www.acme.com" }]);
   const served = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}` });
   assert.equal(served.headers["content-type"], "image/x-icon");
   assert.deepEqual(served.rawPayload, ICO);
 
+  h.network.get("https://unreachable.example").intercept({ path: "/" }).replyWithError(new Error("socket hang up <body>secret</body>"));
+  h.network.get("https://missing.example").intercept({ path: "/" }).reply(200, "<html>no icon</html>");
+  h.network.get("https://missing.example").intercept({ path: "/favicon.ico" }).reply(200, "not an image");
   const cases = [
-    ["FAVICON_BAD_DOMAIN", 400],
-    ["FAVICON_BLOCKED", 400],
-    ["FAVICON_UNREACHABLE", 502],
-    ["FAVICON_NOT_FOUND", 404]
+    ["localhost", "FAVICON_BAD_DOMAIN", 400],
+    ["blocked.example", "FAVICON_BLOCKED", 400],
+    ["unreachable.example", "FAVICON_UNREACHABLE", 502],
+    ["missing.example", "FAVICON_NOT_FOUND", 404]
   ] as const;
-  for (const [code, status] of cases) {
-    next = async () => {
-      throw new FaviconError(code, `acme.com: ${code}`);
-    };
-    const response = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
+  for (const [domain, code, status] of cases) {
+    const response = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain } });
     refused(response, status, code);
-    assert.equal(response.json().message, `acme.com: ${code}`);
+    assert.equal(response.body.includes("secret"), false);
+    assert.deepEqual(h.service.list()[0]?.icon, icon, "a failed fetch leaves the previous icon intact");
   }
-  // A fetched image the store refuses is no usable icon; anything unexpected is unreachable.
-  next = async () => ({ domain: "acme.com", contentType: "image/png", bytes: Buffer.from("html") });
-  refused(await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 404, "FAVICON_NOT_FOUND");
-  next = async () => {
-    throw new Error("socket hang up <body>secret</body>");
-  };
-  const unexpected = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
-  refused(unexpected, 502, "FAVICON_UNREACHABLE");
-  assert.equal(unexpected.body.includes("secret"), false);
-  // Every failure kept the stored icon.
-  assert.deepEqual(h.service.list()[0]?.icon, icon);
 
-  // A domain that is not even a string, or too long, never reaches the fetcher.
-  const before = calls.length;
+  // Invalid request bodies must not reach DNS, even if no mock response has been arranged.
+  const before = h.lookup.mock.calls.length;
   for (const domain of [undefined, 5, "", "  ", "a".repeat(254)]) {
     refused(await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain } }), 400, "FAVICON_BAD_DOMAIN");
   }
-  assert.equal(calls.length, before);
+  assert.equal(h.lookup.mock.calls.length, before);
+  h.network.assertNoPendingInterceptors();
 });
 
-test("favicon: one fetch per repo at a time — a second is 409 FAVICON_BUSY", async (t) => {
-  let release: (value: FetchedFavicon) => void = () => {};
-  let started: () => void = () => {};
-  /** Resolves when the fetcher is next called for acme.com. */
+test("favicon: one fetch per repo across servers; other repos and later fetches proceed", async (t) => {
+  const h = await harness(t);
+  const page = `<link rel="icon" href="data:image/svg+xml;base64,${SVG.toString("base64")}">`;
+  h.network.get("https://acme.com").intercept({ path: "/" }).reply(200, page).times(2);
+  h.network.get("https://other.com").intercept({ path: "/" }).reply(200, page);
+  let release!: () => void;
+  let started!: () => void;
   const nextFetch = () => new Promise<void>((resolve) => (started = resolve));
-  const h = await harness(t, (domain) => {
-    if (domain === "other.com") return Promise.resolve({ domain, contentType: "image/png", bytes: PNG });
+  t.mock.method(Agent.prototype, "dispatch", (options: DispatchArgs[0], handler: DispatchArgs[1]) => {
+    if (String(options.origin) !== "https://acme.com") return h.network.dispatch(options, handler);
     started();
-    return new Promise<FetchedFavicon>((resolve) => (release = resolve));
+    void new Promise<void>((resolve) => (release = resolve)).then(() => h.network.dispatch(options, handler));
+    return true;
   });
+  const second = Fastify();
+  registerRepoIdentityRoutes(second, { service: h.service });
+  t.after(() => second.close());
   let running = nextFetch();
   const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
   await running;
-  refused(await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 409, "FAVICON_BUSY");
-  // Another repo is not held up.
+  refused(await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 409, "FAVICON_BUSY");
   const other = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: "github.com/acme/other", domain: "other.com" } });
   assert.equal(other.statusCode, 200);
 
-  release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
+  release();
   assert.equal((await first).statusCode, 200);
-  // Done: the next fetch for the repo runs.
   running = nextFetch();
   const again = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
   await running;
-  release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
+  release();
   assert.equal((await again).statusCode, 200);
-});
-
-test("favicon: the one-fetch lock holds across every server the routes are registered on", async (t) => {
-  let release: (value: FetchedFavicon) => void = () => {};
-  let started: () => void = () => {};
-  const running = new Promise<void>((resolve) => (started = resolve));
-  const fetchFavicon: RepoIdentityRoutesDeps["fetchFavicon"] = () => {
-    started();
-    return new Promise<FetchedFavicon>((resolve) => (release = resolve));
-  };
-  // The daemon registers the routes twice over one service: the unix socket and HTTP.
-  const h = await harness(t, fetchFavicon);
-  const second = Fastify();
-  registerRepoIdentityRoutes(second, { service: h.service, fetchFavicon });
-  t.after(() => second.close());
-
-  const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
-  await running;
-  const busy = await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
-  refused(busy, 409, "FAVICON_BUSY");
-
-  release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
-  assert.equal((await first).statusCode, 200);
+  h.network.assertNoPendingInterceptors();
 });
 
 test("the daemon serves the routes on both transports; the remote one requires the bearer, ?token= included", async (t) => {

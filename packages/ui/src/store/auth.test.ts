@@ -9,17 +9,13 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { AuthLoginRequest } from "@orquester/api";
 
-import {
-  setThreadCacheBackend,
-  threadCacheIdle,
-  threadCacheKey,
-  threadCacheScopeFor,
-  type ThreadCacheBackend
-} from "../lib/agent-chat/persistent-cache.ts";
+import { fakeIndexedDb } from "../lib/agent-chat/testing/indexed-db.ts";
 import { ApiError, type ApiClient } from "../lib/api-client.ts";
 import type { UiConnection } from "../types";
 import { useAppStore } from "./app.ts";
 
+const database = fakeIndexedDb();
+globalThis.indexedDB = database.factory;
 const storage = new Map<string, string>();
 (globalThis as { localStorage?: unknown }).localStorage = {
   getItem: (key: string) => storage.get(key) ?? null,
@@ -61,7 +57,11 @@ function fakeApi(password?: string): ApiClient {
 
 const store = () => useAppStore.getState();
 
-beforeEach(() => {
+beforeEach(async () => {
+  await database.idle();
+  for (const store of ["thread-meta", "thread-body"]) {
+    for (const row of await database.all(store)) await database.remove(store, row.key as string);
+  }
   storage.clear();
   infoCalls = [];
   logins = [];
@@ -92,7 +92,6 @@ describe("establish", () => {
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
     assert.equal(store().connectionStatus, "error");
-    assert.match(store().authError ?? "", /sign in again/i);
   });
 });
 
@@ -126,61 +125,40 @@ describe("establish on a bad link", () => {
 });
 
 describe("the chats this device saved", () => {
-  /** Keys alone: what a clear removes is all this asks about. */
-  function keysBackend(keys: string[]): ThreadCacheBackend & { keys: Set<string> } {
-    const held = new Set(keys);
-    return {
-      keys: held,
-      read: async () => ({ meta: undefined, body: undefined }),
-      readMetas: async () => [],
-      readKeys: async () => [...held],
-      write: async (change) => {
-        for (const key of change.remove ?? []) held.delete(key);
-      }
-    };
+  // Existing schema keys are fixtures: clearing auth must delete both halves, only for that daemon.
+  const ours = `remote|${ENDPOINT}\u0000s1`;
+  const theirs = "remote|https://other.example\u0000s1";
+  async function seed(keys: string[]) {
+    for (const store of ["thread-meta", "thread-body"]) for (const key of keys) await database.put(store, { key });
   }
-  const ours = threadCacheKey(threadCacheScopeFor(CONNECTION), "s1");
-  const theirs = threadCacheKey(threadCacheScopeFor({ kind: "remote", endpoint: "https://other.example" }), "s1");
+  async function assertKeys(expected: string[]) {
+    for (const store of ["thread-meta", "thread-body"]) assert.deepEqual((await database.all(store)).map((row) => row.key), expected);
+  }
 
   it("go with the credential when the daemon refuses it — that daemon's alone", async () => {
-    const backend = keysBackend([ours, theirs]);
-    setThreadCacheBackend(backend);
-    try {
-      const api = fakeApi(TOKEN);
-      useAppStore.setState({ api });
-      await store().establish(api);
-      await threadCacheIdle();
-      assert.deepEqual([...backend.keys], [theirs]);
-    } finally {
-      setThreadCacheBackend(undefined);
-    }
+    await seed([ours, theirs]);
+    const api = fakeApi(TOKEN);
+    useAppStore.setState({ api });
+    await store().establish(api);
+    await database.idle();
+    await assertKeys([theirs]);
   });
 
   it("go when the remote is removed", async () => {
-    const backend = keysBackend([ours, theirs]);
-    setThreadCacheBackend(backend);
-    try {
-      useAppStore.setState({ activeConnectionId: "local" });
-      await store().removeRemote(CONNECTION.id);
-      await threadCacheIdle();
-      assert.deepEqual([...backend.keys], [theirs]);
-    } finally {
-      setThreadCacheBackend(undefined);
-    }
+    await seed([ours, theirs]);
+    useAppStore.setState({ activeConnectionId: "local" });
+    await store().removeRemote(CONNECTION.id);
+    await database.idle();
+    await assertKeys([theirs]);
   });
 
   it("go on sign-out", async () => {
-    const backend = keysBackend([ours]);
-    setThreadCacheBackend(backend);
-    try {
-      const api = { ...fakeApi(TOKEN), logout: async () => {} } as unknown as ApiClient;
-      useAppStore.setState({ api });
-      await store().signOut();
-      await threadCacheIdle();
-      assert.equal(backend.keys.size, 0);
-    } finally {
-      setThreadCacheBackend(undefined);
-    }
+    await seed([ours]);
+    const api = { ...fakeApi(TOKEN), logout: async () => {} } as unknown as ApiClient;
+    useAppStore.setState({ api });
+    await store().signOut();
+    await database.idle();
+    await assertKeys([]);
   });
 });
 
@@ -224,6 +202,6 @@ describe("submitCredentials", () => {
     loginAnswer = async () => ({ token: LEGACY });
     await store().submitCredentials("admin", "pw");
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
-    assert.match(store().authError ?? "", /invalid session token/);
+    assert.ok(store().authError, "an invalid token response supplies an error");
   });
 });

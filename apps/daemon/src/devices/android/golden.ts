@@ -29,7 +29,7 @@ export const GUEST_SETTINGS_SCRIPT = [
   "input keyevent KEYCODE_WAKEUP"
 ].join("; ");
 
-export const ANIMATIONS_OFF_SCRIPT = GUEST_SETTINGS_SCRIPT.split("; ").slice(0, 3).join("; ");
+const ANIMATIONS_OFF_SCRIPT = GUEST_SETTINGS_SCRIPT.split("; ").slice(0, 3).join("; ");
 
 /**
  * Dismiss what a loaded first boot leaves on screen: `hide_error_dialogs` only stops NEW error
@@ -93,9 +93,6 @@ export const SYSTEM_UI_SETTLE_MS = 5_000;
 export const SYSTEM_UI_PIDOF = "pidof com.android.systemui";
 /** How often, and how many times, a killed SystemUI is looked for again. */
 export const SYSTEM_UI_POLL = Object.freeze({ tries: 60, intervalMs: 500 });
-
-/** The fabricated overlay that carries a snapshot's display cutout in dp (`OrqCutoutRect` and `OrqCutoutFill` beside it). */
-export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
 
 /**
  * Re-express the running device's display cutout in dp: the system image's device emulation
@@ -177,12 +174,11 @@ export async function sampleCpuPercent(pid: number, windowMs: number, signal: Ab
 /** Wait until two windows in a row are under the threshold, or `maxMs` passed. Resolves whether it settled. */
 export async function waitForSettle(
   sample: () => Promise<number | null>,
-  options: { maxMs: number; threshold: number; now?: () => number; onSample?: (percent: number) => void }
+  options: { maxMs: number; threshold: number; onSample?: (percent: number) => void }
 ): Promise<boolean> {
-  const now = options.now ?? Date.now;
-  const deadline = now() + options.maxMs;
+  const deadline = Date.now() + options.maxMs;
   let quiet = 0;
-  while (now() < deadline) {
+  while (Date.now() < deadline) {
     const percent = await sample();
     if (percent === null) throw new Error("exited while settling");
     options.onSample?.(percent);

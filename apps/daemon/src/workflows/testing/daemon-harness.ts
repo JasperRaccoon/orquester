@@ -6,7 +6,8 @@
 // flushed, and a new runtime resumes the runs it left.
 
 import { watch } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import type { TestContext } from "node:test";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -40,6 +41,14 @@ export async function tempAppdir(projects: string[] = ["acme/app"]): Promise<{ r
   await mkdir(join(root, "tmp"), { recursive: true });
   for (const project of projects) await mkdir(join(workspacesDir, project), { recursive: true });
   return { root, workspacesDir, cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+/** Retain already-asserted public results outside the appdir removed by cleanup(). */
+export async function retainWorkflowArtifact(t: TestContext, result: unknown): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-workflow-artifact-"));
+  const path = join(dir, "result.json");
+  await writeFile(path, JSON.stringify({ scenario: t.name, result }, null, 2), { mode: 0o600 });
+  t.diagnostic(`Verified artifact: ${path}`);
 }
 
 /** A git remote nobody polls unless a test says so. */

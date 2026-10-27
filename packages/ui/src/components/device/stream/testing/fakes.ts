@@ -1,7 +1,7 @@
 /** Stand-ins for the browser APIs a stream session uses, for Node tests. */
 
 import { readFileSync } from "node:fs";
-import type { StreamDeps } from "../types.ts";
+import { mock } from "node:test";
 
 /** Build one envelope (tests and fixtures). */
 export function encodeAvccEnvelope(tag: number, payload: Uint8Array): Uint8Array {
@@ -12,7 +12,7 @@ export function encodeAvccEnvelope(tag: number, payload: Uint8Array): Uint8Array
   return out;
 }
 
-export function fixtureBytes(name: string): Uint8Array {
+function fixtureBytes(name: string): Uint8Array {
   return new Uint8Array(readFileSync(new URL(`../__fixtures__/${name}`, import.meta.url)));
 }
 
@@ -207,7 +207,8 @@ export function fakeImageBitmaps(sizeOf: (bytes: Uint8Array) => { width: number;
     return { width, height, close() {} } as ImageBitmap;
   };
   return {
-    createImageBitmap,
+    // Stream callers use only Blob inputs; the browser overload remains the installed boundary.
+    createImageBitmap: createImageBitmap as typeof globalThis.createImageBitmap,
     decoded,
     /** Hold decodes until the returned release is called. */
     hold(): () => void {
@@ -261,9 +262,25 @@ export function fakeStreamingFetch() {
   };
 }
 
-/** Deterministic deps: Date-based clock (mockable), jitter at the ceiling. */
-export function testDeps(overrides: Partial<StreamDeps>): Partial<StreamDeps> {
-  return { now: () => Date.now(), random: () => 1, ...overrides };
+const savedApis = new Map<string, PropertyDescriptor | undefined>();
+
+/** Control the actual browser boundary; restore after each isolated test. */
+export function browserApis(overrides: Partial<Pick<typeof globalThis, "fetch" | "WebSocket" | "createImageBitmap" | "VideoDecoder" | "EncodedVideoChunk" | "requestAnimationFrame" | "cancelAnimationFrame">>): void {
+  for (const [name, value] of Object.entries(overrides)) {
+    if (!savedApis.has(name)) savedApis.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  }
+  mock.method(performance, "now", () => Date.now());
+  mock.method(Math, "random", () => 1);
+}
+
+export function restoreBrowserApis(): void {
+  for (const [name, descriptor] of savedApis) {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else Reflect.deleteProperty(globalThis, name);
+  }
+  savedApis.clear();
+  mock.restoreAll();
 }
 
 /** Let pending promise callbacks run (real setImmediate; tests mock only timers they tick). */

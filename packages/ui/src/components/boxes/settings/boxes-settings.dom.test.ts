@@ -451,7 +451,7 @@ describe("the Ephemeral AI VMs settings section", () => {
   it("Add your machine shows the one-line command and follows the pairing live, then lists the machine", async () => {
     await click(buttonNamed("Add your machine"));
     await click(buttonNamed("Create pairing command"));
-    assert.ok(text().includes("Give the machine a name."));
+    assert.equal(document.querySelector<HTMLInputElement>("#byo-machine-name")?.getAttribute("aria-invalid"), "true");
     assert.deepEqual(byoAdds, []);
     await type(document.querySelector<HTMLInputElement>("#byo-machine-name")!, "  Mac mini ");
     await click(buttonNamed("Create pairing command"));
@@ -459,13 +459,13 @@ describe("the Ephemeral AI VMs settings section", () => {
     assert.ok(text().includes(PAIR_COMMAND));
     assert.ok(document.querySelector('[aria-label="Copy the pairing command"]'));
     assert.ok(text().includes("not with sudo"));
-    assert.match(text(), /Waiting for the machine… The command works once, for 3[01] more min\./);
+    assert.ok(document.querySelector('[role="dialog"] [role="status"]'), "the pairing awaits the machine");
 
     // The machine connects: the dialog says so, and the card lists it online.
     const paired = { ...PAIRING_MACHINE, state: "ready", connected: true, os: "darwin", arch: "arm64", byo: { name: "Mac mini", pairingExpiresAt: null } };
     await act(async () => applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: { boxes: [paired], totals: { activeCount: 0, hourlyUsd: 0, monthEstimatedUsd: 0 } } }));
     await settle();
-    assert.ok(text().includes("Mac mini is paired (macOS, arm64)"));
+    assert.ok(buttonNamed("Done"), "the live pairing completed");
     await click(buttonNamed("Done"));
     assert.ok(text().includes("Online"));
     assert.ok(document.querySelector('[role="switch"][aria-label="Use Mac mini for device simulators"]'));

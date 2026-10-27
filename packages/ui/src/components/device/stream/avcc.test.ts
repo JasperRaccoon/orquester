@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AvccDemuxer, MAX_AVCC_ENVELOPE_BYTES } from "./avcc.ts";
+import { AvccDemuxer } from "./avcc.ts";
 import { encodeAvccEnvelope } from "./testing/fakes.ts";
 
 const concat = (...parts: Uint8Array[]) => {
@@ -32,8 +32,7 @@ const expected = [
 
 describe("AvccDemuxer", () => {
   it("counts the tag byte in the envelope length (as serve-sim writes it)", () => {
-    const envelope = encodeAvccEnvelope(3, delta);
-    assert.equal(new DataView(envelope.buffer).getUint32(0), delta.length + 1);
+    const envelope = Uint8Array.from([0, 0, 0, 7, 3, 0, 0, 0, 2, 0x41, 0x9a]);
     assert.deepEqual(new AvccDemuxer().push(envelope), [{ type: "delta", payload: delta }]);
   });
 
@@ -77,7 +76,7 @@ describe("AvccDemuxer", () => {
   it("throws on an envelope length no screen frame has, and recovers after reset", () => {
     const demuxer = new AvccDemuxer();
     const bogus = new Uint8Array(8);
-    new DataView(bogus.buffer).setUint32(0, MAX_AVCC_ENVELOPE_BYTES + 1);
+    new DataView(bogus.buffer).setUint32(0, 0xffff_ffff);
     assert.throws(() => demuxer.push(bogus), /avcc envelope/);
     assert.equal(demuxer.pending, 0);
     assert.deepEqual(demuxer.push(encodeAvccEnvelope(3, delta)), [{ type: "delta", payload: delta }]);

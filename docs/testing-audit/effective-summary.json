@@ -1,0 +1,18 @@
+{
+  "baselineCommit": "b1c975af002cbc27d37296dc04f4aa81fc76881f",
+  "sourceDeclarations": 11543,
+  "audited": 11543,
+  "missing": 0,
+  "counts": {
+    "KEEP": 9815,
+    "CONSOLIDATE": 257,
+    "DELETE": 188,
+    "REWRITE": 1005,
+    "OPTIMIZE": 278
+  },
+  "incomingChangedOrAdded": 2,
+  "incomingAffectedFiles": 2,
+  "counting": "Source declarations; parameterized families counted once. Consolidation includes donors and surviving owners. Final unlike integration adds one REWRITE declaration and re-audits the modified existing pinned-model owner from KEEP to REWRITE. The two cases are not two new declarations. Historical overlapping phase totals must not be added; evidence reports retain earlier source revisions.",
+  "incomingExistingOwnerOverrides": 1,
+  "previousReference": "e866b62bd0d197200683dcdd61e38d1302235b4e"
+}

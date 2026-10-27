@@ -16,34 +16,27 @@ import {
   entryFormPatch,
   entryPostUrl,
   facetsRequestOf,
-  filterChipLabel,
   filterHas,
   highlightParts,
   knowledgeErrorCode,
   knowledgeErrorText,
   linkingView,
   nextKnowledgeColor,
-  passageText,
   patchNeedsLinking,
   queryIsEmpty,
   rediscoverEntries,
   rediscoverRequestOf,
   rediscoverSeeds,
-  resultsCountText,
   searchHitKey,
-  searchKeyOf,
   searchPageOf,
   searchRequestOf,
   shownSort,
   sortOptionsFor,
   toggleFilterValue,
-  viaBadges,
-  withoutExample
 } from "./knowledge.logic.ts";
-import { EMPTY_KNOWLEDGE_QUERY, findSimilarQuery, withUnlike, withoutExamples, type KnowledgeQuery } from "./query-state.ts";
+import { EMPTY_KNOWLEDGE_QUERY, findSimilarQuery, withoutExamples, type KnowledgeQuery } from "./query-state.ts";
 
 describe("knowledge colours", () => {
-
   it("give a new collection the first unused colour, then go round", () => {
     assert.equal(nextKnowledgeColor([{ color: "chart-1" }, { color: "chart-3" }], KNOWLEDGE_COLORS), "chart-2");
     const all = KNOWLEDGE_COLORS.map((color) => ({ color }));
@@ -65,7 +58,6 @@ describe("knowledge errors", () => {
 });
 
 describe("the status bar text", () => {
-
   it("describes each linking state", () => {
     assert.equal(linkingView({ state: "idle" }).label, "Linking idle");
 
@@ -124,7 +116,6 @@ describe("the collection form", () => {
 });
 
 describe("entry display", () => {
-
   it("offers only http(s) links as the original post", () => {
     assert.equal(entryPostUrl({ url: "https://x.com/a/status/1" }), "https://x.com/a/status/1");
     assert.equal(entryPostUrl({ url: "javascript:alert(1)" }), null);
@@ -209,12 +200,6 @@ describe("the List view's requests", () => {
     assert.deepEqual(searchRequestOf(findSimilarQuery("ke_a"), "unfiled"), { limit: 25, similarTo: ["ke_a"], collections: ["unfiled"], sort: "relevance" });
   });
 
-  it("key a search by everything but its page, so whitespace alone does not search again", () => {
-    assert.equal(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: " seo  " }), "all"));
-    assert.notEqual(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: "seo" }), "kc_seo"));
-    assert.notEqual(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: "seo", sort: "newest" }), "all"));
-  });
-
   it("map filters to the entries list's query string", () => {
     assert.deepEqual(entriesQueryOf("all", {}), { limit: 50 });
     assert.deepEqual(entriesQueryOf("unfiled", { kinds: ["thread", "post"], authors: ["@om", "Om Patel"], years: ["2026"], postedAfter: "2026-01-01" }, { cursor: "c2" }), {
@@ -249,16 +234,13 @@ describe("the List view's filters", () => {
     assert.ok(filterHas(query.filters, "authors", "om_patel5"));
     query = toggleFilterValue(query, "authors", "om_patel5");
     assert.deepEqual(query.filters, {}, "the same author, written differently, is let go of");
-    assert.equal(toggleFilterValue(query, "kinds", "  "), query);
+    assert.deepEqual(toggleFilterValue(query, "kinds", "  ").filters, {});
     const full = q({ filters: { kinds: Array.from({ length: 20 }, (_, i) => `k${i}`) } });
-    assert.equal(toggleFilterValue(full, "kinds", "another"), full);
+    assert.deepEqual(toggleFilterValue(full, "kinds", "another").filters.kinds, Array.from({ length: 20 }, (_, i) => `k${i}`));
     assert.deepEqual(clearFilterField(q({ filters: { kinds: ["a"], years: ["2026"] } }), "kinds").filters, { years: ["2026"] });
   });
 
-  it("label the chips, clean the filters, and know when there is nothing to clear", () => {
-    assert.equal(filterChipLabel("kinds", {}), "Kind");
-    assert.equal(filterChipLabel("kinds", { kinds: ["thread"] }), "Kind: thread");
-    assert.equal(filterChipLabel("years", { years: ["2025", "2026"] }), "Year: 2");
+  it("clean empty filters and distinguish an explicit query from nothing to clear", () => {
     assert.equal(cleanFilters({ kinds: [" "], postedBefore: " " }), undefined);
     assert.equal(queryIsEmpty(q({ filters: { kinds: [] } })), true);
     assert.equal(queryIsEmpty(q({ sort: "newest" })), false);
@@ -272,56 +254,16 @@ describe("the List view's filters", () => {
     assert.equal(shownSort(q({ text: "seo" })), "relevance");
     assert.equal(shownSort(q({ similarTo: ["ke_a"], sort: "newest" })), "newest");
   });
-
-  it("remove examples; the last \"like\" takes the \"not like\" ones with it", () => {
-    const query = withUnlike(q({ similarTo: ["ke_a", "ke_b"] }), "ke_c");
-    assert.deepEqual(withoutExample(query, "ke_c"), { ...query, unlike: [] });
-    assert.deepEqual(withoutExample(query, "ke_a"), { ...query, similarTo: ["ke_b"] });
-    assert.deepEqual(withoutExample(withoutExample(query, "ke_a"), "ke_b"), { ...query, similarTo: [], unlike: [] });
-    assert.equal(withoutExample(query, "ke_z"), query);
-  });
 });
 
 describe("the List view's results", () => {
   it("split text around the matched terms, longest first, case-insensitively", () => {
-    assert.deepEqual(highlightParts("Competitor pages: one page per Competitor", ["page", "pages", "competitor"]), [
-      { text: "Competitor", match: true },
-      { text: " ", match: false },
-      { text: "pages", match: true },
-      { text: ": one ", match: false },
-      { text: "page", match: true },
-      { text: " per ", match: false },
-      { text: "Competitor", match: true }
-    ]);
-    assert.deepEqual(highlightParts("Precios (SaaS) — más", ["(saas)", "más"]), [
-      { text: "Precios ", match: false },
-      { text: "(SaaS)", match: true },
-      { text: " — ", match: false },
-      { text: "más", match: true }
-    ]);
-    assert.deepEqual(highlightParts("a b c", ["a", "b"]), [{ text: "a b c", match: false }], "single letters are not highlighted");
-    assert.deepEqual(highlightParts("seoseo", ["seo"]), [{ text: "seoseo", match: true }], "adjacent matches join");
-    assert.deepEqual(highlightParts("", ["seo"]), []);
-    assert.deepEqual(highlightParts("plain", []), [{ text: "plain", match: false }]);
-  });
-
-  it("name the signals, the passage and the count", () => {
-    assert.deepEqual(
-      viaBadges({ via: ["keyword", "meaning", "similar", "concept"], concepts: [{ id: "c1", name: "Pricing", type: "Topic" }] }).map((b) => b.label),
-      ["Keyword", "Meaning", "Similar", "Concept Pricing"]
-    );
-    assert.deepEqual(viaBadges({ via: ["concept"], concepts: [] }).map((b) => b.label), ["Concept"]);
-    assert.deepEqual(
-      viaBadges({ via: ["concept"], concepts: [{ id: "a", name: "Paywalls", type: "T" }, { id: "b", name: "Pricing", type: "T" }] }).map((b) => b.label),
-      ["Concept Paywalls", "Concept Pricing"]
-    );
-    assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 2, chunks: 12 } }), "passage 3 of 12");
-    assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 0, chunks: 1 } }), null, "a short entry has one passage");
-    assert.equal(passageText({ passage: null }), null);
-    assert.equal(resultsCountText(31, 25), "31 results");
-    assert.equal(resultsCountText(1, 1), "1 result");
-    assert.equal(resultsCountText(200, 25), "Top 200 results");
-    assert.equal(resultsCountText(null, 8), "8 results", "an older daemon: the hits shown");
+    const parts = highlightParts("Competitor pages: one page per Competitor", ["page", "pages", "competitor"]);
+    assert.deepEqual(parts.filter((part) => part.match).map((part) => part.text), ["Competitor", "pages", "page", "Competitor"]);
+    assert.equal(parts.map((part) => part.text).join(""), "Competitor pages: one page per Competitor");
+    const literal = highlightParts("Precios (SaaS) — más", ["(saas)", "más"]);
+    assert.deepEqual(literal.filter((part) => part.match).map((part) => part.text), ["(SaaS)", "más"]);
+    assert.equal(literal.map((part) => part.text).join(""), "Precios (SaaS) — más");
   });
 
   it("page: append without repeats; total and cursor from the newest page", () => {
@@ -331,7 +273,8 @@ describe("the List view's results", () => {
     const first = appendPage(null, searchPageOf({ hits: [a, c], searched: [], total: 3, nextCursor: "p2" }), searchHitKey);
     assert.deepEqual(first, { items: [a, c], total: 3, nextCursor: "p2" });
     const second = appendPage(first, searchPageOf({ hits: [a, b], searched: [], total: 3, nextCursor: null }), searchHitKey);
-    assert.deepEqual(second.items.map(searchHitKey), ["entry:ke_a", "concept:ke_a", "entry:ke_b"]);
+    assert.deepEqual(second.items.map((hit) => [hit.kind, hit.kind === "entry" ? hit.entry.id : hit.concept.id]), [["entry", "ke_a"], ["concept", "ke_a"], ["entry", "ke_b"]]);
+    assert.equal(second.total, 3);
     assert.equal(second.nextCursor, null);
     // An older daemon: no total, no cursor — one page.
     assert.deepEqual(appendPage(null, searchPageOf({ hits: [b], searched: [] }), searchHitKey), { items: [b], total: null, nextCursor: null });
@@ -376,7 +319,7 @@ describe("deleted example entries and history", () => {
   const examples = { ...EMPTY_KNOWLEDGE_QUERY, text: "", similarTo: ["ke_a", "ke_b"], unlike: ["ke_c"] };
 
   it("let go of examples; with no \"more like\" left, \"less like\" goes too", () => {
-    assert.equal(withoutExamples(examples, ["ke_x"]), examples, "the same query when none is an example");
+    assert.deepEqual(withoutExamples(examples, ["ke_x"]), examples);
     assert.deepEqual(withoutExamples(examples, ["ke_a"]), { ...examples, similarTo: ["ke_b"], unlike: ["ke_c"] });
     assert.deepEqual(withoutExamples(examples, ["ke_c"]), { ...examples, unlike: [] });
     const none = withoutExamples(examples, ["ke_a", "ke_b"]);

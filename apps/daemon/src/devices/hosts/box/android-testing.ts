@@ -11,16 +11,17 @@
 import { execFile } from "node:child_process";
 import { copyFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { ANDROID_SYSTEM_IMAGE, deviceProfile } from "@orquester/api";
 
 import type { BoxExecOptions, BoxProcess } from "../../../boxes/contracts.ts";
 import { ANDROID_CACHE_SOURCE, DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
-import { localBoxConnection, type LocalBoxConnection } from "../../../boxes/testing.ts";
+import { type LocalBoxConnection } from "../../../boxes/testing.ts";
 import { avdHardware } from "../../android/avd-config.ts";
 import { profileHash } from "../../toolchain/android-sdk.ts";
 import { scrcpyJarPath } from "../../toolchain/npm-tools.ts";
+import { isolatedDeviceBox } from "./local-namespace.ts";
 import { ANDROID_PROBE_SCRIPT, BOX_GOLDEN_MARKER, BOX_GOLDEN_SNAPSHOT } from "./android-remote.ts";
 
 const FAKE_EMULATOR = `#!/bin/sh
@@ -117,6 +118,8 @@ export interface FakeLinuxBoxOptions {
   cacheAvds?: "tuned" | "legacy";
   /** The GPU mode a tuned cache recorded (default `swiftshader_indirect`). */
   cacheGpu?: string;
+  /** The public remote filesystem namespace to simulate. */
+  provider?: "blacksmith" | "byo";
   /** The probe's answer. */
   kvm?: "direct" | "sg" | "missing";
   ffmpeg?: "libx264" | "missing";
@@ -179,7 +182,7 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
   await write(join(tools, "agent-device", "bin", "agent-device.mjs"), FAKE_AGENT_DEVICE, 0o755);
   await write(scrcpyJarPath(join(root, "tools")), "jar");
   const probe = [
-    `path=${process.env.PATH}`,
+    `path=${dirname(process.execPath)}:/usr/bin:/bin`,
     "os=Linux",
     "user=orquester",
     `node=${process.execPath}`,
@@ -195,13 +198,13 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
   ].join("\n");
   const execs: string[][] = [];
   const envValues: string[] = [];
-  const connection = localBoxConnection({ boxId: "linux-box" });
+  const connection = isolatedDeviceBox({ root, boxId: "linux-box", provider: options.provider ?? "blacksmith" });
   const exec = connection.exec.bind(connection);
   connection.exec = (spec: BoxExecOptions): BoxProcess => {
     execs.push([spec.command, ...(spec.args ?? [])]);
     envValues.push(...Object.values(spec.env ?? {}));
     if (spec.command === "/bin/sh" && spec.args?.[1] === ANDROID_PROBE_SCRIPT) return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "probe", probe] });
-    if (spec.command === "cat" && spec.args?.length === 1 && spec.args[0] === "/proc/meminfo") {
+    if (basename(spec.command) === "cat" && spec.args?.length === 1 && spec.args[0] === "/proc/meminfo") {
       const memory = `MemAvailable: ${Math.floor((options.memAvailableBytes ?? 64 * 1024 ** 3) / 1024)} kB`;
       return exec({ command: "/bin/sh", args: ["-c", 'printf "%s\\n" "$1"', "memory", memory] });
     }

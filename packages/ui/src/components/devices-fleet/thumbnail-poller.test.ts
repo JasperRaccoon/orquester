@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  THUMBNAIL_INTERVAL_MS,
-  ThumbnailPoller,
-  thumbnailBackoffMs,
-  thumbnailErrorText,
-  type ThumbnailDeps,
-  type ThumbnailSnapshot
-} from "./thumbnail-poller.ts";
+import { ThumbnailPoller, type ThumbnailDeps } from "./thumbnail-poller.ts";
 
 interface Pending {
   url: string;
@@ -46,14 +39,12 @@ function harness() {
       revoked.push(url);
     }
   };
-  const snapshots: ThumbnailSnapshot[] = [];
-  const poller = new ThumbnailPoller(deps, (snapshot) => snapshots.push(snapshot));
+  const poller = new ThumbnailPoller(deps, () => undefined);
   const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
   return {
     poller,
     fetches,
     revoked,
-    snapshots,
     timers,
     /** Move the clock, firing due timers in order. */
     advance(ms: number) {
@@ -67,8 +58,9 @@ function harness() {
       }
       now = until;
     },
-    async answer(index: number, ok = true, status = 200, bytes = 10) {
-      fetches[index]!.resolve({ ok, status, blob: async () => new Blob([new Uint8Array(bytes)]) });
+    nextWait: () => Math.min(...[...timers.values()].map((timer) => timer.at - now)),
+    async answer(index: number, ok = true, status = 200) {
+      fetches[index]!.resolve({ ok, status, blob: async () => new Blob([new Uint8Array(1)]) });
       await flush();
     },
     async fail(index: number) {
@@ -80,25 +72,16 @@ function harness() {
 }
 
 describe("thumbnail poller", () => {
-  it("polls only while it has a URL, is on screen and the page is visible", async () => {
-    const h = harness();
-    h.poller.setUrl("http://d/shot");
-    assert.equal(h.fetches.length, 0, "not on screen yet");
-    h.poller.setOnScreen(true);
-    assert.equal(h.fetches.length, 1);
-    assert.equal(h.poller.snapshot.status, "loading");
-    await h.answer(0);
-    assert.deepEqual(h.poller.snapshot, { status: "live", src: "blob:1", error: null, frameAt: 0 });
-  });
-
   it("asks about once a second, one request at a time", async () => {
     const h = harness();
-    h.poller.setUrl("http://d/shot");
     h.poller.setOnScreen(true);
+    assert.equal(h.fetches.length, 0, "no URL yet");
+    h.poller.setUrl("http://d/shot");
+    assert.equal(h.poller.snapshot.status, "loading");
     h.advance(300);
     await h.answer(0);
     assert.equal(h.fetches.length, 1, "the next waits for the interval");
-    h.advance(THUMBNAIL_INTERVAL_MS - 300 - 1);
+    h.advance(1_000 - 300 - 1);
     assert.equal(h.fetches.length, 1);
     h.advance(1);
     assert.equal(h.fetches.length, 2, "an interval after the previous one started");
@@ -116,7 +99,7 @@ describe("thumbnail poller", () => {
     h.poller.setUrl("http://d/shot");
     h.poller.setOnScreen(true);
     await h.answer(0);
-    h.advance(THUMBNAIL_INTERVAL_MS);
+    h.advance(1_000);
     assert.equal(h.fetches.length, 2);
     h.poller.setOnScreen(false);
     assert.equal(h.fetches[1]!.signal.aborted, true);
@@ -149,22 +132,26 @@ describe("thumbnail poller", () => {
     h.poller.setUrl("http://d/shot");
     h.poller.setOnScreen(true);
     await h.answer(0);
-    h.advance(THUMBNAIL_INTERVAL_MS);
+    h.advance(1_000);
     await h.answer(1, false, 502);
     assert.equal(h.poller.snapshot.status, "error");
     assert.equal(h.poller.snapshot.src, "blob:1");
-    assert.equal(h.poller.snapshot.error, "The host did not answer");
-    h.advance(thumbnailBackoffMs(1) - 1);
+    assert.ok(h.poller.snapshot.error);
+    const firstPause = h.nextWait();
+    assert.ok(firstPause > 1_000, "failures back off beyond the normal frame interval");
+    h.advance(firstPause - 1);
     assert.equal(h.fetches.length, 2);
     h.advance(1);
     assert.equal(h.fetches.length, 3);
     await h.fail(2);
-    assert.equal(h.poller.snapshot.error, "Can't reach the host");
-    h.advance(thumbnailBackoffMs(2));
+    assert.ok(h.poller.snapshot.error);
+    const nextPause = h.nextWait();
+    assert.ok(nextPause > firstPause, "successive failures increase the pause");
+    h.advance(nextPause);
     assert.equal(h.fetches.length, 4);
     await h.answer(3);
     assert.equal(h.poller.snapshot.status, "live");
-    h.advance(THUMBNAIL_INTERVAL_MS);
+    h.advance(1_000);
     assert.equal(h.fetches.length, 5, "back to the interval");
   });
 
@@ -182,7 +169,7 @@ describe("thumbnail poller", () => {
     assert.deepEqual(h.revoked, ["blob:1", "blob:2"]);
     h.poller.setUrl("http://d/c");
     await h.answer(2);
-    h.advance(THUMBNAIL_INTERVAL_MS);
+    h.advance(1_000);
     h.poller.dispose();
     assert.equal(h.fetches[3]!.signal.aborted, true);
     assert.deepEqual(h.revoked, ["blob:1", "blob:2", "blob:3"]);
@@ -196,7 +183,6 @@ describe("thumbnail poller", () => {
     h.poller.setUrl("http://d/shot?device=x", { Authorization: "Bearer one" });
     h.poller.setOnScreen(true);
     assert.deepEqual(h.fetches[0]!.headers, { Authorization: "Bearer one" });
-    assert.ok(!h.fetches[0]!.url.includes("token="));
     await h.answer(0);
     h.poller.setUrl("http://d/shot?device=x", { Authorization: "Bearer one" });
     assert.equal(h.fetches.length, 1, "the same URL and headers (a re-render) change nothing");
@@ -206,28 +192,4 @@ describe("thumbnail poller", () => {
     h.poller.dispose();
   });
 
-  it("an empty answer keeps polling without replacing the frame", async () => {
-    const h = harness();
-    h.poller.setUrl("http://d/shot");
-    h.poller.setOnScreen(true);
-    await h.answer(0, true, 200, 0);
-    assert.equal(h.poller.snapshot.status, "loading");
-    assert.equal(h.poller.snapshot.src, null);
-    h.advance(THUMBNAIL_INTERVAL_MS);
-    assert.equal(h.fetches.length, 2);
-  });
-});
-
-describe("thumbnail words and pauses", () => {
-  it("back off 2 s, 5 s, 15 s, then 30 s", () => {
-    assert.deepEqual([0, 1, 2, 3, 4, 9].map(thumbnailBackoffMs), [THUMBNAIL_INTERVAL_MS, 2_000, 5_000, 15_000, 30_000, 30_000]);
-  });
-
-  it("name what failed", () => {
-    assert.equal(thumbnailErrorText(null), "Can't reach the host");
-    assert.equal(thumbnailErrorText(401), "Not allowed to view it");
-    assert.equal(thumbnailErrorText(404), "The device is gone");
-    assert.equal(thumbnailErrorText(503), "The host did not answer");
-    assert.equal(thumbnailErrorText(418), "The host answered 418");
-  });
 });

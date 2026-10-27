@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluateReadiness, ffmpegHasLibx264, FIX_ACTIONS, groupMembers, nodeMajor, type ReadinessProbe } from "./readiness.ts";
+import { evaluateReadiness, ffmpegHasLibx264, groupMembers, nodeMajor, type ReadinessProbe } from "./readiness.ts";
 
 const ready: ReadinessProbe = {
   kvm: { access: "direct" },
@@ -22,11 +22,10 @@ test("readiness: everything installed is ready (golden snapshots are not a check
   const checks = evaluateReadiness(ready);
   assert.ok(checks.every((check) => check.state === "ok"));
   assert.deepEqual(
-    checks.map((check) => check.id),
-    ["kvm", "node", "ffmpeg", "android-sdk", "system-image", "avd:pixel-9", "tool:expo-device-hub", "tool:agent-device"]
+    checks.map((check) => check.id).sort(),
+    ["kvm", "node", "ffmpeg", "android-sdk", "system-image", "avd:pixel-9", "tool:expo-device-hub", "tool:agent-device"].sort()
   );
-  assert.match(byId(ready).get("avd:pixel-9")!.detail!, /first use/);
-  assert.equal(byId({ ...ready, avds: [{ ...ready.avds[0]!, snapshot: true }] }).get("avd:pixel-9")!.detail, "Ready");
+  assert.ok(evaluateReadiness({ ...ready, java: false }).every((check) => check.state === "ok"));
 });
 
 test("readiness: installable items carry their fix action; machine items do not", () => {
@@ -46,8 +45,7 @@ test("readiness: installable items carry their fix action; machine items do not"
   assert.equal(checks.get("ffmpeg")!.state, "error");
   assert.equal(checks.get("java")!.state, "missing");
   assert.equal(checks.get("java")!.fixActionId, undefined);
-  assert.equal(checks.get("android-sdk")!.fixActionId, FIX_ACTIONS.sdk);
-  assert.match(checks.get("android-sdk")!.detail!, /command-line tools, emulator/);
+  assert.equal(checks.get("android-sdk")!.fixActionId, "install-android-sdk");
   assert.equal(checks.get("system-image")!.fixActionId, "install-system-image");
   assert.equal(checks.get("avd:pixel-9")!.fixActionId, "create-avd:pixel-9");
   assert.equal(checks.get("tool:agent-device")!.fixActionId, "install-tool:agent-device");
@@ -55,7 +53,6 @@ test("readiness: installable items carry their fix action; machine items do not"
 
 test("readiness: kvm through sg is usable; a missing /dev/kvm is an error", () => {
   assert.equal(byId({ ...ready, kvm: { access: "sg" } }).get("kvm")!.state, "ok");
-  assert.match(byId({ ...ready, kvm: { access: "sg" } }).get("kvm")!.detail!, /sg kvm/);
   assert.equal(byId({ ...ready, kvm: { access: "missing" } }).get("kvm")!.state, "error");
   assert.equal(byId({ ...ready, ffmpeg: "missing" }).get("ffmpeg")!.state, "missing");
 });

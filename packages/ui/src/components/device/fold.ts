@@ -17,7 +17,7 @@ const POSTURES: readonly AndroidFoldPosture[] = ["closed", "half_opened", "opene
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** The route's answer, or null when it is not one. */
-export function parseAndroidFold(payload: unknown): AndroidFoldState | null {
+function parseAndroidFold(payload: unknown): AndroidFoldState | null {
   if (!isRecord(payload) || payload.ok !== true || !isRecord(payload.fold)) return null;
   const { supported, posture, hingeAngle } = payload.fold;
   if (typeof supported !== "boolean") return null;

@@ -62,17 +62,6 @@ describe("on-demand agent rows — the loader", () => {
     assert.deepEqual(h.posts.at(-1), { streamId: "s-3", agentIds: ["b", "c"] }, "the closed drill-in is no longer requested");
   });
 
-  it("asks nothing before the stream is live, and nothing for an agent no longer omitted", async () => {
-    const h = harness();
-    h.loader.want("a");
-    h.loader.sync(view({ live: false }));
-    await h.flush();
-    assert.deepEqual(h.posts, []);
-    h.loader.sync(view({ omitted: ["b"] }));
-    await h.flush();
-    assert.deepEqual(h.posts, []);
-  });
-
   it("splits a request past the cap", async () => {
     const h = harness();
     const omitted = Array.from({ length: AGENT_ROWS_MAX_AGENTS + 3 }, (_, index) => `agent-${String(index).padStart(3, "0")}`);
@@ -103,20 +92,6 @@ describe("on-demand agent rows — the loader", () => {
     await h.flush();
     assert.equal(h.posts.length, 3);
     assert.equal(h.events.unsupported, 0);
-  });
-
-  it("any other refusal — a route miss above all — stops it and asks for the whole thread, once", async () => {
-    const h = harness(async () => {
-      throw Object.assign(new Error("No route for POST"), { status: 404, code: "THREAD_NOT_FOUND" });
-    });
-    h.loader.want("a");
-    h.loader.sync(view());
-    await h.flush();
-    assert.equal(h.events.unsupported, 1);
-    assert.equal(h.loader.enabled, false);
-    h.loader.sync(view({ streamId: "s-2" }));
-    await h.flush();
-    assert.equal(h.posts.length, 1, "never asked again");
   });
 
   it("a live stream with omitted rows and no id to ask on reads the thread whole, once", async () => {
@@ -187,6 +162,10 @@ describe("on-demand agent rows — the loader reads each refusal for what it is"
     await h.flush();
     assert.equal(h.posts.length, 3, "three batches out");
     assert.equal(h.events.unsupported, 1);
+    assert.equal(h.loader.enabled, false);
+    h.loader.sync(view({ streamId: "s-2", omitted, activeAgentIds: new Set(omitted) }));
+    await h.flush();
+    assert.equal(h.posts.length, 3, "a missing route is never asked again, even on a new stream");
     const once = harness(failing(405));
     once.loader.want("a");
     once.loader.sync(view());

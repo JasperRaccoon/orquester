@@ -1,14 +1,13 @@
 /**
  * In-memory fakes for the secret-files service tests (service.test.ts, routes.test.ts): a vault
  * store, a clone filesystem with watchers, hand-fired timers, the plugin switch and the project
- * listing. Nothing touches the disk, git or the clock. The pure helpers (`parseEnv`,
- * `compareContents`, `mergeEnvContents`) are the real ones.
+ * listing. Nothing touches the disk, git or the clock. The service uses its real pure helpers.
  */
 
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { SECRET_FILE_HISTORY_MAX, isConventionalSecretFileName, type SecretFileUpdatedBy, type SecretFilesChangedPayload } from "@orquester/api";
-import { type CloneFileRefusal, CloneFileError, type WriteCloneFileOptions, compareContents, mergeEnvContents, parseEnv } from "./files.ts";
+import { type CloneFileRefusal, CloneFileError, type WriteCloneFileOptions } from "./files.ts";
 import {
   SecretFilesService,
   type SecretFilesFileOps,
@@ -251,10 +250,7 @@ export class FakeFs {
       await this.git(cloneRoot, signal);
       const tracked = this.tracked.get(cloneRoot) ?? new Set<string>();
       return new Set(relPaths.filter((path) => tracked.has(path)));
-    },
-    parseEnv,
-    compareContents,
-    mergeEnvContents
+    }
   };
 }
 

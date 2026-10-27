@@ -26,7 +26,7 @@ import {
   type BoxSysInfo
 } from "@orquester/api";
 
-export const constantsFixture = {
+const constantsFixture = {
   protocolVersion: BOX_PROTOCOL_VERSION,
   channelWindowBytes: BOX_CHANNEL_WINDOW_BYTES,
   maxFramePayload: BOX_MAX_FRAME_PAYLOAD,
@@ -85,7 +85,7 @@ const fsChange: BoxFsChangeEvent = {
 
 type ByT = { [T in BoxControlMessage["t"]]: Extract<BoxControlMessage, { t: T }>[] };
 
-export const controlFixture: ByT = {
+const controlFixture: ByT = {
   hello: [
     {
       t: "hello",
@@ -183,7 +183,7 @@ export const controlFixture: ByT = {
 
 type ByKind = { [K in BoxChannelKind]: Extract<BoxChannelSpec, { kind: K }>[] };
 
-export const channelsFixture: ByKind = {
+const channelsFixture: ByKind = {
   exec: [
     { kind: "exec", command: "git", args: ["status", "--short"] },
     {
@@ -294,7 +294,7 @@ const boxToHost: MethodSamples<BoxBoxToHostMethods> = {
   ]
 };
 
-export const methodsFixture = { hostToBox, boxToHost };
+const methodsFixture = { hostToBox, boxToHost };
 
 const framePayloads: { channel: number; stream: BoxStream; payload: number[] }[] = [
   { channel: 2, stream: 0, payload: [] },
@@ -304,7 +304,7 @@ const framePayloads: { channel: number; stream: BoxStream; payload: number[] }[]
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 
-export const framesFixture = framePayloads.map(({ channel, stream, payload }) => ({
+const framesFixture = framePayloads.map(({ channel, stream, payload }) => ({
   channel,
   stream,
   payloadHex: hex(Uint8Array.from(payload)),

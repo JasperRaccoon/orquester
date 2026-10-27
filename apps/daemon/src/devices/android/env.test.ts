@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ADB_PORT_BASE, ADB_PORT_SPAN, adbServerPort, androidLayout, androidLayoutAt, appdirMarker, buildAndroidEnv } from "./env.ts";
+import { adbServerPort, androidLayout, androidLayoutAt, appdirMarker, buildAndroidEnv } from "./env.ts";
 
 test("env: every tool home is inside the appdir; the adb port is private; daemon secrets are not passed", () => {
   const layout = androidLayout("/srv/app");
@@ -42,7 +42,7 @@ test("adb port: stable per appdir, different between appdirs, never the default 
   assert.notEqual(adbServerPort("/var/lib/orquester/tmp/devices-local-it/app"), a);
   for (const dir of ["/a", "/b", "/c", "/var/lib/x"]) {
     const port = adbServerPort(dir);
-    assert.ok(port >= ADB_PORT_BASE && port < ADB_PORT_BASE + ADB_PORT_SPAN && port !== 5037);
+    assert.ok(port >= 16_000 && port < 20_000 && port !== 5037);
   }
 });
 

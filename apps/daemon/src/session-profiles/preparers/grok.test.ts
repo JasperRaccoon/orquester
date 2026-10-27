@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { after, describe, it } from "node:test";
 import { parse as parseToml } from "@decimalturn/toml-patch";
-import { GROK_USER_SKILL_ROOTS } from "../../agent-isolation/grok.ts";
 import { grokPreparedSectionSchema } from "../manifest/grok.ts";
 import { grokPreparer } from "./grok.ts";
 import { GROK_FIXTURE_SECRETS, makeGrokProfileFixture } from "./grok.testing.ts";
@@ -49,7 +48,7 @@ describe("Grok preparer", () => {
     ]);
   });
 
-  it("builds a Grok home with only the profile's kit (golden)", async () => {
+  it("builds a private Grok home with an immutable copy of the profile's kit (golden)", async () => {
     const { stagingDir, section, fixture } = await prepare();
     assert.deepEqual(section, {
       configBase: "profile/config.base.toml",
@@ -109,6 +108,15 @@ describe("Grok preparer", () => {
     assert.equal((await stat(script)).mode & 0o777, 0o755, "the managed hook script exists");
     assert.ok(fixture.warnings.some((line) => line.includes('"orquester"')), "Orquester's own server name is refused, with a warning");
     assert.ok(fixture.warnings.every((line) => !line.includes(GROK_FIXTURE_SECRETS.env)));
+    for (const file of ["profile/config.base.toml", "config.toml", "AGENTS.md"]) {
+      assert.equal((await stat(join(stagingDir, file))).mode & 0o777, 0o600, file);
+    }
+    assert.equal((await stat(join(stagingDir, "profile"))).mode & 0o777, 0o700);
+    await writeFile(join(fixture.pluginCacheDir, "skills", "lint", "SKILL.md"), "changed\n");
+    assert.equal(
+      await readFile(join(stagingDir, "profile/plugins/pl1/toolbox/skills/lint/SKILL.md"), "utf8"),
+      "---\nname: lint\ndescription: Lint\n---\nLint.\n"
+    );
   });
 
   it("carries the Global runtime settings over, minus the item sections, plus the profile's MCP servers", async () => {
@@ -139,7 +147,10 @@ describe("Grok preparer", () => {
     });
     const skills = join(fixture.home, ".claude", "skills");
     assert.deepEqual(config.skills.ignore, [
-      ...GROK_USER_SKILL_ROOTS,
+      "~/.claude/skills",
+      "~/.agents/skills",
+      "~/.agents/commands",
+      "~/.claude/commands",
       join(skills, "dangling"),
       join(skills, "linked-one"),
       join(fixture.root, "shared-skills", "linked-one"),
@@ -148,23 +159,6 @@ describe("Grok preparer", () => {
     ]);
     assert.deepEqual(config.plugins, { disabled: [] });
     assert.deepEqual(Object.keys(config.mcp_servers), ["search", "docs"]);
-  });
-
-  it("keeps the config files and instructions 0600 in a 0700 tree", async () => {
-    const { stagingDir } = await prepare();
-    for (const file of ["profile/config.base.toml", "config.toml", "AGENTS.md"]) {
-      assert.equal((await stat(join(stagingDir, file))).mode & 0o777, 0o600, file);
-    }
-    assert.equal((await stat(join(stagingDir, "profile"))).mode & 0o777, 0o700);
-  });
-
-  it("copies the plugin, so a later edit of the profile's cache does not reach the prepared version", async () => {
-    const { stagingDir, fixture } = await prepare();
-    await writeFile(join(fixture.pluginCacheDir, "skills", "lint", "SKILL.md"), "changed\n");
-    assert.equal(
-      await readFile(join(stagingDir, "profile/plugins/pl1/toolbox/skills/lint/SKILL.md"), "utf8"),
-      "---\nname: lint\ndescription: Lint\n---\nLint.\n"
-    );
   });
 
   it("showing built-in skills leaves bundled skills out of the ignore list", async () => {

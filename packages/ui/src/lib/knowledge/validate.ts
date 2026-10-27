@@ -264,7 +264,7 @@ export function parseKnowledgeGraphResponse(value: unknown): KnowledgeGraphRespo
 // The similarity graph
 // ---------------------------------------------------------------------------
 
-export function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarityNode | null {
+function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarityNode | null {
   if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
   return {
     id: value.id,
@@ -280,7 +280,7 @@ export function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarit
   };
 }
 
-export function parseKnowledgeSimilarityEdge(value: unknown): KnowledgeSimilarityEdge | null {
+function parseKnowledgeSimilarityEdge(value: unknown): KnowledgeSimilarityEdge | null {
   if (!isRecord(value) || typeof value.from !== "string" || typeof value.to !== "string" || value.from === value.to) return null;
   return { from: value.from, to: value.to, similarity: num(value.similarity), tree: bool(value.tree) };
 }
@@ -360,7 +360,7 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
  * Why an entry is shown beside another; null for one this client cannot read (an unknown kind from
  * a newer daemon, a meaning without a similarity, an author without a value).
  */
-export function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedReason | null {
+function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedReason | null {
   if (!isRecord(value)) return null;
   switch (value.kind) {
     case "meaning":
@@ -379,7 +379,7 @@ export function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedRea
 }
 
 /** One similar entry: null without a readable entry; unreadable reasons are left out (a reason kind repeats once). */
-export function parseKnowledgeSimilarEntry(value: unknown): KnowledgeSimilarEntry | null {
+function parseKnowledgeSimilarEntry(value: unknown): KnowledgeSimilarEntry | null {
   if (!isRecord(value)) return null;
   const entry = parseKnowledgeEntrySummary(value.entry);
   if (!entry) return null;
@@ -459,7 +459,7 @@ function parseMatchPassage(value: unknown): KnowledgeEntryMatch["passage"] {
  * predates it — when it is not an object, its band is not one this client knows, or it names no
  * signal this client knows; a bad passage reads as none, and unreadable terms or concepts are left out.
  */
-export function parseKnowledgeEntryMatch(value: unknown): KnowledgeEntryMatch | null {
+function parseKnowledgeEntryMatch(value: unknown): KnowledgeEntryMatch | null {
   if (!isRecord(value) || typeof value.band !== "string" || !BANDS.has(value.band)) return null;
   const named = new Set(strings(value.via));
   const via = SIGNAL_ORDER.filter((signal) => named.has(signal));
@@ -506,7 +506,7 @@ function parseFacetCount(value: unknown): KnowledgeFacetCount | null {
 }
 
 /** Facet counts, each value once; a list that is missing or not an array reads as empty. Null when it is not an object. */
-export function parseKnowledgeFacets(value: unknown): KnowledgeFacets | null {
+function parseKnowledgeFacets(value: unknown): KnowledgeFacets | null {
   if (!isRecord(value)) return null;
   const facet = (field: unknown): KnowledgeFacetCount[] => {
     const seen = new Set<string>();

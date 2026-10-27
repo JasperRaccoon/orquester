@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 
 import { WebSocket } from "ws";
 
-import { mapPanelInput, SERVE_SIM_TAG, VphoneBridge } from "./bridge.ts";
+import { VphoneBridge } from "./bridge.ts";
 import { DeviceThumbnails } from "../../thumbnails.ts";
 import { VphoneGuestClient } from "./guest-client.ts";
 import { avccDemux, FIXTURE_AVCC, FIXTURE_DELTA_AU, FIXTURE_JPEG, FIXTURE_KEY_AU, startFakeVphoned, type FakeVphoned } from "./testing.ts";
@@ -12,6 +12,8 @@ import { avccDemux, FIXTURE_AVCC, FIXTURE_DELTA_AU, FIXTURE_JPEG, FIXTURE_KEY_AU
 const GUEST_TOKEN = "guest-token-0123456789abcdef";
 const BRIDGE_TOKEN = "bridge-token-0123456789abcdef";
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+// serve-sim input protocol bytes, independent of the bridge implementation.
+const SERVE_SIM_TAG = { touch: 0x03, button: 0x04, key: 0x06, orientation: 0x07, screenConfig: 0x82, inputAdmitted: 0x83 };
 
 let vphoned: FakeVphoned;
 let bridge: VphoneBridge;
@@ -32,8 +34,7 @@ before(async () => {
   bridge = new VphoneBridge({
     token: BRIDGE_TOKEN,
     device: (id) => (id === "orq-lease1" ? { client, screen: { width: 402, height: 874 } } : null),
-    logger: quiet,
-    tuning: { fps: 200, mjpegIntervalMs: 5 }
+    logger: quiet
   });
   origin = await bridge.start();
 });
@@ -65,7 +66,7 @@ function readStream(path: string, enough: (bytes: Buffer) => boolean, headers: R
 
 test("stream.avcc: vphone frames arrive as serve-sim envelopes the panel decodes", async () => {
   const before = vphoned.screenRequests.length;
-  const { status, type, bytes } = await readStream("/vendor/serve-sim/helper/orq-lease1/stream.avcc", (data) => avccDemux(data).chunks.length >= 4);
+  const { status, type, bytes } = await readStream("/vendor/serve-sim/helper/orq-lease1/stream.avcc", (data) => avccDemux(data).chunks.length >= 3);
   assert.equal(status, 200);
   assert.equal(type, "application/octet-stream");
   const { chunks } = avccDemux(bytes);
@@ -73,10 +74,8 @@ test("stream.avcc: vphone frames arrive as serve-sim envelopes the panel decodes
   assert.deepEqual(Buffer.from(chunks[0]!.payload), FIXTURE_AVCC);
   assert.equal(chunks[1]!.type, "keyframe");
   assert.deepEqual(Buffer.from(chunks[1]!.payload), FIXTURE_KEY_AU);
-  for (const chunk of chunks.slice(2)) {
-    assert.equal(chunk.type, "delta");
-    assert.deepEqual(Buffer.from(chunk.payload), FIXTURE_DELTA_AU);
-  }
+  assert.equal(chunks[2]!.type, "delta");
+  assert.deepEqual(Buffer.from(chunks[2]!.payload), FIXTURE_DELTA_AU);
   const first = vphoned.screenRequests[before]!;
   assert.deepEqual({ codec: first.codec, box: first.box, key: first.key }, { codec: "h264", box: [1600, 1600], key: true });
   assert.ok(typeof first.bitrate === "number" && (first.bitrate as number) > 0);
@@ -86,12 +85,15 @@ test("stream.avcc: vphone frames arrive as serve-sim envelopes the panel decodes
 });
 
 test("stream.mjpeg: screenshots as multipart parts", async () => {
-  const { status, type, bytes } = await readStream("/vendor/serve-sim/helper/orq-lease1/stream.mjpeg", (data) => data.toString("latin1").split("--frame").length > 2);
+  const part = Buffer.concat([
+    Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${FIXTURE_JPEG.length}\r\n\r\n`),
+    FIXTURE_JPEG,
+    Buffer.from("\r\n")
+  ]);
+  const { status, type, bytes } = await readStream("/vendor/serve-sim/helper/orq-lease1/stream.mjpeg", (data) => data.length >= part.length);
   assert.equal(status, 200);
   assert.equal(type, "multipart/x-mixed-replace; boundary=frame");
-  const text = bytes.toString("latin1");
-  assert.ok(text.startsWith(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${FIXTURE_JPEG.length}\r\n\r\n`));
-  assert.ok(bytes.includes(FIXTURE_JPEG));
+  assert.deepEqual(bytes.subarray(0, part.length), part);
 });
 
 test("POST /vendor/serve-sim/api/screenshot?device=: one JPEG of that device (the fleet thumbnail)", async () => {
@@ -117,13 +119,17 @@ test("every bridge request needs the bridge token; unknown devices and paths are
   assert.equal((await readStream("/vendor/serve-sim/helper/orq-lease1/stream.avcc", () => true, { authorization: `Bearer ${GUEST_TOKEN}` })).status, 401);
   assert.equal((await readStream("/vendor/serve-sim/helper/orq-other/stream.avcc", () => true)).status, 404);
   assert.equal((await readStream("/api/devices", () => true)).status, 404);
-  await assert.rejects(
-    new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${origin.replace("http", "ws")}/vendor/serve-sim/helper/ws?device=orq-lease1`);
-      ws.on("open", resolve);
-      ws.on("error", reject);
-    })
-  );
+  const websocketStatus = await new Promise<number>((resolve, reject) => {
+    const ws = new WebSocket(`${origin.replace("http", "ws")}/vendor/serve-sim/helper/ws?device=orq-lease1`);
+    ws.on("unexpected-response", (_request, response) => {
+      response.resume();
+      resolve(response.statusCode!);
+      ws.terminate();
+    });
+    ws.on("open", () => { ws.close(); reject(new Error("An unauthenticated socket was admitted")); });
+    ws.on("error", reject);
+  });
+  assert.equal(websocketStatus, 401);
 });
 
 test("the input socket admits, sends the screen config, and relays touches, buttons, keys and text in order", async () => {
@@ -148,7 +154,14 @@ test("the input socket admits, sends the screen config, and relays touches, butt
   send(SERVE_SIM_TAG.touch, { type: "begin", x: 0.5, y: 0.25 });
   for (let i = 1; i <= 5; i++) send(SERVE_SIM_TAG.touch, { type: "move", x: 0.5, y: 0.25 + i * 0.05 });
   send(SERVE_SIM_TAG.touch, { type: "end", x: 0.5, y: 0.5 });
+  send(SERVE_SIM_TAG.touch, { type: "end", x: 1.4, y: -1 });
+  send(SERVE_SIM_TAG.touch, { type: "tap", x: 0, y: 0 });
+  send(SERVE_SIM_TAG.button, { button: "siri" });
+  send(SERVE_SIM_TAG.key, { type: "down", usage: 70000 });
+  send(SERVE_SIM_TAG.orientation, { orientation: "landscape_left" });
   send(SERVE_SIM_TAG.button, { button: "home" });
+  send(SERVE_SIM_TAG.button, { button: "app_switcher" });
+  send(SERVE_SIM_TAG.button, { button: "lock" });
   send(SERVE_SIM_TAG.key, { type: "down", usage: 4 });
   send(SERVE_SIM_TAG.key, { type: "up", usage: 4 });
   ws.send(JSON.stringify({ type: "text", text: "hello" }));
@@ -159,13 +172,16 @@ test("the input socket admits, sends the screen config, and relays touches, butt
   assert.ok(calls.every((call) => call.via === "ws"));
   const touches = calls.filter((call) => call.method === "input.touch");
   assert.deepEqual(touches[0]!.params, { phase: "down", x: 0.5, y: 0.25, normalized: true });
-  assert.deepEqual(touches[touches.length - 1]!.params, { phase: "up", x: 0.5, y: 0.5, normalized: true });
-  assert.ok(touches.slice(1, -1).every((call) => call.params.phase === "move"));
-  assert.ok(touches.length <= 7, "queued moves collapse");
+  assert.deepEqual(touches.at(-1)!.params, { phase: "up", x: 1, y: 0, normalized: true });
+  assert.ok(touches.some((call) => call.params.phase === "move"));
+  assert.ok(touches.some((call) => call.params.phase === "up" && call.params.x === 0.5 && call.params.y === 0.5));
   assert.deepEqual(
     calls.filter((call) => call.method !== "input.touch").map((call) => [call.method, call.params]),
     [
       ["input.button", { name: "home" }],
+      ["input.button", { name: "home" }],
+      ["input.button", { name: "home" }],
+      ["input.button", { name: "power" }],
       ["input.hid", { page: 7, usage: 4, down: true }],
       ["input.hid", { page: 7, usage: 4, down: false }],
       ["input.type", { text: "hello" }]
@@ -174,14 +190,4 @@ test("the input socket admits, sends the screen config, and relays touches, butt
   // Strictly in order: every touch before the button.
   assert.ok(calls.findIndex((call) => call.method === "input.button") > calls.map((call) => call.method).lastIndexOf("input.touch"));
   assert.deepEqual(vphoned.originRefusals, []);
-});
-
-test("panel input mapping", () => {
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.touch, { type: "move", x: 1.4, y: -1 }), [["input.touch", { phase: "move", x: 1, y: 0, normalized: true }]]);
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.touch, { type: "tap", x: 0, y: 0 }), []);
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.button, { button: "lock" }), [["input.button", { name: "power" }]]);
-  assert.equal(mapPanelInput(SERVE_SIM_TAG.button, { button: "app_switcher" }).length, 2);
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.button, { button: "siri" }), []);
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.key, { type: "down", usage: 70000 }), []);
-  assert.deepEqual(mapPanelInput(SERVE_SIM_TAG.orientation, { orientation: "landscape_left" }), []);
 });

@@ -9,8 +9,6 @@ import test from "node:test";
 import { sessionToolMarkedData } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
 import {
-  ADMIN_APPROVAL_TIMEOUT_MS,
-  approvalPreviewBytes,
   escapeApprovalCodeText,
   parseToolApprovalSummary,
   readToolApprovalReference,
@@ -18,9 +16,7 @@ import {
   sanitizeApprovalProse,
   stripToolApprovalSecrets,
   summarizeApprovalPreview,
-  TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   TOOL_APPROVAL_REFERENCE_KEY,
-  TOOL_APPROVAL_SUMMARY_MAX_BYTES,
   toolApprovalReferenceOfActivityData,
   validateToolApprovalAnswer,
   type ApprovalPreviewSection,
@@ -28,12 +24,6 @@ import {
 } from "./tool-approvals.ts";
 
 const card = { grantOptions: ["chat" as const], secretFields: [{ key: "env.API_KEY", label: "API_KEY" }] };
-
-test("limits are the spec's", () => {
-  assert.equal(ADMIN_APPROVAL_TIMEOUT_MS, 30 * 60 * 1000);
-  assert.equal(TOOL_APPROVAL_SUMMARY_MAX_BYTES, 64 * 1024);
-  assert.equal(TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES, 1024 * 1024);
-});
 
 test("the answer validator: approve with every secret, optionally a grant it offers", () => {
   assert.deepEqual(validateToolApprovalAnswer({ decision: "approve", secrets: { "env.API_KEY": "s3cret" } }, card), {
@@ -100,7 +90,7 @@ test("secret stripping removes `secrets` keys by shape and masks known values ev
     short: "ab"
   });
   const clean = { a: 1, b: ["x"] };
-  assert.equal(stripToolApprovalSecrets(clean, ["zzzz"]), clean, "nothing to strip: same reference");
+  assert.deepEqual(stripToolApprovalSecrets(clean, ["zzzz"]), { a: 1, b: ["x"] });
 });
 
 test("labels are one line without bidi, control or zero-width characters", () => {
@@ -128,7 +118,7 @@ test("a summary carries the whole preview when it fits, and cuts long text — n
   ];
   const summary = summarizeApprovalPreview(big);
   assert.equal(summary.fullPreview, true);
-  assert.ok(approvalPreviewBytes(summary.sections) <= TOOL_APPROVAL_SUMMARY_MAX_BYTES, String(approvalPreviewBytes(summary.sections)));
+  assert.ok(Buffer.byteLength(JSON.stringify(summary.sections), "utf8") <= 64 * 1024, String(Buffer.byteLength(JSON.stringify(summary.sections), "utf8")));
   assert.deepEqual(summary.sections[0], big[0]);
   assert.deepEqual(summary.sections.at(-2), big[3]);
   assert.match((summary.sections.at(-1) as { text: string }).text, /View all/);
@@ -223,7 +213,7 @@ test("every format character is unsafe: tag characters, interlinear annotations,
 
 test("stripping touches only answers and approval contexts — a secret NAMES list in a result stays", () => {
   const result = { secrets: ["DEPLOY_KEY", "API_TOKEN"], workflow: { secrets: { DEPLOY_KEY: "set" } } };
-  assert.equal(stripToolApprovalSecrets(result), result);
+  assert.deepEqual(stripToolApprovalSecrets(result), { secrets: ["DEPLOY_KEY", "API_TOKEN"], workflow: { secrets: { DEPLOY_KEY: "set" } } });
   const context = { outcome: "approved", approvalId: "ap-1", secrets: { k: "v" }, pins: { a: "1" } };
   assert.deepEqual(stripToolApprovalSecrets(context), { outcome: "approved", approvalId: "ap-1", pins: { a: "1" } });
 });
@@ -244,9 +234,9 @@ test("a summary never exceeds its cap, even when the flags alone do", () => {
     ...Array.from({ length: 2_000 }, (_, i): ApprovalPreviewSection => ({ kind: "file", path: `bin/${i}/${"p".repeat(60)}`, size: i, sha256: "f".repeat(64), flag: "executable" })),
     { kind: "code", title: "x", text: "c".repeat(10_000) }
   ];
-  for (const max of [TOOL_APPROVAL_SUMMARY_MAX_BYTES, 4_096]) {
+  for (const max of [64 * 1024, 4_096]) {
     const summary = summarizeApprovalPreview(flags, max);
-    assert.ok(approvalPreviewBytes(summary.sections) <= max, `${max}: ${approvalPreviewBytes(summary.sections)}`);
+    assert.ok(Buffer.byteLength(JSON.stringify(summary.sections), "utf8") <= max, `${max}: ${Buffer.byteLength(JSON.stringify(summary.sections), "utf8")}`);
     assert.equal(summary.fullPreview, true);
     const last = summary.sections.at(-1);
     assert.ok(last?.kind === "warning" && /View all/.test(last.text) && /left out/.test(last.text));

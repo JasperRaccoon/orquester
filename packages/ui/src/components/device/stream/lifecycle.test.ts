@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { wakeReconnects } from "../../../lib/connection/backoff.ts";
-import { RateMeter, StreamLifecycle, type StreamAttempt, type StreamLifecycleOptions } from "./lifecycle.ts";
+import { StreamLifecycle, type StreamAttempt, type StreamLifecycleOptions } from "./lifecycle.ts";
 import { DeviceStreamError, type DeviceStreamState } from "./types.ts";
+import { browserApis, restoreBrowserApis } from "./testing/fakes.ts";
 
-beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
-afterEach(() => mock.timers.reset());
+beforeEach(() => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  browserApis({});
+});
+afterEach(() => {
+  restoreBrowserApis();
+  mock.timers.reset();
+});
 
 function harness(overrides: Partial<StreamLifecycleOptions> = {}) {
   const attempts: StreamAttempt[] = [];
@@ -13,8 +20,6 @@ function harness(overrides: Partial<StreamLifecycleOptions> = {}) {
   const events: string[] = [];
   const lifecycle = new StreamLifecycle({
     transport: "serve-emu",
-    now: () => Date.now(),
-    random: () => 1,
     connect: (attempt) => attempts.push(attempt),
     callbacks: {
       onState: (state, error) => states.push([state, error?.code ?? null]),
@@ -51,7 +56,7 @@ describe("StreamLifecycle", () => {
   });
 
   it("reconnects after long silence, keeping the attempt count for stats", () => {
-    const { lifecycle, attempts } = harness({ reconnectAfterMs: 10_000, backoff: { baseMs: 500, maxMs: 30_000 } });
+    const { lifecycle, attempts } = harness({ reconnectAfterMs: 10_000 });
     lifecycle.start();
     lifecycle.frame(10, 10);
     mock.timers.tick(2_000);
@@ -85,7 +90,10 @@ describe("StreamLifecycle", () => {
       const before = Date.now();
       lifecycle.fail(retryable());
       const count = attempts.length;
-      while (attempts.length === count) mock.timers.tick(50);
+      mock.timers.tick(500 * 2 ** i - 1);
+      assert.equal(attempts.length, count);
+      mock.timers.tick(1);
+      assert.equal(attempts.length, count + 1);
       delays.push(Date.now() - before);
     }
     assert.deepEqual(delays, [500, 1_000, 2_000, 4_000]);
@@ -135,28 +143,26 @@ describe("StreamLifecycle", () => {
     assert.deepEqual(states.at(-1), ["closed", null]);
   });
 
-  it("marks an input-only attempt ready without a stall watchdog", () => {
-    const { lifecycle, attempts } = harness({ stallMs: null });
-    lifecycle.start();
-    lifecycle.ready();
-    mock.timers.tick(120_000);
-    assert.equal(lifecycle.state, "live");
-    assert.equal(attempts.length, 1);
-  });
+
 });
 
-describe("RateMeter", () => {
+describe("StreamLifecycle statistics", () => {
   it("reports fps and kbps over a sliding two-second window", () => {
-    const meter = new RateMeter(() => Date.now());
+    const { lifecycle } = harness();
+    lifecycle.start();
     for (let i = 0; i < 20; i++) {
-      meter.add(1, 25_000);
+      lifecycle.frame(720, 1280);
+      lifecycle.received(25_000);
       mock.timers.tick(100);
     }
     // 19 samples (t = 100…1900 ms) fall inside (0, 2000].
-    assert.deepEqual(meter.rates(), { fps: 9.5, kbps: 1_900 });
+    assert.deepEqual([lifecycle.stats().fps, lifecycle.stats().kbps], [9.5, 1_900]);
     mock.timers.tick(1_000);
-    assert.deepEqual(meter.rates(), { fps: 4.5, kbps: 900 });
+    assert.deepEqual([lifecycle.stats().fps, lifecycle.stats().kbps], [4.5, 900]);
     mock.timers.tick(1_000);
-    assert.deepEqual(meter.rates(), { fps: 0, kbps: 0 });
+    assert.deepEqual([lifecycle.stats().fps, lifecycle.stats().kbps], [0, 0]);
+    assert.equal(lifecycle.stats().framesPainted, 20);
+    assert.equal(lifecycle.stats().bytesReceived, 500_000);
+    lifecycle.close();
   });
 });

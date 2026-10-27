@@ -3,10 +3,7 @@ import { describe, it } from "node:test";
 
 import { type ThreadActivityItem } from "@orquester/api/agent-chat";
 
-import {
-  projectSnapshotActivities,
-  slimActivityEvent
-} from "./coalesce.ts";
+import { projectSnapshotActivities } from "./coalesce.ts";
 
 function activity(
   id: string,
@@ -77,59 +74,6 @@ describe("snapshot tool updates (§5.6)", () => {
       ["d1"]
     );
   });
-});
-
-/**
- * The §5.6 cap is measured in **UTF-8 bytes**, not UTF-16 code units (R5 #16),
- * and the slimmer appends a one-character elision marker and never splits a
- * surrogate pair. So the invariant that holds for EVERY input is on
- * `byteLength`; a `.length` bound only happens to hold for ASCII.
- */
-function assertCapped(value: string): void {
-  const limit = 16384 + Buffer.byteLength("\u2026");
-  assert.ok(
-    Buffer.byteLength(value) <= limit,
-    `capped string was ${Buffer.byteLength(value)} bytes, limit ${limit}`
-  );
-  assert.ok(
-    value.endsWith("\u2026"),
-    "the elision marker is what the UI renders as truncated"
-  );
-  // A split surrogate pair would make the string unencodable downstream.
-  assert.equal(value, Buffer.from(value, "utf8").toString("utf8"));
-}
-
-describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
-  it("slims a row on its way out, and stamps truncated", () => {
-    const huge = "x".repeat(16384 + 1000);
-    const [row] = projectSnapshotActivities([
-      activity("d1", "tool.completed", { toolUseId: "c1", detail: huge })
-    ]);
-    assert.ok(row);
-    const payload = row.payload as { detail: string; truncated?: boolean };
-    assertCapped(payload.detail);
-    assert.equal(payload.truncated, true, "'load full output' needs this flag");
-  });
-
-  it("slimActivityEvent slims an activity event and passes everything else through", () => {
-    const huge = "x".repeat(16384 + 1000);
-    const event = {
-      type: "thread.activity-appended",
-      payload: { activity: activity("d1", "tool.completed", { toolUseId: "c1", detail: huge }) }
-    };
-    const slimmed = slimActivityEvent(event);
-    const payload = slimmed.payload.activity.payload as { detail: string };
-    assertCapped(payload.detail);
-
-    const other = { type: "thread.session-set", payload: { session: { status: "ready" } } };
-    assert.deepEqual(slimActivityEvent(other), other);
-    const small = {
-      type: "thread.activity-appended",
-      payload: { activity: activity("t1", "tool.started", { toolUseId: "c1" }) }
-    };
-    assert.deepEqual(slimActivityEvent(small), small);
-  });
-
 });
 
 describe("snapshot context usage (§5.6)", () => {

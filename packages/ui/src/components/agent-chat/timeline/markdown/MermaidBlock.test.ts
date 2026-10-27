@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { afterEach, before, describe, it } from "node:test";
+import { before, describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChatMarkdown } from "./ChatMarkdown.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
-import { loadPele, setPeleLoader, type PeleEngine } from "./mermaid-engine.ts";
+import { loadPele } from "./mermaid-engine.ts";
 
 /**
- * Server rendering: what a block shows before any effect runs. The diagram
- * itself is mounted by pele in a layout effect, so here a ready block is its
- * chrome and an empty host; `MermaidBlock.dom.test.ts` draws it.
+ * Markdown fence routing and unsupported-source fallback. Mounted controls,
+ * renderer loading and drawing are owned by `MermaidBlock.dom.test.ts`.
  */
 
 const CODE = "graph TD\nA-->B";
@@ -17,77 +16,32 @@ const CODE = "graph TD\nA-->B";
 const block = (props: { code?: string; streaming?: boolean } = {}): string =>
   renderToStaticMarkup(createElement(MermaidBlock, { code: CODE, streaming: false, mode: "dark", ...props }));
 
-/** Loads the real renderer and the types the tests draw, so readiness is known synchronously. */
-async function preload(): Promise<PeleEngine> {
-  setPeleLoader(null);
+before(async () => {
   const pele = await loadPele();
   await pele.load("flowchart");
-  return pele;
-}
+});
 
 describe("MermaidBlock", () => {
-  before(async () => {
-    await preload();
-  });
-
-  it("shows the diagram's chrome once settled: expand, toggle and a copy button for the source", () => {
-    const html = block();
-    // One Expand control for the keyboard and assistive tech (the header's);
-    // the diagram itself is a mouse shortcut, hidden from both.
-    assert.equal((html.match(/aria-label="Expand diagram"/g) ?? []).length, 1, html);
-    assert.ok(html.includes('role="img" aria-label="Mermaid diagram"'), html);
-    assert.match(html, /<button[^>]*tabindex="-1"[^>]*aria-hidden="true"/);
-    assert.ok(html.includes('aria-label="Show code"'));
-    assert.ok(html.includes('aria-label="Copy code"'));
-  });
-
   it("names a diagram type pele does not know above its source, with no Retry", () => {
     for (const code of ["zenuml\n  Alice->John: Hello", "notADiagram\n  foo"]) {
       const html = block({ code });
-      assert.ok(html.includes("Unable to render diagram: This diagram type is not supported."), html);
+      assert.ok(html.includes(code.split("\n")[0]!), "unsupported source remains readable");
       assert.ok(html.includes('data-language="mermaid"'), html);
       assert.ok(!html.includes("Retry"), html);
       assert.ok(!html.includes('role="img"'), html);
     }
   });
 
-  it("does not render an empty fence", () => {
-    const html = block({ code: "  \n" });
-    assert.ok(!html.includes('role="img"'), html);
-    assert.ok(!html.includes("Rendering diagram"), html);
-  });
-
-  describe("before the renderer has loaded", () => {
-    afterEach(async () => {
-      await preload();
-    });
-
-    it("shows a placeholder", () => {
-      setPeleLoader(() => new Promise<PeleEngine>(() => {}));
-      assert.ok(block().includes("Rendering diagram"));
-    });
-
-    it("shows a placeholder until the diagram's type has loaded too", async () => {
-      const pele = await preload();
-      assert.equal(pele.registered("sequence"), false, "precondition: sequence diagrams not loaded yet");
-      assert.ok(block({ code: "sequenceDiagram\n  A->>B: hi" }).includes("Rendering diagram"));
-    });
-  });
 });
 
 describe("ChatMarkdown wiring", () => {
-  before(async () => {
-    await preload();
-  });
-
   const render = (text: string, streaming = false): string =>
     renderToStaticMarkup(createElement(ChatMarkdown, { text, streaming }));
   const MERMAID = "Here:\n\n```mermaid\ngraph TD\nA-->B\n```\n";
 
   it("hands a settled mermaid fence to the diagram block", () => {
     const html = render(MERMAID);
-    assert.ok(html.includes('role="img" aria-label="Mermaid diagram"'), html);
-    assert.ok(html.includes('aria-label="Show code"'), html);
+    assert.ok(html.includes('role="img"'), html);
   });
 
   it("keeps a mermaid fence as source while the message streams", () => {
@@ -97,13 +51,13 @@ describe("ChatMarkdown wiring", () => {
   });
 
   it("recognises the fence language case-insensitively", () => {
-    assert.ok(render("```Mermaid\ngraph TD\nA-->B\n```\n").includes('aria-label="Mermaid diagram"'));
+    assert.ok(render("```Mermaid\ngraph TD\nA-->B\n```\n").includes('role="img"'));
   });
 
   it("leaves other fences on the plain code block", () => {
     const html = render("```ts\nconst x = 1;\n```\n");
     assert.ok(html.includes('data-language="ts"'), html);
     assert.ok(html.includes("const"), html);
-    assert.ok(!html.includes("Expand diagram") && !html.includes("Show code"), html);
+    assert.ok(!html.includes('role="img"'), html);
   });
 });

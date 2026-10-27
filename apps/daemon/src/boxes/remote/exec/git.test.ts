@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -72,6 +72,16 @@ async function fixture(): Promise<Fixture> {
 test("status, diff, stage, commit, log and push run in the box with the box's HOME and git auth env", async () => {
   const f = await fixture();
   try {
+    const monitor = join(f.project, ".git", "fsmonitor");
+    const monitorRan = join(f.project, ".git", "fsmonitor-ran");
+    const hookRan = join(f.project, ".git", "hook-ran");
+    await writeFile(monitor, "#!/bin/sh\nprintf invoked > .git/fsmonitor-ran\n", { mode: 0o755 });
+    await writeFile(join(f.project, ".git", "hooks", "pre-commit"), "#!/bin/sh\nprintf invoked > .git/hook-ran\n", { mode: 0o755 });
+    await exec("git", ["config", "core.fsmonitor", monitor], { cwd: f.project });
+    // A native positive control proves this repository's monitor really would execute.
+    await exec("git", ["status", "--porcelain"], { cwd: f.project });
+    assert.equal(await readFile(monitorRan, "utf8"), "invoked");
+    await rm(monitorRan);
     await writeFile(join(f.project, "kept.txt"), "one\ntwo\n");
     await writeFile(join(f.project, "new.txt"), "fresh\n");
 
@@ -124,8 +134,9 @@ test("status, diff, stage, commit, log and push run in the box with the box's HO
       assert.equal(e.env?.GIT_SSH_COMMAND, undefined);
       assert.equal(e.env?.PATH, undefined, "the host env is never passed");
     }
-    // In the box too, git never asks a repo-configured fsmonitor (its hooks are the box's own business).
-    for (const e of gitExecs) assert.deepEqual(e.args?.slice(0, 2), ["-c", "core.fsmonitor=false"]);
+    // Reading a box repo never executes its monitor; a deliberate commit keeps its own hook.
+    await assert.rejects(readFile(monitorRan), { code: "ENOENT" });
+    assert.equal(await readFile(hookRan, "utf8"), "invoked");
     const pushExec = gitExecs.find((e) => e.args?.[2] === "push");
     assert.equal(pushExec?.env?.GIT_TERMINAL_PROMPT, "0");
   } finally {
@@ -171,11 +182,14 @@ test("a box that is not connected is a 409 BOX_NOT_READY GitError; host projects
   }
 });
 
-test("the watcher's polling reads status in the box and announces a change", async () => {
+test("the watcher's polling reads status in the box and announces a change", async (t) => {
   const f = await fixture();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   try {
     let resolveChange!: (status: GitStatusResponse) => void;
     const changed = new Promise<GitStatusResponse>((resolve) => (resolveChange = resolve));
+    let firstRead!: () => void;
+    const baselineRead = new Promise<void>((resolve) => (firstRead = resolve));
     let polls = 0;
     const counting = new GitService({ route: createBoxGitRouteResolver(f.boxes.registry) });
     const watcher = new GitWatcher(
@@ -184,21 +198,25 @@ test("the watcher's polling reads status in the box and announces a change", asy
           polls += 1;
           const status = await counting.status(path);
           // Change the tree right after the first (baseline) read.
-          if (polls === 1) await writeFile(join(f.project, "later.txt"), "x\n");
+          if (polls === 1) {
+            await writeFile(join(f.project, "later.txt"), "x\n");
+            firstRead();
+          }
           return status;
         }
       } as unknown as GitService,
       (_path, status) => resolveChange(status)
     );
     watcher.subscribe(f.project);
-    // The watcher's own timer is unref'd (it never holds the daemon open): hold the loop here.
-    const keepAlive = setInterval(() => undefined, 60_000);
     try {
+      await baselineRead;
+      // Let the completed baseline poll schedule its next interval before advancing it.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(2_000);
       const status = await changed;
       assert.ok(status.files.some((file) => file.path === "later.txt"));
-      assert.ok(f.execs.some((e) => e.command === "git" && e.args?.[2] === "status"));
+      assert.ok(f.execs.some((e) => e.command === "git" && e.args?.includes("status")));
     } finally {
-      clearInterval(keepAlive);
       watcher.stop();
     }
   } finally {

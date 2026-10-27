@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { MjpegParser, multipartBoundary } from "./mjpeg.ts";
 
 const enc = new TextEncoder();
-const jpeg = (n: number, length = 40) =>
+const jpeg = (n: number, length = 8) =>
   Uint8Array.from({ length }, (_, i) => (i === 0 ? 0xff : i === 1 ? 0xd8 : (n * 31 + i) & 0xff));
 const concat = (...parts: Array<Uint8Array | string>) => {
   const bytes = parts.map((part) => (typeof part === "string" ? enc.encode(part) : part));
@@ -40,7 +40,7 @@ describe("multipartBoundary", () => {
 });
 
 describe("MjpegParser", () => {
-  const frames = [jpeg(1), jpeg(2, 3), jpeg(3, 500)];
+  const frames = [jpeg(1), jpeg(2, 3), jpeg(3, 41)];
   const stream = concat(...frames.map(serveSimPart));
 
   it("parses serve-sim parts split at every byte offset", () => {
@@ -73,7 +73,7 @@ describe("MjpegParser", () => {
   it("accepts LF-only line endings, a preamble, padding after the boundary and odd header case", () => {
     const bytes = concat(
       "preamble text\r\n",
-      "--frame  \ncontent-length: 40\nX-Other: 1\n\n",
+      "--frame  \ncontent-length: 8\nX-Other: 1\n\n",
       jpeg(7),
       "\n--frame\ncontent-type: image/jpeg\n\n",
       jpeg(8),
@@ -90,12 +90,11 @@ describe("MjpegParser", () => {
     assert.deepEqual(parser.push(serveSimPart(jpeg(11))), []);
   });
 
-  it("keeps working after many frames (buffer compaction) and with large frames", () => {
+  it("preserves frame bytes across large and small frames", () => {
     const parser = new MjpegParser("frame");
-    const big = jpeg(12, 700_000);
-    let count = 0;
-    for (let i = 0; i < 50; i++) count += parser.push(serveSimPart(i % 10 === 0 ? big : jpeg(i))).length;
-    assert.equal(count, 50);
+    for (const frame of [jpeg(12, 400_000), jpeg(13), jpeg(14, 400_000)]) {
+      assert.deepEqual(parser.push(serveSimPart(frame)), [frame]);
+    }
   });
 
   it("throws on a Content-Length beyond the frame limit", () => {

@@ -5,7 +5,6 @@ import { test } from "node:test";
 import { ProviderHttpError } from "./http.ts";
 import { ociKeyFingerprint, ociSignedHeaders, oracleAdapter } from "./oracle.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest } from "./fixtures/vm-replay.ts";
-import { monthlyToHourly, roundUsd } from "./price-tables.ts";
 
 const CORE = "https://iaas.eu-frankfurt-1.oraclecloud.com/20160918";
 const IDENTITY = "https://identity.eu-frankfurt-1.oraclecloud.com/20160918";
@@ -89,12 +88,7 @@ const existingNetworkRoutes = [
   }
 ];
 
-/** E5 Flex, Balanced 50/256 GB boot volume, list prices of products.json. */
-function e5Hourly(ocpus: number, memoryGb: number, windows: boolean): number {
-  const boot = monthlyToHourly((windows ? 256 : 50) * (0.0255 + 10 * 0.0017));
-  return roundUsd(ocpus * 0.03 + memoryGb * 0.002 + (windows ? ocpus * 0.092 : 0) + boot);
-}
-
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("signing: matches the OCI SDK test vector for the documented sample key (GET and POST)", () => {
   // Oracle's sample key from https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm and the
   // expected signatures from oci-go-sdk common/http_signer_test.go, which signs the documentation's sample requests.
@@ -173,15 +167,15 @@ test("signing: matches the OCI SDK test vector for the documented sample key (GE
   assert.ok(verify("sha256", Buffer.from(signingString), samplePublic, Buffer.from(signature, "base64")));
 });
 
-test("validate: ok with a working key, a message for a bad key, missing fields, malformed input", async () => {
+test("validate: ok with a working key, a message for a bad key, missing fields, malformed input", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${CORE}/instances?compartmentId=${TENANCY}&limit=1`, body: [] },
     { method: "GET", url: `${CORE}/instances?compartmentId=${TENANCY}&limit=1`, status: 401, body: fixture("oracle", "error-not-authenticated") }
   ]);
-  assert.deepEqual(await oracleAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await oracleAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assertSigned(replay.requests[0]!);
 
-  const bad = await oracleAdapter.validate(credentials, replayOptions(replay));
+  const bad = await oracleAdapter.validate(credentials, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /^Oracle Cloud: The required information to complete authentication/);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /PRIVATE KEY|MII/);
@@ -197,27 +191,27 @@ test("validate: ok with a working key, a message for a bad key, missing fields, 
     [{ ...credentials, compartmentOcid: "ocid1.compartment.oc2..aaaa" }, /not in the commercial realm/]
   ];
   for (const [input, message] of expectations) {
-    const result = await oracleAdapter.validate(input, replayOptions(replay));
+    const result = await oracleAdapter.validate(input, replayOptions(t, replay));
     assert.equal(result.ok, false);
     assert.match(!result.ok ? result.message : "", message);
   }
   assert.equal(replay.requests.length, 2);
 });
 
-test("validate: a PEM flattened onto one line still signs", async () => {
+test("validate: a PEM flattened onto one line still signs", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${CORE}/instances?compartmentId=${TENANCY}&limit=1`, body: [] }]);
   const flattened = { ...credentials, privateKey: testPem.replace(/\n/g, " ") };
-  assert.deepEqual(await oracleAdapter.validate(flattened, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await oracleAdapter.validate(flattened, replayOptions(t, replay)), { ok: true });
   assertSigned(replay.requests[0]!);
 });
 
-test("offers: flex shape configs per availability domain, live prices, Ubuntu LTS images", async () => {
+test("offers: flex shape configs per availability domain, live prices, Ubuntu LTS images", async (t) => {
   const replay = replayFetch([
     ...shapesRoutes(),
     { method: "GET", url: imagesUrl("Canonical Ubuntu"), body: fixture("oracle", "images-ubuntu") },
     { method: "GET", url: PRICE_LIST, body: fixture("oracle", "products") }
   ]);
-  const offers = await oracleAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await oracleAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   for (const request of replay.requests.filter((entry) => entry.url.includes("oraclecloud.com"))) assertSigned(request);
   // The public price list is fetched unsigned.
@@ -236,14 +230,14 @@ test("offers: flex shape configs per availability domain, live prices, Ubuntu LT
     ramGb: 16,
     diskGb: 50,
     gpu: null,
-    hourlyUsd: e5Hourly(2, 16, false),
+    hourlyUsd: 0.0949,
     regions: [AD1, AD2]
   });
   // A1 is Arm (1 vCPU per OCPU), priced at its paid tier, and only in AD-1 here.
   const a1 = offers.sizes.find((size) => size.id === "VM.Standard.A1.Flex:1:8");
   assert.equal(a1?.vcpu, 1);
   assert.deepEqual(a1?.regions, [AD1]);
-  assert.equal(a1?.hourlyUsd, roundUsd(0.01 + 8 * 0.0015 + monthlyToHourly(50 * (0.0255 + 10 * 0.0017))));
+  assert.equal(a1?.hourlyUsd, 0.0249);
 
   const prices = offers.sizes.map((size) => size.hourlyUsd ?? Infinity);
   assert.deepEqual(prices, [...prices].sort((a, b) => a - b));
@@ -261,18 +255,18 @@ test("offers: flex shape configs per availability domain, live prices, Ubuntu LT
   ]);
 });
 
-test("offers: Windows has no Arm shapes, adds the licence per OCPU, falls back to the price table", async () => {
+test("offers: Windows has no Arm shapes, adds the licence per OCPU, falls back to the price table", async (t) => {
   const replay = replayFetch([
     ...shapesRoutes(),
     { method: "GET", url: imagesUrl("Windows"), body: fixture("oracle", "images-windows") },
     { method: "GET", url: PRICE_LIST, status: 503, headers: { "retry-after": "0" }, body: "Service Unavailable", times: 4 }
   ]);
-  const offers = await oracleAdapter.offers(credentials, "windows", replayOptions(replay));
+  const offers = await oracleAdapter.offers(credentials, "windows", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
   assert.equal(offers.sizes.some((size) => size.id.startsWith("VM.Standard.A1.Flex")), false);
   const e5 = offers.sizes.find((size) => size.id === "VM.Standard.E5.Flex:2:16");
   assert.equal(e5?.diskGb, 256);
-  assert.equal(e5?.hourlyUsd, e5Hourly(2, 16, true));
+  assert.equal(e5?.hourlyUsd, 0.2909);
   assert.deepEqual(
     offers.images.map((image) => image.id),
     ["windows-2022", "windows-2025", "windows-2019"]
@@ -281,7 +275,7 @@ test("offers: Windows has no Arm shapes, adds the licence per OCPU, falls back t
   assert.equal(replay.pending().length, 0);
 });
 
-test("create: Linux into the existing shared subnet — one signed launch with name, tags, cloud-init and SSH key", async () => {
+test("create: Linux into the existing shared subnet — one signed launch with name, tags, cloud-init and SSH key", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: shapeImageUrl("Canonical Ubuntu", "24.04", "VM.Standard.E5.Flex"), body: fixture("oracle", "images-ubuntu-e5") },
     { method: "GET", url: PRICE_LIST, body: fixture("oracle", "products") },
@@ -289,7 +283,7 @@ test("create: Linux into the existing shared subnet — one signed launch with n
     { method: "POST", url: `${CORE}/instances`, body: fixture("oracle", "launch-instance") }
   ]);
   const request = testCreateRequest({ size: "VM.Standard.E5.Flex:2:16", region: AD1 });
-  const result = await oracleAdapter.create(credentials, request, replayOptions(replay));
+  const result = await oracleAdapter.create(credentials, request, replayOptions(t, replay));
 
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   assertSigned(post);
@@ -311,12 +305,12 @@ test("create: Linux into the existing shared subnet — one signed launch with n
     freeformTags: { "orquester-box": TEST_BOX_ID }
   });
   assert.deepEqual(result.ref, ref);
-  assert.equal(result.hourlyUsd, e5Hourly(2, 16, false));
+  assert.equal(result.hourlyUsd, 0.0949);
   assert.equal(result.windowsPassword, undefined);
   assert.equal(replay.pending().length, 0);
 });
 
-test("create: sets up the shared network on first use, waiting for the VCN to become available", async () => {
+test("create: sets up the shared network on first use, waiting for the VCN to become available", async (t) => {
   const vcn = fixture<{ id: string; defaultRouteTableId: string; defaultSecurityListId: string }>("oracle", "vcn-available");
   const gateway = fixture<{ id: string }>("oracle", "create-internet-gateway");
   const replay = replayFetch([
@@ -333,7 +327,7 @@ test("create: sets up the shared network on first use, waiting for the VCN to be
     { method: "POST", url: `${CORE}/subnets`, body: fixture("oracle", "create-subnet") },
     { method: "POST", url: `${CORE}/instances`, body: fixture("oracle", "launch-instance") }
   ]);
-  await oracleAdapter.create(credentials, testCreateRequest({ size: "VM.Standard.A1.Flex:1:8", region: AD2, image: "ubuntu-22.04" }), replayOptions(replay));
+  await oracleAdapter.create(credentials, testCreateRequest({ size: "VM.Standard.A1.Flex:1:8", region: AD2, image: "ubuntu-22.04" }), replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
   for (const request of replay.requests.filter((entry) => entry.url.includes("oraclecloud.com"))) assertSigned(request);
 
@@ -367,7 +361,7 @@ test("create: sets up the shared network on first use, waiting for the VCN to be
   assert.deepEqual(launch.shapeConfig, { ocpus: 1, memoryInGBs: 8 });
 });
 
-test("create: Windows gets cloudbase-init PowerShell user data, a 256 GB boot volume and no SSH key", async () => {
+test("create: Windows gets cloudbase-init PowerShell user data, a 256 GB boot volume and no SSH key", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: shapeImageUrl("Windows", "Server 2022 Standard", "VM.Standard.E5.Flex"), body: fixture("oracle", "images-windows-e5") },
     { method: "GET", url: PRICE_LIST, body: fixture("oracle", "products") },
@@ -375,18 +369,18 @@ test("create: Windows gets cloudbase-init PowerShell user data, a 256 GB boot vo
     { method: "POST", url: `${CORE}/instances`, body: fixture("oracle", "launch-instance") }
   ]);
   const request = testCreateRequest({ kind: "windows", size: "VM.Standard.E5.Flex:2:16", region: AD1 });
-  const result = await oracleAdapter.create(credentials, request, replayOptions(replay));
+  const result = await oracleAdapter.create(credentials, request, replayOptions(t, replay));
   const launch = replay.requests.find((entry) => entry.method === "POST")?.body as Record<string, Record<string, unknown>>;
   assert.deepEqual(launch.metadata, {
     user_data: Buffer.from(`#ps1_sysnative\r\n${request.bootstrap.powershellScript}`).toString("base64")
   });
   assert.equal(launch.sourceDetails!.bootVolumeSizeInGBs, 256);
   assert.equal(launch.sourceDetails!.imageId, fixture<Array<{ id: string }>>("oracle", "images-windows-e5")[0]!.id);
-  assert.equal(result.hourlyUsd, e5Hourly(2, 16, true));
+  assert.equal(result.hourlyUsd, 0.2909);
   assert.equal(result.windowsPassword, undefined);
 });
 
-test("create: an out-of-capacity launch is never retried and surfaces Oracle's message", async () => {
+test("create: an out-of-capacity launch is never retried and surfaces Oracle's message", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: shapeImageUrl("Canonical Ubuntu", "24.04", "VM.Standard.E5.Flex"), body: fixture("oracle", "images-ubuntu-e5") },
     { method: "GET", url: PRICE_LIST, body: fixture("oracle", "products") },
@@ -394,7 +388,7 @@ test("create: an out-of-capacity launch is never retried and surfaces Oracle's m
     { method: "POST", url: `${CORE}/instances`, status: 500, body: fixture("oracle", "error-out-of-capacity"), times: 2 }
   ]);
   await assert.rejects(
-    oracleAdapter.create(credentials, testCreateRequest({ size: "VM.Standard.E5.Flex:2:16", region: AD1 }), replayOptions(replay)),
+    oracleAdapter.create(credentials, testCreateRequest({ size: "VM.Standard.E5.Flex:2:16", region: AD1 }), replayOptions(t, replay)),
     (error) => {
       assert.ok(error instanceof ProviderHttpError);
       assert.equal(error.status, 500);
@@ -405,7 +399,7 @@ test("create: an out-of-capacity launch is never retried and surfaces Oracle's m
   assert.equal(replay.requests.filter((entry) => entry.method === "POST").length, 1);
 });
 
-test("create: refuses bad requests before calling Oracle", async () => {
+test("create: refuses bad requests before calling Oracle", async (t) => {
   const replay = replayFetch([]);
   const cases: Array<[Parameters<typeof testCreateRequest>[0], RegExp]> = [
     [{ kind: "windows", size: "VM.Standard.A1.Flex:1:8", region: AD1 }, /VM.Standard.A1.Flex cannot run Windows/],
@@ -414,12 +408,12 @@ test("create: refuses bad requests before calling Oracle", async () => {
     [{ size: "VM.Standard.E5.Flex:2:16", region: "" }, /availability domain is required/]
   ];
   for (const [fields, message] of cases) {
-    await assert.rejects(oracleAdapter.create(credentials, testCreateRequest(fields), replayOptions(replay)), message);
+    await assert.rejects(oracleAdapter.create(credentials, testCreateRequest(fields), replayOptions(t, replay)), message);
   }
   assert.equal(replay.requests.length, 0);
 });
 
-test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is retried", async () => {
+test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is retried", async (t) => {
   const running = fixture<Record<string, unknown>>("oracle", "instance-running");
   const instanceUrl = `${CORE}/instances/${INSTANCE_ID}`;
   const vnic = fixture<Array<{ vnicId: string }>>("oracle", "vnic-attachments")[0]!.vnicId;
@@ -435,19 +429,19 @@ test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is re
     { method: "GET", url: instanceUrl, status: 404, body: fixture("oracle", "error-not-found") },
     { method: "GET", url: `${CORE}/instances?compartmentId=${TENANCY}&limit=100`, body: [] }
   ]);
-  assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.20",
     hourlyUsd: null
   });
-  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const stopped = await oracleAdapter.status(credentials, ref, replayOptions(replay));
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const stopped = await oracleAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual(stopped, { state: "stopped", detail: "Oracle Cloud reports the instance STOPPED", publicIp: null, hourlyUsd: null });
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
-  assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
+  assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The instance no longer exists in Oracle Cloud",
     publicIp: null,
@@ -456,7 +450,7 @@ test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is re
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: NotAuthorizedOrNotFound is gone only when the compartment's listing confirms it", async () => {
+test("status: NotAuthorizedOrNotFound is gone only when the compartment's listing confirms it", async (t) => {
   const instanceUrl = `${CORE}/instances/${INSTANCE_ID}`;
   const listUrl = `${CORE}/instances?compartmentId=${TENANCY}&limit=100`;
   const notFound = { method: "GET", url: instanceUrl, status: 404, body: fixture("oracle", "error-not-found") } as const;
@@ -469,22 +463,22 @@ test("status: NotAuthorizedOrNotFound is gone only when the compartment's listin
     notFound,
     { method: "GET", url: listUrl, body: [{ ...running, lifecycleState: "STOPPED" }] }
   ]);
-  await assert.rejects(oracleAdapter.status(credentials, ref, replayOptions(replay)), /Authorization failed or requested resource not found/);
-  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
+  await assert.rejects(oracleAdapter.status(credentials, ref, replayOptions(t, replay)), /Authorization failed or requested resource not found/);
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "stopped");
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: a failing public IP lookup does not fail the status", async () => {
+test("status: a failing public IP lookup does not fail the status", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${CORE}/instances/${INSTANCE_ID}`, body: fixture("oracle", "instance-running") },
     { method: "GET", url: `${CORE}/vnicAttachments?compartmentId=${TENANCY}&instanceId=${INSTANCE_ID}`, status: 404, body: fixture("oracle", "error-not-found") }
   ]);
-  const status = await oracleAdapter.status(credentials, ref, replayOptions(replay));
+  const status = await oracleAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(status.state, "running");
   assert.equal(status.publicIp, null);
 });
 
-test("destroy: terminates with the boot volume and is idempotent", async () => {
+test("destroy: terminates with the boot volume and is idempotent", async (t) => {
   const deleteUrl = `${CORE}/instances/${INSTANCE_ID}?preserveBootVolume=false`;
   const replay = replayFetch([
     { method: "DELETE", url: deleteUrl, status: 204 },
@@ -492,29 +486,29 @@ test("destroy: terminates with the boot volume and is idempotent", async () => {
     { method: "DELETE", url: deleteUrl, status: 409, body: fixture("oracle", "error-conflict") },
     { method: "GET", url: `${CORE}/instances/${INSTANCE_ID}`, body: { ...fixture<Record<string, unknown>>("oracle", "instance-running"), lifecycleState: "TERMINATING" } }
   ]);
-  await oracleAdapter.destroy(credentials, ref, replayOptions(replay));
+  await oracleAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assertSigned(replay.requests[0]!);
-  await oracleAdapter.destroy(credentials, ref, replayOptions(replay));
-  await oracleAdapter.destroy(credentials, ref, replayOptions(replay));
+  await oracleAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await oracleAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
-  await assert.rejects(oracleAdapter.destroy(credentials, {}, replayOptions(replay)), /instance reference has no instanceId/);
+  await assert.rejects(oracleAdapter.destroy(credentials, {}, replayOptions(t, replay)), /instance reference has no instanceId/);
 });
 
-test("destroy: a conflict on a running instance still fails", async () => {
+test("destroy: a conflict on a running instance still fails", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: `${CORE}/instances/${INSTANCE_ID}?preserveBootVolume=false`, status: 409, body: fixture("oracle", "error-conflict") },
     { method: "GET", url: `${CORE}/instances/${INSTANCE_ID}`, body: fixture("oracle", "instance-running") }
   ]);
-  await assert.rejects(oracleAdapter.destroy(credentials, ref, replayOptions(replay)), /incorrect state/);
+  await assert.rejects(oracleAdapter.destroy(credentials, ref, replayOptions(t, replay)), /incorrect state/);
 });
 
-test("listManaged: lists the compartment across pages, keeps marked instances that are not terminated", async () => {
+test("listManaged: lists the compartment across pages, keeps marked instances that are not terminated", async (t) => {
   const listUrl = `${CORE}/instances?compartmentId=${TENANCY}&limit=100`;
   const replay = replayFetch([
     { method: "GET", url: listUrl, body: fixture("oracle", "instances-page1"), headers: { "opc-next-page": "next/page+2" } },
     { method: "GET", url: `${listUrl}&page=${enc("next/page+2")}`, body: fixture("oracle", "instances-page2") }
   ]);
-  const managed = await oracleAdapter.listManaged(credentials, replayOptions(replay));
+  const managed = await oracleAdapter.listManaged(credentials, replayOptions(t, replay));
   const page2 = fixture<Array<{ id: string }>>("oracle", "instances-page2");
   assert.deepEqual(managed, [
     { ref, name: `orq-${TEST_BOX_ID}`, boxId: TEST_BOX_ID, createdAt: "2026-10-19T23:00:37.123Z", state: "running" },

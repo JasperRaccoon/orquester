@@ -71,11 +71,6 @@ export interface SecretRequestRegistryOptions {
   publish(payload: AgentChatSecretRequestEventPayload): void;
   /** A thread's pending set changed (the summary's attention state follows it). */
   onChange?(threadId: string): void;
-  /** How long a provided answer waits for its call's result to leave (tests shorten it). */
-  deliveryBoundMs?: number;
-  timeoutMs?: number;
-  now?: () => Date;
-  newId?: () => string;
 }
 
 export type SecretAnswer = { answer: "provide"; value: string } | { answer: "decline" };
@@ -101,18 +96,18 @@ export class SecretRequestRegistry implements SessionSecretRequests {
       return Promise.resolve({ outcome: "cancelled" });
     }
     const summary: SecretRequestSummary = {
-      requestId: (this.opts.newId ?? randomUUID)(),
+      requestId: randomUUID(),
       sessionId: threadId,
       name: input.name,
       prompt: input.prompt,
       ...(input.purpose !== undefined && input.purpose.length > 0 ? { purpose: input.purpose } : {}),
-      createdAt: (this.opts.now?.() ?? new Date()).toISOString()
+      createdAt: new Date().toISOString()
     };
     return new Promise<SessionSecretRequestResult>((resolve) => {
       let settled = false;
       const timer = setTimeout(
         () => settle({ outcome: "timed_out" }),
-        this.opts.timeoutMs ?? SECRET_REQUEST_TIMEOUT_MS
+        SECRET_REQUEST_TIMEOUT_MS
       );
       timer.unref?.();
       const onAbort = () => settle({ outcome: "cancelled" });
@@ -164,7 +159,7 @@ export class SecretRequestRegistry implements SessionSecretRequests {
       return "declined";
     }
     entry.settle({ outcome: "provided", value: answer.value }, false);
-    const delivery = await boundedDelivery(entry.delivered, this.opts.deliveryBoundMs);
+    const delivery = await boundedDelivery(entry.delivered);
     // Unconfirmed: the call did receive it; whether its result got out is unknown.
     this.publish(entry.summary, false, delivery === "dropped" ? "cancelled" : "provided");
     return delivery === "delivered" ? "provided" : delivery === "dropped" ? "not_delivered" : "unconfirmed";
@@ -194,14 +189,13 @@ export class SecretRequestRegistry implements SessionSecretRequests {
 
 /** The route's word ("delivered" where no route is involved), or "unconfirmed" past {@link DELIVERY_BOUND_MS}. */
 async function boundedDelivery(
-  delivered: Promise<boolean> | undefined,
-  boundMs = DELIVERY_BOUND_MS
+  delivered: Promise<boolean> | undefined
 ): Promise<"delivered" | "dropped" | "unconfirmed"> {
   if (delivered === undefined) return "delivered";
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<"unconfirmed">((resolve) => {
     // Not unref'd: an answer is in flight and the route awaits it.
-    timer = setTimeout(() => resolve("unconfirmed"), boundMs);
+    timer = setTimeout(() => resolve("unconfirmed"), DELIVERY_BOUND_MS);
   });
   try {
     return await Promise.race([
@@ -232,7 +226,7 @@ const STATUS: Record<SecretRequestErrorCode, number> = {
  * passed on exactly as typed — an all-whitespace value is refused, nothing is
  * trimmed; no message ever quotes it.
  */
-export function parseSecretAnswer(body: unknown): SecretAnswer | null {
+function parseSecretAnswer(body: unknown): SecretAnswer | null {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
   const record = body as Record<string, unknown>;
   if (record.answer === "decline") return { answer: "decline" };

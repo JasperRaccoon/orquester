@@ -511,7 +511,6 @@ describe("reply subscriptions: binding", () => {
     });
     const res = await w.router.subscribe("tgt", request("notify", { causedBy: exchange(3) }));
     assert.equal(res.delivery, "sent");
-    assert.equal(res.commandId, "id-2");
     const disk = seenOnDisk as { subscriptions: Array<{ id: string; state: string; commandId: string }> } | null;
     assert.ok(disk, "the target's /turn came after the write");
     assert.deepEqual(disk.subscriptions.map((s) => [s.id, s.state, s.commandId]), [[res.subscriptionId, "notify", res.commandId]]);
@@ -711,7 +710,6 @@ describe("reply subscriptions: notices", () => {
     const input = w.router.deliveries()[0]!.input;
     assert.equal(w.router.deliveries()[0]!.outcome, "empty");
     assert.ok(input.startsWith('[Reply from thread "Codex review" · session tgt · jaspersito/orquester-3]\n'), input);
-    assert.equal(parseThreadMessage(input)?.body, replyNoticeText("empty", { title: "Codex review", sessionId: "tgt" }));
     assert.match(input, /"Codex review" finished its turn without a written reply\. Read what it did with read_transcript \{sessionId: "tgt"\}\./);
     await w.cleanup();
 

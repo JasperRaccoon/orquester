@@ -189,13 +189,11 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
 
   test("tsc through node_modules/.bin, bin/tsc and lib/tsc.js runs tsc-rs in every workspace while the plugin is on", async () => {
     assert.equal((await stat(preload)).mode & 0o777, 0o644);
-    for (const project of [enabledProject, otherProject]) {
+    for (const [project, entry] of [[enabledProject, ".bin/tsc"], [otherProject, "typescript/bin/tsc"], [enabledProject, "typescript/lib/tsc.js"]] as const) {
       const modules = join(project, "node_modules");
-      for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
-        const result = runNode(script, ["-p", "tsconfig.json", "--noEmit"], { cwd: project });
-        assertRedirected(result, "-p tsconfig.json --noEmit");
-        assert.match(result.stdout, new RegExp(`\\ncwd ${project}\\n`), "tsc-rs ran in the same cwd");
-      }
+      const result = runNode(join(modules, entry), ["-p", "tsconfig.json", "--noEmit"], { cwd: project });
+      assertRedirected(result, "-p tsconfig.json --noEmit");
+      assert.match(result.stdout, new RegExp(`\\ncwd ${project}\\n`), "tsc-rs ran in the same cwd");
     }
   });
 
@@ -203,11 +201,11 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     const current = { version: VERSION, integrity: "sha512-x", installedAt: "x" };
     const modules = join(enabledProject, "node_modules");
     try {
-      for (const record of [{ current }, { enabled: false, current }, { enabledWorkspaces: ["enabled"], current }]) {
+      const records = [{ current }, { enabled: false, current }, { enabledWorkspaces: ["enabled"], current }];
+      const entries = [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")];
+      for (const [index, record] of records.entries()) {
         await writeState({ version: 1, plugins: { "ts-rust": record } });
-        for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
-          assertRealTsc(runNode(script, ["--noEmit"], { cwd: enabledProject }), "--noEmit");
-        }
+        assertRealTsc(runNode(entries[index]!, ["--noEmit"], { cwd: enabledProject }), "--noEmit");
       }
     } finally {
       await writeState(enabledState());

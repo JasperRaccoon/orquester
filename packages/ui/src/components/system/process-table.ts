@@ -25,7 +25,7 @@ export const PROCESS_COLUMNS: readonly ProcessColumn[] = [
 ];
 
 /** Threads is the one column a ~900 px settings pane can spare by default. */
-export const DEFAULT_COLUMNS: readonly ProcessColumn[] = PROCESS_COLUMNS.filter((column) => column !== "threads");
+const DEFAULT_COLUMNS: readonly ProcessColumn[] = PROCESS_COLUMNS.filter((column) => column !== "threads");
 
 /** Numbers read biggest-first; names and ids read A→Z / lowest-first. */
 export function defaultDirection(key: ProcessSortKey): SortDirection {
@@ -100,7 +100,7 @@ export interface RowMetrics {
   startedAt?: number;
 }
 
-export function processMetrics(proc: SystemProcessInfo): RowMetrics {
+function processMetrics(proc: SystemProcessInfo): RowMetrics {
   return {
     name: proc.name,
     pid: proc.pid,
@@ -137,7 +137,7 @@ function sumKnown(values: ReadonlyArray<number | null | undefined>): number | nu
  * Totals of a name group: summed CPU/memory/disk/threads, the lowest pid, the
  * "busiest" state, the oldest start, and the user only when they all share one.
  */
-export function groupMetrics(name: string, procs: readonly SystemProcessInfo[]): RowMetrics {
+function groupMetrics(name: string, procs: readonly SystemProcessInfo[]): RowMetrics {
   const states = procs.map((proc) => proc.state).filter((state): state is SystemProcessState => !!state);
   const users = new Set(procs.map((proc) => proc.user));
   const starts = procs.map((proc) => proc.startedAt).filter((at): at is number => at !== undefined);
@@ -182,7 +182,7 @@ function sortValue(row: RowMetrics, key: ProcessSortKey): number | string | null
   }
 }
 
-export function compareRows(a: RowMetrics, b: RowMetrics, key: ProcessSortKey, direction: SortDirection): number {
+function compareRows(a: RowMetrics, b: RowMetrics, key: ProcessSortKey, direction: SortDirection): number {
   const left = sortValue(a, key);
   const right = sortValue(b, key);
   if (left === null || right === null) {
@@ -222,7 +222,7 @@ export type TableRow =
     };
 
 export const processRowKey = (pid: number): string => `p:${pid}`;
-export const groupRowKey = (name: string): string => `g:${name}`;
+const groupRowKey = (name: string): string => `g:${name}`;
 
 /** Depth cap for the ancestor walk that rejects a cyclic ppid chain. */
 const ANCESTOR_WALK_LIMIT = 256;

@@ -7,22 +7,18 @@
  * server writes v2 (24 bytes). Anything else is raw Annex-B.
  */
 
-export const SEMU_MAGIC = 0x53454d55;
-export const SEMU_V1_HEADER_BYTES = 16;
-export const SEMU_V2_HEADER_BYTES = 24;
+const SEMU_MAGIC = 0x53454d55;
+const SEMU_V1_HEADER_BYTES = 16;
+const SEMU_V2_HEADER_BYTES = 24;
 const SEMU_FLAG_KEY = 1;
 
 export interface SemuPacket {
   /** Annex-B access unit (a view into the message). */
   readonly data: Uint8Array;
-  /** Header version, or null for a raw packet. */
-  readonly version: 1 | 2 | null;
   /** From the header flag; null when there is no header (scan the NALs instead). */
   readonly isKey: boolean | null;
   /** Presentation time in µs, or null without a header or when it exceeds 2^53. */
   readonly timestamp: number | null;
-  /** v2: server send time in epoch milliseconds. */
-  readonly serverTimeMs: number | null;
 }
 
 export function parseSemuPacket(raw: ArrayBuffer | Uint8Array): SemuPacket {
@@ -37,16 +33,14 @@ export function parseSemuPacket(raw: ArrayBuffer | Uint8Array): SemuPacket {
       if (version === 2 && bytes.byteLength > SEMU_V2_HEADER_BYTES) {
         return {
           data: bytes.subarray(SEMU_V2_HEADER_BYTES),
-          version: 2,
           isKey,
-          timestamp,
-          serverTimeMs: Number(view.getBigUint64(16, false)) / 1000
+          timestamp
         };
       }
       if (version === 1) {
-        return { data: bytes.subarray(SEMU_V1_HEADER_BYTES), version: 1, isKey, timestamp, serverTimeMs: null };
+        return { data: bytes.subarray(SEMU_V1_HEADER_BYTES), isKey, timestamp };
       }
     }
   }
-  return { data: bytes, version: null, isKey: null, timestamp: null, serverTimeMs: null };
+  return { data: bytes, isKey: null, timestamp: null };
 }

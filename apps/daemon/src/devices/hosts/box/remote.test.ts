@@ -6,20 +6,14 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { crc32 } from "node:zlib";
 
-import { BOX_TOOLS_LOCK } from "../../toolchain/npm-tools.ts";
-import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import { localBoxConnection } from "../../../boxes/testing.ts";
 import {
   archiveListingProblem,
-  HUB_PROC_ID,
-  INSTALL_TOOLS_SCRIPT,
   IOS_VM_STREAM_FLAGS,
   PROBE_SCRIPT,
   agentDeviceEnv,
   execRemote,
   hubCommand,
-  installedToolVersion,
-  outputTail,
   parseAgentDeviceStart,
   parseHubState,
   parseProbe,
@@ -64,39 +58,52 @@ describe("box device host remote commands", () => {
     assert.ok(probe.nodeMajor !== null && probe.nodeMajor >= 22);
   });
 
-  it("execRemote collects output, reports exit codes and times out", async () => {
+  it("execRemote collects output, reports exit codes and times out", async (t) => {
     const connection = localBoxConnection();
+    const originalExec = connection.exec.bind(connection);
+    const exits: Promise<NodeJS.Signals | null>[] = [];
+    connection.exec = (options) => {
+      const process = originalExec(options);
+      exits.push(new Promise((resolve) => process.once("exit", (_code, signal) => resolve(signal))));
+      return process;
+    };
     const lines: string[] = [];
     const ok = await execRemote(connection, { command: "/bin/sh", args: ["-c", 'printf "a\\nb\\n"; echo err >&2; exit 3'] }, { onLine: (line) => lines.push(line) });
     assert.deepEqual([ok.exitCode, ok.stdout, ok.stderr.trim()], [3, "a\nb\n", "err"]);
     assert.deepEqual(lines.sort(), ["a", "b", "err"]);
-    await assert.rejects(execRemote(connection, { command: "sleep", args: ["5"] }, { timeoutMs: 50 }), /timed out/);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const timed = execRemote(connection, { command: "sleep", args: ["5"] }, { timeoutMs: 50 });
+    t.mock.timers.tick(50);
+    await assert.rejects(timed, /timed out/);
+    assert.notEqual(await exits.at(-1)!, null, "the timed-out child was terminated");
     const abort = new AbortController();
     const pending = execRemote(connection, { command: "sleep", args: ["5"] }, { signal: abort.signal });
-    abort.abort();
-    await assert.rejects(pending);
+    const reason = new Error("caller-cancelled");
+    abort.abort(reason);
+    await assert.rejects(pending, (error) => error === reason);
+    assert.notEqual(await exits.at(-1)!, null, "the cancelled child was terminated");
   });
 
-  it("installs exactly the pinned tools", () => {
-    // From the shipped lockfile only, with no lifecycle script (writeBoxToolLocks puts it there).
-    assert.ok(INSTALL_TOOLS_SCRIPT.includes('cd "$TOOLS"'));
-    assert.ok(INSTALL_TOOLS_SCRIPT.includes("npm ci --ignore-scripts"));
-    assert.ok(!/npm install/.test(INSTALL_TOOLS_SCRIPT));
-    for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(BOX_TOOLS_LOCK!.packageLock.includes(`"node_modules/${name}": {\n      "version": "${version}"`));
-    assert.equal(installedToolVersion('{"name":"agent-device","version":"0.21.31"}'), "0.21.31");
-    assert.equal(installedToolVersion("nope"), null);
-  });
 
-  it("starts the hub detached, token-gated on a random loopback port, with stdout dropped", () => {
-    const layout = remoteLayout({ provider: "blacksmith", home: "/Users/runner" });
-    const command = hubCommand({ nodePath: "/n/node", layout, platform: "ios", streamFlags: IOS_VM_STREAM_FLAGS, env: { PATH: "/n" } });
-    assert.equal(command.command, "/bin/sh");
-    assert.deepEqual(command.args!.slice(0, 5), ["-c", 'exec "$@" > /dev/null', HUB_PROC_ID, "/n/node", layout.hubEntry]);
-    assert.deepEqual(command.args!.slice(5, 11), ["--port", "0", "--host", "127.0.0.1", "--require-token", "--hide-sidebar"]);
-    assert.ok(command.args!.join(" ").endsWith("--platform ios --transport mjpeg --max-dimension 1000 --mjpeg-quality 0.6"));
-    assert.deepEqual(command.detach, { procId: HUB_PROC_ID, bufferBytes: 256 * 1024 });
-    assert.equal(command.env?.EXPO_DEVICE_HUB_STATE_DIR, "/var/lib/orquester/devices/hub");
-    assert.ok(command.envUnset?.includes("EXPO_DEVICE_HUB_SESSION_TOKEN"));
+  it("starts the hub detached, token-gated on a random loopback port, with stdout dropped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orq-hub-command-"));
+    try {
+      const entry = join(dir, "hub.mjs");
+      writeFileSync(entry, 'console.log("startup-token-SECRET"); console.error(JSON.stringify(process.argv.slice(2)));');
+      const layout = { ...remoteLayout({ provider: "blacksmith", home: "/Users/runner" }), root: dir, hubEntry: entry };
+      const command = hubCommand({ nodePath: process.execPath, layout, platform: "ios", streamFlags: IOS_VM_STREAM_FLAGS, env: {} });
+      const result = await execRemote(localBoxConnection(), command);
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.stdout, "", "the hub's token-bearing startup URL is discarded");
+      const args = JSON.parse(result.stderr.trim()) as string[];
+      assert.equal(args[args.indexOf("--host") + 1], "127.0.0.1");
+      assert.equal(args[args.indexOf("--port") + 1], "0");
+      assert.ok(args.includes("--require-token"));
+      assert.equal(command.env?.EXPO_DEVICE_HUB_STATE_DIR, "/var/lib/orquester/devices/hub");
+      assert.ok(command.envUnset?.includes("EXPO_DEVICE_HUB_SESSION_TOKEN"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reads the hub state and the agent-device daemon's answer", () => {
@@ -112,7 +119,6 @@ describe("box device host remote commands", () => {
       AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS: "0",
       AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1"
     });
-    assert.equal(outputTail("a\n\nb\nc\nd\n"), "b · c · d");
   });
 });
 

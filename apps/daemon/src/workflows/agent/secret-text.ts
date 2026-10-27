@@ -24,18 +24,23 @@ function secretMarker(name: string): string {
   return `${OPEN}${name}${CLOSE}`;
 }
 
-/** Every secret value in `text` replaced by its marker (safe to persist). */
+/** Every secret value replaced by its marker; already-protected state stays protected. */
 export function protectSecrets(text: string, secrets: Readonly<Record<string, string>>): string {
   if (!text) return text;
-  const matches = createRedactor(secrets).matches(text);
-  if (matches.length === 0) return text;
-  let out = "";
-  let at = 0;
-  for (const match of matches) {
-    out += text.slice(at, match.start) + secretMarker(match.name);
-    at = match.end;
-  }
-  return out + text.slice(at);
+  const redactor = createRedactor(secrets);
+  // The executor protects each persisted stage. A marker's name may itself be another secret's
+  // value: preserve existing markers rather than nesting a new marker inside one.
+  return text.split(MARKER).map((part, index) => {
+    if (index % 2 === 1) return secretMarker(part);
+    const matches = redactor.matches(part);
+    let out = "";
+    let at = 0;
+    for (const match of matches) {
+      out += part.slice(at, match.start) + secretMarker(match.name);
+      at = match.end;
+    }
+    return out + part.slice(at);
+  }).join("");
 }
 
 /** Every marker replaced by its secret's value (only for what is sent, never for what is kept). */

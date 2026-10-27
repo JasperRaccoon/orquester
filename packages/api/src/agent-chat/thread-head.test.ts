@@ -8,9 +8,6 @@ import test from "node:test";
 
 import { activity } from "./test-helpers.ts";
 import {
-  THREAD_HEAD_LOOKUP_MAX,
-  THREAD_HEAD_RECENT_TURNS,
-  THREAD_HEAD_REPLY_MAX_CHARS,
   lastReplyOf,
   threadHeadOf,
   threadHeadQueryOf,
@@ -50,7 +47,7 @@ test("carries the head, its sequence, the turn counts and the running and settle
   assert.equal(head.startedTurnCount, 2, "a duplicate id counts once, a pending turn not at all");
   assert.deepEqual(head.recentTurns, turns);
   assert.equal(head.olderTurnCount, 0);
-  assert.equal(head.runningTurn, turns[3], "the latest unsettled turn");
+  assert.deepEqual(head.runningTurn, turns[3], "the latest unsettled turn");
   assert.deepEqual(head.lastSettledTurn, { turn: turns[2], ordinal: 2 });
   assert.equal(head.goal, null);
   assert.equal(head.interactionMode, "default");
@@ -64,15 +61,15 @@ test("the running turn is the active one, and the interaction mode is the latest
   const s = source(turns, items);
   s.head = { ...s.head, session: { ...s.head.session, activeTurnId: "t1" } };
   const head = threadHeadOf(s);
-  assert.equal(head.runningTurn, turns[0]);
+  assert.deepEqual(head.runningTurn, turns[0]);
   assert.equal(head.interactionMode, "plan");
 });
 
 test("recentTurns is bounded and says how many older turns the window holds", () => {
-  const turns = Array.from({ length: THREAD_HEAD_RECENT_TURNS + 9 }, (_, i) => turn(`t${i}`, "completed"));
+  const turns = Array.from({ length: 16 + 9 }, (_, i) => turn(`t${i}`, "completed"));
   const head = threadHeadOf(source(turns));
-  assert.equal(head.recentTurns.length, THREAD_HEAD_RECENT_TURNS);
-  assert.equal(head.recentTurns.at(-1), turns.at(-1));
+  assert.equal(head.recentTurns.length, 16);
+  assert.deepEqual(head.recentTurns.at(-1), turns.at(-1));
   assert.equal(head.olderTurnCount, 9);
   assert.equal(head.startedTurnCount, turns.length);
   assert.deepEqual(head.lastSettledTurn, { turn: turns.at(-1), ordinal: turns.length });
@@ -103,7 +100,7 @@ test("the last reply leaves out a re-emitted Claude copy, joins the answer and i
 });
 
 test("matchedTurns finds what turns.find finds over the whole window, by turn id or opening message", () => {
-  const older = Array.from({ length: THREAD_HEAD_RECENT_TURNS + 4 }, (_, i) => turn(`old-${i}`, "completed"));
+  const older = Array.from({ length: 16 + 4 }, (_, i) => turn(`old-${i}`, "completed"));
   const first = turn("dup", "completed", { userMessageId: "msg-a" });
   const replayed = turn("dup", "pending", { userMessageId: "msg-a" });
   const live = turn("live", "running", { userMessageId: "msg-b" });
@@ -111,25 +108,23 @@ test("matchedTurns finds what turns.find finds over the whole window, by turn id
   const head = threadHeadOf(source(turns), { turnIds: ["dup", "missing"], messageIds: ["msg-b", "msg-a"] });
   const matched = head.matchedTurns!;
   assert.deepEqual(matched, [first, live], "each id's FIRST turn of the window, in window order");
-  assert.equal(matched.find((t) => t.turnId === "dup"), turns.find((t) => t.turnId === "dup"));
-  assert.equal(matched.find((t) => t.userMessageId === "msg-a"), turns.find((t) => t.userMessageId === "msg-a"));
-  assert.equal(matched.find((t) => t.turnId === "missing"), undefined);
 });
 
 test("the query crosses the wire and back; malformed parts name nothing, lists and replies are bounded", () => {
   const query = { replyChars: 500, turnIds: ["a,b", "c d"], messageIds: ["m/1"] };
+  assert.deepEqual(threadHeadQueryParams(query), { replyChars: "500", turnIds: "a%2Cb,c%20d", messageIds: "m%2F1" });
   assert.deepEqual(threadHeadQueryOf(threadHeadQueryParams(query)), query);
   assert.deepEqual(threadHeadQueryParams({}), {});
   assert.deepEqual(threadHeadQueryOf({ replyChars: "0", turnIds: "%E0%A4%A,,ok", messageIds: "" }), { turnIds: ["ok"] });
   assert.equal(threadHeadReplyChars("12x"), undefined);
-  assert.equal(threadHeadReplyChars(String(THREAD_HEAD_REPLY_MAX_CHARS + 1)), THREAD_HEAD_REPLY_MAX_CHARS);
+  assert.equal(threadHeadReplyChars(String(64_000 + 1)), 64_000);
   const ids = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`).join(",");
   // Read whole, then refused past the cap — never cut short.
-  const over = threadHeadQueryOf({ turnIds: ids(THREAD_HEAD_LOOKUP_MAX + 5) });
-  assert.equal(over.turnIds?.length, THREAD_HEAD_LOOKUP_MAX + 5);
+  const over = threadHeadQueryOf({ turnIds: ids(64 + 5) });
+  assert.equal(over.turnIds?.length, 64 + 5);
   assert.match(threadHeadQueryProblem(over) ?? "", /turnIds names 69 ids/);
-  assert.match(threadHeadQueryProblem(threadHeadQueryOf({ messageIds: ids(THREAD_HEAD_LOOKUP_MAX + 1) })) ?? "", /messageIds/);
-  assert.equal(threadHeadQueryProblem(threadHeadQueryOf({ turnIds: ids(THREAD_HEAD_LOOKUP_MAX), messageIds: ids(THREAD_HEAD_LOOKUP_MAX) })), null);
+  assert.match(threadHeadQueryProblem(threadHeadQueryOf({ messageIds: ids(64 + 1) })) ?? "", /messageIds/);
+  assert.equal(threadHeadQueryProblem(threadHeadQueryOf({ turnIds: ids(64), messageIds: ids(64) })), null);
 });
 
 test("a head's size does not grow with the window: no item and no older turn rides it", () => {

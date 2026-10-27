@@ -5,7 +5,11 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
@@ -13,12 +17,12 @@ import type { SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { LIFELINE_SUPPORTED } from "../../support/lifeline.ts";
 import { claudeLifelineSpawner } from "./local-process.ts";
 
-function start(script: string): { process: SpawnedProcess; stderr: () => string } {
+function start(script: string, ...args: string[]): { process: SpawnedProcess; stderr: () => string } {
   let captured = "";
   const spawner = claudeLifelineSpawner((data) => (captured += data))!;
   const child = spawner({
     command: "/bin/sh",
-    args: ["-c", script],
+    args: ["-c", script, "sh", ...args],
     env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
     signal: new AbortController().signal
   });
@@ -26,16 +30,33 @@ function start(script: string): { process: SpawnedProcess; stderr: () => string 
 }
 
 describe("the local Claude spawner", { skip: !LIFELINE_SUPPORTED }, () => {
-  it("reports the exit only after stderr written past it has reached the capture", async () => {
-    // The CLI exits at once; what it left behind writes the fatal line a moment later.
-    const { process: child, stderr } = start("(sleep 0.1; echo 'fatal: late line' >&2) & exit 3");
+  it("reports the exit only after stderr written past it has reached the capture", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-claude-stderr-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fifo = join(root, "release");
+    execFileSync("mkfifo", [fifo]);
+    // Only the separate cap case advances real time; scheduler load cannot expire this drain.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    // The inherited writer waits on a pipe until the actual CLI process has exited.
+    const { process: child, stderr } = start("(read release < \"$1\"; echo 'fatal: late line' >&2) & exit 3", fifo);
+    t.after(() => {
+      try {
+        process.kill(-(child as unknown as { pid: number }).pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    });
     let atExit = "";
-    const [code, signal] = (await new Promise((resolve) =>
+    const reported = new Promise((resolve) =>
       child.once("exit", (...args) => {
         atExit = stderr();
         resolve(args);
       })
-    )) as [number | null, NodeJS.Signals | null];
+    );
+    // `exitCode` is the SDK's public process state; its `exit` event intentionally waits for stderr.
+    while (child.exitCode === null) await new Promise<void>((resolve) => setImmediate(resolve));
+    await writeFile(fifo, "release\n");
+    const [code, signal] = (await reported) as [number | null, NodeJS.Signals | null];
     assert.deepEqual([code, signal], [3, null]);
     assert.equal(child.exitCode, 3);
     assert.match(atExit, /fatal: late line/);

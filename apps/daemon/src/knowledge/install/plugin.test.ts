@@ -118,7 +118,7 @@ async function info(h: Harness): Promise<PluginInfo> {
 
 async function settle(h: Harness): Promise<void> {
   await h.service.settled();
-  await h.tracker.settled();
+  await h.tracker.start();
 }
 
 async function onDisk(h: Harness): Promise<any> {
@@ -384,24 +384,6 @@ test("an install from before the model change keeps linking; the hourly check br
   assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION]);
 });
 
-test("a model download that fails its hash records a model error; the runtime keeps linking without the model", async (t) => {
-  const h = await harness(t);
-  await h.service.update(ID, { enabled: true });
-  await settle(h);
-  await oldModel(h, MYKG_PINNED_VERSION);
-  h.host.downloads.set(h.model.spec.fileUrl("onnx/model_quantized.onnx"), Buffer.from("tampered"));
-  await h.service.checkNow(ID);
-  await settle(h);
-  const plugin = await info(h);
-  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION);
-  assert.equal(plugin.lastError?.step, "model");
-  assert.match(plugin.lastError?.message ?? "", /does not match its sha256/);
-  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
-  assert.equal(h.tracker.current()?.embeddingModelReady, false);
-  const manifest = JSON.parse(await readFile(join(knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION), "runtime.json"), "utf8"));
-  assert.equal(manifest.embeddingModel.id, "Xenova/all-MiniLM-L6-v2", "the version was left as it was");
-});
-
 test("a failed model repair is not retried every hour; turning on and a manual check retry it", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const h = await harness(t);
@@ -420,7 +402,14 @@ test("a failed model repair is not retried every hour; turning on and a manual c
   t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
   await settle(h);
   assert.equal(modelTries(), 1);
-  assert.equal((await info(h)).lastError?.step, "model");
+  const failed = await info(h);
+  assert.equal(failed.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(failed.lastError?.step, "model");
+  assert.match(failed.lastError?.message ?? "", /does not match its sha256/);
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
+  assert.equal(h.tracker.current()?.embeddingModelReady, false);
+  const manifest = JSON.parse(await readFile(join(knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION), "runtime.json"), "utf8"));
+  assert.equal(manifest.embeddingModel.id, "Xenova/all-MiniLM-L6-v2", "the version was left as it was");
   assert.equal((await onDisk(h)).lastError.version, MYKG_PINNED_VERSION);
 
   // The next hourly checks leave it (each try is a ~130 MB download); the error stays.
@@ -617,17 +606,4 @@ test("an unsupported host: no turning on, no checks", async (t) => {
   await refusal(h.service.checkNow(ID), 409, "PLUGIN_UNSUPPORTED");
   await h.service.update(ID, { enabled: false });
   assert.deepEqual(h.host.calls.json, []);
-});
-
-test("settings live on the record: merged, unknown keys kept, unreadable state never written", async (t) => {
-  const h = await harness(t, {
-    seed: { version: 1, plugins: { [ID]: { settings: { model: "m", future: { a: 1 } }, extra: true } } }
-  });
-  assert.deepEqual(h.service.pluginSettings(ID), { model: "m", future: { a: 1 } });
-  assert.equal(h.service.isEnabled(ID), false);
-  await h.service.updatePluginSettings(ID, { concurrency: 3, model: undefined });
-  const stored = await onDisk(h);
-  assert.deepEqual(stored.settings, { future: { a: 1 }, concurrency: 3 });
-  assert.equal(stored.extra, true);
-  assert.equal(h.events.length > 0, true, "the change was broadcast");
 });

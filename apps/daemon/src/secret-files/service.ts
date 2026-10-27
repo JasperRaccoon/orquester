@@ -115,7 +115,7 @@ export interface SecretFilesProject {
 /** The vault store's surface the service uses (the real {@link SecretVaultStore}, or a test fake). */
 export type SecretVaultStoreLike = Pick<SecretVaultStore, "writable" | "list" | "get" | "update" | "readContent">;
 
-/** The on-disk helpers of `files.ts` (injectable for tests). */
+/** Clone I/O, supplied by host helpers or the box-aware transport. */
 export interface SecretFilesFileOps {
   readCloneFile(cloneRoot: string, relPath: string): Promise<CloneFileRead>;
   writeCloneFile(cloneRoot: string, relPath: string, content: Uint8Array, mode?: number, options?: WriteCloneFileOptions): Promise<void>;
@@ -123,19 +123,13 @@ export interface SecretFilesFileOps {
   scanCandidates(cloneRoot: string, signal?: AbortSignal): Promise<string[]>;
   /** Rejects when git fails or `signal` aborts: never "nothing tracked" on a guess. */
   trackedPaths(cloneRoot: string, relPaths: readonly string[], signal?: AbortSignal): Promise<Set<string>>;
-  parseEnv(content: Uint8Array): Map<string, string> | null;
-  compareContents(left: Uint8Array | null, right: Uint8Array | null): SecretFileCompare;
-  mergeEnvContents(primary: Uint8Array, others: readonly Uint8Array[]): Uint8Array | null;
 }
 
 const DEFAULT_FILE_OPS: SecretFilesFileOps = {
   readCloneFile,
   writeCloneFile,
   scanCandidates: (cloneRoot, signal) => scanCandidates(cloneRoot, defaultGitRunner, signal),
-  trackedPaths: (cloneRoot, relPaths, signal) => trackedPaths(cloneRoot, relPaths, defaultGitRunner, signal),
-  parseEnv,
-  compareContents,
-  mergeEnvContents
+  trackedPaths: (cloneRoot, relPaths, signal) => trackedPaths(cloneRoot, relPaths, defaultGitRunner, signal)
 };
 
 /** An open directory watch; `close()` is idempotent. */
@@ -799,7 +793,7 @@ export class SecretFilesService {
       const right = await this.store.readContent(current.sha256);
       return {
         path,
-        compare: sanitizeCompare(this.files.compareContents(read.kind === "file" ? read.content : null, right)),
+        compare: sanitizeCompare(compareContents(read.kind === "file" ? read.content : null, right)),
         ...(read.kind === "file" ? { contentToken: this.tokenOf(clone.path, path, sha256Of(read.content)) } : {})
       };
     });
@@ -877,7 +871,7 @@ export class SecretFilesService {
           }
         }
         const ordered = [...groups.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
-        const parsed = ordered.map((group) => this.files.parseEnv(group.content));
+        const parsed = ordered.map((group) => parseEnv(group.content));
         const format: "env" | "lines" = ordered.length > 0 && parsed.every((env) => env !== null) ? "env" : "lines";
         const variants: SecretFileVariant[] = ordered.map((group, index) => ({
           variantId: `v${index + 1}`,
@@ -1225,7 +1219,7 @@ export class SecretFilesService {
           const read = await this.files.readCloneFile(clone.path, path).catch(() => null);
           if (read?.kind === "file") others.push(read.content);
         }
-        const merged = this.files.mergeEnvContents(primaryContent, others);
+        const merged = mergeEnvContents(primaryContent, others);
         if (!merged) throw new SecretFilesError("NOT_ENV_FORMAT", `${path} is not a KEY=VALUE file in every project, so it can't be merged.`);
         out.push({ path, content: merged, clone: primary });
       } else {

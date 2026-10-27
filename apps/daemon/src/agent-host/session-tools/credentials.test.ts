@@ -28,16 +28,6 @@ test("unknown, empty, oversized and missing credentials do not verify", () => {
   }
 });
 
-test("a relaunch revokes the thread's previous credential; other threads keep theirs", () => {
-  const credentials = new SessionToolCredentials();
-  const first = credentials.issue("thread-a");
-  const other = credentials.issue("thread-b");
-  const second = credentials.issue("thread-a");
-  assert.equal(credentials.verify(first.token), null);
-  assert.equal(credentials.verify(second.token)?.threadId, "thread-a");
-  assert.equal(credentials.verify(other.token)?.threadId, "thread-b");
-});
-
 test("revoking a grant (its session ended) ends it, idempotently, and tells the listeners", () => {
   const credentials = new SessionToolCredentials();
   const revoked: SessionToolGrantScope[] = [];

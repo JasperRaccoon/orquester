@@ -32,14 +32,13 @@ test("packTar writes an archive tar extracts: long and non-ASCII names, modes, m
   }
   entries.push({ name: "gone.txt", source: join(src, "missing"), mode: 0o644 });
   const written = new Map<string, number>();
-  const named: string[] = [];
   const out = join(base, "out");
   await mkdir(out);
   const tar = spawn("tar", ["-xf", "-", "-C", out], { stdio: ["pipe", "ignore", "pipe"] });
   let stderr = "";
   tar.stderr!.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
   const exited = new Promise<number | null>((resolve) => tar.on("exit", resolve));
-  await pipeline(Readable.from(packTar(entries, written, (name) => void named.push(name))), tar.stdin!);
+  await pipeline(Readable.from(packTar(entries, written)), tar.stdin!);
   assert.equal(await exited, 0, stderr);
   for (const file of files) assert.equal(await readFile(join(out, file.name), "utf8"), file.content, file.name);
   assert.equal((await stat(join(out, "bin", "run.sh"))).mode & 0o777, 0o755);
@@ -47,8 +46,4 @@ test("packTar writes an archive tar extracts: long and non-ASCII names, modes, m
   assert.equal(Math.floor((await stat(join(out, "a.txt"))).mtimeMs / 1000), sourceMtime, "whole-second mtime kept");
   assert.equal(written.get("big.bin"), 700_000);
   assert.equal(written.has("gone.txt"), false);
-  assert.deepEqual(
-    named,
-    files.map((file) => file.name)
-  );
 });

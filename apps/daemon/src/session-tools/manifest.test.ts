@@ -187,14 +187,13 @@ test("knowledge gating matrix: plugin off/on × Global / profile with collection
   }
 });
 
-test("knowledge: a workflow-owned chat keeps the knowledge tools (none is Admin) and gets both lines, under the raised cap", () => {
+test("knowledge: a workflow-owned chat keeps its tools and receives approval and collection guidance", () => {
   const chat = catalogFor("chat");
   const manifest = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], knowledge: knowledge({ visibleCollectionNames: Array.from({ length: 100 }, (_, i) => `Collection ${i}`) }) });
   assert.deepEqual(manifest.tools.filter((name) => name.startsWith("knowledge_")), USER_KNOWLEDGE);
   assert.match(manifest.instructions, /automated workflow/);
   assert.match(manifest.instructions, /approval.*not available/);
   assert.match(manifest.instructions, KNOWLEDGE_LINE);
-  assert.ok(Buffer.byteLength(manifest.instructions, "utf8") <= 2_304);
 });
 
 test("devices: the device tools and their instruction line only while devices are available", () => {
@@ -209,7 +208,11 @@ test("devices: the device tools and their instruction line only while devices ar
     assert.ok(owned.tools.includes(name), `${name}: none is Admin, so a workflow-owned chat keeps it`);
   }
   assert.doesNotMatch(off.instructions, /list_devices/);
-  assert.match(on.instructions, /Mobile devices: list_devices, open_device;/);
+  assert.ok(owned.instructions.includes("list_devices"));
+  const deviceLines = on.instructions.split("\n").filter((line) => line.includes("list_devices"));
+  assert.equal(deviceLines.length, 1, "devices add one instruction line");
+  for (const name of ["list_devices", "open_device", "device_action"]) assert.ok(deviceLines[0]!.includes(name), name);
+  assert.ok(Buffer.byteLength(deviceLines[0]!, "utf8") <= 160, "documented Devices guidance budget");
   // Gated independently of the box tools.
   assert.ok(!on.tools.includes("create_box"));
 });

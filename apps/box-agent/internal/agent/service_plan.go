@@ -495,14 +495,6 @@ func printPlan(w io.Writer, plan servicePlan) {
 	}
 }
 
-// planRunner runs a plan's commands; tests replace it.
-type planRunner struct {
-	run    func(argv []string) error
-	detach func(argv []string, logPath string) error
-}
-
-var osPlanRunner = planRunner{run: runCommand, detach: startDetached}
-
 func runCommand(argv []string) error {
 	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	if err != nil {
@@ -513,7 +505,7 @@ func runCommand(argv []string) error {
 
 // applyPlan carries out the plan. It stops at the first failure unless the plan is best-effort,
 // which runs every step and returns every failure that was not to be ignored.
-func applyPlan(plan servicePlan, runner planRunner, logf func(string, ...any)) error {
+func applyPlan(plan servicePlan, logf func(string, ...any)) error {
 	var errs []error
 	for _, step := range plan.Steps {
 		var err error
@@ -533,10 +525,10 @@ func applyPlan(plan servicePlan, runner planRunner, logf func(string, ...any)) e
 			}
 		case stepRun:
 			logf("running %s", shellJoin(step.Argv))
-			err = runner.run(step.Argv)
+			err = runCommand(step.Argv)
 		case stepDetach:
 			logf("starting %s in the background", shellJoin(step.Argv))
-			err = runner.detach(step.Argv, step.Path)
+			err = startDetached(step.Argv, step.Path)
 		}
 		if err == nil {
 			continue
@@ -640,7 +632,7 @@ func InstallServiceCommand(version string, opts ServiceOptions, out io.Writer) e
 	if plan.Kind == kindWindows {
 		err = installWindowsService(cfg)
 	} else {
-		err = applyPlan(plan, osPlanRunner, logf)
+		err = applyPlan(plan, logf)
 	}
 	if err != nil {
 		return err
@@ -688,7 +680,7 @@ func uninstallService(plan servicePlan, logf func(string, ...any)) error {
 	if plan.Kind == kindWindows {
 		return uninstallWindowsService()
 	}
-	return applyPlan(plan, osPlanRunner, logf)
+	return applyPlan(plan, logf)
 }
 
 // uninstall is the end of a box its owner removed: the credentials go, then the service.

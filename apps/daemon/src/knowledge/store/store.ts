@@ -63,8 +63,6 @@ export interface KnowledgeStoreOptions {
   /** The appdir: paths come from the `packages/config` helpers. */
   appdir: string;
   logger?: KnowledgeLogger;
-  /** Injected for tests. */
-  now?: () => Date;
 }
 
 /** What one save request did (the route turns it into a `KnowledgeSaveResponse`). */
@@ -131,7 +129,6 @@ export class KnowledgeStore implements KnowledgeStorePort {
   readonly collectionsPath: string;
 
   private readonly logger: KnowledgeLogger;
-  private readonly now: () => Date;
   private readonly entries = new Map<string, StoredEntry>();
   /** Ids with a file in `entries/` this build could not read: kept, and their mirror kept too. */
   private readonly unreadable = new Set<string>();
@@ -152,7 +149,6 @@ export class KnowledgeStore implements KnowledgeStorePort {
     this.mykgInputDir = knowledgeMykgInputDir(options.appdir);
     this.collectionsPath = knowledgeCollectionsPath(options.appdir);
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
   }
 
   /** Load the entries and collections into memory and reconcile the myKG mirror with them. */
@@ -263,7 +259,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
       if (this.collectionsFile.collections.length >= KNOWLEDGE_COLLECTIONS_MAX) {
         throw new KnowledgeError("KNOWLEDGE_INVALID", `There can be at most ${KNOWLEDGE_COLLECTIONS_MAX} collections.`);
       }
-      const at = this.now().toISOString();
+      const at = new Date().toISOString();
       const record = {
         id: this.freshCollectionId(new Set()),
         name,
@@ -287,7 +283,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
       const description = request.description === undefined ? current.description : checkCollectionDescription(request.description);
       const color = request.color ?? current.color;
       if (name === current.name && description === current.description && color === current.color) return toCollection(current);
-      const next = { ...current, name, description, color, updatedAt: this.now().toISOString() };
+      const next = { ...current, name, description, color, updatedAt: new Date().toISOString() };
       const collections = [...this.collectionsFile.collections];
       collections[index] = next;
       await this.writeCollections({ ...this.collectionsFile, collections });
@@ -340,7 +336,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
           `At most ${KNOWLEDGE_SAVE_MAX_ENTRIES} entries per save; split the import into several calls.`
         );
       }
-      const at = this.now().toISOString();
+      const at = new Date().toISOString();
       const savedFrom: KnowledgeEntrySource = request.sessionId ? { by: "agent", sessionId: request.sessionId } : { by: "user" };
 
       // New collections first (an existing name is reused, not an error).
@@ -590,7 +586,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
     if (!edited && !relabelled) return { ...before, body: currentBody };
     const meta = frozenMeta({
       ...next,
-      updatedAt: this.now().toISOString(),
+      updatedAt: new Date().toISOString(),
       linkState: edited ? "pending" : before.linkState
     });
     await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
@@ -896,7 +892,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
         this.logger.warn(`knowledge: ${this.collectionsFile.rejected.length} collection record(s) could not be read; kept as-is`);
       }
     } catch (error) {
-      const aside = `${this.collectionsPath}.corrupt-${this.now().getTime()}`;
+      const aside = `${this.collectionsPath}.corrupt-${Date.now()}`;
       this.logger.error(`knowledge: collections.json is unreadable (${(error as Error).message}); moved to ${aside}`);
       await rename(this.collectionsPath, aside);
     }

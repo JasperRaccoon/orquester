@@ -504,7 +504,7 @@ function renderCollections(response: KnowledgeCollectionsResponse): string {
 }
 
 /** A worker's next task (or the word to stop). */
-export function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
+function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
   if (next.kind === "done") return `No task (${next.reason}). End your turn now.`;
   const task = next.task;
   const lines = [`Task ${task.taskId} · step ${task.step} · answer ≤ ${task.maxTokens} tokens · ${task.remaining} more waiting`];
@@ -525,7 +525,7 @@ const clearableText = (max: number) => z.string().trim().min(1).max(max).nullabl
 /** An entry id, as citations carry it. */
 // Schemas used by more than one field are factories: a zod instance reused inside one tool is
 // listed as a JSON-schema "$ref" to the first field, which clients such as Claude Code do not follow
-// (they then send the value as a string). `catalog/schema-refs.test.ts` keeps every tool free of them.
+// (they then send the value as a string). `catalog/registry.test.ts` keeps every tool free of them.
 const entryId = () => z.string().trim().regex(/^ke_[a-z0-9]{12}$/, "an entry id looks like ke_ and 12 letters or digits");
 
 /** A search's example entries (`similarTo`, `unlike`). */

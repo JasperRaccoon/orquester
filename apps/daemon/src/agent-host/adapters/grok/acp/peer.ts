@@ -73,8 +73,6 @@ export interface AcpPeerOptions {
   onFrame?(direction: AcpFrameDirection, frame: unknown): void;
   /** An unknown method, a malformed line, a reply to nothing (§10). */
   onWarning?(message: string, detail?: unknown): void;
-  /** Default per-request deadline. Individual calls may override it. */
-  defaultTimeoutMs?: number;
   /**
    * Ids the AGENT gives requests it sends itself and then answers on our
    * stdout — Grok's `skills-reload` / `workflows-reload`, a subagent's child
@@ -143,7 +141,7 @@ export class AcpPeer {
     const id = this.nextId;
     this.nextId += 1;
 
-    const timeoutMs = options.timeoutMs ?? this.options.defaultTimeoutMs ?? AGENT_HOST_DEADLINES.sessionOpenMs;
+    const timeoutMs = options.timeoutMs ?? AGENT_HOST_DEADLINES.sessionOpenMs;
 
     return new Promise<T>((resolve, reject) => {
       const finish = (fn: () => void): void => {

@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
-  EXIT_REQUIRED_FAILED,
   browserFontsScript,
   browserInstallScript,
   chromeStartScript,
@@ -107,7 +106,7 @@ test("apt: stale lists are refreshed and the install retried; a missing optional
 test("apt: a required package that cannot be installed fails the script with exit 3", async (t) => {
   const stubs = await stubBin(t, "apt-get");
   const { code, out } = await runWithStubs(desktopInstallScript({ manager: "apt", ...PLAN }), stubs.bin, { ...stubs.env, FAIL: "openbox" });
-  assert.equal(code, EXIT_REQUIRED_FAILED);
+  assert.equal(code, 3);
   assert.match(out, /Could not install the desktop packages\./);
   assert.doesNotMatch(out, /Desktop packages are installed/);
 });

@@ -21,9 +21,6 @@ import {
   type AgentVisualUrlResponse
 } from "@orquester/api/agent-chat";
 
-/** A minted URL's lifetime: the spec's ceiling. */
-export const VISUAL_URL_LIFETIME_MS = HTML_RENDER_URL_MAX_LIFETIME_MS;
-
 /**
  * The response headers every served page carries (spec §2.2). The sandbox
  * CSP gives the document an opaque origin whatever embeds it: scripts and
@@ -41,10 +38,10 @@ export const VISUAL_PAGE_HEADERS: Readonly<Record<string, string>> = {
 };
 
 export interface VisualUrlSigner {
-  /** A signed path for the page, valid from `nowMs` for {@link VISUAL_URL_LIFETIME_MS}. */
-  mint(sessionId: string, attachmentId: string, nowMs?: number): AgentVisualUrlResponse;
+  /** A signed path for the page, valid for {@link HTML_RENDER_URL_MAX_LIFETIME_MS}. */
+  mint(sessionId: string, attachmentId: string): AgentVisualUrlResponse;
   /** Whether `exp`/`sig` (as the query carried them) authorise this page now. */
-  verify(sessionId: string, attachmentId: string, exp: unknown, sig: unknown, nowMs?: number): boolean;
+  verify(sessionId: string, attachmentId: string, exp: unknown, sig: unknown): boolean;
 }
 
 function signature(key: Buffer, sessionId: string, attachmentId: string, exp: number): string {
@@ -53,22 +50,24 @@ function signature(key: Buffer, sessionId: string, attachmentId: string, exp: nu
     .digest("base64url");
 }
 
-/** A signer under `key` (tests), or a fresh random 32-byte key (the daemon). */
-export function createVisualUrlSigner(key: Buffer = randomBytes(32)): VisualUrlSigner {
+/** A signer under a fresh random 32-byte key held only by this daemon. */
+export function createVisualUrlSigner(): VisualUrlSigner {
+  const key = randomBytes(32);
   return {
-    mint(sessionId, attachmentId, nowMs = Date.now()) {
-      const exp = nowMs + VISUAL_URL_LIFETIME_MS;
+    mint(sessionId, attachmentId) {
+      const exp = Date.now() + HTML_RENDER_URL_MAX_LIFETIME_MS;
       const query = new URLSearchParams({ exp: String(exp), sig: signature(key, sessionId, attachmentId, exp) });
       return { path: `${agentChatRoutes.visual(sessionId, attachmentId)}?${query.toString()}`, expiresAt: exp };
     },
 
-    verify(sessionId, attachmentId, exp, sig, nowMs = Date.now()) {
+    verify(sessionId, attachmentId, exp, sig) {
       if (typeof exp !== "string" || !/^\d{1,16}$/.test(exp) || typeof sig !== "string") {
         return false;
       }
       const expiresAt = Number(exp);
+      const nowMs = Date.now();
       // Expired, or claiming more life than any minted URL ever has.
-      if (!Number.isSafeInteger(expiresAt) || expiresAt < nowMs || expiresAt > nowMs + VISUAL_URL_LIFETIME_MS) {
+      if (!Number.isSafeInteger(expiresAt) || expiresAt < nowMs || expiresAt > nowMs + HTML_RENDER_URL_MAX_LIFETIME_MS) {
         return false;
       }
       const expected = Buffer.from(signature(key, sessionId, attachmentId, expiresAt));

@@ -154,7 +154,7 @@ describe("the Jira template's code runs", () => {
       assert.deepEqual(outcome.failed.map((entry) => entry.key), ["PROJ-2"]);
       assert.deepEqual(outcome.skipped, [{ key: "PROJ-3", reason: "unclear" }]);
       assert.deepEqual(posted, ['https://acme.atlassian.net/rest/api/3/issue/PROJ-1/transitions {"transition":{"id":"31"}}']);
-      await assert.rejects(run({ nodes: { FixTickets: { output: { text: "no json" } } }, secrets, log: () => {} }));
+      await assert.rejects(run({ nodes: { FixTickets: { output: { text: "no json" } } }, secrets, log: () => {} }), /no JSON object/);
     } finally {
       globalThis.fetch = originalFetch;
     }

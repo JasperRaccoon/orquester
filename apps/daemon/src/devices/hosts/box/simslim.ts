@@ -42,7 +42,7 @@ export function simslimProfilePath(deviceRoot: string): string {
  * account or Xcode StoreKit config anyway, and cost the most memory. A chat that needs one can
  * still `simslim enable` it on its device.
  */
-export const ORQ_SLIM_PROFILE = Object.freeze({
+const ORQ_SLIM_PROFILE = Object.freeze({
   name: "orquester",
   description: "Orquester device hosts: agents build and test apps (push, universal links and the photo picker kept)",
   except: [] as string[],
@@ -55,7 +55,7 @@ export const ORQ_SLIM_PROFILE_JSON = `${JSON.stringify(ORQ_SLIM_PROFILE, null, 2
 export const SIMSLIM_ENV: Readonly<Record<string, string>> = Object.freeze({ SIMSLIM_BOOT_TIMEOUT: "15m", SIMSLIM_SPAWN_TIMEOUT: "5m" });
 
 /** The earliest runtime whose launchd overrides persist across reboots (simslim's gate). */
-export const SIMSLIM_MIN_IOS = "18.5";
+const SIMSLIM_MIN_IOS = "18.5";
 
 /** Whether simslim can slim a simulator of this iOS version persistently ("27.0", "18.4.1"). */
 export function slimmableIos(osVersion: string): boolean {

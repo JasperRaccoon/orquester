@@ -66,6 +66,14 @@ describe("evaluateRuleAsync", () => {
     const bad = await evaluateRuleAsync(rule("{{ input.s }}", "gt", "1"), ctx, matcher);
     assert.equal(bad.result, false);
     assert.equal(bad.warnings.length, 1);
+    // A warning must redact before clipping: clipping first leaks a prefix of a long secret.
+    const secret = "S".repeat(40) + "-very-long-secret-value-that-passes-sixty-chars";
+    const redacted = await evaluateRulesAsync("all", [rule("{{ input }}", "gt", "3")], { ...ctx, input: secret, secrets: { TOKEN: secret } }, matcher);
+    assert.equal(redacted.result, false);
+    const warning = redacted.warnings.join("\n");
+    assert.ok(!warning.includes("SSSSSSSSSS"), warning);
+    assert.match(warning, /«secret:TOKEN»/);
+
     for (const invalid of ["0x10", "", "Infinity"]) {
       const result = await evaluateRuleAsync(rule(invalid, "gt", "-1"), ctx, matcher);
       assert.equal(result.result, false);

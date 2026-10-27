@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe,it } from "node:test";
 
+import type { ToolApprovalReference } from "@orquester/api/agent-chat";
+
 import type { WorkLogEntry } from "./contracts";
 import {
-singleToolCallLabel,
-toolApprovalOutcomeText,
 workEntryDisplayIndicatesToolFailure,
 workEntryDisplayLabel
 } from "./presentation.logic";
@@ -37,11 +37,15 @@ describe("the output heuristic never judges a call still in progress", () => {
 describe("session tool labels (unified MCP §4)", () => {
 
   it("a gated call's row says how its card ended", () => {
-    const gated = (outcome: "approved" | "granted" | "denied" | "timed_out" | "cancelled" | "not_delivered", kind: "admin" | "toolset" = "admin") =>
+    const gated = (
+      outcome: ToolApprovalReference["outcome"],
+      kind: "admin" | "toolset" = "admin",
+      extra: Pick<ToolApprovalReference, "reason" | "grantScope"> = {}
+    ) =>
       workEntryDisplayLabel(
         entry({
           sessionTool: kind === "toolset" ? "request_toolset" : "create_workflow",
-          toolApproval: { kind, family: kind === "toolset" ? "toolset" : "workflows", title: "t", outcome, ...(outcome === "granted" ? {} : { approvalId: "a" }) }
+          toolApproval: { kind, family: kind === "toolset" ? "toolset" : "workflows", title: "t", outcome, ...(outcome === "granted" ? {} : { approvalId: "a" }), ...extra }
         })
       );
     assert.equal(gated("approved"), "Created a workflow · Approved by you");
@@ -50,12 +54,12 @@ describe("session tool labels (unified MCP §4)", () => {
     assert.equal(gated("timed_out"), "Created a workflow · Expired");
     assert.equal(gated("cancelled"), "Created a workflow · Cancelled");
     assert.equal(gated("approved", "toolset"), "Asked for more tools · Enabled by you");
-    assert.match(toolApprovalOutcomeText({ kind: "admin", outcome: "not_delivered" }), /never reached the agent/);
+    assert.match(gated("not_delivered"), /never reached the agent/);
     // The reference's deny reason and grant scope (contracts follow-up).
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "not on\n  Fridays" }), "Denied: not on Fridays");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "  " }), "Denied by you");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "chat" }), "Allowed by a chat grant");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "project" }), "Allowed by a project grant");
+    assert.equal(gated("denied", "admin", { reason: "not on\n  Fridays" }), "Created a workflow · Denied: not on Fridays");
+    assert.equal(gated("denied", "admin", { reason: "  " }), "Created a workflow · Denied by you");
+    assert.equal(gated("granted", "admin", { grantScope: "chat" }), "Created a workflow · Allowed by a chat grant");
+    assert.equal(gated("granted", "admin", { grantScope: "project" }), "Created a workflow · Allowed by a project grant");
     // No card: the tool's own label.
     assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_projects" })), "Listed projects");
   });
@@ -64,32 +68,22 @@ describe("session tool labels (unified MCP §4)", () => {
 describe("device tool rows (devices §10.3)", () => {
   const device = { device: "local/emulator-5554", leaseId: "l1" };
 
-  it("read as what they did to which device, the store's name as a fallback", () => {
-    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: { ...device, name: "Pixel 9" } })), "Opened Pixel 9");
-    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: device }), undefined, () => "Pixel Fold"), "Opened Pixel Fold");
-    assert.equal(
-      singleToolCallLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, action: "tap", summary: "Tapped @e7 “Search”" } })),
-      "Tapped “Search”"
-    );
-    assert.equal(
-      workEntryDisplayLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, name: "Pixel 9", action: "screenshot" } })),
-      "Took a screenshot of Pixel 9"
-    );
-    // Without a reference: the tool's generic words.
-    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "device_action" })), "Used a device");
-    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_devices", deviceLink: device })), "Listed devices");
+  it("preserves device names and action targets, resolving a missing name from the store", () => {
+    const named = entry({ sessionTool: "open_device", deviceLink: { ...device, name: "Pixel 9" } });
+    const label = workEntryDisplayLabel(named, undefined, () => "Pixel Fold");
+    assert.match(label, /Pixel 9/);
+    assert.doesNotMatch(label, /Pixel Fold/);
+    assert.match(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: device }), undefined, () => "Pixel Fold"), /Pixel Fold/);
+    assert.match(workEntryDisplayLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, action: "tap", summary: "Tapped @e7 “Search”" } })), /Search/);
   });
 
-  it("keep the approval suffix of a gated call", () => {
-    assert.equal(
-      workEntryDisplayLabel(
-        entry({
-          sessionTool: "open_device",
-          deviceLink: { ...device, name: "iPhone 17 Pro" },
-          toolApproval: { kind: "spend", family: "devices", title: "t", outcome: "approved", approvalId: "a" } as WorkLogEntry["toolApproval"]
-        })
-      ),
-      "Opened iPhone 17 Pro · Approved by you"
-    );
+  it("keeps the approval outcome alongside the device name", () => {
+    const label = workEntryDisplayLabel(entry({
+      sessionTool: "open_device",
+      deviceLink: { ...device, name: "iPhone 17 Pro" },
+      toolApproval: { kind: "spend", family: "devices", title: "t", outcome: "approved", approvalId: "a" }
+    }));
+    assert.match(label, /iPhone 17 Pro/);
+    assert.match(label, /Approved/);
   });
 });

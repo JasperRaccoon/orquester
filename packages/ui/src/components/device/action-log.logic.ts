@@ -44,8 +44,7 @@ function oneLine(text: string): string {
 export function actionLogRows(
   entries: readonly DeviceActionEntry[],
   local: readonly LocalDeviceAction[],
-  agentName: string,
-  limit = 400
+  agentName: string
 ): ActionLogRow[] {
   const rows: ActionLogRow[] = [];
   const ids = new Set<string>();
@@ -83,7 +82,7 @@ export function actionLogRows(
     });
   }
   // Stable: equal times keep their arrival order.
-  return rows.sort((a, b) => a.at - b.at).slice(-limit);
+  return rows.sort((a, b) => a.at - b.at).slice(-400);
 }
 
 /** The collapsed drawer's one line: "12 actions · Tapped “Search”" (null with nothing logged). */

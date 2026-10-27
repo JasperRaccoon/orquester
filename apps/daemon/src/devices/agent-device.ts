@@ -75,7 +75,7 @@ export function agentDeviceSession(threadId: string, hostId: string, deviceId: s
 }
 
 /** The full argument list (after the executable): the command's prefix, the pinned global flags, then the command. */
-export function agentDeviceArgv(input: {
+function agentDeviceArgv(input: {
   prefix: readonly string[];
   configPath: string;
   session: string;
@@ -109,7 +109,7 @@ export function agentDeviceArgv(input: {
 const AGENT_DEVICE_ENV_PASSTHROUGH = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TERM", "SHELL", "XDG_RUNTIME_DIR"] as const;
 
 /** The environment a run gets: the allowlisted daemon variables, then the host's additions (`AgentDeviceCommand.env`). */
-export function agentDeviceEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}): Record<string, string> {
+function agentDeviceEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of AGENT_DEVICE_ENV_PASSTHROUGH) {
     const value = base[key];
@@ -121,7 +121,7 @@ export function agentDeviceEnv(base: NodeJS.ProcessEnv, extra: Record<string, st
 }
 
 /** Parse a `--json` answer (the whole stdout, or its last JSON object). */
-export function parseAgentDeviceJson(stdout: string): unknown {
+function parseAgentDeviceJson(stdout: string): unknown {
   const text = stdout.trim();
   if (text === "") return undefined;
   try {
@@ -138,7 +138,7 @@ export function parseAgentDeviceJson(stdout: string): unknown {
 }
 
 /** Absolute host paths in a message become `<path>` (URLs are left alone). */
-export function redactPaths(text: string): string {
+function redactPaths(text: string): string {
   return text.replace(/(?<![:\w/.~-])\/(?:[\w.@~-]+\/)+[\w.@~-]*/g, "<path>");
 }
 

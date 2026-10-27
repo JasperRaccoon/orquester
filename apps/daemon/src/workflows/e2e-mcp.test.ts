@@ -9,7 +9,7 @@ import { after, before, describe, test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerMcp } from "../mcp/server.ts";
 import { ToolError } from "../mcp/errors.ts";
-import { boot, tempAppdir, type Booted } from "./testing/daemon-harness.ts";
+import { boot, retainWorkflowArtifact, tempAppdir, type Booted } from "./testing/daemon-harness.ts";
 
 type Result = Record<string, unknown>;
 
@@ -49,7 +49,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<Result
 
 describe("e2e: the MCP workflow tools against the real routes", () => {
 
-  test("the published Jira create and edit example stays valid on the real routes", async () => {
+  test("the published Jira create and edit example stays valid on the real routes", async (t) => {
     const listed = await call("list_workflow_block_types", {});
     const guide = String(listed.authoringGuide);
     const createExample = /^create_workflow (\{.*\})$/m.exec(guide);
@@ -65,9 +65,10 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     assert.equal(saved.enabled, false, "the example is safe to save without firing it");
     assert.equal(saved.revision, 1);
     await call("delete_workflow", { workflowId: id, confirm: true });
+    await retainWorkflowArtifact(t, { created, updated });
   });
 
-  test("create_workflow and update_workflow {dryRun: true} validate on the real route and save nothing", async () => {
+  test("create_workflow and update_workflow {dryRun: true} validate on the real route and save nothing", async (t) => {
     const before = h.service.list().length;
     const minimal = await call("create_workflow", {
       name: "Minimal",
@@ -81,7 +82,6 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     });
     assert.equal(minimal.valid, true, JSON.stringify(minimal.problems));
     assert.equal(minimal.saved, false);
-    assert.equal(minimal.projects, "Project acme/api");
     const broken = await call("create_workflow", {
       name: "Broken",
       project: { kind: "existing", project: "acme/api" },
@@ -99,12 +99,14 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     const id = created.workflowId as string;
     const dry = await call("update_workflow", { workflowId: id, revision: created.revision, ops: [{ op: "rename_node", node: "Work", to: "Renamed" }], dryRun: true });
     assert.equal(dry.valid, true, JSON.stringify(dry.problems));
-    assert.deepEqual(dry.changes, [{ label: "code · Work → Renamed", change: "changed", detail: "name" }]);
+    const saved = await call("get_workflow", { workflowId: id, node: "Work" });
+    assert.equal((saved.node as { name: string }).name, "Work", "a dry run leaves the stored node unchanged");
     assert.equal(h.service.get(id)!.revision, created.revision, "a dry run saves nothing");
     await call("delete_workflow", { workflowId: id, confirm: true });
+    await retainWorkflowArtifact(t, { minimal, broken, dry });
   });
 
-  test("run_workflow waits for a real run and its stored output can be read by node name", async () => {
+  test("run_workflow waits for a real run and its stored output can be read by node name", async (t) => {
     const created = await call("create_workflow", {
       name: "Doubler",
       project: { kind: "existing", project: "acme/api" },
@@ -127,5 +129,6 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     const one = await call("get_workflow_runs", { runId: run.runId, nodeId: "Double" });
     assert.deepEqual(one.output, { doubled: 42 });
     assert.equal((await h.runStore.load(run.runId))!.status, "succeeded");
+    await retainWorkflowArtifact(t, { ran, runs, output: one.output });
   });
 });

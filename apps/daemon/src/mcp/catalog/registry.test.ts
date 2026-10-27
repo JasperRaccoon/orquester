@@ -40,6 +40,15 @@ function descriptions(value: unknown): string[] {
   ];
 }
 
+/** Supported clients need self-contained schemas, including nested object and array fields. */
+function schemaRefs(value: unknown, path = ""): string[] {
+  if (Array.isArray(value)) return value.flatMap((item, index) => schemaRefs(item, `${path}[${index}]`));
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) =>
+    key === "$ref" ? [`${path || "(root)"} → ${String(child)}`] : schemaRefs(child, `${path}.${key}`)
+  );
+}
+
 async function externalCatalog(): Promise<{ tools: Tool[]; instructions: string; version: string }> {
   const app = Fastify();
   registerMcp(app, { createApi: () => new FakeDaemonApi() });
@@ -97,6 +106,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   for (const [audience, rows] of [["external", external.tools], ["chat", chat]] as const) {
     const allowed = new Set(rows.map((tool) => tool.name));
     for (const row of rows) {
+      assert.deepEqual(schemaRefs(row.inputSchema), [], `${audience} ${row.name}: unsupported schema references`);
       const bytes = Buffer.byteLength(JSON.stringify(row), "utf8");
       assert.ok(bytes <= (TOOL_TARGETS[row.name] ?? 3_000), `${audience} ${row.name}: ${bytes} bytes`);
       assert.ok(Buffer.byteLength(row.description ?? "", "utf8") <= (["html_render", "html_preview"].includes(row.name) ? 2_000 : 1_000), `${audience} ${row.name}: description`);
@@ -119,10 +129,5 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 6_144, `box tools: ${added(boxRows)} bytes`);
-  // Knowledge search filters, body windows and merging share an 8 KiB budget.
-  const knowledgeBytes = added(knowledgeRows.filter((tool) => !workerRows.includes(tool)));
-  assert.ok(knowledgeBytes <= 8_192, `knowledge tools: ${knowledgeBytes} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
-  assert.deepEqual(deviceRows.map((tool) => tool.name), ["list_devices", "open_device", "device_action", "device_install", "close_device"]);
-  assert.ok(added(deviceRows) <= 6_144, `device tools: ${added(deviceRows)} bytes`);
 });

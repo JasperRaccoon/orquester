@@ -582,17 +582,23 @@ describe("the redactor", () => {
 });
 
 describe("the host's teardown", () => {
-  it("drains ingestion with `final`, so held tails are released (masked) before the stop; an ordinary drain is not final", async () => {
-    const host = createTestHost();
-    const calls: Array<{ final?: boolean } | undefined> = [];
-    const drain = host.ingestion.drain.bind(host.ingestion);
-    host.ingestion.drain = async (options?: { final?: boolean }) => {
-      calls.push(options);
-      await drain();
-    };
+  it("persists a held stream tail before the host stops; an ordinary drain leaves it held", async (t) => {
+    const { host, redactor, ingestion, store } = await pipeline(t);
+    const threadId = await host.createThread();
+    redactor.remember(threadId, [VALUE]);
+    host.ingestion.drain = ingestion.drain.bind(ingestion);
+    await ingestion.ingest({
+      eventId: "tail-1", threadId, createdAt: "2026-10-14T10:00:00.000Z",
+      type: "content.delta", itemId: "call-tail", turnId: "turn-1",
+      payload: { streamKind: "command_output", delta: "end correct-" }
+    } as RuntimeEvent);
+    const output = async () => (await store.readAll(threadId)).events.flatMap((event) =>
+      event.type === "thread.activity-appended" && event.payload.activity.activityKind === "tool.output"
+        ? [(event.payload.activity.payload as { delta: string }).delta] : []
+    ).join("");
     await host.orchestrator.drain();
-    assert.deepEqual(calls, [undefined]);
+    assert.equal(await output(), "end ");
     await host.stop();
-    assert.deepEqual(calls.at(-1), { final: true });
+    assert.equal(await output(), "end correct-", "the durable log keeps the tail when no more chunks can arrive");
   });
 });

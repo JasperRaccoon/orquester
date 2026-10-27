@@ -11,7 +11,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import { LONG_PRESS_MS, useLongPress } from "./use-long-press";
+import { useLongPress } from "./use-long-press";
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "Element", "Node", "navigator"] as const;
@@ -72,8 +72,8 @@ describe("useLongPress", () => {
     });
     return notCancelled;
   };
-  const wait = (ms: number): void => {
-    act(() => mock.timers.tick(ms));
+  const finishPress = (): void => {
+    act(() => mock.timers.runAll());
   };
 
   beforeEach(() => {
@@ -95,9 +95,8 @@ describe("useLongPress", () => {
 
   it("a resting finger opens it once, where it rests, and the click that follows is swallowed", () => {
     fire(pointer("pointerdown", { x: 40, y: 12 }));
-    wait(LONG_PRESS_MS - 1);
     assert.deepEqual(presses, []);
-    wait(1);
+    finishPress();
     assert.deepEqual(presses, [{ x: 40, y: 12 }]);
     fire(pointer("pointerup", { x: 40, y: 12 }));
     fire(mouse("click", 40, 12));
@@ -111,10 +110,10 @@ describe("useLongPress", () => {
 
   it("a tap stays a click", () => {
     fire(pointer("pointerdown"));
-    wait(200);
+    act(() => mock.timers.tick(200));
     fire(pointer("pointerup"));
     fire(mouse("click"));
-    wait(LONG_PRESS_MS);
+    finishPress();
     assert.deepEqual(presses, []);
     assert.equal(clicks, 1);
   });
@@ -123,16 +122,16 @@ describe("useLongPress", () => {
     fire(pointer("pointerdown", { x: 0, y: 0 }));
     fire(pointer("pointermove", { x: 0, y: 4 }));
     fire(pointer("pointermove", { x: 0, y: 30 }));
-    wait(LONG_PRESS_MS);
+    finishPress();
     fire(pointer("pointerdown", { x: 0, y: 0 }));
     fire(pointer("pointercancel"));
-    wait(LONG_PRESS_MS);
+    finishPress();
     assert.deepEqual(presses, []);
   });
 
   it("a mouse never starts the timer; its right click opens the menu", () => {
     fire(pointer("pointerdown", { kind: "mouse" }));
-    wait(LONG_PRESS_MS);
+    finishPress();
     assert.deepEqual(presses, []);
     const notCancelled = fire(mouse("contextmenu", 5, 6));
     assert.equal(notCancelled, false, "the browser's own menu is suppressed");
@@ -141,9 +140,8 @@ describe("useLongPress", () => {
 
   it("Android's long-press contextmenu and the timer open it once between them", () => {
     fire(pointer("pointerdown", { x: 9, y: 9 }));
-    wait(LONG_PRESS_MS - 50);
     fire(mouse("contextmenu", 9, 9));
-    wait(LONG_PRESS_MS);
+    finishPress();
     assert.equal(presses.length, 1);
     fire(pointer("pointerup"));
     fire(mouse("click"));
@@ -151,7 +149,7 @@ describe("useLongPress", () => {
 
     // And the other way round: the timer first, then the contextmenu.
     fire(pointer("pointerdown"));
-    wait(LONG_PRESS_MS);
+    finishPress();
     fire(mouse("contextmenu"));
     assert.equal(presses.length, 2);
   });
@@ -163,7 +161,7 @@ describe("useLongPress", () => {
     };
     document.addEventListener("mousedown", onDoc);
     fire(pointer("pointerdown"));
-    wait(LONG_PRESS_MS);
+    finishPress();
     fire(mouse("mousedown"));
     assert.equal(outside, 0);
     // A fresh press is an ordinary mousedown again.
@@ -176,7 +174,7 @@ describe("useLongPress", () => {
   it("a row unmounted mid-press opens nothing", () => {
     fire(pointer("pointerdown"));
     act(() => root.render(createElement("div")));
-    wait(LONG_PRESS_MS);
+    finishPress();
     assert.deepEqual(presses, []);
   });
 });

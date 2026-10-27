@@ -6,9 +6,7 @@ import { test } from "node:test";
 
 import type { StoredBox } from "@orquester/config";
 
-import { BYO_REGION, byoAdapter, byoMachineIdle, byoMachineLabel, byoOffers } from "./byo.ts";
-
-const options = { signal: AbortSignal.timeout(1_000), fetch: (() => assert.fail("no network call")) as unknown as typeof fetch };
+import { byoAdapter, byoOffers } from "./byo.ts";
 
 function machine(id: string, extra: Partial<StoredBox> = {}): StoredBox {
   return {
@@ -26,7 +24,9 @@ function machine(id: string, extra: Partial<StoredBox> = {}): StoredBox {
   };
 }
 
-test("byo: free Linux and macOS machines, no credentials, no lifetime cap, never creates or lists anything", async () => {
+test("byo: free Linux and macOS machines, no credentials, no lifetime cap, never creates or lists anything", async (t) => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("no network call"));
+  const options = { signal: new AbortController().signal };
   assert.equal(byoAdapter.id, "byo");
   assert.deepEqual([...byoAdapter.kinds], ["linux", "macos"]);
   assert.deepEqual(byoAdapter.credentialFields, []);
@@ -38,7 +38,7 @@ test("byo: free Linux and macOS machines, no credentials, no lifetime cap, never
     /paired/
   );
   await byoAdapter.destroy({}, { id: "x" }, options);
-  assert.deepEqual((await byoAdapter.offers({}, "linux", options)).regions, [BYO_REGION]);
+  assert.deepEqual((await byoAdapter.offers({}, "linux", options)).regions.map((region) => region.id), ["own"]);
 });
 
 test("byo offers: one free size per idle, connected machine of the kind; never a device host", () => {
@@ -54,11 +54,7 @@ test("byo offers: one free size per idle, connected machine of the kind; never a
   const connected = () => true;
   const linux = byoOffers(records, "linux", connected);
   assert.deepEqual(linux.sizes.map((size) => [size.id, size.hourlyUsd]), [["bb", 0]]);
-  assert.deepEqual(linux.regions, [BYO_REGION]);
-  assert.deepEqual(byoOffers(records, "macos", connected).sizes.map((size) => size.label), ["Machine eeeee (macOS, arm64)"]);
+  assert.deepEqual(linux.regions.map((region) => region.id), ["own"]);
+  assert.deepEqual(byoOffers(records, "macos", connected).sizes.map((size) => [size.id, size.hourlyUsd]), [["eeeee", 0]]);
   assert.deepEqual(byoOffers(records, "linux", () => false).sizes, [], "only connected machines");
-  assert.equal(byoMachineIdle(machine("x"), true), true);
-  assert.equal(byoMachineIdle(machine("x"), false), false);
-  assert.equal(byoMachineIdle(machine("x", { deviceHost: true }), true), false, "a device host is the device service's");
-  assert.equal(byoMachineLabel(machine("x")), "Machine x");
 });

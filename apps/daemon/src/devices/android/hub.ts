@@ -29,7 +29,7 @@ export const HUB_LAUNCHER = fileURLToPath(new URL("./hub-launcher.mjs", import.m
 export const HUB_READY_TIMEOUT_MS = 30_000;
 export const HUB_TICK_MS = 5_000;
 export const HUB_HEALTHY_RESET_MS = 60_000;
-export const HUB_BACKOFF_MAX_MS = 60_000;
+const HUB_BACKOFF_MAX_MS = 60_000;
 export const RECYCLE_IDLE_MS = 60_000;
 /** After the proxy reports the last viewer gone: a short grace for a reconnect (a reload, a tab switch). */
 export const RECYCLE_AFTER_LAST_VIEWER_MS = 15_000;
@@ -49,8 +49,6 @@ export interface HubDeps {
   persist(record: HubRecord | null): Promise<void>;
   onChange(): void;
   logger: Pick<Console, "info" | "warn" | "error">;
-  /** Tests: time and polling. */
-  now?: () => number;
   /** Where the hub runs (absent: this machine). Paths above are its paths. */
   executor?: DeviceExecutor;
   /** The launcher script where it runs (absent: {@link HUB_LAUNCHER}; a box host uploads it). */
@@ -74,7 +72,7 @@ export function hubArgs(port: number): string[] {
 }
 
 /** The restart delay after `failures` failures in a row. */
-export function hubBackoffMs(failures: number): number {
+function hubBackoffMs(failures: number): number {
   return Math.min(HUB_BACKOFF_MAX_MS, 1_000 * 2 ** Math.max(0, failures - 1));
 }
 
@@ -121,7 +119,7 @@ export class HubSupervisor {
   private endpointValue: (HubEndpoint & { port: number }) | null = null;
 
   constructor(private readonly deps: HubDeps) {
-    this.now = deps.now ?? Date.now;
+    this.now = Date.now;
     this.x = deps.executor ?? LOCAL_EXECUTOR;
     this.launcher = deps.launcher ?? HUB_LAUNCHER;
   }

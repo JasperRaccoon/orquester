@@ -12,24 +12,15 @@ describe("NdjsonLineBuffer", () => {
     const expected = text.split("\n").slice(0, -1);
     for (const size of [1, 7, 1400, 4096, text.length]) {
       const buffer = new NdjsonLineBuffer();
+      assert.deepEqual(buffer.push(""), []);
       const lines: string[] = [];
       for (let offset = 0; offset < text.length; offset += size) lines.push(...buffer.push(text.slice(offset, offset + size)));
       assert.deepEqual(lines, expected, `chunks of ${size}`);
       assert.deepEqual(buffer.push("\"}\n"), ['{"tail"}'], "the open line is kept across chunks");
+      buffer.push("unfinished");
       buffer.reset();
       assert.deepEqual(buffer.push("z\n"), ["z"], "a reset drops the open line");
     }
-  });
-
-  it("closes a line held across many chunks, and keeps empty lines and a reset", () => {
-    const buffer = new NdjsonLineBuffer();
-    assert.deepEqual(buffer.push('{"snap'), []);
-    assert.deepEqual(buffer.push(""), []);
-    assert.deepEqual(buffer.push("shot"), []);
-    assert.deepEqual(buffer.push('":1}\n\n:hb\n{"x'), ['{"snapshot":1}', "", ":hb"]);
-    buffer.reset();
-    assert.deepEqual(buffer.push('"y":2}\n'), ['"y":2}']);
-    assert.deepEqual(buffer.push("\n"), [""]);
   });
 
 });

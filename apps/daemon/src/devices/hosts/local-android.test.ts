@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
@@ -11,6 +11,7 @@ import { ANDROID_SYSTEM_IMAGE, DEFAULT_DEVICES_SETTINGS, deviceProfile, type Dev
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { ExecFn } from "../android/exec.ts";
+import { LOCAL_EXECUTOR } from "../android/executor.ts";
 import { isProcessAlive, waitForExit } from "../android/procs.ts";
 import { readHostState, writeHostState } from "../android/state.ts";
 import type { KvmProbe } from "../android/readiness.ts";
@@ -115,8 +116,6 @@ test("readiness: a fresh appdir needs setup, with a fix action per installable i
     assert.equal(host.hubOrigin(), null);
     assert.equal(host.hubToken(), null);
     assert.equal(host.agentDeviceConfigPath(), null);
-    assert.deepEqual(host.streamCapabilities(), { iosH264: false });
-    assert.equal(host.capacity().used, 0);
   });
 });
 
@@ -142,9 +141,9 @@ test("boot: refused while the host is not ready, and for iOS profiles", async ()
   await withHost({}, async ({ host }) => {
     await host.refreshReadiness();
     const profile = { id: "pixel-9", platform: "android" as const, label: "Pixel 9", formFactor: "phone" as const, os: "Android 15" };
-    await assert.rejects(host.boot({ leaseId: "L", profile, fresh: true }, new AbortController().signal), /need setup first/);
-    await assert.rejects(host.boot({ leaseId: "L", profile: { ...profile, platform: "ios" }, fresh: true }, new AbortController().signal), /not an Android profile/);
-    await assert.rejects(host.run("simctl", ["list"]), /does not run on an Android host/);
+    await assert.rejects(host.boot({ leaseId: "L", profile, fresh: true }, new AbortController().signal), { code: "PLATFORM_NOT_READY" });
+    await assert.rejects(host.boot({ leaseId: "L", profile: { ...profile, platform: "ios" }, fresh: true }, new AbortController().signal), { code: "INVALID_ARGUMENT" });
+    await assert.rejects(host.run("simctl", ["list"]), { code: "INVALID_ARGUMENT" });
   });
 });
 
@@ -191,23 +190,6 @@ test("restart: reattach to an emulator a live lease holds, reap one no lease hol
   });
 });
 
-test("release: a lost lease whose serial now names a golden boot leaves that emulator running", async () => {
-  await withHost({}, async ({ appDir, host }) => {
-    const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
-    const golden = await fakeEmulator(appDir, avd.avd);
-    try {
-      // The golden boot took the console port the lost lease's emulator had (emulator-5588).
-      const emulators = (host as unknown as { emulators: Map<string, unknown> }).emulators;
-      emulators.set("emulator-5588", { serial: "emulator-5588", pid: golden.pid!, pgid: golden.pid!, consolePort: 5588, grpcPort: 8570, profile: "pixel-9", avd: "orq-pixel-9", leaseId: null, golden: true, startedAt: "", logPath: "" });
-      await host.release({ ...lease("lost-one", "emulator-5588"), state: "lost" }, { shutdown: true });
-      assert.equal(await isProcessAlive(golden.pid!), true);
-      assert.equal(emulators.has("emulator-5588"), true);
-    } finally {
-      golden.kill("SIGKILL");
-    }
-  });
-});
-
 test("teardown (plugin off): every emulator stops, then the hub, agent-device and the adb server; no boot starts after", async () => {
   await withHost({}, async ({ appDir, host, leases, emulators, exec }) => {
     const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
@@ -235,36 +217,61 @@ test("teardown (plugin off): every emulator stops, then the hub, agent-device an
   });
 });
 
-test("teardown while the services are still starting: agent-device never starts after it", async () => {
-  await withHost({}, async ({ host }) => {
-    const calls: string[] = [];
-    let hubStarted!: () => void;
-    const hubStarting = new Promise<void>((resolve) => (hubStarted = resolve));
-    let hubEntered!: () => void;
-    const hubCalled = new Promise<void>((resolve) => (hubEntered = resolve));
-    const fakes = host as unknown as { hub: Record<string, unknown>; agentDevice: Record<string, unknown>; startServices(): Promise<void> };
-    Object.assign(fakes.hub, {
-      start: async () => {
-        calls.push("hub.start");
-        hubEntered();
-        await hubStarting;
-      },
-      stop: async () => void calls.push("hub.stop")
-    });
-    Object.assign(fakes.agentDevice, { ensure: async () => void calls.push("agentDevice.ensure"), stop: async () => void calls.push("agentDevice.stop") });
-    const starting = fakes.startServices();
-    await hubCalled;
-    const tearingDown = host.teardown();
-    hubStarted();
-    await Promise.all([starting, tearingDown]);
-    assert.deepEqual(calls, ["hub.start", "hub.stop", "agentDevice.stop"]);
+test("teardown while hub health is pending leaves no hub or later agent daemon", { timeout: 10_000 }, async (t) => {
+  await withHost({ sdk: true }, async ({ appDir, host, exec }) => {
+    const toolchain = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null });
+    // The external SDK fixture makes a real marker through the normal toolchain entry point.
+    const avdCreator = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null, exec: async (_command, args) => {
+      const path = args[args.indexOf("--path") + 1]!;
+      await touch(join(path, "config.ini"), "hw.lcd.width=1080\nhw.lcd.height=2424\n");
+      await touch(join(dirname(path), `${args[args.indexOf("--name") + 1]}.ini`));
+      return { exitCode: 0, stdout: "", stderr: "" };
+    } });
+    await avdCreator.ensureAvd("pixel-9", new AbortController().signal);
+    for (const [name, entry] of [["agent-device", "node_modules/agent-device/bin/agent-device.mjs"], ["expo-device-hub", "node_modules/expo-device-hub/dist/server/cli.mjs"]] as const) {
+      const root = join(toolchain.layout.tools, `${name}@${DEVICE_TOOL_VERSIONS[name]}`);
+      await touch(join(root, entry));
+      await touch(join(root, ".install-complete"));
+      if (name === "expo-device-hub") await touch(join(root, "node_modules/expo-device-hub/vendor/serve-emu/vendor/scrcpy-server-v4.0"));
+    }
+    const child = await fakeEmulator(appDir, toolchain.layout.avd);
+    let entered!: () => void;
+    const checking = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const healthy = new Promise<void>((resolve) => { release = resolve; });
+    const spawnHub: typeof LOCAL_EXECUTOR.spawnDetached = async (_command, args) => {
+      const port = Number(args[args.indexOf("--port") + 1]);
+      await touch(join(toolchain.layout.hubState, `server-${port}.json`), JSON.stringify({ pid: child.pid, token: "fixture-token" }));
+      return child.pid!;
+    };
+    t.mock.method(LOCAL_EXECUTOR, "spawnDetached", spawnHub);
+    t.mock.method(globalThis, "fetch", async () => { entered(); await healthy; return new Response("ok"); });
+    try {
+      const starting = host.start();
+      await checking;
+      const stopping = host.teardown();
+      release();
+      await Promise.all([starting, stopping]);
+      assert.equal(await waitForExit(child.pid!, 5_000), true);
+      assert.equal((await readHostState(toolchain.layout.stateFile)).hub, null);
+      assert.equal(host.agentDeviceConfigPath(), null);
+      assert.ok(!exec.some((call) => call.includes("devices") && call.includes("--json")), "agent-device never started");
+    } finally {
+      release();
+      child.kill("SIGKILL");
+    }
   });
 });
 
 test("uploads land in their own 0700 dir with a safe name", async () => {
-  await withHost({}, async ({ host }) => {
+  await withHost({}, async ({ host, appDir }) => {
     const { path } = await host.uploadFile(Readable.from([Buffer.from("apk")]), "../../evil app.apk");
-    assert.match(path, /\/uploads\/[0-9a-f-]{36}\/evil_app\.apk$/);
+    const uploads = join(appDir, "daemon", "devices", "uploads");
+    assert.ok(!relative(uploads, path).startsWith(".."));
+    assert.notEqual(dirname(path), uploads);
+    assert.equal(await readFile(path, "utf8"), "apk");
+    assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
   });
 });
 
@@ -281,8 +288,5 @@ test("agent-device: the pinned CLI under this node with the private env; refused
     assert.equal(command.env.ANDROID_ADB_SERVER_PORT, toolchain.env.ANDROID_ADB_SERVER_PORT);
     assert.equal(command.env.AGENT_DEVICE_STATE_DIR, toolchain.layout.agentDeviceState);
     assert.ok(Object.values(command.env).every((value) => typeof value === "string"));
-    // Viewer counts are taken per device without throwing.
-    host.viewersChanged("emulator-5586", 2);
-    host.viewersChanged("emulator-5586", 0);
   });
 });

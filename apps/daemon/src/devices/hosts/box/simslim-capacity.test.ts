@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { MAC_HOST_RESERVED_BYTES, PER_SIM_EXTRA_BYTES, SLIM_SIM_BYTES, STOCK_SIM_BYTES, perSimulatorBytes, simulatorCapacity } from "./simslim-capacity.ts";
+import { simulatorCapacity } from "./simslim-capacity.ts";
 import type { SimslimTop, SimslimTopSim } from "./simslim.ts";
 
 const GiB = 1024 ** 3;
@@ -19,15 +19,13 @@ describe("simulatorCapacity", () => {
   it("fits 8 slim or 3 stock simulators on a 24 GB Mac", () => {
     assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: true, top: null, leased: 0 }).total, 8);
     assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: false, top: null, leased: 0 }).total, 3);
-    assert.equal(perSimulatorBytes(true, null), SLIM_SIM_BYTES + PER_SIM_EXTRA_BYTES);
-    assert.equal(perSimulatorBytes(false, null), STOCK_SIM_BYTES + PER_SIM_EXTRA_BYTES);
   });
 
   it("is capped by Settings, and is the setting alone when the RAM is unknown", () => {
     assert.equal(simulatorCapacity({ settingCap: 4, hostBytes: MAC_24, slim: true, top: null, leased: 0 }).total, 4);
     assert.deepEqual(simulatorCapacity({ settingCap: 5, hostBytes: null, slim: true, top: null, leased: 0 }), {
       total: 5,
-      perSimBytes: SLIM_SIM_BYTES + PER_SIM_EXTRA_BYTES,
+      perSimBytes: 2 * GiB,
       byMemory: null,
       roomNow: null
     });
@@ -55,10 +53,10 @@ describe("simulatorCapacity", () => {
 
   it("budgets what this host's simulators really measure when it is more than the default", () => {
     const measured = top(sim(1.6 * GiB, true, "A"), sim(1.4 * GiB, true, "B"), sim(5 * GiB, false, "S"));
-    assert.equal(perSimulatorBytes(true, measured), 1.5 * GiB + PER_SIM_EXTRA_BYTES);
-    assert.equal(perSimulatorBytes(false, measured), 5 * GiB + PER_SIM_EXTRA_BYTES);
-    assert.equal(perSimulatorBytes(true, top(sim(0.7 * GiB, true))), SLIM_SIM_BYTES + PER_SIM_EXTRA_BYTES, "never below the default");
-    assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: true, top: measured, leased: 2 }).byMemory, Math.floor((MAC_24 - MAC_HOST_RESERVED_BYTES) / (2.5 * GiB)));
+    assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: true, top: measured, leased: 2 }).perSimBytes, 2.5 * GiB);
+    assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: false, top: measured, leased: 2 }).perSimBytes, 6 * GiB);
+    assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: true, top: top(sim(0.7 * GiB, true)), leased: 1 }).perSimBytes, 2 * GiB, "never below the default");
+    assert.equal(simulatorCapacity({ settingCap: 16, hostBytes: MAC_24, slim: true, top: measured, leased: 2 }).byMemory, 6);
   });
 
   it("never goes below zero", () => {

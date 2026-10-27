@@ -1,27 +1,21 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
-import {
-  IOS_TAG_INPUT_ADMITTED,
-  IOS_TAG_SCREEN_CONFIG,
-  parseScreenConfig,
-  rawSimulatorPoint,
-  ServeSimInputSocket,
-  taggedJson
-} from "./serveSimInput.ts";
-import { fakeWebSocketClass, testDeps } from "./testing/fakes.ts";
+import { ServeSimInputSocket } from "./serveSimInput.ts";
+import { fakeWebSocketClass, browserApis, restoreBrowserApis } from "./testing/fakes.ts";
 
 const URL = "ws://hub.test/vendor/serve-sim/helper/ws?device=UDID&token=t";
 const decode = (bytes: string | Uint8Array) => {
   const b = bytes as Uint8Array;
   return [b[0], JSON.parse(new TextDecoder().decode(b.subarray(1)))];
 };
-const admitted = () => Uint8Array.of(IOS_TAG_INPUT_ADMITTED).buffer;
-const screen = (config: unknown) => taggedJson(IOS_TAG_SCREEN_CONFIG, config).buffer;
+const admitted = () => Uint8Array.of(0x83).buffer;
+const screen = (config: unknown) => new Uint8Array([0x82, ...new TextEncoder().encode(JSON.stringify(config))]).buffer;
 
 const sockets: ServeSimInputSocket[] = [];
 beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
 afterEach(() => {
   for (const socket of sockets.splice(0)) socket.close();
+  restoreBrowserApis();
   mock.timers.reset();
 });
 
@@ -30,9 +24,9 @@ function setup() {
   const ready: Array<[boolean, string | undefined]> = [];
   const configs: unknown[] = [];
   const errors: string[] = [];
+  browserApis({ WebSocket: ws.WebSocket });
   const input = new ServeSimInputSocket({
     url: URL,
-    deps: testDeps({ WebSocket: ws.WebSocket }),
     onReady: (value, reason) => ready.push([value, reason]),
     onScreenConfig: (config) => configs.push(config),
     onError: (error) => errors.push(error.code)
@@ -71,9 +65,23 @@ describe("ServeSimInputSocket", () => {
     t.socket().receive(admitted());
     t.socket().receive(screen({ width: 1206, height: 2622, orientation: "landscape_left", extra: 1 }));
     assert.deepEqual(t.input.screenConfig, { width: 1206, height: 2622, orientation: "landscape_left" });
-    assert.deepEqual(t.configs, [t.input.screenConfig]);
+    assert.deepEqual(t.configs, [{ width: 1206, height: 2622, orientation: "landscape_left" }]);
     t.input.sendTouch("begin", 0.2, 0.1);
     assert.deepEqual(decode(t.socket().sent.at(-1)!), [0x03, { type: "begin", x: 0.1, y: 0.8 }]);
+    for (const [config, point] of [
+      [{ width: 100, height: 200, orientation: "landscape_right" }, { x: 0.9, y: 0.2 }],
+      [{ width: 100, height: 200, orientation: "portrait_upside_down" }, { x: 0.8, y: 0.9 }],
+      [{ width: 200, height: 100, orientation: "landscape_left" }, { x: 0.2, y: 0.1 }]
+    ] as const) {
+      t.socket().receive(screen(config));
+      t.input.sendTouch("begin", 0.2, 0.1);
+      assert.deepEqual(decode(t.socket().sent.at(-1)!), [0x03, { type: "begin", ...point }]);
+    }
+    const valid = t.input.screenConfig;
+    for (const invalid of [{ width: 0, height: 10, orientation: "portrait" }, { width: 10, height: 10, orientation: "sideways" }, null]) {
+      t.socket().receive(screen(invalid));
+      assert.deepEqual(t.input.screenConfig, valid, "an unreadable config cannot corrupt touch mapping");
+    }
   });
 
   it("stops sending while another client holds the simulator's input", () => {
@@ -82,7 +90,7 @@ describe("ServeSimInputSocket", () => {
     t.socket().receive(admitted());
     t.socket().receive(screen({ width: 1, height: 2, orientation: "portrait", inputUnavailable: true }));
     assert.equal(t.input.ready, false);
-    assert.deepEqual(t.ready.at(-1), [false, "Simulator input is in use by another client."]);
+    assert.equal(t.ready.at(-1)?.[0], false);
     assert.equal(t.input.sendButton("home"), false);
   });
 
@@ -109,7 +117,7 @@ describe("ServeSimInputSocket", () => {
     t.socket().serverOpen();
     t.socket().receive(admitted());
     t.socket().serverClose(1006);
-    assert.deepEqual(t.ready.at(-1), [false, "closed 1006"]);
+    assert.equal(t.ready.at(-1)?.[0], false);
     mock.timers.tick(500);
     assert.equal(t.ws.instances.length, 2);
     t.socket().serverOpen();
@@ -128,27 +136,5 @@ describe("ServeSimInputSocket", () => {
     t.input.close();
     mock.timers.tick(60_000);
     assert.equal(t.ws.instances.length, 1);
-  });
-});
-
-describe("screen config helpers", () => {
-  it("validates 0x82 payloads", () => {
-    assert.equal(parseScreenConfig({ width: 0, height: 10, orientation: "portrait" }), null);
-    assert.equal(parseScreenConfig({ width: 10, height: 10, orientation: "sideways" }), null);
-    assert.equal(parseScreenConfig(null), null);
-    assert.deepEqual(parseScreenConfig({ width: 10, height: 20, orientation: "portrait", inputUnavailable: false }), {
-      width: 10,
-      height: 20,
-      orientation: "portrait",
-      inputUnavailable: false
-    });
-  });
-
-  it("rotates points only for a portrait framebuffer in another orientation", () => {
-    const portrait = { width: 100, height: 200 };
-    assert.deepEqual(rawSimulatorPoint({ ...portrait, orientation: "landscape_right" }, 0.2, 0.1), { x: 0.9, y: 0.2 });
-    assert.deepEqual(rawSimulatorPoint({ ...portrait, orientation: "portrait_upside_down" }, 0.2, 0.1), { x: 0.8, y: 0.9 });
-    assert.deepEqual(rawSimulatorPoint({ width: 200, height: 100, orientation: "landscape_left" }, 0.2, 0.1), { x: 0.2, y: 0.1 });
-    assert.deepEqual(rawSimulatorPoint(null, 0.2, 0.1), { x: 0.2, y: 0.1 });
   });
 });

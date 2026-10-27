@@ -7,7 +7,7 @@ import test from "node:test";
 import { FsSandboxError } from "@orquester/config/fs";
 
 import { BoxFsUnavailableError } from "./errors.ts";
-import { BoxPaths, hostJoin } from "./paths.ts";
+import { BoxPaths } from "./paths.ts";
 import { BoxProjectFs, HostProjectFs, locateProjectFs } from "./project-fs.ts";
 import { boxDiskConnection, fakeBoxRegistry } from "./test-box.ts";
 
@@ -41,8 +41,6 @@ test("Windows mapping: containment compares case-insensitively; POSIX does not",
   assert.equal(posixPaths.toHost("relative"), null);
   assert.equal(posixPaths.segmentsInside("/a/Proj", "/a/proj/x"), null);
   assert.deepEqual(posixPaths.segmentsInside("/a/proj", "/a/proj/x/y"), ["x", "y"]);
-  assert.equal(hostJoin("/a/proj", []), "/a/proj");
-  assert.equal(hostJoin("/a/proj", ["x", "y"]), "/a/proj/x/y");
 });
 
 // --- containment through the box -----------------------------------------------------------

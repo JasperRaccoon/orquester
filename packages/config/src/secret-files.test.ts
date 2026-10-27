@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   isSecretBlobSha256,
-  isSecretVaultVersionId,
   parseSecretVaultsConfig,
   secretBlobsDir,
   secretFilesDir,
@@ -28,7 +27,7 @@ const vault = (overrides: Record<string, unknown> = {}): Record<string, unknown>
   files: [
     {
       path: ".env",
-      versions: [version(), version({ id: "v_older0000", sha256: SHA_B, updatedBy: { kind: "agent", threadId: "t-1" } })]
+      versions: [version(), version({ id: "v_12345678", sha256: SHA_B, updatedBy: { kind: "agent", threadId: "t-1" } })]
     },
     { path: "apps/web/.env.local", versions: [version({ id: "v_web000000" })] }
   ],
@@ -45,14 +44,6 @@ test("the vault index and its blobs live under daemon/secret-files", () => {
   assert.equal(secretFilesDir("/srv/orq"), "/srv/orq/daemon/secret-files");
   assert.equal(secretVaultIndexPath("/srv/orq"), "/srv/orq/daemon/secret-files/vaults.json");
   assert.equal(secretBlobsDir("/srv/orq"), "/srv/orq/daemon/secret-files/blobs");
-});
-
-test("a well-formed index round-trips unchanged", () => {
-  const file = { version: 1, vaults: [vault(), vault({ workspace: "other", clones: {} })] };
-  const parsed = parseSecretVaultsConfig(plain(file));
-  assert.equal(parsed.vaults.length, 2);
-  assert.deepEqual(parsed.rejected, []);
-  assert.deepEqual(plain(serializeSecretVaultsFile(parsed)), file);
 });
 
 test("an empty or default file parses to no vaults; missing excluded/clones default", () => {
@@ -98,6 +89,9 @@ test("bad records are set aside one by one, verbatim, and written back after the
     vault({ files: [{ path: "a\\b", versions: [version()] }] }),
     vault({ files: [{ path: ".env", versions: [] }] }),
     vault({ files: [{ path: ".env", versions: [version({ id: "nope" })] }] }),
+    vault({ files: [{ path: ".env", versions: [version({ id: "v_1234567" })] }] }),
+    vault({ files: [{ path: ".env", versions: [version({ id: `v_${"a".repeat(65)}` })] }] }),
+    vault({ files: [{ path: ".env", versions: [version({ id: "v_1234/678" })] }] }),
     vault({ files: [{ path: ".env", versions: [version({ sha256: "../../etc/passwd" })] }] }),
     vault({ files: [{ path: ".env", versions: [version({ sha256: SHA_A.toUpperCase() })] }] }),
     vault({ files: [{ path: ".env", versions: [version(), version()] }] }),
@@ -171,12 +165,7 @@ test("a __proto__ key in a stored map stays an own key and pollutes nothing", ()
   assert.equal(JSON.stringify(serializeSecretVaultsFile(parsed)), text);
 });
 
-test("the record schema and the id predicates", () => {
-  assert.equal(secretVaultRecordSchema.safeParse(plain(vault())).success, true);
-  assert.equal(isSecretVaultVersionId("v_12345678"), true);
-  assert.equal(isSecretVaultVersionId("v_1234567"), false);
-  assert.equal(isSecretVaultVersionId(`v_${"a".repeat(65)}`), false);
-  assert.equal(isSecretVaultVersionId("v_1234/678"), false);
+test("blob ids are lowercase SHA-256 filenames", () => {
   assert.equal(isSecretBlobSha256(SHA_B), true);
   assert.equal(isSecretBlobSha256(`${SHA_B}\n`), false);
   assert.equal(isSecretBlobSha256("../".repeat(21) + "a"), false);

@@ -61,52 +61,50 @@ func TestServiceDryRunsWriteNothing(t *testing.T) {
 	home := t.TempDir()
 	dataDir := filepath.Join(t.TempDir(), "data dir")
 	t.Setenv("HOME", home)
-	// Unset: a dry run on a dev host shows a placeholder instead of failing.
-	t.Setenv("ORQ_DAEMON_URL", "")
-	t.Setenv("ORQ_BOX_ID", "")
-	t.Setenv("ORQ_BOOTSTRAP_TOKEN", "")
-	t.Setenv("ORQ_BOOTSTRAP_TOKEN_FILE", "")
+	for _, key := range serviceEnvKeys {
+		t.Setenv(key, "")
+	}
+	tokenFile := filepath.Join(t.TempDir(), "one-time-token")
+	const secret = "private-bootstrap-for-dry-run"
+	if err := os.WriteFile(tokenFile, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORQ_BOOTSTRAP_TOKEN_FILE", tokenFile)
 
 	var out strings.Builder
 	if err := InstallServiceCommand("test", ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
 		t.Fatal(err)
 	}
-	got := out.String()
-	for _, want := range []string{
-		"nothing is written or run",
-		"ORQ_DAEMON_URL is not set",
-		"write '" + filepath.Join(dataDir, "agent.env") + "' (mode 0600):",
-		"ORQ_DAEMON_URL=<ORQ_DAEMON_URL>\n",
-		"# service kind: ",
+	for _, value := range []string{
+		"ORQ_DAEMON_URL=<ORQ_DAEMON_URL>",
+		"ORQ_BOOTSTRAP_TOKEN_FILE=" + filepath.Join(dataDir, "bootstrap-token"),
+		filepath.Join(dataDir, "agent.env"),
 	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("install dry run lacks %q:\n%s", want, got)
+		if !strings.Contains(out.String(), value) {
+			t.Errorf("dry run omitted planned configuration %q", value)
 		}
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Fatal("dry run revealed the bootstrap credential")
 	}
 	out.Reset()
 	err := UninstallServiceCommand(ServiceOptions{DataDir: dataDir, DryRun: true}, &out)
-	if os.Geteuid() != 0 && pathExists(systemdUnitPath) {
-		// A system service belongs to root, even for a dry run. The temporary
-		// HOME has no user unit that this caller could uninstall instead.
-		const want = "orq-agent is installed as a system service: run `sudo orq-agent uninstall-service`"
-		if err == nil || err.Error() != want {
-			t.Errorf("uninstall dry run error = %v; want %q", err, want)
+	_, unitErr := os.Stat("/etc/systemd/system/orq-agent.service")
+	if os.Geteuid() != 0 && unitErr == nil {
+		// This temporary HOME owns no user unit; a system installation needs root.
+		if err == nil || !strings.Contains(err.Error(), "system service") || !strings.Contains(err.Error(), "sudo") {
+			t.Fatalf("expected the system-service ownership refusal: %v", err)
 		}
-		if out.Len() != 0 {
-			t.Errorf("refused uninstall dry run printed a plan:\n%s", out.String())
-		}
-	} else {
-		if err != nil {
-			t.Errorf("uninstall dry run: %v", err)
-		}
-		if !strings.Contains(out.String(), "nothing is removed or run") {
-			t.Errorf("uninstall dry run:\n%s", out.String())
-		}
+	} else if err != nil {
+		t.Fatalf("uninstall dry run: %v", err)
 	}
 	if pathExists(dataDir) {
 		t.Error("a dry run created the data dir")
 	}
-	if entries, _ := os.ReadDir(home); len(entries) != 0 {
-		t.Errorf("a dry run wrote into HOME: %v", entries)
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Errorf("dry run wrote into HOME: %v %v", entries, err)
+	}
+	if data, err := os.ReadFile(tokenFile); err != nil || string(data) != secret+"\n" {
+		t.Fatalf("dry run consumed or changed the source token: %q %v", data, err)
 	}
 }

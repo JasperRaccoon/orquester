@@ -18,10 +18,11 @@ it("pinches only a hit device, accumulates independently of native readback, cla
   assert.equal(change.mock.callCount(), 0);
   assert.equal(pinch.begin(0.5, 0.5), true);
   pinch.move(0.25);
-  assert.deepEqual(lastArgs(change), [120]);
-  confirmed = 100;
+  const first = lastArgs(change)![0] as number;
+  assert.ok(first > 90 && first < 180);
+  confirmed = 0;
   pinch.move(0.25);
-  assert.deepEqual(lastArgs(change), [150]);
+  assert.ok((lastArgs(change)![0] as number) > first, "native readback cannot rewind an ongoing pinch");
   pinch.move(2);
   assert.deepEqual(lastArgs(change), [180]);
   pinch.move(-3);

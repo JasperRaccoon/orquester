@@ -15,22 +15,19 @@ import {
   type AgentChatSecretRequestEventPayload
 } from "@orquester/api/agent-chat";
 
-import { parseSecretAnswer, registerSecretRequestRoutes, SecretRequestRegistry } from "./secret-requests.ts";
+import { registerSecretRequestRoutes, SecretRequestRegistry } from "./secret-requests.ts";
 
 const VALUE = "hunter2-but-longer-0815";
 const INPUT = { name: "API_KEY", prompt: "Paste your API key.", purpose: "Call the API" };
 
-function registry(options: { timeoutMs?: number } = {}) {
+function registry() {
   const events: AgentChatSecretRequestEventPayload[] = [];
   const waiters: Array<(payload: AgentChatSecretRequestEventPayload) => void> = [];
-  let n = 0;
   const created = new SecretRequestRegistry({
     publish: (payload) => {
       events.push(payload);
       for (const waiter of waiters.splice(0)) waiter(payload);
-    },
-    newId: () => `req-${(n += 1)}`,
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {})
+    }
   });
   /** The next published event — the open of a request just made. */
   const next = () => new Promise<AgentChatSecretRequestEventPayload>((resolve) => waiters.push(resolve));
@@ -38,7 +35,8 @@ function registry(options: { timeoutMs?: number } = {}) {
 }
 
 describe("secret requests — the wait", () => {
-  it("hands the value to the waiting call, once, and publishes only the request", async () => {
+  it("hands the value to the waiting call, once, and publishes only the request", async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-14T10:00:00.000Z") });
     const { registry: requests, events, next } = registry();
     const opened = next();
     const answer = requests.request("t1", INPUT, new AbortController().signal);
@@ -59,12 +57,12 @@ describe("secret requests — the wait", () => {
     );
     assert.ok(!JSON.stringify(events).includes(VALUE), "the bus never carries the value");
     assert.deepEqual(events[0]?.request, {
-      requestId: "req-1",
+      requestId: request.requestId,
       sessionId: "t1",
       name: "API_KEY",
       prompt: "Paste your API key.",
       purpose: "Call the API",
-      createdAt: events[0]?.request.createdAt
+      createdAt: "2026-10-14T10:00:00.000Z"
     });
   });
 
@@ -111,13 +109,14 @@ describe("secret requests — the wait", () => {
     // open), so with real timers it is the only thing left in this test's event loop and Node
     // may end the loop before it fires — the test then fails "event loop already resolved".
     t.mock.timers.enable({ apis: ["setTimeout"] });
-    const short = registry({ timeoutMs: 5 });
-    const waiting = short.registry.request("t1", INPUT, new AbortController().signal);
-    assert.equal(short.registry.list("t1").length, 1);
-    t.mock.timers.tick(5);
+    const h = registry();
+    const waiting = h.registry.request("t1", INPUT, new AbortController().signal);
+    t.mock.timers.tick(10 * 60_000 - 1);
+    assert.equal(h.registry.list("t1").length, 1);
+    t.mock.timers.tick(1);
     assert.deepEqual(await waiting, { outcome: "timed_out" });
-    assert.deepEqual(short.registry.list("t1"), []);
-    assert.deepEqual(short.events.map((event) => [event.open, event.outcome]), [[true, undefined], [false, "timed_out"]]);
+    assert.deepEqual(h.registry.list("t1"), []);
+    assert.deepEqual(h.events.map((event) => [event.open, event.outcome]), [[true, undefined], [false, "timed_out"]]);
   });
 });
 
@@ -152,22 +151,23 @@ describe("secret requests — delivery", () => {
 });
 
 describe("secret requests — an unconfirmed delivery", () => {
-  it("a result that has not left the daemon within the bound is reported unconfirmed, never not-delivered", async () => {
+  it("a result that has not left the daemon within the bound is reported unconfirmed, never not-delivered", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const events: AgentChatSecretRequestEventPayload[] = [];
     const waiters: Array<() => void> = [];
     const requests = new SecretRequestRegistry({
       publish: (payload) => {
         events.push(payload);
         for (const waiter of waiters.splice(0)) waiter();
-      },
-      deliveryBoundMs: 5
+      }
     });
     const opened = new Promise<void>((resolve) => waiters.push(resolve));
     // The route never says either way (a stalled socket).
     const call = requests.request("t1", INPUT, new AbortController().signal, new Promise<boolean>(() => {}));
     await opened;
-    const outcome = await requests.answer("t1", events[0]!.request.requestId, { answer: "provide", value: VALUE });
-    assert.equal(outcome, "unconfirmed");
+    const outcome = requests.answer("t1", events[0]!.request.requestId, { answer: "provide", value: VALUE });
+    t.mock.timers.tick(30_000);
+    assert.equal(await outcome, "unconfirmed");
     assert.deepEqual(await call, { outcome: "provided", value: VALUE }, "the call did receive it");
     assert.equal(events.at(-1)?.outcome, "provided", "handed to the call");
   });
@@ -231,6 +231,16 @@ describe("secret requests — the routes", () => {
     assert.equal(again.json().error.code, "SECRET_REQUEST_NOT_FOUND");
     assert.ok(!again.body.includes(VALUE));
 
+    const declined = requests.request("t1", INPUT, new AbortController().signal);
+    const card = requests.list("t1")[0]!;
+    const declineResponse = await server.inject({
+      method: "POST",
+      url: agentChatRoutes.secretRequest("t1", card.requestId),
+      payload: { answer: "decline", value: VALUE }
+    });
+    assert.deepEqual(declineResponse.json(), { ok: true, outcome: "declined" });
+    assert.deepEqual(await declined, { outcome: "declined" });
+
     await server.close();
     assert.ok(logs.length > 0, "the server logged its requests");
     assert.ok(!logs.join("").includes(VALUE), "no log line holds the value");
@@ -244,13 +254,15 @@ describe("secret requests — the routes", () => {
     const { request } = await opened;
     const url = agentChatRoutes.secretRequest("t1", request.requestId);
     for (const payload of [
+      null,
+      "provide",
       { answer: "provide", value: "   " },
       { answer: "provide", value: `${VALUE}${"x".repeat(SECRET_VALUE_MAX_CHARS)}` },
       { answer: "provide" },
       { answer: "maybe", value: VALUE },
       [VALUE]
     ]) {
-      const response = await server.inject({ method: "POST", url, payload });
+      const response = await server.inject({ method: "POST", url, headers: { "content-type": "application/json" }, payload: JSON.stringify(payload) });
       assert.equal(response.statusCode, 400);
       assert.equal(response.json().error.code, "INVALID_ARGUMENT");
       assert.ok(!response.body.includes(VALUE));
@@ -281,13 +293,5 @@ describe("secret requests — the routes", () => {
     assert.ok(!response.body.includes(VALUE));
     await server.close();
     assert.ok(!logs.join("").includes(VALUE));
-  });
-
-  it("parses exactly the two answers", () => {
-    assert.deepEqual(parseSecretAnswer({ answer: "decline", value: "ignored" }), { answer: "decline" });
-    assert.deepEqual(parseSecretAnswer({ answer: "provide", value: " v\t" }), { answer: "provide", value: " v\t" }, "never altered");
-    assert.equal(parseSecretAnswer({ answer: "provide", value: " \n\t " }), null, "all whitespace is refused");
-    assert.equal(parseSecretAnswer(null), null);
-    assert.equal(parseSecretAnswer("provide"), null);
   });
 });

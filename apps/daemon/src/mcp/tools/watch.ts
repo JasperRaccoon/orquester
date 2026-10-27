@@ -151,7 +151,7 @@ function pickWords(report: WorkReport): Record<string, unknown> {
   return { ...(lastTurn ? { lastTurn } : {}), ...(reply !== undefined ? { reply } : {}), ...(replyTruncated ? { replyTruncated } : {}), ...(emptyReply ? { emptyReply, hint } : {}), ...(error !== undefined ? { error } : {}) };
 }
 
-/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/schema-refs.test.ts`). */
+/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). */
 const sessionIdField = () => z.string().min(1);
 
 export const waitForSessionTool = defineTool({

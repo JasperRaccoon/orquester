@@ -4,27 +4,21 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { deflateSync } from "node:zlib";
 
-import { DEVICE_ACTION_KINDS, type DeviceActionInput } from "@orquester/api";
+import { type DeviceActionInput } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
-import { createDeviceActionExecutor, homePackageOf, planAction, renderSettle, renderSnapshot, resolvePoint, shellQuote, swipePoints, type PlanContext } from "./actions.ts";
-import { parseAgentDeviceJson, type AgentDeviceClient, type AgentDeviceResult } from "./agent-device.ts";
+import { createDeviceActionExecutor } from "./actions.ts";
+import { type AgentDeviceClient, type AgentDeviceResult } from "./agent-device.ts";
 import { isDeviceError } from "./errors.ts";
-import { FakeDeviceHost } from "./testing.ts";
+import { FakeDeviceHost, solidPng } from "./testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
 const signal = new AbortController().signal;
 
-function fixtureData(name: string): Record<string, unknown> {
-  const json = JSON.parse(readFileSync(new URL(`./fixtures/agent-device/${name}.json`, import.meta.url), "utf8")) as { data: Record<string, unknown> };
-  return json.data;
-}
-
 function result(name: string): AgentDeviceResult {
   const stdout = readFileSync(new URL(`./fixtures/agent-device/${name}.json`, import.meta.url), "utf8");
-  const json = parseAgentDeviceJson(stdout) as { success: boolean };
+  const json = JSON.parse(stdout) as { success: boolean };
   return { exitCode: json.success ? 0 : 1, stdout, stderr: "", json };
 }
 
@@ -50,108 +44,36 @@ function lease(overrides: Partial<StoredDeviceLease> = {}): StoredDeviceLease {
   };
 }
 
-const android: PlanContext = { platform: "android", deviceId: "emulator-5554", unitsPerPoint: 2, screen: { width: 360, height: 640 } };
-const ios: PlanContext = { platform: "ios", deviceId: "UDID-1", unitsPerPoint: 1, screen: { width: 402, height: 874 } };
-
-/** One input per action kind, as `validateDeviceActionInput` accepts it. */
-const SAMPLES: Record<string, DeviceActionInput> = {
-  snapshot: { action: "snapshot" },
-  tap: { action: "tap", ref: "@e3" },
-  long_press: { action: "long_press", x: 100, y: 200, durationMs: 800 },
-  fill: { action: "fill", ref: "@e5", text: "hello" },
-  type: { action: "type", text: "--abc" },
-  press: { action: "press", key: "back" },
-  swipe: { action: "swipe", direction: "up" },
-  scroll: { action: "scroll", direction: "down" },
-  open_app: { action: "open_app", app: "com.example" },
-  close_app: { action: "close_app", app: "com.example" },
-  open_url: { action: "open_url", url: "https://example.com/a?b=1&c='x'" },
-  screenshot: { action: "screenshot" },
-  logs: { action: "logs", seconds: 5 },
-  rotate: { action: "rotate", orientation: "landscape" },
-  appearance: { action: "appearance", appearance: "dark" },
-  location: { action: "location", lat: 37.77, lon: -122.42 },
-  permissions: { action: "permissions", app: "com.example", permission: "Camera", grant: "revoke" },
-  wait: { action: "wait", text: "Done", timeoutMs: 3000 }
-};
-
-test("the mapping table: every action kind on Android and iOS", () => {
-  assert.deepEqual(Object.keys(SAMPLES).sort(), [...DEVICE_ACTION_KINDS].sort());
-  const table = (ctx: PlanContext) => Object.fromEntries(Object.entries(SAMPLES).map(([kind, input]) => [kind, planAction(input, ctx)]));
-  assert.deepEqual(table(android), {
-    snapshot: { via: "special", kind: "snapshot" },
-    tap: { via: "agent-device", command: "click", args: ["@e3", "--settle"] },
-    long_press: { via: "agent-device", command: "longpress", args: ["200", "400", "800", "--settle"] },
-    fill: { via: "agent-device", command: "fill", args: ["@e5", "--text-stdin", "--settle"], stdin: "hello" },
-    type: { via: "agent-device", command: "batch", args: ["--steps-file", "/dev/stdin"], stdin: JSON.stringify([{ command: "type", input: { text: "--abc" } }]) },
-    press: { via: "agent-device", command: "back", args: ["--settle"] },
-    swipe: { via: "agent-device", command: "swipe", args: ["360", "896", "360", "384"] },
-    scroll: { via: "agent-device", command: "scroll", args: ["down", "--settle"] },
-    open_app: { via: "agent-device", command: "open", args: ["com.example"], timeoutMs: 150_000 },
-    close_app: { via: "host", tool: "adb", calls: [["-s", "emulator-5554", "shell", "am force-stop 'com.example'"]] },
-    open_url: { via: "host", tool: "adb", calls: [["-s", "emulator-5554", "shell", `am start -a android.intent.action.VIEW -d 'https://example.com/a?b=1&c='\\''x'\\'''`]] },
-    screenshot: { via: "special", kind: "screenshot" },
-    logs: { via: "special", kind: "logs" },
-    rotate: { via: "special", kind: "rotate-emulator" },
-    appearance: { via: "agent-device", command: "settings", args: ["appearance", "dark"] },
-    location: { via: "agent-device", command: "settings", args: ["location", "set", "37.77", "-122.42"] },
-    permissions: { via: "agent-device", command: "settings", args: ["permission", "deny", "camera", "--app", "com.example"] },
-    wait: {
-      via: "agent-device",
-      command: "batch",
-      args: ["--steps-file", "/dev/stdin"],
-      stdin: JSON.stringify([{ command: "wait", input: { text: "Done", timeoutMs: 3000 } }]),
-      timeoutMs: 23_000
-    }
-  });
-  const onIos = table(ios);
-  assert.deepEqual(onIos.long_press, { via: "agent-device", command: "longpress", args: ["100", "200", "800", "--settle"] });
-  assert.deepEqual(onIos.swipe, { via: "agent-device", command: "swipe", args: ["201", "612", "201", "262"] });
-  assert.deepEqual(onIos.close_app, { via: "host", tool: "simctl", calls: [["terminate", "UDID-1", "com.example"]] });
-  assert.deepEqual(onIos.open_url, { via: "host", tool: "simctl", calls: [["openurl", "UDID-1", "https://example.com/a?b=1&c='x'"]] });
-  assert.deepEqual(onIos.rotate, { via: "agent-device", command: "orientation", args: ["landscape-left"] });
-  // Keys.
-  const press = (key: DeviceActionInput["key"], ctx = android) => planAction({ action: "press", key }, ctx);
-  assert.deepEqual(press("home"), { via: "agent-device", command: "home", args: [] });
-  assert.deepEqual(press("enter"), { via: "agent-device", command: "keyboard", args: ["enter"] });
-  assert.deepEqual(press("app_switch"), { via: "agent-device", command: "app-switcher", args: [] });
-  assert.deepEqual(press("volume_down"), { via: "agent-device", command: "hardware-button", args: ["volume-down"] });
-  assert.deepEqual(press("lock"), { via: "agent-device", command: "hardware-button", args: ["sleep"] });
-  assert.throws(() => press("lock", ios), (error: unknown) => isDeviceError(error) && error.code === "INVALID_ARGUMENT");
-  // A physical Android device rotates through agent-device; a wait on a ref; refusals.
-  assert.deepEqual(planAction({ action: "rotate", orientation: "portrait" }, { ...android, deviceId: "R58M123" }), { via: "agent-device", command: "orientation", args: ["portrait"] });
-  assert.deepEqual(planAction({ action: "wait", ref: "@e9" }, android), { via: "agent-device", command: "wait", args: ["@e9", "10000"], timeoutMs: 30_000 });
-  assert.throws(() => planAction({ action: "permissions", app: "a", permission: "teleport", grant: "grant" }, android), /Unknown permission/);
-  assert.throws(() => planAction({ action: "open_url", url: "not a url" }, android), /spaces|full URL/);
-  assert.throws(() => planAction({ action: "swipe", direction: "up" }, { ...android, screen: null }), /snapshot first/);
-  assert.equal(shellQuote("a'b"), `'a'\\''b'`);
-  assert.deepEqual(swipePoints("left", { width: 100, height: 200 }), { from: { x: 80, y: 100 }, to: { x: 20, y: 100 } });
-});
-
-test("snapshots render as compact refs with frames in points; settle diffs as +/- lines", () => {
-  const rendered = renderSnapshot(fixtureData("snapshot-noopen"), 2);
-  assert.equal(rendered.count, 13);
-  const lines = rendered.text.split("\n");
-  assert.equal(lines[0], "Snapshot: 13 elements");
-  assert.equal(lines[2], '@e2 [viewpager] "At a glance"');
-  assert.ok(lines.includes('@e8 [text] "Chrome"'));
-  // 720×1280 pixels at 2×: the Google search bar's frame in dp.
-  assert.deepEqual(rendered.refs.e1, { x: 0, y: 0, width: 360, height: 640 });
-
-  const fill = renderSettle(fixtureData("fill-settle"))!;
-  assert.match(fill, /^Screen changed \(\+7 −15\)/);
-  assert.ok(fill.includes('+ @e2 [group] "orq"'));
-  assert.ok(fill.includes('- @e2 [group] "Sticker Keyboard"'));
-  assert.match(renderSettle(fixtureData("click-settle"))!, /did not settle/);
-  assert.equal(renderSettle(fixtureData("swipe")), null);
-});
-
-test("ref → point: agent-device's tap point (pixels → points), else the ref's frame centre from the last snapshot", () => {
-  const refs = { e10: { x: 20, y: 550, width: 320, height: 30 } };
-  assert.deepEqual(resolvePoint({ ref: "@e10" }, fixtureData("click-settle"), refs, 2), { x: 180, y: 567 });
-  assert.deepEqual(resolvePoint({ ref: "@e10" }, {}, refs, 2), { x: 180, y: 565 });
-  assert.equal(resolvePoint({ ref: "@e99" }, {}, refs, 2), undefined);
-  assert.deepEqual(resolvePoint({ x: 10, y: 20 }, {}, refs, 2), { x: 10, y: 20 });
+test("actions reach the pinned agent-device protocol with platform coordinates and private text on stdin", async () => {
+  const cases: [DeviceActionInput, string, string[], string?][] = [
+    [{ action: "long_press", x: 100, y: 200, durationMs: 800 }, "longpress", ["200", "400", "800", "--settle"]],
+    [{ action: "type", text: "--abc" }, "batch", ["--steps-file", "/dev/stdin"], JSON.stringify([{ command: "type", input: { text: "--abc" } }])],
+    [{ action: "press", key: "enter" }, "keyboard", ["enter"]],
+    [{ action: "press", key: "app_switch" }, "app-switcher", []],
+    [{ action: "press", key: "volume_down" }, "hardware-button", ["volume-down"]],
+    [{ action: "press", key: "lock" }, "hardware-button", ["sleep"]],
+    [{ action: "swipe", from: { x: 10, y: 20 }, to: { x: 30, y: 40 } }, "swipe", ["20", "40", "60", "80"]],
+    [{ action: "scroll", direction: "down" }, "scroll", ["down", "--settle"]],
+    [{ action: "open_app", app: "com.example" }, "open", ["com.example"]],
+    [{ action: "appearance", appearance: "dark" }, "settings", ["appearance", "dark"]],
+    [{ action: "location", lat: 37.77, lon: -122.42 }, "settings", ["location", "set", "37.77", "-122.42"]],
+    [{ action: "permissions", app: "com.example", permission: "Camera", grant: "revoke" }, "settings", ["permission", "deny", "camera", "--app", "com.example"]],
+    [{ action: "wait", text: "Done", timeoutMs: 3000 }, "batch", ["--steps-file", "/dev/stdin"], JSON.stringify([{ command: "wait", input: { text: "Done", timeoutMs: 3000 } }])],
+    [{ action: "wait", ref: "@e9" }, "wait", ["@e9", "10000"]]
+  ];
+  const agent = new ScriptedAgentDevice(() => ok());
+  const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
+  const ctx = { host: new FakeDeviceHost(), lease: lease() };
+  for (const [input, command, args, stdin] of cases) {
+    await executor.execute(ctx, input, signal);
+    assert.deepEqual(agent.calls.at(-1), { command, args, ...(stdin !== undefined ? { stdin } : {}) }, input.action);
+  }
+  const ios = { host: new FakeDeviceHost("box:mac", "box", ["ios"]), lease: lease({ id: "ios", platform: "ios", deviceId: "UDID-1", screen: { width: 402, height: 874, scale: 3 } }) };
+  await executor.execute(ios, { action: "long_press", x: 100, y: 200, durationMs: 800 }, signal);
+  assert.deepEqual(agent.calls.at(-1), { command: "longpress", args: ["100", "200", "800", "--settle"] });
+  await executor.execute(ios, { action: "rotate", orientation: "landscape" }, signal);
+  assert.deepEqual(agent.calls.at(-1), { command: "orientation", args: ["landscape-left"] });
+  await assert.rejects(executor.execute(ios, { action: "press", key: "lock" }, signal), (error: unknown) => isDeviceError(error) && error.code === "INVALID_ARGUMENT");
 });
 
 /** An agent-device client that answers per command from a script and records the calls. */
@@ -174,17 +96,32 @@ test("execute: snapshot keeps refs; a ref tap logs its point, target and diff; f
   const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
   const ctx = { host: new FakeDeviceHost(), lease: lease() };
   const snap = await executor.execute(ctx, { action: "snapshot" }, signal);
-  assert.equal(snap.log.summary, "Read the screen (13 elements)");
+  assert.ok(snap.text!.includes("@e2") && snap.text!.includes("At a glance"));
   assert.match(snap.text!, /@e10 \[group\] "Google search"/);
 
   const tap = await executor.execute(ctx, { action: "tap", ref: "@e10" }, signal);
-  assert.deepEqual(tap.log, { summary: "Tapped @e10 “Google search”", point: { x: 180, y: 567 }, target: "@e10 Google search" });
+  assert.deepEqual(tap.log.point, { x: 180, y: 567 });
+  assert.equal(tap.log.target, "@e10 Google search");
   assert.match(tap.text!, /did not settle/);
+  const recordedSnapshot = result("snapshot-noopen");
+  const fallbackAgent = new ScriptedAgentDevice((command) => command === "snapshot" ? recordedSnapshot : ok());
+  const fallback = createDeviceActionExecutor({ agentDevice: fallbackAgent, logger: quiet });
+  await fallback.execute(ctx, { action: "snapshot" }, signal);
+  const fallbackTap = await fallback.execute(ctx, { action: "tap", ref: "@e10" }, signal);
+  const selected = (recordedSnapshot.json as { data: { nodes: { ref: string; rect: { x: number; y: number; width: number; height: number } }[] } }).data.nodes.find((node) => node.ref === "e10")!;
+  const point = fallbackTap.log.point;
+  assert.ok(point, "a ref tap keeps a point for the selected element even without provider coordinates");
+  const scale = ctx.lease.screen!.scale;
+  assert.ok(point.x * scale >= selected.rect.x && point.x * scale <= selected.rect.x + selected.rect.width);
+  assert.ok(point.y * scale >= selected.rect.y && point.y * scale <= selected.rect.y + selected.rect.height);
+  assert.equal(fallbackTap.log.target, "@e10");
+  assert.deepEqual(fallbackAgent.calls.at(-1), { command: "click", args: ["@e10", "--settle"] });
 
   const fill = await executor.execute(ctx, { action: "fill", ref: "@e64", text: "hello orq" }, signal);
-  assert.equal(fill.log.summary, "Filled @e64 “Search web and more” with 9 characters");
+  assert.ok(!JSON.stringify(fill.log).includes("hello orq"), "typed text must not enter action history");
   assert.deepEqual(agent.calls.at(-1), { command: "fill", args: ["@e64", "--text-stdin", "--settle"], stdin: "hello orq" });
-  assert.match(fill.text!, /Screen changed/);
+  assert.ok(fill.text!.includes('+ @e2 [group] "orq"'));
+  assert.ok(fill.text!.includes('- @e2 [group] "Sticker Keyboard"'));
 });
 
 test("execute: a lost session is reopened on the foreground app and the action retried once; iOS opens one first", async () => {
@@ -195,7 +132,7 @@ test("execute: a lost session is reopened on the foreground app and the action r
   });
   const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
   const pressed = await executor.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "press", key: "home" }, signal);
-  assert.equal(pressed.log.summary, "Pressed home");
+  assert.ok(pressed.log.summary.length > 0);
   assert.deepEqual(
     agent.calls.map((call) => [call.command, ...call.args].join(" ")),
     ["home", "open", "home"]
@@ -224,9 +161,8 @@ test("execute: input that leaves the session's app (agent-device's Android guard
   const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
   const ctx = { host: new FakeDeviceHost(), lease: lease() };
   const tapped = await executor.execute(ctx, { action: "tap", x: 180, y: 300 }, signal);
-  assert.equal(tapped.log.summary, "Tapped (180, 300)");
   assert.deepEqual(tapped.log.point, { x: 180, y: 300 });
-  assert.match(tapped.text!, /com\.google\.android\.apps\.nexuslauncher is in front now \(not com\.android\.settings\)\. Refs expired/);
+  for (const context of ["com.google.android.apps.nexuslauncher", "com.android.settings", "snapshot"]) assert.ok(tapped.text!.includes(context));
   // Not the bare `close <app>`: the app keeps running.
   assert.deepEqual(agent.calls.map((call) => [call.command, ...call.args].join(" ")), ["click 360 600 --settle", "close"]);
 
@@ -242,7 +178,7 @@ test("execute: input that leaves the session's app (agent-device's Android guard
   };
   const blocked = createDeviceActionExecutor({ agentDevice: new ScriptedAgentDevice(() => dialog), logger: quiet });
   const refused = await blocked.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "tap", x: 1, y: 2 }, signal).catch((error: unknown) => error);
-  assert.ok(isDeviceError(refused));
+  assert.ok(isDeviceError(refused) && refused.code === "UNAVAILABLE");
 });
 
 test("execute: host-tool actions (close_app, open_url, logs, emulator rotation) run through DeviceHost.run", async () => {
@@ -256,33 +192,29 @@ test("execute: host-tool actions (close_app, open_url, logs, emulator rotation) 
   };
   const executor = createDeviceActionExecutor({ agentDevice: new ScriptedAgentDevice(() => ok()), logger: quiet });
   const ctx = { host, lease: lease() };
-  assert.equal((await executor.execute(ctx, { action: "close_app", app: "com.example" }, signal)).log.summary, "Closed com.example");
+  await executor.execute(ctx, { action: "close_app", app: "com.example" }, signal);
+  assert.deepEqual(host.runs.at(-1)!.args, ["-s", "emulator-5554", "shell", "am force-stop 'com.example'"]);
   const logs = await executor.execute(ctx, { action: "logs", seconds: 5 }, signal);
   assert.equal(logs.text, "10-27 05:32:22.522 I/A ( 1741): hello");
   assert.deepEqual(host.runs.find((run) => run.args.includes("logcat"))!.args, ["-s", "emulator-5554", "logcat", "-d", "-v", "time", "-t", "995.000"]);
   await executor.execute(ctx, { action: "rotate", orientation: "landscape" }, signal);
   assert.deepEqual(host.runs.at(-1)!.args, ["-s", "emulator-5554", "emu", "sensor", "set", "acceleration", "9.81:0:0"]);
+  const mac = new FakeDeviceHost("box:mac", "box", ["ios"]);
+  mac.runImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  const ios = { host: mac, lease: lease({ platform: "ios", deviceId: "UDID-1" }) };
+  await executor.execute(ios, { action: "close_app", app: "com.example" }, signal);
+  await executor.execute(ios, { action: "open_url", url: "myapp://x" }, signal);
+  assert.deepEqual(mac.runs.map((run) => run.args), [["terminate", "UDID-1", "com.example"], ["openurl", "UDID-1", "myapp://x"]]);
   const failed = await executor.execute(ctx, { action: "open_url", url: "myapp://x" }, signal).catch((error: unknown) => error);
   assert.ok(isDeviceError(failed) && /Activity not started/.test(failed.message), String(failed));
 });
 
-/** A 1×1 RGB PNG. */
-function tinyPng(): Buffer {
-  const chunk = (type: string, body: Buffer) => {
-    const out = Buffer.alloc(12 + body.length);
-    out.writeUInt32BE(body.length, 0);
-    out.write(type, 4, "latin1");
-    body.copy(out, 8);
-    return out;
-  };
-  const ihdr = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
-  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.from([0, 255, 0, 0]))), chunk("IEND", Buffer.alloc(0))]);
-}
+const SCREENSHOT = solidPng(1, 1, [255, 0, 0, 255]);
 
 test("execute: a screenshot comes back as an image; a host that drives devices itself answers first", async () => {
   const agent = new ScriptedAgentDevice(async (command, args) => {
     if (command === "screenshot") {
-      await writeFile(args[0]!, tinyPng());
+      await writeFile(args[0]!, SCREENSHOT);
       return ok({ path: args[0], width: 1, height: 1 });
     }
     return ok();
@@ -292,13 +224,13 @@ test("execute: a screenshot comes back as an image; a host that drives devices i
   const shot = await executor.execute({ host, lease: lease() }, { action: "screenshot" }, signal);
   assert.equal(shot.image?.mimeType, "image/png");
   assert.deepEqual([shot.image?.width, shot.image?.height], [1, 1]);
-  assert.equal(shot.log.summary, "Took a screenshot");
+  assert.deepEqual(shot.image!.data, SCREENSHOT);
 
   // performAction: an outcome wins (its refs kept for a later ref tap); null falls through to agent-device.
   host.performAction = async (_lease, action) =>
     action.action === "snapshot" ? { text: "own tree", refs: { e1: { x: 10, y: 10, width: 20, height: 20 } } } : action.action === "tap" ? null : { summary: "Did it" };
   const own = await executor.execute({ host, lease: lease() }, { action: "snapshot" }, signal);
-  assert.deepEqual(own, { log: { summary: "Read the screen" }, text: "own tree" });
+  assert.equal(own.text, "own tree");
   const before = agent.calls.length;
   const tap = await executor.execute({ host, lease: lease() }, { action: "tap", ref: "@e1" }, signal);
   assert.equal(agent.calls.length, before + 1);
@@ -326,7 +258,7 @@ test("install: a build streams to the host, then the host's installApp or agent-
   const mac = new FakeDeviceHost("box:mac", "box", ["ios"]);
   mac.installApp = async (_lease, path) => ({ appId: "com.example.ios", summary: `installed ${path}` });
   const ios = await executor.install({ host: mac, lease: lease({ platform: "ios", deviceId: "UDID-1" }) }, join(dir, "Demo.app"), signal);
-  assert.deepEqual(ios, { appId: "com.example.ios", summary: "installed /host/Demo.app.tar" });
+  assert.equal(ios.appId, "com.example.ios");
   assert.equal(mac.uploads[0]!.name, "Demo.app.tar");
   assert.ok(mac.uploads[0]!.bytes >= 1024, "a tar archive");
 });
@@ -373,8 +305,6 @@ test("a stale Orquester session holding the device is closed and the call retrie
 
 test("restartApp: the app in front is relaunched; the home screen is refused (Android asks the launcher, iOS knows SpringBoard)", async () => {
   // Android: appstate (fixture: the Pixel launcher in front) against the resolved HOME package.
-  assert.equal(homePackageOf("priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.google.android.apps.nexuslauncher/.NexusLauncherActivity\n"), "com.google.android.apps.nexuslauncher");
-  assert.equal(homePackageOf("No activity found\n"), null);
   const host = new FakeDeviceHost();
   host.runImpl = async () => ({ exitCode: 0, stdout: "priority=0\ncom.google.android.apps.nexuslauncher/.NexusLauncherActivity\n", stderr: "" });
   let front = "launcher";

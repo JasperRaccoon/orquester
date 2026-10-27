@@ -104,7 +104,7 @@ function access(credentials: ProviderCredentials): BlacksmithAccess {
 
 function github(credentials: ProviderCredentials, options: ProviderCallOptions): GithubCallOptions & BlacksmithAccess {
   const resolved = access(credentials);
-  return { ...resolved, signal: options.signal, fetch: options.fetch };
+  return { ...resolved, signal: options.signal };
 }
 
 /** The template options the setup committed the workflow with (the Tailscale join). */

@@ -65,7 +65,7 @@ export function DeviceActionLog(props: {
   const range = windowed ? visibleRange(scroll.top, scroll.height, ROW_HEIGHT, rows.length) : { start: 0, end: rows.length };
 
   return (
-    <section className="shrink-0 border-t border-neutral-800/80 bg-neutral-950/60" aria-label="Device actions" data-device-action-log="">
+    <section className="shrink-0 border-t border-neutral-800/80 bg-neutral-950/60" aria-label="Device actions">
       <button
         type="button"
         onClick={props.onToggle}

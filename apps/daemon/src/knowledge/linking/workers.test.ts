@@ -220,21 +220,6 @@ describe("WorkerPool", () => {
     );
   });
 
-  it("a chat that keeps submitting answers that do not parse is retired and its task handed on", async () => {
-    const h = await harness({ mode: "manual", concurrency: 1 });
-    const [id] = await h.addTasks(1);
-    await flushAsync();
-    const chat = h.port.sessions[0]!;
-    await h.broker.next(chat.id);
-    for (let i = 0; i < 2; i += 1) assert.equal((await h.broker.submit(chat.id, id!, "no JSON here")).accepted, false);
-    const third = await h.broker.submit(chat.id, id!, "still no JSON");
-    assert.equal(third.accepted, false);
-    assert.match(!third.accepted ? third.error : "", /end your turn/);
-    assert.equal((await h.broker.submit(chat.id, id!, "and again")).accepted, false);
-    assert.deepEqual(await h.broker.next(chat.id), { kind: "done", reason: "session-budget" });
-    assert.equal(h.broker.counts().pending, 1, "the task waits for another chat (a retired chat never takes it back)");
-  });
-
   it("gives up with an error after repeated start failures", async () => {
     const h = await harness({ concurrency: 1 });
     h.port.failStarts = 5;

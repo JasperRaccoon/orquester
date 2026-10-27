@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type { SessionProfileItemDraft } from "@orquester/api";
 import { sessionProfileDeletedFile, sessionProfileDir, sessionProfileSourcesDir } from "@orquester/config";
 import { SessionProfileError } from "./errors.ts";
@@ -266,7 +269,20 @@ describe("SessionProfileStore — items", () => {
     assert.deepEqual(JSON.parse(await readFile(layout.secrets, "utf8")).items, {});
   });
 
-  it("rolls a failed mutation back whole: secrets, rewritten documents and instructions keep their previous text", async () => {
+  it("rolls a failed mutation back whole: secrets, rewritten documents and instructions keep their previous text", async (t) => {
+    if (process.getuid?.() === 0) {
+      // Root bypasses directory modes. Run this same regression without that privilege so the
+      // real failed manifest write still happens after the other files have been rewritten.
+      const { stdout } = await promisify(execFile)(
+        process.platform === "linux" ? "/proc/self/exe" : process.execPath,
+        ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
+          "--test-name-pattern", `^${t.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, fileURLToPath(import.meta.url)],
+        { uid: 65534, gid: 65534, cwd: fileURLToPath(new URL("../../", import.meta.url)),
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", TSX_DISABLE_CACHE: "1" } }
+      );
+      assert.match(stdout, /^# pass 1$/m, "the child must execute the rollback regression");
+      return;
+    }
     const { appdir, store } = await setup();
     await store.create({ name: "P" });
     const { itemId: mcpId } = await store.createItem("id-1", "1", MCP);
@@ -502,10 +518,8 @@ describe("SessionProfileService — the composer's fallback catalog", () => {
     await store.createItem("id-1", "4", { kind: "skill", enabled: false, document: { name: "off", frontmatter: { description: "Off" }, body: "" } });
 
     const claude = await service.composerCatalog("id-1", "claude");
-    assert.deepEqual(claude.slashCommands, [
-      { name: "compact", description: "Compact this conversation's context." },
-      { name: "ship", description: "Ship it", input: { hint: "<version>" } }
-    ]);
+    assert.deepEqual(claude.slashCommands.map((command) => command.name), ["compact", "ship"]);
+    assert.deepEqual(claude.slashCommands[1], { name: "ship", description: "Ship it", input: { hint: "<version>" } });
     assert.deepEqual(
       claude.skills.map((skill) => [skill.name, skill.scope, skill.enabled, skill.description]),
       [["review", "profile", true, "Review the diff"]]
@@ -542,7 +556,6 @@ describe("SessionProfileService — the composer's fallback catalog", () => {
         [`${itemId}:tidy`, "plugin", "Tidy up"]
       ]
     );
-    assert.equal(cache.endsWith(`/${itemId}`), true, "the cache dir is named like the prepared copy");
     const codex = await service.composerCatalog("id-1", "codex");
     assert.deepEqual(codex.skills.map((skill) => skill.name), ["review"]);
   });

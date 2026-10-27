@@ -30,7 +30,6 @@ import {
   configChangeCard,
   configChangeDecisionFailure,
   configChangeFileRow,
-  configChangesIndicator,
   currentSetupStep,
   setupStepText,
   formatBoxCountdown,
@@ -424,15 +423,12 @@ describe("config change cards", () => {
   it("picks the project row's no-turn pending sets of its box", () => {
     const sets = [
       change(),
-      change({ id: "cc-2", state: "approved" }),
+      change({ id: "cc-2", state: "approved", threadId: null }),
       change({ id: "cc-3", threadId: null }),
       change({ id: "cc-4", threadId: null, boxId: "box-2" })
     ];
     assert.deepEqual(projectPendingConfigChanges(sets, "box-1").map((c) => c.id), ["cc-3"]);
     assert.deepEqual(projectPendingConfigChanges(sets, undefined), []);
-    assert.equal(configChangesIndicator(1), "1 config change needs approval");
-    assert.equal(configChangesIndicator(3), "3 config changes need approval");
-    assert.equal(configChangesIndicator(0), null);
   });
 
   it("lists every file with its change, flags executables and notes truncation", () => {

@@ -125,11 +125,12 @@ test("each action takes its own fields: a missing one or a stray one is INVALID_
 test("update renames and replaces the body; toggle ticks one item; delete removes the list", async (t) => {
   const h = await harness(t);
   const id = await h.create({ workspace: "acme" }, "Old");
-  const updated = await h.value("update_todos", { action: "update", workspace: "acme", id, name: "New", body: "- [ ] build\n- [ ] ship" });
+  const updated = await h.value("update_todos", { action: "update", workspace: "acme", id, name: "New", body: "Intro\n- [X] Build\nmiddle\n* [ ]   Ship  " });
   assert.equal((updated.todo as Listed).name, "New");
-  assert.equal((updated.todo as Listed).body, "- [ ] build\n- [ ] ship");
-  assert.deepEqual(await h.value("update_todos", { action: "toggle", workspace: "acme", id, item: 2 }), { id, item: "ship", checked: true, body: "- [ ] build\n- [x] ship" });
-  assert.deepEqual(await h.value("update_todos", { action: "toggle", workspace: "acme", id, item: "build", checked: true }), { id, item: "build", checked: true, body: "- [x] build\n- [x] ship" });
+  assert.equal((updated.todo as Listed).body, "Intro\n- [X] Build\nmiddle\n* [ ]   Ship  ");
+  assert.deepEqual(await h.value("update_todos", { action: "toggle", workspace: "acme", id, item: 2 }), { id, item: "Ship", checked: true, body: "Intro\n- [X] Build\nmiddle\n* [x]   Ship  " });
+  assert.deepEqual(await h.value("update_todos", { action: "toggle", workspace: "acme", id, item: "build", checked: true }), { id, item: "Build", checked: true, body: "Intro\n- [X] Build\nmiddle\n* [x]   Ship  " });
+  assert.deepEqual(await h.value("update_todos", { action: "toggle", workspace: "acme", id, item: "ship", checked: false }), { id, item: "Ship", checked: false, body: "Intro\n- [X] Build\nmiddle\n* [ ]   Ship  " });
   assert.deepEqual(await h.value("update_todos", { action: "delete", workspace: "acme", id }), { deleted: true, id });
   assert.equal(h.manager.get(id), undefined);
   assert.match(await h.refused("update_todos", { action: "delete", workspace: "acme", id }, "NOT_FOUND"), /list_todos shows the ids/);

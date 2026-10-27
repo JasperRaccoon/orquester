@@ -23,8 +23,6 @@ import {
   type IndexedTurn,
   type ThreadIndex
 } from "./index.ts";
-import { createThreadIndexQueries } from "./queries.ts";
-import { SCHEMA_STATEMENTS } from "./schema.ts";
 import { defaultSqliteDriver } from "./sqlite.ts";
 import {
   activity,
@@ -480,11 +478,11 @@ describe("thread index: activity paging", () => {
     );
   });
 
-  it("turnOfSeq preserves containment priority, tied starts, gaps, and malformed-row rejection", () => {
+  it("turnOfSeq resolves competing cached ranges and rejects malformed owners without fallback", () => {
     assert.ok(defaultSqliteDriver);
-    const db = defaultSqliteDriver.open(":memory:");
+    // The cache is a supported persistence boundary: another build may have written its rows.
+    const db = defaultSqliteDriver.open(join(dir, "index.sqlite"));
     try {
-      for (const statement of SCHEMA_STATEMENTS) db.exec(statement);
       const insert = db.prepare(
         `INSERT INTO turns (thread_id, turn_id, ordinal, requested_at,
                             first_seq, last_seq, first_byte, end_byte)
@@ -492,61 +490,23 @@ describe("thread index: activity paging", () => {
       );
       for (const [id, ordinal, start, end] of [
         ["older", 1, 2, 40],
-        ["middle", 2, 10, 15],
-        ["same-start-earlier", 3, 20, 25],
-        ["same-start-later", 4, 20, 22],
-        ["latest", 5, 30, 35]
+        ["same-start-earlier", 2, 20, 25],
+        ["same-start-later", 3, 20, 22],
+        ["latest", 4, 30, 35]
       ] as const) {
         insert.run("thread", id, ordinal, start, end);
       }
-      insert.run("other-thread", "foreign", 1, 1, 100);
-      const queries = createThreadIndexQueries(db);
-      const legacy = db.prepare(
-        `SELECT turn_id FROM turns WHERE thread_id = ? AND first_seq <= ?
-         ORDER BY (last_seq >= ?) DESC, first_seq DESC, ordinal DESC LIMIT 1`
-      );
-      for (let seq = 0; seq <= 45; seq += 1) {
-        const expected = legacy.get("thread", seq, seq) as { turn_id: string } | undefined;
-        assert.equal(
-          queries.turnOfSeq("thread", seq)?.turnId ?? null,
-          expected?.turn_id ?? null,
-          `seq ${seq}`
-        );
-      }
-      assert.equal(
-        queries.turnOfSeq("thread", 28)?.turnId,
-        "older",
-        "an older containing turn wins over a newer ended turn"
-      );
-      assert.equal(
-        queries.turnOfSeq("thread", 21)?.turnId,
-        "same-start-later",
-        "ties use the later ordinal"
-      );
-      assert.equal(
-        queries.turnOfSeq("thread", 24)?.turnId,
-        "same-start-earlier",
-        "containment precedes the ordinal tiebreaker"
-      );
-      assert.equal(
-        queries.turnOfSeq("thread", 45)?.turnId,
-        "latest",
-        "a gap uses the nearest preceding start"
-      );
-      assert.equal(queries.turnOfSeq("absent", 45), null);
-      db.prepare(
-        "UPDATE turns SET first_byte = -1 WHERE thread_id = 'thread' AND turn_id = 'latest'"
-      ).run();
-      assert.equal(
-        queries.turnOfSeq("thread", 32),
-        null,
-        "a malformed containing row is rejected without a fallback"
-      );
-      assert.equal(
-        queries.turnOfSeq("thread", 45),
-        null,
-        "a malformed nearest row is rejected in a gap too"
-      );
+      // A missing thread predicate can now pick this competing range, rather than pass vacuously.
+      insert.run("other-thread", "foreign", 99, 20, 100);
+      assert.equal(index.turnOfSeq("thread", 28)?.turnId, "older", "a containing turn wins over newer ended ranges");
+      assert.equal(index.turnOfSeq("thread", 21)?.turnId, "same-start-later", "same start: latest content ordinal wins");
+      assert.equal(index.turnOfSeq("thread", 24)?.turnId, "same-start-earlier", "containment wins over the ordinal tie-breaker");
+      assert.equal(index.turnOfSeq("thread", 45)?.turnId, "latest", "a gap uses the nearest preceding start");
+
+      db.prepare("UPDATE turns SET first_byte = -1 WHERE thread_id = 'thread' AND turn_id = 'older'").run();
+      assert.equal(index.turnOfSeq("thread", 28), null, "a malformed containing row must not fall back to the valid newer ended row");
+      db.prepare("UPDATE turns SET first_byte = -1 WHERE thread_id = 'thread' AND turn_id = 'latest'").run();
+      assert.equal(index.turnOfSeq("thread", 45), null, "a malformed nearest row is rejected in a gap too");
     } finally {
       db.close();
     }

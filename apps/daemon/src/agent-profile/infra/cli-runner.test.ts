@@ -102,7 +102,10 @@ test("buildAgentCliEnv refuses ORQUESTER_* and malformed extras", () => {
 
 test("a deadline kills the child and says so", async (t) => {
   const bin = await fakeCli(t, `setInterval(() => {}, 1000);`);
-  const result = await runAgentCli({ bin, args: [], timeoutMs: 200 });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = runAgentCli({ bin, args: [], timeoutMs: 200 });
+  t.mock.timers.tick(200);
+  const result = await pending;
   assert.equal(result.timedOut, true);
   assert.equal(result.code, null);
   assert.equal(result.signal, "SIGTERM");

@@ -5,8 +5,6 @@
  * from a decoder it has already replaced.
  */
 
-import type { StreamDeps } from "./types.ts";
-
 /** Draw `source` at its native size; resizes the canvas when the frame size changes. */
 export function paintCanvas(canvas: HTMLCanvasElement, source: CanvasImageSource, width: number, height: number): boolean {
   const context = canvas.getContext("2d");
@@ -20,13 +18,12 @@ export function paintCanvas(canvas: HTMLCanvasElement, source: CanvasImageSource
 }
 
 /** Decoded frames waiting beyond this mean the decoder is falling behind the feed. */
-export const SOFT_DECODE_QUEUE = 8;
+const SOFT_DECODE_QUEUE = 8;
 const FRAME_DURATION_US = 16_667;
 
 export type DecodeResult = "decoded" | "awaiting-keyframe" | "unconfigured" | "overflow" | "error";
 
 export interface H264DecoderOptions {
-  readonly deps: Pick<StreamDeps, "VideoDecoder" | "EncodedVideoChunk">;
   /** A decoded frame; borrowed, closed after the callback returns. */
   readonly onFrame: (frame: VideoFrame) => void;
   /** The decoder failed asynchronously; it has been reset and waits for a keyframe. */
@@ -51,7 +48,7 @@ export class H264Decoder {
    * meanwhile.
    */
   async configure(codec: string, description?: Uint8Array): Promise<boolean> {
-    const VideoDecoderCtor = this.options.deps.VideoDecoder;
+    const VideoDecoderCtor = globalThis.VideoDecoder;
     if (!VideoDecoderCtor) return false;
     const epoch = ++this.epoch;
     const config: VideoDecoderConfig = {
@@ -75,7 +72,7 @@ export class H264Decoder {
   /** Decode one access unit; deltas before the first keyframe are dropped. */
   decode(isKey: boolean, data: Uint8Array, timestampUs?: number | null): DecodeResult {
     const decoder = this.decoder;
-    const Chunk = this.options.deps.EncodedVideoChunk;
+    const Chunk = globalThis.EncodedVideoChunk;
     if (!decoder || decoder.state !== "configured" || !Chunk) return "unconfigured";
     if (this.awaitingKeyframe) {
       if (!isKey) return "awaiting-keyframe";

@@ -11,8 +11,6 @@ import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import {
   applyProfileContribution,
   createProfileLaunchResolver,
-  type ProfileLaunchContext,
-  type ProfileLaunchContributors,
   SessionProfileNames
 } from "./launch.ts";
 import { writePreparedManifest } from "./manifest.ts";
@@ -23,7 +21,7 @@ after(async () => {
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function preparedDir(agent: SessionProfileAgentId, section: Record<string, unknown> = {}): Promise<string> {
+async function preparedDir(agent: SessionProfileAgentId): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "orq-launch-"));
   roots.push(dir);
   await writePreparedManifest(dir, {
@@ -33,31 +31,20 @@ async function preparedDir(agent: SessionProfileAgentId, section: Record<string,
     agent,
     accountKey: "acc-1",
     preparedAt: "2026-10-18T00:00:00.000Z",
-    agentSection: section
+    agentSection: {}
   } as never);
   return dir;
 }
 
-function fakeLifecycle(answer: (profileId: string, agent: SessionProfileAgentId, accountId: string | null) => SessionProfileReady | Error) {
-  const calls: Array<[string, SessionProfileAgentId, string | null]> = [];
+function fakeLifecycle(answer: () => SessionProfileReady | Error) {
   return {
-    calls,
-    ensureReady: async (profileId: string, agent: SessionProfileAgentId, accountId: string | null) => {
-      calls.push([profileId, agent, accountId]);
-      const result = answer(profileId, agent, accountId);
+    ensureReady: async () => {
+      const result = answer();
       if (result instanceof Error) throw result;
       return result;
     }
   };
 }
-
-const none = (): object => ({});
-const contributors = (codex: ProfileLaunchContributors["codex"]): ProfileLaunchContributors => ({
-  claude: none,
-  codex,
-  grok: none,
-  opencode: none
-});
 
 describe("the per-agent launch contributions", () => {
   it("apply over the account's launch: env wins, unset merges, home follows the home variable, serverPool replaces", () => {
@@ -86,45 +73,16 @@ describe("the per-agent launch contributions", () => {
 });
 
 describe("createProfileLaunchResolver", () => {
-  it("ensures the profile is ready for the agent and account, reads its section and applies the contribution", async () => {
-    const dir = await preparedDir("codex", { codexHome: "/prepared/p1/home" });
-    const lifecycle = fakeLifecycle(() => ({ profileId: "p1", agent: "codex", accountKey: "acc-1", revision: "7", preparedDir: dir }));
-    const seen: ProfileLaunchContext<"codex">[] = [];
-    const resolve = createProfileLaunchResolver({
-      lifecycle,
-      contributors: contributors((ctx) => {
-        seen.push(ctx);
-        return { env: { CODEX_HOME: String(ctx.manifestSection.codexHome) } };
-      })
-    });
-    const resolved = await resolve({
-      profileId: "p1",
-      agent: "codex",
-      accountId: "acc-1",
-      projectPath: "/w/p",
-      base: { launchEnv: { CODEX_HOME: "/homes/acc-1" }, homePath: "/homes/acc-1" }
-    });
-    assert.deepEqual(lifecycle.calls, [["p1", "codex", "acc-1"]]);
-    assert.deepEqual(resolved.profile, { profileId: "p1", revision: "7", preparedDir: dir });
-    assert.deepEqual(resolved.fields, { launchEnv: { CODEX_HOME: "/prepared/p1/home" }, homePath: "/prepared/p1/home" });
-    assert.equal(seen[0]!.accountId, "acc-1");
-    assert.equal(seen[0]!.accountHome, "/homes/acc-1");
-    assert.equal(seen[0]!.projectPath, "/w/p");
-    assert.deepEqual(seen[0]!.manifestSection, { codexHome: "/prepared/p1/home" });
-  });
-
   it("asks the System account as null, and names its home through accountHome", async () => {
     const dir = await preparedDir("grok");
     const lifecycle = fakeLifecycle(() => ({ profileId: "p1", agent: "grok", accountKey: "system", revision: "7", preparedDir: dir }));
-    let home: string | null | undefined;
     const resolve = createProfileLaunchResolver({
       lifecycle,
-      accountHome: (agent, accountId) => (accountId === null ? `/system/${agent}` : null),
-      contributors: { ...contributors(none), grok: (ctx) => ((home = ctx.accountHome), {}) }
+      accountHome: (agent, accountId) => (accountId === null ? `/system/${agent}` : null)
     });
-    await resolve({ profileId: "p1", agent: "grok", accountId: "", projectPath: "", base: { launchEnv: {} } });
-    assert.deepEqual(lifecycle.calls, [["p1", "grok", null]]);
-    assert.equal(home, "/system/grok");
+    const resolved = await resolve({ profileId: "p1", agent: "grok", accountId: "", projectPath: "", base: { launchEnv: {} } });
+    assert.equal(resolved.fields.launchEnv.GROK_AUTH_PATH, "/system/grok/auth.json");
+    assert.equal(resolved.fields.homePath, dir);
   });
 
   it("passes the lifecycle's refusals through and turns a bad manifest or a failing contributor into PROFILE_NOT_READY", async () => {
@@ -146,16 +104,13 @@ describe("createProfileLaunchResolver", () => {
       noManifest({ profileId: "p1", agent: "codex", accountId: "a", projectPath: "", base }),
       (error: unknown) => error instanceof SessionProfileError && error.code === "PROFILE_NOT_READY" && /manifest is missing/.test(error.message)
     );
-    const dir = await preparedDir("codex");
+    const dir = await preparedDir("grok");
     const throwing = createProfileLaunchResolver({
-      lifecycle: fakeLifecycle(() => ({ profileId: "p1", agent: "codex", accountKey: "a", revision: "7", preparedDir: dir })),
-      contributors: contributors(() => {
-        throw new Error("no state DB");
-      })
+      lifecycle: fakeLifecycle(() => ({ profileId: "p1", agent: "grok", accountKey: "a", revision: "7", preparedDir: dir }))
     });
     await assert.rejects(
-      throwing({ profileId: "p1", agent: "codex", accountId: "a", projectPath: "", base }),
-      (error: unknown) => error instanceof SessionProfileError && error.code === "PROFILE_NOT_READY" && /no state DB/.test(error.message)
+      throwing({ profileId: "p1", agent: "grok", accountId: "a", projectPath: "", base }),
+      (error: unknown) => error instanceof SessionProfileError && error.code === "PROFILE_NOT_READY" && /account's home is not known/.test(error.message)
     );
     const unknownAgent = createProfileLaunchResolver({ lifecycle: fakeLifecycle(() => new Error("never asked")) });
     await assert.rejects(

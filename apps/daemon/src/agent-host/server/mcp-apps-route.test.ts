@@ -161,7 +161,7 @@ describe("the host's MCP App route", () => {
         content: [{ type: "text", text: "x" }]
       });
       assert.equal(context.status, 409);
-      assert.equal(context.body.error.message, "This agent cannot take context from an MCP app.");
+      assert.equal(context.body.error.code, "COMMAND_REJECTED");
 
       const unknown = await h.call(`/threads/${threadId}/mcp-apps/delete`, { itemId: "tool-1" });
       assert.equal(unknown.status, 400);

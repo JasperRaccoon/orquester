@@ -44,7 +44,7 @@ export interface SimPoolDeps {
   logger: Pick<Console, "warn">;
 }
 
-export const MAX_REFILL_FAILURES = 2;
+const MAX_REFILL_FAILURES = 2;
 
 /** `orq-pool-<profileId>.<id>`. */
 export function poolSimulatorName(profileId: string, id: string): string {
@@ -124,11 +124,6 @@ export class SimPool {
     this.running = this.loop().finally(() => {
       this.running = null;
     });
-  }
-
-  /** Resolves once the refill loop in progress ends (tests, the integration run). */
-  async settled(): Promise<void> {
-    await this.running;
   }
 
   /** Stop refilling (dispose, helpers stopped); ready simulators stay in the box for the next prepare. */

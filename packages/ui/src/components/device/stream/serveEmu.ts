@@ -15,12 +15,10 @@ import { clampUnit } from "./pointer.ts";
 import { parseSemuPacket } from "./semu.ts";
 import {
   DeviceStreamError,
-  resolveDeps,
   type DeviceButton,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
-  type StreamDeps,
   type TouchPhase,
   type VideoSessionOptions
 } from "./types.ts";
@@ -48,7 +46,6 @@ const TOUCH_ACTIONS = { begin: "down", move: "move", end: "up" } as const;
 
 export class ServeEmuSession implements DeviceVideoSession {
   readonly transport = "serve-emu" as const;
-  private readonly deps: StreamDeps;
   private readonly lifecycle: StreamLifecycle;
   private readonly decoder: H264Decoder;
   private readonly video: boolean;
@@ -61,10 +58,8 @@ export class ServeEmuSession implements DeviceVideoSession {
   private lastKeyframeRequest = -Infinity;
 
   constructor(private readonly options: ServeEmuSessionOptions) {
-    this.deps = resolveDeps(options.deps);
     this.video = options.video !== false;
     this.decoder = new H264Decoder({
-      deps: this.deps,
       onFrame: (frame) => {
         if (paintCanvas(options.canvas, frame, frame.displayWidth, frame.displayHeight)) {
           this.lifecycle.frame(frame.displayWidth, frame.displayHeight);
@@ -80,10 +75,7 @@ export class ServeEmuSession implements DeviceVideoSession {
       transport: this.transport,
       callbacks: options,
       connect: (attempt) => this.connect(attempt),
-      now: this.deps.now,
-      random: this.deps.random,
-      stallMs: this.video ? options.stallMs : null,
-      reconnectAfterMs: options.reconnectAfterMs,
+      stallMs: this.video ? undefined : null,
       onStall: () => this.requestKeyframe(true)
     });
     this.lifecycle.start();
@@ -99,7 +91,7 @@ export class ServeEmuSession implements DeviceVideoSession {
 
   /** The socket is open and accepts input. */
   get inputReady(): boolean {
-    return this.socket?.readyState === this.deps.WebSocket.OPEN;
+    return this.socket?.readyState === WebSocket.OPEN;
   }
 
   stats(): DeviceStreamStats {
@@ -113,8 +105,8 @@ export class ServeEmuSession implements DeviceVideoSession {
   }
 
   /** Ask serve-emu for a keyframe (rate-limited unless `force`). */
-  requestKeyframe(force = false): boolean {
-    const now = this.deps.now();
+  private requestKeyframe(force = false): boolean {
+    const now = performance.now();
     if (!force && now - this.lastKeyframeRequest < KEYFRAME_REQUEST_INTERVAL_MS) return false;
     if (!this.send({ type: "reset-video", ack: false })) return false;
     this.lastKeyframeRequest = now;
@@ -151,7 +143,7 @@ export class ServeEmuSession implements DeviceVideoSession {
 
   private send(message: object): boolean {
     const socket = this.socket;
-    if (!socket || socket.readyState !== this.deps.WebSocket.OPEN) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     try {
       socket.send(JSON.stringify(message));
       return true;
@@ -168,7 +160,7 @@ export class ServeEmuSession implements DeviceVideoSession {
     this.queued = null;
     let socket: WebSocket;
     try {
-      socket = new this.deps.WebSocket(this.options.url);
+      socket = new WebSocket(this.options.url);
     } catch (cause) {
       this.lifecycle.fail(networkError(cause));
       return;

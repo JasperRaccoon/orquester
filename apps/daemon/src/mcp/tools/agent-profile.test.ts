@@ -14,7 +14,6 @@ import type { ApprovalRequest, ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { unifiedDiff } from "./agent-profile-preview.ts";
 
 const SECRET = "private-profile-credential";
 const base = "/api/agent-profile/claude";
@@ -605,14 +604,21 @@ test("chat TOCTOU: an item edited after the card is PREVIEW_STALE and nothing is
   assert.deepEqual(writes(api), []);
 
   const path = `${base}/instructions`;
-  api.on("GET", path, reply({ text: "# Rules\nBe brief.\n", info: instructions })).on("PUT", path, reply(mutation));
+  const before = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+  const after = before.replace("line 3", "line three").replace("line 18", "line eighteen");
+  api.on("GET", path, reply({ text: before, info: instructions })).on("PUT", path, reply(mutation));
   const card = new FakeApprovalPort();
-  await chat(api, card, { agent: "claude", changes: [{ action: "write_instructions", text: "# Rules\nBe thorough.\n" }] });
+  await chat(api, card, { agent: "claude", changes: [{ action: "write_instructions", text: after }] });
   const diff = sectionsOf(card.cards[0]!, "diff")[0];
   assert.match(diff.unifiedDiff, /^--- a\/CLAUDE\.md$/m);
-  assert.match(diff.unifiedDiff, /^-Be brief\.$/m);
-  assert.match(diff.unifiedDiff, /^\+Be thorough\.$/m);
-  assert.deepEqual(request(api, "PUT", path).body, { text: "# Rules\nBe thorough.\n", revision: "instructions-r1" });
+  for (const line of ["-line 3", "+line three", "-line 18", "+line eighteen"]) {
+    assert.ok(diff.unifiedDiff.split("\n").includes(line), line);
+  }
+  assert.deepEqual(request(api, "PUT", path).body, { text: after, revision: "instructions-r1" });
+  api.on("GET", path, reply({ text: "", info: instructions }));
+  const empty = new FakeApprovalPort();
+  await chat(api, empty, { agent: "claude", changes: [{ action: "write_instructions", text: "new\n" }] });
+  assert.match(sectionsOf(empty.cards[0]!, "diff")[0].unifiedDiff, /^\+new$/m);
 });
 
 test("chat gate: workflow-owned chats get ADMIN_NOT_AVAILABLE and planning chats are refused, both without a card", async () => {
@@ -625,21 +631,6 @@ test("chat gate: workflow-owned chats get ADMIN_NOT_AVAILABLE and planning chats
   const denied = new FakeApprovalPort({ outcome: "denied", approvalId: "", reason: "not now" });
   await rejects(chat(api, denied, args), "APPROVAL_DENIED");
   assert.deepEqual(writes(api), []);
-});
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-test("unifiedDiff preserves distant changes and empty-file additions", () => {
-  const before = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
-  const after = before.replace("line 3", "line three").replace("line 18", "line eighteen");
-  const diff = unifiedDiff(before, after, "a", "b");
-  for (const line of ["-line 3", "+line three", "-line 18", "+line eighteen"]) {
-    assert.ok(diff.split("\n").includes(line), line);
-  }
-  assert.match(unifiedDiff("", "new\n", "a", "b"), /^\+new$/m);
-  assert.doesNotMatch(unifiedDiff("same", "same", "a", "b"), /^[-+]same$/m);
 });
 
 // ---------------------------------------------------------------------------

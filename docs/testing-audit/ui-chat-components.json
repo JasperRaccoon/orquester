@@ -1,0 +1,4230 @@
+{
+  "replacementOwners": [
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "name": "keeps unclosed inline delimiters literal and renders the later formula within the CPU budget",
+      "disposition": "REWRITE",
+      "reason": "Public parser output must contain all literal inline-openers and the later formula, under a measured generous CPU ceiling; cache-loss mutation detects the historical quadratic algorithm."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "name": "keeps unclosed block delimiters literal and renders the later formula within the CPU budget",
+      "disposition": "REWRITE",
+      "reason": "Public parser output must contain all literal block-openers and the later formula, under a measured generous CPU ceiling; repeated-index-build mutation detects work outside tokenizer callbacks."
+    }
+  ],
+  "scope": "UI agent-chat components",
+  "originalDeclarationCount": 537,
+  "originalExpandedCaseCount": 618,
+  "deletedOriginalDeclarations": 28,
+  "replacementDeclarations": 2,
+  "removedRuntimeCases": 35,
+  "replacementRuntimeCases": 2,
+  "files": 60,
+  "checks": {
+    "banners/banner-render.check.ts": [
+      "posting a decision disables approval controls",
+      "posting an answer disables question controls",
+      "provider warning/option data reach accessible approval controls",
+      "provider reason shown only when supplied",
+      "subagent provenance is visible",
+      "blocking callback cannot dismiss; message-mode request may dismiss",
+      "compact secret answer remains masked",
+      "request_secret shows source/purpose/provider privacy boundary and masked nonremembered field",
+      "secret requests remain behind questions and require an answer path"
+    ],
+    "composer/composer-send-render.check.ts": [
+      "a remounted composer disables send/rewind for its thread in flight only",
+      "settling enables send/rewind again",
+      "approval redirect keeps composer usable and names its effect",
+      "question answer hint differs; legacy pending flag promises no unknown action"
+    ],
+    "roster/drill-in-render.check.ts": [
+      "seeded background shell command/output immediately visible",
+      "omitted agent starts loading then shows its own delivered rows",
+      "reconnect retains visible agent rows until refreshed frame",
+      "truncated frame renders warning rather than claiming whole history"
+    ]
+  },
+  "fileEvidence": {
+    "ThreadGoneNotice.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.1 and ThreadGoneNotice focus contract",
+      "seam": "ThreadGoneNotice props and document.activeElement",
+      "failure": "keys remain directed to a covered composer or focus is stolen from another surface",
+      "unique": "only these mounted cases distinguish covered-chat, body and unrelated-field focus"
+    },
+    "banners/QuestionCard.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.5 and docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md preview/privacy rules",
+      "seam": "mounted QuestionCard/ChatBannerDock, keyboard/click events, submitted answer maps and iframe security attributes",
+      "failure": "question cannot be answered, premature/IME submission, lost multi-question answer, wrong preview/file target, or active preview content enters host",
+      "unique": "answer-model tests do not prove native event wiring, bridge registration, iframe isolation or file navigation"
+    },
+    "banners/ToolApprovalCard.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a7\u00a77.1,9.3,14.2.10",
+      "seam": "mounted ToolApprovalCard, native controls and ToolApprovalAnswer callback",
+      "failure": "accidental/duplicate approval, stale preview approval, secret reuse or incorrect grant/denial",
+      "unique": "only mounted controls prove guard wiring, preview gates, resets and clearing secret fields"
+    },
+    "banners/approval-detail.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.3,5.6,7.5 and documented E7 regression",
+      "seam": "resolveApprovalDetail over provider request/activity wire records",
+      "failure": "the user approves a different command/file or cannot see the gated diff",
+      "unique": "timeline joining receives a different group-shaped contract; request-owned/id-bound detail lookup has no stronger owner"
+    },
+    "banners/banner-model.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.3,7.5,7.6; docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a7\u00a77.1,7.5",
+      "seam": "approval options/dock decision model, keyboard eligibility, parsed preview summary",
+      "failure": "wrong urgent card, unsupported decision offered, hidden background Stop access, unsafe key or stale card retained",
+      "unique": "render cases do not cover this complete priority/default/capability model; copy-only and duplicate expiry cases were removed"
+    },
+    "banners/pending-answer.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.2,4.5,7.5; answer wire contract and secret confidentiality",
+      "seam": "buildPendingUserInputAnswers/applyComposerAnswer and answer eligibility APIs",
+      "failure": "wrong scalar/array answer, premature upload submission, lost text, leaked secret or cross-question attachment collision",
+      "unique": "DOM cases own event registration; these fixed input maps own distinct provider answer conversion and eligibility"
+    },
+    "banners/tool-approval.render.test.ts": {
+      "source": "docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a7\u00a77.1,9.3,14.2.10 and handover compatibility",
+      "seam": "ToolApprovalCard/ChatBannerDock props and rendered native semantics/data",
+      "failure": "proposed bytes/warnings disappear, text spoofs the action, expired/unknown card approves, old card or oldest pending card is hidden",
+      "unique": "DOM cases own interaction; surviving render cases own section data, compatibility and expiry with fixed timestamps"
+    },
+    "composer/composer-bridge.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 composer lifetime",
+      "seam": "registerComposerHandle/insertComposerText lifecycle",
+      "failure": "late cleanup unregisters the currently visible composer",
+      "unique": "other draft/store tests do not interleave old cleanup with replacement handle registration"
+    },
+    "composer/composer-draft.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 persisted draft/file preservation; AGENTS.md tolerant storage",
+      "seam": "composerDraftToPersist/loadComposerDraft and persisted return/scheduler APIs",
+      "failure": "draft/quotes/files vanish, placeholders duplicate or a late write resurrects sent text",
+      "unique": "storage routing tests own send failures; these retained cases own ready-ref persistence, returned-message conversion and flush ordering"
+    },
+    "composer/composer-failed-send.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 failed-send ownership regression",
+      "seam": "restoreFailedSendDraft through real composer bridge and localStorage bytes",
+      "failure": "failure restores into wrong thread, behind live composer, or loses text/files/quotes",
+      "unique": "lower merge helpers cannot verify target routing or the actual persisted record"
+    },
+    "composer/composer-files.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 attachment host paths",
+      "seam": "removeFilePath string behavior consumed by composer removal",
+      "failure": "removing chip deletes other text/path or leaves the sent path behind",
+      "unique": "image placeholders use a separate grammar; file literal matching and one-occurrence removal are unique"
+    },
+    "composer/composer-image-fit.test.ts": {
+      "source": "composer-image-fit.ts documented provider 2000px image contract, EXIF and lossless fallback policy",
+      "seam": "prepareImageForUpload across native File/canvas codec boundary and MIME classification consumed by ChatComposer",
+      "failure": "oversized upload rejected, portrait distorted, transparency/animation lost, or codec failure prevents upload",
+      "unique": "mock codec supplies browser I/O only; tested scale/type/fallback decisions remain production code and have no other owner"
+    },
+    "composer/composer-images.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 image placeholders and preview lifetime",
+      "seam": "image numbering/removal APIs and actual blob URL readability",
+      "failure": "wrong image referred to after removal or a staged preview leaks/gets revoked incorrectly",
+      "unique": "draft restore uses these helpers but does not own direct chip removal or live blob lifetime"
+    },
+    "composer/composer-menu.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.6.4\u20134.6.8 and goal design \u00a78.5",
+      "seam": "menu eligibility, insertion and command-action APIs over advertised catalog",
+      "failure": "unavailable command offered, provider text dispatched wrongly, duplicate skill or unsupported mode change",
+      "unique": "trigger tests own token recognition; these own catalog/capability-driven choices and their send versus insert semantics"
+    },
+    "composer/composer-model.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.1,4.6.5 and model descriptor wire contracts",
+      "seam": "model/effort selection APIs over ProviderModel/ModelSelection",
+      "failure": "selection falls to wrong model, stale option crosses models or effort value is silently invalid",
+      "unique": "adapter tests own provider translation; these own selection before wire submission"
+    },
+    "composer/composer-outbox.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 reload idempotency/queue absence; AGENTS.md tolerant browser storage",
+      "seam": "outbox APIs in isolated real module pages and sessionStorage JSON",
+      "failure": "reload loses/reposts wrong thread message, reorders queue, drops in-flight send or rejects all old records",
+      "unique": "store.reload tests own delivery; these own stored document parsing, page adoption, bounds and queue metadata"
+    },
+    "composer/composer-pending-send.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a77.4,7.5 redirect/question handling and goal \u00a78.2",
+      "seam": "pending request planning and external submit APIs",
+      "failure": "redirect queues behind its own approval, typed answer becomes new turn or subagent feedback receives unsupported files",
+      "unique": "DOM card tests own field input; these own composer/external-surface routing through pending requests"
+    },
+    "composer/composer-quotes.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 selected reply passages; CommonMark blockquote/fence wire grammar",
+      "seam": "composeQuotedPrompt, splitLeadingQuotes, quote-list/restore APIs",
+      "failure": "user text swallowed by unclosed code, quoted bytes mangled, or failed send loses passage order",
+      "unique": "normalization/blockquote helper probes consolidated into composed prompt bytes; selection DOM owns extracting a passage, not send serialization"
+    },
+    "composer/composer-recall.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 prompt history and arrow ownership",
+      "seam": "recall entries/direction/step APIs",
+      "failure": "history recalls another agent/internal message, overwrites edited draft, or steals field navigation",
+      "unique": "persistent history/index tests do not own composer recall position and caret eligibility"
+    },
+    "composer/composer-sends.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 send-outlives-composer and queued-send ordering regressions",
+      "seam": "begin/settle/send-state subscription APIs",
+      "failure": "late settle enables another thread or queued message overtakes a still-pending predecessor",
+      "unique": "render check owns component subscription; these interleavings own registry lifetime and idempotent settles"
+    },
+    "composer/composer-submission.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.1,4.6.5,7.4 and goal \u00a78.2",
+      "seam": "submission/attachment/restore/external-send APIs and send callback payload",
+      "failure": "invalid/duplicate input sent, incorrect queue/steer/plan mode, truncated plan dispatched or draft data lost",
+      "unique": "outbox tests own persistence/replay; these fixed cases own decisions and full prompt bytes before transport"
+    },
+    "composer/composer-trigger.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.6.7,7.4",
+      "seam": "caret-relative token detection and replacement APIs",
+      "failure": "path/date opens command menu, a currency keyboard cannot mention skill, or picking menu destroys adjacent text",
+      "unique": "menu tests own advertised choices; these own lexical trigger and replacement range"
+    },
+    "composer/profile-chip.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-10-18-agent-profiles-design.md \u00a75.3; README Agent Profiles",
+      "seam": "mounted ProfileChip and onChange profile IDs",
+      "failure": "unready profile selected, busy thread switches or Global pick fails to clear remembered profile",
+      "unique": "profile store tests cannot prove native disabled/menu action wiring"
+    },
+    "composer/skill-mentions.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a74.6.8 and provider skill-name grammar",
+      "seam": "skillMentionsInText over sent text/catalog",
+      "failure": "unknown/currency/path token misattributed to installed skill or plugin-qualified name split",
+      "unique": "row renderer owns locating recognized mentions; token eligibility has this lowest owning seam"
+    },
+    "composer/tab-visibility.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a77.1,7.4 keyboard ownership regressions",
+      "seam": "composer Escape ownership/action APIs",
+      "failure": "composer steals modal/menu Escape, interrupts parent while leaving child, or held key repeats an action",
+      "unique": "shell Escape owns disjoint outside-composer scope; these cases own window/composer-field priority"
+    },
+    "composer/workspace-skills.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.6.4,4.6.7",
+      "seam": "workspaceSkills over provider/cwd snapshots",
+      "failure": "composer offers wrong workspace skills or hides machine catalog behind empty overlay",
+      "unique": "provider catalog tests do not own client cwd preference/fallback"
+    },
+    "drill-in-navigation.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 auto-return/search-reveal regressions",
+      "seam": "nextDrillInReturn/revealClosesDrillIn state transitions",
+      "failure": "reader yanked from finished child, work state inherited from other child or search hit remains hidden",
+      "unique": "row projection and memory tests do not own transitions back to main timeline"
+    },
+    "escape-action.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a75.5,7.1,7.4,7.6",
+      "seam": "resolveChatEscape/chatEscapeSequenceStep",
+      "failure": "Escape stops wrong/hidden thread, takes modal/field key or rewinds after unrelated input",
+      "unique": "composer Escape tests own a separate target scope; these own outside-composer and double-press gating"
+    },
+    "forge-links/forge-link-pill.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 plus forge-link public URL/preview contract",
+      "seam": "mounted ForgeLinkPill native href/rel, tooltip events and preview API",
+      "failure": "unsafe target, eager request, wrong repository identity or touch tap blocked by preview",
+      "unique": "parser tests do not prove real native link/tooltip/API integration"
+    },
+    "forge-links/forge-link-pill.render.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 and forge link labels/URL policy",
+      "seam": "ChatMarkdown/UserMessageRow with plain or authored links",
+      "failure": "markdown URL never reaches forge UI, author words overwritten, punctuation swallowed or hostile lookalike classified",
+      "unique": "DOM pill tests start with an already parsed link and cannot catch markdown/plain-text routing"
+    },
+    "lineage.render.test.ts": {
+      "source": "thread lineage GUI contract; docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a78.2; old context-marker compatibility",
+      "seam": "ThreadLineageBar/UserMessageRow props and actionable/attribution semantics",
+      "failure": "unavailable merge/fork offered, held reply treated as failure, or another agent/old host message attributed to user",
+      "unique": "count/caption duplicates removed in favor of lineage.logic and folded DOM; controls and legacy attribution need renderer seam"
+    },
+    "mcp-app/McpAppFrame.dom.test.ts": {
+      "source": "MCP Apps ui/initialize/resource-teardown protocol; app isolation and reconnect contract",
+      "seam": "mounted McpAppFrame plus actual window postMessage JSON-RPC",
+      "failure": "reconnect tears down app, stale client handles requests, denied app requests data or shortcut escapes focus",
+      "unique": "host unit tests cannot prove frame lifetime or browser-message/native focus wiring; width is protocol data, not appearance"
+    },
+    "primitives/elapsed.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 and malformed CLI timestamp tolerance",
+      "seam": "elapsedBetween over provider timestamp values",
+      "failure": "NaNs appears in elapsed status for malformed timestamp",
+      "unique": "other format tests own valid durations, not absent/invalid stamps"
+    },
+    "roster/background-shell.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 background-shell protocol and stable disclosure identity",
+      "seam": "projectBackgroundShell from ThreadItem wire activity data",
+      "failure": "shell output vanishes/stales, wrong command shown or expansion closes while streaming",
+      "unique": "generic row join owns joining; these own shell-specific mapping and cache invalidation"
+    },
+    "roster/drill-in-memory.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 50-agent reading memory and follow re-arm regression",
+      "seam": "rememberDrillIn/recallDrillIn/drillInOpening",
+      "failure": "reopened child loses position/title, state leaks across children or stale position defeats follow",
+      "unique": "main thread persistent LRU is a different owner; no duplicate owns this per-agent transient state"
+    },
+    "roster/roster-summary.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 kind-aware roster/workflow accounting",
+      "seam": "rosterKindCounts/workflowGroupSummary/partitionRosterRows",
+      "failure": "shell counted as agent, coordinator double-counted, work tokens doubled or drivers misplaced",
+      "unique": "API panel model tests do not own client section/count projection over workflows"
+    },
+    "status/goal-chip.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-24-agent-goals-design.md \u00a7\u00a74.5,8.2",
+      "seam": "goalActions over status, capabilities and turn/background state",
+      "failure": "unsupported goal action offered, provider action queues behind running turn or wrong /goal bytes sent",
+      "unique": "adapter tests own honoring an action; this matrix owns what UI offers and sends"
+    },
+    "status/status-line.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.6 context meter contract",
+      "seam": "deriveContextMeter over provider token/window fields",
+      "failure": "fabricated percentage/negative remaining or absent data displayed as zero",
+      "unique": "provider tests cannot own client degradation and percent/remaining arithmetic"
+    },
+    "status/tools-chip.test.ts": {
+      "source": "docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a77.6 grants and workflow-owned tools",
+      "seam": "deriveToolsChip display string model",
+      "failure": "only tooltip/label copy, punctuation and direct array count changed",
+      "unique": "grant availability/revocation and workflow authorization remain in lib/agent-tools/store.test.ts and daemon gate/tool tests"
+    },
+    "thread-link.render.test.ts": {
+      "source": "thread lineage GUI tool target links; old provenance context compatibility",
+      "seam": "ThreadLink/WorkRow/UserMessageRow rendering",
+      "failure": "stale result title used, closed target remains clickable, link omitted or marked legacy message attributed to user",
+      "unique": "primitive target rules and activity-row integration fail independently; old marker fallback is absent from current-header DOM cases"
+    },
+    "thread-switch.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.1 paint hold/reconnect behavior",
+      "seam": "resolveThreadSwitchTimeline/threadSwitchDisplay",
+      "failure": "wrong thread interactive while loading, own reconnect inert or settled empty thread shows someone else",
+      "unique": "store tests own snapshots; these own held-paint display flags used by view"
+    },
+    "timeline/anchor.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a77.2,7.3 restored reading position",
+      "seam": "restoreTurnOf eligibility",
+      "failure": "drill-in/unpainted list triggers irrelevant parent history read",
+      "unique": "mounted restore tests cover positive paging; this owns no-history/no-row eligibility"
+    },
+    "timeline/diff-tree.test.ts": {
+      "source": "Git unified-diff byte/old-new path formats; docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 changed-files model",
+      "seam": "splitUnifiedDiff/countDiffLines/buildDiffTree/summarizeDiffStats",
+      "failure": "wrong file path/patch, lost binary/deletion, polluted count or incorrect aggregate",
+      "unique": "standard split, CRLF full metadata/count scenario and malformed/quoted partial forms are distinct; repeated LF metadata probes removed"
+    },
+    "timeline/folded-thread-message.dom.test.ts": {
+      "source": "docs/superpowers/research/2026-10-22-t3code-gap/10-delta-chat-web.md folded agent messages and docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md \u00a78.2 context provenance",
+      "seam": "UserMessageRow clicks, beforematch, native aria-expanded/hidden state",
+      "failure": "message cannot open/find, sender lost, attention hidden or user text spoofed as agent",
+      "unique": "parser tests do not prove disclosure event wiring or accessible find-in-page retention"
+    },
+    "timeline/follow.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 reduced-motion accessibility",
+      "seam": "shouldAnimateFollow",
+      "failure": "active stream animates despite reduced-motion preference",
+      "unique": "row/store tests never own animation eligibility preference"
+    },
+    "timeline/markdown/MarkdownMath.dom.test.ts": {
+      "source": "math.ts documented TeX/clipboard/lazy-render contract; CommonMark selection semantics",
+      "seam": "ChatMarkdown native DOM copy event/button, loader boundary and clipboard bytes",
+      "failure": "eager KaTeX download, failed chunk blanks formula, copied selection loses TeX or display copy fails",
+      "unique": "parse/render tests cannot prove browser clipboard events, async source fallback or retry on remount"
+    },
+    "timeline/markdown/MermaidBlock.dom.test.ts": {
+      "source": "docs/superpowers/research/2026-10-22-t3code-gap/10-delta-chat-web.md Pele diagram requirements; MermaidBlock documented fallback/copy/expand contract",
+      "seam": "mounted MermaidBlock with real Pele renderer and native controls",
+      "failure": "missing labels, active malicious link, broken retry/toggle/fallback/expand or leaked blob",
+      "unique": "SVG sanitizer tests own sanitization; this owns actual loader/render/mount/control composition"
+    },
+    "timeline/markdown/MermaidBlock.test.ts": {
+      "source": "docs/superpowers/research/2026-10-22-t3code-gap/10-delta-chat-web.md diagrams and documented settled/streamed fence routing",
+      "seam": "ChatMarkdown/MermaidBlock public React props and visible code/diagram state",
+      "failure": "streamed partial diagram renders early, other fence reclassified or unsupported source disappears",
+      "unique": "DOM component cases start after markdown fence routing; chrome/placeholder duplicates removed"
+    },
+    "timeline/markdown/highlight-core.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 code source preservation and documented 120000-char highlighting fallback",
+      "seam": "highlightCode/incremental highlighter over real JS parser and failing grammar boundary",
+      "failure": "code bytes lost, grammar failure kills message or incremental context colors stay stale",
+      "unique": "markdown parse tests do not own syntax grammar token/source preservation"
+    },
+    "timeline/markdown/incremental.test.ts": {
+      "source": "CommonMark reference-link/CRLF/BOM byte semantics across streamed updates",
+      "seam": "incremental remark plugin through ReactMarkdown output",
+      "failure": "late reference definition never resolves or cached prefix corrupts line ending/interior character",
+      "unique": "one-shot markdown tests cannot expose invalidation after earlier render"
+    },
+    "timeline/markdown/knowledge-citation.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Citations; URL/privacy policy",
+      "seam": "ChatMarkdown URL filter/native citation clicks and knowledge-view/API state",
+      "failure": "custom URL navigates externally, unsafe scheme admitted, wrong entry opens or deleted citation stays valid",
+      "unique": "knowledge-store unit tests do not prove scheme filtering or browser navigation event behavior"
+    },
+    "timeline/markdown/local-image.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.3 host-local markdown image path/file API contract",
+      "seam": "resolveMarkdownImageSource",
+      "failure": "relative path resolves outside project context, valid host path lost or remote URL rewritten",
+      "unique": "question markdown integration covers one normal relative image, not absolute/query/home/remote resolution"
+    },
+    "timeline/markdown/math.test.ts": {
+      "source": "math.ts/math-tex.ts documented CommonMark/Pandoc/TeX notation and historical quadratic malformed-opener regression",
+      "seam": "remarkChatMath via real ReactMarkdown rendered prose/formulas and process.cpuUsage; real KaTeX rendering",
+      "failure": "text/code/currency eaten as math, incomplete stream swallowed, unsafe TeX fetch, runaway macro or quadratic rescanning",
+      "unique": "DOM owns clipboard/loading; these own fixed parse/semantic/security examples and public CPU regressions; private consume counters and byte-prefix replay removed"
+    },
+    "timeline/markdown/mermaid-engine.test.ts": {
+      "source": "Mermaid label MathML contract and KaTeX untrusted input policy",
+      "seam": "loadMathResolver with real KaTeX and DOM",
+      "failure": "malformed label renders error, duplicate TeX annotation or link survives label typesetting",
+      "unique": "plain markdown math never uses this resolver/MathML export path"
+    },
+    "timeline/markdown/mermaid-svg.test.ts": {
+      "source": "SVG/MathML security allowlists and standalone XML image contract",
+      "seam": "createDiagramSanitizers/standaloneSvg with real DOMPurify/DOMParser",
+      "failure": "script/remote references survive, math labels destroyed or expanded XML invalid/loses resolved colors",
+      "unique": "mounted diagram cases sample one real drawing, not hostile SVG profiles or standalone XML serialization"
+    },
+    "timeline/plan-reader.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a75.6,7.3,7.4 complete-plan-before-Implement requirement",
+      "seam": "readPlanWithoutStore",
+      "failure": "truncated plan returned as complete when store unavailable",
+      "unique": "send tests inject reader failure; this owns actual no-store fallback reader behavior"
+    },
+    "timeline/quote-selection.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a77.4 selected agent passages and CommonMark quoting",
+      "seam": "DOM Selection/Range-to-markdown and QuoteSelectionToolbar native events",
+      "failure": "wrong sender/text selected, code/table/math serialization lost or quote action unavailable",
+      "unique": "composer quote tests begin with markdown passage and cannot protect DOM selection/extraction/events"
+    },
+    "timeline/row-chrome.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a74.6.5,4.6.7,5.6,7.3 stable toolCallId/stream bytes",
+      "seam": "joinLifecycleDetails/splitSkillMentions/isCompactCommandMessage",
+      "failure": "command output lost or borrowed across calls, skill bytes altered or ordinary prompt mistaken for /compact",
+      "unique": "projection tests own mapping events to entries; these own group-local joins and final sent-text splitting"
+    },
+    "timeline/row-format.test.ts": {
+      "source": "docs/superpowers/research/2026-10-22-t3code-gap/10-delta-chat-web.md first nonempty folded-message summary",
+      "seam": "foldedMessageSummary",
+      "failure": "standalone summary formatting changes",
+      "unique": "folded-thread-message.dom.test.ts now supplies whitespace/CRLF input to actual rendered fold header"
+    },
+    "timeline/scroll-restore.dom.test.ts": {
+      "source": "docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md \u00a7\u00a77.2,7.3 cold/partial-window reading restoration regression",
+      "seam": "mounted ChatTimeline with real stream store and revealTurn action boundary",
+      "failure": "restore fires before rows, pages wrong turn or re-restores on every update",
+      "unique": "anchor helper tests cover eligibility only, not mount/effect/store projection handoff"
+    }
+  },
+  "entries": [
+    {
+      "path": "packages/ui/src/components/agent-chat/ThreadGoneNotice.dom.test.ts",
+      "line": 69,
+      "name": "takes focus from the chat it covers",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/ThreadGoneNotice.dom.test.ts",
+      "line": 79,
+      "name": "takes focus when nothing had it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/ThreadGoneNotice.dom.test.ts",
+      "line": 85,
+      "name": "leaves focus that is elsewhere in the app",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 184,
+      "name": "never takes focus: the composer keeps it while a question with previews appears",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 190,
+      "name": "renders the question as the chat's markdown",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 200,
+      "name": "renders option labels and inline markdown descriptions without nested links",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 215,
+      "name": "keeps the numbered options, picks by digit, and ignores a digit typed into the answer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 244,
+      "name": "is a textarea: Shift+Enter is a newline, Enter answers with the line breaks kept",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 259,
+      "name": "never answers on an IME composition's Enter",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 270,
+      "name": "on a phone, Return in the field is a newline; the button answers",
+      "disposition": "REWRITE",
+      "reason": "executes the claimed phone Submit button and checks actual submitted map after proving Return did not send."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 281,
+      "name": "an Enter on the first of two questions moves on rather than answering",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 290,
+      "name": "a secret question keeps its masked single-line field",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 302,
+      "name": "answers each question in turn, then sends them all; gone once the card is",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 325,
+      "name": "a single question's typed answer from the composer is submitted at once",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 345,
+      "name": "shows no pane when no option has a preview",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 350,
+      "name": "follows the focused option, and says so when the focused one has none",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 372,
+      "name": "follows a pick too, and starts over on the next question",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 392,
+      "name": "frames an HTML preview in an empty sandbox; its markup never enters the page",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 411,
+      "name": "builds the framed document with a CSP that refuses every fetch, and the theme's tokens",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/QuestionCard.dom.test.ts",
+      "line": 425,
+      "name": "reads a relative image through the file API against the project, and opens a file link in a tab",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 163,
+      "name": "never takes focus: the composer keeps it when the card appears",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 169,
+      "name": "ignores \u2318/Ctrl+Enter for 1.5 s after the card appears, then approves",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 182,
+      "name": "restarts the guard when the card changes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 195,
+      "name": "Enter alone never approves \u2014 not even on the focused Approve button",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 213,
+      "name": "the composer's own \u2318/Ctrl+Enter never reaches the card",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 221,
+      "name": "sends typed secrets with the approval and clears them from the card",
+      "disposition": "CONSOLIDATE",
+      "reason": "survives as password/autocomplete, disabled-until-filled, payload and secret-clearing owner; absorbs redundant SSR password check."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 235,
+      "name": "a denial carries the reason; \u2318/Ctrl+Enter in the reason denies",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 250,
+      "name": "the grant menu approves with exactly the grant it offers",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 261,
+      "name": "a cut preview keeps Approve disabled until View all loaded the whole preview",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 283,
+      "name": "on a phone, opening the review sheet loads the cut preview and only then enables Approve",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 296,
+      "name": "a double click never approves the card that replaces the answered one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 315,
+      "name": "a click with detail 0 (assistive or programmatic) also waits out the appearance window",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 328,
+      "name": "new content under the same card id re-locks the preview gate and restarts the guards",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 361,
+      "name": "new content under the same card id drops what was typed for the old content and closes the review sheet",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 385,
+      "name": "on a phone a blocked Approve says why next to it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/ToolApprovalCard.dom.test.ts",
+      "line": 390,
+      "name": "a grant row ignores a pointer click inside the guard too",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 38,
+      "name": "E7: the request's own detail wins and is marked as such",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 46,
+      "name": "E7: with no detail, the card joins the gated tool call by toolUseId",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 62,
+      "name": "E7: the path list alone is enough when the item carries no diff",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 69,
+      "name": "E7: the join is by id only \u2014 a second write in flight is never guessed at",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 78,
+      "name": "E7: the newest activity wins when a tool id is reused across updates",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 86,
+      "name": "E7: a command payload is used when there are no changed files",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/approval-detail.test.ts",
+      "line": 94,
+      "name": "E7: a missing or malformed payload never throws",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 19,
+      "name": "the default four split into Approve/Decline primary and the rest overflow",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 31,
+      "name": "an empty advertised list falls back to the default four",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 37,
+      "name": "advertised approval decisions keep their grouping when reordered",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 47,
+      "name": "the liveness banner is hidden while a turn is working",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 62,
+      "name": "the dock shows one card at a time, in a fixed priority order",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 103,
+      "name": "an agent's request for a secret docks after approvals and questions, before the plan prompt \u2014 on mobile too",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 121,
+      "name": "an Orquester card comes after a provider approval and before everything else",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 129,
+      "name": "only \u2318/Ctrl+Enter approves, and never within the guard",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 146,
+      "name": "a secret-files push names the vault, clones and privacy boundary",
+      "disposition": "DELETE",
+      "reason": "Fails independent oracle for behavior: checks fixed marketing/disclosure sentence only; no secret value or write boundary is exercised.",
+      "owner": "daemon secret-files service/routes and gate tests retain actual secret redaction/containment"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 154,
+      "name": "a box rental (spend card) says what approving costs and reads as money, not Admin",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 162,
+      "name": "the card counts down and says when it expired",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: clock-to-label helper duplicated rendered expiry and disabled approval.",
+      "owner": "banners/tool-approval.render.test.ts: footer counts down; expired cannot approve"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 170,
+      "name": "a late answer says the agent stopped waiting; a bad one keeps the card",
+      "disposition": "REWRITE",
+      "reason": "retain status-to-closed state policy; drop fixed notice sentence equality."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 184,
+      "name": "a preview is cut when the summary says so or any section is partial",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/banner-model.test.ts",
+      "line": 191,
+      "name": "a create_box card reads as renting a VM, by its kind or, before this build knows the kind, by its tool",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 40,
+      "name": "an option with no value answers with its label",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 48,
+      "name": "a custom answer beats a selected option",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 53,
+      "name": "a custom answer is refused when the question forbids one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 58,
+      "name": "multi-select answers with an array and drops unknown values",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 66,
+      "name": "an attachment alone satisfies a question",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 74,
+      "name": "an unfinished upload keeps the answer unresolved",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 84,
+      "name": "a choice-only question offers no attachments",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 89,
+      "name": "an `isOther` option asks for text rather than answering with its label",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 106,
+      "name": "a secret answer is never carried back into the thread draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 110,
+      "name": "displaced text lands after whatever was already in the draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 116,
+      "name": "toggling clears the custom answer; multi-select toggles in place",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 126,
+      "name": "a new single-select choice becomes the submitted answer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 133,
+      "name": "custom text overrides a choice while empty text preserves it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 142,
+      "name": "the answers map is null until every question resolves",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 154,
+      "name": "progress reports the active question, the count and completeness",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 168,
+      "name": "an out-of-range question index is clamped, never thrown on",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 175,
+      "name": "attachment drafts are namespaced per (requestId, questionId)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 195,
+      "name": "a digit picks its option on the visible tab",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 202,
+      "name": "an open layer keeps the digit: it never answers the question behind a modal, a menu or a popover",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 212,
+      "name": "a digit never answers from a hidden tab, while typing, or under a modifier",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 220,
+      "name": "only 1\u20139, and only an option the question has",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 241,
+      "name": "a secret field's IME Enter commits the candidate, never the answer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 246,
+      "name": "on a phone the multi-line field's Return is a newline; the one-line secret's still answers",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 257,
+      "name": "the composer's text answers a single question and submits it, over a picked option",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 271,
+      "name": "on an earlier question the composer's text answers it and the card moves on",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 295,
+      "name": "the last question cannot send while an earlier one is unanswered",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/pending-answer.test.ts",
+      "line": 304,
+      "name": "a typed answer is refused where it cannot stand",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 68,
+      "name": "renders the proposed content and flags from every preview section",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 90,
+      "name": "agent text is sanitised: bidi overrides stripped from titles, escaped in code",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 103,
+      "name": "secret fields are masked and approval waits for them",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: mounted test proves native password field, disabled state, approval payload and clearing; autocomplete assertion moved there.",
+      "owner": "banners/ToolApprovalCard.dom.test.ts: sends typed secrets with approval and clears them"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 110,
+      "name": "the footer counts down to expiry; an expired card cannot be approved",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 117,
+      "name": "an older daemon's toolset card still renders: Enable for this chat / Deny",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 134,
+      "name": "a newer daemon's card can only be denied here",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 140,
+      "name": "on a phone the preview goes behind a sheet; the flags stay on the card",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/banners/tool-approval.render.test.ts",
+      "line": 166,
+      "name": "the dock shows the oldest card with its counter, after a provider approval and before a question",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-bridge.test.ts",
+      "line": 18,
+      "name": "a stale unregister cannot drop the handle that replaced it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 47,
+      "name": "builds the persisted shape from text, uploaded refs and the carried context",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 68,
+      "name": "re-stages every uploaded attachment as a ready chip and keeps the text verbatim",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 86,
+      "name": "keeps every file a restore wrote, over the eight, de-duplicated \u2014 the send gate holds the rest",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 115,
+      "name": "a file a bound still refuses leaves the message as its chip's X would take it, and is handed back for its path",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 144,
+      "name": "merges behind the persisted draft, keeping every file and its context",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 165,
+      "name": "writes a returned file a bound refuses into the text as its path, so no later mount drops a file",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 193,
+      "name": "persists them whole, and leaves the field off when there are none",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 210,
+      "name": "tells a draft whose quotes changed from one that did not",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 222,
+      "name": "loads them back with the text",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 228,
+      "name": "puts a failed send's quotes back ahead of the persisted ones, with its own words",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same real draft conversion is reached through persisted storage routing; survivor now combines existing text with quotes.",
+      "owner": "composer/composer-failed-send.test.ts: quoted send comes back; send gives nothing back"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 243,
+      "name": "gives nothing back for a refusal, whatever it carried",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same real draft conversion is reached through persisted storage routing; survivor now combines existing text with quotes.",
+      "owner": "composer/composer-failed-send.test.ts: quoted send comes back; send gives nothing back"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 255,
+      "name": "keeps the persisted quotes when a message comes back behind the draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 264,
+      "name": "takes a returned quoted message's quotes back out, after the draft's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 289,
+      "name": "flushes synchronously, so an unmount or a reload keeps the tail",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-draft.test.ts",
+      "line": 301,
+      "name": "writes a clear immediately and drops anything the debounce still held",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 109,
+      "name": "handed another thread while it was in flight: into its own thread's persisted draft, never the one on screen",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 150,
+      "name": "unmounted by a project switch: into its own thread's persisted draft, where the next mount loads it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 159,
+      "name": "still showing its thread: into the live draft, as always, and nothing is written behind it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 168,
+      "name": "its tab open again in another composer: into that composer's live draft, never behind its back",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 196,
+      "name": "a composer that no longer shows the thread refuses it, and the persisted draft takes it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 218,
+      "name": "a quoted send comes back with its quotes as quotes, ahead of any quoted meanwhile",
+      "disposition": "CONSOLIDATE",
+      "reason": "persisted record now includes nonempty meanwhile text plus quote ordering; catches data loss/reordering through real storage routing."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts",
+      "line": 243,
+      "name": "a send that gives nothing back writes no draft: a refusal, a failed Implement",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-files.test.ts",
+      "line": 6,
+      "name": "removing a file drops its path and one adjacent space",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-files.test.ts",
+      "line": 14,
+      "name": "removes exactly one occurrence, so a path the user repeated stays",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-files.test.ts",
+      "line": 18,
+      "name": "treats the path literally: metacharacters in a name never widen the match",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 57,
+      "name": "accepts PNG and JPEG only",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 68,
+      "name": "re-encodes a large JPEG at the cap with quality 0.85",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 81,
+      "name": "uses the decoded (EXIF-upright) dimensions for the target",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 89,
+      "name": "keeps a still PNG as PNG so transparency survives",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 97,
+      "name": "keeps the original for an animated PNG, GIF, WebP and SVG",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 110,
+      "name": "keeps the original when it already fits",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 118,
+      "name": "keeps the original when the re-encode is not smaller, empty, retyped or missing",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-image-fit.test.ts",
+      "line": 126,
+      "name": "keeps the original when decoding or encoding fails, or there is no codec",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-images.test.ts",
+      "line": 12,
+      "name": "numbers images by position among images only",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-images.test.ts",
+      "line": 24,
+      "name": "removing an image drops its placeholder and renumbers the later ones",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-images.test.ts",
+      "line": 34,
+      "name": "releases every staged preview without revoking an unrelated image",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-images.test.ts",
+      "line": 46,
+      "name": "hands chips back without their revoked preview URLs, and the rest untouched",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 34,
+      "name": "a disabled skill is never offered, and userInvocable:false hides one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 43,
+      "name": "userInvocationOnly does not hide a skill \u2014 it is the reason to show it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 49,
+      "name": "the slash-menu skill setting is honoured; the $ menu ignores it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 58,
+      "name": "a skill that is also advertised as a command is listed once, as the skill",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 74,
+      "name": "away from offset 0 provider commands are dropped; host commands and skills stay",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 84,
+      "name": "/plan and /default appear only where the plan toggle is shown",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 96,
+      "name": "/effort appears only when the selected model has a reasoning descriptor",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 106,
+      "name": "/compact is hidden until its full precondition list holds",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 122,
+      "name": "the compact precondition rejects a non-empty draft or any attachment",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 138,
+      "name": "a name match outranks a description match",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 147,
+      "name": "insertion: provider commands and skills insert text, host commands insert nothing",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 183,
+      "name": "R2-2: a synthesised provider /effort never duplicates the host row",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 201,
+      "name": "R2-5: Grok's /always-approve is refused with a pointer at the mode chip",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 206,
+      "name": "R2-5: the refusal is Grok-only and never fires on a lookalike",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 221,
+      "name": "goals \u00a78.5: a host-parsed /goal (Codex) joins the host commands, with its description and hint",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 232,
+      "name": "goals \u00a78.5: a provider adapter's own /goal entry is used unchanged",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 245,
+      "name": "goals \u00a78.5: the host row replaces a provider row of the same name \u2014 one /goal, never two",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 255,
+      "name": "goals \u00a78.5: picking /goal TYPES it \u2014 the host parses the sent text, so it must reach the draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 268,
+      "name": "goals \u00a78.5: /goal is offered only at the start of the prompt \u2014 the host recognises nothing else",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-menu.test.ts",
+      "line": 278,
+      "name": "goals \u00a78.5: picking /goal ACTS on nothing \u2014 the insertion is the whole pick, nothing is sent",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 40,
+      "name": "the reasoning descriptor is found under any of the four adapters' ids",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 51,
+      "name": "a boolean descriptor is never mistaken for the reasoning select",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 61,
+      "name": "the selected model falls back to the provider default, then to the first",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 68,
+      "name": "an unset option reads the descriptor's default, then its currentValue",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 75,
+      "name": "switching model drops options the new model does not advertise",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 93,
+      "name": "an option whose value is no longer a valid choice is dropped too",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-model.test.ts",
+      "line": 101,
+      "name": "/effort <id> matches by id or label and refuses anything else",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 87,
+      "name": "hands what this page is sending to the next page of the tab, once \u2014 never back to this page",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 103,
+      "name": "hands a thread its own leftovers only, and leaves every other thread's for that thread",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 111,
+      "name": "forgets a settled entry even while it is still stored under the page that left it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 120,
+      "name": "writes a queue over any stored copy of its messages, whichever page stored it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 130,
+      "name": "mirrors a thread's queue in order, keeping the send in flight and every other thread's queue",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 152,
+      "name": "never drops a send in flight to stay under the cap \u2014 only messages still waiting, oldest first",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 170,
+      "name": "holds a message at the front of a thread's kept queue, reason and all, and says whether it could",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 187,
+      "name": "says whether a queue write reached the storage",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 198,
+      "name": "keeps a thread's last-shown stamp while it has queued messages, and forgets it with them",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 213,
+      "name": "is fresh while the later of the queue's last showing and the message's queueing is within the bound",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 228,
+      "name": "keeps every send in flight even past the cap: the bound only ever drops a waiting message",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 255,
+      "name": "reads nothing out of a value that is not a v1 outbox",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 261,
+      "name": "keeps the entries it can read, and drops each one it cannot",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 289,
+      "name": "keeps a redirect's approvals with its send, so a re-post declines them too",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 298,
+      "name": "drops a malformed optional field, never the message it belongs to",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 355,
+      "name": "keeps a model selection and a plan-mode turn it can read",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 377,
+      "name": "reads a held message's reason, and the last-shown stamps, field-wise",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts",
+      "line": 404,
+      "name": "keeps the first of two entries under one commandId",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 34,
+      "name": "nothing pending: an ordinary send, and no hint",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 39,
+      "name": "a message over pending approvals redirects: every approval is declined, files and all",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 48,
+      "name": "an approval being answered from its card holds the redirect back",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 57,
+      "name": "a bare /compact cannot redirect; /compact with words or files is a message",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 63,
+      "name": "a /goal the host applies itself is an ordinary send over any card",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 70,
+      "name": "a message over a question is its answer, unless it carries files",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 76,
+      "name": "an approval is in front of a question, in the dock and in what a send does",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 82,
+      "name": "a redirect is never queued behind the turn it answers",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 104,
+      "name": "another surface's send over an approval redirects too; over a question it waits",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 118,
+      "name": "the rail's Send over an approval is a redirect, sent now even with queueing preferred",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 139,
+      "name": "a request already answered elsewhere is neither redirected nor answered again",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-pending-send.test.ts",
+      "line": 155,
+      "name": "only subagents' approvals: the message is their answer, text only, and the wording says so",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 22,
+      "name": "quotes every line, a blank one as a bare `>` so the quote stays one block",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails stable-seam/unique-protection bar as direct internal formatting helper; original line endings/blank/nested/indented/code cases now run through actual composed send-prompt bytes.",
+      "owner": "same file: puts quote ahead of user text; keeps quoted code block closed"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 26,
+      "name": "nests a line that was already a quote, and keeps indentation",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails stable-seam/unique-protection bar as direct internal formatting helper; original line endings/blank/nested/indented/code cases now run through actual composed send-prompt bytes.",
+      "owner": "same file: puts quote ahead of user text; keeps quoted code block closed"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 30,
+      "name": "drops blank lines at either end and unifies line endings",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails stable-seam/unique-protection bar as direct internal formatting helper; original line endings/blank/nested/indented/code cases now run through actual composed send-prompt bytes.",
+      "owner": "same file: puts quote ahead of user text; keeps quoted code block closed"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 34,
+      "name": "quotes a fenced code block line by line, its blank lines included",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails stable-seam/unique-protection bar as direct internal formatting helper; original line endings/blank/nested/indented/code cases now run through actual composed send-prompt bytes.",
+      "owner": "same file: puts quote ahead of user text; keeps quoted code block closed"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 41,
+      "name": "closes a fence the passage opened and never closed",
+      "disposition": "REWRITE",
+      "reason": "inspect independently expected composed prompt bytes instead of private normalizer output."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 50,
+      "name": "puts the quote ahead of the user's text, a blank line between",
+      "disposition": "CONSOLIDATE",
+      "reason": "survivor combines CRLF, edge blanks, nested quote and indentation; fixed expected prompt protects original four helper cases."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 57,
+      "name": "keeps several quotes several blocks, in order",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 64,
+      "name": "sends the quotes alone when there is no text",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 68,
+      "name": "leaves the text exactly as it is when there are no quotes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 73,
+      "name": "keeps a quoted code block closed, so the user's text never lands inside it",
+      "disposition": "CONSOLIDATE",
+      "reason": "retains code-body blank line plus automatic closer and user text boundary in composed prompt."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 80,
+      "name": "reads back what a quoted send composed",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 88,
+      "name": "has no body when the quotes were sent alone",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 92,
+      "name": "is all body when the message does not open with a quote",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 96,
+      "name": "is all body when a line continues a quote (markdown would fold it in)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 100,
+      "name": "takes off one level of `>` and an optional space",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 106,
+      "name": "returns as it was composed: its quotes as quotes, its words as the text",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 113,
+      "name": "is left as it is without quotes, or with one too long to hold",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 121,
+      "name": "previews prose on one line, markers stripped",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 125,
+      "name": "previews code without its fences, and bounds the length",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 132,
+      "name": "knows a quote that is one code block and nothing else",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 142,
+      "name": "adds a passage at the end, normalised",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 148,
+      "name": "refuses an empty passage, one too long, and one past the bound",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-quotes.test.ts",
+      "line": 159,
+      "name": "puts a failed send's quotes back ahead of the ones quoted meanwhile, each once",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 42,
+      "name": "the entries: the parent's own typed prompts, oldest first, repeats collapsed onto the newest",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 65,
+      "name": "walks back from the newest prompt",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 72,
+      "name": "walks forward, and past the newest prompt empties the composer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 79,
+      "name": "a draft the user typed, or an edited recall, is never replaced",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 87,
+      "name": "follows the entry by id when the list grows under it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-recall.test.ts",
+      "line": 116,
+      "name": "the arrows walk the history only from the edge line, with nothing else claiming them",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-sends.test.ts",
+      "line": 21,
+      "name": "each settle closes its own send only, and a second call is a no-op",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-sends.test.ts",
+      "line": 32,
+      "name": "a send that left A, settling late, never re-enables B's send",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-sends.test.ts",
+      "line": 43,
+      "name": "tells subscribers about every change, until they unsubscribe",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-sends.test.ts",
+      "line": 67,
+      "name": "holds a thread's queue while any of its queued sends is in flight, and no other thread's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-sends.test.ts",
+      "line": 79,
+      "name": "is not a composer send: a queued send never reads as Sending, and a composer send never holds the queue",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 35,
+      "name": "Enter sends on desktop and Shift+Enter is a newline",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 40,
+      "name": "mobile never sends on Enter, whatever else is held",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 56,
+      "name": "mod+Enter during a running turn is the per-message inversion",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 65,
+      "name": "the mod-enter shortcut requires the modifier and makes a bare Enter a newline",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 76,
+      "name": "mod-enter-multiline only demands the modifier once the draft has a newline",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 88,
+      "name": "steer vs queue is the preference XOR the per-message inversion",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 108,
+      "name": "nothing queues when no turn is running",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 119,
+      "name": "the prompt limit accepts 120000 characters and refuses the next",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 124,
+      "name": "an answer to a pending question is exempt from the turn input bound",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 133,
+      "name": "a paste at or over 32 KiB becomes an attachment",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 142,
+      "name": "the byte length folds a paste the character count would let through",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 149,
+      "name": "a smaller paste still folds when it would blow the input limit",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 156,
+      "name": "the escape hatch and a composer that cannot attach both keep the paste inline",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 165,
+      "name": "the paste-as-text chord is platform-specific",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 175,
+      "name": "the attachment budget counts staged and in-flight together",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 181,
+      "name": "an unsupported image type and an oversized file are both refused",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 227,
+      "name": "an unfinished or failed upload blocks send",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 233,
+      "name": "a draft with only whitespace has nothing to send",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 239,
+      "name": "quotes alone are a message",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 244,
+      "name": "an empty draft implements the plan and leaves plan mode",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 254,
+      "name": "text in the draft refines the plan and STAYS in plan mode",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 268,
+      "name": "a ref that arrives under a different key is still matched by its id",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 279,
+      "name": "a ref with no declared mimeType is measured as a file, never guessed into an image",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 290,
+      "name": "a file coming back is never refused for the count, and every other bound still applies",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 317,
+      "name": "the status line works the count out from the draft, so it follows every chip removed and goes once the draft fits",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 325,
+      "name": "a draft over eight attachments cannot be sent",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 343,
+      "name": "Q2-5: Enter during an IME composition is not a send",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 356,
+      "name": "Q2-5: the keyCode 229 fallback is honoured for engines without isComposing",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 368,
+      "name": "R7-3: an empty draft with an actionable plan is NOT a no-op submit",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 377,
+      "name": "R2-3: /plan is swallowed only where the toggle is shown",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 384,
+      "name": "R2-3: /default follows the same gate, and an attachment defeats both",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 395,
+      "name": "R2-3: only a STANDALONE command is swallowed",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 418,
+      "name": "goals \u00a78.2: a chip action is refused for exactly what refuses the composer's own send",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 431,
+      "name": "fix round 1 (7): a typed host /goal is never queued \u2014 the host applies it at once",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 461,
+      "name": "final wave (4): an open card never holds back a goal command the HOST applies",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 470,
+      "name": "final wave (4): everything else still waits for the card",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 497,
+      "name": "Implement on a plan that cannot be read back sends nothing, and says why",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 517,
+      "name": "a read-back prompt over the turn bound is refused before it is sent, and nothing goes back to the draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 531,
+      "name": "a plan read back whole is what gets sent, not the cut one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 540,
+      "name": "a plain send goes out as typed, and one the host refuses goes back to the draft as typed",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 555,
+      "name": "a failed Implement leaves the draft alone: its prompt is the composer's, not the user's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 569,
+      "name": "send ownership marks only generated prompts to stay out of the draft after reload",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 585,
+      "name": "every Implement reads its plan at send time, intact or cut, and no other send does",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 642,
+      "name": "what was typed or staged while it was in flight stays, behind it, and no chip is doubled",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 675,
+      "name": "an image staged meanwhile keeps its own [Image #N] once the sent images are back ahead of it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 717,
+      "name": "a send that went out, a refusal and a failed Implement all leave the draft as it is",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 738,
+      "name": "a message returned behind the draft keeps naming its own images, never the draft's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 770,
+      "name": "a returned message joins the draft's text with one blank line, and no blank lines when either side is empty",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 799,
+      "name": "a failed send comes back ahead of the draft exactly as it was sent, the draft's own images renumbered behind it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 822,
+      "name": "goals \u00a78.2: a failed goal chip action says why and writes nothing back into any draft",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 851,
+      "name": "the rail's Send measures the TRIMMED text against the length bound, as Enter does",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-submission.test.ts",
+      "line": 856,
+      "name": "the rail's Send: a double click's twin is not queued twice",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 10,
+      "name": "slash opens the command menu only at the start of a line",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 28,
+      "name": "a slash trigger dies as soon as the token contains whitespace",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 32,
+      "name": "the bare slash itself is a trigger with an empty query",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 41,
+      "name": "any currency symbol starts a skill token, not just $",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 56,
+      "name": "@ starts a path token on the current whitespace-delimited word",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 65,
+      "name": "a caret before the trigger character sees no trigger",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts",
+      "line": 69,
+      "name": "replaceTextRange splices and reports the caret after the replacement",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/profile-chip.dom.test.ts",
+      "line": 117,
+      "name": "names Global, lists the profiles, and disables one not ready for the chat's agent",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/profile-chip.dom.test.ts",
+      "line": 139,
+      "name": "shows the thread's profile and switches back to Global",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/profile-chip.dom.test.ts",
+      "line": 149,
+      "name": "Global in a Global chat still reports the pick (it forgets a remembered profile; the chat itself does not switch)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/profile-chip.dom.test.ts",
+      "line": 157,
+      "name": "is closed while the thread is busy, saying why",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 14,
+      "name": "R2-8: known $skill mentions are found in order, deduped",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 21,
+      "name": "R2-8: an UNKNOWN mention stays literal \u2014 it is not a chip",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 26,
+      "name": "R2-8: a mention must start a token, so an email or a path is not one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 32,
+      "name": "R2-8: matching is case-insensitive but the text's own spelling is returned",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 36,
+      "name": "R2-8: any currency symbol opens a mention, as the composer trigger does",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 40,
+      "name": "R2-8: dots and dashes are part of a skill name",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 44,
+      "name": "a plugin's `plugin:skill`, dotted plugin names included, is one mention \u2014 as the daemon dispatches it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts",
+      "line": 54,
+      "name": "`$1.50` and a dot or colon ending a sentence are no mention, as dispatch leaves them literal",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 16,
+      "name": "while a layer is up, the composer yields Escape",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 21,
+      "name": "with a subagent view open, the composer claims Escape even while idle",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 26,
+      "name": "the composer claims running-turn Escape only inside its shell",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 31,
+      "name": "the textarea keeps Escape to itself \u2014 the token menu gets first refusal",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 45,
+      "name": "whoever ran first can stand the other down via defaultPrevented",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 49,
+      "name": "Escape with no turn running never interrupts from the composer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 65,
+      "name": "the token menu takes the textarea's Escape before anything else",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 74,
+      "name": "an open layer takes the textarea's Escape: no interrupt, and no half of Esc Esc",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 86,
+      "name": "with a subagent's view open, the textarea's Escape leaves it \u2014 never an interrupt",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 98,
+      "name": "with a subagent's view open, a menu or a layer still takes its Escape first",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 110,
+      "name": "with nothing open, Escape stops a running turn, and an idle one is half of Esc Esc",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts",
+      "line": 115,
+      "name": "a held Escape is one press: its auto-repeat does nothing, whatever is open",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/workspace-skills.test.ts",
+      "line": 25,
+      "name": "the cwd's overlay wins where it lists any skill",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/workspace-skills.test.ts",
+      "line": 29,
+      "name": "an empty overlay, another cwd, or none: the machine-level catalogue",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/composer/workspace-skills.test.ts",
+      "line": 35,
+      "name": "no snapshot, no skills",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 29,
+      "name": "an agent seen at work that settles while the reader follows its end hands the view back",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 42,
+      "name": "opening a finished agent from a running agent's view stays open (was one flag for the whole view)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 53,
+      "name": "a reader who scrolled up stays when it settles \u2014 and is not yanked later on reaching the end",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 64,
+      "name": "idle is not at work: an idle agent that settles returns nothing",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 68,
+      "name": "an agent the roster dropped, then back, starts over",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 79,
+      "name": "A \u2192 B \u2192 A: each agent is watched from its own opening",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 93,
+      "name": "a NEW reveal closes an open drill-in, so the thread's timeline takes it at once",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/drill-in-navigation.test.ts",
+      "line": 98,
+      "name": "no new reveal closes nothing: opening a drill-in while an old one is pending leaves it open",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 24,
+      "name": "the drill-in wins over the interrupt",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 34,
+      "name": "Escape interrupts a running turn from anywhere in the tab",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 38,
+      "name": "a hidden tab never acts, whatever it is doing",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 51,
+      "name": "a blocking layer keeps the key: Escape closes the modal, not the thread",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 58,
+      "name": "focus inside the composer belongs to the composer's own arm, not this one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 69,
+      "name": "an event another listener already handled is not handled twice",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 76,
+      "name": "a held Escape is one press: its auto-repeat never stops the turn the first press spared",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 89,
+      "name": "only Escape",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 101,
+      "name": "a second idle Escape opens the rewind picker",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 105,
+      "name": "the first idle Escape does nothing \u2014 it is only half of the gesture",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 109,
+      "name": "no message to go back to, no picker",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 113,
+      "name": "the double press never outranks leaving a drill-in or stopping a turn",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 125,
+      "name": "the rewind obeys every gate the other two do",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 142,
+      "name": "only an idle Escape is pressed into the double-press sequence",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 146,
+      "name": "an Escape that did something else starts the count over",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 158,
+      "name": "any other key between two Escapes breaks the sequence",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 163,
+      "name": "holding Escape is one press, and its auto-repeat breaks nothing either",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/escape-action.test.ts",
+      "line": 169,
+      "name": "an Escape typed into a field outside this chat is that field's: nothing here, and Esc Esc starts over",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 158,
+      "name": "is a real new-tab link with the short label, and reads nothing until hovered",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 171,
+      "name": "drops owner/repo for a link into the project's own repo",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 185,
+      "name": "hover opens the card, reads the preview once, and takes the merged colour",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 210,
+      "name": "a touch does not open the card in the way of the tap",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 217,
+      "name": "keeps the author's text, and stays a plain styled link when the read fails",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.dom.test.ts",
+      "line": 230,
+      "name": "never reads links that have no preview, but still shows their card",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.render.test.ts",
+      "line": 21,
+      "name": "assistant autolinks become pills with short labels",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.render.test.ts",
+      "line": 36,
+      "name": "a link with the author's words keeps them and gains the icon",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.render.test.ts",
+      "line": 42,
+      "name": "badge images, other hosts and look-alikes stay ordinary links",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.render.test.ts",
+      "line": 57,
+      "name": "GitLab and Bitbucket change requests are pills too",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/forge-links/forge-link-pill.render.test.ts",
+      "line": 65,
+      "name": "a user's plain-text message turns its GitHub URLs into pills and keeps the rest as typed",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 56,
+      "name": "a fork's bar names its parent and offers Merge back",
+      "disposition": "REWRITE",
+      "reason": "retain parent identity and merge action; remove caption grammar."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 63,
+      "name": "a child whose parent was closed says so, and offers no merge",
+      "disposition": "REWRITE",
+      "reason": "retain unavailable merge action when parent absent; remove closed-parent sentence wording."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 69,
+      "name": "a parent's bar counts its forks and tasks; a thread with neither shows nothing",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same child relation counts already belong to the lineage model.",
+      "owner": "lib/agent-chat/lineage.logic.test.ts: a parent counts its children by relation"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 74,
+      "name": "a reply held after a stop is said quietly as held, with Deliver now \u2014 never as a failed merge",
+      "disposition": "REWRITE",
+      "reason": "retain source identity, held state, recovery action and reported error; remove appearance class and fixed sentence."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 85,
+      "name": "the tab mark is titled with the relation and the parent",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/refactor bar for exact English captions, class/data marker spellings or duplicate counts; actionable fork/merge availability remains covered.",
+      "owner": "lib/agent-chat/lineage.logic.test.ts; folded-thread-message.dom.test.ts; retained lineage control cases"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 121,
+      "name": "a prompt and a reply offer Fork from here; a read-only timeline does not",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 141,
+      "name": "Continue in another agent\u2026 sits beside the fork buttons, only where it is offered",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 157,
+      "name": "a continued chat's bar says where it came from, and keeps Merge back",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/refactor bar for exact English captions, class/data marker spellings or duplicate counts; actionable fork/merge availability remains covered.",
+      "owner": "lib/agent-chat/lineage.logic.test.ts; folded-thread-message.dom.test.ts; retained lineage control cases"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 170,
+      "name": "pending merges show on both tabs, with deliver and discard; a failed one says why",
+      "disposition": "REWRITE",
+      "reason": "retain queued/retry state, recovery actions, parent identity and provider failure data; remove caption grammar."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 183,
+      "name": "a merged-back message shows where it came from, and the result alone",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: mounted merged-result case proves marked result remains visible; protocol/parser owners prove body extraction.",
+      "owner": "timeline/folded-thread-message.dom.test.ts: a merged-back result is never folded; lib/agent-chat/lineage.logic.test.ts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 204,
+      "name": "an opened chat reads Opened by \u2014 never as a fork \u2014 and its parent counts it apart",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/refactor bar for exact English captions, class/data marker spellings or duplicate counts; actionable fork/merge availability remains covered.",
+      "owner": "lib/agent-chat/lineage.logic.test.ts; folded-thread-message.dom.test.ts; retained lineage control cases"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 222,
+      "name": "another chat's reply reads Reply from, with its project; the bubble holds the reply alone",
+      "disposition": "REWRITE",
+      "reason": "retains sender/project identity and body/provenance; removes exact caption grammar."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 238,
+      "name": "sent, opened and delegated captions keep their words; an unmarked header is the user's own text",
+      "disposition": "CONSOLIDATE",
+      "reason": "Caption wording fails independent-contract bar; spoof-resistant unmarked attribution already has a mounted owner.",
+      "owner": "timeline/folded-thread-message.dom.test.ts: user own message is never folded"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/lineage.render.test.ts",
+      "line": 251,
+      "name": "an opened chat's merge back says so; an older build's automatic continue is Orquester's",
+      "disposition": "REWRITE",
+      "reason": "removes duplicate opened merge caption, preserves old persisted toolset-continue attribution; final test renamed.",
+      "finalName": "an older build's automatic continue is attributed to Orquester"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/mcp-app/McpAppFrame.dom.test.ts",
+      "line": 153,
+      "name": "keeps its host across a reconnect's new API client, and asks through the new one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/mcp-app/McpAppFrame.dom.test.ts",
+      "line": 171,
+      "name": "sends its teardown on unmount",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/mcp-app/McpAppFrame.dom.test.ts",
+      "line": 180,
+      "name": "never reports a hidden tab's zero width",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/mcp-app/McpAppFrame.dom.test.ts",
+      "line": 192,
+      "name": "refuses an app that reaches Orquester before asking anything",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/mcp-app/McpAppFrame.dom.test.ts",
+      "line": 203,
+      "name": "tells the app its shortcuts, and replays one it passes on while focused",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/primitives/elapsed.test.ts",
+      "line": 5,
+      "name": "elapsedBetween returns empty for missing or unparseable stamps",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 90,
+      "name": "the row keeps the first frame's id, so a streaming row cannot close itself",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 95,
+      "name": "with no lifecycle frame left, the shell is titled from its roster row, its whole output joined",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 110,
+      "name": "a Grok shell folds its task lifecycle into the command's output and status",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 121,
+      "name": "a running Grok shell has no output until it prints",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 127,
+      "name": "a Grok monitor's latest line is its output",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/background-shell.test.ts",
+      "line": 135,
+      "name": "a chunk of the shell's own updates the cached output",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 34,
+      "name": "an agent never opened opens as today: at its end, following, nothing open",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 42,
+      "name": "re-opening an agent restores its disclosures and a mid-list position, with follow OFF",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 51,
+      "name": "a reader who re-armed follow (the pill, mod+J) comes back to the end, whatever position was published before",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 61,
+      "name": "an entry keeps the last roster row seen, so a reopened agent the roster evicted keeps its title and kind",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 69,
+      "name": "A \u2192 B saves A's and restores B's, and each keeps its own",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts",
+      "line": 77,
+      "name": "keeps the 50 most recent agents: the least recently remembered goes first",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 17,
+      "name": "counts agents and shells apart, live ones included",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 29,
+      "name": "counts a loop and a goal as neither an agent nor a shell",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 50,
+      "name": "counts the members as agents and the coordinator with members as none",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 60,
+      "name": "counts a coordinator with no members yet as the one agent it stands for",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 66,
+      "name": "summarises the group's header from its members",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 76,
+      "name": "has no members to settle before the first is reported, and the coordinator's tokens",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/roster/roster-summary.test.ts",
+      "line": 88,
+      "name": "renders a loop and a goal with the agents, never as shells",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 105,
+      "name": "the action matrix \u2014 claude \u00d7 every status \u00d7 running/idle \u00d7 background liveness",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 105,
+      "name": "the action matrix \u2014 codex \u00d7 every status \u00d7 running/idle \u00d7 background liveness",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 105,
+      "name": "the action matrix \u2014 grok \u00d7 every status \u00d7 running/idle \u00d7 background liveness",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 123,
+      "name": "no goal or no goal support \u21d2 no actions",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 132,
+      "name": "only the actions an adapter honours are ever offered",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/goal-chip.test.ts",
+      "line": 144,
+      "name": "each action sends exactly the \u00a78.2 text, as the user's message",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 9,
+      "name": "the meter reports a percentage only when a context window is reported",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 23,
+      "name": "without maxTokens there is no ring and no percentage \u2014 never a zero",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 38,
+      "name": "an adapter that does not report a context window degrades even if a max leaks through",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 52,
+      "name": "usage past the window clamps at 100% and never reports negative remaining",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 65,
+      "name": "no usage frame yet means no meter at all, not a zeroed one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/status-line.test.ts",
+      "line": 88,
+      "name": "zero and non-finite extras are dropped rather than shown",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/tools-chip.test.ts",
+      "line": 23,
+      "name": "no grants: a plain Tools chip saying every tool is available",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/stable-seam bar: directly restates label/tooltip copy and array length; no native control, grant revocation or authorization is exercised.",
+      "owner": "lib/agent-tools/store.test.ts; daemon MCP/workflow-owned gate tests"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/status/tools-chip.test.ts",
+      "line": 31,
+      "name": "grants are counted; a workflow-owned chat says it has no Admin tools",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/stable-seam bar: directly restates label/tooltip copy and array length; no native control, grant revocation or authorization is exercised.",
+      "owner": "lib/agent-tools/store.test.ts; daemon MCP/workflow-owned gate tests"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-link.render.test.ts",
+      "line": 33,
+      "name": "the link names the thread by its live tab title, never the result's",
+      "disposition": "REWRITE",
+      "reason": "retain live/stale title and target behavior, drop tooltip wording."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-link.render.test.ts",
+      "line": 41,
+      "name": "a closed thread's link says so and is no button",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-link.render.test.ts",
+      "line": 47,
+      "name": "the tool row carries the link beside its label",
+      "disposition": "REWRITE",
+      "reason": "retain actual activity-row target link integration, drop action label wording."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-link.render.test.ts",
+      "line": 56,
+      "name": "a marked message whose header this build no longer reads is still another chat's, never the user's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-switch.test.ts",
+      "line": 8,
+      "name": "rows for the named thread always win",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-switch.test.ts",
+      "line": 19,
+      "name": "a reconnect on the same thread repaints its own rows, still interactive",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-switch.test.ts",
+      "line": 25,
+      "name": "switching to a thread with no snapshot holds the previous one, inert",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/thread-switch.test.ts",
+      "line": 33,
+      "name": "a settled empty thread renders empty rather than someone else's rows",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/anchor.test.ts",
+      "line": 12,
+      "name": "nothing to page for a drill-in, an unpainted list, or a row of no remembered turn",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 28,
+      "name": "buildDiffTree rolls stats up through every ancestor",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 35,
+      "name": "summarizeDiffStats totals changed lines",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 43,
+      "name": "splitUnifiedDiff yields one entry per file with its own patch text",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 51,
+      "name": "a deletion keeps the old path when the new one is /dev/null",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same parser and count outputs already asserted together for deletion, binary and ordinary patches in existing CRLF case. Standard LF split/patch bytes remain independently covered.",
+      "owner": "same file: a CRLF patch splits with clean paths, binary flags and counts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 58,
+      "name": "a binary file is flagged rather than dropped",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same parser and count outputs already asserted together for deletion, binary and ordinary patches in existing CRLF case. Standard LF split/patch bytes remain independently covered.",
+      "owner": "same file: a CRLF patch splits with clean paths, binary flags and counts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 69,
+      "name": "a bare patch with no `diff --git` preamble is still one file",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 76,
+      "name": "a quoted path with spaces is unquoted",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 88,
+      "name": "an empty or whitespace diff is no files, not a throw",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 93,
+      "name": "a truncated patch still yields the file it started",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 102,
+      "name": "countDiffLines ignores the file headers",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: same parser and count outputs already asserted together for deletion, binary and ordinary patches in existing CRLF case. Standard LF split/patch bytes remain independently covered.",
+      "owner": "same file: a CRLF patch splits with clean paths, binary flags and counts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts",
+      "line": 107,
+      "name": "a CRLF patch splits with clean paths, binary flags and counts",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 114,
+      "name": "folds a sent message behind a header naming its sender and first line",
+      "disposition": "CONSOLIDATE",
+      "reason": "Surviving mounted owner now absorbs whitespace/CRLF summary normalization; actual origin, disclosure, sender and findable body are still asserted."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 114,
+      "name": "folds a reply message behind a header naming its sender and first line",
+      "disposition": "CONSOLIDATE",
+      "reason": "Surviving mounted owner now absorbs whitespace/CRLF summary normalization; actual origin, disclosure, sender and findable body are still asserted."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 114,
+      "name": "folds a opened message behind a header naming its sender and first line",
+      "disposition": "CONSOLIDATE",
+      "reason": "Surviving mounted owner now absorbs whitespace/CRLF summary normalization; actual origin, disclosure, sender and findable body are still asserted."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 114,
+      "name": "folds a delegated message behind a header naming its sender and first line",
+      "disposition": "CONSOLIDATE",
+      "reason": "Surviving mounted owner now absorbs whitespace/CRLF summary normalization; actual origin, disclosure, sender and findable body are still asserted."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 127,
+      "name": "opens on a click and closes on the next, the body in the bubble",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 141,
+      "name": "opens when find-in-page matches its hidden text",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 152,
+      "name": "a request for the user's input keeps its caption over the full bubble",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 159,
+      "name": "a merged-back result is never folded",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/folded-thread-message.dom.test.ts",
+      "line": 167,
+      "name": "the user's own message is never folded, even one that types another chat's header",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/follow.test.ts",
+      "line": 5,
+      "name": "snaps when the user prefers reduced motion, even mid-turn",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 113,
+      "name": "is not loaded for a message without math",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 121,
+      "name": "is loaded once the first formula mounts, which shows its source meanwhile",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 135,
+      "name": "keeps the source after a failed load and retries on the next mount",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 172,
+      "name": "copies a selection across formulas as markdown with their TeX",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 184,
+      "name": "copies a whole formula's TeX from a selection inside its glyphs",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 192,
+      "name": "leaves a selection without a formula to the browser",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 197,
+      "name": "puts both flavours on the clipboard from the copy event",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MarkdownMath.dom.test.ts",
+      "line": 214,
+      "name": "gives display math a Copy TeX button that copies the bare TeX",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 105,
+      "name": "draws readable diagram labels without active links",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 113,
+      "name": "shows pele's parse error above the source, with no Retry",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 121,
+      "name": "offers Retry when the renderer fails to load, and draws once it loads",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 132,
+      "name": "toggles between the diagram and its source",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 142,
+      "name": "falls back to the source when drawing throws",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 160,
+      "name": "typesets $$ labels with the chat's KaTeX, as MathML without the TeX annotation",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.dom.test.ts",
+      "line": 180,
+      "name": "expands into the modal as a blob image, and revokes it on close",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 33,
+      "name": "shows the diagram's chrome once settled: expand, toggle and a copy button for the source",
+      "disposition": "DELETE",
+      "reason": "Fails stable-seam/unique-protection bar: SSR cannot mount a diagram and checks control inventory/placeholder copy or incidental loader readiness. Real draw/toggle/retry/expand stays mounted.",
+      "owner": "timeline/markdown/MermaidBlock.dom.test.ts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 44,
+      "name": "names a diagram type pele does not know above its source, with no Retry",
+      "disposition": "REWRITE",
+      "reason": "retain visible unsupported source, no diagram and no Retry; remove fixed error sentence."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 54,
+      "name": "does not render an empty fence",
+      "disposition": "DELETE",
+      "reason": "Fails stable-seam/unique-protection bar: SSR cannot mount a diagram and checks control inventory/placeholder copy or incidental loader readiness. Real draw/toggle/retry/expand stays mounted.",
+      "owner": "timeline/markdown/MermaidBlock.dom.test.ts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 65,
+      "name": "shows a placeholder",
+      "disposition": "DELETE",
+      "reason": "Fails stable-seam/unique-protection bar: SSR cannot mount a diagram and checks control inventory/placeholder copy or incidental loader readiness. Real draw/toggle/retry/expand stays mounted.",
+      "owner": "timeline/markdown/MermaidBlock.dom.test.ts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 70,
+      "name": "shows a placeholder until the diagram's type has loaded too",
+      "disposition": "DELETE",
+      "reason": "Fails stable-seam/unique-protection bar: SSR cannot mount a diagram and checks control inventory/placeholder copy or incidental loader readiness. Real draw/toggle/retry/expand stays mounted.",
+      "owner": "timeline/markdown/MermaidBlock.dom.test.ts"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 87,
+      "name": "hands a settled mermaid fence to the diagram block",
+      "disposition": "REWRITE",
+      "reason": "assert image semantic state; remove attribute-order/label inventory."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 93,
+      "name": "keeps a mermaid fence as source while the message streams",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 99,
+      "name": "recognises the fence language case-insensitively",
+      "disposition": "REWRITE",
+      "reason": "assert image semantic state without fixed accessible wording."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.test.ts",
+      "line": 103,
+      "name": "leaves other fences on the plain code block",
+      "disposition": "REWRITE",
+      "reason": "retain source language/data and absent diagram state; remove control-label wording."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts",
+      "line": 11,
+      "name": "highlighting preserves source bytes across styled, empty and trailing lines",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts",
+      "line": 19,
+      "name": "an oversized block preserves the source without running the grammar",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts",
+      "line": 28,
+      "name": "a grammar failure preserves the source instead of killing the row",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts",
+      "line": 34,
+      "name": "an unknown grammar preserves the source",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts",
+      "line": 38,
+      "name": "syntax context changes reclassify unchanged source lines",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/incremental.test.ts",
+      "line": 19,
+      "name": "a reference in the prefix resolves when its definition arrives later",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/incremental.test.ts",
+      "line": 28,
+      "name": "a streamed reference resolves a definition before the cached fence",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/incremental.test.ts",
+      "line": 37,
+      "name": "a streamed CR becoming CRLF preserves text and one line break",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/incremental.test.ts",
+      "line": 46,
+      "name": "a BOM inside streamed text remains an interior character",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 86,
+      "name": "keeps a citation link and the usual schemes, and nothing else of the custom scheme",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 97,
+      "name": "refuses every near-citation: case, whitespace, controls, encodings, smuggling, length",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 136,
+      "name": "renders link text as text and never as HTML, and a citation-shaped image as no image",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 215,
+      "name": "renders each citation as a chip with its text, not a link",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 229,
+      "name": "a click opens the entry in the Knowledge view and does not navigate",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 240,
+      "name": "middle-, ctrl-, meta- and keyboard activation never open a window or navigate",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 267,
+      "name": "asks whether an entry exists on hover, once per entry, and strikes a deleted one through",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 285,
+      "name": "asks again when the entry is deleted from this client",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/knowledge-citation.dom.test.ts",
+      "line": 301,
+      "name": "is the plain link text while the plugin is off",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/local-image.test.ts",
+      "line": 8,
+      "name": "joins a project-relative path onto the project root",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/local-image.test.ts",
+      "line": 19,
+      "name": "keeps an absolute host path and drops a query or fragment",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/local-image.test.ts",
+      "line": 27,
+      "name": "leaves URLs to the browser",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/local-image.test.ts",
+      "line": 33,
+      "name": "cannot place a relative path without a project, nor a home-relative one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Inline $x^2$ and \\\\(y_1\\\\), display $$a+b$$ and \\\\[c\\\\].\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$x$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(x\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[x\\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$x$$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"so $$a+b$$ here\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$\\n\\\\frac{a}{b}\\n$$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\n\\\\frac{a}{b}\\n\\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Where\\n\\\\[\\n\\\\begin{aligned} a &= b \\\\\\\\ c &= d \\\\end{aligned}\\n\\\\]\\nholds.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\nx\\n- y\\n# z\\n\\\\]\\nafter\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\na\\n=\\nb\\n\\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\nx \\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\nx\\n   \\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"> $$\\n> x\\n> $$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"> \\\\[\\n> x\\n> \\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"- intro\\n\\n  $$\\n  x^2\\n  $$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$x^2\\n+y^2$$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Intro\\n\\n$$ E = mc^2 $$\\n\\nOutro\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Intro\\n\\n\\\\[ E = mc^2 \\\\]\\n\\nOutro\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$a$$ is the first formula.\\nSome prose.\\n$$\\nb\\n$$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"```math\\nx^2\\n```\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"~~~math\\nx^2\\n~~~\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"```Math\\nx^2\\n```\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"> ```math\\n> x^2\\n> ```\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(\\\\left(x\\\\right)\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(a \\\\\\\\ b\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(\\\\{x\\\\}\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(x\\n+y\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\\\alpha\\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[x_1, x_2\\\\]\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(1\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Pay \\\\$$x$ now.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"- [ ] check \\\\(x\\\\)\\n- [x] then $y$\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"**bold \\\\(x\\\\)** and *em $y$*\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"[label \\\\(x\\\\)](https://example.com)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"| A | B |\\n| --- | --- |\\n| \\\\(x\\\\) | $y$ |\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"| Name | Value |\\n| --- | --- |\\n| first | \\\\(x |\\n| second | y\\\\) |\\n| valid | $z$ |\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"As shown in \\\\[1\\\\] and \\\\[2, 3\\\\].\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"call f\\\\(\\\\) here\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"empty \\\\( \\\\) parens\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Escaped \\\\\\\\(x\\\\\\\\) stays.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\(a `\\\\)` b\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"text \\\\[a`\\\\]`\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"See [docs](https://example.com/\\\\(a\\\\)) here.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"Energy \\\\(E = mc\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$\\nx^2\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"\\\\[\\nx^2\\n- y\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"$$E=mc^2\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"```math\\nx^2\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"`\\\\(x\\\\)` and `$y$`\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"    \\\\(x\\\\)\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 120,
+      "name": "\"```\\n$x$ \\\\(y\\\\) \\\\[z\\\\]\\n```\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"As shown in \\\\[1\\\\] and \\\\[2, 3\\\\].\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"Escaped \\\\\\\\(x\\\\\\\\) stays.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"Escaped \\\\$x\\\\$ stays.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"\\\\(a `\\\\)` b\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"call f\\\\(\\\\) here\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"Energy \\\\(E = mc\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"$$E=mc^2\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"Use `$x$` in code.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 139,
+      "name": "\"`\\\\(x\\\\)` and `\\\\[y\\\\]`\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 144,
+      "name": "keeps the code a code block holds, delimiters and all",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 150,
+      "name": "keeps an unclosed math fence a code block showing its source",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 155,
+      "name": "keeps link destinations with dollars and parentheses intact",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 165,
+      "name": "keeps an adjacent code span whole",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"It costs $5 and then $10.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"It costs $5 and $10.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"price $20,000 or $30,000\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"Between $5 and $10 per seat, plus $3.50 tax\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"Budget $5-$10 per seat, or $20,000-$30,000 a year.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"Plans are $5/$10 monthly.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"We paid $ 5 and $ 10\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"Run $browser then $deploy on it.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"Set $HOME before running.\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"$5\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 193,
+      "name": "\"just a lone $ sign\"",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 199,
+      "name": "keeps prices as prose when real math follows on the same line",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 207,
+      "name": "still finds real math next to currency",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 213,
+      "name": "keeps the lists and quotes after an unclosed $$ or \\[ as they are",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 221,
+      "name": "does not split the paragraph above an unclosed block",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 228,
+      "name": "does not let a `\\]` ending a later line of prose close a block",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 234,
+      "name": "parses every prefix of a streamed message without throwing",
+      "disposition": "DELETE",
+      "reason": "Fails unique-protection bar: reparses every ordinary character prefix of one sample; independent delimiter/unfinished-stream cases already verify returned content and structure.",
+      "owner": "same file delimiter, unclosed block, incremental cache and streaming source tests"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 247,
+      "name": "composes with the incremental fence cache",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 unclosed \\( in one paragraph",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 unclosed \\[ in one paragraph",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "600 alternating unclosed \\( and \\[",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 openers before one backtick",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 citations before one closer",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 unclosed $ in one paragraph",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 lines of \\[",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 318,
+      "name": "1,000 lines of $$",
+      "disposition": "CONSOLIDATE",
+      "reason": "Private tokenize/effects counter fails stable seam/refactor bar and misses block source-lookahead work; replaced by two public parse/render owners with literal output plus measured CPU budget. Historical inline-cache and block-index mutants are validated separately.",
+      "owner": "math.test.ts: unclosed inline/block delimiters literal, later formula, CPU budget"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 332,
+      "name": "still finds the formula after a run of unclosed openers",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 350,
+      "name": "typesets every delimiter, inline and display",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 359,
+      "name": "keeps formulas reachable by keyboard",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 378,
+      "name": "shows a formula KaTeX cannot parse as its source, not an error",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 385,
+      "name": "refuses links and remote loads from inside a formula (trust: false)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 394,
+      "name": "never turns provider HTML into elements",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 400,
+      "name": "shows a streaming math fence as code until it closes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 407,
+      "name": "keeps an unclosed display block and the prose after it readable while streaming",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 416,
+      "name": "renders math in a control's inline markdown without a tab stop or a button",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 433,
+      "name": "clamps user-specified lengths (\\rule) to maxSize",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 439,
+      "name": "bounds macro expansion (maxExpand)",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/math.test.ts",
+      "line": 447,
+      "name": "still reads 'the $n$th term' as math, which is why the rules stop at digits",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-engine.test.ts",
+      "line": 6,
+      "name": "leaves invalid math labels unresolved and refuses links in labels",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 46,
+      "name": "keeps a pele diagram intact: shapes, label text, CSS variables",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 60,
+      "name": "drops script, handlers, links, images, styles and every reference attribute",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 66,
+      "name": "drops foreignObject entirely, HTML or MathML inside it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 79,
+      "name": "keeps KaTeX's MathML and its presentation attributes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 93,
+      "name": "drops what KaTeX never emits: annotations, glyph images, links and unknown attributes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 104,
+      "name": "drops the same hostile markup as the plain profile, HTML inside the label included",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 129,
+      "name": "fixes the size from the viewBox, sets an opaque background and leaves the mounted SVG alone",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 141,
+      "name": "writes the page's resolved --pele-* colours onto the copy, which an image cannot inherit",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/markdown/mermaid-svg.test.ts",
+      "line": 158,
+      "name": "keeps labels with entities and MathML well-formed",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/plan-reader.test.ts",
+      "line": 5,
+      "name": "with no thread store, a truncated plan rejects rather than returning partial markdown",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 147,
+      "name": "one inside a single agent reply, naming that reply",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 152,
+      "name": "not one in a user message, a tool row, or across two replies",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 159,
+      "name": "a triple click that runs to the start of the next row: trimmed to what it selects",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 165,
+      "name": "not one of only unselectable chrome, nor a collapsed one",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 170,
+      "name": "not one outside the timeline it watches",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 182,
+      "name": "rebuilds the structure: emphasis, code, links, headings, lists, code blocks, quotes, tables, math",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 199,
+      "name": "keeps the part of a paragraph it selects, no more",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 203,
+      "name": "quotes lines of a code block as a fenced block in its language",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 210,
+      "name": "quotes a part of one code line as inline code",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 214,
+      "name": "leaves the code block's header out when the selection starts in it",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 219,
+      "name": "joins a paragraph and the code after it as two blocks",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 300,
+      "name": "shows over a settled selection in a reply, and Quote hands its markdown to the composer",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 319,
+      "name": "goes on Escape, and on a collapse",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 337,
+      "name": "goes on a press elsewhere, and on a scroll of the timeline",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 353,
+      "name": "follows a keyboard selection once it settles",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/quote-selection.dom.test.ts",
+      "line": 365,
+      "name": "never shows for a user message, nor where no composer takes quotes",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 19,
+      "name": "a `/compact` user message is recognised at render time",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 26,
+      "name": "only a bare `/compact` from the user, with no attachments, is the command",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 36,
+      "name": "idle compaction's own `/compact` is labelled automatic; any other is the user's",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 43,
+      "name": "the concatenated runs always reproduce the input exactly",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 54,
+      "name": "a sent `$plugin:skill` mention, dotted plugin name included, is one chip",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 69,
+      "name": "a fileChange approval with no diff borrows it from its own item.started",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 91,
+      "name": "several orphan chunks of one call join into ONE row: the first carries all their text, nothing lost",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 113,
+      "name": "the row a command's streamed output joins onto says the call streamed, however its rows were built",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 139,
+      "name": "the join never overwrites a value the row already has",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts",
+      "line": 148,
+      "name": "the join is keyed on toolCallId only \u2014 never on a label match",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-format.test.ts",
+      "line": 10,
+      "name": "a folded message shows its first line with text, whitespace collapsed",
+      "disposition": "CONSOLIDATE",
+      "reason": "Fails unique-protection bar: whitespace/CRLF normalization now runs through existing mounted fold header scenarios.",
+      "owner": "timeline/folded-thread-message.dom.test.ts four origin cases"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/row-format.test.ts",
+      "line": 16,
+      "name": "a message with no text has no line",
+      "disposition": "DELETE",
+      "reason": "Fails independent-contract/credible-failure bar: empty string formatter result only; no distinct navigation/content behavior; mounted fold cases retain real nonempty content."
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/scroll-restore.dom.test.ts",
+      "line": 224,
+      "name": "a cold open waits for its rows, then pages in a turn the window does not hold",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/scroll-restore.dom.test.ts",
+      "line": 236,
+      "name": "pages in a turn shown only by a row kept out of it, without its prompt",
+      "disposition": "KEEP"
+    },
+    {
+      "path": "packages/ui/src/components/agent-chat/timeline/scroll-restore.dom.test.ts",
+      "line": 243,
+      "name": "keeps the pixel offset for a turn the window shows with its prompt",
+      "disposition": "KEEP"
+    }
+  ],
+  "finalDeclarationCount": 511,
+  "finalExpandedCaseCount": 585,
+  "validation": {
+    "focusedTests": 221,
+    "fail": 0,
+    "wallSeconds": 11.611852218,
+    "bannerCheckWallSeconds": 2.409103283,
+    "publicPerformanceCasesPassed": 2,
+    "expectedMutationFailures": {
+      "failed-scanCpuMs": 16260,
+      "block-indexCpuMs": 19148
+    },
+    "cpuBudgetMs": 5000,
+    "testLinesAdded": 67,
+    "testLinesRemoved": 396
+  }
+}

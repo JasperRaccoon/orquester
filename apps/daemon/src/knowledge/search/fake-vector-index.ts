@@ -1,7 +1,7 @@
 /**
  * An in-memory {@link KnowledgeVectorIndex} for tests: chunk vectors set by hand, the port's
  * semantics (accept before score, L2-normalized entry means, a generation bumped on every change),
- * and counters so a test can see what was scored.
+ * with generation changes matching the production port.
  */
 
 import type { KnowledgeVectorHit, KnowledgeVectorIndex, KnowledgeVectorThresholds } from "../ports.ts";
@@ -46,9 +46,6 @@ export class FakeVectorIndex implements KnowledgeVectorIndex {
   limits: KnowledgeVectorThresholds | null = FAKE_THRESHOLDS;
   /** What `embedQuery` answers (null: embeddings unavailable). */
   queryVector: ((text: string) => Float32Array | null) | null = null;
-  /** Calls of `entryVector`, and the ids `search` scored (only accepted ones may appear). */
-  entryVectorCalls = 0;
-  scored: string[] = [];
   private readonly chunks = new Map<string, Float32Array[]>();
   private readonly means = new Map<string, Float32Array>();
   private gen = 0;
@@ -85,7 +82,6 @@ export class FakeVectorIndex implements KnowledgeVectorIndex {
     const hits: KnowledgeVectorHit[] = [];
     for (const [entryId, vectors] of this.chunks) {
       if (!accept(entryId)) continue;
-      this.scored.push(entryId);
       let best = -Infinity;
       let chunk = 0;
       vectors.forEach((vector, i) => {
@@ -101,7 +97,6 @@ export class FakeVectorIndex implements KnowledgeVectorIndex {
   }
 
   entryVector(entryId: string): Float32Array | null {
-    this.entryVectorCalls += 1;
     if (!this.model) return null;
     const cached = this.means.get(entryId);
     if (cached) return cached;

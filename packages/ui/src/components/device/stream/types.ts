@@ -1,7 +1,6 @@
 /**
  * Shared shapes of the browser-side device stream: the session state machine,
- * stats for the debug tooltip, errors, and the injectable browser APIs that
- * let Node tests drive a session without a DOM.
+ * stats for the debug tooltip and errors.
  */
 
 export type { DevicePlatform } from "@orquester/api";
@@ -93,30 +92,6 @@ export interface DeviceVideoSession {
   close(): void;
 }
 
-/** Browser APIs a session uses, injectable for tests. Defaults come from `globalThis`. */
-export interface StreamDeps {
-  readonly fetch: typeof fetch;
-  readonly WebSocket: typeof WebSocket;
-  readonly createImageBitmap: (blob: Blob) => Promise<ImageBitmap>;
-  readonly VideoDecoder: typeof VideoDecoder | undefined;
-  readonly EncodedVideoChunk: typeof EncodedVideoChunk | undefined;
-  readonly random: () => number;
-  readonly now: () => number;
-}
-
-export function resolveDeps(overrides: Partial<StreamDeps> = {}): StreamDeps {
-  const g = globalThis as Partial<typeof globalThis>;
-  return {
-    fetch: overrides.fetch ?? ((input, init) => g.fetch!(input, init)),
-    WebSocket: overrides.WebSocket ?? (g.WebSocket as typeof WebSocket),
-    createImageBitmap: overrides.createImageBitmap ?? ((blob) => g.createImageBitmap!(blob)),
-    VideoDecoder: "VideoDecoder" in overrides ? overrides.VideoDecoder : g.VideoDecoder,
-    EncodedVideoChunk: "EncodedVideoChunk" in overrides ? overrides.EncodedVideoChunk : g.EncodedVideoChunk,
-    random: overrides.random ?? Math.random,
-    now: overrides.now ?? (() => performance.now())
-  };
-}
-
 /** Options every video session takes. */
 export interface VideoSessionOptions extends DeviceStreamCallbacks {
   /** Full URL, without credentials (`ApiClient.deviceHttpRequest`). */
@@ -124,9 +99,4 @@ export interface VideoSessionOptions extends DeviceStreamCallbacks {
   /** Sent with every request: the transport's auth headers (`ApiClient.deviceHttpRequest`). */
   readonly headers?: Readonly<Record<string, string>>;
   readonly canvas: HTMLCanvasElement;
-  /** Silence after the last frame before the state turns `stalled` (default 2 s). */
-  readonly stallMs?: number;
-  /** Silence before the session reconnects on its own (default 15 s). */
-  readonly reconnectAfterMs?: number;
-  readonly deps?: Partial<StreamDeps>;
 }

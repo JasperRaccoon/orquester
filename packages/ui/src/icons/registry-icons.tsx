@@ -87,7 +87,7 @@ type AppIconProps = { refId: LazyIconId; size: number | string; fallback: React.
 const AppIcon = React.lazy<React.ComponentType<AppIconProps>>(() =>
   import("./app-icons").then(
     (module): { default: React.ComponentType<AppIconProps> } => ({ default: module.AppIcon }),
-    () => ({ default: ({ fallback }: AppIconProps) => <>{fallback}</> })
+    (): { default: React.ComponentType<AppIconProps> } => ({ default: ({ fallback }: AppIconProps) => <>{fallback}</> })
   )
 );
 

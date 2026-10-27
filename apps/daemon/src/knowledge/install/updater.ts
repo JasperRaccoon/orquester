@@ -51,12 +51,7 @@ export interface KnowledgeGraphUpdaterOptions {
   env: NodeJS.ProcessEnv;
   /** Network, process runner and clock; the real ones by default. */
   deps?: KnowledgeInstallerDeps;
-  /**
-   * Fixtures for tests: the overlay, the locks, the uv build (null: unsupported), the model and
-   * the tiktoken encodings; the pinned ones by default.
-   */
-  overlayRoot?: string;
-  locksDir?: string;
+  /** Artifact specifications used with the network/process dependencies; shipped pins by default. */
   uv?: UvBuild | null;
   model?: EmbeddingModelSpec;
   encodings?: readonly TiktokenEncodingSpec[];
@@ -69,11 +64,10 @@ export function createKnowledgeGraphUpdater(options: KnowledgeGraphUpdaterOption
   const uv = options.uv !== undefined ? options.uv : uvBuildFor(platform, arch, options.libc);
   const model = options.model ?? EMBEDDING_MODEL;
   const encodings = options.encodings ?? TIKTOKEN_ENCODINGS;
-  const overlayRoot = options.overlayRoot ?? MYKG_PROMPTS_ROOT;
   // The shipped overlay does not change while the daemon runs; read once.
   let digest: Promise<string> | null = null;
   const currentDigest = (): Promise<string> => {
-    digest ??= overlayDigest(MYKG_LINE, overlayRoot).catch((error) => {
+    digest ??= overlayDigest(MYKG_LINE, MYKG_PROMPTS_ROOT).catch((error) => {
       digest = null;
       throw error;
     });
@@ -107,10 +101,8 @@ export function createKnowledgeGraphUpdater(options: KnowledgeGraphUpdaterOption
         uv,
         env: options.env,
         signal,
-        overlayRoot,
         model,
-        encodings,
-        ...(options.locksDir ? { locksDir: options.locksDir } : {})
+        encodings
       });
     },
     prune: (keep) => pruneKnowledgeVersions(runtimeDir, keep)

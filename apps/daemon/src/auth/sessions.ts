@@ -33,9 +33,9 @@ import {
 import { writeFileAtomic } from "../agent-hooks.ts";
 
 /** A device session lapses after this long without a request. */
-export const DEVICE_SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+const DEVICE_SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 /** `lastUsedAt` reaches the disk at most this often per session. */
-export const LAST_USED_PERSIST_MS = 5 * 60 * 1000;
+const LAST_USED_PERSIST_MS = 5 * 60 * 1000;
 
 /** The store refuses to mint while it is read-only (its file could not be read). */
 export class AuthSessionsUnavailableError extends Error {

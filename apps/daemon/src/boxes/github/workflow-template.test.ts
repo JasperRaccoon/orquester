@@ -8,31 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
-import {
-  ANDROID_AVD_STEP_SCRIPT,
-  ANDROID_CACHE_KEY,
-  ANDROID_CACHE_PATHS,
-  ANDROID_SDK_STEP_SCRIPT,
-  APPLE_RUNNER_CACHE_PATHS,
-  APPLE_RUNNER_STEP_SCRIPT,
-  appleRunnerCacheKey,
-  DEVICE_TOOLS_CACHE_PATHS,
-  DEVICE_TOOLS_STEP_SCRIPT,
-  deviceToolsCacheKey,
-  KVM_STEP_SCRIPT,
-  XCODE_BUILD_STEP_SCRIPT
-} from "./device-cache.ts";
-import {
-  BLACKSMITH_LINUX_RUNNER_LABELS,
-  BLACKSMITH_RUNNER_LABELS,
-  blacksmithDeviceCacheWorkflowTemplate,
-  blacksmithRunnerOs,
-  blacksmithWorkflowTemplate,
-  CACHE_CHECK_STEP_SCRIPT,
-  CHECK_STEP_SCRIPT,
-  DOWNLOAD_STEP_SCRIPT,
-  PATHS_STEP_SCRIPT
-} from "./workflow-template.ts";
+import { blacksmithDeviceCacheWorkflowTemplate, blacksmithWorkflowTemplate } from "./workflow-template.ts";
 
 interface Step {
   name: string;
@@ -93,15 +69,9 @@ test("the workflow: dispatch inputs, OIDC permission, runner choice, lifetime, s
   for (const input of ["box_id", "lifetime_minutes", "daemon_url", "runner", "os", "prepare"]) assert.ok(workflow.on.workflow_dispatch.inputs[input]);
   assert.ok(workflow.on.workflow_dispatch.inputs.runner!.options!.includes("blacksmith-6vcpu-macos-26"));
   assert.ok(workflow.on.workflow_dispatch.inputs.runner!.options!.includes("blacksmith-12vcpu-macos-15"));
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.runner!.options, [...BLACKSMITH_RUNNER_LABELS]);
   // Dispatches from builds that send no os/prepare (and old runs) stay plain macOS boxes.
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.os, {
-    description: "The runner's OS",
-    required: false,
-    type: "choice",
-    default: "macos",
-    options: ["macos", "linux"]
-  } as Input);
+  const os = workflow.on.workflow_dispatch.inputs.os!;
+  assert.deepEqual([os.required, os.type, os.default, os.options], [false, "choice", "macos", ["macos", "linux"]]);
   assert.deepEqual(
     [workflow.on.workflow_dispatch.inputs.prepare!.default, workflow.on.workflow_dispatch.inputs.prepare!.options],
     ["none", ["none", "devices"]]
@@ -110,6 +80,7 @@ test("the workflow: dispatch inputs, OIDC permission, runner choice, lifetime, s
   assert.equal(workflow.jobs.box["runs-on"], "${{ inputs.runner }}");
   assert.equal(workflow.jobs.box["timeout-minutes"], "${{ fromJSON(inputs.lifetime_minutes) }}");
   const steps = workflow.jobs.box.steps;
+  assert.equal(steps.find((step) => step.env?.AGENT_PLATFORM)?.env?.AGENT_PLATFORM, "${{ inputs.os == 'linux' && 'linux-x64' || 'darwin-arm64' }}");
   const env = steps.find((step) => step.env?.ORQ_GITHUB_OIDC === "1")!.env!;
   assert.equal(env.ORQ_DAEMON_URL, "${{ inputs.daemon_url }}");
   assert.equal(env.ORQ_BOX_ID, "${{ inputs.box_id }}");
@@ -130,165 +101,67 @@ test("the optional Tailscale step uses workload identity, the box tag and hostna
   assert.throws(() => blacksmithWorkflowTemplate({ tailscale: { oauthClientId: "x\ny", audience: "a" } }), /Invalid/);
 });
 
-test("macOS without devices runs exactly the macOS box steps", () => {
-  const steps = stepsFor(parsed().jobs.box.steps, { os: "macos", prepare: "none" });
-  assert.deepEqual(
-    steps.map((step) => step.name),
-    ["Check inputs", "Download orq-agent", "Prepare paths", "Run orq-agent"]
-  );
-  assert.equal(steps[1]!.env!.AGENT_PLATFORM, "${{ inputs.os == 'linux' && 'linux-x64' || 'darwin-arm64' }}");
-});
 
-test("Linux boxes enable KVM before orq-agent starts; device hosts restore the Android and tool caches", () => {
+test("Linux device hosts restore their SDK and tools before the agent, without saving on cancellation", () => {
   const all = parsed().jobs.box.steps;
-  const plain = stepsFor(all, { os: "linux", prepare: "none" });
-  assert.deepEqual(
-    plain.map((step) => step.name),
-    ["Check inputs", "Enable KVM", "Download orq-agent", "Prepare paths", "Run orq-agent"]
-  );
-  assert.equal(plain[1]!.run!.trimEnd(), KVM_STEP_SCRIPT.trimEnd());
-
+  assert.ok(!stepsFor(all, { os: "linux", prepare: "none" }).some((step) => step.uses?.startsWith("actions/cache")));
   const devices = stepsFor(all, { os: "linux", prepare: "devices" });
-  assert.deepEqual(
-    devices.map((step) => step.name),
-    [
-      "Check inputs",
-      "Enable KVM",
-      "Download orq-agent",
-      "Prepare paths",
-      "Set up Node for the device tools",
-      "Restore the Android SDK and AVDs",
-      "Restore the device tools",
-      "Run orq-agent"
-    ]
-  );
-  const android = devices.find((step) => step.name === "Restore the Android SDK and AVDs")!;
+  const android = devices.find((step) => String(step.with?.path).includes("/var/lib/orquester/devices/android-sdk"))!;
   assert.equal(android.uses, "actions/cache/restore@v4");
-  assert.equal(android["continue-on-error"], true, "a cache problem never keeps orq-agent from starting");
-  assert.equal(android.with!.key, ANDROID_CACHE_KEY);
-  assert.deepEqual((android.with!.path as string).trim().split("\n"), [...ANDROID_CACHE_PATHS]);
-  const tools = devices.find((step) => step.name === "Restore the device tools")!;
-  assert.equal(tools.with!.key, `\${{ inputs.os == 'linux' && '${deviceToolsCacheKey("linux")}' || '${deviceToolsCacheKey("macos")}' }}`);
-  assert.deepEqual((tools.with!.path as string).trim().split("\n"), [...DEVICE_TOOLS_CACHE_PATHS]);
-  // Box runs never save: a destroy cancels the run.
+  assert.equal(android["continue-on-error"], true, "a cache failure does not prevent the agent starting");
+  assert.deepEqual(String(android.with!.path).trim().split("\n"), ["/var/lib/orquester/devices/android-sdk", "/var/lib/orquester/devices/avd"]);
+  const tools = devices.find((step) => String(step.with?.path).trim() === "/var/lib/orquester/devices/tools")!;
+  assert.equal(tools.uses, "actions/cache/restore@v4");
+  assert.ok(devices.indexOf(android) < devices.findIndex((step) => step.env?.ORQ_GITHUB_OIDC === "1"));
   assert.ok(!all.some((step) => step.uses?.startsWith("actions/cache/save")));
 });
 
-test("macOS device hosts restore agent-device's iOS runner keyed on the Xcode build", () => {
+test("macOS device hosts restore the iOS runner only for a known Xcode build", () => {
   const all = parsed().jobs.box.steps;
-  const names = (outputs: Record<string, string>) => stepsFor(all, { os: "macos", prepare: "devices" }, outputs).map((step) => step.name);
-  assert.deepEqual(names({ "steps.xcode.outputs.build": "17E202" }), [
-    "Check inputs",
-    "Download orq-agent",
-    "Prepare paths",
-    "Set up Node for the device tools",
-    "Find the Xcode build",
-    "Restore the device tools",
-    "Restore agent-device's iOS runner",
-    "Run orq-agent"
-  ]);
-  assert.ok(!names({}).includes("Restore agent-device's iOS runner"), "skipped when the Xcode build is unknown");
-  const runner = all.find((step) => step.name === "Restore agent-device's iOS runner")!;
-  assert.equal(runner.with!.key, appleRunnerCacheKey("${{ steps.xcode.outputs.build }}"));
-  assert.deepEqual((runner.with!.path as string).trim().split("\n"), [...APPLE_RUNNER_CACHE_PATHS]);
-  assert.equal(all.find((step) => step.name === "Find the Xcode build")!.id, "xcode");
+  const runner = (outputs: Record<string, string>) => stepsFor(all, { os: "macos", prepare: "devices" }, outputs).find((step) => String(step.with?.path).trim() === "~/.agent-device/apple-runner");
+  const restored = runner({ "steps.xcode.outputs.build": "17E202" })!;
+  assert.equal(restored.uses, "actions/cache/restore@v4");
+  assert.match(String(restored.with!.key), /\$\{\{ steps\.[a-z-]+\.outputs\.build \}\}/);
+  assert.equal(runner({}), undefined);
 });
 
-test("the device-cache workflow builds what is missing and saves it under the keys box runs restore", () => {
+test("the device-cache workflow saves the same SDK, tools and iOS runner keys and paths that box runs restore", () => {
   const workflow = parsedCacheWorkflow();
   assert.equal(workflow["run-name"], "orq-cache-${{ inputs.os }}-${{ inputs.request_id }}");
-  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs), ["request_id", "os", "runner"]);
-  assert.deepEqual(workflow.permissions, { contents: "read" }, "no OIDC: it never talks to the daemon");
+  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs).sort(), ["os", "request_id", "runner"]);
+  assert.deepEqual(workflow.permissions, { contents: "read" });
   assert.equal(workflow.jobs.linux.if, "inputs.os == 'linux'");
   assert.equal(workflow.jobs.macos.if, "inputs.os == 'macos'");
-  for (const job of Object.values(workflow.jobs)) {
-    for (const step of job.steps) assert.ok(!step.run?.includes("${{"), `${step.name} interpolates an expression into shell`);
+  const box = parsed().jobs.box.steps;
+  for (const [os, job] of Object.entries(workflow.jobs)) {
+    for (const step of job.steps) assert.ok(!step.run?.includes("${{"), "inputs are passed through env");
+    const miss = stepsFor(job.steps, { os }, { "steps.xcode.outputs.build": "17E202" });
+    const savedCaches = miss.filter((step) => step.uses === "actions/cache/save@v4");
+    assert.deepEqual(new Set(savedCaches.map((step) => String(step.with!.path).trim())), new Set(os === "linux"
+      ? ["/var/lib/orquester/devices/tools", "/var/lib/orquester/devices/android-sdk\n/var/lib/orquester/devices/avd"]
+      : ["/var/lib/orquester/devices/tools", "~/.agent-device/apple-runner"]));
+    for (const saved of savedCaches) {
+      const restored = box.find((step) => step.with?.path === saved.with!.path)!;
+      assert.ok(restored, "every saved cache can be restored by a box");
+      let restoreKey = String(restored.with!.key);
+      const osChoice = /^\$\{\{ inputs\.os == 'linux' && '([^']+)' \|\| '([^']+)' \}\}$/.exec(restoreKey);
+      if (osChoice) restoreKey = osChoice[os === "linux" ? 1 : 2]!;
+      assert.equal(saved.with!.key, restoreKey);
+    }
+    const hit = stepsFor(job.steps, { os }, { "steps.android.outputs.cache-hit": "true", "steps.tools.outputs.cache-hit": "true", "steps.runner.outputs.cache-hit": "true", "steps.xcode.outputs.build": "17E202" });
+    assert.ok(!hit.some((step) => step.uses === "actions/cache/save@v4"), "cache hits do no save work");
+    assert.ok(!hit.some((step) => /sdkmanager|npm ci|simctl create/.test(step.run ?? "")), "cache hits do no install/build work");
+    assert.equal(job.steps.find((step) => step.id === "tools")!.with!["lookup-only"], undefined);
   }
-
-  const linux = workflow.jobs.linux.steps;
-  const linuxMiss = stepsFor(linux, { os: "linux" }).map((step) => step.name);
-  assert.deepEqual(linuxMiss, [
-    "Check inputs",
-    "Enable KVM",
-    "Prepare paths",
-    "Set up Node for the device tools",
-    "Restore the device tools",
-    "Install the device tools",
-    "Save the device tools",
-    "Look up the Android cache",
-    "Set up Java for the Android SDK tools",
-    "Install the Android SDK",
-    "Create the AVDs and their golden snapshots",
-    "Save the Android cache"
-  ]);
-  const hit = stepsFor(linux, { os: "linux" }, { "steps.android.outputs.cache-hit": "true", "steps.tools.outputs.cache-hit": "true" });
-  assert.deepEqual(
-    hit.map((step) => step.name),
-    ["Check inputs", "Enable KVM", "Prepare paths", "Set up Node for the device tools", "Restore the device tools", "Look up the Android cache"]
-  );
-  const lookup = linux.find((step) => step.id === "android")!;
-  const save = linux.find((step) => step.name === "Save the Android cache")!;
-  assert.equal(lookup.with!["lookup-only"], true);
-  assert.equal(save.uses, "actions/cache/save@v4");
-  // actions/cache versions an entry by its paths: save and restore must list the same ones.
-  const boxRestore = parsed().jobs.box.steps.find((step) => step.name === "Restore the Android SDK and AVDs")!;
-  assert.deepEqual([save.with!.key, save.with!.path], [boxRestore.with!.key, boxRestore.with!.path]);
-
-  const macos = workflow.jobs.macos.steps;
-  const macMiss = stepsFor(macos, { os: "macos" }, { "steps.xcode.outputs.build": "17E202" }).map((step) => step.name);
-  assert.deepEqual(macMiss, [
-    "Check inputs",
-    "Prepare paths",
-    "Set up Node for the device tools",
-    "Restore the device tools",
-    "Install the device tools",
-    "Save the device tools",
-    "Find the Xcode build",
-    "Look up agent-device's iOS runner",
-    "Build agent-device's iOS runner",
-    "Save agent-device's iOS runner"
-  ]);
-  const runnerSave = macos.find((step) => step.name === "Save agent-device's iOS runner")!;
-  const boxRunner = parsed().jobs.box.steps.find((step) => step.name === "Restore agent-device's iOS runner")!;
-  assert.deepEqual([runnerSave.with!.key, runnerSave.with!.path], [boxRunner.with!.key, boxRunner.with!.path]);
-  // The tools are restored for real on both: the runner build needs agent-device, the AVD script its helper APKs.
-  assert.equal(macos.find((step) => step.id === "tools")!.with!["lookup-only"], undefined);
-  assert.equal(linux.find((step) => step.id === "tools")!.with!["lookup-only"], undefined);
+  const android = workflow.jobs.linux.steps.find((step) => step.id === "android")!;
+  assert.equal(android.with!["lookup-only"], true);
 });
 
-test("the templates are deterministic", () => {
-  assert.equal(blacksmithWorkflowTemplate(), blacksmithWorkflowTemplate());
-  assert.equal(blacksmithDeviceCacheWorkflowTemplate(), blacksmithDeviceCacheWorkflowTemplate());
-});
 
-test("runner labels: macOS M4 and x64 Ubuntu 24.04, no ARM Linux", () => {
-  assert.deepEqual(BLACKSMITH_LINUX_RUNNER_LABELS, [
-    "blacksmith-2vcpu-ubuntu-2404",
-    "blacksmith-4vcpu-ubuntu-2404",
-    "blacksmith-8vcpu-ubuntu-2404",
-    "blacksmith-16vcpu-ubuntu-2404",
-    "blacksmith-32vcpu-ubuntu-2404"
-  ]);
-  assert.ok(!BLACKSMITH_RUNNER_LABELS.some((label) => label.endsWith("-arm")));
-  assert.equal(blacksmithRunnerOs("blacksmith-6vcpu-macos-26"), "macos");
-  assert.equal(blacksmithRunnerOs("blacksmith-8vcpu-ubuntu-2404"), "linux");
-  assert.equal(blacksmithRunnerOs("blacksmith-8vcpu-ubuntu-2404-arm"), null);
-  assert.equal(blacksmithRunnerOs(undefined), null);
-});
 
 test("the step scripts pass bash -n", () => {
-  for (const script of [
-    CHECK_STEP_SCRIPT,
-    CACHE_CHECK_STEP_SCRIPT,
-    DOWNLOAD_STEP_SCRIPT,
-    PATHS_STEP_SCRIPT,
-    KVM_STEP_SCRIPT,
-    XCODE_BUILD_STEP_SCRIPT,
-    DEVICE_TOOLS_STEP_SCRIPT,
-    ANDROID_SDK_STEP_SCRIPT,
-    ANDROID_AVD_STEP_SCRIPT,
-    APPLE_RUNNER_STEP_SCRIPT
-  ]) {
+  const steps = [...parsed().jobs.box.steps, ...Object.values(parsedCacheWorkflow().jobs).flatMap((job) => job.steps)];
+  for (const script of new Set(steps.flatMap((step) => step.run ? [step.run] : []))) {
     const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
   }
@@ -296,7 +169,7 @@ test("the step scripts pass bash -n", () => {
 
 test("the input check rejects values that could break out of the run", () => {
   const check = (env: Record<string, string>): number | null =>
-    spawnSync("bash", ["-c", CHECK_STEP_SCRIPT], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
+    spawnSync("bash", ["-c", parsed().jobs.box.steps.find((step) => step.env?.LIFETIME)!.run!], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
   const good = {
     BOX_ID: "box-0123456789ab",
     DAEMON_URL: "https://orq.example.com:8443/t4",
@@ -319,7 +192,7 @@ test("the input check rejects values that could break out of the run", () => {
   assert.equal(check({ ...good, LIFETIME: "1e3" }), 1);
 
   const cacheCheck = (env: Record<string, string>): number | null =>
-    spawnSync("bash", ["-c", CACHE_CHECK_STEP_SCRIPT], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
+    spawnSync("bash", ["-c", parsedCacheWorkflow().jobs.linux.steps.find((step) => step.env?.REQUEST_ID)!.run!], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
   const cache = { REQUEST_ID: "6f1c1d1e-4a1b-4c7d-9e2f-0a1b2c3d4e5f", OS: "linux", RUNNER: "blacksmith-8vcpu-ubuntu-2404" };
   assert.equal(cacheCheck(cache), 0);
   assert.equal(cacheCheck({ ...cache, REQUEST_ID: "x; id" }), 1);
@@ -352,7 +225,7 @@ for (const platform of ["darwin-arm64", "linux-x64"]) {
     await mkdir(home);
     await mkdir(runnerTemp);
 
-    const child = spawn("bash", ["-eo", "pipefail", "-c", DOWNLOAD_STEP_SCRIPT], {
+    const child = spawn("bash", ["-eo", "pipefail", "-c", parsed().jobs.box.steps.find((step) => step.env?.AGENT_PLATFORM)!.run!], {
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: home,

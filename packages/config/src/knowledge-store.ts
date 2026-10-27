@@ -41,10 +41,6 @@ export function isKnowledgeEntryId(value: unknown): value is string {
   return typeof value === "string" && KNOWLEDGE_ENTRY_ID_PATTERN.test(value);
 }
 
-export function isKnowledgeCollectionId(value: unknown): value is string {
-  return typeof value === "string" && KNOWLEDGE_COLLECTION_ID_PATTERN.test(value);
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -223,13 +223,6 @@ interface OpenCodeThreadSessionDeps {
    * with no exit at all.
    */
   onClosed: (threadId: string) => void;
-  /**
-   * The wait between two attempts: the event stream's reconnect, and every
-   * retry below it. `util.ts`'s `delay` — a timer the session's stop ends
-   * early — unless a test hands in its own, so a dropped stream reconnects
-   * without a clock.
-   */
-  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 interface StartOpenCodeSessionInput {
@@ -585,9 +578,9 @@ export class OpenCodeThreadSession {
     this.deps.emit(event);
   }
 
-  /** Wait `ms` before the next attempt (`OpenCodeThreadSessionDeps.delay`); the stop ends it early. */
+  /** Wait `ms` before the next attempt; the stop ends it early. */
   private async backoff(ms: number): Promise<void> {
-    await (this.deps.delay ?? delay)(ms, this.pumpAbort.signal);
+    await delay(ms, this.pumpAbort.signal);
   }
 
   /**

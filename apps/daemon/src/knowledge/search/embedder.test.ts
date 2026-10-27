@@ -3,24 +3,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { Tokenizer } from "@huggingface/tokenizers";
+import { InferenceSession, Tensor } from "onnxruntime-node";
 import type { KnowledgeRuntime } from "../ports.ts";
-import {
-  type EmbeddingSession,
-  MINILM_THRESHOLDS,
-  OnnxSentenceEmbedder,
-  type OnnxEmbedderOptions,
-  frameIds,
-  meanPoolNormalized,
-  runtimeEmbedderSource,
-  tokenFrameOf
-} from "./embedder.ts";
+import { OnnxSentenceEmbedder, type OnnxEmbedderOptions, runtimeEmbedderSource } from "./embedder.ts";
 
-// The ONNX embedder without ONNX: a tiny XLM-R-shaped tokenizer (`<s>` 0, `<pad>` 1, `</s>` 2 —
-// not BERT's 101/102/0) on disk and a fake session that echoes each position's token id, so the
-// prefixes, the special tokens, the padding, truncation (and its log line) and the pooling are
-// all visible. The real model is exercised by embedder.model.test.ts.
-
+// A real tokenizer with XLM-R's <s>/</s>/<pad> ids. Only the native inference dependency is
+// replaced: inputs remain observable at its protocol boundary and pooling runs in production.
 const VOCAB = ["<s>", "<pad>", "</s>", "<unk>", "query:", "passage:", "hello", "world", "paywall", "ads", "tiktok"];
 const ID = Object.fromEntries(VOCAB.map((token, id) => [token, id])) as Record<string, number>;
 
@@ -60,203 +48,152 @@ async function modelDir(t: TestContext): Promise<string> {
   return root;
 }
 
-/** Each position's hidden state is a one-hot of its token id (dims = vocabulary size), so pooling shows which tokens counted. */
-class EchoEmbedder extends OnnxSentenceEmbedder {
-  batches: { ids: number[][]; mask: number[][] }[] = [];
-  released = 0;
-  protected override async openSession(): Promise<EmbeddingSession> {
-    return {
-      run: async (inputIds, mask, rows, width) => {
-        const dims = VOCAB.length;
-        const hidden = new Float32Array(rows * width * dims);
-        const ids: number[][] = [];
-        const masks: number[][] = [];
-        for (let r = 0; r < rows; r += 1) {
-          ids.push([...inputIds.slice(r * width, (r + 1) * width)].map(Number));
-          masks.push([...mask.slice(r * width, (r + 1) * width)].map(Number));
-          for (let c = 0; c < width; c += 1) hidden[(r * width + c) * dims + Number(inputIds[r * width + c])] = 1;
+function nativeSession(t: TestContext) {
+  const state = { batches: [] as { ids: number[]; mask: number[] }[], released: 0 };
+  t.mock.method(InferenceSession, "create", async () => ({
+    inputNames: ["input_ids", "attention_mask"],
+    outputNames: ["last_hidden_state"],
+    async run(feeds: Record<string, Tensor>) {
+      const [rows, width] = feeds.input_ids!.dims as [number, number];
+      const ids = feeds.input_ids!.data as BigInt64Array;
+      const masks = feeds.attention_mask!.data as BigInt64Array;
+      const hidden = new Float32Array(rows * width * 2);
+      for (let row = 0; row < rows; row += 1) {
+        state.batches.push({
+          ids: [...ids.slice(row * width, (row + 1) * width)].map(Number),
+          mask: [...masks.slice(row * width, (row + 1) * width)].map(Number)
+        });
+        for (let col = 0; col < width; col += 1) {
+          const token = Number(ids[row * width + col]);
+          // The 3-4-5 triangle gives literal normalized outputs. Large padding states make an
+          // unmasked mean fail, while distinct rows expose losing the caller's input order.
+          const value = token === ID.hello || token === ID.world ? [3, 4]
+            : token === ID.ads ? [4, 3] : token === ID.tiktok ? [-2, 0]
+            : token === ID["<pad>"] ? [100, 100] : [0, 0];
+          hidden.set(value, (row * width + col) * 2);
         }
-        this.batches.push({ ids, mask: masks });
-        return { hidden, dims };
-      },
-      release: async () => {
-        this.released += 1;
       }
-    };
-  }
+      return { last_hidden_state: new Tensor("float32", hidden, [rows, width, 2]) };
+    },
+    async release() { state.released += 1; }
+  } as unknown as InferenceSession));
+  return state;
 }
 
-function embedder(dir: string, options: Partial<OnnxEmbedderOptions> = {}): { embedder: EchoEmbedder; warnings: string[] } {
+function embedder(dir: string, options: Partial<OnnxEmbedderOptions> = {}) {
   const warnings: string[] = [];
-  const e = new EchoEmbedder({
-    modelDir: dir,
-    modelId: "Fixture/xlmr-tiny",
-    dimensions: VOCAB.length,
-    queryPrefix: "query: ",
-    passagePrefix: "passage: ",
-    maxTokens: 8,
-    thresholds: { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 },
-    logger: { warn: (line: string) => warnings.push(line) },
-    ...options
+  const e = new OnnxSentenceEmbedder({
+    modelDir: dir, modelId: "Fixture/xlmr-tiny", dimensions: 2,
+    queryPrefix: "query: ", passagePrefix: "passage: ", maxTokens: 8,
+    logger: { warn: (line: string) => warnings.push(line) }, ...options
   });
   return { embedder: e, warnings };
 }
 
-test("the frame comes from the tokenizer: <s> … </s> and <pad>, not BERT's ids", () => {
-  const tokenizer = new Tokenizer(tokenizerJson() as object, TOKENIZER_CONFIG);
-  assert.deepEqual(tokenFrameOf(tokenizer, TOKENIZER_CONFIG), { before: [ID["<s>"]], after: [ID["</s>"]], pad: ID["<pad>"] });
-  // An AddedToken-style pad_token; no pad_token at all falls back to the end token.
-  assert.equal(tokenFrameOf(tokenizer, { pad_token: { content: "<pad>" } }).pad, ID["<pad>"]);
-  assert.equal(tokenFrameOf(tokenizer, {}).pad, ID["</s>"]);
-});
+const realTokens = (row: { ids: number[]; mask: number[] }) => row.ids.filter((_, i) => row.mask[i] === 1);
+const close = (actual: Float32Array, expected: number[]) => {
+  assert.equal(actual.length, expected.length);
+  expected.forEach((value, i) => assert.ok(Math.abs(actual[i]! - value) < 1e-6, `${actual} != ${expected}`));
+};
 
-test("truncation keeps the start and closes with the model's end token", () => {
-  const frame = { before: [0], after: [2], pad: 1 };
-  assert.deepEqual(frameIds(frame, [5, 6, 7], 8), { ids: [0, 5, 6, 7, 2], truncated: false });
-  assert.deepEqual(frameIds(frame, [5, 6, 7, 8, 9, 10, 11], 8), { ids: [0, 5, 6, 7, 8, 9, 10, 2], truncated: true });
-  assert.deepEqual(frameIds(frame, [5, 6, 7, 8, 9, 10, 11, 12], 8), { ids: [0, 5, 6, 7, 8, 9, 10, 2], truncated: true });
-  assert.deepEqual(frameIds({ before: [101], after: [102, 102], pad: 0 }, [5, 6, 7, 8], 5), { ids: [101, 5, 6, 102, 102], truncated: true });
-});
-
-test("mean pooling counts only the real tokens of each row, then L2-normalizes", () => {
-  // Two rows, width 3, dims 2; row 1 has one padded position whose state must not count.
-  const hidden = new Float32Array([1, 0, 0, 1, 1, 1, 3, 4, 3, 4, 100, 100]);
-  const [a, b] = meanPoolNormalized(hidden, [3, 2], 3, 2);
-  const norm = Math.hypot(2 / 3, 2 / 3);
-  assert.ok(Math.abs(a![0]! - 2 / 3 / norm) < 1e-6 && Math.abs(a![1]! - 2 / 3 / norm) < 1e-6);
-  assert.ok(Math.abs(b![0]! - 0.6) < 1e-6 && Math.abs(b![1]! - 0.8) < 1e-6);
-});
-
-test("embed applies the kind's prefix, the tokenizer's special tokens and its padding", async (t) => {
-  const dir = await modelDir(t);
-  const { embedder: e, warnings } = embedder(dir);
+test("embed preserves input order, prefixes and tokenizer framing, and normalizes a masked mean", async (t) => {
+  const native = nativeSession(t);
+  const { embedder: e, warnings } = embedder(await modelDir(t));
   t.after(() => e.dispose());
   const [q] = await e.embed(["hello world"], "query");
   const [p, short] = await e.embed(["hello world paywall", "ads"], "passage");
   const [plain] = await e.embed(["tiktok"]);
 
-  assert.deepEqual(e.batches[0]!.ids, [[ID["<s>"], ID["query:"], ID.hello, ID.world, ID["</s>"]]]);
-  // Sorted by length within the call; the shorter row is padded with <pad> and masked out.
-  assert.deepEqual(e.batches[1]!.ids, [
-    [ID["<s>"], ID["passage:"], ID.ads, ID["</s>"], ID["<pad>"], ID["<pad>"]],
-    [ID["<s>"], ID["passage:"], ID.hello, ID.world, ID.paywall, ID["</s>"]]
-  ]);
-  assert.deepEqual(e.batches[1]!.mask, [
-    [1, 1, 1, 1, 0, 0],
-    [1, 1, 1, 1, 1, 1]
-  ]);
-  // "passage" is the default kind.
-  assert.deepEqual(e.batches[2]!.ids, [[ID["<s>"], ID["passage:"], ID.tiktok, ID["</s>"]]]);
-
-  // Each vector is the normalized mean of its own tokens' one-hots: padding never counts.
-  const expect = (tokens: string[]) => {
-    const v = new Float32Array(VOCAB.length);
-    for (const token of tokens) v[ID[token]!]! += 1 / tokens.length;
-    const n = Math.hypot(...v);
-    return [...v].map((x) => x / n);
-  };
-  const close = (a: Float32Array, b: number[]) => a.every((x, i) => Math.abs(x - b[i]!) < 1e-6);
-  assert.ok(close(q!, expect(["<s>", "query:", "hello", "world", "</s>"])));
-  assert.ok(close(p!, expect(["<s>", "passage:", "hello", "world", "paywall", "</s>"])));
-  assert.ok(close(short!, expect(["<s>", "passage:", "ads", "</s>"])));
-  assert.ok(close(plain!, expect(["<s>", "passage:", "tiktok", "</s>"])));
+  assert.deepEqual(realTokens(native.batches[0]!), [0, 4, 6, 7, 2]);
+  const passageRows = native.batches.slice(1, 3);
+  assert.deepEqual(realTokens(passageRows.find((row) => row.ids.includes(ID.paywall))!), [0, 5, 6, 7, 8, 2]);
+  const ads = passageRows.find((row) => row.ids.includes(ID.ads))!;
+  assert.deepEqual(realTokens(ads), [0, 5, 9, 2]);
+  ads.ids.forEach((token, i) => { if (ads.mask[i] === 0) assert.equal(token, 1); });
+  assert.deepEqual(realTokens(native.batches[3]!), [0, 5, 10, 2]);
+  close(q!, [0.6, 0.8]);
+  close(p!, [0.6, 0.8]);
+  close(short!, [0.8, 0.6]);
+  close(plain!, [-1, 0]);
   assert.deepEqual(warnings, []);
-  assert.deepEqual(e.thresholds, { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 });
 });
 
-test("inputs past maxTokens are truncated, closed with </s>, and counted in one warning per call (no text)", async (t) => {
-  const dir = await modelDir(t);
-  const { embedder: e, warnings } = embedder(dir, { maxTokens: 8 });
+test("oversize inputs close at maxTokens and log only a truncation count", async (t) => {
+  const native = nativeSession(t);
+  const { embedder: e, warnings } = embedder(await modelDir(t));
   t.after(() => e.dispose());
   const secret = "hello world paywall ads tiktok hello world";
   await e.embed([secret, "ads", `${secret} tiktok`], "passage");
-  const rows = e.batches[0]!.ids;
-  assert.deepEqual(rows.at(-1), [ID["<s>"], ID["passage:"], ID.hello, ID.world, ID.paywall, ID.ads, ID.tiktok, ID["</s>"]]);
+  const long = native.batches.map(realTokens).filter((row) => row.length > 4);
+  assert.deepEqual(long, [[0, 5, 6, 7, 8, 9, 10, 2], [0, 5, 6, 7, 8, 9, 10, 2]]);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /^knowledge: 2 of 3 passage text\(s\) exceeded 8 tokens for Fixture\/xlmr-tiny and were truncated$/);
+  assert.match(warnings[0]!, /\b2 of 3\b/);
+  assert.match(warnings[0]!, /\b8 tokens\b/);
   assert.ok(!warnings[0]!.includes("paywall"));
   await e.embed(["ads"], "query");
-  assert.equal(warnings.length, 1, "nothing truncated, nothing logged");
+  assert.equal(warnings.length, 1);
 });
 
-test("a symmetric model has no prefixes; the defaults are all-MiniLM-L6-v2's", async (t) => {
-  const dir = await modelDir(t);
-  const e = new EchoEmbedder({ modelDir: dir, modelId: "Fixture/xlmr-tiny", dimensions: VOCAB.length, logger: { warn: () => {} } });
+test("legacy symmetric model inputs are unprefixed and limited to 256 tokens by default", async (t) => {
+  const native = nativeSession(t);
+  const e = new OnnxSentenceEmbedder({ modelDir: await modelDir(t), modelId: "Fixture/xlmr-tiny", dimensions: 2, logger: { warn() {} } });
   t.after(() => e.dispose());
   await e.embed(["hello"], "query");
-  assert.deepEqual(e.batches[0]!.ids, [[ID["<s>"], ID.hello, ID["</s>"]]]);
-  assert.deepEqual(e.thresholds, MINILM_THRESHOLDS);
-  assert.equal(e.maxTokens, 256);
+  assert.deepEqual(realTokens(native.batches[0]!), [0, 6, 2]);
+  await e.embed(["hello ".repeat(300)]);
+  assert.equal(realTokens(native.batches[1]!).length, 256);
+  assert.equal(realTokens(native.batches[1]!).at(-1), 2);
 });
 
-test("dispose releases the session; a disposed embedder refuses", async (t) => {
-  const dir = await modelDir(t);
-  const { embedder: e } = embedder(dir);
+test("dispose releases the native session and refuses further embedding", async (t) => {
+  const native = nativeSession(t);
+  const { embedder: e } = embedder(await modelDir(t));
   await e.embed(["hello"]);
   await e.dispose();
-  assert.equal(e.released, 1);
+  assert.equal(native.released, 1);
   await assert.rejects(e.embed(["hello"]), /disposed/);
 });
 
 function fakeRuntime(dir: string, extra: Partial<KnowledgeRuntime> = {}): KnowledgeRuntime {
   return {
-    mykgVersion: "0.4.10",
-    mykgBin: "/x/mykg",
-    pythonBin: "/x/python",
-    tiktokenCacheDir: "/x/tiktoken",
-    embeddingModelDir: dir,
-    embeddingModelId: "Fixture/xlmr-tiny",
-    embeddingDimensions: VOCAB.length,
-    embeddingModelReady: true,
-    embeddingQueryPrefix: "query: ",
-    embeddingPassagePrefix: "passage: ",
-    embeddingMaxTokens: 512,
-    embeddingThresholds: { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 },
-    ...extra
+    mykgVersion: "0.4.10", mykgBin: "/x/mykg", pythonBin: "/x/python", tiktokenCacheDir: "/x/tiktoken",
+    embeddingModelDir: dir, embeddingModelId: "Fixture/xlmr-tiny", embeddingDimensions: 2,
+    embeddingModelReady: true, embeddingQueryPrefix: "query: ", embeddingPassagePrefix: "passage: ",
+    embeddingMaxTokens: 8, embeddingThresholds: { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 }, ...extra
   };
 }
 
-test("the runtime source passes the model's prefixes, limit and thresholds; none while the model is missing", async () => {
+test("runtime availability and model changes configure actual embedding and preserve legacy defaults", async (t) => {
+  const native = nativeSession(t);
+  const dir = await modelDir(t);
   let runtime: KnowledgeRuntime | null = null;
   const listeners = new Set<(rt: KnowledgeRuntime | null) => void>();
   const source = runtimeEmbedderSource({
     current: () => runtime,
-    onChange: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    }
-  });
+    onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); }
+  }, { logger: { warn() {} } });
+  t.after(() => source.dispose());
   let changes = 0;
-  source.onChange(() => (changes += 1));
+  source.onChange(() => { changes += 1; });
   assert.equal(source.current(), null);
-
-  // myKG installed with an older model: linking runs, search has no embedder (text and graph only).
-  runtime = fakeRuntime("/models", { embeddingModelReady: false });
+  runtime = fakeRuntime(dir, { embeddingModelReady: false });
   for (const listener of listeners) listener(runtime);
   assert.equal(changes, 1);
   assert.equal(source.current(), null);
 
-  runtime = fakeRuntime("/models");
-  const ready = source.current() as OnnxSentenceEmbedder;
-  assert.ok(ready instanceof OnnxSentenceEmbedder);
-  assert.equal(ready.modelId, "Fixture/xlmr-tiny");
-  assert.equal(ready.maxTokens, 512);
+  runtime = fakeRuntime(dir);
+  const ready = source.current()!;
+  await ready.embed(["hello ".repeat(20)], "query");
+  assert.deepEqual(realTokens(native.batches[0]!), [0, 4, 6, 6, 6, 6, 6, 2]);
   assert.deepEqual(ready.thresholds, { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 });
-  assert.equal(source.current(), ready, "the same runtime keeps the same embedder");
+  assert.equal(source.current(), ready);
 
-  // A runtime written before these fields (an older daemon's fake): all-MiniLM-L6-v2's defaults.
-  runtime = {
-    mykgVersion: "0.4.10",
-    mykgBin: "/x",
-    pythonBin: "/x",
-    tiktokenCacheDir: "/x",
-    embeddingModelDir: "/models",
-    embeddingModelId: "Xenova/all-MiniLM-L6-v2",
-    embeddingDimensions: 384
-  };
-  const legacy = source.current() as OnnxSentenceEmbedder;
-  assert.notEqual(legacy, ready);
-  assert.deepEqual(legacy.thresholds, MINILM_THRESHOLDS);
-  assert.equal(legacy.maxTokens, 256);
-  await source.dispose();
+  // Persisted runtimes written before the new embedding fields remain usable.
+  runtime = { mykgVersion: "0.4.10", mykgBin: "/x", pythonBin: "/x", tiktokenCacheDir: "/x",
+    embeddingModelDir: dir, embeddingModelId: "Fixture/xlmr-tiny", embeddingDimensions: 2 };
+  const legacy = source.current()!;
+  await legacy.embed(["hello"], "query");
+  assert.deepEqual(realTokens(native.batches[1]!), [0, 6, 2]);
+  assert.equal(native.released, 1);
+  await assert.rejects(ready.embed(["hello"]), /disposed/);
 });

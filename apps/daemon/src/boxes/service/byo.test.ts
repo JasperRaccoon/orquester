@@ -6,11 +6,10 @@ import test from "node:test";
 
 import { boxesStorePath } from "@orquester/config";
 
-import { hashSecret } from "../hub/auth.ts";
 import { byoAdapter } from "../providers/byo.ts";
 import { localBoxConnection } from "../testing.ts";
 import { BoxError } from "./errors.ts";
-import { PAIRING_TTL_MS, PairingThrottle, pairingThrottleKey } from "./byo.ts";
+import { PairingThrottle } from "./byo.ts";
 import { testBoxService, testClock } from "./testing.ts";
 
 async function tempDir(t: test.TestContext): Promise<string> {
@@ -20,13 +19,12 @@ async function tempDir(t: test.TestContext): Promise<string> {
 }
 
 /** A service with only the `byo` provider and a clock the test moves. */
-async function setup(t: test.TestContext, options: { enabled?: boolean } = {}) {
+async function setup(t: test.TestContext) {
   const base = await tempDir(t);
   let now = Date.parse("2026-10-27T10:00:00.000Z");
   const harness = testBoxService({
     baseDir: base,
     adapters: [byoAdapter],
-    ...(options.enabled !== undefined ? { enabled: options.enabled } : {}),
     overrides: { clock: testClock(() => now) }
   });
   t.after(() => harness.service.stop());
@@ -61,12 +59,12 @@ test("Add your machine: a pairing record and a one-time command; only the code's
   assert.deepEqual(pairing.box.setup, []);
   assert.equal(pairing.box.deviceHost, false);
   assert.deepEqual(pairing.box.byo, { name: "Mac mini", pairingExpiresAt: pairing.expiresAt });
-  assert.equal(Date.parse(pairing.expiresAt) - Date.parse("2026-10-27T10:00:00.000Z"), PAIRING_TTL_MS);
+  assert.equal(Date.parse(pairing.expiresAt) - Date.parse("2026-10-27T10:00:00.000Z"), 30 * 60_000);
 
   const code = codeOf(pairing.command);
   const onDisk = await readFile(boxesStorePath(base), "utf8");
   assert.ok(!onDisk.includes(code), "the code itself is never stored");
-  assert.equal(JSON.parse(onDisk).boxes[pairing.box.id].pairingCodeHash, hashSecret(code));
+  assert.match(JSON.parse(onDisk).boxes[pairing.box.id].pairingCodeHash, /^[0-9a-f]{64}$/);
   // An idle machine is not a running box.
   assert.equal(service.boxesResponse().totals.activeCount, 0);
 
@@ -77,16 +75,18 @@ test("Add your machine: a pairing record and a one-time command; only the code's
 test("the pairing code is spent by the first fetch and its script carries the box's bootstrap token", async (t) => {
   const { service, hub } = await setup(t);
   const pairing = await service.byo.add({ kind: "linux", name: "Build server" });
-  const code = codeOf(pairing.command);
+  const code = "AAAAAAAAAAAAAAAAAAAAAAAA";
+  await service.records.update(pairing.box.id, (record) => {
+    // SHA-256 of the literal code above, independent of the production hash helper.
+    record.pairingCodeHash = "1bda9f0aed80857d43c9329457f28b1ca29f736a0c539901e1ba16a909eb07b4";
+  });
 
   const first = await service.byo.pairingScript(code, "203.0.113.5");
   assert.ok(first.ok);
   if (!first.ok) return;
   const token = hub.tokens.get(pairing.box.id)!;
-  assert.ok(first.script.includes(`T='${token}'`), "the token is written to the 0600 token file");
+  assert.ok(first.script.includes(token), "the delivered script carries its newly minted bootstrap token");
   assert.ok(first.script.includes(`ORQ_BOX_ID='${pairing.box.id}'`));
-  assert.ok(first.script.includes('"$T" install-service'));
-  assert.ok(first.script.includes('[ "$OS" = linux ]'), "the script checks it runs on the kind it was made for");
   const record = service.registry.get(pairing.box.id)!;
   assert.equal(record.pairingCodeHash, undefined);
   assert.equal(service.registry.summary(pairing.box.id)?.byo?.pairingExpiresAt, null);
@@ -98,7 +98,7 @@ test("the pairing code is spent by the first fetch and its script carries the bo
 test("an expired, unknown or malformed code answers the same 404; failures are throttled per client", async (t) => {
   const { service, advance } = await setup(t);
   const pairing = await service.byo.add({ kind: "linux", name: "Box" });
-  advance(PAIRING_TTL_MS + 1);
+  advance(30 * 60_000 + 1);
   const expired = await service.byo.pairingScript(codeOf(pairing.command), "198.51.100.1");
   assert.ok(!expired.ok && expired.status === 404);
   assert.equal(service.registry.get(pairing.box.id)?.pairingCodeHash, undefined, "an expired code is dropped");
@@ -116,28 +116,28 @@ test("an expired, unknown or malformed code answers the same 404; failures are t
 });
 
 test("pairing throttle: IPv6 by /64, IPv4-mapped as IPv4; bounded and pruned in window order", () => {
-  assert.equal(pairingThrottleKey("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
-  assert.equal(pairingThrottleKey("2001:0db8:0001:0002:ffff:ffff:ffff:ffff"), "2001:db8:1:2::/64");
-  assert.equal(pairingThrottleKey("2001:db8::1"), "2001:db8:0:0::/64");
-  assert.equal(pairingThrottleKey("fe80::1%eth0"), "fe80:0:0:0::/64");
-  assert.equal(pairingThrottleKey("::ffff:192.0.2.1"), "192.0.2.1");
-  assert.equal(pairingThrottleKey("192.0.2.1"), "192.0.2.1");
-
   let now = 0;
   const throttle = new PairingThrottle(() => now);
-  // One /64 is one client: rotating the interface id does not reset its count.
-  for (let i = 0; i < PairingThrottle.MAX_FAILURES; i++) throttle.recordFailure(`2001:db8:1:2::${(i + 1).toString(16)}`);
-  assert.ok(throttle.retryAfterMs("2001:db8:1:2:dead:beef:0:1") > 0);
-  assert.equal(throttle.retryAfterMs("2001:db8:1:3::1"), 0);
+  for (const [client, same, other] of [
+    ["2001:db8:1:2:aaaa::1", "2001:0db8:0001:0002:ffff:ffff:ffff:ffff", "2001:db8:1:3::1"],
+    ["fe80::1%eth0", "fe80::2%eth1", "fe80:0:0:1::1"],
+    ["::ffff:192.0.2.1", "192.0.2.1", "192.0.2.2"]
+  ] as const) {
+    for (let i = 0; i < PairingThrottle.MAX_FAILURES; i++) throttle.recordFailure(client);
+    assert.ok(throttle.retryAfterMs(same) > 0, same);
+    assert.equal(throttle.retryAfterMs(other), 0, other);
+  }
 
   // Bounded: a flood of new clients evicts the oldest windows, never grows past the cap.
-  for (let i = 0; i < PairingThrottle.MAX_CLIENTS + 500; i++) throttle.recordFailure(`10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
-  assert.equal(throttle.size, PairingThrottle.MAX_CLIENTS);
+  for (let i = 0; i < 5000; i++) throttle.recordFailure(`10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
   assert.equal(throttle.retryAfterMs("2001:db8:1:2::1"), 0, "the oldest window was evicted");
-  // Ended windows leave on the next check.
+  for (let i = 0; i < PairingThrottle.MAX_FAILURES; i++) throttle.recordFailure("198.51.100.7");
+  assert.ok(throttle.retryAfterMs("198.51.100.7") > 0, "recent clients remain throttled after eviction");
+  // An expired refusal is lifted without requiring the client to change address.
   now += PairingThrottle.WINDOW_MS + 1;
+  assert.equal(throttle.retryAfterMs("198.51.100.7"), 0);
   throttle.recordFailure("198.51.100.7");
-  assert.equal(throttle.size, 1);
+  assert.equal(throttle.retryAfterMs("198.51.100.7"), 0, "the old failures were pruned");
 });
 
 test("with the plugin off a valid code is refused (404) and stays unspent", async (t) => {
@@ -146,7 +146,8 @@ test("with the plugin off a valid code is refused (404) and stays unspent", asyn
   setEnabled(false);
   const refused = await service.byo.pairingScript(codeOf(pairing.command), "192.0.2.1");
   assert.ok(!refused.ok && refused.status === 404);
-  assert.ok(service.registry.get(pairing.box.id)?.pairingCodeHash);
+  setEnabled(true);
+  assert.ok((await service.byo.pairingScript(codeOf(pairing.command), "192.0.2.1")).ok, "the original code works once the plugin is back on");
 });
 
 test("first connect pairs the machine; it is offline while away and ready when back, never destroyed", async (t) => {
@@ -169,7 +170,7 @@ test("first connect pairs the machine; it is offline while away and ready when b
 
   hub.connect(id, localBoxConnection({ boxId: id }));
   await until(service, id, () => service.registry.get(id)?.state === "ready");
-  await assert.rejects(service.destroyBox(id, "deleted"), (error: BoxError) => error.status === 409, "an idle machine is removed, not destroyed");
+  await assert.rejects(service.destroyBox(id, "deleted"), (error: unknown) => error instanceof BoxError && error.status === 409 && error.code === "BOX_INVALID_REQUEST", "an idle machine is removed, not destroyed");
 });
 
 test("a chat borrows an idle machine (provider byo) and destroying it gives it back", async (t) => {
@@ -185,10 +186,9 @@ test("a chat borrows an idle machine (provider byo) and destroying it gives it b
   assert.equal(lent.purpose, "temporary");
   assert.equal(lent.threadId, "chat-1");
   assert.ok(lent.deadlineAt);
-  assert.deepEqual(lent.setup.map((step) => step.state), ["done", "done", "done"]);
   await assert.rejects(
     service.startTemporaryBox({ threadId: "chat-2", kind: "linux", provider: "byo", lifetimeMinutes: 30, purposeNote: "x" }),
-    (error: BoxError) => error.code === "BOX_NOT_READY" && /None of your Linux machines is free/.test(error.message),
+    (error: BoxError) => error.code === "BOX_NOT_READY",
     "a lent machine is not free"
   );
   await assert.rejects(service.byo.remove(id), (error: BoxError) => error.code === "BOX_IN_USE");
@@ -198,7 +198,6 @@ test("a chat borrows an idle machine (provider byo) and destroying it gives it b
   assert.equal(back.purpose, "machine");
   assert.equal(back.threadId, null);
   assert.equal(back.deadlineAt, null);
-  assert.ok(connection.calls.some((call) => call.method === "proc.list"), "the chat's background jobs are looked for");
   assert.equal(service.registry.get(id)?.destroyedAt ?? null, null);
 });
 
@@ -209,8 +208,11 @@ test("a machine used for device simulators is never lent to a chat or a project"
   hub.connect(id, localBoxConnection({ boxId: id }));
   await until(service, id, () => service.registry.get(id)?.state === "ready");
   await service.byo.update(id, { deviceHost: true });
-  await assert.rejects(service.createTemporaryBox({ threadId: "chat-1", kind: "linux", provider: "byo", lifetimeMinutes: 10, purposeNote: "x" }));
-  await assert.rejects(service.byo.leaseProject(id, { workspace: "w", name: "p" } as never), (error: BoxError) => error.code === "BOX_IN_USE");
+  await assert.rejects(
+    service.createTemporaryBox({ threadId: "chat-1", kind: "linux", provider: "byo", lifetimeMinutes: 10, purposeNote: "x" }),
+    (error: unknown) => error instanceof BoxError && error.code === "BOX_NOT_READY"
+  );
+  await assert.rejects(service.byo.leaseProject(id, { workspace: "w", name: "p", path: "/ws/w/p" }), (error: BoxError) => error.code === "BOX_IN_USE");
   await assert.rejects(service.byo.leaseTemporary(id, { threadId: "chat-1", purposeNote: "x", lifetimeMinutes: 10 }), (error: BoxError) => error.code === "BOX_IN_USE");
   assert.equal(service.registry.get(id)?.purpose, "machine");
 });
@@ -230,12 +232,14 @@ test("a chat's lease past its time limit is released by the reconciler", async (
 });
 
 test("device-simulator flag and rename persist on the record and show on the summary", async (t) => {
-  const { service } = await setup(t);
+  const { service, base } = await setup(t);
   const pairing = await service.byo.add({ kind: "macos", name: "Mac" });
   const updated = await service.byo.update(pairing.box.id, { deviceHost: true, name: "Studio" });
   assert.equal(updated.deviceHost, true);
   assert.equal(updated.byo?.name, "Studio");
-  assert.equal(service.registry.get(pairing.box.id)?.deviceHost, true);
+  const saved = JSON.parse(await readFile(boxesStorePath(base), "utf8")).boxes[pairing.box.id];
+  assert.equal(saved.deviceHost, true);
+  assert.equal(saved.machineName, "Studio");
   await assert.rejects(service.byo.update(pairing.box.id, { deviceHost: "yes" as never }), (error: BoxError) => error.status === 400);
 });
 

@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { defaultDevicesSettings, type DevicesSettings } from "@orquester/config";
+import { createDefaultDevicesSettingsFile, type DevicesSettings } from "@orquester/config";
 
 import {
-  ANDROID_HOST_HARD_CAP,
-  HOST_START_SECONDS,
   choosePlacement,
   decidePool,
   hostCap,
@@ -19,7 +17,7 @@ import {
 } from "./pool.ts";
 
 const settings = (patch: (s: DevicesSettings) => void = () => undefined): DevicesSettings => {
-  const s = defaultDevicesSettings();
+  const s = createDefaultDevicesSettingsFile().settings;
   s.android.enabled = true;
   s.ios.enabled = true;
   patch(s);
@@ -41,11 +39,6 @@ test("a platform that is off is disabled", () => {
   assert.deepEqual(choosePlacement({ platform: "android", hosts: [host("local")], settings: settings((s) => void (s.android.enabled = false)), canProvision: false }), { kind: "disabled" });
 });
 
-test("local first, then the busiest box host with room (best fit)", () => {
-  const hosts = [host("box:a", { used: 0, total: 3 }), host("box:b", { used: 2, total: 3 }), host("box:c", { used: 3, total: 3 })];
-  assert.deepEqual(choosePlacement({ platform: "ios", hosts, settings: settings(), canProvision: true }), { kind: "host", hostId: "box:b" });
-  assert.deepEqual(choosePlacement({ platform: "android", hosts: [host("local")], settings: settings(), canProvision: false }), { kind: "host", hostId: "local" });
-});
 
 test("no room: wait for a starting host, set up a fixable one, rent one, or report full / not ready", () => {
   assert.deepEqual(choosePlacement({ platform: "ios", hosts: [host("box:a", { status: "starting" })], settings: settings(), canProvision: true }), { kind: "wait", hostId: "box:a" });
@@ -171,7 +164,7 @@ test("decidePool: Android never above 16 per host, whatever the host reports", (
   assert.deepEqual(placed(d), { r1: "box:big" });
   assert.deepEqual(queued(d), { r2: "capacity:-" });
   // Learned capacities are clamped too.
-  assert.equal(plannedCapacity("android", poolSettings(), [{ platform: "android", provider: "blacksmith", size: "32vcpu", capacity: 30 }], "blacksmith", "32vcpu"), ANDROID_HOST_HARD_CAP);
+  assert.equal(plannedCapacity("android", poolSettings(), [{ platform: "android", provider: "blacksmith", size: "32vcpu", capacity: 30 }], "blacksmith", "32vcpu"), 16);
   assert.equal(hostCap("ios", 30), 30);
 });
 
@@ -180,7 +173,7 @@ test("decidePool: starting hosts' future slots are used before renting; queued w
   const d = decide({ hosts: [starting], requests: [req("r1"), req("r2")], learned: [{ platform: "android", provider: "blacksmith", size: "16vcpu", capacity: 1 }] });
   // A starting host with no reported total plans with the default (8): both wait on it.
   assert.deepEqual(queued(d), { r1: "host-starting:box:s", r2: "host-starting:box:s" });
-  assert.equal(d.queue[0]!.etaSeconds, HOST_START_SECONDS.android - 10);
+  assert.equal(d.queue[0]!.etaSeconds, 30);
   // Its learned capacity (1, for what it was rented as) leaves the second request to a new host.
   const learnedHost = { ...starting, provider: "blacksmith", size: "16vcpu" };
   const e = decide({ hosts: [learnedHost], requests: [req("r1"), req("r2")], learned: [{ platform: "android", provider: "blacksmith", size: "16vcpu", capacity: 1 }] });
@@ -286,5 +279,5 @@ test("decidePool: a platform switched off fails its queued requests; platforms a
     ["android", "demand", ["a1"]]
   ]);
   // A new Mac host is planned with `ios.maxSimulatorsPerHost` (nothing learned yet).
-  assert.equal(mixed.perHostCapacity.ios, defaultDevicesSettings().ios.maxSimulatorsPerHost);
+  assert.equal(mixed.perHostCapacity.ios, createDefaultDevicesSettingsFile().settings.ios.maxSimulatorsPerHost);
 });

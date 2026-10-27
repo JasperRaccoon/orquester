@@ -135,7 +135,7 @@ export class VphoneGuestClient {
 }
 
 /** Refuse anything that would confirm a **force** method. */
-export function assertSafeParams(params: Record<string, unknown>): void {
+function assertSafeParams(params: Record<string, unknown>): void {
   if (Object.prototype.hasOwnProperty.call(params, "force")) throw new VphoneRpcError("refused", "Orquester never sends vphoned's force methods.");
 }
 

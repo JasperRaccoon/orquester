@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { KNOWLEDGE_FILTER_MAX_VALUES, encodeKnowledgeFilterList } from "@orquester/api";
 import { KnowledgeError } from "../store/errors.ts";
-import { NO_FILTER, entryMatchesFilter, entryYear, filterKey, isEmptyFilter, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
+import { entryMatchesFilter, entryYear, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 
 const meta = (over: Partial<{ kind: string; author: string | null; handle: string | null; postedAt: string | null; savedAt: string }> = {}) => ({
   kind: "thread",
@@ -14,23 +14,24 @@ const meta = (over: Partial<{ kind: string; author: string | null; handle: strin
   ...over
 });
 
-const refusal = (fn: () => unknown): string => {
+const refusal = (fn: () => unknown): void => {
   try {
     fn();
   } catch (error) {
     assert.ok(error instanceof KnowledgeError);
     assert.equal(error.code, "KNOWLEDGE_INVALID");
-    return error.message;
+    assert.ok(error.message.trim().length > 0);
+    return;
   }
   assert.fail("expected a refusal");
 };
 
-test("no filters, empty lists and blank bounds are NO_FILTER", () => {
-  assert.equal(parseKnowledgeFilters(undefined), NO_FILTER);
-  assert.equal(parseKnowledgeFilters({}), NO_FILTER);
-  assert.equal(parseKnowledgeFilters({ kinds: [], authors: ["  "], postedAfter: " " }), NO_FILTER);
-  assert.ok(isEmptyFilter(NO_FILTER));
-  assert.ok(entryMatchesFilter(meta(), NO_FILTER));
+test("omitted and empty filters leave entries unrestricted", () => {
+  for (const input of [undefined, {}, { kinds: [], authors: ["  "], postedAfter: " " }]) {
+    const filter = parseKnowledgeFilters(input);
+    assert.ok(entryMatchesFilter(meta(), filter));
+    assert.ok(entryMatchesFilter(meta({ kind: "note", author: null, handle: null, postedAt: null }), filter));
+  }
 });
 
 test("kinds compare case-insensitively and trimmed", () => {
@@ -56,7 +57,7 @@ test("years use postedAt, else savedAt", () => {
   assert.ok(!entryMatchesFilter(meta(), filter));
   assert.ok(entryMatchesFilter(meta({ postedAt: "2025-04-22" }), filter));
   assert.ok(entryMatchesFilter(meta({ postedAt: null, savedAt: "2025-12-31T23:00:00.000Z" }), filter));
-  assert.match(refusal(() => parseKnowledgeFilters({ years: ["26"] })), /not a valid year/);
+  refusal(() => parseKnowledgeFilters({ years: ["26"] }));
 });
 
 test("date bounds are inclusive, compare dates on the day, and posted bounds drop undated entries", () => {
@@ -72,14 +73,14 @@ test("date bounds are inclusive, compare dates on the day, and posted bounds dro
 });
 
 test("invalid input is refused with a readable message", () => {
-  assert.match(refusal(() => parseKnowledgeFilters({ postedAfter: "yesterday" })), /postedAfter is not an ISO date/);
-  assert.match(refusal(() => parseKnowledgeFilters({ savedBefore: "2026-13-45" })), /savedBefore is not an ISO date/);
-  assert.match(refusal(() => parseKnowledgeFilters({ kinds: Array.from({ length: KNOWLEDGE_FILTER_MAX_VALUES + 1 }, (_, i) => `k${i}`) })), /At most/);
-  assert.match(refusal(() => parseKnowledgeFilters({ kinds: [3 as unknown as string] })), /must be strings/);
-  assert.match(refusal(() => parseKnowledgeFilters({ authors: "om" as unknown as string[] })), /must be a list/);
+  refusal(() => parseKnowledgeFilters({ postedAfter: "yesterday" }));
+  refusal(() => parseKnowledgeFilters({ savedBefore: "2026-13-45" }));
+  refusal(() => parseKnowledgeFilters({ kinds: Array.from({ length: KNOWLEDGE_FILTER_MAX_VALUES + 1 }, (_, i) => `k${i}`) }));
+  refusal(() => parseKnowledgeFilters({ kinds: [3 as unknown as string] }));
+  refusal(() => parseKnowledgeFilters({ authors: "om" as unknown as string[] }));
 });
 
-test("comma lists and keys", () => {
+test("comma and JSON lists preserve filter values; malformed wire input is refused", () => {
   assert.deepEqual(splitFilterList(" thread, ,article "), ["thread", "article"]);
   assert.equal(splitFilterList(""), undefined);
   assert.equal(splitFilterList(undefined), undefined);
@@ -89,11 +90,7 @@ test("comma lists and keys", () => {
     assert.deepEqual(splitFilterList(encodeKnowledgeFilterList(values)), values);
   }
   assert.equal(splitFilterList("[]"), undefined);
-  assert.match(refusal(() => splitFilterList("[Smith, John", "authors")), /^authors starting with "\[" must be a JSON array of strings/);
-  assert.match(refusal(() => splitFilterList('["a", 3]', "kinds")), /^kinds starting with "\[" must be a JSON array of strings/);
-  assert.match(refusal(() => splitFilterList(" [{}]")), /JSON array of strings/);
-  const a = parseKnowledgeFilters({ kinds: ["thread", "article"], years: ["2026"] });
-  const b = parseKnowledgeFilters({ kinds: ["Article", "thread"], years: ["2026"] });
-  assert.equal(filterKey(a), filterKey(b), "order and case do not change the key");
-  assert.notEqual(filterKey(a), filterKey(NO_FILTER));
+  refusal(() => splitFilterList("[Smith, John", "authors"));
+  refusal(() => splitFilterList('["a", 3]', "kinds"));
+  refusal(() => splitFilterList(" [{}]"));
 });

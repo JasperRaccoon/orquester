@@ -11,7 +11,7 @@ import {
   Texture,
   Vector3,
 } from "three";
-import { createDuoScene, duoDisplayKey, duoRawPoint } from "./duoScene.ts";
+import { createDuoScene, duoDisplayKey } from "./duoScene.ts";
 
 const closeTo = (actual: number | undefined, expected: number, digits = 2) =>
   assert.ok(
@@ -53,35 +53,6 @@ function fixture() {
   return { scene, camera, left, right, innerLeft, innerRight };
 }
 
-it("derives resting views from the hinged display planes independently of the inspection orbit", () => {
-  const { scene } = fixture();
-  scene.setAngle(90);
-  const frames = scene.restFrames(3);
-  assert.deepEqual(
-    frames.map((frame) => frame.face),
-    ["inside", "left", "right"],
-  );
-  assert.ok(frames[1]!.normal.x > 0.5);
-  assert.ok(frames[2]!.normal.x < -0.5);
-  scene.root.rotation.set(0.5, 1.2, -0.7);
-  scene.root.position.set(3, -2, 1);
-  const rotated = scene.restFrames(3);
-  for (let index = 0; index < frames.length; index++) {
-    assert.ok(rotated[index]!.normal.distanceTo(frames[index]!.normal) < 1e-6);
-    assert.ok(rotated[index]!.center.distanceTo(frames[index]!.center) < 1e-6);
-  }
-  scene.setAngle(180);
-  assert.deepEqual(
-    scene.restFrames(3).map((frame) => frame.face),
-    ["inside"],
-  );
-  assert.deepEqual(
-    scene.restFrames(1).map((frame) => frame.face),
-    ["cover"],
-  );
-  scene.dispose();
-});
-
 it("maps active display input through hardware mounting and blocks rear, inactive and stale surfaces", () => {
   const { scene, camera, innerLeft } = fixture();
   scene.setAngle(180);
@@ -107,6 +78,5 @@ it("maps active display input through hardware mounting and blocks rear, inactiv
   assert.equal(scene.screenPoint(x, y, camera, screen, "old"), null);
   assert.notEqual(scene.screenPoint(x, y, camera, screen, key), null);
   assert.ok((scene.screenPoint(x, 1.1, camera, screen, key, true)?.x ?? -Infinity) > 1);
-  assert.deepEqual(duoRawPoint(1, 0.2, 0.7), { x: 0.2, y: 0.7 });
   scene.dispose();
 });

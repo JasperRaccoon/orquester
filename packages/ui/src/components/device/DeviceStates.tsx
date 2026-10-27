@@ -216,7 +216,7 @@ export function DevicePicker(props: {
               {group.rows.map((row) => {
                 const opening = props.opening === row.profile.id;
                 return (
-                  <li key={row.profile.id} className="flex items-center gap-3 px-3 py-2.5" data-profile={row.profile.id} aria-disabled={!row.enabled || undefined} title={row.hint ?? undefined}>
+                  <li key={row.profile.id} className="flex items-center gap-3 px-3 py-2.5" aria-disabled={!row.enabled || undefined} title={row.hint ?? undefined}>
                     <FormFactorIcon formFactor={row.profile.formFactor} className={row.enabled ? "text-neutral-400" : "text-neutral-600"} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
@@ -308,7 +308,7 @@ export function DeviceBooting(props: {
         </div>
         <ol>
           {props.steps.map((step) => (
-            <li key={step.id} className={cn("flex items-start gap-2.5 rounded-lg px-2 py-1.5", step.state === "active" && "bg-neutral-800/60")} data-step={step.id} data-state={step.state}>
+            <li key={step.id} className={cn("flex items-start gap-2.5 rounded-lg px-2 py-1.5", step.state === "active" && "bg-neutral-800/60")}>
               <span className="mt-[1px] flex h-4 w-4 shrink-0 items-center justify-center">
                 {step.state === "done" ? (
                   <Check size={13} strokeWidth={2.4} aria-hidden className="text-ok" />

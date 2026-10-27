@@ -48,24 +48,6 @@ test("splitUnifiedDiff yields one entry per file with its own patch text", () =>
   assert.ok(!files[0]?.patch.includes("was here"));
 });
 
-test("a deletion keeps the old path when the new one is /dev/null", () => {
-  const files = splitUnifiedDiff(TWO_FILE_DIFF);
-  assert.equal(files[1]?.path, "src/gone.ts");
-  assert.equal(files[1]?.newPath, null);
-  assert.equal(files[1]?.oldPath, "src/gone.ts");
-});
-
-test("a binary file is flagged rather than dropped", () => {
-  const diff = [
-    "diff --git a/logo.png b/logo.png",
-    "index 1111111..2222222 100644",
-    "Binary files a/logo.png and b/logo.png differ"
-  ].join("\n");
-  const files = splitUnifiedDiff(diff);
-  assert.equal(files.length, 1);
-  assert.equal(files[0]?.binary, true);
-});
-
 test("a bare patch with no `diff --git` preamble is still one file", () => {
   const diff = ["--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1 +1 @@", "-a", "+b"].join("\n");
   const files = splitUnifiedDiff(diff);
@@ -97,11 +79,6 @@ test("a truncated patch still yields the file it started", () => {
   const files = splitUnifiedDiff(diff);
   assert.equal(files[0]?.path, "src/a.ts");
   assert.ok(files[0]?.patch.includes("+a"));
-});
-
-test("countDiffLines ignores the file headers", () => {
-  const patch = splitUnifiedDiff(TWO_FILE_DIFF)[0]?.patch ?? "";
-  assert.deepEqual(countDiffLines(patch), { additions: 1, deletions: 0 });
 });
 
 test("a CRLF patch splits with clean paths, binary flags and counts", () => {

@@ -63,8 +63,6 @@ export interface BoxToolingProvisionerDeps {
   plugins: readonly ToolingPlugin[];
   /** A getter: the daemon's workspaces root can move at runtime. */
   workspacesDir: () => string;
-  /** Archive downloads; the global `fetch` by default. */
-  fetch?: typeof fetch;
   now?: () => Date;
   logger?: Pick<Console, "warn" | "error">;
   /** A box's status changed (the plugins service broadcasts `plugins.changed`). */
@@ -149,7 +147,7 @@ interface BoxEntry {
 }
 
 export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): BoxToolingProvisionerHandle {
-  const cache = new ToolingArchiveCache({ baseDir: deps.baseDir, fetch: deps.fetch });
+  const cache = new ToolingArchiveCache({ baseDir: deps.baseDir });
   const now = deps.now ?? (() => new Date());
   const logger = deps.logger ?? console;
   const boxes = new Map<string, BoxEntry>();

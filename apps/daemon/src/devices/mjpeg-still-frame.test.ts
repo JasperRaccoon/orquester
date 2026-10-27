@@ -2,45 +2,46 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
 
-import { MjpegPartTracker, repeatStillFrame } from "./mjpeg-still-frame.ts";
+import { repeatStillFrame } from "./mjpeg-still-frame.ts";
 
 const part = (body: string) => Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${body.length}\r\n\r\n${body}\r\n`);
 
-test("the tracker keeps the last complete part, across chunk splits, and stops on unknown framing", () => {
-  const tracker = new MjpegPartTracker();
+test("MJPEG repeats only complete parts across byte splits and leaves unknown framing untouched", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stream = repeatStillFrame();
+  const out: Buffer[] = [];
+  stream.on("data", (chunk: Buffer) => out.push(chunk));
   const whole = Buffer.concat([part("one"), part("second")]);
-  // Fed byte by byte: a part is still only at a boundary.
-  for (let i = 0; i < part("one").length - 1; i += 1) {
-    tracker.feed(whole.subarray(i, i + 1));
-    assert.equal(tracker.still, null);
-  }
-  tracker.feed(whole.subarray(part("one").length - 1, part("one").length));
-  assert.deepEqual(Buffer.concat(tracker.still!), part("one"));
-  tracker.feed(whole.subarray(part("one").length));
-  assert.deepEqual(Buffer.concat(tracker.still!), part("second"));
+  for (let i = 0; i < whole.length - 1; i += 1) stream.write(whole.subarray(i, i + 1));
+  t.mock.timers.runAll();
+  assert.deepEqual(Buffer.concat(out), whole.subarray(0, -1), "an incomplete final part is never replayed");
+  stream.write(whole.subarray(-1));
+  t.mock.timers.runAll();
+  assert.deepEqual(Buffer.concat(out), Buffer.concat([whole, part("second")]));
+  stream.end();
+  await once(stream, "end");
 
-  const other = new MjpegPartTracker();
-  other.feed(Buffer.from("HTTP garbage without a boundary\r\n\r\nxx"));
-  assert.equal(other.still, null);
-  other.feed(part("late"));
-  assert.equal(other.still, null);
+  const unknown = repeatStillFrame();
+  const untouched: Buffer[] = [];
+  unknown.on("data", (chunk: Buffer) => untouched.push(chunk));
+  const input = Buffer.concat([Buffer.from("HTTP garbage without a boundary\r\n\r\nxx"), part("late")]);
+  unknown.write(input);
+  t.mock.timers.runAll();
+  unknown.end();
+  await once(unknown, "end");
+  assert.deepEqual(Buffer.concat(untouched), input);
 });
 
 test("a quiet stream re-sends its last part once; a new part cancels the repeat", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const stream = repeatStillFrame(20);
+  const stream = repeatStillFrame();
   const out: Buffer[] = [];
   stream.on("data", (chunk: Buffer) => out.push(chunk));
-  const firstFrame = once(stream, "data");
   stream.write(part("a"));
-  await firstFrame;
-  t.mock.timers.tick(10);
   stream.write(part("b"));
-  t.mock.timers.tick(19);
-  assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b")]));
-  t.mock.timers.tick(1);
+  t.mock.timers.runAll();
   assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b"), part("b")]));
-  t.mock.timers.tick(80);
+  t.mock.timers.runAll();
   stream.end();
   await new Promise((resolve) => stream.once("end", resolve));
   assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b"), part("b")]));

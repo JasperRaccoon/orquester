@@ -68,12 +68,12 @@ export interface ProfileLaunchContribution {
   serverPool?: HostThreadServerPool;
 }
 
-export type ProfileLaunchContributor<A extends SessionProfileAgentId = SessionProfileAgentId> = (
+type ProfileLaunchContributor<A extends SessionProfileAgentId = SessionProfileAgentId> = (
   ctx: ProfileLaunchContext<A>
 ) => ProfileLaunchContribution | Promise<ProfileLaunchContribution>;
 
 /** One contributor per agent. */
-export type ProfileLaunchContributors = { [A in SessionProfileAgentId]: ProfileLaunchContributor<A> };
+type ProfileLaunchContributors = { [A in SessionProfileAgentId]: ProfileLaunchContributor<A> };
 
 /** Per-agent launch contributions. Claude's isolation is read from its prepared manifest. */
 const profileLaunchContributors: ProfileLaunchContributors = {
@@ -140,7 +140,6 @@ export type ResolveProfileLaunch = (request: ProfileLaunchRequest) => Promise<Re
 
 export interface ProfileLaunchResolverOptions {
   lifecycle: { ensureReady(profileId: string, agent: SessionProfileAgentId, accountId: string | null): Promise<SessionProfileReady> };
-  contributors?: ProfileLaunchContributors;
   /** The account's home when the launch env names none (System: the agent's system home). */
   accountHome?(agent: SessionProfileAgentId, accountId: string | null): string | null;
 }
@@ -171,7 +170,7 @@ export function createProfileLaunchResolver(options: ProfileLaunchResolverOption
     const accountHome = request.base.launchEnv[homeVariable] ?? options.accountHome?.(agent, accountId) ?? null;
     let contribution: ProfileLaunchContribution;
     try {
-      const contribute = (options.contributors ?? profileLaunchContributors)[agent] as ProfileLaunchContributor;
+      const contribute = profileLaunchContributors[agent] as ProfileLaunchContributor<typeof agent>;
       contribution = await contribute({
         agent,
         profile,

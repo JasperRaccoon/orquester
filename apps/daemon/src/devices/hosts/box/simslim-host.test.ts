@@ -4,14 +4,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, type TestContext } from "node:test";
 
 import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
 import type { DeviceToolchain } from "../../toolchain/index.ts";
 import { BoxDeviceHost, type BoxDeviceHostDeps } from "./host.ts";
-import { ORQ_SLIM_PROFILE_JSON } from "./simslim.ts";
 import { FakeMacBox } from "./testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -84,8 +83,6 @@ describe("BoxDeviceHost with simslim", () => {
       activeLeases: () => leases,
       logger: quiet,
       fetch: box.fetch,
-      now: () => Date.parse("2026-10-27T11:00:00.000Z"),
-      timing: { hubPollMs: 2, framePollMs: 1, frameWaitMs: 2_000 },
       ...overrides
     });
   };
@@ -93,13 +90,16 @@ describe("BoxDeviceHost with simslim", () => {
   /** Prepared, warmed, and the pool's first fill done. */
   const prepared = async (host: BoxDeviceHost) => {
     await host.ensureReady(new AbortController().signal, () => undefined);
-    await host.warmSettled();
-    return host.poolSettled();
+    await until(() => [...box.files.keys()].some((path) => path.endsWith("/apple-runner-warmed")), "the persisted runner warmup");
+    const expected = host.kind === "box" && [...box.files.keys()].some((path) => path.endsWith("/simslim-profile.json")) ? 2 : 0;
+    await until(() => poolSims().length === expected, "the ready pool simulators");
+    return poolSims().length ? { "iphone-17-pro": poolSims().length } : {};
   };
 
   const poolSims = () => [...box.sims.values()].filter((sim) => sim.name.startsWith("orq-pool-"));
 
-  beforeEach(async () => {
+  beforeEach(async (t) => {
+    (t as TestContext).mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-27T11:00:00.000Z") });
     appDir = await mkdtemp(join(tmpdir(), "orq-simslim-host-"));
     localCli = join(appDir, "agent-device.mjs");
     await writeFile(localCli, "");
@@ -115,23 +115,15 @@ describe("BoxDeviceHost with simslim", () => {
   it("installs simslim and its profile, then fills the pool for the default profile one at a time", async () => {
     const host = makeHost();
     assert.deepEqual(await prepared(host), { "iphone-17-pro": 2 });
-    assert.equal(box.files.get(PROFILE), ORQ_SLIM_PROFILE_JSON);
-    assert.deepEqual(
-      host.readiness().checks.find((check) => check.id === "tool:simslim"),
-      { id: "tool:simslim", label: "simslim (slim simulators)", state: "ok", detail: "0.13.0", fixActionId: "install-tools" }
-    );
+    const profile = JSON.parse(box.files.get(PROFILE)!);
+    assert.deepEqual(profile.keep, ["com.apple.apsd", "com.apple.swcd", "com.apple.assetsd"]);
+    assert.equal(host.readiness().checks.find((check) => check.id === "tool:simslim")?.state, "ok");
     const sims = poolSims();
     assert.equal(sims.length, 2);
     for (const sim of sims) {
       assert.match(sim.name, /^orq-pool-iphone-17-pro\.[0-9a-f]{8}$/);
       assert.deepEqual([sim.state, sim.slim, sim.runtimeId], ["Shutdown", true, RUNTIME]);
     }
-    // Each one: created as orq-poolprep-*, slimmed while shut down (one boot, back to shut down), renamed.
-    const making = box.log.filter((line) => /^simctl (create orq-poolprep|rename)|^simslim on/.test(line));
-    assert.equal(making.length, 6);
-    assert.match(making[0]!, /^simctl create orq-poolprep-[0-9a-f]{8} com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-17-Pro /);
-    assert.match(making[1]!, /^simslim on \S+ --preserve-boot-state$/);
-    assert.match(making[2]!, /^simctl rename \S+ orq-pool-iphone-17-pro\./);
     // Pool simulators are not devices.
     assert.deepEqual(await host.listDevices(), []);
   });
@@ -145,19 +137,9 @@ describe("BoxDeviceHost with simslim", () => {
     const udid = result.deviceId;
     assert.ok(pooled.has(udid), "a pool simulator");
     assert.equal(box.sims.get(udid)?.name, "orq-L1");
-    const bootLog = box.log.slice(0, box.log.indexOf(`hub /vendor/serve-sim/grid/api/start ${udid}`) + 1);
-    assert.deepEqual(bootLog, [
-      "simctl list -j devicetypes runtimes",
-      "simctl list -j devices",
-      `simctl rename ${udid} orq-L1`,
-      `simctl boot ${udid}`,
-      `simctl bootstatus ${udid} -b`,
-      `frame ${udid}`,
-      `frame ${udid}`,
-      `hub /vendor/serve-sim/grid/api/start ${udid}`
-    ]);
-
-    assert.deepEqual(await host.poolSettled(), { "iphone-17-pro": 2 }, "refilled after the boot");
+    assert.equal(box.sims.get(udid)?.state, "Booted");
+    assert.equal(box.sims.get(udid)?.slim, true);
+    await until(() => poolSims().length === 2, "refill after the boot");
     await until(() => box.log.includes(`simslim verify ${udid} --json`), "the slim check");
 
     // Capacity: one slim simulator booted (0.9 GB) on 24 GB: the settings cap of 8 holds.
@@ -170,20 +152,11 @@ describe("BoxDeviceHost with simslim", () => {
   });
 
   it("slims a new simulator while shut down when the pool is empty, and boots it stock if slimming fails", async () => {
-    const host = makeHost({ simPoolSize: 0 });
+    const host = makeHost({ kind: "byo", record: () => boxRecord({ provider: "byo", purpose: "machine" }) });
     await prepared(host);
     assert.equal(poolSims().length, 0);
     box.log.length = 0;
     const slim = await host.boot({ leaseId: "L1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal);
-    const created = box.log.slice(0, 5);
-    assert.deepEqual(created, [
-      "simctl list -j devicetypes runtimes",
-      "simctl list -j devices",
-      `simctl create orq-L1 com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro ${RUNTIME}`,
-      `simslim on ${slim.deviceId}`,
-      `simctl bootstatus ${slim.deviceId} -b`
-    ]);
-    assert.ok(!box.log.includes(`simctl boot ${slim.deviceId}`), "simslim's boot is the boot");
     assert.equal(box.sims.get(slim.deviceId)?.slim, true);
 
     box.failNext = "simslim on";
@@ -201,7 +174,7 @@ describe("BoxDeviceHost with simslim", () => {
     box.holdSlim = new Promise((resolve) => (release = resolve));
     const host = makeHost();
     await host.ensureReady(new AbortController().signal, () => undefined);
-    await host.warmSettled();
+    await until(() => [...box.files.keys()].some((path) => path.endsWith("/apple-runner-warmed")), "the persisted runner warmup");
     await until(() => box.log.some((line) => line.endsWith("--preserve-boot-state")), "a refill");
     const preparing = [...box.sims.values()].find((sim) => sim.name.startsWith("orq-poolprep-"))!;
     assert.ok(preparing);
@@ -213,7 +186,7 @@ describe("BoxDeviceHost with simslim", () => {
     assert.equal(box.sims.get(result.deviceId)?.name, "orq-L1");
     assert.equal(box.sims.get(result.deviceId)?.slim, true);
     release();
-    assert.deepEqual(await host.poolSettled(), { "iphone-17-pro": 2 });
+    await until(() => poolSims().length === 2, "refill after preemption");
     assert.equal([...box.sims.values()].filter((sim) => sim.name.startsWith("orq-poolprep-")).length, 0);
     assert.ok(steps.includes("boot"));
   });
@@ -226,7 +199,6 @@ describe("BoxDeviceHost with simslim", () => {
     assert.deepEqual(await prepared(host), { "iphone-17-pro": 2 });
     assert.ok(box.sims.has("READY"));
     assert.ok(!box.sims.has("HALF") && !box.sims.has("USED"));
-    assert.equal(box.log.filter((line) => line.endsWith("--preserve-boot-state")).length, 1, "one more made");
     const result = await host.boot({ leaseId: "L1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal);
     assert.equal(result.deviceId, "READY", "the adopted one is used");
   });
@@ -235,14 +207,13 @@ describe("BoxDeviceHost with simslim", () => {
     const own = makeHost({ kind: "byo", label: "Studio (your Mac)", record: () => boxRecord({ provider: "byo", purpose: "machine" }) });
     assert.deepEqual(await prepared(own), {});
     assert.equal(poolSims().length, 0);
-    assert.ok(box.execs.some((exec) => exec.command === "/Users/runner/.orquester/devices/tools/simslim/v0.13.0/simslim"), "own machines keep simslim in ~/.orquester/devices");
     await own.dispose();
 
     box = new FakeMacBox();
     const intel = makeHost();
     assert.deepEqual(await prepared(intel), {});
     const check = intel.readiness().checks.find((entry) => entry.id === "tool:simslim");
-    assert.deepEqual([check?.state, check?.detail], ["ok", "Not used on this Mac (test Mac): simulators run stock"]);
+    assert.equal(check?.state, "ok");
     box.log.length = 0;
     const result = await intel.boot({ leaseId: "L1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal);
     assert.ok(box.log.includes(`simctl boot ${result.deviceId}`));

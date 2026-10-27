@@ -70,7 +70,7 @@ export const BOX_APPLE_RUNNER_DIR = "~/.agent-device/apple-runner";
 export const DEVICE_NODE_VERSION = "22";
 
 /** A pinned tool's binary in a box. */
-export function boxDeviceToolBin(tool: keyof typeof DEVICE_TOOL_VERSIONS): string {
+function boxDeviceToolBin(tool: keyof typeof DEVICE_TOOL_VERSIONS): string {
   return `${BOX_DEVICE_TOOLS_DIR}/node_modules/.bin/${tool}`;
 }
 
@@ -79,12 +79,12 @@ export function boxDeviceToolBin(tool: keyof typeof DEVICE_TOOL_VERSIONS): strin
 // ---------------------------------------------------------------------------
 
 /** sdkmanager packages installed next to cmdline-tools: the box host's list ({@link SDK_PACKAGES} and the image). */
-export const ANDROID_SDK_PACKAGES: readonly string[] = [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE];
+const ANDROID_SDK_PACKAGES: readonly string[] = [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE];
 /**
  * The profiles the cache holds an AVD and golden snapshot of: Settings' default Android profiles
  * (a box host makes any other profile's AVD itself, on its first open).
  */
-export const ANDROID_CACHE_PROFILES: readonly DeviceProfile[] = DEFAULT_ANDROID_DEVICE_PROFILE_IDS.map((id) => {
+const ANDROID_CACHE_PROFILES: readonly DeviceProfile[] = DEFAULT_ANDROID_DEVICE_PROFILE_IDS.map((id) => {
   const profile = deviceProfile(id);
   if (!profile || profile.platform !== "android") throw new Error(`unknown Android profile ${id}`);
   return profile;
@@ -399,7 +399,7 @@ function shortHash(value: unknown): string {
 }
 
 /** Hash of everything the Android cache holds (the pinned cmdline-tools, the packages, the script that makes the AVDs): a change to any of it is a new key. */
-export const ANDROID_CACHE_HASH = shortHash({ cmdlineTools: CMDLINE_TOOLS.sha256, packages: ANDROID_SDK_PACKAGES, avds: ANDROID_AVD_STEP_SCRIPT });
+const ANDROID_CACHE_HASH = shortHash({ cmdlineTools: CMDLINE_TOOLS.sha256, packages: ANDROID_SDK_PACKAGES, avds: ANDROID_AVD_STEP_SCRIPT });
 export const ANDROID_CACHE_KEY = `orq-devices-android-${ANDROID_CACHE_HASH}-${ANDROID_CACHE_VERSION}`;
 export const ANDROID_CACHE_PATHS: readonly string[] = [BOX_ANDROID_SDK_DIR, BOX_ANDROID_AVD_DIR];
 

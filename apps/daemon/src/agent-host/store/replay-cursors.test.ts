@@ -10,12 +10,14 @@ import * as fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import test, { type TestContext } from "node:test";
+import test, { after, type TestContext } from "node:test";
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
 import { createThreadStore } from "./index.ts";
 
 const eventsPathOf = (root: string, id: string): string => path.join(root, "threads", id, "events.ndjson");
+const roots: string[] = [];
+after(async () => { await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))); });
 
 function fixedClock(iso = "2026-01-01T00:00:00.000Z"): Clock {
   return { now: () => new Date(iso), nowIso: () => iso };
@@ -105,6 +107,7 @@ function observeReads(t: TestContext, rootDir: string) {
 /** A thread of `count` messages after its creation, appended in batches like a live turn's. */
 async function seeded(t: TestContext, count: number) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-replay-"));
+  roots.push(rootDir);
   const reads = observeReads(t, rootDir);
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   await store.append({ threadId: "t1", events: [created()] });
@@ -118,6 +121,7 @@ async function seeded(t: TestContext, count: number) {
 
 test("a thread idle for the drop interval loses its cursors; reconnects then read the whole log, and its next append starts over", async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-replay-idle-"));
+  roots.push(rootDir);
   let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
   const reads = observeReads(t, rootDir);
   const store = createThreadStore({

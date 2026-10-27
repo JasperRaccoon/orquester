@@ -22,23 +22,23 @@ const AUSTIN = "1d6a3b52-0c7e-4f5e-9a51-6f1a2b3c4d5e";
 const FRANKFURT = "7f3e9c10-2b4d-4a6e-8c1f-0a9b8c7d6e5f";
 const unauthorized = { status: 401, body: "Unauthorized", headers: { "content-type": "text/plain" } };
 
-test("tensordock: Linux + GPU only, and validate checks the token on /instances", async () => {
+test("tensordock: Linux + GPU only, and validate checks the token on /instances", async (t) => {
   assert.deepEqual(tensordockAdapter.kinds, ["linux-gpu"]);
   assert.match(tensordockAdapter.accountNote ?? "", /Windows/);
 
   const good = routedFetch([{ path: "/api/v2/instances", replies: [{ body: f("instances-list.json") }] }]);
-  assert.deepEqual(await tensordockAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await tensordockAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(good.seen[0]!.headers.authorization, "Bearer td_test");
 
   const bad = routedFetch([{ path: "/api/v2/instances", replies: [unauthorized] }]);
-  const result = await tensordockAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await tensordockAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Unauthorized/);
 });
 
-test("tensordock: offers price the fixed size per location and keep the cheapest per GPU", async () => {
+test("tensordock: offers price the fixed size per location and keep the cheapest per GPU", async (t) => {
   const { fetch } = routedFetch([{ path: "/api/v2/locations", replies: [{ body: f("locations.json") }] }]);
-  const offers = await tensordockAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await tensordockAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.equal(offers.priceSource, "live");
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
@@ -62,16 +62,16 @@ test("tensordock: offers price the fixed size per location and keep the cheapest
       [FRANKFURT, "Frankfurt, Hesse, Germany"]
     ]
   );
-  assert.deepEqual((await tensordockAdapter.offers(creds, "windows-gpu", callOptions(fetch))).sizes, []);
+  assert.deepEqual((await tensordockAdapter.offers(creds, "windows-gpu", callOptions(t, fetch))).sizes, []);
 });
 
-test("tensordock: create places on the cheapest location and sends cloud-init, the key and the name once", async () => {
+test("tensordock: create places on the cheapest location and sends cloud-init, the key and the name once", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/api/v2/locations", replies: [{ body: f("locations.json") }] },
     { method: "POST", path: "/api/v2/instances", replies: [{ body: f("create.json") }] }
   ]);
   const request = sampleCreateRequest({ size: "geforcertx4090-pcie-24gb", region: "any" });
-  const result = await tensordockAdapter.create(creds, request, callOptions(fetch));
+  const result = await tensordockAdapter.create(creds, request, callOptions(t, fetch));
   const posts = seen.filter((call) => call.method === "POST");
   assert.equal(posts.length, 1);
   const attributes = (posts[0]!.body as { data: { type: string; attributes: Record<string, unknown> } }).data.attributes;
@@ -95,13 +95,13 @@ test("tensordock: create places on the cheapest location and sends cloud-init, t
   assert.deepEqual(cloudInit.write_files, [{ path: "/root/.orq-bootstrap.sh", content: "echo hi", owner: "root:root", permissions: "0700" }]);
 });
 
-test("tensordock: create honours a chosen location, refuses unavailable sizes and never retries", async () => {
+test("tensordock: create honours a chosen location, refuses unavailable sizes and never retries", async (t) => {
   const pinned = routedFetch([
     { path: "/api/v2/locations", replies: [{ body: f("locations.json") }] },
     { method: "POST", path: "/api/v2/instances", replies: [{ status: 503, body: '{"error":"no capacity on this location"}' }] }
   ]);
   await assert.rejects(
-    tensordockAdapter.create(creds, sampleCreateRequest({ size: "geforcertx4090-pcie-24gb", region: AUSTIN }), callOptions(pinned.fetch)),
+    tensordockAdapter.create(creds, sampleCreateRequest({ size: "geforcertx4090-pcie-24gb", region: AUSTIN }), callOptions(t, pinned.fetch)),
     /no capacity/
   );
   const posts = pinned.seen.filter((call) => call.method === "POST");
@@ -110,23 +110,23 @@ test("tensordock: create honours a chosen location, refuses unavailable sizes an
 
   const none = routedFetch([{ path: "/api/v2/locations", replies: [{ body: f("locations.json") }] }]);
   await assert.rejects(
-    tensordockAdapter.create(creds, sampleCreateRequest({ size: "rtx3090-pcie-24gb", region: "any" }), callOptions(none.fetch)),
+    tensordockAdapter.create(creds, sampleCreateRequest({ size: "rtx3090-pcie-24gb", region: "any" }), callOptions(t, none.fetch)),
     /not available/
   );
   await assert.rejects(
-    tensordockAdapter.create(creds, sampleCreateRequest({ kind: "windows-gpu", size: "x", region: "any" }), callOptions(none.fetch)),
+    tensordockAdapter.create(creds, sampleCreateRequest({ kind: "windows-gpu", size: "x", region: "any" }), callOptions(t, none.fetch)),
     /only Linux/
   );
 });
 
-test("tensordock: status reads the unwrapped instance; 404 → gone; status words map case-insensitively", async () => {
+test("tensordock: status reads the unwrapped instance; 404 → gone; status words map case-insensitively", async (t) => {
   const running = routedFetch([{ path: "/api/v2/instances/5c0ffee0", replies: [{ body: f("instance-get.json") }] }]);
   assert.deepEqual(
-    await tensordockAdapter.status(creds, { instanceId: "5c0ffee0-1234-4abc-9def-00000000beef" }, callOptions(running.fetch)),
+    await tensordockAdapter.status(creds, { instanceId: "5c0ffee0-1234-4abc-9def-00000000beef" }, callOptions(t, running.fetch)),
     { state: "running", detail: "Running", publicIp: "198.51.100.23", hourlyUsd: 0.425 }
   );
   const gone = routedFetch([{ path: "/api/v2/instances/", replies: [{ status: 404, body: '{"error":"Instance not found"}' }] }]);
-  assert.equal((await tensordockAdapter.status(creds, { instanceId: "x" }, callOptions(gone.fetch))).state, "gone");
+  assert.equal((await tensordockAdapter.status(creds, { instanceId: "x" }, callOptions(t, gone.fetch))).state, "gone");
 
   const base = JSON.parse(f("instance-get.json"));
   for (const [raw, state] of [
@@ -137,30 +137,30 @@ test("tensordock: status reads the unwrapped instance; 404 → gone; status word
     ["error", "error"]
   ] as const) {
     const stub = routedFetch([{ path: "/api/v2/instances/", replies: [{ body: JSON.stringify({ data: { ...base, status: raw } }) }] }]);
-    assert.equal((await tensordockAdapter.status(creds, { instanceId: "x" }, callOptions(stub.fetch))).state, state, raw);
+    assert.equal((await tensordockAdapter.status(creds, { instanceId: "x" }, callOptions(t, stub.fetch))).state, state, raw);
   }
 });
 
-test("tensordock: destroy is idempotent", async () => {
+test("tensordock: destroy is idempotent", async (t) => {
   const { fetch, seen } = routedFetch([
     { method: "DELETE", path: "/api/v2/instances/", replies: [{ body: f("delete.json") }, { status: 404, body: '{"error":"Instance not found"}' }] }
   ]);
-  await tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(fetch));
-  await tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(fetch));
+  await tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(t, fetch));
+  await tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(t, fetch));
   assert.equal(seen.length, 2);
   const denied = routedFetch([{ method: "DELETE", path: "/api/v2/instances/", replies: [unauthorized] }]);
-  await assert.rejects(tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(denied.fetch)), /Unauthorized/);
+  await assert.rejects(tensordockAdapter.destroy(creds, { instanceId: "5c0ffee0" }, callOptions(t, denied.fetch)), /Unauthorized/);
 });
 
-test("tensordock: listManaged accepts both documented list shapes and keeps orq- names", async () => {
+test("tensordock: listManaged accepts both documented list shapes and keeps orq- names", async (t) => {
   const first = routedFetch([{ path: "/api/v2/instances", replies: [{ body: f("instances-list.json") }] }]);
   assert.deepEqual(
-    (await tensordockAdapter.listManaged(creds, callOptions(first.fetch))).map((instance) => [instance.name, instance.boxId, instance.state]),
+    (await tensordockAdapter.listManaged(creds, callOptions(t, first.fetch))).map((instance) => [instance.name, instance.boxId, instance.state]),
     [["orq-box-0123abcd", "box-0123abcd", "running"]]
   );
   const alt = routedFetch([{ path: "/api/v2/instances", replies: [{ body: f("instances-list-alt.json") }] }]);
   assert.deepEqual(
-    (await tensordockAdapter.listManaged(creds, callOptions(alt.fetch))).map((instance) => [instance.ref.instanceId, instance.boxId, instance.state]),
+    (await tensordockAdapter.listManaged(creds, callOptions(t, alt.fetch))).map((instance) => [instance.ref.instanceId, instance.boxId, instance.state]),
     [["66666666-7777-4888-9999-000000000000", "box-99887766", "stopped"]]
   );
 });

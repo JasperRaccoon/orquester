@@ -70,11 +70,6 @@ export class KnowledgeRuntimeTracker implements KnowledgeRuntimePort {
     return () => this.listeners.delete(listener);
   }
 
-  /** Every refresh queued so far has run (for tests). */
-  settled(): Promise<void> {
-    return this.queue;
-  }
-
   /** Re-check `version` (the record's current, or null) and publish when the active runtime changed. Serialized. */
   private refresh(version: string | null): Promise<void> {
     const run = this.queue.then(async () => {

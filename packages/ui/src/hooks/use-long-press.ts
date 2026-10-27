@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 
 /** How long a finger rests before it is a long press (Android's default). */
-export const LONG_PRESS_MS = 500;
+const LONG_PRESS_MS = 500;
 /** A finger that moves this far is scrolling or panning, not pressing. */
 const SLOP_PX = 10;
 

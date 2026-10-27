@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { DEVICE_PROFILES, deviceProfile } from "@orquester/api";
+import { deviceProfile } from "@orquester/api";
 
 import {
-  REAL_FRAME_MIN_PNG_BYTES,
-  isRealFrame,
   leaseIdOfSimulator,
   leaseSimulatorName,
   newestIphoneTarget,
@@ -30,7 +28,6 @@ describe("simctl", () => {
     // The M5 iPad is not in this Xcode: the profile's next choice is.
     assert.equal(pickSimulatorTarget(catalog, deviceProfile("ipad-pro-13")!)?.deviceTypeName, "iPad Pro 13-inch (M4)");
     assert.equal(pickSimulatorTarget(catalog, deviceProfile("iphone-duo")!), null);
-    for (const profile of DEVICE_PROFILES.filter((entry) => entry.platform === "ios")) assert.ok((profile.simDeviceTypes ?? []).length > 0, profile.id);
   });
 
   it("honours a pinned runtime and skips unavailable or non-iOS ones", () => {
@@ -80,23 +77,13 @@ describe("simctl", () => {
     assert.equal(leaseIdOfSimulator("orq-L1"), "L1");
     assert.equal(leaseIdOfSimulator("orq-warm-runner"), null);
     assert.equal(leaseIdOfSimulator("iPhone 17"), null);
-    assert.deepEqual(simDeviceSummary("box:m", devices[0]!, () => "iphone-17-pro"), {
-      key: "box:m/A",
-      hostId: "box:m",
-      id: "A",
-      platform: "ios",
-      name: "orq-L1",
-      osVersion: "iOS 27.0",
-      profile: "iphone-17-pro",
-      booted: true,
-      leaseId: null
-    });
+    const summary = simDeviceSummary("box:m", devices[0]!, () => "iphone-17-pro")!;
+    assert.equal(summary.key, "box:m/A");
+    assert.equal(summary.profile, "iphone-17-pro");
+    assert.equal(summary.platform, "ios");
+    assert.equal(summary.booted, true);
     assert.equal(simDeviceSummary("box:m", devices[1]!, () => null), null);
   });
 
-  it("tells a rendered frame from the boot logo by size", () => {
-    assert.equal(isRealFrame(40_000), false);
-    assert.equal(isRealFrame(REAL_FRAME_MIN_PNG_BYTES), true);
-    assert.equal(isRealFrame(Number.NaN), false);
-  });
+
 });

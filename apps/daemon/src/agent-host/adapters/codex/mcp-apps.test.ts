@@ -329,9 +329,12 @@ describe("codex — MCP Apps", () => {
     await r.stop();
   });
 
-  it("an app's model context rides every turn as untrusted additional context", async () => {
-    const contexts = new Map<string, string>();
-    const r = rig({ turns: [{ kind: "text", text: "ok" }] }, { appContext: () => contexts });
+  it("an app's model context updates between turns as untrusted context beside the session tools", async () => {
+    const contexts = new Map([["mcp-app:item-1", "initial app view"]]);
+    const r = rig({ turns: [{ kind: "text", text: "ok" }] }, {
+      appContext: () => contexts,
+      sessionTools: { url: "http://127.0.0.1:1/mcp", instructions: "Orquester tools block", revoke: () => undefined }
+    });
     await r.session.start();
     await r.session.sendTurn({ input: "first", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.completed");
@@ -339,27 +342,12 @@ describe("codex — MCP Apps", () => {
     await r.session.sendTurn({ input: "second", attachments: [], interactionMode: "default" });
     const starts = r.received().filter((frame) => frame.method === "turn/start");
     assert.equal(starts.length, 2);
-    assert.equal("additionalContext" in (starts[0]!.params as object), false, "no context, no field");
-    assert.deepEqual((starts[1]!.params as { additionalContext?: unknown }).additionalContext, {
-      "mcp-app:item-1": { kind: "untrusted", value: "MCP app apps/show_widget (mcp-app:item-1):\nboard has 3 cards" }
+    assert.deepEqual((starts[0]!.params as { additionalContext?: unknown }).additionalContext, {
+      "mcp-app:item-1": { kind: "untrusted", value: "initial app view" },
+      orquester: { kind: "application", value: "Orquester tools block" }
     });
-    await r.stop();
-  });
-
-  it("an app's context rides beside the session tools' instruction block, never in place of it", async () => {
-    const contexts = new Map([["mcp-app:item-1", "board has 3 cards"]]);
-    const r = rig(
-      { turns: [{ kind: "text", text: "ok" }] },
-      {
-        appContext: () => contexts,
-        sessionTools: { url: "http://127.0.0.1:1/mcp", instructions: "Orquester tools block", revoke: () => undefined }
-      }
-    );
-    await r.session.start();
-    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
-    const [start] = r.received().filter((frame) => frame.method === "turn/start");
-    assert.deepEqual((start!.params as { additionalContext?: unknown }).additionalContext, {
-      "mcp-app:item-1": { kind: "untrusted", value: "board has 3 cards" },
+    assert.deepEqual((starts[1]!.params as { additionalContext?: unknown }).additionalContext, {
+      "mcp-app:item-1": { kind: "untrusted", value: "MCP app apps/show_widget (mcp-app:item-1):\nboard has 3 cards" },
       orquester: { kind: "application", value: "Orquester tools block" }
     });
     await r.stop();

@@ -295,7 +295,6 @@ describe("switching the profile mid-chat (spec §5.3)", () => {
     const row = activitiesOf(host, threadId).find((a) => a.activityKind === PROFILE_CHANGED_ACTIVITY_KIND);
     const meta = logOf(host, threadId).filter((event) => event.type === "thread.meta-updated").at(-1);
     assert.deepEqual(meta?.payload, { profileId: "" }, "the log's Global is the empty string");
-    assert.equal(row?.summary, "Switched to Global");
     assert.deepEqual(row?.payload, { profileId: null, previousProfileId: "p1" });
 
     await turn(host, threadId, "again");

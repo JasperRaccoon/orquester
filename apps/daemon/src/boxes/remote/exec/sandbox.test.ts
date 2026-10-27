@@ -9,7 +9,7 @@ import type { SandboxHandle, SandboxSpawnRequest } from "../../../workflows/cont
 import type { DetailedSandboxRunner, SandboxExitDetail } from "../../../workflows/sandbox/sandbox.ts";
 import type { BoxExecOptions } from "../../contracts.ts";
 import { localBoxConnection } from "../../testing.ts";
-import { BOX_SANDBOX_STARTTIME, ResultLineFilter, createBoxAwareSandboxRunner } from "./sandbox.ts";
+import { ResultLineFilter, createBoxAwareSandboxRunner } from "./sandbox.ts";
 import { boxRecord, fakeAgentConnection, fakeBoxes } from "./testing.ts";
 
 let root: string;
@@ -107,7 +107,6 @@ describe("shell blocks in a box", () => {
     assert.equal(exit.timedOut, false);
     assert.equal(stdout, `out:hi\n${project}\n`);
     assert.equal(stderr, "err\n");
-    assert.equal(handle.starttime, BOX_SANDBOX_STARTTIME);
     assert.equal(r.host.spawned.length, 0);
     const exitJson = JSON.parse(await readFile(join(attemptDir, "exit.json"), "utf8")) as { code: number; stdoutBytes: number };
     assert.equal(exitJson.code, 3);

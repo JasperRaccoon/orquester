@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -131,11 +131,12 @@ process.stdin.on("end", () => process.exit(0));
   return bin;
 }
 
-test("the Agent SDK drives a CLI in the box through spawnClaudeCodeProcess (fixture 01 replayed)", async () => {
+test("the Agent SDK drives a CLI in the box through spawnClaudeCodeProcess (fixture 01 replayed)", async (t) => {
   const connection = localBoxConnection();
   const spawned: string[] = [];
   const spawn = boxClaudeSpawner({ connection, procId, stderr: () => undefined });
   const bin = writeReplayClaude();
+  t.after(() => rmSync(dirname(bin), { recursive: true, force: true }));
   let release!: () => void;
   const released = new Promise<void>((resolve) => {
     release = resolve;

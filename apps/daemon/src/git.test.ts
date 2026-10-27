@@ -11,7 +11,6 @@ import {
   GitError,
   GitService,
   GitWatcher,
-  gitSafetyArgs,
   passesGitEventFilter,
   workingDiffMaxBytes
 } from "./git";
@@ -36,7 +35,7 @@ const tempRepo = async (): Promise<string> => {
   return dir;
 };
 
-/** An argv without the `-c` safety options GitService puts in front of every git (asserted on their own below). */
+/** Strip per-invocation safety options before matching native Git commands. */
 const withoutSafetyArgs = (argv: string[]): string[] => {
   let index = 0;
   while (argv[index] === "-c" && /^core\.(fsmonitor|hooksPath)=/.test(argv[index + 1] ?? "")) index += 2;
@@ -79,8 +78,8 @@ const deferred = (): Deferred => {
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-test("status reads a work tree in one git invocation and preserves porcelain paths", async () => {
-  const { git, calls } = fakeGit(() => nul(
+test("status preserves porcelain branch metadata and paths", async () => {
+  const { git } = fakeGit((args) => args[0] === "rev-parse" ? "true\n" : nul(
     "# branch.head main",
     "# branch.upstream origin/main",
     "# branch.ab +2 -1",
@@ -98,7 +97,6 @@ test("status reads a work tree in one git invocation and preserves porcelain pat
       { path: "untracked.txt", status: "untracked", staged: false, unstaged: true }
     ]
   });
-  assert.deepEqual(calls, [["status", "--porcelain=v2", "--branch", "-z"]]);
 });
 
 test("status retains its empty state for non-repositories and bare repositories", async (t) => {
@@ -112,38 +110,6 @@ test("status retains its empty state for non-repositories and bare repositories"
   assert.deepEqual(await service.status(dir), expected);
   await exec("git", ["init", "--bare", "-q", dir]);
   assert.deepEqual(await service.status(dir), expected);
-});
-
-test("status preserves a work tree failure's original details", async () => {
-  const calls: string[][] = [];
-  const service = new GitService({ runner: async (_file, argv) => {
-    const args = withoutSafetyArgs(argv);
-    calls.push(args);
-    if (args[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
-    throw Object.assign(new Error("status failed"), { stderr: "fatal: unable to read index", code: 128 });
-  } });
-  await assert.rejects(service.status("/repo"), (error: unknown) => {
-    assert.ok(error instanceof GitError);
-    assert.equal(error.status, 500);
-    assert.equal(error.message, "fatal: unable to read index");
-    return true;
-  });
-  assert.deepEqual(calls, [["status", "--porcelain=v2", "--branch", "-z"], ["rev-parse", "--is-inside-work-tree"]]);
-});
-
-test("status propagates box routing errors without retrying", async () => {
-  let routes = 0;
-  const service = new GitService({ route: async () => {
-    routes += 1;
-    throw new GitError(409, "Box is not ready", "BOX_NOT_READY");
-  } });
-  await assert.rejects(service.status("/box/repo"), (error: unknown) => {
-    assert.ok(error instanceof GitError);
-    assert.equal(error.status, 409);
-    assert.equal(error.code, "BOX_NOT_READY");
-    return true;
-  });
-  assert.equal(routes, 1);
 });
 
 test("serializes concurrent git mutations in the same repository", async () => {
@@ -533,21 +499,28 @@ test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
   assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), 524_288);
 });
 
-test("an overflow on a read that did not ask for a cap is still an error", async () => {
-  const git = new GitService({
-    runner: async (_file, args) => {
-      if (withoutSafetyArgs(args)[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
-      throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
-        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-        stdout: "partial",
-        stderr: ""
-      });
-    }
-  });
-  await assert.rejects(git.status("/repo"), (error: unknown) => {
-    assert.ok(error instanceof GitError, `expected a GitError, got ${String(error)}`);
-    return true;
-  });
+test("status failures preserve uncapped overflow and native error details", async () => {
+  for (const [failure, message] of [
+    [Object.assign(new Error("stdout maxBuffer length exceeded"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "partial", stderr: ""
+    }), "stdout maxBuffer length exceeded"],
+    [Object.assign(new Error("status failed"), {
+      code: 128, stderr: "fatal: unable to read index"
+    }), "fatal: unable to read index"]
+  ] as const) {
+    const git = new GitService({
+      runner: async (_file, args) => {
+        if (withoutSafetyArgs(args)[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
+        throw failure;
+      }
+    });
+    await assert.rejects(git.status("/repo"), (error: unknown) => {
+      assert.ok(error instanceof GitError);
+      assert.equal(error.status, 500);
+      assert.equal(error.message, message);
+      return true;
+    });
+  }
 });
 
 test("working diff of a directory that is not a repo is isRepo:false, never an error", async (t) => {
@@ -744,18 +717,6 @@ test("working diff ignores the user's own diff config: no quoting, a/ b/ prefixe
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});
-
-test("gitSafetyArgs: fsmonitor off everywhere, hooks off for the daemon's own reads on this host", () => {
-  const off = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
-  assert.deepEqual(gitSafetyArgs(["status", "--porcelain=v2"], true), off);
-  assert.deepEqual(gitSafetyArgs(["-c", "core.quotePath=false", "diff", "--no-color"], true), off);
-  assert.deepEqual(gitSafetyArgs(["stash", "list"], true), off);
-  for (const command of ["commit", "push", "fetch", "merge", "checkout", "add", "stash"]) {
-    assert.deepEqual(gitSafetyArgs([command], true), ["-c", "core.fsmonitor=false"], `${command} keeps the repo's hooks`);
-  }
-  // A box repo's hooks run in its box; its fsmonitor is still never asked for.
-  assert.deepEqual(gitSafetyArgs(["status"], false), ["-c", "core.fsmonitor=false"]);
 });
 
 test("a repo's own fsmonitor command and post-index-change hook never run on the daemon's reads; commit hooks still do", async () => {

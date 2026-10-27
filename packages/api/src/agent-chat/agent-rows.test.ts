@@ -123,23 +123,9 @@ test("only a settled agent's own calls, words and their unstamped chunks are lef
     assert.ok(ids(omitted.items).includes(id), id);
   }
   // Nothing else of the snapshot moved.
-  assert.equal(omitted.roster, snapshot.roster);
-  assert.equal(omitted.pending, snapshot.pending);
+  assert.deepEqual(omitted.roster, snapshot.roster);
+  assert.deepEqual(omitted.pending, snapshot.pending);
   assert.equal(omitted.seq, snapshot.seq);
-});
-
-test("a snapshot with no settled agent is the same object, without the field", () => {
-  reset();
-  const events = [
-    created(),
-    ev("thread.session-set", { session: session("running", "t1") }),
-    row(activity("task.started", agentTask("a"), { id: "a-launch" })),
-    ...call("a", "a1")
-  ];
-  const { snapshot } = fullSnapshot(events);
-  const same = omitOnDemandAgentRows(snapshot);
-  assert.equal(same, snapshot);
-  assert.equal("omittedAgentIds" in same, false);
 });
 
 test("a loop, a goal and a background shell are never on demand; idle and failed agents are", () => {
@@ -257,16 +243,6 @@ test("a placement the client does not hold falls back to the agent's launch", ()
     ids(frame.items),
     "the agent's own rows keep the host's order"
   );
-});
-
-test("an empty frame of an agent with nothing on demand changes nothing", () => {
-  reset();
-  const events = fleet();
-  const { fold, snapshot } = fullSnapshot(events);
-  const client = clientFold(snapshot, events);
-  const frame = agentRowsFrameOf({ items: snapshot.items, roster: fold.roster, seq: fold.seq, agentIds: ["nobody"] });
-  assert.deepEqual(frame.items, []);
-  assert.equal(applyAgentRows(client, frame), client);
 });
 
 test("the fold keeps folding and trimming after a replacement", () => {

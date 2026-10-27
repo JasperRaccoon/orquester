@@ -657,7 +657,7 @@ function pinRefused(): SavedPromptError {
  * approval card naming them (the agent tools read the index themselves, and fail closed when it
  * cannot tell; a list row only names what it knows).
  */
-export function savedPromptWorkflowUses(
+function savedPromptWorkflowUses(
   index: Pick<WorkflowReferenceIndex, "promptUses">,
   promptId: string,
   workspacesDir?: string

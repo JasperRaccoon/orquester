@@ -14,14 +14,8 @@ import type { ChatLimitFailover, ChatUsageLimitState } from "@orquester/api/agen
 import { shortAccountLabel } from "../account-label";
 import { chatAccountSwitchSupported } from "./account-switch";
 
-/** Locale and zone overrides, for tests; the user's own by default. */
-export interface LimitClockOptions {
-  locale?: string;
-  timeZone?: string;
-}
-
 /** "2d 3h", "1h 12m", "12m", "<1m" — floored, never negative. */
-export function formatLimitCountdown(ms: number): string {
+function formatLimitCountdown(ms: number): string {
   const minutes = Math.floor(Math.max(0, ms) / 60_000);
   if (minutes < 1) return "<1m";
   const days = Math.floor(minutes / 1440);
@@ -32,52 +26,52 @@ export function formatLimitCountdown(ms: number): string {
   return `${mins}m`;
 }
 
-function dayKey(date: Date, timeZone: string | undefined): string {
-  return date.toLocaleDateString("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+function dayKey(date: Date): string {
+  return date.toLocaleDateString("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
 /**
  * The wall clock a limit resets (or the chat resumes) at: "3:40 PM" today, "Tue 3:40 PM" within
  * the week, "Oct 28, 3:40 PM" further out. "" for an unreadable stamp.
  */
-export function formatLimitClock(iso: string, now: number, opts: LimitClockOptions = {}): string {
+function formatLimitClock(iso: string, now: number): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   // ICU puts a narrow no-break space before the day period ("3:40\u202fPM"); a plain one reads the same everywhere.
   const time = date
-    .toLocaleTimeString(opts.locale, { hour: "numeric", minute: "2-digit", timeZone: opts.timeZone })
+    .toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
     .replace(/[\u202f\u00a0]/g, " ");
-  if (dayKey(date, opts.timeZone) === dayKey(new Date(now), opts.timeZone)) return time;
+  if (dayKey(date) === dayKey(new Date(now))) return time;
   const ahead = date.getTime() - now;
   if (ahead > 0 && ahead < 6 * 24 * 60 * 60_000) {
-    return `${date.toLocaleDateString(opts.locale, { weekday: "short", timeZone: opts.timeZone })} ${time}`;
+    return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
   }
-  return `${date.toLocaleDateString(opts.locale, { month: "short", day: "numeric", timeZone: opts.timeZone })}, ${time}`;
+  return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
 }
 
 /** An account id as the chat surfaces name it: "System" for the system login, else its short label. */
-export function limitAccountLabel(accountId: string | undefined, accounts: readonly AgentAccount[] | undefined): string {
+function limitAccountLabel(accountId: string | undefined, accounts: readonly AgentAccount[] | undefined): string {
   if (!accountId || accountId === SYSTEM_ACCOUNT_ID) return "System";
   const account = (accounts ?? []).find((candidate) => candidate.id === accountId);
   return shortAccountLabel(account?.label) || accountId;
 }
 
 /** "at 3:40 PM (in 1h 12m)", or "shortly" once the time is (about) here. */
-function when(iso: string, now: number, opts: LimitClockOptions): string {
+function when(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t) || t - now < 60_000) return "shortly";
-  return `at ${formatLimitClock(iso, now, opts)} (in ${formatLimitCountdown(t - now)})`;
+  return `at ${formatLimitClock(iso, now)} (in ${formatLimitCountdown(t - now)})`;
 }
 
 /** The one line after the title: where the automatic resume stands. */
-export function usageLimitStatusText(state: ChatUsageLimitState, now: number, opts: LimitClockOptions = {}): string {
+function usageLimitStatusText(state: ChatUsageLimitState, now: number): string {
   if (state.kind === "overloaded") {
     // `resetAt` is the retry's own time, not an account reset.
     switch (state.autoResume) {
       case "resuming":
         return "Retrying…";
       case "armed":
-        return state.resumeAt ? `Retries automatically ${when(state.resumeAt, now, opts)}` : "Retries automatically";
+        return state.resumeAt ? `Retries automatically ${when(state.resumeAt, now)}` : "Retries automatically";
       default:
         return "Not retrying automatically";
     }
@@ -86,15 +80,15 @@ export function usageLimitStatusText(state: ChatUsageLimitState, now: number, op
     case "resuming":
       return "Resuming…";
     case "armed":
-      return state.resumeAt ? `Resumes automatically ${when(state.resumeAt, now, opts)}` : "Resumes automatically";
+      return state.resumeAt ? `Resumes automatically ${when(state.resumeAt, now)}` : "Resumes automatically";
     case "off": {
       if (!state.resetAt) return "Reset time unknown";
       const t = Date.parse(state.resetAt);
-      return Number.isFinite(t) && t > now ? `Resets ${when(state.resetAt, now, opts)}` : `Reset at ${formatLimitClock(state.resetAt, now, opts)}`;
+      return Number.isFinite(t) && t > now ? `Resets ${when(state.resetAt, now)}` : `Reset at ${formatLimitClock(state.resetAt, now)}`;
     }
     default:
       // `unscheduled`, and any status a newer daemon may send.
-      return state.resetAt ? `Resets ${when(state.resetAt, now, opts)}` : "Reset time unknown";
+      return state.resetAt ? `Resets ${when(state.resetAt, now)}` : "Reset time unknown";
   }
 }
 
@@ -119,7 +113,6 @@ export function usageLimitBannerModel(input: {
   refId: string;
   accounts: readonly AgentAccount[] | undefined;
   now: number;
-  clock?: LimitClockOptions;
 }): UsageLimitBannerModel {
   const { state } = input;
   const busy = state.autoResume === "resuming";
@@ -138,7 +131,7 @@ export function usageLimitBannerModel(input: {
     (input.accounts ?? []).some((account) => account.agent === input.refId && account.id !== current && !account.needsReauth);
   return {
     title: overloaded ? "Model at capacity" : `Usage limit reached on ${limitAccountLabel(state.accountId, input.accounts)}`,
-    detail: `· ${usageLimitStatusText(state, input.now, input.clock)}`,
+    detail: `· ${usageLimitStatusText(state, input.now)}`,
     tooltip: state.message ?? (overloaded ? "The provider had no capacity for the model." : "The agent's account ran out of quota."),
     toggle,
     busy,
@@ -157,11 +150,10 @@ export function limitFailoverText(failover: ChatLimitFailover, accounts: readonl
 /** The "Limited" marker of a session row: its tooltip names the reset; null when the chat is not limited. */
 export function limitedMarker(
   session: Pick<SessionSummary, "usageLimit">,
-  now: number,
-  opts: LimitClockOptions = {}
+  now: number
 ): { label: "Limited" | "At capacity"; title: string } | null {
   const state = session.usageLimit;
   if (!state) return null;
-  if (state.kind === "overloaded") return { label: "At capacity", title: `Model at capacity · ${usageLimitStatusText(state, now, opts)}` };
-  return { label: "Limited", title: `Usage limit reached · ${usageLimitStatusText(state, now, opts)}` };
+  if (state.kind === "overloaded") return { label: "At capacity", title: `Model at capacity · ${usageLimitStatusText(state, now)}` };
+  return { label: "Limited", title: `Usage limit reached · ${usageLimitStatusText(state, now)}` };
 }

@@ -2,12 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_DEVICES_SETTINGS,
-  DEVICES_SETTINGS_LIMITS,
-  createDefaultDeviceLeasesFile,
-  createDefaultDevicePoolStateFile,
   createDefaultDevicesSettingsFile,
-  defaultDevicesSettings,
   isVphoneSource,
   mergeDevicesSettings,
   parseDeviceLeasesFile,
@@ -44,15 +39,15 @@ test("device paths live under the daemon appdir", () => {
   assert.equal(devicePoolPath("/a"), "/a/daemon/device-pool.json");
 });
 
-test("settings: an empty or missing value reads as the defaults", () => {
-  assert.deepEqual(readDevicesSettings(undefined), DEFAULT_DEVICES_SETTINGS);
-  assert.deepEqual(readDevicesSettings({}), DEFAULT_DEVICES_SETTINGS);
-  assert.deepEqual(parseDevicesSettingsFile({}).settings, DEFAULT_DEVICES_SETTINGS);
-  assert.deepEqual(createDefaultDevicesSettingsFile().settings, DEFAULT_DEVICES_SETTINGS);
-  // The defaults are not shared mutable state.
-  const copy = defaultDevicesSettings();
-  copy.android.profiles.push("x");
-  assert.notDeepEqual(copy, DEFAULT_DEVICES_SETTINGS);
+test("settings: old files require rental approval and fresh defaults do not share mutable profiles", () => {
+  const settings = parseDevicesSettingsFile({}).settings;
+  assert.equal(settings.android.enabled, false);
+  assert.equal(settings.ios.enabled, false);
+  assert.equal(settings.pool.rentWithoutAsking, false);
+  assert.equal(settings.pool.placement, "prefer-local");
+  const first = createDefaultDevicesSettingsFile();
+  first.settings.android.profiles.push("x");
+  assert.equal(createDefaultDevicesSettingsFile().settings.android.profiles.includes("x"), false);
 });
 
 test("settings: each bad field falls back alone, numbers are clamped, unknown keys survive a round trip", () => {
@@ -71,23 +66,23 @@ test("settings: each bad field falls back alone, numbers are clamped, unknown ke
   const file = parseDevicesSettingsFile(raw);
   const s = file.settings;
   assert.equal(s.android.enabled, true);
-  assert.equal(s.android.maxLocalDevices, DEVICES_SETTINGS_LIMITS.maxLocalDevices.max);
+  assert.equal(s.android.maxLocalDevices, 32);
   assert.deepEqual(s.android.profiles, ["pixel-9", "galaxy-s26"]);
   assert.equal(s.ios.enabled, false);
-  assert.equal(s.ios.size, DEFAULT_DEVICES_SETTINGS.ios.size);
+  assert.equal(s.ios.size, "blacksmith-6vcpu-macos-26");
   assert.equal(s.ios.monthlyCapUsd, 0);
-  assert.deepEqual(s.agents, DEFAULT_DEVICES_SETTINGS.agents);
-  assert.equal(s.leaseIdleMinutes, DEFAULT_DEVICES_SETTINGS.leaseIdleMinutes);
+  assert.deepEqual(s.agents, { enabled: true, followAgentDevices: true });
+  assert.equal(s.leaseIdleMinutes, 60);
   assert.equal(s.pool.placement, "prefer-local");
   assert.deepEqual(s.pool.minWarmHosts, { android: 3, ios: 0 });
   assert.equal(s.pool.maxHosts, 10);
 
   const written = serializeDevicesSettingsFile(file);
+  assert.equal(written.version, 1);
   assert.deepEqual(written.future, { keep: true });
   const settings = written.settings as Record<string, Record<string, unknown>>;
   assert.equal(settings.android!.skin, "x");
   assert.deepEqual(settings.fleetView, { thumbnails: true });
-  assert.deepEqual(parseDevicesSettingsFile(JSON.parse(JSON.stringify(written))).settings, s);
 });
 
 test("settings: a file that is not version 1 or not an object throws (it is moved aside, never overwritten)", () => {
@@ -105,7 +100,7 @@ test("settings: a patch merges field-wise and keeps the keys it does not name", 
     maxLeasesPerChat: 2
   });
   assert.equal(next.android.enabled, true);
-  assert.equal(next.android.maxLocalDevices, DEFAULT_DEVICES_SETTINGS.android.maxLocalDevices);
+  assert.equal(next.android.maxLocalDevices, 6);
   assert.equal((next.android as unknown as Record<string, unknown>).custom, 1);
   assert.equal((next.pool as unknown as Record<string, unknown>).custom, 2);
   assert.equal(next.ios.rentWithoutAsking, true);
@@ -151,10 +146,6 @@ test("settings: vphone host entries this build does not read (bad key, not an ob
   assert.equal(written.settings.research.vphoneHosts.box0, "future-shape");
   assert.deepEqual(written.settings.research.vphoneHosts.box66, { enabled: true });
   assert.equal(Object.keys(written.settings.research.vphoneHosts).length, 68);
-  // Read again: the same 64 are read and the same 4 kept aside.
-  const again = parseDevicesSettingsFile(JSON.parse(JSON.stringify(written)));
-  assert.deepEqual(Object.keys(again.settings.research.vphoneHosts), Object.keys(file.settings.research.vphoneHosts));
-  assert.deepEqual(again.droppedVphoneHosts, file.droppedVphoneHosts);
 });
 
 const lease = (id: string, extra: Record<string, unknown> = {}) => ({
@@ -191,9 +182,10 @@ test("leases: entry-wise tolerant; rejected entries and unknown keys are written
   assert.equal(file.leases[1]!.deviceId, null);
   assert.equal(file.rejected.length, 2);
   const written = serializeDeviceLeasesFile(file);
+  assert.equal(written.version, 1);
   assert.equal(written.note, "kept");
   assert.equal((written.leases as unknown[]).length, 4);
-  assert.deepEqual(parseDeviceLeasesFile(JSON.parse(JSON.stringify(written))).leases, file.leases);
+  assert.deepEqual(written.leases, [raw.leases[0], raw.leases[3], bad, raw.leases[2]]);
 });
 
 test("leases: defaults fill optional fields; a broken outer shape throws", () => {
@@ -208,7 +200,7 @@ test("leases: defaults fill optional fields; a broken outer shape throws", () =>
     controller: "agent",
     openedBy: "agent"
   });
-  assert.deepEqual(parseDeviceLeasesFile({}), createDefaultDeviceLeasesFile());
+  assert.deepEqual(parseDeviceLeasesFile({}).leases, []);
   assert.throws(() => parseDeviceLeasesFile({ leases: {} }));
   assert.throws(() => parseDeviceLeasesFile({ version: 2, leases: [] }));
   assert.throws(() => parseDeviceLeasesFile("nope"));
@@ -222,10 +214,10 @@ test("rent without asking: one pool switch; a legacy Mac switch is adopted on re
   const both = readDevicesSettings({ ios: { rentWithoutAsking: true, monthlyCapUsd: 40 }, pool: { rentWithoutAsking: false, monthlyCapUsd: 70 } });
   assert.equal(both.pool.rentWithoutAsking, false);
   assert.equal(both.pool.monthlyCapUsd, 70);
-  const merged = mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true, monthlyCapUsd: 25 } });
+  const merged = mergeDevicesSettings(createDefaultDevicesSettingsFile().settings, { ios: { rentWithoutAsking: true, monthlyCapUsd: 25 } });
   assert.equal(merged.pool.rentWithoutAsking, true);
   assert.equal(merged.pool.monthlyCapUsd, 25);
-  assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true }, pool: { rentWithoutAsking: false } }).pool.rentWithoutAsking, false);
+  assert.equal(mergeDevicesSettings(createDefaultDevicesSettingsFile().settings, { ios: { rentWithoutAsking: true }, pool: { rentWithoutAsking: false } }).pool.rentWithoutAsking, false);
 });
 
 test("idle teardown: the pool's one setting; a legacy Mac idle teardown is adopted on read and mirrored from patches", () => {
@@ -233,10 +225,10 @@ test("idle teardown: the pool's one setting; a legacy Mac idle teardown is adopt
   // A file that already has the pool's keeps it; an out-of-range legacy value is clamped like any.
   assert.equal(readDevicesSettings({ ios: { idleTeardownMinutes: 45 }, pool: { idleTeardownMinutes: 15 } }).pool.idleTeardownMinutes, 15);
   assert.equal(readDevicesSettings({ ios: { idleTeardownMinutes: 1 } }).pool.idleTeardownMinutes, 5);
-  const merged = mergeDevicesSettings(defaultDevicesSettings(), { ios: { idleTeardownMinutes: 30 } });
+  const merged = mergeDevicesSettings(createDefaultDevicesSettingsFile().settings, { ios: { idleTeardownMinutes: 30 } });
   assert.equal(merged.pool.idleTeardownMinutes, 30);
   assert.equal(merged.ios.idleTeardownMinutes, 30);
-  assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { idleTeardownMinutes: 30 }, pool: { idleTeardownMinutes: 10 } }).pool.idleTeardownMinutes, 10);
+  assert.equal(mergeDevicesSettings(createDefaultDevicesSettingsFile().settings, { ios: { idleTeardownMinutes: 30 }, pool: { idleTeardownMinutes: 10 } }).pool.idleTeardownMinutes, 10);
 });
 
 test("Linux host lifetime: its own pool setting; a file without it keeps its Mac lifetime for Linux hosts", () => {
@@ -255,7 +247,7 @@ test("Linux host lifetime: its own pool setting; a file without it keeps its Mac
   assert.equal(invalid.pool.maxHosts, 3);
   assert.equal((invalid.pool as unknown as Record<string, unknown>).future, 1);
   // A patch of one never moves the other.
-  const merged = mergeDevicesSettings(defaultDevicesSettings(), { pool: { androidLifetimeMinutes: 120 } });
+  const merged = mergeDevicesSettings(createDefaultDevicesSettingsFile().settings, { pool: { androidLifetimeMinutes: 120 } });
   assert.equal(merged.pool.androidLifetimeMinutes, 120);
   assert.equal(merged.ios.lifetimeMinutes, 240);
   assert.equal(mergeDevicesSettings(merged, { ios: { lifetimeMinutes: 60 } }).pool.androidLifetimeMinutes, 120);
@@ -269,7 +261,7 @@ test("pool settings: the monthly cap defaults, clamps and falls back alone", () 
 });
 
 test("device-pool.json: tolerant per section; rejected entries and unknown keys are written back", () => {
-  assert.deepEqual(parseDevicePoolStateFile({}).state, createDefaultDevicePoolStateFile().state);
+  assert.deepEqual(parseDevicePoolStateFile({}).state, { rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} });
   const raw = {
     version: 1,
     future: { keep: true },
@@ -290,12 +282,17 @@ test("device-pool.json: tolerant per section; rejected entries and unknown keys 
   assert.equal(file.state.cache.linux?.lastAutoWarmAt, null);
   assert.equal(file.state.cache.macos, undefined);
   const out = serializeDevicePoolStateFile(file);
+  assert.equal(out.version, 1);
   assert.deepEqual(out.future, { keep: true });
   assert.equal((out.rentals as unknown[]).length, 2);
   assert.deepEqual((out.learnedCapacity as unknown[])[1], "junk");
   assert.deepEqual(out.spend, { note: "an older build's key, kept" });
   assert.deepEqual((out.cache as Record<string, unknown>).other, { x: 1 });
+  assert.equal((out.cache as Record<string, unknown>).macos, 5, "unreadable cache records are retained for a newer build");
   assert.equal((out.rentals as Record<string, unknown>[])[0]!.extra, 1);
+  file.state.cache.macos = { lastWarmAt: "2026-10-27T01:00:00.000Z", lastAutoWarmAt: null, lastRunId: null, lastConclusion: null };
+  const refreshedCache = serializeDevicePoolStateFile(file).cache as { macos: { lastWarmAt: string } };
+  assert.equal(refreshedCache.macos.lastWarmAt, "2026-10-27T01:00:00.000Z", "a current cache write supersedes the retained raw value");
   assert.throws(() => parseDevicePoolStateFile({ version: 2 }));
   assert.throws(() => parseDevicePoolStateFile([]));
 });

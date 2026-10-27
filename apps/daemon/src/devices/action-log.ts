@@ -17,16 +17,16 @@ export class DeviceActionLog {
   private readonly logs = new Map<string, DeviceActionEntry[]>();
 
   constructor(
-    private readonly options: { limit?: number; now?: () => Date; id?: () => string } = {}
+    private readonly options: { now?: () => Date } = {}
   ) {}
 
   /** Append a row (stamped with an id and time; the summary cut to one short line); returns it. */
   append(leaseId: string, draft: DeviceActionDraft): DeviceActionEntry {
-    const limit = this.options.limit ?? DEVICE_ACTION_LOG_LIMIT;
+    const limit = DEVICE_ACTION_LOG_LIMIT;
     const summary = draft.summary.replace(/\s+/g, " ").trim();
     const entry: DeviceActionEntry = {
       ...draft,
-      id: this.options.id?.() ?? randomUUID(),
+      id: randomUUID(),
       leaseId,
       at: draft.at ?? (this.options.now?.() ?? new Date()).toISOString(),
       summary: summary.length > SUMMARY_MAX_CHARS ? `${summary.slice(0, SUMMARY_MAX_CHARS - 1)}…` : summary

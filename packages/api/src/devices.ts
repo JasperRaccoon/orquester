@@ -708,7 +708,7 @@ export const DEVICE_THUMBNAIL_WIDTH = { default: 320, min: 64, max: 720 } as con
  * itself (hub streams, screenshots, fold, input) sends `Authorization`; WebSockets check their own
  * `?token=` after the upgrade (`ws-routes.ts`).
  */
-export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
+const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
 
 /** Whether a request may authenticate with `?token=`: a GET/HEAD of a {@link DEVICE_QUERY_TOKEN_ROUTES} route. */
 export function deviceQueryTokenAllowed(method: string, routePath: string | undefined): boolean {

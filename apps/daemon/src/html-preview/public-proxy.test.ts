@@ -230,8 +230,11 @@ describe("the SOCKS5 proxy", () => {
 async function dnsServer(answers: Record<string, string>, silent = false) {
   const socket = dgram.createSocket("udp4");
   let queries = 0;
+  let received!: () => void;
+  const queried = new Promise<void>((resolve) => (received = resolve));
   socket.on("message", (message, peer) => {
     queries += 1;
+    received();
     if (silent) return;
     // Question: after the 12-byte header, labels until a 0 byte, then type and class.
     let at = 12;
@@ -257,6 +260,7 @@ async function dnsServer(answers: Record<string, string>, silent = false) {
   return {
     server: `127.0.0.1:${socket.address().port}`,
     queries: () => queries,
+    queried,
     close: () => new Promise<void>((resolve) => socket.close(() => resolve()))
   };
 }
@@ -276,22 +280,21 @@ describe("name resolution (c-ares, bounded)", () => {
     }
   });
 
-  it("a resolver that never answers stalls no file read, and every lookup gives up at its timeout", async () => {
+  it("a resolver that never answers stalls no file read, and every lookup gives up at its timeout", async (t) => {
     const dns = await dnsServer({}, true);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const resolver = createDnsResolver({ servers: [dns.server], timeoutMs: 1500 });
     try {
       // Twice libuv's default thread pool: with getaddrinfo these would hold every fs thread.
-      const started = Date.now();
       const lookups = Array.from({ length: 8 }, (_, index) => resolver.resolve(`slow-${index}.example`));
       let settled = 0;
       for (const lookup of lookups) void lookup.then(() => (settled += 1));
+      await dns.queried;
       const reads = await Promise.all(Array.from({ length: 8 }, () => readFile(new URL(import.meta.url))));
       assert.ok(reads.every((bytes) => bytes.length > 0));
       assert.equal(settled, 0, "the file reads finished while every lookup was still pending");
+      t.mock.timers.tick(1500);
       assert.deepEqual(await Promise.all(lookups), Array.from({ length: 8 }, () => []));
-      const elapsed = Date.now() - started;
-      // Four at a time: the first four, then the rest share the same deadline.
-      assert.ok(elapsed < 4000, `${elapsed} ms`);
       assert.ok(dns.queries() > 0);
     } finally {
       resolver.close();
@@ -323,11 +326,15 @@ describe("name resolution (c-ares, bounded)", () => {
     await dns.close();
   });
 
-  it("the proxy refuses a name whose lookup times out", async () => {
+  it("the proxy refuses a name whose lookup times out", async (t) => {
     const dns = await dnsServer({}, true);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const proxy = await startPublicProxy({ dnsServers: [dns.server], lookupTimeoutMs: 500 });
     try {
-      const { code, socket } = await socksConnect(proxy.port, "slow.example", 443);
+      const connecting = socksConnect(proxy.port, "slow.example", 443);
+      await dns.queried;
+      t.mock.timers.tick(500);
+      const { code, socket } = await connecting;
       assert.equal(code, SOCKS_REFUSED_BY_RULE);
       socket.destroy();
     } finally {

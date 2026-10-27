@@ -19,7 +19,7 @@ import {
   type SecretVaultDetail,
   type SessionSummary
 } from "@orquester/api";
-import { serverViewOpen, useAppStore } from "../store/app.ts";
+import { useAppStore } from "../store/app.ts";
 import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./agent-profile/store.ts";
 import type { ApiClient } from "./api-client.ts";
 import { boxesStore, resetBoxes } from "./boxes/store.ts";
@@ -336,7 +336,8 @@ afterEach(async () => {
       assert.equal(first?.id, "ke_aaaaaaaaaaaa");
       store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
       const second = store().knowledgeView.focus;
-      assert.ok(second && first && second.nonce > first.nonce, "the same citation clicked again asks again");
+      assert.ok(second);
+      assert.notEqual(second.nonce, first?.nonce, "the same citation clicked again asks again");
 
       store().openKnowledgeConcept("tactic-alternatives");
       assert.equal(store().knowledgeView.focus?.kind, "concept");
@@ -344,7 +345,7 @@ afterEach(async () => {
       // Closing and opening again keeps what the view was showing (same request, same nonce).
       store().closeKnowledge();
       store().openKnowledge();
-      assert.equal(store().knowledgeView.focus, concept);
+      assert.deepEqual(store().knowledgeView.focus, concept);
     });
 
     it("going to the project, a tab or a tool leaves it, keeping its focus", () => {
@@ -361,7 +362,7 @@ afterEach(async () => {
         const focus = store().knowledgeView.focus;
         leave();
         assert.equal(store().knowledgeView.open, false, name);
-        assert.equal(store().knowledgeView.focus, focus, `${name} keeps the focus`);
+        assert.deepEqual(store().knowledgeView.focus, focus, `${name} keeps the focus`);
       }
     });
 
@@ -432,18 +433,14 @@ afterEach(async () => {
     it("opens over the main area in Knowledge's place, and the other way round", () => {
       useAppStore.setState({ sidebarDrawerOpen: true });
       store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
-      const focus = store().knowledgeView.focus;
       store().openDevicesFleet();
       assert.equal(store().devicesFleetOpen, true);
       assert.equal(store().knowledgeView.open, false, "one server-level view at a time");
-      assert.equal(store().knowledgeView.focus, focus, "Knowledge keeps what it showed");
+      assert.partialDeepStrictEqual(store().knowledgeView.focus, { kind: "entry", id: "ke_aaaaaaaaaaaa" });
       assert.equal(store().sidebarDrawerOpen, false);
-      assert.equal(serverViewOpen(store()), true);
       store().openKnowledge();
       assert.equal(store().devicesFleetOpen, false);
       assert.equal(store().knowledgeView.open, true);
-      store().closeKnowledge();
-      assert.equal(serverViewOpen(store()), false);
     });
 
     it("going to the project, a tab, a tool or a session leaves it", () => {

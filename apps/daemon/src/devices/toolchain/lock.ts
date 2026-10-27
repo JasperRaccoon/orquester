@@ -24,7 +24,7 @@ const POLL_MS = 500;
 export type LockOwner = { state: "free" } | { state: "held" } | { state: "stale"; ino: number };
 
 /** What the lock dir at `path` is now: free, held by a live owner (or too young to judge), or stale. */
-export async function inspectLock(path: string, now = Date.now()): Promise<LockOwner> {
+export async function inspectLock(path: string): Promise<LockOwner> {
   const info = await stat(path).catch(() => null);
   if (!info) return { state: "free" };
   const owner = Number((await readFile(join(path, "pid"), "utf8").catch(() => "")).trim());
@@ -32,7 +32,7 @@ export async function inspectLock(path: string, now = Date.now()): Promise<LockO
     // Our own pid: a crashed earlier run of this pid (this process queues its own takers first).
     return owner !== process.pid && (await isProcessAlive(owner)) ? { state: "held" } : { state: "stale", ino: info.ino };
   }
-  return now - info.mtimeMs > EMPTY_LOCK_STALE_MS ? { state: "stale", ino: info.ino } : { state: "held" };
+  return Date.now() - info.mtimeMs > EMPTY_LOCK_STALE_MS ? { state: "stale", ino: info.ino } : { state: "held" };
 }
 
 /** Move a stale lock aside and remove it, unless it is no longer the dir that was judged. */

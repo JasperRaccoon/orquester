@@ -102,8 +102,8 @@ import { DEADLINE_MARGIN_MS } from "./host.ts";
 import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
 import { installedToolVersion, INSTALL_TOOLS_SCRIPT, outputTail, writeBoxToolLocks } from "./remote.ts";
 
-/** How long things may take (tests shorten them). */
-export interface BoxAndroidTiming {
+/** Production command and polling deadlines. */
+interface BoxAndroidTiming {
   commandMs: number;
   installMs: number;
   /** The SDK and system image download and install. */
@@ -118,7 +118,7 @@ export interface BoxAndroidTiming {
   teardownWaitMs: number;
 }
 
-export const DEFAULT_BOX_ANDROID_TIMING: BoxAndroidTiming = {
+const DEFAULT_BOX_ANDROID_TIMING: BoxAndroidTiming = {
   commandMs: 2 * 60_000,
   installMs: 15 * 60_000,
   sdkMs: 45 * 60_000,
@@ -143,16 +143,6 @@ export interface BoxAndroidHostDeps {
   /** Rented hosts: destroy the box. */
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
-  now?(): number;
-  timing?: Partial<BoxAndroidTiming>;
-  /** Tests and the integration run: the device root in the box (absent: by provider, {@link boxAndroidRoot}). */
-  root?: string;
-  /** GPU modes a golden made in the box tries, in order (absent: {@link BOX_GPU_MODES}). */
-  gpuModes?: readonly string[];
-  /** Make the first profile's golden snapshot while preparing (default true: a pool host's first lease boots in seconds). */
-  eagerGolden?: boolean;
-  /** Tests: agent-device on this machine (absent: the pinned install, installed when missing). */
-  localAgentDevice?(signal: AbortSignal): Promise<string>;
 }
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
@@ -186,7 +176,7 @@ export class BoxAndroidHost implements DeviceHost {
   readonly platforms = ["android"] as const;
 
   private readonly events = new EventEmitter();
-  private readonly timing: BoxAndroidTiming;
+  private readonly timing = { ...DEFAULT_BOX_ANDROID_TIMING };
   private readonly x: DeviceExecutor;
   private phase: Phase = "pending";
   private detail: string | null = null;
@@ -222,7 +212,6 @@ export class BoxAndroidHost implements DeviceHost {
     this.id = `box:${deps.boxId}`;
     this.kind = deps.kind;
     this.label = deps.label;
-    this.timing = { ...DEFAULT_BOX_ANDROID_TIMING, ...deps.timing };
     this.x = boxExecutor(() => this.link());
   }
 
@@ -421,7 +410,7 @@ export class BoxAndroidHost implements DeviceHost {
       await this.ensureAvds(probe, signal);
 
       const first = this.profiles()[0];
-      if (first && this.deps.eagerGolden !== false) {
+      if (first) {
         this.working = "golden";
         this.step("golden", `Preparing ${first.label} for first use`, "running", 60);
         const before = await boxGolden(this.x, layout.avd, first, await boxAvdState(this.x, layout.avd, first), await this.emulatorRevision());
@@ -446,7 +435,7 @@ export class BoxAndroidHost implements DeviceHost {
 
       this.working = "tool:agent-device-local";
       this.step("tool:agent-device-local", "agent-device on this machine", "running", 95);
-      this.localCli = await (this.deps.localAgentDevice?.(signal) ?? ensureLocalAgentDevice({ appDir: this.deps.appDir, ...(this.deps.toolchain ? { toolchain: this.deps.toolchain } : {}), signal })).catch((error: unknown) => {
+      this.localCli = await ensureLocalAgentDevice({ appDir: this.deps.appDir, ...(this.deps.toolchain ? { toolchain: this.deps.toolchain } : {}), signal }).catch((error: unknown) => {
         throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Installing agent-device on this machine failed: ${errorText(error)}`);
       });
       this.step("tool:agent-device-local", "agent-device on this machine", "done", 98);
@@ -493,7 +482,7 @@ export class BoxAndroidHost implements DeviceHost {
     const probe = parseAndroidProbe(result.stdout);
     this.probe = probe;
     if (!this.layoutValue && probe.nodePath) {
-      const root = this.deps.root ?? boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
+      const root = boxAndroidRoot({ provider: this.deps.record()?.provider ?? "byo", home: this.link().sys.home });
       this.layoutValue = androidLayoutAt(root);
     }
     if (this.layoutValue && probe.nodePath) {
@@ -620,7 +609,7 @@ export class BoxAndroidHost implements DeviceHost {
       if (this.instancesOf(profile.id) > 0) return null;
       const kvm = this.kvmMode();
       const deviceDensity = (await readAvdMarker(layout.avd, profile.id, this.x))?.deviceDensity;
-      const modes = this.deps.gpuModes ?? BOX_GPU_MODES[this.kind];
+      const modes = BOX_GPU_MODES[this.kind];
       const failures: string[] = [];
       for (const gpu of modes) {
         await clearGolden(layout.avd, profile.id, this.x);
@@ -814,7 +803,7 @@ export class BoxAndroidHost implements DeviceHost {
     }
     signal.throwIfAborted();
     progress("start-device", `Starting ${profile.label}`);
-    const gpu = golden?.gpu ?? (this.deps.gpuModes ?? BOX_GPU_MODES[this.kind])[0]!;
+    const gpu = golden?.gpu ?? (BOX_GPU_MODES[this.kind])[0]!;
     let record: EmulatorRecord;
     try {
       try {
@@ -1233,7 +1222,7 @@ export class BoxAndroidHost implements DeviceHost {
   }
 
   private now(): number {
-    return this.deps.now?.() ?? Date.now();
+    return Date.now();
   }
 }
 

@@ -3,54 +3,34 @@ import { describe, it } from "node:test";
 
 import {
   addComposerQuote,
-  blockquote,
   composeQuotedPrompt,
   isCodeQuote,
-  MAX_COMPOSER_QUOTE_CHARS,
-  MAX_COMPOSER_QUOTES,
   mergeQuotes,
-  normalizeQuoteText,
   quoteExcerpt,
   quotesFromText,
   splitLeadingQuotes,
   type ComposerQuote
 } from "./composer-quotes";
+import { MAX_COMPOSER_QUOTE_CHARS, MAX_COMPOSER_QUOTES } from "../../../lib/agent-chat/composer.logic";
 
 const q = (id: string, text: string): ComposerQuote => ({ id, text });
 
 describe("a passage as a blockquote", () => {
-  it("quotes every line, a blank one as a bare `>` so the quote stays one block", () => {
-    assert.equal(blockquote("first line\n\nsecond paragraph"), "> first line\n>\n> second paragraph");
-  });
-
-  it("nests a line that was already a quote, and keeps indentation", () => {
-    assert.equal(blockquote("> they said\n    indented"), "> > they said\n>     indented");
-  });
-
-  it("drops blank lines at either end and unifies line endings", () => {
-    assert.equal(blockquote("\n\n  \r\nbody\r\nmore\n\n"), "> body\n> more");
-  });
-
-  it("quotes a fenced code block line by line, its blank lines included", () => {
-    assert.equal(
-      blockquote("```ts\nconst a = 1;\n\nconst b = 2;\n```"),
-      "> ```ts\n> const a = 1;\n>\n> const b = 2;\n> ```"
-    );
-  });
 
   it("closes a fence the passage opened and never closed", () => {
-    assert.equal(normalizeQuoteText("see\n```py\nprint(1)"), "see\n```py\nprint(1)\n```");
-    assert.equal(normalizeQuoteText("~~~~\nx\n~~~"), "~~~~\nx\n~~~\n~~~~", "a shorter fence does not close it");
-    assert.equal(normalizeQuoteText("````\na\n````"), "````\na\n````", "a closed fence is left alone");
-    assert.equal(normalizeQuoteText("``` not `a` fence\ntext"), "``` not `a` fence\ntext", "a backtick in the info string is no fence");
+    const prompt = (text: string) => composeQuotedPrompt([q("1", text)], "");
+    assert.equal(prompt("see\n```py\nprint(1)"), "> see\n> ```py\n> print(1)\n> ```");
+    assert.equal(prompt("~~~~\nx\n~~~"), "> ~~~~\n> x\n> ~~~\n> ~~~~", "a shorter fence does not close it");
+    assert.equal(prompt("````\na\n````"), "> ````\n> a\n> ````", "a closed fence is left alone");
+    assert.equal(prompt("``` not `a` fence\ntext"), "> ``` not `a` fence\n> text", "a backtick in the info string is no fence");
   });
 });
 
 describe("the prompt a quoted send carries", () => {
   it("puts the quote ahead of the user's text, a blank line between", () => {
     assert.equal(
-      composeQuotedPrompt([q("1", "The cache is per tab.")], "Why per tab?"),
-      "> The cache is per tab.\n\nWhy per tab?"
+      composeQuotedPrompt([q("1", "\n\n  \r\nThe cache is per tab.\r\n\r\n> nested\n    indented\n\n")], "Why per tab?"),
+      "> The cache is per tab.\n>\n> > nested\n>     indented\n\nWhy per tab?"
     );
   });
 
@@ -71,8 +51,8 @@ describe("the prompt a quoted send carries", () => {
   });
 
   it("keeps a quoted code block closed, so the user's text never lands inside it", () => {
-    const prompt = composeQuotedPrompt([q("1", "```js\nlet x;")], "rename x");
-    assert.equal(prompt, "> ```js\n> let x;\n> ```\n\nrename x");
+    const prompt = composeQuotedPrompt([q("1", "```js\nlet x;\n\nnext();")], "rename x");
+    assert.equal(prompt, "> ```js\n> let x;\n>\n> next();\n> ```\n\nrename x");
   });
 });
 

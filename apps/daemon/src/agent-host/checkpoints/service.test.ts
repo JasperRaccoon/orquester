@@ -499,22 +499,23 @@ test("a repository with no commits at all still captures a baseline", async (t) 
   assert.deepEqual(await refNames(repo, "refs/heads/"), []);
 });
 
-test("a capture failure is reported, never thrown into the turn", async (t) => {
+test("a capture failure is reported with a redacted detail, never thrown into the turn", async (t) => {
   const repo = await seededRepo();
-  const gitDir = join(repo.dir, ".git");
-  t.after(async () => {
-    await chmod(gitDir, 0o700);
-    await repo.cleanup();
-  });
-  const service = serviceFor(repo);
+  t.after(() => repo.cleanup());
+  const home = dirname(repo.dir);
+  const service = createCheckpointService({ gitEnv: { ...repo.gitEnv, HOME: home } });
 
-  // The git dir is unwritable, so the temporary index cannot be created.
-  await chmod(gitDir, 0o500);
+  // A real hook refuses the ref and prints its absolute cwd, so the failure
+  // exercises both error reporting and home redaction even when run as root.
+  const hook = ".git/hooks/reference-transaction";
+  await repo.write(hook, "#!/bin/sh\npwd >&2\nexit 1\n");
+  await chmod(join(repo.dir, hook), 0o755);
   const baseline = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
 
   assert.ok(baseline, "a git project still reports a result");
   assert.equal(baseline.status, "error");
-  assert.ok((baseline.detail ?? "").length > 0, "the failure carries a detail for the activity");
+  assert.ok(baseline.detail?.includes("~"), "the failure detail names the redacted path");
+  assert.ok(!baseline.detail?.includes(home), "the host's home never reaches a timeline row");
 
   const summary = await service.captureTurnEnd({
     threadId: THREAD,
@@ -685,27 +686,16 @@ test("R5 #20: a non-cone sparse checkout that cannot be rebuilt fails the captur
 
 test("Q1 #42: a ref that survives deletion fails the prune instead of reporting success", async (t) => {
   const repo = await seededRepo();
-  const gitDir = join(repo.dir, ".git");
-  t.after(async () => {
-    await chmod(gitDir, 0o700);
-    await repo.cleanup();
-  });
+  t.after(() => repo.cleanup());
   const service = serviceFor(repo);
-
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  await repo.write("tracked.txt", "second\n");
-  await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-
   const surviving = checkpointRefForThreadTurn(THREAD, 1);
-  // Deletion needs a lock file in the git dir; a read-only git dir is what a
-  // hard lock contention looks like from here. Reads still work, so the
-  // service can see that the ref survived — which is the whole point.
-  await chmod(gitDir, 0o500);
+  const head = (await repo.gitReadOnly("rev-parse", "HEAD")).trim();
+  await repo.gitStdin(
+    [checkpointRefForThreadTurn(THREAD, 0), surviving].map((ref) => `create ${ref}\0${head}\0`).join(""),
+    "update-ref", "-z", "--stdin"
+  );
+  // A real competing ref lock prevents deletion regardless of filesystem permissions.
+  await repo.write(`.git/${surviving}.lock`, "another git operation\n");
 
   await assert.rejects(
     service.pruneAbove({ threadId: THREAD, cwd: repo.dir, targetTurnCount: 0 }),
@@ -716,7 +706,6 @@ test("Q1 #42: a ref that survives deletion fails the prune instead of reporting 
     }
   );
 
-  await chmod(gitDir, 0o700);
   assert.deepEqual(
     await refNames(repo, checkpointRefNamespace(THREAD)),
     [checkpointRefForThreadTurn(THREAD, 0), surviving],
@@ -768,29 +757,6 @@ test("E2E #E8: a capture for a turn a revert truncated is dropped", async (t) =>
   });
   assert.ok(fresh, "the rewound thread can still make new checkpoints");
   assert.equal(fresh.turnCount, 2);
-});
-
-test("S1 #9: a failure detail collapses the host's home path to ~", async (t) => {
-  const repo = await seededRepo();
-  const gitDir = join(repo.dir, ".git");
-  t.after(async () => {
-    await chmod(gitDir, 0o700);
-    await repo.cleanup();
-  });
-  // HOME is the repo's parent here, so any path git names sits under it.
-  const home = dirname(repo.dir);
-  const service = createCheckpointService({ gitEnv: { ...repo.gitEnv, HOME: home } });
-  await chmod(gitDir, 0o500);
-
-  const result = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-
-  assert.ok(result);
-  assert.equal(result.status, "error");
-  assert.ok(result.detail?.includes("~"), "the actual host-home path was replaced");
-  assert.ok(
-    !(result.detail ?? "").includes(home),
-    `raw host path leaked into a timeline row: ${result.detail ?? ""}`
-  );
 });
 
 // ---------------------------------------------------------------------------

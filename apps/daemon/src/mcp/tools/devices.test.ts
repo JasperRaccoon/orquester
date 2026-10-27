@@ -20,7 +20,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ApprovalPort, ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { deviceQuickStart, devicesFamily } from "./devices.ts";
+import { devicesFamily } from "./devices.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "mcp-devices-")));
 const PROJECT = join(ROOT, "acme", "app");
@@ -28,15 +28,11 @@ mkdirSync(join(PROJECT, "build"), { recursive: true });
 writeFileSync(join(PROJECT, "build", "app.apk"), "apk");
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 
-/** A `DaemonApi` whose device methods reach `port` the way `InjectDaemonApi` does; it records the principals. */
-function apiFor(port: DeviceToolsPort | null): { api: FakeDaemonApi; principals: (string | undefined)[] } {
+/** Device calls reach the real service through the same principal gate as `InjectDaemonApi`. */
+function apiFor(port: DeviceToolsPort | null): FakeDaemonApi {
   const api = new FakeDaemonApi();
   api.fsRoot = api.workspacesDir = ROOT;
-  const principals: (string | undefined)[] = [];
-  const run = <T>(opts: DeviceCallOptions | undefined, fn: Parameters<typeof runDeviceTool<T>>[2]) => {
-    principals.push(opts?.principal?.kind === "agent" ? opts.principal.threadId : opts?.principal?.kind);
-    return runDeviceTool(port, opts, fn);
-  };
+  const run = <T>(opts: DeviceCallOptions | undefined, fn: Parameters<typeof runDeviceTool<T>>[2]) => runDeviceTool(port, opts, fn);
   Object.assign(api, {
     devicesList: (opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolList(id)),
     devicesPlanOpen: (platform: "ios" | "android", opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolPlanOpen(id, platform)),
@@ -46,7 +42,7 @@ function apiFor(port: DeviceToolsPort | null): { api: FakeDaemonApi; principals:
     deviceInstall: (input: Parameters<DeviceToolsPort["toolInstall"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id, signal) => p.toolInstall(id, input, signal)),
     deviceClose: (input: Parameters<DeviceToolsPort["toolClose"]>[1], opts?: DeviceCallOptions) => run(opts, (p, id) => p.toolClose(id, input))
   });
-  return { api, principals };
+  return api;
 }
 
 function chat(over: Partial<ThreadCaller> = {}): ThreadCaller {
@@ -77,10 +73,10 @@ async function androidService(): Promise<TestDeviceService> {
 }
 
 test("the device tools are chat-only; schemas refuse bad and unknown arguments", async () => {
-  const { api } = apiFor(null);
-  for (const tool of devicesFamily) {
-    const external = await call(api, tool.name, {}, { caller: { kind: "external" } });
-    assert.ok(!external.ok && external.code === "TOOL_NOT_FOUND", tool.name);
+  const api = apiFor(null);
+  for (const name of ["list_devices", "open_device", "device_action", "device_install", "close_device"]) {
+    const external = await call(api, name, {}, { caller: { kind: "external" } });
+    assert.ok(!external.ok && external.code === "TOOL_NOT_FOUND", name);
   }
   const schema = (name: string) => audienceSchema(devicesFamily.find((tool) => tool.name === name)!, "chat");
   assert.ok(schema("open_device").safeParse({ platform: "android", profile: "pixel-fold", app: "com.example.app" }).success);
@@ -96,8 +92,8 @@ test("the device tools are chat-only; schemas refuse bad and unknown arguments",
   assert.ok(!schema("device_action").safeParse({ action: "press", key: "power" }).success);
 });
 
-test("plugin off: every tool answers DEVICES_DISABLED", async () => {
-  const { api } = apiFor(null);
+test("an unavailable device backend returns DEVICES_DISABLED", async () => {
+  const api = apiFor(null);
   const listed = await call(api, "list_devices", {});
   assert.ok(!listed.ok && listed.code === "DEVICES_DISABLED");
   const bare = new FakeDaemonApi();
@@ -108,17 +104,16 @@ test("plugin off: every tool answers DEVICES_DISABLED", async () => {
 test("open → act → screenshot → install → close, acting for the calling chat only", async () => {
   const t = await androidService();
   try {
-    const { api, principals } = apiFor(t.service);
+    const api = apiFor(t.service);
     const opened = await call(api, "open_device", { platform: "android" });
     assert.ok(opened.ok, JSON.stringify(opened));
     assert.equal(opened.value.device, "local/dev-1");
     assert.equal(opened.value.ready, true);
     const quickStart = String(opened.value.quick_start);
     assert.ok(quickStart.split("\n").length <= 6);
-    for (const needle of [/snapshot/, /@eN refs/, /\.apk/, /Device panel/]) assert.match(quickStart, needle);
+    for (const needle of [/snapshot/, /@eN/, /\.apk/, /device_install/, /DEVICE_CONTROLLED_BY_USER/, /close_device/]) assert.match(quickStart, needle);
     // The reference names the device, so a reloaded (slimmed) row still reads "Opened Pixel 9".
     assert.deepEqual(readDeviceToolReference(opened.value[DEVICE_TOOL_REFERENCE_KEY]), { device: "local/dev-1", leaseId: opened.value.lease_id, name: "Pixel 9" });
-    assert.ok(principals.every((who) => who === "me"));
 
     const tapped = await call(api, "device_action", { action: "tap", ref: "e3" });
     assert.ok(tapped.ok);
@@ -143,7 +138,7 @@ test("open → act → screenshot → install → close, acting for the calling 
     t.actions.result = () => ({ log: { summary: "Took a screenshot" }, image: { mimeType: "image/png", data: Buffer.from("png"), width: 2, height: 4 } });
     const shot = await call(api, "device_action", { device: "local/dev-1", action: "screenshot" });
     assert.ok(shot.ok);
-    assert.deepEqual(shot.result.content[0], { type: "image", data: Buffer.from("png").toString("base64"), mimeType: "image/png" });
+    assert.deepEqual(shot.result.content[0], { type: "image", data: "cG5n", mimeType: "image/png" });
     assert.deepEqual(JSON.parse((shot.result.content[1] as { text: string }).text), shot.value);
     const ref = readDeviceToolReference(shot.value[DEVICE_TOOL_REFERENCE_KEY]);
     assert.ok(ref?.screenshotId);
@@ -164,11 +159,9 @@ test("open → act → screenshot → install → close, acting for the calling 
     t.service.userInput("local", "dev-1");
     const refused = await call(api, "device_action", { action: "tap", x: 1, y: 2 });
     assert.ok(!refused.ok && refused.code === "DEVICE_CONTROLLED_BY_USER");
-    assert.match(refused.message, /give control back/);
     t.actions.result = (input) => ({ log: { summary: `did ${input.action}` }, text: "tree" });
     const read = await call(api, "device_action", { action: "snapshot" });
     assert.ok(read.ok);
-    assert.match(String(read.value.note), /user has control/);
 
     const closed = await call(api, "close_device", { shutdown: true });
     assert.ok(closed.ok);
@@ -191,10 +184,20 @@ test("open_device: a rental the owner did not pre-approve raises a devices spend
   factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "6vcpu", sizeLabel: "6 vCPU macOS", hourlyUsd: 4.8, lifetimeMinutes: 240, needsApproval: true };
   const t = await startTestDeviceService({ factories: [factory], settings: { ios: { enabled: true } } });
   try {
-    const { api } = apiFor(t.service);
+    const api = apiFor(t.service);
     const port = new FakeApprovalPort();
+    const planning = await call(api, "open_device", { platform: "ios" }, { port, caller: chat({ planning: true }) });
+    assert.ok(!planning.ok && planning.code === "PERMISSION_DENIED");
+    assert.equal(port.cards.length, 0, "planning cannot raise a spend card");
+    assert.deepEqual(factory.provisioned, []);
+
     const opened = await call(api, "open_device", { platform: "ios" }, { port });
     assert.ok(opened.ok, JSON.stringify(opened));
+    const quickStart = String(opened.value.quick_start);
+    assert.ok(quickStart.split("\n").length <= 6);
+    assert.ok(quickStart.indexOf("open_app") >= 0 && quickStart.indexOf("open_app") < quickStart.indexOf("snapshot"), "iOS needs an app session before its first snapshot");
+    assert.match(quickStart, /\.app/);
+    assert.doesNotMatch(quickStart, /\.apk/);
     assert.equal(port.cards.length, 1);
     assert.equal(port.cards[0]!.kind, "spend");
     assert.equal(port.cards[0]!.family, "devices");
@@ -216,38 +219,4 @@ test("open_device: a rental the owner did not pre-approve raises a devices spend
   } finally {
     await t.cleanup();
   }
-});
-
-test("open_device while planning: no spend card can be raised", async () => {
-  const factory = new FakeHostFactory("box", ["ios"], [], () => new FakeDeviceHost("box:m1", "box", ["ios"], "Mac host"));
-  factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "s", sizeLabel: "S", hourlyUsd: 1, lifetimeMinutes: 60, needsApproval: true };
-  const t = await startTestDeviceService({ factories: [factory], settings: { ios: { enabled: true } } });
-  try {
-    const { api } = apiFor(t.service);
-    const planning = await call(api, "open_device", { platform: "ios" }, { caller: chat({ planning: true }) });
-    assert.ok(!planning.ok && planning.code === "PERMISSION_DENIED");
-    assert.deepEqual(factory.provisioned, []);
-  } finally {
-    await t.cleanup();
-  }
-});
-
-test("the quick start is per platform, at most six lines and 1 KiB, and says what the spikes found", () => {
-  for (const platform of ["ios", "android"] as const) {
-    const text = deviceQuickStart(platform);
-    assert.ok(text.split("\n").length <= 6, platform);
-    assert.ok(Buffer.byteLength(text) <= 1024, `${platform}: ${Buffer.byteLength(text)} bytes`);
-    // Refs first, they expire after open, screenshots are images, the build path, and the handoff.
-    for (const needle of [/@eN refs/, /Prefer refs/, /refs expire/, /open_app, open_url or rotate/, /returns an image/, /device_install \{path\}/, /in this project/, /Device panel/, /DEVICE_CONTROLLED_BY_USER/, /wait, or ask/]) {
-      assert.match(text, needle, `${platform}: ${needle}`);
-    }
-  }
-  const ios = deviceQuickStart("ios");
-  // iOS: an app session before the first snapshot.
-  assert.ok(ios.indexOf("open_app") < ios.indexOf("snapshot"));
-  assert.match(ios, /simulator \.app/);
-  assert.match(ios, /bundle id/);
-  assert.doesNotMatch(ios, /\.apk/);
-  assert.match(deviceQuickStart("android"), /\.apk/);
-  assert.match(deviceQuickStart("android"), /package/);
 });

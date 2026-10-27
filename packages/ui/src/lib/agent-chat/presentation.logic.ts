@@ -651,7 +651,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
  * "After"): "Denied: <reason>" when the reference carries the user's words
  * (one line), else "Denied by you"; a grant names its reach when known.
  */
-export function toolApprovalOutcomeText(reference: Pick<ToolApprovalReference, "kind" | "outcome" | "reason" | "grantScope">): string {
+function toolApprovalOutcomeText(reference: Pick<ToolApprovalReference, "kind" | "outcome" | "reason" | "grantScope">): string {
   switch (reference.outcome) {
     case "approved":
       return reference.kind === "toolset" ? "Enabled by you" : "Approved by you";

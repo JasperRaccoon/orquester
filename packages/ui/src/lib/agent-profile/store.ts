@@ -139,7 +139,7 @@ export const agentProfileStore = createStore<AgentProfileState>(() => initialSta
 /** Said after a 409 `PROFILE_CONFLICT`: the list was refetched. */
 const PROFILE_CONFLICT_NOTICE = "It changed on disk; the list was refreshed.";
 
-export function agentProfileItemKey(agent: AgentProfileAgentId, id: string): string {
+function agentProfileItemKey(agent: AgentProfileAgentId, id: string): string {
   return `${agent}\n${id}`;
 }
 

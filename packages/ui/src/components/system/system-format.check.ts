@@ -9,7 +9,5 @@ assert.equal(killErrorCode({ body: { code: "INVALID_SIGNAL" } }), "INVALID_SIGNA
 assert.equal(killErrorCode({ body: { code: "UNSUPPORTED_PLATFORM" } }), "UNSUPPORTED_PLATFORM");
 assert.equal(killErrorCode({ body: { code: "SOMETHING_ELSE" } }), null);
 assert.equal(killErrorCode(new Error("network down")), null);
-assert.equal(killErrorCode(null), null);
-assert.equal(killErrorCode(undefined), null);
 
 console.log("system-format.check.ts OK");

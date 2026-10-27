@@ -11,19 +11,17 @@ import { HID_USAGE_LEFT_SHIFT, textToHidStrokes } from "./keymap.ts";
 import { clampUnit } from "./pointer.ts";
 import {
   DeviceStreamError,
-  resolveDeps,
   type DeviceOrientation,
   type DeviceScreenConfig,
-  type StreamDeps,
   type TouchPhase
 } from "./types.ts";
 
-export const IOS_MSG_TOUCH = 0x03;
-export const IOS_MSG_BUTTON = 0x04;
-export const IOS_MSG_KEY = 0x06;
-export const IOS_MSG_ORIENTATION = 0x07;
-export const IOS_TAG_SCREEN_CONFIG = 0x82;
-export const IOS_TAG_INPUT_ADMITTED = 0x83;
+const IOS_MSG_TOUCH = 0x03;
+const IOS_MSG_BUTTON = 0x04;
+const IOS_MSG_KEY = 0x06;
+const IOS_MSG_ORIENTATION = 0x07;
+const IOS_TAG_SCREEN_CONFIG = 0x82;
+const IOS_TAG_INPUT_ADMITTED = 0x83;
 
 export type ServeSimButton = "home" | "app_switcher" | "lock";
 
@@ -32,7 +30,7 @@ const ORIENTATIONS: ReadonlySet<string> = new Set(["portrait", "portrait_upside_
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export function taggedJson(tag: number, payload: unknown): Uint8Array<ArrayBuffer> {
+function taggedJson(tag: number, payload: unknown): Uint8Array<ArrayBuffer> {
   const json = encoder.encode(JSON.stringify(payload));
   const out = new Uint8Array(1 + json.length);
   out[0] = tag;
@@ -41,7 +39,7 @@ export function taggedJson(tag: number, payload: unknown): Uint8Array<ArrayBuffe
 }
 
 /** Validate a `0x82` payload; null when it is not a usable screen config. */
-export function parseScreenConfig(payload: unknown): DeviceScreenConfig | null {
+function parseScreenConfig(payload: unknown): DeviceScreenConfig | null {
   if (typeof payload !== "object" || payload === null) return null;
   const record = payload as Record<string, unknown>;
   const { width, height, orientation } = record;
@@ -60,7 +58,7 @@ export function parseScreenConfig(payload: unknown): DeviceScreenConfig | null {
  * serve-sim streams the raw portrait framebuffer even when the simulator is in
  * landscape; map a point in the screen as displayed into that raw space.
  */
-export function rawSimulatorPoint(screen: DeviceScreenConfig | null, x: number, y: number): { x: number; y: number } {
+function rawSimulatorPoint(screen: DeviceScreenConfig | null, x: number, y: number): { x: number; y: number } {
   if (!screen || screen.width > screen.height) return { x, y };
   switch (screen.orientation) {
     case "landscape_left":
@@ -83,11 +81,9 @@ export interface ServeSimInputOptions {
   readonly onWarning?: (message: string) => void;
   /** The socket was refused for auth; it stops reconnecting. */
   readonly onError?: (error: DeviceStreamError) => void;
-  readonly deps?: Partial<StreamDeps>;
 }
 
 export class ServeSimInputSocket {
-  private readonly deps: StreamDeps;
   private socket: WebSocket | null = null;
   private admitted = false;
   private screen: DeviceScreenConfig | null = null;
@@ -96,7 +92,6 @@ export class ServeSimInputSocket {
   private closed = false;
 
   constructor(private readonly options: ServeSimInputOptions) {
-    this.deps = resolveDeps(options.deps);
     this.connect();
   }
 
@@ -160,7 +155,7 @@ export class ServeSimInputSocket {
 
   private send(tag: number, payload: unknown): boolean {
     const socket = this.socket;
-    if (!this.ready || !socket || socket.readyState !== this.deps.WebSocket.OPEN) return false;
+    if (!this.ready || !socket || socket.readyState !== WebSocket.OPEN) return false;
     try {
       socket.send(taggedJson(tag, payload));
       return true;
@@ -178,7 +173,7 @@ export class ServeSimInputSocket {
     if (this.closed) return;
     let socket: WebSocket;
     try {
-      socket = new this.deps.WebSocket(this.options.url);
+      socket = new WebSocket(this.options.url);
     } catch (cause) {
       this.scheduleReconnect(cause instanceof Error ? cause.message : String(cause));
       return;
@@ -233,7 +228,7 @@ export class ServeSimInputSocket {
   private scheduleReconnect(reason: string): void {
     if (this.closed) return;
     this.options.onWarning?.(`Device input disconnected (${reason}); reconnecting.`);
-    const delay = backoffDelayMs(this.attempt++, RECONNECT_BACKOFF, this.deps.random);
+    const delay = backoffDelayMs(this.attempt++, RECONNECT_BACKOFF, Math.random);
     this.retry = scheduleRetry(delay, (woken) => {
       this.retry = null;
       if (woken) this.attempt = 0;

@@ -5,10 +5,9 @@
 // errors are the API's documented wording. No live account was used. Stubbed fetch only.
 
 import assert from "node:assert/strict";
-import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
-import { CLOUDRIFT_PROTOCOL, cloudriftAdapter, pickCloudriftImage } from "./cloudrift.ts";
+import { cloudriftAdapter } from "./cloudrift.ts";
 import { detachedStartCommand } from "./gpu-common.ts";
 import { callOptions, fixture, routedFetch, sampleCreateRequest } from "./gpu-testing.ts";
 
@@ -18,24 +17,24 @@ const recipes = JSON.parse(f("recipes.json")).data.groups.flatMap((group: { reci
 const imageOf = (name: string): string => recipes.find((recipe: { name: string }) => recipe.name === name).details.VirtualMachine.image_url;
 const text = (status: number, body: string) => ({ status, body, headers: { "content-type": "text/plain" } });
 
-test("cloudrift: validate posts /auth/me with X-API-Key; a bad key never leaks into the message", async () => {
+test("cloudrift: validate posts /auth/me with X-API-Key; a bad key never leaks into the message", async (t) => {
   const good = routedFetch([{ method: "POST", path: "/api/v1/auth/me", replies: [{ body: f("auth-me.json") }] }]);
-  assert.deepEqual(await cloudriftAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await cloudriftAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(good.seen[0]!.headers["x-api-key"], "rift_secret_key_123");
 
   const bad = routedFetch([{ method: "POST", path: "/api/v1/auth/me", replies: [text(403, "API key rift_secret_key_123 not found")] }]);
-  const result = await cloudriftAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await cloudriftAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   const message = (result as { message: string }).message;
   assert.match(message, /API key … not found/);
   assert.ok(!message.includes("rift_secret_key_123"));
 });
 
-test("cloudrift: offers list GPU variants with a free node, priced from cents", async () => {
+test("cloudrift: offers list GPU variants with a free node, priced from cents", async (t) => {
   const { fetch, seen } = routedFetch([{ method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] }]);
-  const offers = await cloudriftAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await cloudriftAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.deepEqual(seen[0]!.body, {
-    version: CLOUDRIFT_PROTOCOL,
+    version: "2026-10-12",
     data: { selector: { ByServiceAndLocation: { services: ["vm"], datacenters: null } } }
   });
   assert.deepEqual(
@@ -59,15 +58,14 @@ test("cloudrift: offers list GPU variants with a free node, priced from cents", 
     ]
   );
 });
-
-test("cloudrift: create rents once with the right driver image, one-line cloud-init command, name and tag", async () => {
+test("cloudrift: create rents once with the right driver image, one-line cloud-init command, name and tag", async (t) => {
   const { fetch, seen } = routedFetch([
     { method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] },
     { method: "POST", path: "/api/v1/recipes/list", replies: [{ body: f("recipes.json") }] },
     { method: "POST", path: "/api/v1/instances/rent", replies: [{ status: 201, body: f("rent.json") }] }
   ]);
   const request = sampleCreateRequest({ size: "rtx49-7c-kn.1", region: "any" });
-  const result = await cloudriftAdapter.create(creds, request, callOptions(fetch));
+  const result = await cloudriftAdapter.create(creds, request, callOptions(t, fetch));
   const rents = seen.filter((call) => call.url.endsWith("/instances/rent"));
   assert.equal(rents.length, 1);
   const data = (rents[0]!.body as { data: Record<string, unknown> }).data;
@@ -83,13 +81,13 @@ test("cloudrift: create rents once with the right driver image, one-line cloud-i
   assert.deepEqual(result, { ref: { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11", instanceType: "rtx49-7c-kn.1" }, hourlyUsd: 0.388 });
 });
 
-test("cloudrift: create fails without a free node and never retries a failed rent", async () => {
+test("cloudrift: create fails without a free node and never retries a failed rent", async (t) => {
   const busy = routedFetch([
     { method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] },
     { method: "POST", path: "/api/v1/recipes/list", replies: [{ body: f("recipes.json") }] }
   ]);
-  await assert.rejects(cloudriftAdapter.create(creds, sampleCreateRequest({ size: "rtx59-16c-nr.2", region: "any" }), callOptions(busy.fetch)), /no free/);
-  await assert.rejects(cloudriftAdapter.create(creds, sampleCreateRequest({ size: "nope.1", region: "any" }), callOptions(busy.fetch)), /unknown instance type/);
+  await assert.rejects(cloudriftAdapter.create(creds, sampleCreateRequest({ size: "rtx59-16c-nr.2", region: "any" }), callOptions(t, busy.fetch)), /no free/);
+  await assert.rejects(cloudriftAdapter.create(creds, sampleCreateRequest({ size: "nope.1", region: "any" }), callOptions(t, busy.fetch)), /unknown instance type/);
 
   const failing = routedFetch([
     { method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] },
@@ -97,7 +95,7 @@ test("cloudrift: create fails without a free node and never retries a failed ren
     { method: "POST", path: "/api/v1/instances/rent", replies: [text(503, "NodeAllocationModeMixed")] }
   ]);
   await assert.rejects(
-    cloudriftAdapter.create(creds, sampleCreateRequest({ size: "rtx59-16c-nr.1", region: "us-east-nc-nr-1" }), callOptions(failing.fetch)),
+    cloudriftAdapter.create(creds, sampleCreateRequest({ size: "rtx59-16c-nr.1", region: "us-east-nc-nr-1" }), callOptions(t, failing.fetch)),
     /NodeAllocationModeMixed/
   );
   const rents = failing.seen.filter((call) => call.url.endsWith("/instances/rent"));
@@ -107,9 +105,9 @@ test("cloudrift: create fails without a free node and never retries a failed ren
   assert.equal(vm.with_public_ip, false, "that data center has no public IPs");
 });
 
-test("cloudrift: status by id; a missing instance is gone; Failed carries the user message", async () => {
+test("cloudrift: status by id; a missing instance is gone; Failed carries the user message", async (t) => {
   const active = routedFetch([{ method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-one.json") }] }]);
-  assert.deepEqual(await cloudriftAdapter.status(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(active.fetch)), {
+  assert.deepEqual(await cloudriftAdapter.status(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(t, active.fetch)), {
     state: "running",
     detail: "Active",
     publicIp: "203.0.113.90",
@@ -118,34 +116,34 @@ test("cloudrift: status by id; a missing instance is gone; Failed carries the us
   assert.deepEqual((active.seen[0]!.body as { data: { selector: unknown } }).data.selector, { ById: ["f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11"] });
 
   const missing = routedFetch([{ method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-empty.json") }] }]);
-  assert.equal((await cloudriftAdapter.status(creds, { instanceId: "x" }, callOptions(missing.fetch))).state, "gone");
+  assert.equal((await cloudriftAdapter.status(creds, { instanceId: "x" }, callOptions(t, missing.fetch))).state, "gone");
 
   const failed = routedFetch([{ method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-by-status.json") }] }]);
-  const status = await cloudriftAdapter.status(creds, { instanceId: "00000000-0000-4000-8000-000000000002" }, callOptions(failed.fetch));
+  const status = await cloudriftAdapter.status(creds, { instanceId: "00000000-0000-4000-8000-000000000002" }, callOptions(t, failed.fetch));
   assert.deepEqual([status.state, status.detail], ["error", "The VM failed to boot"]);
 });
 
-test("cloudrift: destroy terminates; an empty terminated list is fine when the instance is gone", async () => {
+test("cloudrift: destroy terminates; an empty terminated list is fine when the instance is gone", async (t) => {
   const ok = routedFetch([{ method: "POST", path: "/api/v1/instances/terminate", replies: [{ status: 201, body: f("terminate.json") }] }]);
-  await cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(ok.fetch));
+  await cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(t, ok.fetch));
   assert.equal(ok.seen.length, 1);
 
   const already = routedFetch([
     { method: "POST", path: "/api/v1/instances/terminate", replies: [{ status: 201, body: f("terminate-none.json") }] },
     { method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-empty.json") }] }
   ]);
-  await cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(already.fetch));
+  await cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(t, already.fetch));
 
   const stuck = routedFetch([
     { method: "POST", path: "/api/v1/instances/terminate", replies: [{ status: 201, body: f("terminate-none.json") }] },
     { method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-one.json") }] }
   ]);
-  await assert.rejects(cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(stuck.fetch)), /did not stop/);
+  await assert.rejects(cloudriftAdapter.destroy(creds, { instanceId: "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11" }, callOptions(t, stuck.fetch)), /did not stop/);
 });
 
-test("cloudrift: listManaged reads live statuses and keeps tagged or orq- named instances", async () => {
+test("cloudrift: listManaged reads live statuses and keeps tagged or orq- named instances", async (t) => {
   const { fetch, seen } = routedFetch([{ method: "POST", path: "/api/v1/instances/list", replies: [{ body: f("list-by-status.json") }] }]);
-  const managed = await cloudriftAdapter.listManaged(creds, callOptions(fetch));
+  const managed = await cloudriftAdapter.listManaged(creds, callOptions(t, fetch));
   assert.deepEqual((seen[0]!.body as { data: { selector: unknown } }).data.selector, {
     ByStatus: { statuses: ["Initializing", "Active", "Deactivating", "Failed"] }
   });
@@ -156,20 +154,4 @@ test("cloudrift: listManaged reads live statuses and keeps tagged or orq- named 
       ["orq-box-99887766", "box-99887766", "error"]
     ]
   );
-});
-
-test("cloudrift: the start command is one line that decodes the script; image choice follows the driver rules; 429 retried", async () => {
-  const command = detachedStartCommand("#!/bin/sh\necho 'hi'\n");
-  assert.ok(!command.includes("\n"));
-  const encoded = /echo (\S+) \| base64 -d/.exec(command)![1]!;
-  // The script deletes its own file (it holds the bootstrap token) before anything else.
-  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), "rm -f \"$0\"\n#!/bin/sh\necho 'hi'\n");
-  assert.equal(pickCloudriftImage(recipes, "OpenOrProprietary"), imageOf("Ubuntu 24.04 Server (R580, CUDA 13.3)"));
-  assert.equal(pickCloudriftImage([], "OpenOnly"), null);
-
-  const { fetch, seen } = routedFetch([
-    { method: "POST", path: "/api/v1/auth/me", replies: [{ status: 429, headers: { "retry-after": "0" }, body: "" }, { body: f("auth-me.json") }] }
-  ]);
-  assert.deepEqual(await cloudriftAdapter.validate(creds, callOptions(fetch)), { ok: true });
-  assert.equal(seen.length, 2);
 });

@@ -139,7 +139,7 @@ test("agent profile item routes match ids longer than the router's default 100-c
 
 test("an agent page's signed route passes the bearer hook on its signature alone; minting still needs the bearer", async () => {
   const page = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
-  const signer = createVisualUrlSigner(Buffer.alloc(32, 3));
+  const signer = createVisualUrlSigner();
   const resolved: string[] = [];
   const app = remoteApp({
     agentChat: {

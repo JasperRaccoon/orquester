@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 
-import { ANIMATIONS_OFF_SCRIPT, CLOSE_SYSTEM_DIALOGS_SCRIPT, CUTOUT_OVERLAY, fixDisplayCutout, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
+import { fixDisplayCutout, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
 import type { ExecFn } from "./exec.ts";
 
-function clock() {
-  let t = 0;
-  return { now: () => t, advance: (ms: number) => (t += ms) };
+function clock(t: test.TestContext) {
+  t.mock.timers.enable({ apis: ["Date"], now: 0 });
+  return { advance: (ms: number) => t.mock.timers.tick(ms) };
 }
 
-test("settle: two quiet windows in a row, after the first-boot burst", async () => {
-  const c = clock();
+test("settle: two quiet windows in a row, after the first-boot burst", async (t) => {
+  const c = clock(t);
   const samples = [350, 280, 40, 120, 30, 20, 10];
   const seen: number[] = [];
   const settled = await waitForSettle(
@@ -18,32 +19,29 @@ test("settle: two quiet windows in a row, after the first-boot burst", async () 
       c.advance(10_000);
       return samples.shift() ?? 5;
     },
-    { maxMs: 300_000, threshold: 60, now: c.now, onSample: (p) => seen.push(p) }
+    { maxMs: 300_000, threshold: 60, onSample: (p) => seen.push(p) }
   );
   assert.equal(settled, true);
   assert.deepEqual(seen, [350, 280, 40, 120, 30, 20]);
 });
 
-test("settle: gives up after the limit (the snapshot is taken anyway); an exit fails it", async () => {
-  const c = clock();
-  assert.equal(await waitForSettle(async () => (c.advance(10_000), 300), { maxMs: 60_000, threshold: 60, now: c.now }), false);
+test("settle: gives up after the limit (the snapshot is taken anyway); an exit fails it", async (t) => {
+  const c = clock(t);
+  assert.equal(await waitForSettle(async () => (c.advance(10_000), 300), { maxMs: 60_000, threshold: 60 }), false);
   await assert.rejects(waitForSettle(async () => null, { maxMs: 60_000, threshold: 60 }), /exited/);
 });
 
-test("guest settings: animations off, screen never off, error dialogs hidden, stay awake", () => {
+test("golden and lease guest commands disable animations; loaded dialogs are dismissed", () => {
   for (const part of ["window_animation_scale 0", "transition_animation_scale 0", "animator_duration_scale 0", "screen_off_timeout 2147483647", "hide_error_dialogs 1", "svc power stayon true"]) {
     assert.ok(GUEST_SETTINGS_SCRIPT.includes(part), part);
   }
-  assert.ok(ANIMATIONS_OFF_SCRIPT.includes("animator_duration_scale 0") && !ANIMATIONS_OFF_SCRIPT.includes("stayon"));
+  for (const part of ["window_animation_scale 0", "transition_animation_scale 0", "animator_duration_scale 0", "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS"]) {
+    assert.ok(LEASE_BOOT_SCRIPT.includes(part), part);
+  }
 });
 
-test("dialogs a loaded first boot raised are closed: before the snapshot is saved, and after every lease boot", () => {
-  assert.equal(CLOSE_SYSTEM_DIALOGS_SCRIPT, "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
-  // An older snapshot may still hold a "System UI isn't responding" dialog: each lease boot closes it too.
-  assert.ok(LEASE_BOOT_SCRIPT.startsWith(ANIMATIONS_OFF_SCRIPT) && LEASE_BOOT_SCRIPT.endsWith(`; ${CLOSE_SYSTEM_DIALOGS_SCRIPT}`));
-});
-
-test("cutout: the pixel spec of the device emulation overlay is replaced by a dp one, as root, then adbd unroots", async () => {
+test("cutout: the pixel spec of the device emulation overlay is replaced by a dp one, as root, then adbd unroots", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const calls: string[] = [];
   let spec = "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left";
   let systemUiPid = 996;
@@ -60,7 +58,13 @@ test("cutout: the pixel spec of the device emulation overlay is replaced by a dp
     if (command.startsWith("shell cmd overlay enable com.android.shell:OrqCutout")) spec = "m 221 33 @left @dp";
     return { exitCode: 0, stdout: "", stderr: "" };
   };
-  const how = await fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal });
+  let finished = false;
+  const fixing = fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal }).finally(() => { finished = true; });
+  while (!finished) {
+    t.mock.timers.runAll();
+    await setImmediate();
+  }
+  const how = await fixing;
   assert.equal(how, "fixed");
   assert.deepEqual(calls.slice(2, 4), ["root", "wait-for-device"]);
   assert.ok(calls.includes("shell cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 'm 221.524 32.952 a 16 16 0 0 0 -32 0 16 16 0 0 0 32 0 z @left @dp'"));
@@ -76,7 +80,7 @@ test("cutout: the pixel spec of the device emulation overlay is replaced by a dp
   assert.ok(calls.indexOf("shell kill 996") < calls.indexOf("unroot"));
   assert.equal(systemUiPid, 1204);
   assert.ok(!calls.some((call) => call.includes("pixel_8")));
-  assert.ok(calls.indexOf("unroot") > calls.indexOf(`shell cmd overlay enable ${CUTOUT_OVERLAY}`));
+  assert.ok(calls.indexOf("unroot") > calls.indexOf("shell cmd overlay enable com.android.shell:OrqCutout"));
   // Already in dp (or none): nothing to do.
   calls.length = 0;
   assert.equal(await fixDisplayCutout({ exec, adb: "adb", env: {}, serial: "emulator-5554", cutoutDensity: 420, signal: new AbortController().signal }), "kept");

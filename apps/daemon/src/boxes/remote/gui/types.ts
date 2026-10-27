@@ -48,6 +48,4 @@ export interface BoxGuiInstaller {
 
 export interface BoxGuiInstallerDeps {
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
-  /** Command deadlines in ms (tests); defaults: probe 1 min, install 15 min, Chrome start 3 min. */
-  timeouts?: { probeMs?: number; installMs?: number; chromeStartMs?: number };
 }

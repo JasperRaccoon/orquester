@@ -111,7 +111,10 @@ function roundTrip(port: number, payload: string): Promise<string> {
 }
 
 function startAgent(binary: string, env: Record<string, string>): { child: ChildProcess; logs: () => string; exited: Promise<number | null> } {
-  const child = spawn(binary, ["run"], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+  // A test running inside a real box must not inherit that box's identity or login inputs.
+  // In particular, ORQ_BOX_ID would override this fixture's persisted identity after restart.
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("ORQ_")));
+  const child = spawn(binary, ["run"], { env: { ...inherited, ...env }, stdio: ["ignore", "ignore", "pipe"] });
   let logs = "";
   child.stderr!.on("data", (chunk: Buffer) => (logs += chunk.toString("utf8")));
   const exited = once(child, "exit").then(([code]) => code as number | null);
@@ -157,7 +160,8 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     agent = startAgent(agentBin, {
       ORQ_DAEMON_URL: `http://127.0.0.1:${proxy.port}`,
       ORQ_BOOTSTRAP_TOKEN_FILE: tokenFile,
-      ORQ_DATA_DIR: dataDir
+      ORQ_DATA_DIR: dataDir,
+      FOO: "from-parent"
     });
     connection = await hub.waitConnected(BOX_ID, { timeoutMs: 120_000 });
   });
@@ -201,13 +205,13 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     const env = await run(
       connection.exec({
         command: "sh",
-        args: ["-c", 'echo "$FOO-${HOME:-none}-$ORQ_BOX_ID-${ORQ_AGENT_PATH:+agent}-${SSH_AUTH_SOCK:+ssh}-${ORQ_BOOTSTRAP_TOKEN_FILE:-scrubbed}"'],
-        env: { FOO: "bar" },
+        args: ["-c", 'echo "$FOO-$ADDED-${HOME:-none}-$ORQ_BOX_ID-${ORQ_AGENT_PATH:+agent}-${SSH_AUTH_SOCK:+ssh}-${ORQ_BOOTSTRAP_TOKEN_FILE:-scrubbed}"'],
+        env: { FOO: "bar", ADDED: "new" },
         envUnset: ["HOME"],
         cwd: work
       })
     );
-    assert.equal(env.stdout, `bar-none-${BOX_ID}-agent-ssh-scrubbed\n`);
+    assert.equal(env.stdout, `bar-new-none-${BOX_ID}-agent-ssh-scrubbed\n`);
 
     const shell = await run(connection.exec({ command: "echo $((1+2)) && pwd", shell: true, cwd: work }));
     assert.equal(shell.stdout, `3\n${work}\n`);

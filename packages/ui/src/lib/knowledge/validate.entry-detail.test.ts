@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parseKnowledgeItemResponse, parseKnowledgeRelatedReason, parseKnowledgeSimilarEntry } from "./validate.ts";
+import { parseKnowledgeItemResponse } from "./validate.ts";
 
 const SELF = "ke_aaaaaaaaaaaa";
 
@@ -40,51 +40,40 @@ function readEntry(value: unknown) {
 }
 
 describe("entry detail retrieval fields", () => {
-  it("read every reason kind", () => {
-    assert.deepEqual(parseKnowledgeRelatedReason({ kind: "meaning", similarity: 0.91 }), { kind: "meaning", similarity: 0.91 });
-    assert.deepEqual(
-      parseKnowledgeRelatedReason({ kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }, { nope: 1 }], shared: 4 }),
-      { kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }], shared: 4 }
-    );
-    assert.deepEqual(
-      parseKnowledgeRelatedReason({ kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }] }),
-      { kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }], shared: 1 },
-      "shared is at least the concepts named"
-    );
-    assert.deepEqual(parseKnowledgeRelatedReason({ kind: "author", value: "@om_patel5" }), { kind: "author", value: "@om_patel5" });
-    assert.deepEqual(parseKnowledgeRelatedReason({ kind: "meaning", similarity: 7 }), { kind: "meaning", similarity: 1 }, "clamped");
-  });
-
-  it("refuse a malformed or unknown reason", () => {
-    for (const bad of [
-      null,
-      "meaning",
-      [],
-      { kind: "meaning" },
-      { kind: "meaning", similarity: "0.9" },
-      { kind: "meaning", similarity: Number.NaN },
-      { kind: "author" },
-      { kind: "author", value: "  " },
-      { kind: "cited-together" }
-    ]) {
-      assert.equal(parseKnowledgeRelatedReason(bad), null, JSON.stringify(bad));
-    }
-  });
-
   it("read a similar entry, repairing its similarity and keeping each reason kind once", () => {
-    const parsed = parseKnowledgeSimilarEntry({
-      entry: meta("ke_bbbbbbbbbbbb"),
-      similarity: "high",
-      reasons: [{ kind: "author", value: "Hridoy" }, { kind: "later" }, { kind: "author", value: "Other" }, { kind: "meaning", similarity: 0.8 }]
-    });
-    assert.ok(parsed);
-    assert.equal(parsed.entry.id, "ke_bbbbbbbbbbbb");
-    assert.equal(parsed.similarity, null);
-    assert.deepEqual(parsed.reasons, [{ kind: "author", value: "Hridoy" }, { kind: "meaning", similarity: 0.8 }]);
-    assert.equal(parseKnowledgeSimilarEntry({ similarity: 0.9, reasons: [] }), null, "no entry");
-    assert.equal(parseKnowledgeSimilarEntry({ entry: { title: "no id" }, similarity: 0.9, reasons: [] }), null);
-    assert.equal(parseKnowledgeSimilarEntry("ke_bbbbbbbbbbbb"), null);
-    assert.deepEqual(parseKnowledgeSimilarEntry({ entry: meta("ke_bbbbbbbbbbbb"), similarity: 0.5 })?.reasons, [], "reasons not a list");
+    const detail = readEntry(item({
+      similar: [
+        {
+          entry: meta("ke_bbbbbbbbbbbb"), similarity: "high",
+          reasons: [
+            { kind: "meaning", similarity: 7 },
+            { kind: "author", value: "Hridoy" },
+            { kind: "later" },
+            { kind: "author", value: "Other" },
+            { kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }, { nope: 1 }], shared: 4 }
+          ]
+        },
+        {
+          entry: meta("ke_cccccccccccc"), similarity: 0.5,
+          reasons: [null, { kind: "meaning", similarity: "0.9" }, { kind: "author", value: "  " },
+            { kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }] }]
+        },
+        { entry: meta("ke_dddddddddddd"), similarity: 0.5 },
+        { similarity: 0.9, reasons: [] },
+        { entry: { title: "no id" }, similarity: 0.9, reasons: [] },
+        "ke_bbbbbbbbbbbb"
+      ]
+    }));
+    assert.deepEqual(detail.similar?.map((similar) => similar.entry.id), ["ke_bbbbbbbbbbbb", "ke_cccccccccccc", "ke_dddddddddddd"]);
+    const [first, second, third] = detail.similar!;
+    assert.equal(first!.similarity, null);
+    assert.deepEqual(first!.reasons, [
+      { kind: "meaning", similarity: 1 },
+      { kind: "author", value: "Hridoy" },
+      { kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }], shared: 4 }
+    ]);
+    assert.deepEqual(second!.reasons, [{ kind: "concepts", concepts: [{ id: "tactic-a", name: "A", type: "Tactic" }], shared: 1 }]);
+    assert.deepEqual(third!.reasons, []);
   });
 
   it("read `similar` and `possibleDuplicates` from a current daemon", () => {

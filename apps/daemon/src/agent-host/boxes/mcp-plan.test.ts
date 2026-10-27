@@ -57,7 +57,6 @@ test("the plan: stdio, loopback and secret-header servers are bridged; internet 
     { runInBox: new Set(["linter"]), sys }
   );
   assert.deepEqual(plan.bridged.map((s) => [s.name, s.target.transport]), [["stdio", "stdio"], ["loop", "http"], ["secret", "sse"]]);
-  assert.deepEqual(plan.bridged[0]?.args, ["mcp-bridge", plan.bridged[0]?.serverId]);
   assert.deepEqual(plan.direct.map((s) => s.name), ["public"]);
   assert.deepEqual(plan.inBox.map((s) => s.name), ["linter"]);
 });

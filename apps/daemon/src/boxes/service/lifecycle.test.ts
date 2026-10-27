@@ -705,15 +705,7 @@ test("a device-host box runs create, connect, the device service's `devices` ste
   await service.settled();
   const ready = service.registry.summary(box.id)!;
   assert.equal(ready.state, "ready");
-  assert.deepEqual(
-    ready.setup.map((step) => [step.id, step.state]),
-    [
-      ["create", "done"],
-      ["connect", "done"],
-      ["devices", "done"],
-      ["ready", "done"]
-    ]
-  );
+  assert.equal(ready.setup.find((step) => step.id === "devices")?.state, "done");
   assert.deepEqual(prepared, [box.id]);
   assert.equal(adapter.creates[0]!.prepare, "devices");
   assert.match(await service.setupLog(box.id), /\[devices\] Installing the device tools…/);

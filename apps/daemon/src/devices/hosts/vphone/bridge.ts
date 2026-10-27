@@ -27,7 +27,7 @@ import { asRecord, type VphoneGuestClient } from "./guest-client.ts";
 import { decodeScreenReply, encodeScreenRequest, HostScreenToAvcc, MJPEG_BOUNDARY, mjpegPart } from "./screen-protocol.ts";
 
 /** serve-sim helper socket tags (`packages/ui/src/components/device/stream/serveSimInput.ts`). */
-export const SERVE_SIM_TAG = { touch: 0x03, button: 0x04, key: 0x06, orientation: 0x07, screenConfig: 0x82, inputAdmitted: 0x83 } as const;
+const SERVE_SIM_TAG = { touch: 0x03, button: 0x04, key: 0x06, orientation: 0x07, screenConfig: 0x82, inputAdmitted: 0x83 } as const;
 
 /** USB HID keyboard page. */
 const HID_KEYBOARD_PAGE = 7;
@@ -38,7 +38,7 @@ export interface VphoneBridgeDevice {
   screen: { width: number; height: number } | null;
 }
 
-export interface VphoneStreamTuning {
+interface VphoneStreamTuning {
   /** The box frames are fitted into (no enlarging). */
   box: [number, number];
   fps: number;
@@ -55,7 +55,6 @@ export interface VphoneBridgeOptions {
   /** A device the bridge serves (`orq-<leaseId>`), or null. */
   device(id: string): VphoneBridgeDevice | null;
   logger: Pick<Console, "info" | "warn" | "error">;
-  tuning?: Partial<VphoneStreamTuning>;
 }
 
 /** Pulls in flight at once on `/v1/host/screen` (vphoned refuses more than 16 waiting). */
@@ -71,12 +70,9 @@ export class VphoneBridge {
   private readonly wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 });
   private originValue: string | null = null;
   private closed = false;
-  private readonly tuning: VphoneStreamTuning;
   private readonly sessions = new Set<{ close(): void }>();
 
-  constructor(private readonly options: VphoneBridgeOptions) {
-    this.tuning = { ...DEFAULT_STREAM_TUNING, ...options.tuning };
-  }
+  constructor(private readonly options: VphoneBridgeOptions) {}
 
   /** Listen on 127.0.0.1 (an OS-chosen port). */
   async start(): Promise<string> {
@@ -139,13 +135,13 @@ export class VphoneBridge {
     if (match[2] === "stream.avcc") {
       response.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store, no-transform" });
       if (request.method === "HEAD") return void response.end();
-      const pump: H264Pump = new H264Pump(device, response, this.tuning, this.options.logger, () => this.sessions.delete(pump));
+      const pump: H264Pump = new H264Pump(device, response, this.options.logger, () => this.sessions.delete(pump));
       this.sessions.add(pump);
       pump.start();
     } else {
       response.writeHead(200, { "content-type": `multipart/x-mixed-replace; boundary=${MJPEG_BOUNDARY}`, "cache-control": "no-store, no-transform" });
       if (request.method === "HEAD") return void response.end();
-      const pump: MjpegPump = new MjpegPump(device, response, this.tuning, this.options.logger, () => this.sessions.delete(pump));
+      const pump: MjpegPump = new MjpegPump(device, response, this.options.logger, () => this.sessions.delete(pump));
       this.sessions.add(pump);
       pump.start();
     }
@@ -205,7 +201,6 @@ class H264Pump {
   constructor(
     device: VphoneBridgeDevice,
     private readonly out: ServerResponse,
-    private readonly tuning: VphoneStreamTuning,
     private readonly logger: Pick<Console, "warn">,
     private readonly ended: () => void
   ) {
@@ -214,7 +209,7 @@ class H264Pump {
 
   start(): void {
     this.guest.on("open", () => {
-      this.timer = setInterval(() => this.pull(), Math.max(5, Math.round(1000 / this.tuning.fps)));
+      this.timer = setInterval(() => this.pull(), Math.max(5, Math.round(1000 / DEFAULT_STREAM_TUNING.fps)));
       this.pull();
     });
     this.guest.on("message", (data, isBinary) => this.onReply(data, isBinary));
@@ -232,7 +227,7 @@ class H264Pump {
     const key = this.wantKey;
     this.wantKey = false;
     this.inFlight += 1;
-    this.guest.send(encodeScreenRequest({ id: this.nextId++, codec: "h264", box: this.tuning.box, fps: this.tuning.fps, bitrate: this.tuning.bitrate, key }));
+    this.guest.send(encodeScreenRequest({ id: this.nextId++, codec: "h264", box: DEFAULT_STREAM_TUNING.box, fps: DEFAULT_STREAM_TUNING.fps, bitrate: DEFAULT_STREAM_TUNING.bitrate, key }));
   }
 
   private onReply(data: RawData, isBinary: boolean): void {
@@ -287,7 +282,6 @@ class MjpegPump {
   constructor(
     private readonly device: VphoneBridgeDevice,
     private readonly out: ServerResponse,
-    private readonly tuning: VphoneStreamTuning,
     private readonly logger: Pick<Console, "warn">,
     private readonly ended: () => void
   ) {}
@@ -319,7 +313,7 @@ class MjpegPump {
         if (failures === 1) this.logger.warn("[devices] vphone screenshot failed", error instanceof Error ? error.message : String(error));
       }
       if (failures >= 5) break;
-      await delay(Math.max(0, this.tuning.mjpegIntervalMs * (failures > 0 ? 4 : 1) - (Date.now() - started)), signal);
+      await delay(Math.max(0, DEFAULT_STREAM_TUNING.mjpegIntervalMs * (failures > 0 ? 4 : 1) - (Date.now() - started)), signal);
     }
     if (!this.out.writableEnded) this.out.end();
   }
@@ -424,7 +418,7 @@ class InputRelay {
 const TOUCH_PHASE: Readonly<Record<string, string>> = { begin: "down", move: "move", end: "up" };
 
 /** A panel input message (tag + JSON) as vphoned requests; none for anything not understood. */
-export function mapPanelInput(tag: number, payload: Record<string, unknown>): [string, Record<string, unknown>][] {
+function mapPanelInput(tag: number, payload: Record<string, unknown>): [string, Record<string, unknown>][] {
   switch (tag) {
     case SERVE_SIM_TAG.touch: {
       const phase = typeof payload.type === "string" ? TOUCH_PHASE[payload.type] : undefined;

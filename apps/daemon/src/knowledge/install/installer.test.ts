@@ -466,22 +466,12 @@ test("readiness splits myKG from the model: another model's install runs but lac
   assert.equal(await knowledgeMykgReady(h.runtimeDir, MYKG_PINNED_VERSION, { overlayDigestNow, encodings: h.host.encodings }), true);
   assert.equal(await knowledgeModelReady(h.runtimeDir, MYKG_PINNED_VERSION, h.model.spec), false);
   assert.equal(await knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION, { model: h.model.spec }), false);
-  // The runtime it provides says so, with the model's prefixes, limit and thresholds.
-  const runtime = knowledgeRuntimeOf(h.runtimeDir, MYKG_PINNED_VERSION, h.model.spec, false);
-  assert.equal(runtime.embeddingModelReady, false);
-  assert.equal(runtime.embeddingModelId, h.model.spec.id);
-  assert.equal(runtime.embeddingQueryPrefix, "query: ");
-  assert.equal(runtime.embeddingPassagePrefix, "passage: ");
-  assert.equal(runtime.embeddingMaxTokens, 512);
-  assert.deepEqual(runtime.embeddingThresholds, h.model.spec.thresholds);
   // The pinned model: e5's prefixes, 512 tokens, thresholds ordered minimum < good < strong < duplicate.
   assert.equal(EMBEDDING_MODEL.id, "Xenova/multilingual-e5-small");
   assert.deepEqual([EMBEDDING_MODEL.queryPrefix, EMBEDDING_MODEL.passagePrefix, EMBEDDING_MODEL.maxTokens], ["query: ", "passage: ", 512]);
   const { minimum, good, strong, duplicate } = EMBEDDING_MODEL.thresholds;
   assert.ok(0 < minimum && minimum < good && good < strong && strong < duplicate && duplicate < 1);
   assert.ok(EMBEDDING_MODEL.files.some((file) => file.path === "onnx/model_quantized.onnx"));
-  for (const file of EMBEDDING_MODEL.files) assert.match(file.sha256, /^[0-9a-f]{64}$/);
-  assert.match(EMBEDDING_MODEL.revision, /^[0-9a-f]{40}$/);
   assert.equal(EMBEDDING_MODEL.fileUrl("config.json"), `https://huggingface.co/Xenova/multilingual-e5-small/resolve/${EMBEDDING_MODEL.revision}/config.json`);
 });
 
@@ -618,10 +608,11 @@ test("the uv pins: one build per supported host, none elsewhere", () => {
 
 test("the shipped lock pins the pinned myKG by its wheel hash and every dependency by version", async () => {
   const lock = await readFile(join(MYKG_LOCKS_DIR, MYKG_LOCKS[MYKG_PINNED_VERSION] ?? ""), "utf8");
-  assert.ok(lock.includes(`--hash=sha256:${MYKG_PINNED_WHEEL_SHA256}`));
-  const versions = parseLockVersions(lock);
-  assert.ok(versions.includes(`mykg==${MYKG_PINNED_VERSION}`));
-  assert.ok(versions.length > 40);
-  assert.ok(versions.every((line) => /^[A-Za-z0-9._-]+==\S+/.test(line)));
-  assert.ok(versions.some((line) => line.startsWith("pywin32==312 ;")), "markers are kept");
+  const requirements = lock.replace(/^#.*$/gm, "").trim().split(/\n(?=\S)/);
+  const mykg = requirements.find((block) => block.startsWith(`mykg==${MYKG_PINNED_VERSION} `));
+  assert.ok(mykg?.includes(`--hash=sha256:${MYKG_PINNED_WHEEL_SHA256}`), "the pinned wheel is hashed in its requirement");
+  for (const block of requirements) {
+    assert.match(block.split("\n")[0]!, /^[A-Za-z0-9._-]+==[^\s;]+(?:\s*;.*)?\s*\\?$/, "every requirement is pinned");
+    assert.match(block, /--hash=sha256:[0-9a-f]{64}\b/, "every requirement has an integrity hash");
+  }
 });

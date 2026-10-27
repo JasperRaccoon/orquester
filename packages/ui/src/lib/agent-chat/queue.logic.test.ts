@@ -5,8 +5,8 @@ import type { QueuedComposerMessage } from "./contracts";
 import {
 EMPTY_QUEUE,
 enqueue,
-isQueuedMessageDue,
 latestCompletedToolActivityId,
+nextDueQueuedMessage,
 takeQueued,
 type QueueState
 } from "./queue.logic";
@@ -47,25 +47,24 @@ describe("enqueue / take / re-anchor", () => {
 
 describe("the three guards", () => {
   it("guard 3: nothing flushes while a request is pending", () => {
+    const { state } = queueOf("one");
     assert.equal(
-      isQueuedMessageDue({
-        message: { queuedAfterToolActivityId: null, holdUntilUserAction: false },
+      nextDueQueuedMessage(state, {
         phase: "ready",
         latestToolActivityId: null,
         hasPendingRequests: true
       }),
-      false
+      null
     );
   });
 });
 
-describe("isQueuedMessageDue", () => {
-  const message = { queuedAfterToolActivityId: "a1", holdUntilUserAction: false };
-
+describe("the next queued message", () => {
   it("never sends while connecting — the gap between a send and pick-up", () => {
+    const { state } = queueOf("one");
     assert.equal(
-      isQueuedMessageDue({ message, phase: "connecting", latestToolActivityId: "a2" }),
-      false
+      nextDueQueuedMessage(state, { phase: "connecting", latestToolActivityId: "a2" }),
+      null
     );
   });
 });

@@ -70,7 +70,8 @@ describe("a thread store and its transport", () => {
     ensureThreadStore("A", { transport: after.transport });
     assert.equal(before.streams[0]!.closed, true, "the stream on the revoked token is closed");
     assert.equal(after.streams.length, 1);
-    assert.deepEqual(after.streams[0]!.options, { after: 7, hostInstanceId: "h1" }, "resumed by cursor");
+    assert.equal(after.streams[0]!.options.after, 7, "resumed by cursor");
+    assert.equal(after.streams[0]!.options.hostInstanceId, "h1");
 
     await store.getState().actions.uploadAttachment(new Blob(["x"]) as File, { name: "b" } as never);
     assert.deepEqual([...before.uploads, ...after.uploads], ["new"]);
@@ -91,6 +92,7 @@ describe("a thread store and its transport", () => {
     await flush();
     assert.equal(before.streams.length, 0);
     assert.equal(after.streams.length, 1);
-    assert.deepEqual(after.streams[0]!.options, {});
+    assert.equal(after.streams[0]!.options.after, undefined);
+    assert.equal(after.streams[0]!.options.hostInstanceId, undefined);
   });
 });

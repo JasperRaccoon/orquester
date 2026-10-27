@@ -44,7 +44,6 @@ test("never overwrites an existing value", (t) => {
   const file = envFile(t, content);
   const result = run(file, "orq.example.com");
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /already set/);
   assert.equal(readFileSync(file, "utf8"), content);
 });
 

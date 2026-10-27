@@ -154,7 +154,9 @@ test("a provider's capacity failure is reported as an overloaded notice; a newer
     parked: false,
     kind: "overloaded"
   });
-  const limited = [...items, limitRow()];
-  assert.equal(usageLimitNoticeOf(limited, [turn("t1", "failed", start)])?.kind, undefined);
+  const newer = limitRow();
+  const limited = usageLimitNoticeOf([...items, newer], [turn("t1", "failed", start)]);
+  assert.equal(limited?.activityId, newer.id);
+  assert.equal(limited?.kind, undefined);
   assert.equal(usageLimitNoticeOf([...items, message("user")], [turn("t1", "failed", start)]), null, "the user spoke after it");
 });

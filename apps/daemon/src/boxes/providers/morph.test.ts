@@ -20,24 +20,24 @@ function scriptFromExec(body: unknown): string {
   return Buffer.from(encoded, "base64").toString("utf8");
 }
 
-test("validate: ok with a working key, a message for a bad or missing one", async () => {
+test("validate: ok with a working key, a message for a bad or missing one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/image`, body: fixture("morph", "images") },
     { method: "GET", url: `${API}/image`, status: 401, body: fixture("morph", "error-unauthorized"), headers: { "content-type": "text/plain" } }
   ]);
-  assert.deepEqual(await morphAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await morphAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer morph_test_key");
 
-  const bad = await morphAdapter.validate({ apiKey: "wrong-key" }, replayOptions(replay));
+  const bad = await morphAdapter.validate({ apiKey: "wrong-key" }, replayOptions(t, replay));
   assert.deepEqual(bad, { ok: false, message: "Morph: unauthorized (check the key and its permissions)" });
 
-  assert.deepEqual(await morphAdapter.validate({ apiKey: " " }, replayOptions(replay)), { ok: false, message: "Morph: API key is missing" });
+  assert.deepEqual(await morphAdapter.validate({ apiKey: " " }, replayOptions(t, replay)), { ok: false, message: "Morph: API key is missing" });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: balanced sizes priced in MCUs, one region, live images with the minimal image first", async () => {
+test("offers: balanced sizes priced in MCUs, one region, live images with the minimal image first", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${API}/image`, body: fixture("morph", "images") }]);
-  const offers = await morphAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await morphAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.vcpu, size.ramGb, size.diskGb, size.hourlyUsd]),
@@ -55,10 +55,10 @@ test("offers: balanced sizes priced in MCUs, one region, live images with the mi
     { id: "morphvm-minimal", label: "Minimal Morph VM" },
     { id: "morphvm-sandbox", label: "morphvm-sandbox" }
   ]);
-  await assert.rejects(morphAdapter.offers(credentials, "windows", replayOptions(replay)), /does not rent windows/);
+  await assert.rejects(morphAdapter.offers(credentials, "windows", replayOptions(t, replay)), /does not rent windows/);
 });
 
-test("create: base snapshot by digest, one instance start with the marker, the bootstrap started over exec", async () => {
+test("create: base snapshot by digest, one instance start with the marker, the bootstrap started over exec", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: SNAPSHOTS_BY_DIGEST, body: fixture("morph", "snapshots-empty") },
     { method: "POST", url: `${API}/snapshot`, body: fixture("morph", "create-snapshot") },
@@ -68,7 +68,7 @@ test("create: base snapshot by digest, one instance start with the marker, the b
     { method: "POST", url: `${INSTANCE}/exec`, body: fixture("morph", "exec-ok") }
   ]);
   const request = testCreateRequest({ size: "2vcpu-8gb", region: "default" });
-  const result = await morphAdapter.create(credentials, request, replayOptions(replay));
+  const result = await morphAdapter.create(credentials, request, replayOptions(t, replay));
 
   assert.deepEqual(replay.requests[1]!.body, {
     image_id: "morphvm-minimal",
@@ -94,7 +94,7 @@ test("create: base snapshot by digest, one instance start with the marker, the b
   assert.equal(replay.pending().length, 0);
 });
 
-test("create: reuses the ready snapshot of the size and image", async () => {
+test("create: reuses the ready snapshot of the size and image", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/snapshot?digest=orquester-morphvm-sandbox-2c-8192m-32768d`, body: {
       object: "list",
@@ -103,7 +103,7 @@ test("create: reuses the ready snapshot of the size and image", async () => {
     { method: "POST", url: `${API}/instance`, body: fixture("morph", "instance-ready") },
     { method: "POST", url: `${INSTANCE}/exec`, body: fixture("morph", "exec-ok") }
   ]);
-  await morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default", image: "morphvm-sandbox" }), replayOptions(replay));
+  await morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default", image: "morphvm-sandbox" }), replayOptions(t, replay));
   assert.deepEqual(
     replay.requests.map((entry) => `${entry.method} ${entry.url}`),
     [
@@ -114,12 +114,12 @@ test("create: reuses the ready snapshot of the size and image", async () => {
   );
 });
 
-test("create: a failed instance start is never retried and surfaces Morph's message", async () => {
+test("create: a failed instance start is never retried and surfaces Morph's message", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: SNAPSHOTS_BY_DIGEST, body: fixture("morph", "snapshots-by-digest") },
     { method: "POST", url: `${API}/instance`, status: 503, body: fixture("morph", "error-unavailable"), times: 2 }
   ]);
-  await assert.rejects(morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(replay)), (error) => {
+  await assert.rejects(morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 503);
     assert.equal(error.message, "Morph: No capacity available for the requested instance size");
@@ -128,7 +128,7 @@ test("create: a failed instance start is never retried and surfaces Morph's mess
   assert.equal(replay.requests.filter((entry) => entry.method === "POST").length, 1);
 });
 
-test("create: an instance that errors or a failing bootstrap exec is deleted", async () => {
+test("create: an instance that errors or a failing bootstrap exec is deleted", async (t) => {
   const errored = replayFetch([
     { method: "GET", url: SNAPSHOTS_BY_DIGEST, body: fixture("morph", "snapshots-by-digest") },
     { method: "POST", url: `${API}/instance`, body: fixture("morph", "instance-pending") },
@@ -136,7 +136,7 @@ test("create: an instance that errors or a failing bootstrap exec is deleted", a
     { method: "DELETE", url: INSTANCE, status: 204 }
   ]);
   await assert.rejects(
-    morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(errored)),
+    morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(t, errored)),
     /Morph: the instance is error/
   );
   assert.equal(errored.pending().length, 0);
@@ -148,7 +148,7 @@ test("create: an instance that errors or a failing bootstrap exec is deleted", a
     { method: "DELETE", url: INSTANCE, status: 204 }
   ]);
   await assert.rejects(
-    morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(failedExec)),
+    morphAdapter.create(credentials, testCreateRequest({ size: "2vcpu-8gb", region: "default" }), replayOptions(t, failedExec)),
     (error) => {
       assert.equal((error as Error).message, "Morph: starting the bootstrap failed (exit code 2)");
       return true;
@@ -157,13 +157,13 @@ test("create: an instance that errors or a failing bootstrap exec is deleted", a
   assert.equal(failedExec.pending().length, 0);
 });
 
-test("create: rejects an unknown size before any call", async () => {
+test("create: rejects an unknown size before any call", async (t) => {
   const replay = replayFetch([]);
-  await assert.rejects(morphAdapter.create(credentials, testCreateRequest({ size: "3vcpu-12gb", region: "default" }), replayOptions(replay)), /unknown size 3vcpu-12gb/);
+  await assert.rejects(morphAdapter.create(credentials, testCreateRequest({ size: "3vcpu-12gb", region: "default" }), replayOptions(t, replay)), /unknown size 3vcpu-12gb/);
   assert.equal(replay.requests.length, 0);
 });
 
-test("status: maps instance states, 404 is gone, 429 is retried", async () => {
+test("status: maps instance states, 404 is gone, 429 is retried", async (t) => {
   const ready = fixture<Record<string, unknown>>("morph", "instance-ready");
   const replay = replayFetch([
     { method: "GET", url: INSTANCE, status: 429, headers: { "retry-after": "0" }, body: fixture("morph", "error-rate-limit") },
@@ -175,34 +175,34 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: INSTANCE, status: 404, body: fixture("morph", "error-not-found") }
   ]);
   const ref = { instanceId: "morphvm_11111111", snapshotId: "snapshot_11111111" };
-  assert.deepEqual(await morphAdapter.status(credentials, ref, replayOptions(replay)), { state: "running", detail: null, publicIp: null, hourlyUsd: null });
-  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const paused = await morphAdapter.status(credentials, ref, replayOptions(replay));
+  assert.deepEqual(await morphAdapter.status(credentials, ref, replayOptions(t, replay)), { state: "running", detail: null, publicIp: null, hourlyUsd: null });
+  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const paused = await morphAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(paused.state, "stopped");
   assert.equal(paused.detail, "Morph reports the instance paused");
-  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
+  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: deletes the instance, keeps the shared snapshot, and is idempotent", async () => {
+test("destroy: deletes the instance, keeps the shared snapshot, and is idempotent", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: INSTANCE, status: 204 },
     { method: "DELETE", url: INSTANCE, status: 404, body: fixture("morph", "error-not-found") }
   ]);
   const ref = { instanceId: "morphvm_11111111", snapshotId: "snapshot_11111111" };
-  await morphAdapter.destroy(credentials, ref, replayOptions(replay));
-  await morphAdapter.destroy(credentials, ref, replayOptions(replay));
+  await morphAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await morphAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
   assert.equal(replay.requests.some((entry) => entry.url.includes("/snapshot")), false);
-  await assert.rejects(morphAdapter.destroy(credentials, {}, replayOptions(replay)), /instance reference has no instanceId/);
+  await assert.rejects(morphAdapter.destroy(credentials, {}, replayOptions(t, replay)), /instance reference has no instanceId/);
 });
 
-test("listManaged: instances with the marker metadata or an orq- name", async () => {
+test("listManaged: instances with the marker metadata or an orq- name", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${API}/instance`, body: fixture("morph", "instances-managed") }]);
-  const managed = await morphAdapter.listManaged(credentials, replayOptions(replay));
+  const managed = await morphAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(managed, [
     {
       ref: { instanceId: "morphvm_11111111", snapshotId: "snapshot_11111111" },

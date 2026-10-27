@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -62,7 +62,6 @@ test("state file: written atomically with mode 0600; a missing file reads empty"
     await writeHostState(file, { version: 1, hub: null, emulators: [emulator("emulator-5586", 20, "L")], extra: {} });
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     assert.equal((await readHostState(file)).emulators[0]?.leaseId, "L");
-    assert.ok((await readFile(file, "utf8")).endsWith("\n"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

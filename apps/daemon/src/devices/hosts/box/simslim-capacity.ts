@@ -23,13 +23,13 @@ import { isSlim, type SimslimTop } from "./simslim.ts";
 const GiB = 1024 ** 3;
 
 /** Kept free for macOS itself, the hub, agent-device's daemon and orq-agent. */
-export const MAC_HOST_RESERVED_BYTES = 8 * GiB;
+const MAC_HOST_RESERVED_BYTES = 8 * GiB;
 /** A slim simulator's launchd tree after it settled (measured 0.59–0.81 GiB; 1.06 with the runner app). */
-export const SLIM_SIM_BYTES = 1 * GiB;
+const SLIM_SIM_BYTES = 1 * GiB;
 /** A stock simulator's launchd tree (measured 2.4–2.6 GiB 45 s after boot and climbing; simslim README: 4.0 GB settled). */
-export const STOCK_SIM_BYTES = 4 * GiB;
+const STOCK_SIM_BYTES = 4 * GiB;
 /** Per booted simulator outside its launchd tree, plus the app under test. */
-export const PER_SIM_EXTRA_BYTES = 1 * GiB;
+const PER_SIM_EXTRA_BYTES = 1 * GiB;
 
 export interface SimCapacityInput {
   /** Settings → Devices `ios.maxSimulatorsPerHost`. */
@@ -59,7 +59,7 @@ export interface SimCapacity {
  * The per-simulator budget: the larger of the default tree size and what this host's booted
  * simulators of the same kind (slim or stock) measure on average, plus {@link PER_SIM_EXTRA_BYTES}.
  */
-export function perSimulatorBytes(slim: boolean, top: SimslimTop | null): number {
+function perSimulatorBytes(slim: boolean, top: SimslimTop | null): number {
   const base = slim ? SLIM_SIM_BYTES : STOCK_SIM_BYTES;
   const measured = (top?.sims ?? []).filter((sim) => sim.memory !== null && isSlim(sim) === slim).map((sim) => sim.memory!.bytes);
   const mean = measured.length > 0 ? measured.reduce((a, b) => a + b, 0) / measured.length : 0;

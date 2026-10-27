@@ -217,9 +217,9 @@ describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {
     fake.onReadItem(async () => {
       throw new AgentChatCommandError(503, "HOST_UNAVAILABLE", "The agent host is restarting.");
     });
-    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan));
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
     fake.onReadItem(async (itemId) => ({ item: activity("turn.proposed.completed", {}, { id: itemId }) }));
-    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan));
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
     assert.deepEqual(fake.posted, []);
   });
 });

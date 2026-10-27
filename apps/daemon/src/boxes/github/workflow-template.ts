@@ -156,8 +156,8 @@ export interface BlacksmithWorkflowOptions {
 
 const TAILSCALE_VALUE = /^[A-Za-z0-9._:/-]{1,200}$/;
 
-/** The step that downloads `orq-agent` (bash; exported for tests). */
-export const DOWNLOAD_STEP_SCRIPT = `set +x
+/** The step that downloads `orq-agent` (bash). */
+const DOWNLOAD_STEP_SCRIPT = `set +x
 set -eu
 umask 077
 case "$AGENT_PLATFORM" in darwin-arm64 | linux-x64) ;; *) echo "::error::invalid orq-agent platform"; exit 1 ;; esac
@@ -200,8 +200,8 @@ const RUNNER_CHECK = `case "$OS:$RUNNER" in
 esac
 `;
 
-/** The input check step (bash; exported for tests). */
-export const CHECK_STEP_SCRIPT = `set -eu
+/** The input check step (bash). */
+const CHECK_STEP_SCRIPT = `set -eu
 printf '%s' "$BOX_ID" | grep -Eq '^[A-Za-z0-9-]{8,64}$' || { echo "::error::invalid box_id"; exit 1; }
 printf '%s' "$DAEMON_URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$' || { echo "::error::invalid daemon_url"; exit 1; }
 case "$LIFETIME" in '' | *[!0-9]*) echo "::error::invalid lifetime_minutes"; exit 1 ;; esac
@@ -209,8 +209,8 @@ if [ "$LIFETIME" -lt 1 ] || [ "$LIFETIME" -gt ${BLACKSMITH_MAX_LIFETIME_MINUTES}
 ${RUNNER_CHECK}case "$PREPARE" in none | devices) ;; *) echo "::error::invalid prepare"; exit 1 ;; esac
 `;
 
-/** The cache-warming workflow's input check (bash; exported for tests). */
-export const CACHE_CHECK_STEP_SCRIPT = `set -eu
+/** The cache-warming workflow's input check (bash). */
+const CACHE_CHECK_STEP_SCRIPT = `set -eu
 printf '%s' "$REQUEST_ID" | grep -Eq '^[A-Za-z0-9-]{8,64}$' || { echo "::error::invalid request_id"; exit 1; }
 ${RUNNER_CHECK}`;
 
@@ -219,7 +219,7 @@ ${RUNNER_CHECK}`;
  * The runner user owns /var/lib/orquester (user and group: on Linux the group is not `staff`),
  * so the device caches restore into it without sudo.
  */
-export const PATHS_STEP_SCRIPT = `set -eu
+const PATHS_STEP_SCRIPT = `set -eu
 sudo mkdir -p /var/lib/orquester
 sudo chown "$(id -un):$(id -gn)" /var/lib/orquester
 if [ "\${PREPARE:-none}" = devices ]; then mkdir -p /var/lib/orquester/devices; fi

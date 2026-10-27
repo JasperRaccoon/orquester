@@ -36,10 +36,7 @@ test("unknown top-level keys and record fields survive a rewrite", () => {
   assert.equal(parsed.sessions.length, 2);
   assert.equal(parsed.passwordFingerprint, "f".repeat(64));
   const written = JSON.parse(serializeAuthSessionsFile(parsed));
-  assert.deepEqual(written.futureKey, { nested: [1, 2] });
-  assert.equal(written.sessions[0].futureField, "kept");
-  assert.equal(written.sessions[1].expiresAt, undefined);
-  assert.deepEqual(parseAuthSessionsFile(written), parsed, "a rewrite reads back the same");
+  assert.deepEqual(written, raw, "known login data and unknown fields survive; API tokens gain no expiry");
 });
 
 test("records this build cannot read are kept verbatim and never honoured", () => {

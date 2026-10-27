@@ -133,7 +133,7 @@ const FIXTURE_10 = "10-fork-rollback-and-messages.ndjson";
 const ROOT_SESSION = "ses_f3e57df42ffeYDUh6RvaJqgKpe";
 const EMPTY_FORK = "ses_f3e57c504ffe3tko2eNnLjl5PB";
 
-test("fixture 10: the captured history replays as turn markers around completed items", async () => {
+test("fixture 10: history preserves messages, settled turns, unavailable usage and historical attribution", async () => {
   const events = await project("thread-1", historyFor(FIXTURE_10, ROOT_SESSION));
 
   // Two turns: the answered prompt, then the trailing prompt nothing answered.
@@ -162,10 +162,6 @@ test("fixture 10: the captured history replays as turn markers around completed 
     ]
   );
   assert.ok(items.every((item) => item.payload.status === "completed"));
-});
-
-test("fixture 10: every replayed turn reports usage as unavailable, never a guess", async () => {
-  const events = await project("thread-1", historyFor(FIXTURE_10, ROOT_SESSION));
   const completions = events.filter(
     (event): event is TurnCompleted => event.type === "turn.completed"
   );
@@ -177,31 +173,17 @@ test("fixture 10: every replayed turn reports usage as unavailable, never a gues
     assert.equal(completed.payload.tokenUsage?.usageStatus, "unavailable");
   }
 
-  // The `step-finish` parts DO carry token counts — attributing them to a turn
-  // needs the live ownership bookkeeping, so they are deliberately not used.
-  const stepTokens = historyFor(FIXTURE_10, ROOT_SESSION)
-    .flatMap((entry) => entry.parts ?? [])
-    .filter((part) => part.type === "step-finish");
-  assert.ok(stepTokens.length > 0);
-});
-
-test("fixture 10: every projected event is stamped historical and carries the turn id", async () => {
-  const messages = historyFor(FIXTURE_10, ROOT_SESSION);
-  const events = await project("thread-7", messages);
-  const assistantId = messages.find((entry) => entry.info.role === "assistant")?.info.id;
-
-  assert.ok(events.length > 0);
   for (const event of events) {
     // The host tests this exact literal to keep history out of attention,
     // pushes and live turns — so it must be the shared constant, not a local one.
     assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
-    assert.equal(event.threadId, "thread-7");
+    assert.equal(event.threadId, "thread-1");
     assert.equal(typeof event.turnId, "string");
     assert.equal(event.providerRefs?.providerTurnId, event.turnId);
     assert.equal(typeof event.createdAt, "string");
   }
   // The turn is keyed on the ASSISTANT message — the unit `rollbackThread` counts.
-  assert.equal(events[0]!.turnId, assistantId);
+  assert.equal(events[0]!.turnId, "msg_0c1a825550011EKYcpxIULTkGe");
 });
 
 test("fixture 10: an empty fork projects to no events at all", async () => {
@@ -306,7 +288,8 @@ test("fixture 3: a completed tool call replays under its lifecycle type with its
 test("fixture 6: reasoning replays as its own item and an aborted tool call is failed", async () => {
   const fixture = "06-abort-with-permission-pending.ndjson";
   const messages = historyFor(fixture, "ses_f3e59fb7affeW8iTraEqOrrRL6");
-  const items = itemsOf(await project("thread-1", messages));
+  const events = await project("thread-1", messages);
+  const items = itemsOf(events);
 
   const reasoning = items.find((item) => item.payload.itemType === "reasoning");
   assert.ok(reasoning !== undefined);
@@ -318,7 +301,7 @@ test("fixture 6: reasoning replays as its own item and an aborted tool call is f
   assert.equal(tool.payload.detail, "Tool execution aborted");
 
   // No approval is replayed: an answered-or-abandoned request is not actionable.
-  const types = new Set((await project("thread-1", messages)).map((event) => event.type));
+  const types = new Set(events.map((event) => event.type));
   assert.equal(types.has("request.opened"), false);
   assert.equal(types.has("content.delta"), false);
 });

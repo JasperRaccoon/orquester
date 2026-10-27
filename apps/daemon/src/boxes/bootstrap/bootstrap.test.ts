@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lchown, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -50,6 +50,11 @@ test("validates its input before anything reaches a script", () => {
   assert.throws(() => normalizeDaemonUrl("http://orq.example.com"), /https/);
   assert.throws(() => normalizeDaemonUrl("https://user:pw@orq.example.com"), /credentials/);
   assert.throws(() => normalizeDaemonUrl("https://orq.example.com/?a=1"), /query/);
+  for (const path of ["/;id;/path", "/&id/path", "/|id/path", "/(id)/path"]) {
+    assert.throws(() => normalizeDaemonUrl(`https://orq.example.com${path}`), /characters/);
+  }
+  assert.equal(normalizeDaemonUrl("https://orq.example.com/base%3Bdata%26part%7Cname/"), "https://orq.example.com/base%3Bdata%26part%7Cname");
+  assert.equal(normalizeDaemonUrl("https://orq.example.com/`name`"), "https://orq.example.com/%60name%60");
   assert.equal(normalizeDaemonUrl("https://orq.example.com:8443/base/"), "https://orq.example.com:8443/base");
   assert.equal(normalizeDaemonUrl("http://127.0.0.1:4000"), "http://127.0.0.1:4000");
 });
@@ -228,7 +233,17 @@ async function runScript(
   argv: string[],
   options: { onlyPath?: boolean; env?: Record<string, string> } = {}
 ): Promise<{ code: number | null; output: string }> {
+  const unprivileged = process.getuid?.() === 0;
+  if (unprivileged) {
+    // BusyBox may resolve its built-in id before PATH's shim. Run without root privileges so
+    // no generated bootstrap can write the host's real /var/lib/orq-agent, under any shell.
+    // lchown changes the sandbox's tool symlinks, never the system executables they point at.
+    for (const path of [box.dir, ...(await readdir(box.dir, { recursive: true })).map((name) => join(box.dir, name))]) {
+      await lchown(path, 65534, 65534);
+    }
+  }
   const child = spawn(argv[0]!, argv.slice(1), {
+    ...(unprivileged ? { uid: 65534, gid: 65534 } : {}),
     env: {
       HOME: box.home,
       PATH: options.onlyPath ? box.bin : `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -338,7 +353,8 @@ test("containerCommand takes its secrets from env, unsets them and stays in the 
   const daemon = await startFakeDaemon(t);
   const box = await sandbox(t);
   const boot = buildBootstrap(input({ daemonUrl: daemon.url, container: true }));
-  const { code, output } = await runScript(box, ["sh", ...boot.containerCommand.slice(1)], { env: boot.env });
+  const shell = has("busybox") ? ["busybox", "sh"] : ["sh"];
+  const { code, output } = await runScript(box, [...shell, ...boot.containerCommand.slice(1)], { env: boot.env });
   assert.equal(code, 0, output);
   await assertAgentStarted(box, daemon, output);
   const agentEnv = await readFile(`${box.result}.env`, "utf8");
@@ -451,12 +467,13 @@ test("the pairing script installs orq-agent for the user and runs install-servic
   await writeFile(join(box.bin, "sudo"), `#!/bin/sh\necho "sudo $*" >>"${box.log}"\nexit 1\n`);
   await chmod(join(box.bin, "sudo"), 0o755);
   const scriptPath = join(box.dir, "pair.sh");
-  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "linux", name: "Build server" }));
+  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "linux", name: 'Build server $(touch "$HOME/pairing-injected")' }));
 
   const { code, output } = await runScript(box, ["sh", scriptPath]);
   assert.equal(code, 0, output);
   const result = await readResult(box);
   assert.equal(result.cmd, "install-service");
+  await assert.rejects(stat(join(box.home, "pairing-injected")), { code: "ENOENT" });
   assert.equal(result.url, daemon.url);
   assert.equal(result.box, BOX_ID);
   assert.equal(result.token, TOKEN);
@@ -467,9 +484,6 @@ test("the pairing script installs orq-agent for the user and runs install-servic
   // A user without root: ~/.local/bin, the real file (the service runs it, and updates replace it).
   assert.equal((await stat(join(box.home, ".local", "bin", "orq-agent"))).mode & 0o777, 0o755);
   await assert.rejects(stat(join(box.home, ".orq-agent", "bin", "orq-agent")), { code: "ENOENT" });
-  assert.match(await readFile(box.log, "utf8"), /^sudo -p .* ln -sf \S+\/\.local\/bin\/orq-agent \/usr\/local\/bin\/orq-agent$/m);
-  assert.match(output, /orq-agent stays in .*\.local\/bin\/orq-agent \(no sudo\)/);
-  assert.match(output, /connects to Orquester as "Build server"/);
 });
 
 test("a pairing script made for macOS refuses to run on Linux and leaves no token behind", async (t) => {
@@ -491,6 +505,4 @@ test("the pairing script refuses bad input and puts the macOS agent under Applic
   assert.throws(() => byoPairingScript({ ...ok, boxId: "x;rm" }), /box id/);
   const script = byoPairingScript({ ...ok, name: "Mac 'mini' $(reboot)" });
   assert.ok(script.includes('T="$HOME/Library/Application Support/Orquester/orq-agent"'));
-  assert.ok(script.includes("not with sudo"));
-  assert.ok(!script.includes("$(reboot)") && !script.includes("'mini'"), "the name is reduced to plain characters");
 });

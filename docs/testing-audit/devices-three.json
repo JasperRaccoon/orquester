@@ -1,0 +1,1583 @@
+{
+  "scope": "packages/ui/src/components/device/three/",
+  "baseCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "originalFiles": 16,
+  "finalFiles": 15,
+  "originalDeclarations": 50,
+  "originalRuntimeCases": 74,
+  "finalDeclarations": 35,
+  "finalRuntimeCases": 50,
+  "originalTestLOC": 1634,
+  "finalTestLOC": 1186,
+  "netTestLOC": -448,
+  "dispositionCounts": {
+    "DELETE": 16,
+    "REWRITE": 30,
+    "OPTIMIZE": 0,
+    "CONSOLIDATE": 8,
+    "KEEP": 20
+  },
+  "entries": [
+    {
+      "path": "packages/ui/src/components/device/three/androidFoldScene.test.ts",
+      "line": 15,
+      "name": "maps touches on each open half and the closed cover to the live frame",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "maps touches on each open half and the closed cover to the live frame",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 normalized touch and rotation; phase 3 \u00a72.2 fold posture; viewport onTouch contract.",
+        "B2_realRegression": "Procedural fallback fold can address the wrong half/cover even when imported GLB mapping works.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createAndroidFoldScene.screenPoint/setAngle with real Three camera and ray casting",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Procedural fallback fold can address the wrong half/cover even when imported GLB mapping works."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts"
+      ],
+      "baselineDurationMs": 41.857678,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/deviceMotion.test.ts",
+      "line": 18,
+      "name": "selects the nearest quarter turn, retains a nearby yaw, and treats quaternion signs identically",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "No independent requirement fixes quarter-turn snap or yaw cap; rest candidates/angles are a private motion policy. Actual click-without-drag motion regression remains.",
+      "originalDeclaration": "selects the nearest quarter turn, retains a nearby yaw, and treats quaternion signs identically",
+      "failedBar": "No independent requirement fixes quarter-turn snap or yaw cap; rest candidates/angles are a private motion policy. Actual click-without-drag motion regression remains.",
+      "baselineDurationMs": 2.965654,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/deviceMotion.test.ts",
+      "line": 32,
+      "name": "a click without dragging resumes the interrupted resting view instead of stranding the device",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep externally consumed pose convergence/idle output for interrupted click; remove choose collaborator call-count assertion.",
+      "originalDeclaration": "a click without dragging resumes the interrupted resting view instead of stranding the device",
+      "behavioralBar": {
+        "B1_independentContract": "Historical interrupted-rest regression expressed by the original case; resetView/gesture cancellation retain the user-selected resting view.",
+        "B2_realRegression": "A press without movement can interrupt animation permanently or choose a new rest pose; no scene pointer test covers motion completion.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDeviceMotion rotation and needsFrame outputs after public gesture transitions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A press without movement can interrupt animation permanently or choose a new rest pose; no scene pointer test covers motion completion."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "duoViewer.ts"
+      ],
+      "baselineDurationMs": 4.341807,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoControl.test.ts",
+      "line": 8,
+      "name": "pinches only a hit device, accumulates independently of native readback, clamps and cancels",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep hit gating, in-progress accumulation independent of delayed native acknowledgement, physical angle bounds and cancellation; remove arbitrary pinch sensitivity constants.",
+      "originalDeclaration": "pinches only a hit device, accumulates independently of native readback, clamps and cancels",
+      "behavioralBar": {
+        "B1_independentContract": "Duo native hinge commands and DeviceDuoViewport pinch-preview contract; begin only on the hit device, uninterrupted preview, end clears preview.",
+        "B2_realRegression": "Delayed native hinge acknowledgement can rewind an active pinch; gesture cancellation can leave a preview command active.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDuoPinch begin/move/end and caller change callback",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Delayed native hinge acknowledgement can rewind an active pinch; gesture cancellation can leave a preview command active."
+      },
+      "supportingProductionCallers": [
+        "DeviceDuoViewport.tsx"
+      ],
+      "baselineDurationMs": 2.258609,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoScene.test.ts",
+      "line": 56,
+      "name": "derives resting views from the hinged display planes independently of the inspection orbit",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Internal restFrames face/normal DTO and inspection-orbit implementation invariants, no stable native input or independently specified exact resting-view pose.",
+      "originalDeclaration": "derives resting views from the hinged display planes independently of the inspection orbit",
+      "failedBar": "Internal restFrames face/normal DTO and inspection-orbit implementation invariants, no stable native input or independently specified exact resting-view pose.",
+      "baselineDurationMs": 7.695261,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoScene.test.ts",
+      "line": 85,
+      "name": "maps active display input through hardware mounting and blocks rear, inactive and stale surfaces",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep actual ray-to-hardware panel coordinates, stale epoch/inactive surface refusal and captured pointer behavior; remove direct trivial cover helper identity assertion and make helper private if caller check confirms.",
+      "originalDeclaration": "maps active display input through hardware mounting and blocks rear, inactive and stale surfaces",
+      "behavioralBar": {
+        "B1_independentContract": "Native Duo screenId/display-key generation and hardware mounting protocol; only the elected current visible panel accepts input.",
+        "B2_realRegression": "A delayed panel generation can receive touches or mounting can swap/flip raw hardware coordinates; ordinary slab input has no panel epoch.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDuoScene.screenPoint using real meshes, camera and native panel key",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A delayed panel generation can receive touches or mounting can swap/flip raw hardware coordinates; ordinary slab input has no panel epoch."
+      },
+      "supportingProductionCallers": [
+        "duoViewer.ts"
+      ],
+      "baselineDurationMs": 9.437676,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoSnap.test.ts",
+      "line": 18,
+      "name": "chooses a leaf-focused seated view when it is closer than the middle of the fold",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Independent-oracle failure: released rotation is computed from duoViewSnaps itself; any wrong candidate basis can pass. nearestDeviceView and scene pointer-mapping owners remain. No independent requirement fixes seated 15-degree pose.",
+      "originalDeclaration": "chooses a leaf-focused seated view when it is closer than the middle of the fold",
+      "failedBar": "Independent-oracle failure: released rotation is computed from duoViewSnaps itself; any wrong candidate basis can pass. nearestDeviceView and scene pointer-mapping owners remain. No independent requirement fixes seated 15-degree pose.",
+      "baselineDurationMs": 4.744837,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoViewer.test.ts",
+      "line": 169,
+      "name": "cancels loading and disposes a late model after unmount without installing or rendering it",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep native drawImage primary-source handoff and no-render-after-teardown outcomes; remove unused GPU camera, bounds, quaternion, allocation and environment-disposal recording.",
+      "originalDeclaration": "cancels loading and disposes a late model after unmount without installing or rendering it",
+      "behavioralBar": {
+        "B1_independentContract": "DuoPanelSinks/DeviceDuoBinding frame handoff and viewer unmount ownership contract.",
+        "B2_realRegression": "Duo viewer can keep requesting draws/installing decoded content after unmount despite correct generic slot behavior.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDuoViewer frameUpdated/dispose with native canvas drawImage and renderer.render boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Duo viewer can keep requesting draws/installing decoded content after unmount despite correct generic slot behavior."
+      },
+      "supportingProductionCallers": [
+        "DeviceDuoViewport.tsx lazy createDuoViewer import"
+      ],
+      "baselineDurationMs": 6.848103,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/duoViewer.test.ts",
+      "line": 182,
+      "name": "uses the elected primary frame during handoff and never lets a stale fixed-panel feed overwrite it",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep native drawImage primary-source handoff and no-render-after-teardown outcomes; remove unused GPU camera, bounds, quaternion, allocation and environment-disposal recording.",
+      "originalDeclaration": "uses the elected primary frame during handoff and never lets a stale fixed-panel feed overwrite it",
+      "behavioralBar": {
+        "B1_independentContract": "DuoPanelSinks/DeviceDuoBinding frame handoff and viewer unmount ownership contract.",
+        "B2_realRegression": "A stale fixed-panel update can overwrite the newly elected primary frame; scene projection tests never upload live frames.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDuoViewer frameUpdated/dispose with native canvas drawImage and renderer.render boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A stale fixed-panel update can overwrite the newly elected primary frame; scene projection tests never upload live frames."
+      },
+      "supportingProductionCallers": [
+        "DeviceDuoViewport.tsx lazy createDuoViewer import"
+      ],
+      "baselineDurationMs": 13.699883,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 29,
+      "name": "normalizes over the letterboxed screen, not the host",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "normalizes over the letterboxed screen, not the host",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "Host offset or bezel letterboxing can shift all real device touches.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Host offset or bezel letterboxing can shift all real device touches."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 1.768465,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 35,
+      "name": "starts a touch only on the screen and clamps a captured one at its edges",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "starts a touch only on the screen and clamps a captured one at its edges",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "Dragging beyond the flat display can abandon an active native gesture or start one on the bezel.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Dragging beyond the flat display can abandon an active native gesture or start one on the bezel."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.350431,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 42,
+      "name": "rejects an unmeasured screen and non-finite positions",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "rejects an unmeasured screen and non-finite positions",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "A frame arriving before resize can emit NaN/Infinity normalized input.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A frame arriving before resize can emit NaN/Infinity normalized input."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.149062,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 50,
+      "name": "agrees with the 3D projection on every visible corner in portrait",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "originalDeclaration": "`agrees with the 3D projection on every visible corner in ${orientation}`",
+      "failedBar": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "baselineDurationMs": 31.696038,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 50,
+      "name": "agrees with the 3D projection on every visible corner in landscape_left",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "originalDeclaration": "`agrees with the 3D projection on every visible corner in ${orientation}`",
+      "failedBar": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "baselineDurationMs": 19.238427,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 50,
+      "name": "agrees with the 3D projection on every visible corner in landscape_right",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "originalDeclaration": "`agrees with the 3D projection on every visible corner in ${orientation}`",
+      "failedBar": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "baselineDurationMs": 11.8997,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 50,
+      "name": "agrees with the 3D projection on every visible corner in portrait_upside_down",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "originalDeclaration": "`agrees with the 3D projection on every visible corner in ${orientation}`",
+      "failedBar": "Four helper cross-checks are duplicate lower-seam flat and 3D input coverage; expected visible corner is derived from actual production scene geometry, no component handoff exercised.",
+      "baselineDurationMs": 7.822942,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 87,
+      "name": "reports the visible aspect, defaulting by platform before a frame",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep native portrait/landscape frame ratios; remove undocumented default silhouette aspect constants.",
+      "originalDeclaration": "reports the visible aspect, defaulting by platform before a frame",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "iOS portrait bytes in landscape can be squeezed into the wrong aspect; Android already-rotated frames must keep their native ratio.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "iOS portrait bytes in landscape can be squeezed into the wrong aspect; Android already-rotated frames must keep their native ratio."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.407638,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 95,
+      "name": "turns an iOS portrait framebuffer to the reported interface orientation only",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "turns an iOS portrait framebuffer to the reported interface orientation only",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "Wrong signed quarter turn rotates device content/screenshot incorrectly; Android and already-landscape frames must not turn twice.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Wrong signed quarter turn rotates device content/screenshot incorrectly; Android and already-landscape frames must not turn twice."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.325713,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 105,
+      "name": "sizes a sideways frame so that, once rotated, it covers the screen exactly",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Private CSS width/left/top/transform spelling; orientation byte contract remains in flatMediaRotation; actual screenshot pixel-corner placement has a stronger device/screenshot.test.ts owner.",
+      "originalDeclaration": "sizes a sideways frame so that, once rotated, it covers the screen exactly",
+      "failedBar": "Private CSS width/left/top/transform spelling; orientation byte contract remains in flatMediaRotation; actual screenshot pixel-corner placement has a stronger device/screenshot.test.ts owner.",
+      "baselineDurationMs": 0.402469,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 120,
+      "name": "draws the bezel from the shape profile and turns it with the device",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Restates private shape arithmetic and side-button coordinates; no independent visual golden requirement fixes those geometry values.",
+      "originalDeclaration": "draws the bezel from the shape profile and turns it with the device",
+      "failedBar": "Restates private shape arithmetic and side-button coordinates; no independent visual golden requirement fixes those geometry values.",
+      "baselineDurationMs": 0.69459,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 149,
+      "name": "fits the device and its buttons inside the host",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Geometry-only helper test with private construction and no rendered accessibility/interaction outcome.",
+      "originalDeclaration": "fits the device and its buttons inside the host",
+      "failedBar": "Geometry-only helper test with private construction and no rendered accessibility/interaction outcome.",
+      "baselineDurationMs": 0.290908,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 158,
+      "name": "maps a screen point to pixels from the viewport's top-left and inverts flatScreenPoint",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep independent literal top-left and noncentral overlay coordinates; drop redundant inverse-only assertion.",
+      "originalDeclaration": "maps a screen point to pixels from the viewport's top-left and inverts flatScreenPoint",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "Agent overlay can use page offsets rather than viewport-local CSS pixels; input-only owners do not calculate overlay output.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Agent overlay can use page offsets rather than viewport-local CSS pixels; input-only owners do not calculate overlay output."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.292502,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/flat.test.ts",
+      "line": 167,
+      "name": "clamps to the screen and refuses an unsized screen",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "clamps to the screen and refuses an unsized screen",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 pointer\u2192normalized touch with letterbox/rotation; viewport onTouch and projectPoint interfaces, iOS raw-portrait versus Android already-rotated frames.",
+        "B2_realRegression": "An early agent tap overlay can be drawn outside its display or before a measurable screen exists.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "flat screen/client coordinate boundary and native platform/frame orientation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "An early agent tap overlay can be drawn outside its display or before a measurable screen exists."
+      },
+      "supportingProductionCallers": [
+        "DeviceFlatViewport.tsx",
+        "DeviceViewport.tsx",
+        "../DeviceLiveView.tsx screenshot rotation"
+      ],
+      "baselineDurationMs": 0.154681,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/foldModelScene.test.ts",
+      "line": 38,
+      "name": "reads the hinge axis from the rig's half names",
+      "dynamic": false,
+      "disposition": "CONSOLIDATE",
+      "reason": "Real-asset loading plus open/closed vertical/horizontal input scenarios already prove required rig classification/compatibility; retain rejection with reason via actual asset creation where unique.",
+      "originalDeclaration": "reads the hinge axis from the rig's half names",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 normalized hinge rigs and fold posture; converter rig names/authored-open format; visible normalized touch API.",
+        "B2_realRegression": "Real-asset loading plus open/closed vertical/horizontal input scenarios already prove required rig classification/compatibility; retain rejection with reason via actual asset creation where unique.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createImportedFoldScene screenPoint/setAngle and imported rig acceptance boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Real-asset loading plus open/closed vertical/horizontal input scenarios already prove required rig classification/compatibility; retain rejection with reason via actual asset creation where unique."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts"
+      ],
+      "baselineDurationMs": 6.575428,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/foldModelScene.test.ts",
+      "line": 46,
+      "name": "maps a book fold's open halves and its closed cover to the one framebuffer",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "maps a book fold's open halves and its closed cover to the one framebuffer",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 normalized hinge rigs and fold posture; converter rig names/authored-open format; visible normalized touch API.",
+        "B2_realRegression": "A vertical imported hinge rig can route a touch to the wrong framebuffer half or keep the hidden inner texture active after closing.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createImportedFoldScene screenPoint/setAngle and imported rig acceptance boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A vertical imported hinge rig can route a touch to the wrong framebuffer half or keep the hidden inner texture active after closing."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts"
+      ],
+      "baselineDurationMs": 9.171053,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/foldModelScene.test.ts",
+      "line": 71,
+      "name": "swings the folding half toward the viewer and seats the spine at the fold edge",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Precise spine offset/angle/restore internals have no independent visual regression requirement. Hinge open/closed behavior stays in touch mapping and viewer hinge update scenario.",
+      "originalDeclaration": "swings the folding half toward the viewer and seats the spine at the fold edge",
+      "failedBar": "Precise spine offset/angle/restore internals have no independent visual regression requirement. Hinge open/closed behavior stays in touch mapping and viewer hinge update scenario.",
+      "baselineDurationMs": 3.725114,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/foldModelScene.test.ts",
+      "line": 93,
+      "name": "folds a clamshell about its horizontal hinge with the cover on the top half",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Retain public input coordinates across open/closed horizontal model; remove internal standing/lying Box3 pose and fixed quaternion assertions.",
+      "originalDeclaration": "folds a clamshell about its horizontal hinge with the cover on the top half",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 normalized hinge rigs and fold posture; converter rig names/authored-open format; visible normalized touch API.",
+        "B2_realRegression": "Horizontal rig side names/axis can be treated like a vertical fold, reversing cover or top/bottom input.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createImportedFoldScene screenPoint/setAngle and imported rig acceptance boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Horizontal rig side names/axis can be treated like a vertical fold, reversing cover or top/bottom input."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts"
+      ],
+      "baselineDurationMs": 6.007438,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/foldModelScene.test.ts",
+      "line": 114,
+      "name": "flips touches for an upside-down frame and refuses a rig authored folded",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep upside-down native coordinates and authored-open format refusal; absorb missing-hinge refusal with its precise failure reason from duplicate rig-classification inventory.",
+      "originalDeclaration": "flips touches for an upside-down frame and refuses a rig authored folded",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 normalized hinge rigs and fold posture; converter rig names/authored-open format; visible normalized touch API.",
+        "B2_realRegression": "Upside-down input can address the opposite half; pre-folded/missing-half imported rigs can be accepted and then misrender or fail after installation.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createImportedFoldScene screenPoint/setAngle and imported rig acceptance boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Upside-down input can address the opposite half; pre-folded/missing-half imported rigs can be accepted and then misrender or fail after installation."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts"
+      ],
+      "baselineDurationMs": 3.127127,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/model.test.ts",
+      "line": 30,
+      "name": "cancels superseded downloads and releases a late decoded model without installing it",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "cancels superseded downloads and releases a late decoded model without installing it",
+      "behavioralBar": {
+        "B1_independentContract": "createDeviceModelSlot load/install/dispose public callback ownership and procedural fallback documented by viewport model loading contract.",
+        "B2_realRegression": "Out-of-order downloads can install stale assets or leak superseded resources; exact same source should not redownload.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDeviceModelSlot callback lifecycle with externally controlled download completion",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Out-of-order downloads can install stale assets or leak superseded resources; exact same source should not redownload."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts model/accessory slots",
+        "duoViewer.ts model slot"
+      ],
+      "baselineDurationMs": 2.558083,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/model.test.ts",
+      "line": 53,
+      "name": "keeps the fallback on request failure and disposes results that finish after teardown",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "keeps the fallback on request failure and disposes results that finish after teardown",
+      "behavioralBar": {
+        "B1_independentContract": "createDeviceModelSlot load/install/dispose public callback ownership and procedural fallback documented by viewport model loading contract.",
+        "B2_realRegression": "A rejected download can remove fallback, or a post-teardown decode can leak resources.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDeviceModelSlot callback lifecycle with externally controlled download completion",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A rejected download can remove fallback, or a post-teardown decode can leak resources."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts model/accessory slots",
+        "duoViewer.ts model slot"
+      ],
+      "baselineDurationMs": 0.397399,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/model.test.ts",
+      "line": 69,
+      "name": "retries a failed source while ignoring rejection of a superseded request",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "retries a failed source while ignoring rejection of a superseded request",
+      "behavioralBar": {
+        "B1_independentContract": "createDeviceModelSlot load/install/dispose public callback ownership and procedural fallback documented by viewport model loading contract.",
+        "B2_realRegression": "A failed request can block retry forever, or stale rejection can clear the latest request identity.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDeviceModelSlot callback lifecycle with externally controlled download completion",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A failed request can block retry forever, or stale rejection can clear the latest request identity."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts model/accessory slots",
+        "duoViewer.ts model slot"
+      ],
+      "baselineDurationMs": 0.442685,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/model.test.ts",
+      "line": 89,
+      "name": "releases an invalid model and restores the fallback if scene preparation rejects it",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "releases an invalid model and restores the fallback if scene preparation rejects it",
+      "behavioralBar": {
+        "B1_independentContract": "createDeviceModelSlot load/install/dispose public callback ownership and procedural fallback documented by viewport model loading contract.",
+        "B2_realRegression": "Synchronous scene validation failure can leak the decoded asset or leave no fallback, even when network failure is handled.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createDeviceModelSlot callback lifecycle with externally controlled download completion",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Synchronous scene validation failure can leak the decoded asset or leave no fallback, even when network failure is handled."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts model/accessory slots",
+        "duoViewer.ts model slot"
+      ],
+      "baselineDurationMs": 0.501255,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-18-pro.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-18-pro.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-18-pro.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 102.128908,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-18-pro-max.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-18-pro-max.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-18-pro-max.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 62.515071,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads ipad-pro-13-m5.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads ipad-pro-13-m5.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads ipad-pro-13-m5.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 20.743425,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads ipad-pro-13-m5-magic-keyboard.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads ipad-pro-13-m5-magic-keyboard.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads ipad-pro-13-m5-magic-keyboard.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 18.842321,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-duo.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-duo.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-duo.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 50.134485,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-17.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-17.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-17.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 24.054348,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-air.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-air.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-air.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 22.794974,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads iphone-17e.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads iphone-17e.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads iphone-17e.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 27.3862,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads ipad-air.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads ipad-air.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads ipad-air.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 11.854463,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads ipad-a16.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads ipad-a16.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads ipad-a16.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 14.444537,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads galaxy-s26.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads galaxy-s26.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads galaxy-s26.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 9.497099,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads galaxy-s26-plus.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads galaxy-s26-plus.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads galaxy-s26-plus.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 8.093853,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads galaxy-s26-ultra.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads galaxy-s26-ultra.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads galaxy-s26-ultra.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 24.986886,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads galaxy-z-fold8.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads galaxy-z-fold8.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads galaxy-z-fold8.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 17.498295,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+      "line": 47,
+      "name": "loads galaxy-z-flip8.glb into its viewer scene",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Load each shipped GLB through production loadDeviceModel, stubbing only native fetch/image decode. Remove arbitrary body aspect/height/closed thickness thresholds; preserve actual compressed asset/rig contract and successful scene preparation. Current custom GLTFLoader duplicates production configuration and misses decoder registration regressions.",
+      "originalDeclaration": "`loads ${model.file} into its viewer scene`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.4 ship GLBs and register meshopt; phase 3 \u00a72.2 additional models; converter device-screen/inner-display normalization format.",
+        "B2_realRegression": "loads galaxy-z-flip8.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy.",
+        "B3_independentOracle": "Actual GLB acceptance and explicitly documented display format, independent of loader implementation; real compressed bytes, not mock geometry.",
+        "B4_stableSeam": "production loadDeviceModel plus actual binary GLB \u2192 native Three scene preparation",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "loads galaxy-z-flip8.glb into its viewer scene: these exact shipped bytes can be corrupt, missing required rig/display nodes or require an unregistered decoder while every other asset loads; mocks substitute no geometry or loader policy."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts loadDeviceModel",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 14.995155,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelMatch.test.ts",
+      "line": 6,
+      "name": "matches simulator device names exactly and case-insensitively",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "matches simulator device names exactly and case-insensitively",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 exact Apple device and Samsung AVD/model selection; catalog identities in packages/api/src/devices.ts and sources.json.",
+        "B2_realRegression": "Exact supported simulator names/aliases can select the wrong GLB, while near names must keep the procedural fallback.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "resolveDeviceModelId public platform/name\u2192asset-id configuration boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Exact supported simulator names/aliases can select the wrong GLB, while near names must keep the procedural fallback."
+      },
+      "supportingProductionCallers": [
+        "DeviceViewport.tsx resolveDeviceModelId"
+      ],
+      "baselineDurationMs": 1.858695,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelMatch.test.ts",
+      "line": 34,
+      "name": "never gives an Android device an Apple model",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "never gives an Android device an Apple model",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 exact Apple device and Samsung AVD/model selection; catalog identities in packages/api/src/devices.ts and sources.json.",
+        "B2_realRegression": "Cross-platform name collision can install Apple geometry on an Android stream.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "resolveDeviceModelId public platform/name\u2192asset-id configuration boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Cross-platform name collision can install Apple geometry on an Android stream."
+      },
+      "supportingProductionCallers": [
+        "DeviceViewport.tsx resolveDeviceModelId"
+      ],
+      "baselineDurationMs": 0.443627,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelMatch.test.ts",
+      "line": 39,
+      "name": "matches Samsung emulator names and AVD profiles exactly and case-insensitively",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "matches Samsung emulator names and AVD profiles exactly and case-insensitively",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 exact Apple device and Samsung AVD/model selection; catalog identities in packages/api/src/devices.ts and sources.json.",
+        "B2_realRegression": "Samsung profile/display-name matching can accidentally accept near names or fall through to Apple model mapping.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "resolveDeviceModelId public platform/name\u2192asset-id configuration boundary",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Samsung profile/display-name matching can accidentally accept near names or fall through to Apple model mapping."
+      },
+      "supportingProductionCallers": [
+        "DeviceViewport.tsx resolveDeviceModelId"
+      ],
+      "baselineDurationMs": 0.223341,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelMatch.test.ts",
+      "line": 63,
+      "name": "has a recorded source for every model id it can return",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "Catalog/file inventory duplicates Vite imports/build and actual binary asset loading; does not verify required source URL/hash provenance bytes. Matching tables remain actual platform/name configuration contract.",
+      "originalDeclaration": "has a recorded source for every model id it can return",
+      "failedBar": "Catalog/file inventory duplicates Vite imports/build and actual binary asset loading; does not verify required source URL/hash provenance bytes. Matching tables remain actual platform/name configuration contract.",
+      "baselineDurationMs": 9.965981,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelScene.test.ts",
+      "line": 32,
+      "name": "rejects touches from the rear and preserves borrowed textures when releasing imported resources",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "rejects touches from the rear and preserves borrowed textures when releasing imported resources",
+      "behavioralBar": {
+        "B1_independentContract": "Converter normalized device-screen format and meshopt quantization; stream owns live texture while model slot owns imported resources; rear cannot receive screen input.",
+        "B2_realRegression": "Scene teardown can dispose a live shared framebuffer or fail to release owned model geometry/textures; rear-facing imported screen must refuse taps.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "converted GLB\u2192scene construction, screenPoint, and native dispose interfaces",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Scene teardown can dispose a live shared framebuffer or fail to release owned model geometry/textures; rear-facing imported screen must refuse taps."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 8.476574,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelScene.test.ts",
+      "line": 56,
+      "name": "rejects missing and incorrectly normalized displays before changing their materials",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "rejects missing and incorrectly normalized displays before changing their materials",
+      "behavioralBar": {
+        "B1_independentContract": "Converter normalized device-screen format and meshopt quantization; stream owns live texture while model slot owns imported resources; rear cannot receive screen input.",
+        "B2_realRegression": "Malformed converted assets can mutate ownership/materials before rejection, making fallback or subsequent reuse unsafe.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "converted GLB\u2192scene construction, screenPoint, and native dispose interfaces",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Malformed converted assets can mutate ownership/materials before rejection, making fallback or subsequent reuse unsafe."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 1.541156,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/modelScene.test.ts",
+      "line": 82,
+      "name": "bakes a meshopt-quantized display's node transform back into float geometry",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep successful quantized asset normalization and independently expected vertex/touch behavior; remove Float32Array and unit scale representation checks.",
+      "originalDeclaration": "bakes a meshopt-quantized display's node transform back into float geometry",
+      "behavioralBar": {
+        "B1_independentContract": "Converter normalized device-screen format and meshopt quantization; stream owns live texture while model slot owns imported resources; rear cannot receive screen input.",
+        "B2_realRegression": "Quantized integer attributes can be transformed in place and destroy the normalized display shape/touch coordinates, unlike valid float assets.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "converted GLB\u2192scene construction, screenPoint, and native dispose interfaces",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Quantized integer attributes can be transformed in place and destroy the normalized display shape/touch coordinates, unlike valid float assets."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "duoViewer.ts loadDeviceModel"
+      ],
+      "baselineDurationMs": 3.312916,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneInteraction.test.ts",
+      "line": 9,
+      "name": "keeps a captured screen gesture separate from orbit and ends it once on cancellation",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep public begin/move/end callback sequence and pointer ownership; provide an actual captured/uncaptured projection boundary and remove collaborator argument inspection.",
+      "originalDeclaration": "keeps a captured screen gesture separate from orbit and ends it once on cancellation",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 normalized begin/move/end touch; viewport onTouch, navigation and cancellation callback contract.",
+        "B2_realRegression": "Wrong pointer can move/end the captured native gesture, or cancelling twice can emit duplicate native end commands.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createPhoneInteraction public gesture entry points and caller callbacks",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Wrong pointer can move/end the captured native gesture, or cancelling twice can emit duplicate native end commands."
+      },
+      "supportingProductionCallers": [
+        "mountDeviceViewer.ts",
+        "phoneTrackpad.ts"
+      ],
+      "baselineDurationMs": 3.01236,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneInteraction.test.ts",
+      "line": 37,
+      "name": "blocks navigation during either captured gesture, then resumes without sending device touches",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "blocks navigation during either captured gesture, then resumes without sending device touches",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 normalized begin/move/end touch; viewport onTouch, navigation and cancellation callback contract.",
+        "B2_realRegression": "Orbit/navigation can interfere with an active pointer capture or spuriously send native touches.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createPhoneInteraction public gesture entry points and caller callbacks",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Orbit/navigation can interfere with an active pointer capture or spuriously send native touches."
+      },
+      "supportingProductionCallers": [
+        "mountDeviceViewer.ts",
+        "phoneTrackpad.ts"
+      ],
+      "baselineDurationMs": 0.385506,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneInteraction.test.ts",
+      "line": 62,
+      "name": "ends wheel orbit without ending a captured screen touch",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "ends wheel orbit without ending a captured screen touch",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 normalized begin/move/end touch; viewport onTouch, navigation and cancellation callback contract.",
+        "B2_realRegression": "Scroll-end delivery can terminate an unrelated held native touch; ordinary pointer cancellation cannot catch that cross-input bug.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createPhoneInteraction public gesture entry points and caller callbacks",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Scroll-end delivery can terminate an unrelated held native touch; ordinary pointer cancellation cannot catch that cross-input bug."
+      },
+      "supportingProductionCallers": [
+        "mountDeviceViewer.ts",
+        "phoneTrackpad.ts"
+      ],
+      "baselineDurationMs": 0.465738,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneInteraction.test.ts",
+      "line": 89,
+      "name": "normalizes wheel units and bounds jumps from coarse scroll wheels",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "reason": "B1/B4: exact 16-pixel line sensitivity and 25%-orbit cap are private navigation policy without an independent requirement. Gesture phase ownership/endWheel behavior remains; no numeric policy replacement added.",
+      "originalDeclaration": "normalizes wheel units and bounds jumps from coarse scroll wheels",
+      "failedBar": "B1/B4: exact 16-pixel line sensitivity and 25%-orbit cap are private navigation policy without an independent requirement. Gesture phase ownership/endWheel behavior remains; no numeric policy replacement added.",
+      "baselineDurationMs": 0.400645,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 23,
+      "name": "preserves input projection for the ios-tablet silhouette in every orientation",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Keep literal noncentral native coordinates across shapes/orientations, independently projected by Three from actual framebuffer mesh. Incorporate zoom and overlay coverage here without duplicate scene builds.",
+      "originalDeclaration": "`preserves input projection for the ${profile.id} silhouette in every orientation`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "preserves input projection for the ios-tablet silhouette in every orientation: independently checks noncentral normalized input for this actual rounded screen mesh; tablet aspect and phone silhouettes can occlude/raycast differently. Only ios-phone also owns overlay position; no separate overlay scene setup remains.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "preserves input projection for the ios-tablet silhouette in every orientation: independently checks noncentral normalized input for this actual rounded screen mesh; tablet aspect and phone silhouettes can occlude/raycast differently. Only ios-phone also owns overlay position; no separate overlay scene setup remains."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 67.187431,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 23,
+      "name": "preserves input projection for the ios-phone silhouette in every orientation",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "reason": "Keep literal noncentral native coordinates across shapes/orientations, independently projected by Three from actual framebuffer mesh. Incorporate zoom and overlay coverage here without duplicate scene builds.",
+      "originalDeclaration": "`preserves input projection for the ${profile.id} silhouette in every orientation`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "preserves input projection for the ios-phone silhouette in every orientation: independently checks noncentral normalized input for this actual rounded screen mesh; tablet aspect and phone silhouettes can occlude/raycast differently. Only ios-phone also owns overlay position; no separate overlay scene setup remains.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "preserves input projection for the ios-phone silhouette in every orientation: independently checks noncentral normalized input for this actual rounded screen mesh; tablet aspect and phone silhouettes can occlude/raycast differently. Only ios-phone also owns overlay position; no separate overlay scene setup remains."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 16.201259,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 23,
+      "name": "preserves input projection for the android-phone silhouette in every orientation",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "B6: identical aspect, noncentral target, camera and shared projection code as ios-phone; Android cosmetic rounding differs only away from the target. IOS phone and tablet independent input/overlay owners remain; native Android frame orientation is separately owned by flat.test.ts.",
+      "originalDeclaration": "`preserves input projection for the ${profile.id} silhouette in every orientation`",
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "failedBar": "B6: identical aspect, noncentral target, camera and shared projection code as ios-phone; Android cosmetic rounding differs only away from the target. IOS phone and tablet independent input/overlay owners remain; native Android frame orientation is separately owned by flat.test.ts.",
+      "baselineDurationMs": 15.698321,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 58,
+      "name": "keeps device coordinates accurate at 0.6 camera zoom",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions.",
+      "originalDeclaration": "`keeps device coordinates accurate at ${zoom} camera zoom`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 9.268987,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 58,
+      "name": "keeps device coordinates accurate at 2.2 camera zoom",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions.",
+      "originalDeclaration": "`keeps device coordinates accurate at ${zoom} camera zoom`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Same ray/camera transform contract as surviving input projection owner; that owner now runs at both existing 0.6 and 2.2 zoom values, avoiding two extra scene constructions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 2.722353,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 77,
+      "name": "rejects new gestures outside the display, but clamps captured drags at its edge",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "rejects new gestures outside the display, but clamps captured drags at its edge",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Real ray casting can start new gestures beyond the screen or on its rear, while a held drag must remain clamped.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Real ray casting can start new gestures beyond the screen or on its rear, while a held drag must remain clamped."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 5.758037,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 91,
+      "name": "unrotates an already-landscape framebuffer in landscape_left",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Center-only oracle (0.5,0.5) is unchanged by every tested rotation and cannot detect wrong unrotation; noncentral orientation input cases remain.",
+      "originalDeclaration": "`unrotates an already-landscape framebuffer in ${orientation}`",
+      "failedBar": "Center-only oracle (0.5,0.5) is unchanged by every tested rotation and cannot detect wrong unrotation; noncentral orientation input cases remain.",
+      "baselineDurationMs": 2.68362,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 91,
+      "name": "unrotates an already-landscape framebuffer in landscape_right",
+      "dynamic": true,
+      "disposition": "DELETE",
+      "reason": "Center-only oracle (0.5,0.5) is unchanged by every tested rotation and cannot detect wrong unrotation; noncentral orientation input cases remain.",
+      "originalDeclaration": "`unrotates an already-landscape framebuffer in ${orientation}`",
+      "failedBar": "Center-only oracle (0.5,0.5) is unchanged by every tested rotation and cannot detect wrong unrotation; noncentral orientation input cases remain.",
+      "baselineDurationMs": 5.518506,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 106,
+      "name": "projects a screen point back onto the view in portrait (viewPoint inverts screenPoint)",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+      "originalDeclaration": "`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 10.683515,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 106,
+      "name": "projects a screen point back onto the view in landscape_left (viewPoint inverts screenPoint)",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+      "originalDeclaration": "`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 3.548602,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 106,
+      "name": "projects a screen point back onto the view in landscape_right (viewPoint inverts screenPoint)",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+      "originalDeclaration": "`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 2.315916,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneScene.test.ts",
+      "line": 106,
+      "name": "projects a screen point back onto the view in portrait_upside_down (viewPoint inverts screenPoint)",
+      "dynamic": true,
+      "disposition": "CONSOLIDATE",
+      "reason": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+      "originalDeclaration": "`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Move overlay output assertions into the ios-phone input owner in every orientation, with independent native camera oracle rather than inverse production functions."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 6.281855,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneViewer.test.ts",
+      "line": 126,
+      "name": "rejects incompatible accessories and releases an accessory that finishes after detaching",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "reason": "Keep distinct actual input, lifecycle/resource, native frame or model-name configuration contract; six-bar evidence will be recorded per file/case.",
+      "originalDeclaration": "rejects incompatible accessories and releases an accessory that finishes after detaching",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 Magic Keyboard compatibility and reported fold posture; viewport model/accessory loading and cancellation contract.",
+        "B2_realRegression": "A keyboard can be requested for an incompatible model, or a detached accessory decode can leak/mount late despite correct model-slot behavior.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createPhoneViewer setModel/setAccessory/setFoldAngle/dispose and caller-owned asset lifetime",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "A keyboard can be requested for an incompatible model, or a detached accessory decode can leak/mount late despite correct model-slot behavior."
+      },
+      "supportingProductionCallers": [
+        "DevicePhoneViewport.tsx lazy createPhoneViewer import"
+      ],
+      "baselineDurationMs": 36.830179,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneViewer.test.ts",
+      "line": 148,
+      "name": "folds a foldable model to the reported hinge angle; a slab model ignores it",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Keep rig angle update over time and compatible slab/fold behavior; remove children[0] tree/displayAngle inspection and reduce FakeRenderer recording to fields actually needed.",
+      "originalDeclaration": "folds a foldable model to the reported hinge angle; a slab model ignores it",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 3 \u00a72.2 Magic Keyboard compatibility and reported fold posture; viewport model/accessory loading and cancellation contract.",
+        "B2_realRegression": "Viewer can omit applying reported hinge state to imported rigs, or misroute it to slab models. Scene-only angle setters do not cover viewer wiring.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createPhoneViewer setModel/setAccessory/setFoldAngle/dispose and caller-owned asset lifetime",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Viewer can omit applying reported hinge state to imported rigs, or misroute it to slab models. Scene-only angle setters do not cover viewer wiring."
+      },
+      "supportingProductionCallers": [
+        "DevicePhoneViewport.tsx lazy createPhoneViewer import"
+      ],
+      "baselineDurationMs": 24.538902,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/phoneViewer.test.ts",
+      "line": 186,
+      "name": "projects screen points into the canvas for the overlay, inverse of screenPoint",
+      "dynamic": false,
+      "disposition": "CONSOLIDATE",
+      "reason": "The inverse pair had no independent oracle. Meaningful overlay position is now independently proved by phoneScene at the lower stable camera boundary; undocumented post-disposal accessor probe has no remaining caller.",
+      "originalDeclaration": "projects screen points into the canvas for the overlay, inverse of screenPoint",
+      "behavioralBar": {
+        "B1_independentContract": "Phase 1 core \u00a710.1 rotation/letterbox mapping and agent tap overlay; viewport onTouch/projectPoint interfaces. Geometry is used to target the visible screen, not asserted as a visual requirement.",
+        "B2_realRegression": "The inverse pair had no independent oracle. Meaningful overlay position is now independently proved by phoneScene at the lower stable camera boundary; undocumented post-disposal accessor probe has no remaining caller.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "real mesh/camera screenPoint and viewPoint observable normalized positions",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "The inverse pair had no independent oracle. Meaningful overlay position is now independently proved by phoneScene at the lower stable camera boundary; undocumented post-disposal accessor probe has no remaining caller."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "modelScene.ts shared display projections"
+      ],
+      "baselineDurationMs": 8.807057,
+      "baselineObserved": true
+    },
+    {
+      "path": "packages/ui/src/components/device/three/renderScheduler.test.ts",
+      "line": 6,
+      "name": "coalesces frame and pointer invalidations, then stops scheduling when idle or disposed",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "reason": "Use browser RAF/cancel globals at real native boundary; remove unused-in-production request/cancel injection parameters and exact handle-number assertion. Native coalescing/idle/disposal contract remains.",
+      "originalDeclaration": "coalesces frame and pointer invalidations, then stops scheduling when idle or disposed",
+      "behavioralBar": {
+        "B1_independentContract": "notifyFrame contract schedules one render for changed content and remains idle thereafter; dispose cancels pending browser animation work.",
+        "B2_realRegression": "Duplicate invalidations can create perpetual rendering or a callback can render after cancellation; viewer loading tests do not isolate scheduling.",
+        "B3_independentOracle": "Literal native coordinates, documented format/error reason, externally controlled event order, or observed ownership/callback outcomes; expected values do not invoke the function under test.",
+        "B4_stableSeam": "createRenderScheduler invalidate/dispose against browser requestAnimationFrame/cancelAnimationFrame",
+        "B5_refactorResistance": "No source grep, tree index, private method count or geometry/appearance snapshot. Native interfaces, required asset format and externally consumed outputs remain valid across internal reorganization.",
+        "B6_uniqueProtection": "Duplicate invalidations can create perpetual rendering or a callback can render after cancellation; viewer loading tests do not isolate scheduling."
+      },
+      "supportingProductionCallers": [
+        "phoneViewer.ts",
+        "duoViewer.ts"
+      ],
+      "baselineDurationMs": 2.196141,
+      "baselineObserved": true
+    }
+  ],
+  "removedInfrastructure": [
+    "duoSnap.test.ts",
+    "unused phone/Duo fake renderer camera, bounds, quaternion, allocation, frame-tree and environment recording",
+    "manual test GLTFLoader/MeshoptDecoder registration and parser texture plugin",
+    "duoRawPoint public export (now private, only production local callers)",
+    "createRenderScheduler optional request/cancel injection arguments (all production callers already use native RAF)"
+  ],
+  "retainedInfrastructure": [
+    "foldRig.testing.ts still supports two imported-rig test owners",
+    "actual GLB fixtures are production assets; no asset or manifest removed",
+    "viewer renderer/loader injection options remain used to isolate real WebGL/network from retained lifecycle tests"
+  ],
+  "validation": [
+    {
+      "command": "TSX_DISABLE_CACHE=1 node --import tsx --import ./test/svg-loader.mjs --test --test-timeout=600000 --test-concurrency=4 src/components/device/three/*.test.ts",
+      "cwd": "packages/ui",
+      "result": "PASS: 51 tests, 0 failures before final removal of the identical Android-phone generated case; final 50-case set awaits root full gate",
+      "durationMs": 2049.15397,
+      "log": "/tmp/orquester-test-audit/devices-three-focused.log"
+    },
+    {
+      "command": "TSX_DISABLE_CACHE=1 node --import tsx --import ./test/svg-loader.mjs --import /tmp/orquester-test-audit/devices-three-mutation-loader.mjs --test --test-timeout=600000 --test-concurrency=4 src/components/device/three/modelAssets.test.ts",
+      "cwd": "packages/ui",
+      "result": "Expected failure: deleting production meshopt registration fails all 14 compressed asset cases; uncompressed Duo passes",
+      "durationMs": 593.201895,
+      "log": "/tmp/orquester-test-audit/devices-three-meshopt-mutant.log"
+    },
+    {
+      "command": "git diff --check -- packages/ui/src/components/device/three",
+      "result": "PASS"
+    },
+    {
+      "command": "pnpm check",
+      "result": "Initial root compile diagnostic caught three implicit-any mock callback parameters in modelAssets.test.ts despite the focused runtime pass. Added public fetch input and TextureLoader load callback parameter types; root compile recheck pending. No behavior change.",
+      "log": "/tmp/orquester-test-audit/devices-check-diagnostic.log"
+    }
+  ],
+  "performanceLimitations": "Frozen whole-suite baseline records every original case duration; no isolated equivalent pre-edit three-suite run was requested. Focused final 2.049 s is not comparable to whole-suite baseline for a speedup claim. Root owns comparable whole-suite measurements, required typecheck/build and final integration."
+}

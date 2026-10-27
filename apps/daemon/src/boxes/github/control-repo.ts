@@ -311,7 +311,7 @@ export interface WorkflowFileResult {
 }
 
 /** The git blob id of `content` (what the contents API reports as a file's `sha`). */
-export function gitBlobSha(content: string): string {
+function gitBlobSha(content: string): string {
   const bytes = Buffer.from(content, "utf8");
   return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 }
@@ -361,7 +361,7 @@ export async function ensureWorkflowFile(
 }
 
 /** The control repo's workflow files and their contents for these options. */
-export function controlWorkflowFiles(options: BlacksmithWorkflowOptions = {}): Array<{ path: string; label: string; content: string }> {
+function controlWorkflowFiles(options: BlacksmithWorkflowOptions = {}): Array<{ path: string; label: string; content: string }> {
   return [
     { path: BLACKSMITH_WORKFLOW_PATH, label: "the Orquester box workflow", content: blacksmithWorkflowTemplate(options) },
     { path: BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH, label: "the Orquester device cache workflow", content: blacksmithDeviceCacheWorkflowTemplate() }

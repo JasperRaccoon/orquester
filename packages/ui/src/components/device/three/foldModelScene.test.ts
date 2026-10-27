@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Box3, Group, Mesh, PerspectiveCamera, Texture, Vector3, type Object3D } from "three";
-import { createImportedFoldScene, foldRigHinge } from "./foldModelScene.ts";
+import { Group, Mesh, PerspectiveCamera, Texture, Vector3, type Object3D } from "three";
+import { createImportedFoldScene } from "./foldModelScene.ts";
 import { createFoldRig, FOLD_RIG } from "./foldRig.testing.ts";
 import { phoneDisplayLayout } from "./phoneScene.ts";
 
@@ -35,14 +35,6 @@ const map = (asset: Object3D, name: string) =>
   ((node(asset, name) as Mesh).material as { map?: Texture | null }).map ?? null;
 
 describe("foldable model scene", () => {
-  it("reads the hinge axis from the rig's half names", () => {
-    assert.equal(foldRigHinge(createFoldRig("vertical")), "vertical");
-    assert.equal(foldRigHinge(createFoldRig("horizontal")), "horizontal");
-    assert.equal(foldRigHinge(new Group()), null);
-    const layout = phoneDisplayLayout(null, 1, 1);
-    assert.throws(() => createImportedFoldScene(new Group(), new Texture(), layout, 180));
-  });
-
   it("maps a book fold's open halves and its closed cover to the one framebuffer", () => {
     const { asset, texture, scene, camera, touch } = view("vertical", 180);
     closeTo(touch("inner-display-left")?.x, 0.25);
@@ -68,38 +60,11 @@ describe("foldable model scene", () => {
     scene.dispose();
   });
 
-  it("swings the folding half toward the viewer and seats the spine at the fold edge", () => {
-    const { asset, scene } = view("vertical", 90);
-    const standing = new Box3().setFromObject(node(asset, "left-half"));
-    const lying = new Box3().setFromObject(node(asset, "right-half"));
-    assert.ok(standing.max.z - lying.max.z > FOLD_RIG.across * 0.9, "left half toward +Z");
-    scene.setAngle(0);
-    const right = new Box3().setFromObject(node(asset, "right-half"));
-    const left = new Box3().setFromObject(node(asset, "left-half"));
-    // Closed: stacked over the right half, inner faces together, half the open width.
-    closeTo(left.min.x, right.min.x, 0.01);
-    assert.ok(left.min.z >= right.max.z - 0.011);
-    const spine = node(asset, "hinge");
-    closeTo(spine.position.x, -(FOLD_RIG.spineFront - FOLD_RIG.pivotZ), 1e-6);
-    closeTo(spine.rotation.y, Math.PI / 2, 1e-6);
-    scene.dispose();
-    // Disposing restores the authored open pose and the asset's own materials.
-    assert.equal(node(asset, "left-half").quaternion.w, 1);
-    assert.equal(spine.position.z, FOLD_RIG.pivotZ);
-    assert.equal(map(asset, "cover-display"), null);
-    assert.equal(asset.parent, null);
-  });
-
   it("folds a clamshell about its horizontal hinge with the cover on the top half", () => {
     const { asset, texture, scene, touch } = view("horizontal", 180);
     closeTo(touch("inner-display-top")?.y, 0.25);
     closeTo(touch("inner-display-bottom")?.y, 0.75);
     closeTo(touch("inner-display-top")?.x, 0.5);
-    scene.setAngle(90);
-    const standing = new Box3().setFromObject(node(asset, "top-half"));
-    const lying = new Box3().setFromObject(node(asset, "bottom-half"));
-    assert.ok(standing.max.z - lying.max.z > FOLD_RIG.across * 0.9, "top half toward +Z");
-    assert.equal(node(asset, "bottom-half").quaternion.w, 1);
     scene.setAngle(0);
     assert.equal(map(asset, "cover-display"), texture);
     closeTo(touch("cover-display")?.y, 0.5);
@@ -117,6 +82,10 @@ describe("foldable model scene", () => {
     scene.setDisplay(new Texture(), phoneDisplayLayout(upsideDown, 2200, 1840));
     closeTo(touch("inner-display-left")?.x, 0.75);
     scene.dispose();
+    assert.throws(
+      () => createImportedFoldScene(new Group(), new Texture(), phoneDisplayLayout(null, 1, 1), 180),
+      /two hinge halves/,
+    );
     const folded = createFoldRig("vertical");
     node(folded, "left-half").rotation.y = 1;
     assert.throws(

@@ -1,9 +1,12 @@
-import { test, type TestContext } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, readFile, stat, mkdir, writeFile, lstat, readlink, readdir, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentAccountsService } from "./agent-accounts.ts";
+
+const fixtureRoot = await mkdtemp(join(tmpdir(), "orq-accounts-fixtures-"));
+after(() => rm(fixtureRoot, { recursive: true, force: true }));
 
 function jwt(payload: Record<string, unknown>): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -11,7 +14,7 @@ function jwt(payload: Record<string, unknown>): string {
 }
 
 async function makeService() {
-  const base = await mkdtemp(join(tmpdir(), "orq-accts-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-accts-"));
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
@@ -138,7 +141,7 @@ test("index and API responses carry no token material", async () => {
 
 async function makeServiceWithFetch(t: TestContext, now: number | (() => number), fetchImpl: typeof fetch) {
   t.mock.method(globalThis, "fetch", fetchImpl);
-  const base = await mkdtemp(join(tmpdir(), "orq-fresh-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-fresh-"));
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
@@ -264,7 +267,7 @@ test("an account the retired model proxy owned is refreshed by the account servi
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
     access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" })
   }), { status: 200 }));
-  const base = await mkdtemp(join(tmpdir(), "orq-fresh-legacy-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-fresh-legacy-"));
   t.after(() => rm(base, { recursive: true, force: true }));
   const opts = {
     indexFile: join(base, "agent-accounts.json"),
@@ -289,7 +292,7 @@ test("an account the retired model proxy owned is refreshed by the account servi
 
 test("resolveLaunchEnv seeds a Claude home: onboarding, mcps, stripped identity, symlinked skills/plugins", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
-  const base = await mkdtemp(join(tmpdir(), "orq-seed-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-seed-"));
   await writeFile(
     join(base, ".claude.json"),
     JSON.stringify({ oauthAccount: { emailAddress: "sys@x" }, userID: "u1", mcpServers: { foo: { command: "x" } }, hasCompletedOnboarding: false, tipsHistory: { a: 1 } })
@@ -313,7 +316,7 @@ test("resolveLaunchEnv seeds a Claude home: onboarding, mcps, stripped identity,
 
 test("Claude re-sync refreshes mcpServers but preserves the account's own identity", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
-  const base = await mkdtemp(join(tmpdir(), "orq-seed2-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-seed2-"));
   await mkdir(join(base, ".claude"), { recursive: true });
   await writeFile(join(base, ".claude.json"), JSON.stringify({ mcpServers: { foo: {} }, hasCompletedOnboarding: false }));
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
@@ -333,7 +336,7 @@ test("Claude re-sync refreshes mcpServers but preserves the account's own identi
 
 test("resolveLaunchEnv shares Claude settings.json (symlink, replaces a stale real file)", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
-  const base = await mkdtemp(join(tmpdir(), "orq-set-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-set-"));
   await mkdir(join(base, ".claude"), { recursive: true });
   await writeFile(join(base, ".claude.json"), JSON.stringify({ mcpServers: {} }));
   await writeFile(join(base, ".claude", "settings.json"), JSON.stringify({ hooks: { Stop: [{ user: 1 }] } }));
@@ -350,7 +353,7 @@ test("resolveLaunchEnv shares Claude settings.json (symlink, replaces a stale re
 
 test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale real files)", async () => {
   delete process.env.CODEX_HOME;
-  const base = await mkdtemp(join(tmpdir(), "orq-chooks-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-chooks-"));
   await mkdir(join(base, ".codex"), { recursive: true });
   await writeFile(join(base, ".codex", "config.toml"), "model='sys'\n[mcp_servers.foo]\n");
   await writeFile(join(base, ".codex", ".personality_migration"), "1");
@@ -371,7 +374,7 @@ test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale rea
 
 test("resolveLaunchEnv symlinks an empty/absent Codex sessions/ to the shared store", async () => {
   delete process.env.CODEX_HOME;
-  const base = await mkdtemp(join(tmpdir(), "orq-hist2-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-hist2-"));
   await mkdir(join(base, ".codex", "sessions", "s1"), { recursive: true });
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
   await svc.init();
@@ -384,7 +387,7 @@ test("resolveLaunchEnv symlinks an empty/absent Codex sessions/ to the shared st
 
 test("shared history recursively merges a COLLIDING project dir, then symlinks", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
-  const base = await mkdtemp(join(tmpdir(), "orq-histc-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-histc-"));
   await mkdir(join(base, ".claude", "projects", "P"), { recursive: true }); // system project P
   await writeFile(join(base, ".claude", "projects", "P", "s1.jsonl"), "sys");
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
@@ -551,7 +554,7 @@ async function linkingFixture(agent: "claude" | "codex" | "grok") {
   delete process.env.CLAUDE_CONFIG_DIR;
   delete process.env.CODEX_HOME;
   delete process.env.GROK_HOME;
-  const base = await mkdtemp(join(tmpdir(), `orq-link-${agent}-`));
+  const base = await mkdtemp(join(fixtureRoot, `orq-link-${agent}-`));
   const system = join(base, agent === "claude" ? ".claude" : agent === "codex" ? ".codex" : ".grok");
   await mkdir(system, { recursive: true });
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
@@ -702,7 +705,7 @@ test("Grok: AGENTS.md, commands/ and rules/ are shared; agents/ is not", async (
 
 test("nothing is linked into an agent home the daemon user does not have", async () => {
   delete process.env.GROK_HOME;
-  const base = await mkdtemp(join(tmpdir(), "orq-link-nohome-"));
+  const base = await mkdtemp(join(fixtureRoot, "orq-link-nohome-"));
   const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
   await svc.init();
   const acct = await svc.importAccount({ content: GROK_BLOB });

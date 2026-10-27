@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, watch } from "node:fs";
+import { once } from "node:events";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,14 +9,10 @@ import test from "node:test";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import {
-  agentDeviceArgv,
   agentDeviceData,
-  agentDeviceEnv,
   AgentDeviceError,
   agentDeviceSession,
   createAgentDeviceClient,
-  parseAgentDeviceJson,
-  redactPaths,
   type AgentDeviceResult
 } from "./agent-device.ts";
 import { isDeviceError } from "./errors.ts";
@@ -24,7 +21,7 @@ import type { DeviceToolchain } from "./toolchain/index.ts";
 
 function fixture(name: string): AgentDeviceResult {
   const stdout = readFixture(name);
-  const json = parseAgentDeviceJson(stdout) as { success?: boolean };
+  const json = JSON.parse(stdout) as { success?: boolean };
   return { exitCode: json?.success === false ? 1 : 0, stdout, stderr: "", json };
 }
 
@@ -51,44 +48,11 @@ function lease(overrides: Partial<StoredDeviceLease> = {}): StoredDeviceLease {
   };
 }
 
-test("argv: the pinned global flags come before the command; iOS pins a UDID, Android a serial", () => {
+test("automation sessions stay stable per chat, host and device without colliding across chats or hosts", () => {
   const session = agentDeviceSession("thread-1", "local", "emulator-5554");
-  assert.match(session, /^orq-[0-9a-f]{16}$/);
   assert.equal(session, agentDeviceSession("thread-1", "local", "emulator-5554"));
   assert.notEqual(session, agentDeviceSession("thread-2", "local", "emulator-5554"));
   assert.notEqual(session, agentDeviceSession("thread-1", "box:a", "emulator-5554"));
-  assert.deepEqual(
-    agentDeviceArgv({ prefix: ["/opt/ad.mjs"], configPath: "/cfg.json", session, platform: "android", deviceId: "emulator-5554", command: "type", args: ["--", "--abc"] }),
-    ["/opt/ad.mjs", "--config", "/cfg.json", "--session", session, "--platform", "android", "--serial", "emulator-5554", "--json", "type", "--", "--abc"]
-  );
-  assert.deepEqual(agentDeviceArgv({ prefix: [], configPath: "/c", session: "s", platform: "ios", deviceId: "UDID", command: "snapshot", args: ["-i"] }).slice(4, 8), ["--platform", "ios", "--udid", "UDID"]);
-});
-
-test("env: only the allowlisted daemon variables pass, AGENT_DEVICE_* never; the host's additions win", () => {
-  const env = agentDeviceEnv(
-    {
-      PATH: "/usr/bin",
-      AGENT_DEVICE_DAEMON_BASE_URL: "http://evil",
-      AGENT_DEVICE_DAEMON_AUTH_TOKEN: "t",
-      AGENT_DEVICE_CONFIG: "/x",
-      HOME: "/home/o",
-      LANG: "en_US.UTF-8",
-      TZ: "UTC",
-      ANTHROPIC_API_KEY: "sk-secret",
-      GITHUB_TOKEN: "ghp_secret",
-      ORQUESTER_PASSWORD: "pw",
-      NODE_OPTIONS: "--require /tmp/evil.js"
-    },
-    { ANDROID_ADB_SERVER_PORT: "15037", AGENT_DEVICE_HOME: "/state/ad-home", PATH: "/sdk/platform-tools:/usr/bin" }
-  );
-  assert.deepEqual(Object.keys(env).sort(), ["AGENT_DEVICE_HOME", "ANDROID_ADB_SERVER_PORT", "ELECTRON_RUN_AS_NODE", "HOME", "LANG", "NO_COLOR", "PATH", "TZ"]);
-  assert.equal(env.PATH, "/sdk/platform-tools:/usr/bin");
-  assert.equal(env.HOME, "/home/o");
-  assert.equal(env.ANDROID_ADB_SERVER_PORT, "15037");
-  assert.equal(env.AGENT_DEVICE_HOME, "/state/ad-home");
-  assert.equal(env.AGENT_DEVICE_DAEMON_BASE_URL, undefined);
-  assert.equal(env.AGENT_DEVICE_DAEMON_AUTH_TOKEN, undefined);
-  assert.equal(env.AGENT_DEVICE_CONFIG, undefined);
 });
 
 test("batch (type/wait text through stdin): the step's data and the step's own refusal", () => {
@@ -125,9 +89,10 @@ test("output: data from real answers; refusals become DeviceErrors that name the
 
   const crashed = catchError(() => agentDeviceData({ exitCode: 2, stdout: "", stderr: "boom at /var/lib/x/y.js:1\n" }, "snapshot"));
   assert.equal(crashed.code, "UNAVAILABLE");
-  assert.equal(crashed.message, "agent-device snapshot failed: boom at <path>:1");
-  assert.equal(redactPaths("see https://example.com/a/b and /home/u/.agent-device/x.log"), "see https://example.com/a/b and <path>");
-  assert.deepEqual(parseAgentDeviceJson("noise\n{\"success\":true,\"data\":{}}"), { success: true, data: {} });
+  assert.ok(crashed.message.includes("boom") && !crashed.message.includes("/var/lib/x/y.js"));
+  const path = catchError(() => agentDeviceData({ exitCode: 2, stdout: "", stderr: "see https://example.com/a/b and /home/u/.agent-device/x.log" }, "snapshot"));
+  assert.ok(path.message.includes("https://example.com/a/b"));
+  assert.ok(!path.message.includes("/home/u/.agent-device/x.log"));
 });
 
 function catchError(run: () => unknown): AgentDeviceError {
@@ -159,16 +124,17 @@ const toolchain = (bin: string | null): DeviceToolchain => ({
 test("the runner: the toolchain's CLI under this Node, the host's config, no token in argv, stdin, scrubbed env", async (t) => {
   const cli = await fakeCli(
     `let input = ""; process.stdin.on("data", (d) => (input += d)).on("end", () => {
-      const env = Object.keys(process.env).filter((k) => k.startsWith("AGENT_DEVICE_"));
+      const env = process.env;
+      console.log("preliminary CLI diagnostic");
       console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2), input, env } }));
     });`
   );
   t.after(() => rm(cli.dir, { recursive: true, force: true }));
   const host = new FakeDeviceHost();
   host.agentDeviceConfigPath = () => "/state/agent-device/local.json";
-  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: { ...process.env, AGENT_DEVICE_DAEMON_AUTH_TOKEN: "leak" } });
+  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: { PATH: process.env.PATH, HOME: "/home/device-test", LANG: "en_US.UTF-8", AGENT_DEVICE_DAEMON_AUTH_TOKEN: "leak", AGENT_DEVICE_CONFIG: "/evil", ANTHROPIC_API_KEY: "secret-provider", NODE_OPTIONS: "--require /tmp/evil.js" } });
   const result = await client.run({ host, lease: lease() }, "fill", ["@e3", "--text-stdin", "--settle"], { signal: new AbortController().signal, stdin: "secret words" });
-  const data = agentDeviceData(result, "fill") as { argv: string[]; input: string; env: string[] };
+  const data = agentDeviceData(result, "fill") as { argv: string[]; input: string; env: Record<string, string> };
   assert.deepEqual(data.argv, [
     "--config",
     "/state/agent-device/local.json",
@@ -185,7 +151,16 @@ test("the runner: the toolchain's CLI under this Node, the host's config, no tok
     "--settle"
   ]);
   assert.equal(data.input, "secret words");
-  assert.deepEqual(data.env, []);
+  assert.equal(data.env.HOME, "/home/device-test");
+  assert.equal(data.env.LANG, "en_US.UTF-8");
+  for (const key of ["AGENT_DEVICE_DAEMON_AUTH_TOKEN", "AGENT_DEVICE_CONFIG", "ANTHROPIC_API_KEY", "NODE_OPTIONS"]) assert.equal(data.env[key], undefined, key);
+  host.agentDeviceCommand = () => ({ command: process.execPath, args: [cli.path], env: { HOME: "/host/home", AGENT_DEVICE_HOME: "/host/state" } });
+  const ios = await client.run({ host, lease: lease({ platform: "ios", deviceId: "UDID" }) }, "snapshot", ["-i"], { signal: new AbortController().signal });
+  const iosData = (ios.json as { data: { argv: string[]; env: Record<string, string> } }).data;
+  const iosArgv = iosData.argv;
+  assert.equal(iosData.env.HOME, "/host/home");
+  assert.equal(iosData.env.AGENT_DEVICE_HOME, "/host/state");
+  assert.deepEqual(iosArgv.slice(4), ["--platform", "ios", "--udid", "UDID", "--json", "snapshot", "-i"]);
   assert.ok(!data.argv.some((arg) => arg.includes("secret") || arg.includes("leak")));
 });
 
@@ -201,7 +176,9 @@ test("the runner: a one-step batch reads its steps from /dev/stdin", async (t) =
 });
 
 test("the runner: a host's own command wins; missing config, missing CLI, timeouts and aborts refuse", async (t) => {
-  const slow = await fakeCli(`setTimeout(() => console.log("{}"), 30_000);`);
+  const slow = await fakeCli(`import { writeFileSync } from "node:fs";
+    writeFileSync(new URL("./started", import.meta.url), "ready");
+    setTimeout(() => console.log("{}"), 30_000);`);
   t.after(() => rm(slow.dir, { recursive: true, force: true }));
   const host = new FakeDeviceHost();
   const client = createAgentDeviceClient({ toolchain: toolchain(null), env: process.env });
@@ -214,14 +191,18 @@ test("the runner: a host's own command wins; missing config, missing CLI, timeou
   assert.ok(isDeviceError(noCli) && /not installed/.test(noCli.message));
 
   host.agentDeviceCommand = () => ({ command: process.execPath, args: [slow.path], env: {} });
-  const started = Date.now();
   const timedOut = await client.run({ host, lease: lease() }, "snapshot", [], { signal, timeoutMs: 200 }).catch((error: unknown) => error);
   assert.ok(isDeviceError(timedOut) && /timed out/.test(timedOut.message), String(timedOut));
-  assert.ok(Date.now() - started < 10_000);
 
   const abort = new AbortController();
+  t.after(() => abort.abort());
+  const watcher = watch(slow.dir);
+  t.after(() => watcher.close());
+  const launched = once(watcher, "change");
   const pending = client.run({ host, lease: lease() }, "snapshot", [], { signal: abort.signal });
-  setTimeout(() => abort.abort(), 50);
+  await Promise.race([launched, pending.then(() => { throw new Error("the stalled fixture exited before cancellation"); })]);
+  watcher.close();
+  abort.abort();
   const cancelled = await pending.catch((error: unknown) => error);
   assert.ok(isDeviceError(cancelled) && cancelled.code === "CANCELLED");
 

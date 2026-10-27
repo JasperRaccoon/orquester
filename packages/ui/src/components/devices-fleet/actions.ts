@@ -19,8 +19,8 @@ export type FleetApi = Pick<ApiClient, "setDeviceHostDraining" | "destroyDeviceH
  * Open the chat that holds `lease` with its Device panel on that lease. The chat opens through
  * the session deep link (the daemon says which project it is in), which leaves the fleet view.
  */
-export function openLeaseInChat(lease: Pick<DeviceLeaseSummary, "id" | "threadId">, options: { phone?: boolean } = {}): void {
-  showDeviceInPanel({ threadId: lease.threadId, leaseId: lease.id }, options);
+export function openLeaseInChat(lease: Pick<DeviceLeaseSummary, "id" | "threadId">): void {
+  showDeviceInPanel({ threadId: lease.threadId, leaseId: lease.id });
   requestSessionDeepLink({ sessionId: lease.threadId });
 }
 

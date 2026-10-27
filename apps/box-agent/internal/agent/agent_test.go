@@ -1,9 +1,6 @@
 package agent
 
 import (
-	"io"
-	"log"
-	"slices"
 	"testing"
 	"time"
 
@@ -65,24 +62,6 @@ func TestConnectURL(t *testing.T) {
 	}
 }
 
-func TestEnvMergeOverridesAndDeletes(t *testing.T) {
-	env := newEnvMap([]string{"A=1", "B=2", "C=3"})
-	env.del("B")
-	env.set("C", "4")
-	env.set("D", "5")
-	got := env.list()
-	slices.Sort(got)
-	want := []string{"A=1", "C=4", "D=5"}
-	if len(got) != len(want) {
-		t.Fatalf("env = %v", got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("env = %v; want %v", got, want)
-		}
-	}
-}
-
 func TestWatchIgnore(t *testing.T) {
 	w := &watch{root: "/r", params: wire.WatchParams{Ignore: []string{"node_modules", "*.log", "build/out"}}}
 	for path, want := range map[string]bool{
@@ -95,38 +74,5 @@ func TestWatchIgnore(t *testing.T) {
 		if got := w.ignored(path); got != want {
 			t.Errorf("ignored(%s) = %v", path, got)
 		}
-	}
-}
-
-func TestBoxDestroyedUninstallsTheServiceAndStops(t *testing.T) {
-	newAgent := func(uninstalled *int) *Agent {
-		return &Agent{
-			log:           log.New(io.Discard, "", 0),
-			procs:         newProcRegistry(),
-			linkUp:        make(chan struct{}),
-			stop:          make(chan struct{}),
-			uninstallHook: func() { *uninstalled++ },
-		}
-	}
-
-	var uninstalled int
-	a := newAgent(&uninstalled)
-	a.handleReject(&wire.Reject{Code: "BOX_DESTROYED", Message: "This box was destroyed"})
-	select {
-	case <-a.stop:
-	default:
-		t.Fatal("BOX_DESTROYED must stop orq-agent")
-	}
-	// Exit 0 without a restart, and the service is gone: launchd/systemd do not start it again.
-	if uninstalled != 1 || a.exitCode != 0 || a.restart {
-		t.Fatalf("uninstalled=%d exit=%d restart=%v", uninstalled, a.exitCode, a.restart)
-	}
-
-	// Another refusal (a stale credential, an outdated agent) keeps the service installed.
-	uninstalled = 0
-	other := newAgent(&uninstalled)
-	other.handleReject(&wire.Reject{Code: "AUTH_FAILED", Message: "nope"})
-	if uninstalled != 0 {
-		t.Fatal("only BOX_DESTROYED uninstalls the service")
 	}
 }

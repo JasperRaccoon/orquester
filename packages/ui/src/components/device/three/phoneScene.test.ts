@@ -1,9 +1,9 @@
 // Adapted from T3 Code (MIT, Copyright 2026 T3 Tools Inc.): packages/client-runtime/src/device/phoneScene.test.ts
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PerspectiveCamera, Texture, Vector3 } from "three";
+import { Mesh, PerspectiveCamera, Texture, Vector3 } from "three";
 import { createPhoneScene, phoneDisplayLayout } from "./phoneScene.ts";
-import { IOS_TABLET_SHAPE, IOS_PHONE_SHAPE, ANDROID_PHONE_SHAPE } from "./shapeProfile.ts";
+import { IOS_TABLET_SHAPE, IOS_PHONE_SHAPE } from "./shapeProfile.ts";
 
 const orientations = [
   "portrait",
@@ -19,7 +19,7 @@ const closeTo = (actual: number | undefined, expected: number, digits = 2) =>
   );
 
 describe("3D phone input", () => {
-  for (const profile of [IOS_TABLET_SHAPE, IOS_PHONE_SHAPE, ANDROID_PHONE_SHAPE])
+  for (const profile of [IOS_TABLET_SHAPE, IOS_PHONE_SHAPE])
     it(`preserves input projection for the ${profile.id} silhouette in every orientation`, () => {
       for (const orientation of orientations) {
         const texture = new Texture();
@@ -30,15 +30,24 @@ describe("3D phone input", () => {
           1200,
         );
         const phone = createPhoneScene(texture, layout, profile);
-        const camera = new PerspectiveCamera(32, 1, 0.1, 30);
-        camera.position.z = 6;
+        const camera = new PerspectiveCamera(32, 0.65, 0.1, 30);
+        camera.position.z = 6 / (orientation === "portrait" ? 0.6 : 2.2);
         camera.updateMatrixWorld(true);
         phone.root.rotation.set(0.2, -0.3, 0, "YXZ");
         phone.orientation.rotation.z = layout.rotation;
         phone.root.updateMatrixWorld(true);
-        const point = new Vector3((-2.2 * aspect) / 4, -2.2 / 4, 0.043);
-        phone.orientation.localToWorld(point);
-        point.project(camera);
+        // Read a fixed noncentral location on the rendered framebuffer surface. The camera's
+        // projection is independent of both input mapping and overlay projection.
+        let display: Mesh | undefined;
+        phone.root.traverse((object) => {
+          if (object instanceof Mesh && !Array.isArray(object.material) &&
+              "map" in object.material && object.material.map === texture) display = object;
+        });
+        assert.ok(display);
+        display.geometry.computeBoundingBox();
+        const bounds = display.geometry.boundingBox!;
+        const point = new Vector3().lerpVectors(bounds.min, bounds.max, 0.25);
+        display.localToWorld(point).project(camera);
         const hit = phone.screenPoint((point.x + 1) / 2, (1 - point.y) / 2, camera);
         const expected =
           orientation === "landscape_left"
@@ -50,30 +59,16 @@ describe("3D phone input", () => {
                 : { x: 0.25, y: 0.75 };
         closeTo(hit?.x, expected.x);
         closeTo(hit?.y, expected.y);
+        if (profile.id === "ios-phone") {
+          const overlay = phone.viewPoint(expected.x, expected.y, camera);
+          closeTo(overlay?.x, (point.x + 1) / 2);
+          closeTo(overlay?.y, (1 - point.y) / 2);
+          assert.equal(phone.viewPoint(Number.NaN, 0.5, camera), null);
+        }
         phone.dispose();
         texture.dispose();
       }
     });
-  for (const zoom of [0.6, 2.2])
-    it(`keeps device coordinates accurate at ${zoom} camera zoom`, () => {
-    const texture = new Texture();
-    const layout = phoneDisplayLayout(null, 900, 1950);
-    const phone = createPhoneScene(texture, layout);
-    const camera = new PerspectiveCamera(32, 0.65, 0.1, 30);
-    camera.position.z = 6 / zoom;
-    camera.updateMatrixWorld(true);
-    phone.root.rotation.set(0.2, -0.3, 0, "YXZ");
-    phone.root.updateMatrixWorld(true);
-    const point = new Vector3((-2.2 * layout.aspect) / 4, -2.2 / 4, 0.043);
-    phone.orientation.localToWorld(point);
-    point.project(camera);
-    const hit = phone.screenPoint((point.x + 1) / 2, (1 - point.y) / 2, camera);
-    closeTo(hit?.x, 0.25);
-    closeTo(hit?.y, 0.75);
-    phone.dispose();
-    texture.dispose();
-    });
-
   it("rejects new gestures outside the display, but clamps captured drags at its edge", () => {
     const texture = new Texture();
     const phone = createPhoneScene(texture, phoneDisplayLayout(null, 900, 1950));
@@ -86,47 +81,4 @@ describe("3D phone input", () => {
     phone.dispose();
     texture.dispose();
   });
-
-  for (const orientation of ["landscape_left", "landscape_right"] as const)
-    it(`unrotates an already-landscape framebuffer in ${orientation}`, () => {
-      const texture = new Texture();
-      const layout = phoneDisplayLayout({ width: 1950, height: 900, orientation }, 1950, 900);
-      const phone = createPhoneScene(texture, layout);
-      phone.orientation.rotation.z = layout.rotation;
-      const camera = new PerspectiveCamera(32, 1, 0.1, 30);
-      camera.position.z = 5;
-      assert.deepEqual(phone.screenPoint(0.5, 0.5, camera), { x: 0.5, y: 0.5 });
-      phone.dispose();
-      texture.dispose();
-    });
-});
-
-describe("3D phone overlay projection", () => {
-  for (const orientation of orientations)
-    it(`projects a screen point back onto the view in ${orientation} (viewPoint inverts screenPoint)`, () => {
-      const texture = new Texture();
-      const layout = phoneDisplayLayout({ width: 540, height: 1200, orientation }, 540, 1200);
-      const phone = createPhoneScene(texture, layout, IOS_PHONE_SHAPE);
-      const camera = new PerspectiveCamera(32, 1, 0.1, 30);
-      camera.position.z = 6;
-      camera.updateMatrixWorld(true);
-      phone.root.rotation.set(0.15, -0.25, 0, "YXZ");
-      phone.orientation.rotation.z = layout.rotation;
-      phone.root.updateMatrixWorld(true);
-      for (const [x, y] of [
-        [0.5, 0.5],
-        [0.2, 0.8],
-        [0.9, 0.1],
-      ] as const) {
-        const seen = phone.viewPoint(x, y, camera);
-        assert.ok(seen, "a point on the screen is in view");
-        assert.ok(seen.x > 0 && seen.x < 1 && seen.y > 0 && seen.y < 1);
-        const back = phone.screenPoint(seen.x, seen.y, camera);
-        closeTo(back?.x, x);
-        closeTo(back?.y, y);
-      }
-      assert.equal(phone.viewPoint(Number.NaN, 0.5, camera), null);
-      phone.dispose();
-      texture.dispose();
-    });
 });

@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 
 import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
 import { LOCAL_EXECUTOR } from "../../android/executor.ts";
+import type { DeviceToolchain } from "../../toolchain/index.ts";
 import { isProcessAlive, waitForExit } from "../../android/procs.ts";
-import { boxAgentDeviceConfigPath } from "./agent-device-config.ts";
 import { BoxAndroidHost, type BoxAndroidHostDeps } from "./android-host.ts";
 import { androidRentalSpec, boxAvdState, boxGolden } from "./android-remote.ts";
 import { createFakeLinuxBox, type FakeLinuxBox, type FakeLinuxBoxOptions } from "./android-testing.ts";
@@ -65,13 +65,15 @@ interface Harness {
 }
 
 const cleanups: (() => Promise<void>)[] = [];
-after(async () => {
+afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
 async function harness(options: FakeLinuxBoxOptions = {}, recordOverrides: Partial<StoredBox> = {}): Promise<Harness> {
-  const box = await createFakeLinuxBox(options);
+  const box = await createFakeLinuxBox({ ...options, provider: recordOverrides.provider === "byo" ? "byo" : "blacksmith" });
   const appDir = await mkdtemp(join(tmpdir(), "orq-android-box-app-"));
+  const cliPath = join(appDir, "agent-device.mjs");
+  await writeFile(cliPath, "");
   cleanups.push(async () => {
     await box.cleanup();
     await rm(appDir, { recursive: true, force: true });
@@ -96,9 +98,7 @@ async function harness(options: FakeLinuxBoxOptions = {}, recordOverrides: Parti
         settings: () => settings,
         activeLeases: () => leases,
         logger: quiet,
-        root: box.root,
-        localAgentDevice: async () => "/opt/agent-device/bin/agent-device.mjs",
-        timing: { bootMs: 20_000, commandMs: 20_000 },
+        toolchain: { toolBin: () => cliPath } as unknown as DeviceToolchain,
         ...overrides
       });
       // A failed test still stops what its host started (forwards, the hub, emulators).
@@ -113,7 +113,7 @@ const signal = () => AbortSignal.timeout(60_000);
 
 describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
   it("prepares a box the device caches restored: nothing installed, hub and agent-device forwarded, the token in no argv or env", async () => {
-    const h = await harness();
+    const h = await harness({ memAvailableBytes: 4 * 1024 ** 3 });
     const host = h.make();
     const steps: string[] = [];
     await host.prepare(h.box.connection, signal(), (progress) => steps.push(`${progress.step}:${progress.state}`));
@@ -124,8 +124,7 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     assert.ok(steps.includes("tools:skipped") && steps.includes("android-sdk:skipped"));
     // Nothing installed: no npm, sdkmanager, avdmanager or apt.
     assert.ok(!h.box.execs.some((args) => /npm ci|npm install|sdkmanager|avdmanager|apt-get install/.test(args.join(" "))), h.box.execs.map((a) => a.join(" ")).join("\n"));
-    // 16 vCPU: 8 emulators (one per two vCPUs), never more than 16.
-    assert.equal(host.capacity().total, 8, "the fake box's 16 CPUs and 64 GiB provide eight slots");
+    assert.deepEqual(host.capacity(), { used: 0, total: 0 });
     // The hub, through its forward, wants its token.
     const origin = host.hubOrigin()!;
     const token = host.hubToken()!;
@@ -134,7 +133,6 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     assert.equal((await fetch(`${origin}/api/devices`, { headers: { authorization: `Bearer ${token}` } })).status, 200);
     // Secrets: never in an argument or an env value of any command; the hub log is redacted.
     const config = host.agentDeviceConfigPath()!;
-    assert.equal(config, boxAgentDeviceConfigPath(h.appDir, host.id));
     assert.equal((await stat(config)).mode & 0o777, 0o600);
     const agentToken = (JSON.parse(await readFile(config, "utf8")) as { daemonAuthToken: string; daemonBaseUrl: string }).daemonAuthToken;
     for (const secret of [token, agentToken]) {
@@ -143,14 +141,19 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     }
     const hubLog = await readFile(join(h.box.root, "logs", "hub.log"), "utf8");
     assert.ok(hubLog.includes("token=<redacted>") && !hubLog.includes(token));
-    assert.deepEqual(host.agentDeviceCommand(), { command: process.execPath, args: ["/opt/agent-device/bin/agent-device.mjs"], env: {} });
+    await assert.rejects(
+      host.boot({ leaseId: "no-memory", profile, fresh: true }, signal()),
+      { code: "DEVICE_CAPACITY", status: 503 }
+    );
+    assert.deepEqual(await h.box.emulatorArgs(), [], "a refused boot never starts an emulator");
     await host.teardown();
   });
 
   it("boots read-only instances from orq-golden with its GPU mode; adb runs with the box's private env; release stops them", async () => {
-    const h = await harness();
+    const h = await harness({ cacheGpu: "swangle_indirect" });
     const host = h.make();
     await host.prepare(h.box.connection, signal());
+    assert.deepEqual(host.capacity(), { used: 0, total: 8 }, "the fake box's 16 CPUs and 64 GiB provide eight slots");
     const [a, b] = await Promise.all(
       ["lease-a", "lease-b"].map(async (id) => {
         h.leases.push(lease(id));
@@ -161,13 +164,11 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     );
     assert.notEqual(a!.deviceId, b!.deviceId);
     assert.deepEqual(a!.stream, { kind: "serve-emu", deviceParam: a!.deviceId });
-    // The cache's AVD is tuned like one made here: Pixel 9 at 720×1616 @280.
-    assert.deepEqual(a!.screen, { width: 411, height: 923, scale: 1.75 });
     const args = await h.box.emulatorArgs();
     assert.equal(args.length, 2);
     for (const line of args) {
       assert.match(line, /^-read-only -avd orq-pixel-9 /);
-      assert.match(line, /-gpu swiftshader_indirect/);
+      assert.match(line, /-gpu swangle_indirect/);
       assert.match(line, /-snapshot orq-golden -no-snapshot-save$/);
     }
     assert.equal(host.capacity().used, 2);
@@ -181,27 +182,12 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     await host.release(h.leases[0]!);
     assert.equal(await waitForExit(pidA, 5_000), true);
     assert.equal(host.capacity().used, 1);
-    // A lost lease naming a serial a golden boot holds now leaves that emulator running.
-    const recordB = (host as unknown as { emulators: Map<string, { leaseId: string | null; golden: boolean }> }).emulators.get(b!.deviceId)!;
-    Object.assign(recordB, { leaseId: null, golden: true });
+    // A stale lease cannot stop another current lease using the same serial.
+    const pidB = await pidOf(b!.deviceId);
     await host.release({ ...lease("lost-one"), deviceId: b!.deviceId, state: "lost" });
-    assert.equal(await isProcessAlive(await pidOf(b!.deviceId)), true);
-    Object.assign(recordB, { leaseId: "lease-b", golden: false });
+    assert.equal(await isProcessAlive(pidB), true, "the current lease emulator survives a stale release");
     await host.teardown();
     assert.equal(host.capacity().used, 0);
-  });
-
-  it("refuses a boot when the box has no memory beyond the host reserve", async () => {
-    const h = await harness({ memAvailableBytes: 4 * 1024 ** 3 });
-    const host = h.make();
-    await host.prepare(h.box.connection, signal());
-    assert.deepEqual(host.capacity(), { used: 0, total: 0 });
-    await assert.rejects(
-      host.boot({ leaseId: "no-memory", profile, fresh: true }, signal()),
-      { code: "DEVICE_CAPACITY", status: 503 }
-    );
-    assert.deepEqual(await h.box.emulatorArgs(), [], "a refused boot never starts an emulator");
-    await host.teardown();
   });
 
   it("boots cold when the snapshot does not load", async () => {
@@ -280,18 +266,6 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
 });
 
 describe("the device cache's AVDs in a box", { concurrency: false }, () => {
-  it("a restored AVD is the cache's: leases boot from its golden with the GPU mode the cache recorded", async () => {
-    const h = await harness({ cacheGpu: "swangle_indirect" });
-    const host = h.make();
-    await host.prepare(h.box.connection, signal());
-    assert.equal(host.cacheState(), "hit");
-    h.leases.push(lease("lease-a"));
-    await host.boot({ leaseId: "lease-a", profile, fresh: true }, signal());
-    const [line] = await h.box.emulatorArgs();
-    assert.match(line!, /-gpu swangle_indirect/);
-    assert.match(line!, /-snapshot orq-golden -no-snapshot-save$/);
-    await host.teardown();
-  });
 
   it("an older cache's untuned AVD (no markers), another config or another emulator is not trusted", async () => {
     const legacy = await createFakeLinuxBox({ cacheAvds: "legacy" });

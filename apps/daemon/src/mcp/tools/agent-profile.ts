@@ -199,7 +199,7 @@ function authoringView(agent: Agent): Record<string, unknown> {
 // get_agent_profile
 // ---------------------------------------------------------------------------
 
-/** Factories here: one instance in two fields is listed as a "$ref" (see `catalog/schema-refs.test.ts`). */
+/** Factories here: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). */
 const agentArg = () => z.enum(AGENT_PROFILE_AGENTS);
 
 async function profileSummary(client: ProfileClient): Promise<Record<string, unknown>> {

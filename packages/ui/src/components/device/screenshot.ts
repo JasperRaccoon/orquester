@@ -5,18 +5,10 @@
  * (`flatMediaRotation`). Android emulators rotate their own framebuffer: no turn.
  */
 
-import { flatMediaRotation } from "./three/flat";
-import type { DeviceOrientation, DevicePlatform } from "./three/types";
-
 export type ScreenshotTurn = 0 | 90 | -90 | 180;
 
-/** The clockwise turn that makes a captured frame of `frame` size upright. */
-export function screenshotTurn(platform: DevicePlatform, frame: { width: number; height: number }, orientation: DeviceOrientation): ScreenshotTurn {
-  return flatMediaRotation(platform, frame, orientation);
-}
-
 /** The part of a 2D context the turn uses. */
-export interface TurnContext<S> {
+interface TurnContext<S> {
   translate(x: number, y: number): void;
   rotate(angle: number): void;
   drawImage(source: S, x: number, y: number): void;

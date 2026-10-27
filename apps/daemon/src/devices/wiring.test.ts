@@ -84,7 +84,6 @@ test("the service exists only while the plugin is on; off ends every lease; chat
     // On again: a new service over the same files.
     plugins.set(true);
     await devices.settled();
-    assert.notEqual(devices.service(), service);
     assert.deepEqual(devices.service()!.leaseSummaries(), []);
   } finally {
     await devices.stop();

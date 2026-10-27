@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
@@ -16,8 +16,9 @@ import { recordingSync, recordingTokens } from "./testing.ts";
 
 const quiet = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
 
-async function setup(auth: Record<string, unknown>) {
+async function setup(t: TestContext, auth: Record<string, unknown>) {
   const home = await mkdtemp(join(tmpdir(), "opencode-box-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(join(home, ".local", "bin"), { recursive: true });
   await writeFile(join(home, "sh"), '#!/bin/sh\nprintf "%s" "/usr/bin:/bin"\n', "utf8");
   await chmod(join(home, "sh"), 0o755);
@@ -25,6 +26,7 @@ async function setup(auth: Record<string, unknown>) {
   await symlink(peer.bin, join(home, ".local", "bin", "opencode"));
   // The host's own OpenCode config and logins (the source of truth; never synced).
   const xdg = await mkdtemp(join(tmpdir(), "opencode-box-xdg-"));
+  t.after(() => rm(xdg, { recursive: true, force: true }));
   await mkdir(join(xdg, "config", "opencode"), { recursive: true });
   await mkdir(join(xdg, "data", "opencode"), { recursive: true });
   await writeFile(
@@ -34,6 +36,7 @@ async function setup(auth: Record<string, unknown>) {
   );
   await writeFile(join(xdg, "data", "opencode", "auth.json"), JSON.stringify(auth), "utf8");
   const appdir = await mkdtemp(join(tmpdir(), "opencode-box-appdir-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const boxes = createAgentHostBoxes({
     appdir,
@@ -42,7 +45,7 @@ async function setup(auth: Record<string, unknown>) {
     sync: recordingSync(),
     logger: quiet
   });
-  const fake = createFakeContext({ boxes });
+  const fake = createFakeContext({ boxes, tmpDir: () => join(appdir, "tmp") });
   const box: HostThreadBox = {
     boxId: connection.boxId,
     socketPath: "/nonexistent/relay.sock",
@@ -60,8 +63,8 @@ async function setup(auth: Record<string, unknown>) {
   return { peer, appdir, connection, fake, box, hostEnv };
 }
 
-test("OpenCode in a box refuses a host whose OpenCode is signed in with OAuth (spec §7, §17)", async () => {
-  const { peer, fake, box, hostEnv } = await setup({ anthropic: { type: "oauth", refresh: "never-leaves", access: "x", expires: 0 } });
+test("OpenCode in a box refuses a host whose OpenCode is signed in with OAuth (spec §7, §17)", async (t) => {
+  const { peer, fake, box, hostEnv } = await setup(t, { anthropic: { type: "oauth", refresh: "never-leaves", access: "x", expires: 0 } });
   try {
     await assert.rejects(
       prepareOpenCodeBoxServer({
@@ -76,9 +79,10 @@ test("OpenCode in a box refuses a host whose OpenCode is signed in with OAuth (s
   }
 });
 
-test("opencode serve runs in the box, reached through a forwarded port; API keys and bridged servers ride its config content", async () => {
-  const { peer, appdir, connection, fake, box, hostEnv } = await setup({ openrouter: { type: "api", key: "sk-or-host-key" } });
+test("opencode serve runs in the box, reached through a forwarded port; API keys and bridged servers ride its config content", async (t) => {
+  const { peer, appdir, connection, fake, box, hostEnv } = await setup(t, { openrouter: { type: "api", key: "sk-or-host-key" } });
   const project = await mkdtemp(join(tmpdir(), "opencode-box-project-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
   const abort = new AbortController();
   const pool = new OpenCodeServerPool({
     logger: quiet,
@@ -123,6 +127,7 @@ test("opencode serve runs in the box, reached through a forwarded port; API keys
     }, "the server's bridge entries removed");
   } finally {
     abort.abort();
+    await pool.stopAll();
     peer.cleanup();
   }
 });

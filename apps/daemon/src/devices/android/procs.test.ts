@@ -6,8 +6,8 @@ import test from "node:test";
 import { descendantsOf, establishedOnPort, isProcessAlive, parseMemAvailable, parseProcNetTcp, parseProcStat, processMatches, waitForExit } from "./procs.ts";
 
 test("stat: comm with spaces and parentheses, ppid, pgrp, cpu ticks", () => {
-  const stat = parseProcStat("4242 (qemu-system (x) 86) S 4240 4240 4240 0 -1 4194560 1 0 0 0 1500 250 0 0 20 0 9 0");
-  assert.deepEqual(stat, { pid: 4242, comm: "qemu-system (x) 86", state: "S", ppid: 4240, pgrp: 4240, cpuTicks: 1750 });
+  const stat = parseProcStat("4242 (qemu-system (x) 86) S 4240 4240 4240 0 -1 4194560 1 0 0 0 1500 250 0 0 20 0 9 0 123456 8000000 900");
+  assert.deepEqual(stat, { pid: 4242, comm: "qemu-system (x) 86", state: "S", ppid: 4240, pgrp: 4240, cpuTicks: 1750, startTicks: 123456 });
   assert.equal(parseProcStat("garbage"), null);
 });
 
@@ -45,9 +45,4 @@ test("processMatches: a live process is ours only with the appdir marker in its 
   }
   assert.equal(await waitForExit(child.pid!, 5_000), true);
   assert.equal(await isProcessAlive(child.pid!), false);
-});
-
-test("stat: the start time (field 22) when the line has it", () => {
-  const line = "4242 (qemu-system-x86) S 4240 4240 4240 0 -1 4194560 1 0 0 0 1500 250 0 0 20 0 9 0 123456 8000000 900";
-  assert.equal(parseProcStat(line)?.startTicks, 123456);
 });

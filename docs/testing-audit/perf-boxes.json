@@ -1,0 +1,284 @@
+{
+  "base": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "incoming": "ee5c3249",
+  "scope": "Implemented incoming ee5 boxes test-helper cleanup: four exact incoming declarations deleted,95test LOC removed; unused spawnTar option removed while actual native extraction fix remains. No baseline or surviving-owner count is added.",
+  "tests": [
+    {
+      "path": "apps/daemon/src/boxes/testing.test.ts",
+      "line": 38,
+      "name": "local tar writes drain the source when a successful extractor closes stdin before source EOF",
+      "disposition": "DELETE",
+      "independentSource": "No independent user/public API/protocol requirement specifies LocalBoxConnection test-double collaborator/error identity. Product streaming/abort contracts exist, but remain owned by real native public integration scenarios listed separately.",
+      "reason": "The fake extractor accepts invalid archive bytes, destroys its writable stream, emits exit0 and explicitly ends the source with padding. Asserting byte count7 and readableEnded only proves the arranged fake lifecycle; no real tar or user-visible downloaded/uploaded artifact is checked.",
+      "failedBar": "Independent contract, stable product seam and unique protection fail; fake implements the successful extraction being assumed.",
+      "independentOracleAssessment": "Expected values/flags/errors are arranged by the injected fake; no independent native artifact establishes extraction or process termination.",
+      "stableSeamAssessment": "localBoxConnection and spawnTar are test-only support APIs.",
+      "refactorResistanceAssessment": "Depends on private child EventEmitter/stdin/exit sequencing and/or exact error identity/message.",
+      "uniqueProtectionAssessment": "No application runtime consumer; direct fixture conformance is redundant maintenance beside actual native product archive/cancel contracts.",
+      "survivingOwners": [
+        {
+          "path": "apps/daemon/src/boxes/temporary/tools.test.ts",
+          "owner": "download: tar can close its input before the box finishes; the entire source still decides success",
+          "contract": "Real native tar plus closure receipt verifies exact file artifact/byte count, late source failure, cancellation,4GiB cap and nonzero extractor status. This is the stronger public user-transfer owner, not proof of every local helper call shape.",
+          "sixBar": {
+            "independentContract": "TemporaryBoxTools directory download is atomic and depends on complete remote stream success; cancellation/size/errors cannot be hidden by early tar EOF.",
+            "realRegressionDetection": "Actual native tar can finish before sourceEOF, but a late failure/cancel/cap must refuse publication and successful padding must still deliver exact bytes.",
+            "independentOracle": "Real payload.txt bytes/byte count, literal refusal codes, no final or staging artifact after failure, native tar exit/error.",
+            "stableSeam": "TemporaryBoxTools.download with real native extraction and filesystem artifacts.",
+            "refactorResistance": "Receipt synchronizes real fd closure; no private child object/kill boolean or source snapshot is asserted.",
+            "uniqueProtection": "Only integrated tool owner combines native extraction, bounded full-source validation, cancellation and atomic rename."
+          }
+        },
+        {
+          "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+          "owner": "tar both ways",
+          "contract": "Actual Go/TypeScript box protocol + native tar verifies file/link/mode content, excluding filtered files, missing path refusal and a truncated gzipped source failure.",
+          "sixBar": {
+            "independentContract": "Go\u2194TypeScript box channel tar-read/tar-write protocol preserves archive contents/links/modes and rejects truncated compressed input.",
+            "realRegressionDetection": "Channel/tar implementations lose files or link/mode semantics, include excluded paths, accept truncated gzip, or hide missing paths.",
+            "independentOracle": "Actual native filesystem A/link/mode artifacts and literal missing/truncation rejection; external tar/Go independently consume frames.",
+            "stableSeam": "Real built Go agent, WebSocket box channel and native tar/archive filesystem boundary.",
+            "refactorResistance": "Wire/real artifact outcomes survive helper implementation and local-double changes.",
+            "uniqueProtection": "Local fixture tests cannot verify actual Go\u2194TS interoperability or compressed wire failures."
+          }
+        },
+        {
+          "path": "apps/daemon/src/boxes/sync/config-sync.test.ts",
+          "owner": "a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing",
+          "contract": "Existing public sync integration naturally exercises the repaired native local writeTar fixture using actual valid archives and real filesystem outcomes.",
+          "sixBar": {
+            "independentContract": "Initial configuration synchronization streams a compressed archive preserving actual file bytes/modes and durable baseline, then sends no unnecessary update for unchanged state.",
+            "realRegressionDetection": "Tar setup fails/hangs on valid stream close, loses mode/data, or a fresh baseline causes repeated full transfer.",
+            "independentOracle": "Real native extracted files/modes and known persisted baseline; settled unchanged pass performs no new semantic transfer/hash work.",
+            "stableSeam": "BoxConfigSyncService with actual native tar local fixture and on-disk output.",
+            "refactorResistance": "Required content/state and externally meaningful transfer work remain, independent of private spawn override.",
+            "uniqueProtection": "Exercises actual repaired local writeTar during a meaningful product sync; separate Go owner protects remote protocol."
+          }
+        },
+        {
+          "path": "apps/daemon/src/devices/hosts/box/remote.test.ts",
+          "owner": "execRemote collects output, reports exit codes and times out",
+          "contract": "Actual native subprocess exit receipts prove timeout and caller cancellation terminate children; a fake kill boolean is not retained as a duplicate assertion of native termination.",
+          "sixBar": {
+            "independentContract": "Device execRemote preserves exit/output and terminates actual child processes on deadline or caller abort.",
+            "realRegressionDetection": "Timeout/abort rejects but leaves the native child alive, loses caller cancellation reason or returns wrong output/exit code.",
+            "independentOracle": "Literal stdout/stderr/exit3 and actual child exit-signal receipt, independently supplied cancellation reason.",
+            "stableSeam": "Production execRemote over real native child process connection.",
+            "refactorResistance": "No fake kill boolean; native process receipts and public result/refusal survive collaborator refactors.",
+            "uniqueProtection": "This actual process owner supersedes invented local helper kill conformance; tar-transfer owners protect stream publication instead."
+          }
+        }
+      ]
+    },
+    {
+      "path": "apps/daemon/src/boxes/testing.test.ts",
+      "line": 49,
+      "name": "local tar writes reject an extractor failure even when its stdin closed early",
+      "disposition": "DELETE",
+      "independentSource": "No independent user/public API/protocol requirement specifies LocalBoxConnection test-double collaborator/error identity. Product streaming/abort contracts exist, but remain owned by real native public integration scenarios listed separately.",
+      "reason": "The fake emits a chosen exit2 and the helper rejects with its test-only message. No production caller uses this helper, and the application wire/native archive refusal is protected at actual Go-agent/public tool boundaries.",
+      "failedBar": "Stable product seam and unique protection fail; exact helper failure prose is not a user protocol contract.",
+      "independentOracleAssessment": "Expected values/flags/errors are arranged by the injected fake; no independent native artifact establishes extraction or process termination.",
+      "stableSeamAssessment": "localBoxConnection and spawnTar are test-only support APIs.",
+      "refactorResistanceAssessment": "Depends on private child EventEmitter/stdin/exit sequencing and/or exact error identity/message.",
+      "uniqueProtectionAssessment": "No application runtime consumer; direct fixture conformance is redundant maintenance beside actual native product archive/cancel contracts.",
+      "survivingOwners": [
+        {
+          "path": "apps/daemon/src/boxes/temporary/tools.test.ts",
+          "owner": "download: tar can close its input before the box finishes; the entire source still decides success",
+          "contract": "Real native tar plus closure receipt verifies exact file artifact/byte count, late source failure, cancellation,4GiB cap and nonzero extractor status. This is the stronger public user-transfer owner, not proof of every local helper call shape."
+        },
+        {
+          "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+          "owner": "tar both ways",
+          "contract": "Actual Go/TypeScript box protocol + native tar verifies file/link/mode content, excluding filtered files, missing path refusal and a truncated gzipped source failure."
+        },
+        {
+          "path": "apps/daemon/src/boxes/sync/config-sync.test.ts",
+          "owner": "a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing",
+          "contract": "Existing public sync integration naturally exercises the repaired native local writeTar fixture using actual valid archives and real filesystem outcomes."
+        },
+        {
+          "path": "apps/daemon/src/devices/hosts/box/remote.test.ts",
+          "owner": "execRemote collects output, reports exit codes and times out",
+          "contract": "Actual native subprocess exit receipts prove timeout and caller cancellation terminate children; a fake kill boolean is not retained as a duplicate assertion of native termination."
+        }
+      ]
+    },
+    {
+      "path": "apps/daemon/src/boxes/testing.test.ts",
+      "line": 58,
+      "name": "local tar writes preserve source failures and stop the extractor",
+      "disposition": "DELETE",
+      "independentSource": "No independent user/public API/protocol requirement specifies LocalBoxConnection test-double collaborator/error identity. Product streaming/abort contracts exist, but remain owned by real native public integration scenarios listed separately.",
+      "reason": "The test mutates a stopped boolean in its fake kill method, emits exit itself, and compares the exact arranged error object. It cannot establish that a native subprocess was terminated or that a user transfer remained atomic.",
+      "failedBar": "Independent product contract, stable seam/refactor resistance and unique protection fail; collaborator-shape/boolean kill illusion is weaker than real termination/transfer artifacts.",
+      "independentOracleAssessment": "Expected values/flags/errors are arranged by the injected fake; no independent native artifact establishes extraction or process termination.",
+      "stableSeamAssessment": "localBoxConnection and spawnTar are test-only support APIs.",
+      "refactorResistanceAssessment": "Depends on private child EventEmitter/stdin/exit sequencing and/or exact error identity/message.",
+      "uniqueProtectionAssessment": "No application runtime consumer; direct fixture conformance is redundant maintenance beside actual native product archive/cancel contracts.",
+      "survivingOwners": [
+        {
+          "path": "apps/daemon/src/boxes/temporary/tools.test.ts",
+          "owner": "download: tar can close its input before the box finishes; the entire source still decides success",
+          "contract": "Real native tar plus closure receipt verifies exact file artifact/byte count, late source failure, cancellation,4GiB cap and nonzero extractor status. This is the stronger public user-transfer owner, not proof of every local helper call shape."
+        },
+        {
+          "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+          "owner": "tar both ways",
+          "contract": "Actual Go/TypeScript box protocol + native tar verifies file/link/mode content, excluding filtered files, missing path refusal and a truncated gzipped source failure."
+        },
+        {
+          "path": "apps/daemon/src/boxes/sync/config-sync.test.ts",
+          "owner": "a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing",
+          "contract": "Existing public sync integration naturally exercises the repaired native local writeTar fixture using actual valid archives and real filesystem outcomes."
+        },
+        {
+          "path": "apps/daemon/src/devices/hosts/box/remote.test.ts",
+          "owner": "execRemote collects output, reports exit codes and times out",
+          "contract": "Actual native subprocess exit receipts prove timeout and caller cancellation terminate children; a fake kill boolean is not retained as a duplicate assertion of native termination."
+        }
+      ]
+    },
+    {
+      "path": "apps/daemon/src/boxes/testing.test.ts",
+      "line": 81,
+      "name": "local tar writes propagate extractor spawn failures",
+      "disposition": "DELETE",
+      "independentSource": "No independent user/public API/protocol requirement specifies LocalBoxConnection test-double collaborator/error identity. Product streaming/abort contracts exist, but remain owned by real native public integration scenarios listed separately.",
+      "reason": "The injected spawn function returns a handmade EventEmitter and emits the exact expected error object on a microtask. This verifies private test-helper forwarding and requires a new spawnTar seam with no runtime caller.",
+      "failedBar": "Independent product contract, stable seam and unique protection fail; dead-seam helper test.",
+      "independentOracleAssessment": "Expected values/flags/errors are arranged by the injected fake; no independent native artifact establishes extraction or process termination.",
+      "stableSeamAssessment": "localBoxConnection and spawnTar are test-only support APIs.",
+      "refactorResistanceAssessment": "Depends on private child EventEmitter/stdin/exit sequencing and/or exact error identity/message.",
+      "uniqueProtectionAssessment": "No application runtime consumer; direct fixture conformance is redundant maintenance beside actual native product archive/cancel contracts.",
+      "survivingOwners": [
+        {
+          "path": "apps/daemon/src/boxes/temporary/tools.test.ts",
+          "owner": "download: tar can close its input before the box finishes; the entire source still decides success",
+          "contract": "Real native tar plus closure receipt verifies exact file artifact/byte count, late source failure, cancellation,4GiB cap and nonzero extractor status. This is the stronger public user-transfer owner, not proof of every local helper call shape."
+        },
+        {
+          "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+          "owner": "tar both ways",
+          "contract": "Actual Go/TypeScript box protocol + native tar verifies file/link/mode content, excluding filtered files, missing path refusal and a truncated gzipped source failure."
+        },
+        {
+          "path": "apps/daemon/src/boxes/sync/config-sync.test.ts",
+          "owner": "a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing",
+          "contract": "Existing public sync integration naturally exercises the repaired native local writeTar fixture using actual valid archives and real filesystem outcomes."
+        },
+        {
+          "path": "apps/daemon/src/devices/hosts/box/remote.test.ts",
+          "owner": "execRemote collects output, reports exit codes and times out",
+          "contract": "Actual native subprocess exit receipts prove timeout and caller cancellation terminate children; a fake kill boolean is not retained as a duplicate assertion of native termination."
+        }
+      ]
+    }
+  ],
+  "sourceDisposition": {
+    "apps/daemon/src/boxes/testing.ts": {
+      "outcome": "KEEP_FIX_REMOVE_HOOK",
+      "preserve": "Preserve incoming real native writeTar source drain, early-stdin-close tolerance, process exit/error handling and failure cleanup. These correct fixture behavior used by legitimate native integration tests; do not revert the actual fix.",
+      "remove": "Remove LocalBoxConnectionOptions.spawnTar and replace (options.spawnTar ?? spawn)(...) with direct spawn(...). Only the four new helper tests supply this option. No production behavior is changed.",
+      "nativeFixCaveat": "The stdin error/drain/kill logic belongs to test infrastructure, not a production-facing export. Existing actual tar upload/sync runs should validate it; do not claim the fake EventEmitter cases prove native semantics."
+    },
+    "apps/daemon/src/boxes/testing.test.ts": {
+      "outcome": "DELETE_FILE",
+      "reason": "All4cases fail strict independent product seam/unique protection bar; delete95LOC test file plus extractionPath/closingExtractor fakes and imports. No fixture files/snapshots/dependencies to retain."
+    }
+  },
+  "callerAudit": {
+    "method": "rg all localBoxConnection/LocalBoxConnection imports in ee5c source and current checkout, followed consumers rather than assuming non-.test filename means production.",
+    "directConsumers": "remote/exec/testing.ts, remote/fs/test-box.ts, sync/testing.ts, service/testing.ts, agent-host/boxes/testing.ts and devices/hosts/box/android-testing.ts are test fixtures; *.it.ts device integration programs are manually invoked tests.",
+    "productionBoundaryEvidence": "agent-host/boxes/connections.ts explicitly says main.ts supplies real socket connections while tests pass localBoxConnection; no runtime main module imports boxes/testing.ts. Current local-namespace.ts is an integration filesystem isolation adapter used only by test fixtures/manual integration programs and explicitly refuses tar operations.",
+    "spawnTar": "Only new testing.test.ts supplies spawnTar; no runtime caller or compatibility obligation found."
+  },
+  "countTreatment": "4incomingDELETE decisions only. Surviving owner references are not additional tests and must not increase baseline/610d totals.",
+  "validationPlan": [
+    "After merge/root release, delete tests+hook, syntax/diff-check affected file.",
+    "Run existing public native tar tools/sync/Go interop targets and real execRemote abort/timeout owner using root coordinated slot; no replacement helper tests.",
+    "Do not run unsafe unmodified fixtures or live daemon; no tests were executed during this read-only review."
+  ],
+  "performance": "No measured speedup claimed. Deleted95lines/four fake fixture-conformance scenarios and unused2-line option; actual native fixture repair is preserved for integration reliability.",
+  "counts": {
+    "DELETE": 4
+  },
+  "implementation": {
+    "deletedFiles": [
+      "apps/daemon/src/boxes/testing.test.ts"
+    ],
+    "testLOCDeltaVsIncoming": -95,
+    "sourceLOCDeltaVsIncoming": -2,
+    "removedInfrastructure": [
+      "LocalBoxConnectionOptions.spawnTar",
+      "injected child EventEmitter/Writable/kill fakes",
+      "extractionPath and closingExtractor helpers"
+    ],
+    "preservedFix": "Native spawn, source drain through real tar early stdin close, process error/exit status and source-failure cleanup remain exactly as incoming aside from removing spawn override.",
+    "stageCommit": "No staging or commit by this workstream."
+  },
+  "remainingNativeOwners": [
+    {
+      "path": "apps/daemon/src/boxes/temporary/tools.test.ts",
+      "owner": "download: tar can close its input before the box finishes; the entire source still decides success",
+      "contract": "Real native tar plus closure receipt verifies exact file artifact/byte count, late source failure, cancellation,4GiB cap and nonzero extractor status. This is the stronger public user-transfer owner, not proof of every local helper call shape.",
+      "sixBar": {
+        "independentContract": "TemporaryBoxTools directory download is atomic and depends on complete remote stream success; cancellation/size/errors cannot be hidden by early tar EOF.",
+        "realRegressionDetection": "Actual native tar can finish before sourceEOF, but a late failure/cancel/cap must refuse publication and successful padding must still deliver exact bytes.",
+        "independentOracle": "Real payload.txt bytes/byte count, literal refusal codes, no final or staging artifact after failure, native tar exit/error.",
+        "stableSeam": "TemporaryBoxTools.download with real native extraction and filesystem artifacts.",
+        "refactorResistance": "Receipt synchronizes real fd closure; no private child object/kill boolean or source snapshot is asserted.",
+        "uniqueProtection": "Only integrated tool owner combines native extraction, bounded full-source validation, cancellation and atomic rename."
+      }
+    },
+    {
+      "path": "apps/daemon/src/boxes/hub/agent.integration.test.ts",
+      "owner": "tar both ways",
+      "contract": "Actual Go/TypeScript box protocol + native tar verifies file/link/mode content, excluding filtered files, missing path refusal and a truncated gzipped source failure.",
+      "sixBar": {
+        "independentContract": "Go\u2194TypeScript box channel tar-read/tar-write protocol preserves archive contents/links/modes and rejects truncated compressed input.",
+        "realRegressionDetection": "Channel/tar implementations lose files or link/mode semantics, include excluded paths, accept truncated gzip, or hide missing paths.",
+        "independentOracle": "Actual native filesystem A/link/mode artifacts and literal missing/truncation rejection; external tar/Go independently consume frames.",
+        "stableSeam": "Real built Go agent, WebSocket box channel and native tar/archive filesystem boundary.",
+        "refactorResistance": "Wire/real artifact outcomes survive helper implementation and local-double changes.",
+        "uniqueProtection": "Local fixture tests cannot verify actual Go\u2194TS interoperability or compressed wire failures."
+      }
+    },
+    {
+      "path": "apps/daemon/src/boxes/sync/config-sync.test.ts",
+      "owner": "a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing",
+      "contract": "Existing public sync integration naturally exercises the repaired native local writeTar fixture using actual valid archives and real filesystem outcomes.",
+      "sixBar": {
+        "independentContract": "Initial configuration synchronization streams a compressed archive preserving actual file bytes/modes and durable baseline, then sends no unnecessary update for unchanged state.",
+        "realRegressionDetection": "Tar setup fails/hangs on valid stream close, loses mode/data, or a fresh baseline causes repeated full transfer.",
+        "independentOracle": "Real native extracted files/modes and known persisted baseline; settled unchanged pass performs no new semantic transfer/hash work.",
+        "stableSeam": "BoxConfigSyncService with actual native tar local fixture and on-disk output.",
+        "refactorResistance": "Required content/state and externally meaningful transfer work remain, independent of private spawn override.",
+        "uniqueProtection": "Exercises actual repaired local writeTar during a meaningful product sync; separate Go owner protects remote protocol."
+      }
+    },
+    {
+      "path": "apps/daemon/src/devices/hosts/box/remote.test.ts",
+      "owner": "execRemote collects output, reports exit codes and times out",
+      "contract": "Actual native subprocess exit receipts prove timeout and caller cancellation terminate children; a fake kill boolean is not retained as a duplicate assertion of native termination.",
+      "sixBar": {
+        "independentContract": "Device execRemote preserves exit/output and terminates actual child processes on deadline or caller abort.",
+        "realRegressionDetection": "Timeout/abort rejects but leaves the native child alive, loses caller cancellation reason or returns wrong output/exit code.",
+        "independentOracle": "Literal stdout/stderr/exit3 and actual child exit-signal receipt, independently supplied cancellation reason.",
+        "stableSeam": "Production execRemote over real native child process connection.",
+        "refactorResistance": "No fake kill boolean; native process receipts and public result/refusal survive collaborator refactors.",
+        "uniqueProtection": "This actual process owner supersedes invented local helper kill conformance; tar-transfer owners protect stream publication instead."
+      }
+    }
+  ],
+  "validation": {
+    "executed": [
+      "git diff --check -- apps/daemon/src/boxes/testing.ts",
+      "TypeScript syntax parse of retained testing.ts (zero diagnostics)",
+      "rg spawnTar across apps/packages: no remaining references"
+    ],
+    "notExecuted": "No tests, typecheck, build or benchmark executed while the root measures its matching baseline. Root owns next focused/full gate.",
+    "recommended": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/boxes/temporary/tools.test.ts src/boxes/sync/config-sync.test.ts src/boxes/hub/agent.integration.test.ts src/devices/hosts/box/remote.test.ts"
+  }
+}

@@ -134,15 +134,11 @@ export interface NpmInstallDeps {
   env: NodeJS.ProcessEnv;
   /** Kept downloads (the scrcpy jar). */
   downloads: string;
-  /** Tests: the pinned jar instead of {@link SCRCPY_SERVER}. */
-  scrcpy?: PinnedDownload;
-  /** Tests: the lock to install instead of the shipped one ({@link toolLock}). */
-  lock?: ToolLock;
 }
 
 /** Copy the verified scrcpy-server jar into a hub install (downloaded once into `downloads`). */
-export async function seedScrcpyServer(hubDir: string, deps: Pick<NpmInstallDeps, "download" | "downloads" | "scrcpy">, signal: AbortSignal): Promise<void> {
-  const pinned = deps.scrcpy ?? SCRCPY_SERVER;
+export async function seedScrcpyServer(hubDir: string, deps: Pick<NpmInstallDeps, "download" | "downloads">, signal: AbortSignal): Promise<void> {
+  const pinned = SCRCPY_SERVER;
   const cached = join(deps.downloads, SCRCPY_SERVER.fileName);
   await deps.download(pinned, cached, { signal });
   if ((await sha256File(cached)) !== pinned.sha256) throw new Error("The scrcpy-server download does not match its pinned checksum.");
@@ -172,7 +168,7 @@ export async function installNpmTool(
       await seedScrcpyServer(dir, deps, signal);
       if (isToolInstalled(root, name, version)) return dir;
     }
-    const lock = deps.lock ?? toolLock(name, version);
+    const lock = toolLock(name, version);
     if (!lock) throw new Error(`This build ships no lockfile for ${name}@${version}.`);
     const staging = join(root, `.staging-${name}@${version}-${randomUUID().slice(0, 8)}`);
     await mkdir(staging, { recursive: true });

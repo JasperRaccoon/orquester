@@ -26,7 +26,7 @@ import {
  */
 
 /**
- * Runs git in a clone (injectable for tests). Resolves stdout; rejects on a non-zero exit, and when
+ * Runs git in a clone through the host or box transport. Resolves stdout; rejects on a non-zero exit, and when
  * `signal` aborts (the child is killed: the daemon is shutting down).
  */
 export type GitRunner = (cwd: string, args: string[], signal?: AbortSignal) => Promise<string>;

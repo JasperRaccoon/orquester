@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { exoscaleAdapter, exoscaleAuthorization, exoscaleTiming } from "./exoscale.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest } from "./fixtures/vm-replay.ts";
-import { roundUsd } from "./price-tables.ts";
 
 exoscaleTiming.pollMs = 0;
 
@@ -44,6 +43,7 @@ function assertSigned(request: RecordedRequest): void {
   );
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("signature: EXO2-HMAC-SHA256 over method+path, body, query values, headers and expiry", () => {
   // Expected values computed independently with Python's hmac/hashlib/base64.
   assert.equal(
@@ -71,34 +71,34 @@ test("signature: EXO2-HMAC-SHA256 over method+path, body, query values, headers 
   );
 });
 
-test("validate: ok with a working key, a message for a bad or missing one", async () => {
+test("validate: ok with a working key, a message for a bad or missing one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${GVA}/instance`, body: fixture("exoscale", "instances-empty") },
     { method: "GET", url: `${GVA}/instance`, status: 403, body: fixture("exoscale", "error-forbidden") }
   ]);
-  assert.deepEqual(await exoscaleAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await exoscaleAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assertSigned(replay.requests[0]!);
   assert.match(replay.requests[0]!.headers.authorization!, /^EXO2-HMAC-SHA256 credential=EXOtestkey0000000000000000,expires=\d+,signature=/);
 
-  const bad = await exoscaleAdapter.validate({ apiKey: "EXOwrong", apiSecret: "wrong-secret" }, replayOptions(replay));
+  const bad = await exoscaleAdapter.validate({ apiKey: "EXOwrong", apiSecret: "wrong-secret" }, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /Invalid key or request signature/);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /wrong-secret/);
 
-  assert.deepEqual(await exoscaleAdapter.validate({ apiKey: "EXOkey" }, replayOptions(replay)), {
+  assert.deepEqual(await exoscaleAdapter.validate({ apiKey: "EXOkey" }, replayOptions(t, replay)), {
     ok: false,
     message: "Exoscale: API secret is missing"
   });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: Linux types with live prices including the root disk, zones and curated templates", async () => {
+test("offers: Linux types with live prices including the root disk, zones and curated templates", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${GVA}/zone`, body: fixture("exoscale", "zones") },
     ...catalogRoutes(GVA),
     ...pricingRoutes()
   ]);
-  const offers = await exoscaleAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await exoscaleAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   // micro (512 MB), mega (needs authorization), storage and GPU types are not offered.
   assert.deepEqual(
@@ -111,7 +111,7 @@ test("offers: Linux types with live prices including the root disk, zones and cu
   assert.equal(tiny.diskGb, 40);
   assert.equal(tiny.gpu, null);
   // standard.tiny $0.01458/h + 40 GiB × $0.00014 per GiB-hour.
-  assert.equal(tiny.hourlyUsd, roundUsd(0.01458 + 40 * 0.00014));
+  assert.equal(tiny.hourlyUsd, 0.0202);
   // Zones the account does not list (at-vie-1 here) are dropped from a type's regions.
   assert.deepEqual(tiny.regions, ["ch-dk-2", "de-fra-1", "ch-gva-2"]);
   assert.deepEqual(offers.sizes.find((size) => size.id === "memory.extra-large")?.regions, ["de-fra-1"]);
@@ -135,13 +135,13 @@ test("offers: Linux types with live prices including the root disk, zones and cu
   assert.equal(replay.requests.find((entry) => entry.url.startsWith(PRICING))?.headers.authorization, undefined);
 });
 
-test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", async () => {
+test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${GVA}/zone`, body: fixture("exoscale", "zones") },
     ...catalogRoutes(GVA),
     ...pricingRoutes()
   ]);
-  const offers = await exoscaleAdapter.offers(credentials, "windows", replayOptions(replay));
+  const offers = await exoscaleAdapter.offers(credentials, "windows", replayOptions(t, replay));
   assert.deepEqual(
     offers.sizes.map((size) => size.id),
     ["standard.medium", "standard.large", "memory.extra-large", "cpu.extra-large"]
@@ -149,9 +149,9 @@ test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", asyn
   const medium = offers.sizes[0]!;
   assert.equal(medium.diskGb, 60);
   // 2 vCPUs: the up-to-7-vCPU licence.
-  assert.equal(medium.hourlyUsd, roundUsd(0.04666 + 60 * 0.00014 + 0.01111));
+  assert.equal(medium.hourlyUsd, 0.0662);
   // 8 vCPUs: the 8-or-more licence.
-  assert.equal(offers.sizes.find((size) => size.id === "cpu.extra-large")?.hourlyUsd, roundUsd(0.23333 + 60 * 0.00014 + 0.02222));
+  assert.equal(offers.sizes.find((size) => size.id === "cpu.extra-large")?.hourlyUsd, 0.264);
   assert.deepEqual(
     offers.images.map((image) => [image.id, image.label]),
     [
@@ -161,14 +161,14 @@ test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", asyn
   );
 });
 
-test("create: one signed POST with name, labels, base64 cloud-init and the resolved ids", async () => {
+test("create: one signed POST with name, labels, base64 cloud-init and the resolved ids", async (t) => {
   const replay = replayFetch([
     ...catalogRoutes(FRA),
     ...pricingRoutes(),
     { method: "POST", url: `${FRA}/instance`, body: fixture("exoscale", "create-operation") }
   ]);
   const request = testCreateRequest({ size: "standard.medium", region: "de-fra-1" });
-  const result = await exoscaleAdapter.create(credentials, request, replayOptions(replay));
+  const result = await exoscaleAdapter.create(credentials, request, replayOptions(t, replay));
 
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   assert.deepEqual(post.body, {
@@ -185,11 +185,11 @@ test("create: one signed POST with name, labels, base64 cloud-init and the resol
   // Every read came first.
   assert.equal(replay.requests.at(-1), post);
   assert.deepEqual(result.ref, { instanceId: INSTANCE_ID, zone: "de-fra-1" });
-  assert.equal(result.hourlyUsd, roundUsd(0.04666 + 40 * 0.00014));
+  assert.equal(result.hourlyUsd, 0.0523);
   assert.equal(result.windowsPassword, undefined);
 });
 
-test("create: Windows gets cloudbase-init user data, the template's disk floor and the generated password", async () => {
+test("create: Windows gets cloudbase-init user data, the template's disk floor and the generated password", async (t) => {
   const replay = replayFetch([
     ...catalogRoutes(GVA),
     ...pricingRoutes(),
@@ -197,17 +197,17 @@ test("create: Windows gets cloudbase-init user data, the template's disk floor a
     { method: "GET", url: `${GVA}/instance/${INSTANCE_ID}:password`, body: fixture("exoscale", "instance-password") }
   ]);
   const request = testCreateRequest({ kind: "windows", size: "standard.medium", region: "ch-gva-2", image: WINDOWS_2022 });
-  const result = await exoscaleAdapter.create(credentials, request, replayOptions(replay));
+  const result = await exoscaleAdapter.create(credentials, request, replayOptions(t, replay));
   const body = replay.requests.find((entry) => entry.method === "POST")!.body as Record<string, unknown>;
   assert.equal(Buffer.from(body["user-data"] as string, "base64").toString("utf8"), `#ps1_sysnative\r\n${request.bootstrap.powershellScript}`);
   assert.deepEqual(body.template, { id: WINDOWS_2022 });
   assert.equal(body["disk-size"], 60);
-  assert.equal(result.hourlyUsd, roundUsd(0.04666 + 60 * 0.00014 + 0.01111));
+  assert.equal(result.hourlyUsd, 0.0662);
   assert.equal(result.windowsPassword, "Redacted-Windows-Password-1");
   assertSigned(replay.requests.at(-1)!);
 });
 
-test("create: polls the operation until it names the instance", async () => {
+test("create: polls the operation until it names the instance", async (t) => {
   const replay = replayFetch([
     ...catalogRoutes(FRA),
     ...pricingRoutes(),
@@ -215,12 +215,12 @@ test("create: polls the operation until it names the instance", async () => {
     { method: "GET", url: `${FRA}/operation/${OPERATION_ID}`, body: fixture("exoscale", "create-operation-unreferenced") },
     { method: "GET", url: `${FRA}/operation/${OPERATION_ID}`, body: { ...fixture<object>("exoscale", "create-operation"), state: "success" } }
   ]);
-  const result = await exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.small", region: "de-fra-1" }), replayOptions(replay));
+  const result = await exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.small", region: "de-fra-1" }), replayOptions(t, replay));
   assert.deepEqual(result.ref, { instanceId: INSTANCE_ID, zone: "de-fra-1" });
   assert.equal(replay.pending().length, 0);
 });
 
-test("create: a failed operation surfaces Exoscale's message", async () => {
+test("create: a failed operation surfaces Exoscale's message", async (t) => {
   const replay = replayFetch([
     ...catalogRoutes(FRA),
     ...pricingRoutes(),
@@ -228,18 +228,18 @@ test("create: a failed operation surfaces Exoscale's message", async () => {
     { method: "GET", url: `${FRA}/operation/${OPERATION_ID}`, body: fixture("exoscale", "operation-failed") }
   ]);
   await assert.rejects(
-    exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1" }), replayOptions(replay)),
+    exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1" }), replayOptions(t, replay)),
     /Exoscale: creating the instance failed \(Insufficient capacity for instance type standard\.medium\)/
   );
 });
 
-test("create: a 5xx on the create is never retried; unknown sizes and images fail before it", async () => {
+test("create: a 5xx on the create is never retried; unknown sizes and images fail before it", async (t) => {
   const replay = replayFetch([
     ...catalogRoutes(FRA),
     ...pricingRoutes(),
     { method: "POST", url: `${FRA}/instance`, status: 503, body: fixture("exoscale", "error-unavailable"), times: 2 }
   ]);
-  await assert.rejects(exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1" }), replayOptions(replay)), (error) => {
+  await assert.rejects(exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 503);
     assert.equal(error.message, "Exoscale: Service temporarily unavailable");
@@ -249,17 +249,17 @@ test("create: a 5xx on the create is never retried; unknown sizes and images fai
 
   const reads = replayFetch([...catalogRoutes(FRA), ...catalogRoutes(FRA)]);
   await assert.rejects(
-    exoscaleAdapter.create(credentials, testCreateRequest({ size: "gpu2.small", region: "de-fra-1" }), replayOptions(reads)),
+    exoscaleAdapter.create(credentials, testCreateRequest({ size: "gpu2.small", region: "de-fra-1" }), replayOptions(t, reads)),
     /Exoscale: no instance type gpu2\.small for linux boxes in de-fra-1/
   );
   await assert.rejects(
-    exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1", image: "00000000-0000-4000-8000-000000000000" }), replayOptions(reads)),
+    exoscaleAdapter.create(credentials, testCreateRequest({ size: "standard.medium", region: "de-fra-1", image: "00000000-0000-4000-8000-000000000000" }), replayOptions(t, reads)),
     /no template 00000000-0000-4000-8000-000000000000 in de-fra-1/
   );
   assert.equal(reads.requests.some((entry) => entry.method === "POST"), false);
 });
 
-test("status: maps instance states in the ref's zone, 404 is gone, 429 is retried", async () => {
+test("status: maps instance states in the ref's zone, 404 is gone, 429 is retried", async (t) => {
   const running = fixture<Record<string, unknown>>("exoscale", "instance-running");
   const url = `${FRA}/instance/${INSTANCE_ID}`;
   const replay = replayFetch([
@@ -273,21 +273,21 @@ test("status: maps instance states in the ref's zone, 404 is gone, 429 is retrie
     { method: "GET", url, status: 404, body: fixture("exoscale", "error-not-found") }
   ]);
   const ref = { instanceId: INSTANCE_ID, zone: "de-fra-1" };
-  assert.deepEqual(await exoscaleAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.20",
     hourlyUsd: null
   });
-  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const stopped = await exoscaleAdapter.status(credentials, ref, replayOptions(replay));
+  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const stopped = await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Exoscale reports the instance stopped");
-  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
-  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
+  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.deepEqual(await exoscaleAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.deepEqual(await exoscaleAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The instance no longer exists in Exoscale",
     publicIp: null,
@@ -297,28 +297,28 @@ test("status: maps instance states in the ref's zone, 404 is gone, 429 is retrie
   replay.requests.forEach(assertSigned);
 });
 
-test("destroy: deletes the instance in its zone and is idempotent", async () => {
+test("destroy: deletes the instance in its zone and is idempotent", async (t) => {
   const url = `${FRA}/instance/${INSTANCE_ID}`;
   const replay = replayFetch([
     { method: "DELETE", url, body: fixture("exoscale", "delete-operation") },
     { method: "DELETE", url, status: 404, body: fixture("exoscale", "error-not-found") }
   ]);
   const ref = { instanceId: INSTANCE_ID, zone: "de-fra-1" };
-  await exoscaleAdapter.destroy(credentials, ref, replayOptions(replay));
-  await exoscaleAdapter.destroy(credentials, ref, replayOptions(replay));
+  await exoscaleAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await exoscaleAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
   assertSigned(replay.requests[0]!);
-  await assert.rejects(exoscaleAdapter.destroy(credentials, { instanceId: INSTANCE_ID }, replayOptions(replay)), /instance reference has no zone/);
+  await assert.rejects(exoscaleAdapter.destroy(credentials, { instanceId: INSTANCE_ID }, replayOptions(t, replay)), /instance reference has no zone/);
 });
 
-test("listManaged: every zone, by label or orq- name, with the zone in the ref", async () => {
+test("listManaged: every zone, by label or orq- name, with the zone in the ref", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${GVA}/zone`, body: fixture("exoscale", "zones") },
     { method: "GET", url: `${GVA}/instance`, body: fixture("exoscale", "instances-gva") },
     { method: "GET", url: `${DK}/instance`, body: fixture("exoscale", "instances-empty") },
     { method: "GET", url: `${FRA}/instance`, body: fixture("exoscale", "instances-fra") }
   ]);
-  assert.deepEqual(await exoscaleAdapter.listManaged(credentials, replayOptions(replay)), [
+  assert.deepEqual(await exoscaleAdapter.listManaged(credentials, replayOptions(t, replay)), [
     {
       ref: { instanceId: INSTANCE_ID, zone: "ch-gva-2" },
       name: `orq-${TEST_BOX_ID}`,

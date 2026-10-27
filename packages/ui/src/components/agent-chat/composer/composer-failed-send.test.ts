@@ -218,7 +218,7 @@ describe("a send that did not go out comes back to the thread it was sent from",
   it("a quoted send comes back with its quotes as quotes, ahead of any quoted meanwhile", () => {
     backing = {
       [DRAFTS_KEY]: JSON.stringify({
-        A: { text: "", attachments: [], context: [], quotes: [{ id: "q-later", text: "quoted meanwhile" }] }
+        A: { text: "typed meanwhile", attachments: [], context: [], quotes: [{ id: "q-later", text: "quoted meanwhile" }] }
       })
     };
     const quoted: FailedSendRestore<StagedAttachment> = {
@@ -230,7 +230,7 @@ describe("a send that did not go out comes back to the thread it was sent from",
 
     assert.equal(target, "persisted");
     assert.deepEqual(persisted().A, {
-      text: "is this right?",
+      text: "is this right?\n\ntyped meanwhile",
       attachments: [],
       context: [],
       quotes: [

@@ -46,7 +46,7 @@ import type { BoxSettings } from "./settings.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
 
-export const PAIRING_TTL_MS = BYO_PAIRING_TTL_MINUTES * 60_000;
+const PAIRING_TTL_MS = BYO_PAIRING_TTL_MINUTES * 60_000;
 /** The bootstrap token the spent code mints: the script has this long to download and connect. */
 const PAIRING_BOOTSTRAP_TTL_MS = 30 * 60_000;
 /** 18 random bytes, base64url. */
@@ -67,7 +67,7 @@ export type PairingScriptOutcome =
  * an IPv6 address by its /64 (one host usually holds a whole /64, so per-address keys would let
  * it rotate freely); anything else verbatim.
  */
-export function pairingThrottleKey(client: string): string {
+function pairingThrottleKey(client: string): string {
   const address = client.split("%")[0]!.toLowerCase();
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address);
   if (mapped) return mapped[1]!;
@@ -103,11 +103,6 @@ export class PairingThrottle {
   private readonly failures = new Map<string, { count: number; since: number }>();
 
   constructor(private readonly now: () => number) {}
-
-  /** How many clients are remembered (tests). */
-  get size(): number {
-    return this.failures.size;
-  }
 
   retryAfterMs(client: string): number {
     this.prune();

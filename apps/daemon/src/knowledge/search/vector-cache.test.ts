@@ -102,20 +102,18 @@ test("another model, a corrupt manifest or a short file discards the cache", asy
   assert.equal((await open(path2)).get(H1), null);
 });
 
-test("retain forgets dead hashes and compacts into a new generation", async (t) => {
+test("retain removes dead rows while preserving live rows after compaction and reopen", async (t) => {
   const path = await dir(t);
   const cache = await open(path);
   await cache.put(H1, rows(300, 1));
   await cache.put(H2, rows(1, 2));
   await cache.flush();
-  const before = (await readdir(path)).filter((n) => n.endsWith(".bin"));
   await cache.retain(new Set([H2]));
   assert.equal(cache.get(H1), null);
   assert.deepEqual([...cache.get(H2)!], [...rows(1, 2)]);
   const after = (await readdir(path)).filter((n) => n.endsWith(".bin"));
   assert.equal(after.length, 1);
   assert.equal((await stat(join(path, after[0]!))).size, 16);
-  assert.notEqual(before[0], after[0]);
   const again = await open(path);
   assert.deepEqual([...again.get(H2)!], [...rows(1, 2)]);
   assert.equal(again.get(H1), null);

@@ -132,6 +132,8 @@ export class FakeMacBox {
   readonly execs: BoxExecOptions[] = [];
   hub: { proc: FakeProcess; pid: number; running: boolean } | null = null;
   agentRunning = false;
+  /** Hold publication of the external hub state file for startup-wait scenarios. */
+  hubStateReady: Promise<void> | null = null;
   connected = true;
   frames: number[];
   vm: boolean;
@@ -155,7 +157,7 @@ export class FakeMacBox {
 
   constructor(private readonly options: FakeMacBoxOptions = {}) {
     this.sys = localSysInfo({ os: "darwin", arch: "arm64", home: options.home ?? "/Users/runner", user: "runner" });
-    this.frames = [...(options.frames ?? [24_000, 2_400_000])];
+    this.frames = [...(options.frames ?? [2_400_000])];
     this.vm = options.vm ?? true;
     this.nodeVersion = options.nodeVersion === undefined ? "v22.11.0" : options.nodeVersion;
     if (options.toolsInstalled) this.installTools("/var/lib/orquester/devices/tools");
@@ -299,7 +301,9 @@ export class FakeMacBox {
             box.files.delete(`${stateDir}/server-${box.hubPort}.json`);
           });
           box.hub = { proc: hubProc, pid: hubProc.pid, running: true };
-          setImmediate(() => box.files.set(`${stateDir}/server-${box.hubPort}.json`, JSON.stringify({ pid: hubProc.pid, port: box.hubPort, url: "x", token: box.hubToken })));
+          const publishState = () => box.files.set(`${stateDir}/server-${box.hubPort}.json`, JSON.stringify({ pid: hubProc.pid, port: box.hubPort, url: "x", token: box.hubToken }));
+          if (box.hubStateReady) void box.hubStateReady.then(publishState);
+          else publishState();
           return hubProc;
         } else if (script === SIMSLIM_INSTALL_SCRIPT) {
           box.log.push("simslim-install");

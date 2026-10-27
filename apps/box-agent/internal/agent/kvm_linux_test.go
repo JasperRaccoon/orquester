@@ -27,10 +27,7 @@ func TestKVMUsableOpensTheDeviceReadWrite(t *testing.T) {
 	if !kvmUsable(kvmFixture(t, 0o600), nil) {
 		t.Fatal("a read-write device is usable")
 	}
-	if os.Geteuid() == 0 {
-		t.Skip("root opens read-only files read-write")
-	}
-	if kvmUsable(kvmFixture(t, 0o400), nil) {
+	if os.Geteuid() != 0 && kvmUsable(kvmFixture(t, 0o400), nil) {
 		t.Fatal("a read-only device is not usable")
 	}
 }
@@ -62,17 +59,5 @@ func TestKVMUsableForTheWorkUserFollowsTheModeBits(t *testing.T) {
 	work := workUser{uid: other, gid: otherGroup}
 	if kvmUsable(filepath.Join(t.TempDir(), "missing"), &work) {
 		t.Error("a missing device is not usable for the work user")
-	}
-}
-
-func TestDetectSysInfoReportsKVM(t *testing.T) {
-	a := &Agent{}
-	info := detectSysInfo(a)
-	f, err := os.OpenFile(kvmDevice, os.O_RDWR, 0)
-	if err == nil {
-		defer f.Close()
-	}
-	if want := err == nil; info.KVM != want {
-		t.Fatalf("sys.kvm = %v, want %v (open /dev/kvm: %v)", info.KVM, want, err)
 	}
 }

@@ -8,16 +8,22 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import {
   RawFrameLog,
   pruneRawLogDirectory
 } from "./raw-log.ts";
 
+const roots: string[] = [];
+after(async () => { await Promise.all(roots.map((root) => fsp.rm(root, { recursive: true, force: true }))); });
+async function tempRoot(prefix = "orq-raw-log-"): Promise<string> {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
 async function tempFile(): Promise<string> {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-log-"));
-  return path.join(dir, "raw.ndjson");
+  return path.join(await tempRoot(), "raw.ndjson");
 }
 
 function readLines(filePath: string): unknown[] {
@@ -188,7 +194,7 @@ test("the file rotates past 10 MiB and keeps at most 10 generations", async () =
 });
 
 test("a writer that cannot open its file degrades to a no-op", async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-log-"));
+  const dir = await tempRoot("orq-raw-log-");
   // A directory where the file should be: every write fails.
   const filePath = path.join(dir, "raw.ndjson");
   fs.mkdirSync(filePath);
@@ -252,7 +258,7 @@ test("the ceiling is enforced ACROSS threads, which rotation alone cannot do", a
   // rotation already caps the set at 9 x 10 MiB — so the 512 MiB test was
   // unconditionally true and the prune was unreachable. 100 threads were
   // 10 GiB in the one writable appdir.
-  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  const threadsRoot = await tempRoot("orq-raw-ceiling-");
   for (let i = 0; i < 6; i += 1) {
     // t0 is the OLDEST, so oldest-first eviction takes it before t5.
     await seedThreadLog(threadsRoot, `t${i}`, "raw.ndjson.1", 128 * 1024 * 1024, (6 - i) * 60_000);
@@ -267,7 +273,7 @@ test("the ceiling is enforced ACROSS threads, which rotation alone cannot do", a
 });
 
 test("a live file whose thread has an open writer is never unlinked", async () => {
-  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  const threadsRoot = await tempRoot("orq-raw-ceiling-");
   const live = await seedThreadLog(threadsRoot, "live", "raw.ndjson", 300 * 1024 * 1024, 600_000);
   const idle = await seedThreadLog(threadsRoot, "idle", "raw.ndjson", 300 * 1024 * 1024, 300_000);
 
@@ -280,7 +286,7 @@ test("a live file whose thread has an open writer is never unlinked", async () =
 });
 
 test("a rung past the age bound is removed even when the ceiling is not reached", async () => {
-  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  const threadsRoot = await tempRoot("orq-raw-ceiling-");
   const stale = await seedThreadLog(
     threadsRoot,
     "t1",
