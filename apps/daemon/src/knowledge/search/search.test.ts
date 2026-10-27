@@ -496,6 +496,51 @@ test("query by example: nearest entries by meaning, never the examples; unlike p
   await assert.rejects(search.search({ query: "   ", similarTo: [] }, ALL), invalid);
 });
 
+/**
+ * Like a real sentence model, every vector shares one large component, so any two texts score
+ * 0.91–1, and `minimum` sits just under unrelated pairs, as e5's 0.78 sits under its 0.785 median.
+ */
+class ConeEmbedder extends FakeEmbedder {
+  constructor() {
+    super({ modelId: "fake/cone", thresholds: { minimum: 0.9, good: 0.93, strong: 0.96, duplicate: 0.995 } });
+  }
+  override vector(text: string): Float32Array {
+    const own = super.vector(text);
+    let norm = 0;
+    for (const x of own) norm += x * x;
+    norm = Math.sqrt(norm) || 1;
+    const out = new Float32Array(this.dimensions);
+    const last = this.dimensions - 1;
+    for (let d = 0; d < last; d += 1) out[d] = (0.3 * own[d]!) / norm;
+    out[last] = Math.sqrt(0.91);
+    let total = 0;
+    for (const x of out) total += x * x;
+    total = Math.sqrt(total);
+    for (let d = 0; d < out.length; d += 1) out[d]! /= total;
+    return out;
+  }
+}
+
+// The order `unlike` gives (an entry closer to it than to the examples drops) is checked on the real
+// model, in eval/eval.test.ts; this fake's near-copies sit as close to both examples.
+test("query by example with unlike, on a model whose vectors sit in a narrow cone: unlike never empties it or changes what matches", async (t) => {
+  const { store, search } = await setup(t, { embedder: new ConeEmbedder() });
+  const twin = "ke_twintwintwin";
+  const cousin = "ke_cousincousin";
+  store.put(twin, "Getting cited in ChatGPT and Perplexity answers: LLM answer engines cite original data.", [SEO], { title: "AI citations" }, true);
+  store.put(cousin, "Getting cited in ChatGPT and Perplexity answers: LLM answer engines cite original data and tables.", [SEO], { title: "AI citations, again" }, true);
+  await search.indexEntries([twin, cousin]);
+  await warm(search);
+
+  const like = entryIds((await search.search({ similarTo: [CLOUDFLARE], limit: 25 }, ALL)).hits);
+  assert.ok(like.includes(cousin) && like.length >= 2, `like alone finds the cousin (${like.join(", ")})`);
+
+  const steered = entryIds((await search.search({ similarTo: [CLOUDFLARE], unlike: [twin], limit: 25 }, ALL)).hits);
+  assert.ok(steered.length > 0, "unlike never empties a search by example");
+  assert.ok(!steered.includes(twin) && !steered.includes(CLOUDFLARE), "the examples are never returned");
+  assert.deepEqual(new Set(steered), new Set(like.filter((id) => id !== twin)), "unlike reorders; it does not change what matches");
+});
+
 test("query by example without vectors falls back to BM25 over the examples' titles and openings", async (t) => {
   const { store, search } = await setup(t, { embedder: null });
   const pricing = "ke_pricingpage1";

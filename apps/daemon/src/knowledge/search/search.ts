@@ -381,8 +381,15 @@ export class KnowledgeSearch {
   }
 
   /**
-   * Query by example: the entries nearest normalize(mean(similarTo) − 0.5 · mean(unlike)) of the
-   * examples' entry vectors; BM25 over the examples' titles and openings when none has vectors.
+   * Query by example: the entries nearest mean(similarTo) of the examples' entry vectors (at or above
+   * the model's `minimum`); with `unlike`, an entry closer to mean(unlike) than to the examples drops
+   * by the difference. BM25 over the examples' titles and openings when none has vectors.
+   *
+   * `unlike` steers the order, not the target: a sentence model puts every text in a narrow cone
+   * (multilingual-e5 scores any two entries 0.73–0.99), so subtracting a vector removes much of what
+   * all entries share and would leave nothing above `minimum`. Both similarities are rescaled from
+   * [minimum, 1] to [0, 1] first, which spreads that narrow band out. Only the excess counts, so
+   * entries on the examples' topic that merely share it with the unlike entry keep their place.
    */
   private exampleSearch(
     similarTo: readonly string[],
@@ -390,17 +397,29 @@ export class KnowledgeSearch {
     accept: (id: string) => boolean
   ): { ids: string[]; hits: Map<string, KnowledgeVectorHit> } {
     const like = similarTo.map((id) => this.vectors.entryVector(id)).filter((v): v is Float32Array => v !== null);
-    if (like.length > 0) {
-      const target = meanOf(like);
+    const target = like.length > 0 ? meanOf(like) : null;
+    if (target && normalize(target)) {
       const away = unlike.map((id) => this.vectors.entryVector(id)).filter((v): v is Float32Array => v !== null);
-      if (away.length > 0) {
-        const less = meanOf(away);
-        for (let d = 0; d < target.length; d += 1) target[d]! -= 0.5 * less[d]!;
-      }
-      if (normalize(target)) {
+      const awayTarget = away.length > 0 ? meanOf(away) : null;
+      const thresholds = this.vectors.thresholds();
+      if (!awayTarget || !normalize(awayTarget) || !thresholds) {
         const hits = this.vectors.search(target, accept, CANDIDATES);
         return { ids: hits.map((hit) => hit.entryId), hits: new Map(hits.map((hit) => [hit.entryId, hit])) };
       }
+      const floor = thresholds.minimum;
+      const spread = (similarity: number) => Math.max(0, (similarity - floor) / Math.max(1e-6, 1 - floor));
+      const steered = this.vectors
+        .search(target, accept, KNOWLEDGE_SEARCH_MAX_RESULTS)
+        .map((hit) => {
+          const vector = this.vectors.entryVector(hit.entryId);
+          const awaySimilarity = vector ? dotOf(vector, awayTarget) : floor;
+          const near = spread(hit.score);
+          return { hit, order: near - Math.max(0, spread(awaySimilarity) - near) };
+        })
+        .sort((a, b) => b.order - a.order || b.hit.score - a.hit.score || (a.hit.entryId < b.hit.entryId ? -1 : 1))
+        .slice(0, CANDIDATES)
+        .map(({ hit }) => hit);
+      return { ids: steered.map((hit) => hit.entryId), hits: new Map(steered.map((hit) => [hit.entryId, hit])) };
     }
     const exampleTerms: string[] = [];
     for (const id of similarTo) {
@@ -811,6 +830,12 @@ function queryWords(query: string): { word: string; tokens: string[] }[] {
 
 function firstWords(text: string, count: number): string {
   return (text.match(/\S+/g) ?? []).slice(0, count).join(" ");
+}
+
+function dotOf(a: Float32Array, b: Float32Array): number {
+  let sum = 0;
+  for (let d = 0; d < a.length; d += 1) sum += a[d]! * b[d]!;
+  return sum;
 }
 
 function meanOf(vectors: readonly Float32Array[]): Float32Array {
