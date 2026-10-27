@@ -93,6 +93,18 @@ test("env: only the allowlisted daemon variables pass, AGENT_DEVICE_* never; the
   assert.equal(env.AGENT_DEVICE_CONFIG, undefined);
 });
 
+test("batch (type/wait text through stdin): the step's data and the step's own refusal", () => {
+  const ok = { exitCode: 0, stdout: "", stderr: "", json: { success: true, data: { total: 1, executed: 1, results: [{ command: "wait", data: { waitedMs: 120, text: "Done" } }] } } };
+  assert.deepEqual(agentDeviceData(ok, "batch"), { waitedMs: 120, text: "Done" });
+  assert.deepEqual(agentDeviceData({ ...ok, json: { success: true, data: { results: [{ ok: true }] } } }, "batch"), { ok: true });
+  assert.deepEqual(agentDeviceData({ ...ok, json: { success: true, data: {} } }, "batch"), {});
+  // Observed (0.21.31): a one-step batch's refusal keeps the step's code; the prefix goes.
+  const failed = { exitCode: 1, stdout: "", stderr: "", json: { success: false, error: { code: "SESSION_NOT_FOUND", message: "Batch failed at step 1 (type): No active session. Run open first.", details: { step: 1, command: "type" } } } };
+  const error = catchError(() => agentDeviceData(failed, "batch"));
+  assert.equal(error.cliCode, "SESSION_NOT_FOUND");
+  assert.match(error.message, /^No active session/);
+});
+
 test("output: data from real answers; refusals become DeviceErrors that name the next call, without host paths", () => {
   const click = agentDeviceData(fixture("click-settle"), "click");
   assert.equal(click.x, 360);

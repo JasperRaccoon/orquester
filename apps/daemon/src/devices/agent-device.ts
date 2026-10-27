@@ -160,11 +160,17 @@ const STALE_REF_REASONS = new Set(["plain_ref_requires_complete_frame", "ref_fra
 /** The `data` of a successful run, or the refusal as a `DeviceError` written for the agent. */
 export function agentDeviceData(result: AgentDeviceResult, command: string): Record<string, unknown> {
   const json = result.json as { success?: unknown; data?: unknown; error?: { code?: unknown; message?: unknown; hint?: unknown; details?: { reason?: unknown } } } | undefined;
-  if (json && json.success === true) return json.data && typeof json.data === "object" ? (json.data as Record<string, unknown>) : {};
+  if (json && json.success === true) {
+    const data = json.data && typeof json.data === "object" ? (json.data as Record<string, unknown>) : {};
+    return command === "batch" ? batchStepData(data) : data;
+  }
   if (json && json.success === false && json.error) {
     const cliCode = typeof json.error.code === "string" ? json.error.code : null;
     const reason = typeof json.error.details?.reason === "string" ? json.error.details.reason : null;
-    const message = clip(redactPaths(typeof json.error.message === "string" ? json.error.message : `${command} failed`));
+    let text = typeof json.error.message === "string" ? json.error.message : `${command} failed`;
+    // A one-step batch (`type`/`wait` text through stdin) fails in the step's own words.
+    if (command === "batch") text = text.replace(/^Batch failed at step \d+ \([\w-]+\): /, "");
+    const message = clip(redactPaths(text));
     const hint = typeof json.error.hint === "string" ? clip(redactPaths(json.error.hint)) : null;
     const details = json.error.details && typeof json.error.details === "object" ? (json.error.details as Record<string, unknown>) : null;
     const error = classify(cliCode, reason, message, hint);
@@ -173,6 +179,14 @@ export function agentDeviceData(result: AgentDeviceResult, command: string): Rec
   if (result.exitCode === 0) return {};
   const line = result.stderr.trim().split("\n").filter(Boolean).pop() ?? `exit code ${result.exitCode}`;
   throw new AgentDeviceError("UNAVAILABLE", `agent-device ${command} failed: ${clip(redactPaths(line))}`, null, null);
+}
+
+/** A one-step batch's answer: the step's own data (`results[0].data`, or the result itself). */
+function batchStepData(data: Record<string, unknown>): Record<string, unknown> {
+  const first = Array.isArray(data.results) ? (data.results[0] as unknown) : undefined;
+  if (!first || typeof first !== "object") return {};
+  const inner = (first as { data?: unknown }).data;
+  return inner && typeof inner === "object" ? (inner as Record<string, unknown>) : (first as Record<string, unknown>);
 }
 
 function classify(cliCode: string | null, reason: string | null, message: string, hint: string | null): AgentDeviceError {

@@ -182,6 +182,15 @@ function checkUrl(url: string): string {
   return url;
 }
 
+/**
+ * A command whose text must stay out of argv (process listings) but that has no `--text-stdin`:
+ * agent-device's `batch --steps-file /dev/stdin` with the one step on stdin (its answer and errors
+ * are unwrapped to the step's own by `agentDeviceData`).
+ */
+function textStep(command: "type" | "wait", input: Record<string, string | number>): Extract<ActionPlan, { via: "agent-device" }> {
+  return { via: "agent-device", command: "batch", args: ["--steps-file", "/dev/stdin"], stdin: JSON.stringify([{ command, input }]) };
+}
+
 /** Map one validated action onto agent-device or the host's tool. Throws `INVALID_ARGUMENT` for what the platform cannot do. */
 export function planAction(input: DeviceActionInput, ctx: PlanContext): ActionPlan {
   const target = (): string[] => (input.ref !== undefined ? [input.ref] : [units(input.x!, ctx), units(input.y!, ctx)]);
@@ -198,7 +207,8 @@ export function planAction(input: DeviceActionInput, ctx: PlanContext): ActionPl
       // The text goes through stdin: it never shows in argv.
       return { via: "agent-device", command: "fill", args: [input.ref!, "--text-stdin", "--settle"], stdin: input.text! };
     case "type":
-      return { via: "agent-device", command: "type", args: ["--", input.text!] };
+      // agent-device's `type` has no --text-stdin: the text goes as a one-step batch read from stdin.
+      return textStep("type", { text: input.text! });
     case "press": {
       const key = input.key!;
       if (key === "lock") {
@@ -249,8 +259,9 @@ export function planAction(input: DeviceActionInput, ctx: PlanContext): ActionPl
     }
     case "wait": {
       const timeout = input.timeoutMs ?? WAIT_DEFAULT_MS;
-      const args = input.ref !== undefined ? [input.ref, String(timeout)] : ["--", "text", input.text!, String(timeout)];
-      return { via: "agent-device", command: "wait", args, timeoutMs: timeout + 20_000 };
+      if (input.ref !== undefined) return { via: "agent-device", command: "wait", args: [input.ref, String(timeout)], timeoutMs: timeout + 20_000 };
+      // The awaited text stays out of argv as `type`'s does.
+      return { ...textStep("wait", { text: input.text!, timeoutMs: timeout }), timeoutMs: timeout + 20_000 };
     }
   }
 }

@@ -83,7 +83,7 @@ test("the mapping table: every action kind on Android and iOS", () => {
     tap: { via: "agent-device", command: "click", args: ["@e3", "--settle"] },
     long_press: { via: "agent-device", command: "longpress", args: ["200", "400", "800", "--settle"] },
     fill: { via: "agent-device", command: "fill", args: ["@e5", "--text-stdin", "--settle"], stdin: "hello" },
-    type: { via: "agent-device", command: "type", args: ["--", "--abc"] },
+    type: { via: "agent-device", command: "batch", args: ["--steps-file", "/dev/stdin"], stdin: JSON.stringify([{ command: "type", input: { text: "--abc" } }]) },
     press: { via: "agent-device", command: "back", args: ["--settle"] },
     swipe: { via: "agent-device", command: "swipe", args: ["360", "896", "360", "384"] },
     scroll: { via: "agent-device", command: "scroll", args: ["down", "--settle"] },
@@ -96,7 +96,13 @@ test("the mapping table: every action kind on Android and iOS", () => {
     appearance: { via: "agent-device", command: "settings", args: ["appearance", "dark"] },
     location: { via: "agent-device", command: "settings", args: ["location", "set", "37.77", "-122.42"] },
     permissions: { via: "agent-device", command: "settings", args: ["permission", "deny", "camera", "--app", "com.example"] },
-    wait: { via: "agent-device", command: "wait", args: ["--", "text", "Done", "3000"], timeoutMs: 23_000 }
+    wait: {
+      via: "agent-device",
+      command: "batch",
+      args: ["--steps-file", "/dev/stdin"],
+      stdin: JSON.stringify([{ command: "wait", input: { text: "Done", timeoutMs: 3000 } }]),
+      timeoutMs: 23_000
+    }
   });
   const onIos = table(ios);
   assert.deepEqual(onIos.long_press, { via: "agent-device", command: "longpress", args: ["100", "200", "800", "--settle"] });
