@@ -163,8 +163,15 @@ const searchSchema = z.object({
   facets: nullish(z.boolean()),
   sessionId
 });
-/** A comma-separated filter list on the query string (`search/filters.ts` splits and checks it). */
-const filterListParam = z.string().max(KNOWLEDGE_FILTER_MAX_VALUES * 201).optional();
+/**
+ * A filter list on the query string, comma-separated or a JSON array (`search/filters.ts` splits and
+ * checks it). Room for the most values at ~200 characters each in the JSON form: every character
+ * escaped to two (quotes, backslashes), plus each value's quotes and comma, plus the brackets.
+ */
+const filterListParam = z
+  .string()
+  .max(KNOWLEDGE_FILTER_MAX_VALUES * (2 * 200 + 3) + 2)
+  .optional();
 const entriesQuerySchema = z.object({
   collection: z.string().min(1).optional(),
   cursor: z.string().min(1).max(500).optional(),

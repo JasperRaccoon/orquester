@@ -525,9 +525,9 @@ export class KnowledgeSearch {
    */
   async listEntries(query: KnowledgeEntriesQuery, visibility: KnowledgeVisibility): Promise<KnowledgeEntriesResponse> {
     const filter = parseKnowledgeFilters({
-      kinds: splitFilterList(query.kinds),
-      authors: splitFilterList(query.authors),
-      years: splitFilterList(query.years),
+      kinds: splitFilterList(query.kinds, "kinds"),
+      authors: splitFilterList(query.authors, "authors"),
+      years: splitFilterList(query.years, "years"),
       postedAfter: query.postedAfter,
       postedBefore: query.postedBefore,
       savedAfter: query.savedAfter,

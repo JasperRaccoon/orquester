@@ -7,6 +7,7 @@ import Fastify, { type InjectOptions, type LightMyRequestResponse } from "fastif
 import {
   KNOWLEDGE_CHANGED_EVENT,
   KNOWLEDGE_CHANNEL,
+  encodeKnowledgeFilterList,
   knowledgeRoutes,
   type KnowledgeCollectionView,
   type KnowledgeCollectionsResponse,
@@ -435,6 +436,19 @@ test("entries list takes the search filters as query params", async (t) => {
   assert.deepEqual(await list("kinds=article&sessionId=seo-chat"), []);
   refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?postedAfter=tomorrow` }), 400, "KNOWLEDGE_INVALID");
   refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?years=20x5` }), 400, "KNOWLEDGE_INVALID");
+
+  // An author whose name holds a comma travels as a JSON array (the client's encoding).
+  await h.store.updateEntry(billing, { author: "Smith, John" });
+  const authors = (values: string[]) => `authors=${encodeURIComponent(encodeKnowledgeFilterList(values)!)}`;
+  assert.equal(encodeKnowledgeFilterList(["Smith, John"]), '["Smith, John"]');
+  assert.deepEqual(await list(authors(["Smith, John"])), [billing]);
+  assert.deepEqual((await list(authors(["smith, john", "Hridoy"]))).sort(), [alt, billing].sort());
+  assert.deepEqual(await list(authors(["Smith"])), [], "the comma form still splits");
+  assert.deepEqual(await list(`authors=${encodeURIComponent('["Smith, John"]')}&sessionId=seo-chat`), [], "still scoped");
+  refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?authors=${encodeURIComponent("[Smith, John")}` }), 400, "KNOWLEDGE_INVALID");
+  // A full list of long values with characters JSON escapes fits the query bound.
+  const long = Array.from({ length: 20 }, (_, i) => `${i}, "${"\\".repeat(97)}`);
+  assert.deepEqual(await list(authors(long)), []);
 });
 
 test("an edit that moves an entry out of a profile caller's view answers the edit, still scoped", async (t) => {

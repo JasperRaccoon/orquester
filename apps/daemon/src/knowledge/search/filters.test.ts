@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { KNOWLEDGE_FILTER_MAX_VALUES } from "@orquester/api";
+import { KNOWLEDGE_FILTER_MAX_VALUES, encodeKnowledgeFilterList } from "@orquester/api";
 import { KnowledgeError } from "../store/errors.ts";
 import { NO_FILTER, entryMatchesFilter, entryYear, filterKey, isEmptyFilter, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 
@@ -83,6 +83,15 @@ test("comma lists and keys", () => {
   assert.deepEqual(splitFilterList(" thread, ,article "), ["thread", "article"]);
   assert.equal(splitFilterList(""), undefined);
   assert.equal(splitFilterList(undefined), undefined);
+  // The JSON form, for values holding a comma; it round-trips the client's encoding.
+  assert.deepEqual(splitFilterList(' ["Smith, John", " Om ", ""] '), ["Smith, John", "Om"]);
+  for (const values of [["Smith, John", "om"], ["[weird"], ["thread", "article"], ['a "quote", and \\ a backslash']]) {
+    assert.deepEqual(splitFilterList(encodeKnowledgeFilterList(values)), values);
+  }
+  assert.equal(splitFilterList("[]"), undefined);
+  assert.match(refusal(() => splitFilterList("[Smith, John", "authors")), /^authors starting with "\[" must be a JSON array of strings/);
+  assert.match(refusal(() => splitFilterList('["a", 3]', "kinds")), /^kinds starting with "\[" must be a JSON array of strings/);
+  assert.match(refusal(() => splitFilterList(" [{}]")), /JSON array of strings/);
   const a = parseKnowledgeFilters({ kinds: ["thread", "article"], years: ["2026"] });
   const b = parseKnowledgeFilters({ kinds: ["Article", "thread"], years: ["2026"] });
   assert.equal(filterKey(a), filterKey(b), "order and case do not change the key");
