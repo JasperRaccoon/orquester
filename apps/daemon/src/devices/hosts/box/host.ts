@@ -120,6 +120,9 @@ export const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
   warmMs: 15 * 60_000
 };
 
+/** agent-device's iOS simulator runner build under the box user's home (the runner cache restores it). */
+export const APPLE_RUNNER_BUILD_DIR = ".agent-device/apple-runner/derived/ios-simulator";
+
 /** A host whose box's time limit ends within this takes no new lease. */
 export const DEADLINE_MARGIN_MS = 20 * 60_000;
 
@@ -606,6 +609,20 @@ export class BoxDeviceHost implements DeviceHost {
     const probe = this.probe;
     if (!probe?.nodePath) return;
     const layout = this.layout(link);
+    // Once per box (not per daemon start: a second warm-up beside booting leases doubles their boot
+    // time on a 6 vCPU Mac): its marker names the agent-device and Xcode it was built for. A
+    // Blacksmith box that restored the runner cache (keyed by both) needs none.
+    const marker = posix.join(layout.root, "apple-runner-warmed");
+    const built = `agent-device ${DEVICE_TOOL_VERSIONS["agent-device"]}; ${probe.xcode ?? "Xcode"}`;
+    if ((await readSmallFile(link, marker))?.trim() === built) return;
+    const restored =
+      this.kind === "box" &&
+      (await link.request("fs.stat", { path: posix.join(link.sys.home, APPLE_RUNNER_BUILD_DIR) }).catch(() => null))?.kind === "dir";
+    if (!restored) await this.buildRunner(link, probe, layout);
+    await link.writeFile(marker, `${built}\n`, { mode: 0o600 });
+  }
+
+  private async buildRunner(link: BoxConnection, probe: RemoteProbe, layout: RemoteLayout): Promise<void> {
     const signal = AbortSignal.timeout(this.timing.warmMs);
     const catalog = parseSimCatalog((await this.simctl(link, ["list", "-j", "devicetypes", "runtimes"], signal)).stdout);
     const target = newestIphoneTarget(catalog);

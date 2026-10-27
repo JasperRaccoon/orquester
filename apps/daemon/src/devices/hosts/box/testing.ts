@@ -111,6 +111,8 @@ export class FakeMacBox {
   readonly log: string[] = [];
   readonly files = new Map<string, string>();
   readonly sims = new Map<string, FakeSim>();
+  /** Directories that exist (`fs.stat`), e.g. a restored runner cache. */
+  readonly dirs = new Set<string>();
   readonly hubToken = "hub-session-token-SECRET";
   readonly agentToken = "agent-device-token-SECRET";
   readonly hubPort = 41_234;
@@ -298,6 +300,8 @@ export class FakeMacBox {
             return undefined;
           case "fs.mkdir":
             return undefined;
+          case "fs.stat":
+            return box.dirs.has(String(params.path)) ? { path: params.path, kind: "dir", size: 0, mtimeMs: 0, mode: 0o755, identity: "1:1" } : null;
           case "fs.readdir": {
             const prefix = `${String(params.path)}/`;
             return [...box.files.keys()].filter((path) => path.startsWith(prefix) && !path.slice(prefix.length).includes("/")).map((path) => ({ name: path.slice(prefix.length), kind: "file", size: 1, mtimeMs: 0 }));

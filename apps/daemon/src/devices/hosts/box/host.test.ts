@@ -129,6 +129,22 @@ describe("BoxDeviceHost", () => {
     assert.ok(warm.some((line) => line.startsWith("agent-device open com.apple.Preferences --platform ios --udid ")));
     assert.ok(warm.includes("agent-device snapshot -i --session orq-warm"));
     assert.equal(box.sims.size, 0);
+
+    // Once per box: a restarted daemon's host does not warm again.
+    await host.dispose();
+    box.log.length = 0;
+    const again = makeHost();
+    await prepared(again);
+    assert.ok(!box.log.some((line) => line.includes("orq-warm-runner")), "warmed once per box");
+  });
+
+  it("skips the runner build on a Blacksmith box that restored the runner cache", async () => {
+    box = new FakeMacBox({ toolsInstalled: true });
+    box.dirs.add("/Users/runner/.agent-device/apple-runner/derived/ios-simulator");
+    const host = makeHost();
+    await prepared(host);
+    assert.ok(!box.log.some((line) => line.includes("orq-warm-runner")));
+    assert.match(box.files.get("/var/lib/orquester/devices/apple-runner-warmed") ?? "", /^agent-device \S+; Xcode 26\.6/);
   });
 
   it("never puts a token in argv or env, and writes the agent-device config 0600", async () => {
