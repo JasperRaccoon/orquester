@@ -686,6 +686,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private merges: readonly ConceptMergeOverlay[] = [];
   private similarProvider: SimilarConceptsProvider | null = null;
   private backingProvider: ((conceptId: string) => readonly string[]) | null = null;
+  private vectorsReady: (() => boolean) | null = null;
   private backingRev = 0;
   private readonly loadListeners = new Set<() => void>();
   /** Numbers loads in the order they start; `appliedLoad` is the current base graph's. */
@@ -788,10 +789,35 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     this.similarProvider = provider;
   }
 
-  /** Where {@link backingConcepts} reads from (null: none). */
-  setBackingConcepts(provider: ((conceptId: string) => readonly string[]) | null): void {
+  /**
+   * Where {@link backingConcepts} reads from (null: none), and whether concept vectors are ready
+   * (what {@link similarConceptIds} needs to answer; absent: never).
+   */
+  setBackingConcepts(provider: ((conceptId: string) => readonly string[]) | null, ready?: () => boolean): void {
     this.backingProvider = provider;
+    this.vectorsReady = provider ? (ready ?? null) : null;
     this.backingMoved();
+  }
+
+  /** Whether concept vectors from a calibrated model are complete ({@link setBackingConcepts}'s `ready`). */
+  conceptVectorsReady(): boolean {
+    return this.vectorsReady?.() ?? false;
+  }
+
+  /**
+   * Same-type concepts close in meaning to `conceptId` (the similar concepts of a concept detail,
+   * without its name rules), as the graph's ids, never itself; unscoped. Null while concept vectors
+   * are not ready (no calibrated model, or not computed yet): unknown, not "none".
+   */
+  similarConceptIds(conceptId: string): readonly string[] | null {
+    if (!this.conceptVectorsReady() || !this.similarProvider) return null;
+    const own = this.canonicalConceptId(conceptId);
+    const out = new Set<string>();
+    for (const hit of this.similarProvider(own)) {
+      const id = this.canonicalConceptId(hit.id);
+      if (id !== own && this.snapshot.concepts.has(id)) out.add(id);
+    }
+    return [...out];
   }
 
   /** What the backing provider answers may have changed (its vectors were computed). */

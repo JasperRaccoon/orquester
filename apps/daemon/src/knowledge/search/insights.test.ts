@@ -314,6 +314,30 @@ test("link gaps: very close linked entries that share no concept, `queued` from 
   assert.equal((await s.insights.list({}, s.seoOnly)).gaps[0]!.queued, false);
 });
 
+test("link gaps: once concept vectors are ready, only pairs where a claim of one is close to a claim of the other; never a survey", async () => {
+  const s = await setup();
+  await loadGraph(s.graph, [
+    node("topic-qa", "Queues", files("q1", "q2", "q3")),
+    node("topic-qb", "Queue tooling", files("q1", "q2", "q4")),
+    node("tactic-retry", "Retry with backoff", files("q3")),
+    node("tactic-backoff", "Back off, then retry", files("q4")),
+    node("tool-redis", "Redis", files("q4"), { type: "Tool" })
+  ]);
+  const gaps = async () => (await s.insights.list({}, s.seoOnly)).gaps.map(pairOf);
+  const close = new Map<string, string[]>();
+  s.graph.setSimilarConcepts((id) => (close.get(id) ?? []).map((other) => ({ id: other, similarity: 0.95 })));
+  s.graph.setBackingConcepts(() => [], () => true);
+  assert.deepEqual(await gaps(), [], "close in meaning, no claim of theirs close: no gap");
+  close.set("tool-redis", ["tactic-retry"]);
+  s.graph.backingMoved(); // as a complete vector computation announces
+  assert.deepEqual(await gaps(), [], "only claims count");
+  close.set("tactic-retry", ["tactic-backoff"]);
+  s.graph.backingMoved();
+  assert.deepEqual(await gaps(), [[ke("q3"), ke("q4")]]);
+  s.store.put(ke("q3"), "body q3", ["kc_seo"], { title: "Q note 3", kind: "synthesis" }, true);
+  assert.deepEqual(await gaps(), [], "a survey is never a side");
+});
+
 test("limit applies to every list after totals are counted; a pair-check change or a narrower scope is computed anew", async () => {
   const s = await setup();
   const full = await s.insights.list({}, s.all);

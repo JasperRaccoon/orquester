@@ -21,7 +21,9 @@
  *   discuss the topic and do not back the claim are what makes it worth checking. Ranked by what
  *   they came from (a saved post, thread or article before a note: {@link noteTier}), then centrality: the share of the cluster's peers that discuss its topic; taken one per entry in
  *   turn (entries by their most central claim), so one prolific entry does not fill the list.
- * - Link gaps: {@link findLinkGaps} at the model's `strong` threshold; `queued` from the re-linker.
+ * - Link gaps: {@link findLinkGaps} at the model's `strong` threshold over non-survey entries, and
+ *   once concept vectors are ready only pairs a claim of one is close to a claim of the other
+ *   ({@link KnowledgeInsights.claimsClose}); `queued` from the re-linker.
  *
  * Clusters are those of the similarity graph over the most recent
  * {@link KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES} embedded entries (the default `k`; the same clusters
@@ -79,6 +81,15 @@ const BRIDGE_CONCEPTS_MAX = 5;
  * on its rule), and the policy is checked against the platform, not against other entries.
  */
 const SINGLE_SOURCE_TYPES: ReadonlySet<string> = new Set(["tactic", "result", "metric"]);
+/**
+ * Claims a link gap's topical test compares (126 real entries, 12 gaps at `strong`: in the 4 where
+ * a tactic of one has a close one in the other, the two name one practice twice, such as "Post
+ * twice a day then once a day" and "2 posts per account per day"; the 8 without are neighbours by
+ * genre: "Claude prompt to find your aha moment" ~ "polling and v2 fallbacks", whose closest
+ * concepts are "Downloads" ~ "Podcast downloads" or "ChatGPT" ~ "TikTok"). Not metrics or named
+ * things: siblings of one kind score as close as one thing does.
+ */
+const GAP_CLAIM_TYPES: ReadonlySet<string> = new Set(["tactic", "rule", "guideline", "result"]);
 /** The cluster size from which an unbacked claim counts (peers that could have said it and did not). */
 const SINGLE_SOURCE_MIN_CLUSTER = 3;
 /**
@@ -103,7 +114,7 @@ const CENTRALITY_WEIGHT = 0.1;
 
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType" | "backingConcepts" | "backingRevision">;
+  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType" | "backingConcepts" | "backingRevision" | "similarConceptIds" | "conceptVectorsReady">;
   similarity: Pick<KnowledgeSimilarity, "graph" | "clusterLabelsRevision">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
@@ -159,18 +170,21 @@ export class KnowledgeInsights {
     for (const meta of visible) fingerprint.update(`${meta.id}\u0000${meta.updatedAt}\u0000${meta.collections.join(",")}\u0001`);
     const visibleKey = fingerprint.digest("base64");
     const base = [scopeKey(scope), vectors?.index.modelId() ?? null, vectors?.thresholds ?? null, vectors?.index.generation() ?? null, this.options.graph.revision(), visibleKey];
-    const gapsKey = JSON.stringify(base);
+    // Concept vectors (what the gaps' topical test and backing read) are part of both keys.
+    const gapsKey = JSON.stringify([INSIGHTS_ALGORITHM, ...base, this.options.graph.backingRevision()]);
     // The clusters' LLM names are part of what insights show (a cluster ref's label).
     const key = JSON.stringify([INSIGHTS_ALGORITHM, ...base, limit, this.options.pairChecksRevision?.() ?? 0, this.options.similarity.clusterLabelsRevision(), this.options.graph.backingRevision()]);
 
     const gaps = vectors
       ? remember(this.gapCache, gapsKey, () =>
           findLinkGaps({
-            ids: visible.map((meta) => meta.id),
+            // A survey is close to what it surveys and links its own concepts: never a side of a gap.
+            ids: visible.filter((meta) => !isSurveyEntry(meta)).map((meta) => meta.id),
             index: vectors.index,
             conceptsOf: (id) => this.options.graph.conceptsOfEntry(id, scope).map(linkGapConceptKey),
             minimum: vectors.thresholds.strong,
-            limit: Number.POSITIVE_INFINITY
+            limit: Number.POSITIVE_INFINITY,
+            related: this.claimsClose(scope)
           })
         )
       : Promise.resolve([]);
@@ -183,6 +197,36 @@ export class KnowledgeInsights {
       gaps: computed.gaps.map(({ pair, ...gap }) => ({ ...copy(gap), queued: queued(pair.a, pair.b) })),
       totals: { ...computed.totals }
     };
+  }
+
+  /**
+   * A link gap's topical test: a claim of one entry ({@link GAP_CLAIM_TYPES}) has a concept close
+   * in meaning (`KnowledgeGraph.similarConceptIds`) among the other's. Two entries merely close in
+   * meaning ("polling and v2 fallbacks" and "Reddit's push budgeter": both app engineering) pass
+   * no claim of theirs between them. Absent (every pair) while concept vectors are not ready.
+   */
+  private claimsClose(scope: KnowledgeScope): ((a: string, b: string) => boolean) | undefined {
+    const graph = this.options.graph;
+    const claims = new Map<string, string[]>();
+    const claimsOf = (id: string): string[] => {
+      let list = claims.get(id);
+      if (!list) {
+        claims.set(id, (list = graph.conceptsOfEntry(id, scope).filter((c) => GAP_CLAIM_TYPES.has(c.type.toLowerCase())).map((c) => graph.canonicalConceptId(c.id))));
+      }
+      return list;
+    };
+    if (!graph.conceptVectorsReady()) return undefined;
+    const near = new Map<string, readonly string[]>();
+    const nearOf = (conceptId: string): readonly string[] => {
+      let list = near.get(conceptId);
+      if (!list) near.set(conceptId, (list = graph.similarConceptIds(conceptId) ?? []));
+      return list;
+    };
+    const close = (x: string, y: string): boolean => {
+      const theirs = new Set(claimsOf(y));
+      return claimsOf(x).some((id) => nearOf(id).some((other) => theirs.has(other)));
+    };
+    return (a, b) => close(a, b) || close(b, a);
   }
 
   private async compute(

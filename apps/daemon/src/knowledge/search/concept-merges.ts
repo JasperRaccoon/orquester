@@ -660,7 +660,13 @@ export class KnowledgeConceptMerges {
     // Nothing to overlay leaves the graph (and its revision) as it is.
     if (this.file.merges.length > 0) this.graph.setConceptMerges(overlayOf(this.file));
     this.graph.setSimilarConcepts((id) => this.similar(id));
-    this.graph.setBackingConcepts((id) => this.backing(id));
+    this.graph.setBackingConcepts(
+      (id) => this.backing(id),
+      () => {
+        const set = this.vectors.current();
+        return set !== null && this.thresholdsOf(set.modelId) !== null;
+      }
+    );
     this.unsubscribe.push(this.graph.onLoad(() => this.graphLoaded()));
     this.unsubscribe.push(
       this.vectors.onComputed(() => {
