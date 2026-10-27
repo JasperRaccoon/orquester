@@ -104,9 +104,53 @@ export const ANDROID_CACHE_PATHS: readonly string[] = [BOX_ANDROID_SDK_DIR, BOX_
 // Device tools (both) and the iOS runner (macOS boxes)
 // ---------------------------------------------------------------------------
 
+/**
+ * simslim (MIT, mobai-app/simslim): turns off a simulator's unneeded background daemons (~4x less
+ * memory). Pinned release binary (ad-hoc signed, darwin arm64) with its SHA-256; installed into
+ * `<tools>/simslim/<tag>/simslim`, so the device-tools cache carries it.
+ */
+export const SIMSLIM_RELEASE = Object.freeze({
+  version: "0.13.0",
+  tag: "v0.13.0",
+  url: "https://github.com/MobAI-App/simslim/releases/download/v0.13.0/simslim-v0.13.0-macos-arm64.tar.gz",
+  sha256: "76807efb5beb57b73b40959eea04defe21fc18265811a495db1509b5e7be07c1"
+});
+/** simslim's binary under a tools dir. */
+export const SIMSLIM_TOOL_PATH = `simslim/${SIMSLIM_RELEASE.tag}/simslim`;
+
+/**
+ * Install the pinned simslim into `$TOOLS` (POSIX sh; `$TOOLS` from the env, the rest constants).
+ * Prints `simslim <version>` when it is there, or `simslim-unsupported <reason>` (exit 0) on a Mac
+ * it cannot run on; exits non-zero when the download or the checksum fails.
+ */
+export const SIMSLIM_INSTALL_SCRIPT = `set -eu
+if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+  echo "simslim-unsupported $(uname -s) $(uname -m)"
+  exit 0
+fi
+bin="$TOOLS/${SIMSLIM_TOOL_PATH}"
+if [ -x "$bin" ] && [ "$("$bin" --version 2> /dev/null)" = ${sq(`simslim ${SIMSLIM_RELEASE.version}`)} ]; then
+  "$bin" --version
+  exit 0
+fi
+tmp=$(mktemp -d "\${TMPDIR:-/tmp}/orq-simslim.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp/simslim.tar.gz" ${sq(SIMSLIM_RELEASE.url)}
+sum=$(shasum -a 256 "$tmp/simslim.tar.gz" | awk '{ print $1 }')
+if [ "$sum" != ${sq(SIMSLIM_RELEASE.sha256)} ]; then
+  echo "simslim: checksum mismatch ($sum)" >&2
+  exit 1
+fi
+tar -xzf "$tmp/simslim.tar.gz" -C "$tmp" simslim
+mkdir -p "$(dirname "$bin")"
+chmod 755 "$tmp/simslim"
+mv "$tmp/simslim" "$bin"
+"$bin" --version
+`;
+
 /** The tools cache key for an OS (native modules differ per OS and Node major). */
 export function deviceToolsCacheKey(os: BlacksmithOs): string {
-  return `orq-devices-tools-${os}-node${DEVICE_NODE_VERSION}-${shortHash(DEVICE_TOOL_VERSIONS)}-${DEVICE_CACHE_VERSION}`;
+  return `orq-devices-tools-${os}-node${DEVICE_NODE_VERSION}-${shortHash({ ...DEVICE_TOOL_VERSIONS, simslim: SIMSLIM_RELEASE.sha256 })}-${DEVICE_CACHE_VERSION}`;
 }
 export const DEVICE_TOOLS_CACHE_PATHS: readonly string[] = [BOX_DEVICE_TOOLS_DIR];
 
@@ -149,7 +193,7 @@ esac
 echo "build=$build" >> "$GITHUB_OUTPUT"
 `;
 
-/** Install the pinned device tools into {@link BOX_DEVICE_TOOLS_DIR}. */
+/** Install the pinned device tools (and simslim on macOS) into {@link BOX_DEVICE_TOOLS_DIR}. */
 export const DEVICE_TOOLS_STEP_SCRIPT = `set -eu
 mkdir -p ${BOX_DEVICE_TOOLS_DIR}
 cd ${BOX_DEVICE_TOOLS_DIR}
@@ -158,6 +202,9 @@ npm install --no-audit --no-fund --save-exact ${Object.entries(DEVICE_TOOL_VERSI
   .map(([name, version]) => sq(`${name}@${version}`))
   .join(" ")}
 ./node_modules/.bin/agent-device --version
+if [ "$(uname -s)" = Darwin ]; then
+  TOOLS=${BOX_DEVICE_TOOLS_DIR} sh -c ${sq(SIMSLIM_INSTALL_SCRIPT)}
+fi
 `;
 
 /** Install cmdline-tools and {@link ANDROID_SDK_PACKAGES} into {@link BOX_ANDROID_SDK_DIR} (needs Java 17+). */

@@ -14,9 +14,16 @@
  * 5. leftover `orq-<leaseId>` simulators of leases that no longer exist are deleted, and (once per
  *    host) agent-device's XCTest runner is warmed in the background on a scratch simulator.
  *
- * Leases: `boot` creates `orq-<leaseId>` (profile device type, newest iOS runtime), boots it, waits
- * for `bootstatus -b` and then for a real frame (see `simctl.ts`), and attaches serve-sim through the
- * hub; `release` stops the hub's capture of it, shuts it down and deletes it.
+ * 6. simslim (pinned; `simslim.ts`), the slim profile file and the Mac's RAM; then, in the
+ *    background, the pre-slimmed pool (`sim-pool.ts`) fills.
+ *
+ * Leases: `boot` takes a pool simulator of the profile (renamed `orq-<leaseId>`) or creates
+ * `orq-<leaseId>` (profile device type, newest iOS runtime) and slims it while shut down
+ * (`simslim on`, which boots it), boots it, waits for `bootstatus -b` and then for a real frame (see
+ * `simctl.ts`), attaches serve-sim through the hub, and checks the slim state (`simslim verify`) in
+ * the background; `release` stops the hub's capture of it, shuts it down and deletes it. Without
+ * simslim (an Intel Mac, a runtime before iOS 18.5, a failed install) simulators boot stock.
+ * `capacity` comes from host RAM and `simslim top` (`simslim-capacity.ts`).
  */
 
 import { randomUUID } from "node:crypto";
@@ -28,6 +35,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   DEVICE_ERROR_CODES,
   DEVICE_PLATFORM_LABELS,
+  deviceProfile,
   type DeviceCapacity,
   type DeviceHostBoxInfo,
   type DeviceHostPoolInfo,
@@ -40,7 +48,7 @@ import {
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
 import type { BoxConnection, BoxHostForward, BoxProcess } from "../../../boxes/contracts.ts";
-import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
+import { DEVICE_TOOL_VERSIONS, SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE } from "../../../boxes/github/device-cache.ts";
 import { DeviceError, isDeviceError } from "../../errors.ts";
 import type { DeviceToolchain } from "../../toolchain/index.ts";
 import type {
@@ -75,8 +83,26 @@ import {
   type RemoteProbe,
   type RemoteResult
 } from "./remote.ts";
+import { SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim } from "./sim-pool.ts";
+import { simulatorCapacity } from "./simslim-capacity.ts";
+import {
+  ORQ_SLIM_PROFILE_JSON,
+  SIMSLIM_ENV,
+  isPinnedSimslim,
+  parseSimslimInstall,
+  parseSimslimTop,
+  parseSimslimVerify,
+  simslimBin,
+  simslimOnArgs,
+  simslimProfilePath,
+  simslimTopArgs,
+  simslimVerifyArgs,
+  slimmableIos,
+  type SimslimTop
+} from "./simslim.ts";
 import {
   FRAME_SIZE_SCRIPT,
+  POOL_PREP_SIM_PREFIX,
   WARM_SIM_NAME,
   isRealFrame,
   leaseIdOfSimulator,
@@ -86,7 +112,8 @@ import {
   parseSimDevices,
   pickSimulatorTarget,
   simDeviceSummary,
-  type SimDevice
+  type SimDevice,
+  type SimTarget
 } from "./simctl.ts";
 
 /** How long things may take (tests shorten them). */
@@ -105,6 +132,8 @@ export interface BoxHostTiming {
   /** serve-sim's first capture start (~6 s) and later ones. */
   streamStartMs: number;
   warmMs: number;
+  /** `simslim on`: a slim first boot (~35 s on a 6 vCPU Mac; simslim's own deadline is 15 min). */
+  slimMs: number;
 }
 
 export const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
@@ -117,7 +146,8 @@ export const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
   frameWaitMs: 45_000,
   framePollMs: 1_500,
   streamStartMs: 3 * 60_000,
-  warmMs: 15 * 60_000
+  warmMs: 15 * 60_000,
+  slimMs: 10 * 60_000
 };
 
 /** agent-device's iOS simulator runner build under the box user's home (the runner cache restores it). */
@@ -148,7 +178,15 @@ export interface BoxDeviceHostDeps {
   fetch?: typeof fetch;
   now?(): number;
   timing?: Partial<BoxHostTiming>;
+  /**
+   * Pre-slimmed shut-down simulators kept per profile (default {@link DEFAULT_SIM_POOL_SIZE} on
+   * rented hosts, 0 on the owner's own Mac: its simulator list stays theirs).
+   */
+  simPoolSize?: number;
 }
+
+/** Pool simulators per profile on a rented host. */
+export const DEFAULT_SIM_POOL_SIZE = 2;
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
 
@@ -196,6 +234,20 @@ export class BoxDeviceHost implements DeviceHost {
   /** Cold boots in line ({@link oneBootAtATime}). */
   private bootQueue: Promise<void> = Promise.resolve();
   private bootsRunning = 0;
+  /** Lease boots under way (from their first call, before they queue): the pool waits for them. */
+  private leaseBoots = 0;
+  /** simslim in the box (null: simulators boot stock). */
+  private slim: { bin: string; profilePath: string } | null = null;
+  /** The `tool:simslim` readiness check; null before the first prepare. */
+  private slimCheck: { ok: boolean; detail: string } | null = null;
+  /** `hw.memsize`; null until read. */
+  private hostBytes: number | null = null;
+  /** The latest `simslim top --json`. */
+  private top: SimslimTop | null = null;
+  private sampling: Promise<void> | null = null;
+  private simPool: SimPool | null = null;
+  /** Profiles the pool keeps stocked beyond the default one: those leased on this host. */
+  private readonly poolProfiles = new Set<string>();
 
   constructor(private readonly deps: BoxDeviceHostDeps) {
     this.id = `box:${deps.boxId}`;
@@ -255,6 +307,7 @@ export class BoxDeviceHost implements DeviceHost {
         await this.probeBox(link, signal);
         if (this.hub && !(await this.healthy(this.hub.forward.hostPort, "/readyz"))) this.hubLost("The device hub stopped responding.");
         if (this.agent && !(await this.healthy(this.agent.forward.hostPort, "/health"))) this.agentLost();
+        await this.sampleCapacity(link);
       } catch (error) {
         this.deps.logger.warn(`[devices] probing ${this.id} failed`, errorText(error));
       }
@@ -263,8 +316,16 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   capacity(): DeviceCapacity {
-    const total = this.platformEnabled() ? this.deps.settings().ios.maxSimulatorsPerHost : 0;
-    return { used: this.deps.activeLeases().length, total };
+    const leased = this.deps.activeLeases().length;
+    if (!this.platformEnabled()) return { used: leased, total: 0 };
+    const { total } = simulatorCapacity({
+      settingCap: this.deps.settings().ios.maxSimulatorsPerHost,
+      hostBytes: this.hostBytes,
+      slim: this.slim !== null,
+      top: this.top,
+      leased
+    });
+    return { used: leased, total };
   }
 
   box(): DeviceHostBoxInfo | null {
@@ -399,12 +460,20 @@ export class BoxDeviceHost implements DeviceHost {
       });
       this.step("tool:agent-device-local", "agent-device on this machine", "done", 97);
 
+      this.working = "tool:simslim";
+      this.step("tool:simslim", "simslim (slim simulators)", "running", 98);
+      await this.ensureSimslim(link, probe, layout, signal);
+      this.step("tool:simslim", "simslim (slim simulators)", "done", 99, this.slimCheck?.detail);
+
       this.working = null;
       await this.removeLeftovers(link, signal).catch((error) => this.deps.logger.warn(`[devices] cleaning ${this.id}'s leftover simulators failed`, errorText(error)));
       this.checkedAt = new Date(this.now()).toISOString();
       this.setPhase("ready", null);
       this.emitProgress({ step: "ready", label: "Ready", state: "done", percent: 100 });
       this.startWarm(link);
+      void this.sampleCapacity(link);
+      this.simPool?.reset();
+      this.simPool?.kick();
     } catch (error) {
       const failedCheck = this.working;
       this.working = null;
@@ -574,11 +643,17 @@ export class BoxDeviceHost implements DeviceHost {
   /** Simulators of leases that no longer exist (a restart, a failed release) and the warm-up one. */
   private async removeLeftovers(link: BoxConnection, signal: AbortSignal): Promise<void> {
     const live = new Set(this.deps.activeLeases().map((lease) => lease.id));
+    const adopted: PoolSim[] = [];
     for (const device of await this.simDevices(link, signal)) {
       const leaseId = leaseIdOfSimulator(device.name);
-      const stale = (leaseId !== null && !live.has(leaseId)) || (device.name === WARM_SIM_NAME && !this.warming);
+      const poolProfile = profileOfPoolSimulator(device.name);
+      // A pool simulator someone booted, or one a stopped daemon left half-made, is not ready.
+      const stalePool = (poolProfile !== null && (device.state !== "Shutdown" || !this.simPool)) || (device.name.startsWith(POOL_PREP_SIM_PREFIX) && !this.simPool?.busy);
+      const stale = (leaseId !== null && !live.has(leaseId)) || (device.name === WARM_SIM_NAME && !this.warming) || stalePool;
       if (stale) await this.deleteSimulator(link, device.udid, signal);
+      else if (poolProfile !== null) adopted.push({ udid: device.udid, profileId: poolProfile, runtimeId: device.runtimeId });
     }
+    this.simPool?.adopt(adopted);
     await link.request("fs.rm", { path: this.layout(link).uploads, recursive: true, force: true }).catch(() => undefined);
     await link.request("fs.mkdir", { path: this.layout(link).uploads, recursive: true, mode: 0o700 }).catch(() => undefined);
   }
@@ -599,6 +674,7 @@ export class BoxDeviceHost implements DeviceHost {
       )
       .finally(() => {
         this.warming = null;
+        this.simPool?.kick();
       });
   }
 
@@ -648,6 +724,132 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   // -------------------------------------------------------------------------
+  // simslim: install, pool, capacity
+  // -------------------------------------------------------------------------
+
+  /**
+   * Install the pinned simslim (skipped when the tools cache restored it), write the slim profile
+   * and read the Mac's RAM. Never fails the prepare: without simslim, simulators boot stock.
+   */
+  private async ensureSimslim(link: BoxConnection, probe: RemoteProbe, layout: RemoteLayout, signal: AbortSignal): Promise<void> {
+    if (this.deps.platform !== "ios") return;
+    this.hostBytes = await this.readHostBytes(link, signal);
+    try {
+      const result = await execRemote(
+        link,
+        { command: "/bin/sh", args: ["-c", SIMSLIM_INSTALL_SCRIPT, "simslim-install"], env: { ...remoteEnv(probe), TOOLS: layout.tools } },
+        { signal, timeoutMs: this.timing.commandMs }
+      );
+      const install = result.exitCode === 0 ? parseSimslimInstall(result.stdout) : null;
+      if (install?.kind === "unsupported") {
+        this.slim = null;
+        this.slimCheck = { ok: true, detail: `Not used on this Mac (${install.reason}): simulators run stock` };
+        return;
+      }
+      if (!isPinnedSimslim(install)) throw new Error(outputTail(result.stderr || result.stdout) || `exit ${result.exitCode}`);
+      const profilePath = simslimProfilePath(layout.root);
+      await link.writeFile(profilePath, ORQ_SLIM_PROFILE_JSON, { mode: 0o600 });
+      this.slim = { bin: simslimBin(layout.tools), profilePath };
+      this.slimCheck = { ok: true, detail: SIMSLIM_RELEASE.version };
+      const size = this.deps.simPoolSize ?? (this.kind === "box" ? DEFAULT_SIM_POOL_SIZE : 0);
+      if (size > 0 && !this.simPool) this.simPool = this.createPool(size);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.slim = null;
+      this.slimCheck = { ok: false, detail: `Not installed (${errorText(error)}): simulators run stock` };
+      this.deps.logger.warn(`[devices] installing simslim on ${this.id} failed; simulators boot stock`, errorText(error));
+    }
+  }
+
+  private async readHostBytes(link: BoxConnection, signal: AbortSignal): Promise<number | null> {
+    const result = await execRemote(link, { command: "/usr/sbin/sysctl", args: ["-n", "hw.memsize"] }, { signal, timeoutMs: this.timing.commandMs }).catch(() => null);
+    const bytes = Number(result?.stdout.trim());
+    return result?.exitCode === 0 && Number.isFinite(bytes) && bytes > 0 ? bytes : null;
+  }
+
+  private async runSimslim(link: BoxConnection, args: string[], signal?: AbortSignal, timeoutMs = this.timing.commandMs): Promise<RemoteResult> {
+    if (!this.slim) throw new DeviceError("UNAVAILABLE", `simslim is not installed on ${this.label}.`);
+    const env = { ...(this.probe ? remoteEnv(this.probe) : {}), ...SIMSLIM_ENV };
+    return execRemote(link, { command: this.slim.bin, args, env }, { ...(signal ? { signal } : {}), timeoutMs });
+  }
+
+  private createPool(size: number): SimPool {
+    return new SimPool({
+      size,
+      logger: this.deps.logger,
+      targets: () => {
+        const enabled = this.deps.settings().ios.profiles;
+        return [...new Set([enabled[0], ...this.poolProfiles].filter((id): id is string => typeof id === "string" && enabled.includes(id)))];
+      },
+      idle: () => this.isReady() && this.leaseBoots === 0 && this.bootsRunning === 0 && !this.warming && !this.draining(),
+      exclusive: (signal, work) => this.oneBootAtATime(signal, () => undefined, work),
+      ops: { make: (profileId, signal) => this.makePoolSimulator(this.requireLink(), profileId, signal) }
+    });
+  }
+
+  /** Create `orq-poolprep-<id>`, slim it (one boot, back to shut down), name it `orq-pool-<profile>.<id>`. */
+  private async makePoolSimulator(link: BoxConnection, profileId: string, signal: AbortSignal): Promise<PoolSim> {
+    const profile = deviceProfile(profileId);
+    if (!profile || !this.slim) throw new Error(`no profile ${profileId} or no simslim`);
+    const catalog = parseSimCatalog((await this.simctl(link, ["list", "-j", "devicetypes", "runtimes"], signal)).stdout);
+    const target = pickSimulatorTarget(catalog, profile);
+    if (!target || !slimmableIos(target.osVersion)) throw new Error(`no iOS 18.5+ simulator for ${profile.label}`);
+    const id = randomUUID().slice(0, 8);
+    const udid = await this.createSimulator(link, `${POOL_PREP_SIM_PREFIX}${id}`, target.deviceTypeId, target.runtimeId, signal);
+    try {
+      const slimmed = await this.runSimslim(link, simslimOnArgs({ udid, profilePath: this.slim.profilePath, preserveBootState: true }), signal, this.timing.slimMs);
+      if (slimmed.exitCode !== 0) throw new Error(`simslim on failed: ${outputTail(slimmed.stderr || slimmed.stdout) || `exit ${slimmed.exitCode}`}`);
+      await this.simctl(link, ["rename", udid, poolSimulatorName(profileId, id)], signal);
+      return { udid, profileId, runtimeId: target.runtimeId };
+    } catch (error) {
+      await this.deleteSimulator(link, udid, AbortSignal.timeout(this.timing.commandMs)).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /** After a lease's slim boot: its overrides match the profile, else apply what is missing live (no reboot). */
+  private async verifySlim(link: BoxConnection, udid: string): Promise<void> {
+    if (!this.slim) return;
+    try {
+      const verified = parseSimslimVerify((await this.runSimslim(link, simslimVerifyArgs({ udid, profilePath: this.slim.profilePath }))).stdout);
+      if (verified?.ok !== false) return;
+      this.deps.logger.warn(`[devices] ${udid} on ${this.id} is not slim (${verified.missing.length} missing, ${verified.extra.length} extra); slimming it live`);
+      await this.runSimslim(link, simslimOnArgs({ udid, profilePath: this.slim.profilePath, noReboot: true }), undefined, this.timing.slimMs);
+    } catch (error) {
+      this.deps.logger.warn(`[devices] verifying ${udid}'s slim state on ${this.id} failed`, errorText(error));
+    }
+  }
+
+  /** Resolves once the pool's refill in progress ended (tests, the integration run). */
+  async poolSettled(): Promise<Record<string, number>> {
+    await this.simPool?.settled();
+    return this.simPool?.counts() ?? {};
+  }
+
+  /** A simulator booted or went: measure again, then refill the pool. */
+  private afterDeviceChange(link: BoxConnection): void {
+    void this.sampleCapacity(link).finally(() => this.simPool?.kick());
+  }
+
+  /** `simslim top --json` (memory of every booted simulator) for {@link capacity}. */
+  private sampleCapacity(link: BoxConnection): Promise<void> {
+    if (!this.slim || !link.connected) return Promise.resolve();
+    this.sampling ??= this.runSimslim(link, simslimTopArgs())
+      .then((result) => {
+        const top = result.exitCode === 0 ? parseSimslimTop(result.stdout) : null;
+        if (!top) return;
+        const before = this.capacity().total;
+        this.top = top;
+        if (this.capacity().total !== before) this.emitChange();
+      })
+      .catch((error) => this.deps.logger.warn(`[devices] measuring ${this.id}'s simulators failed`, errorText(error)))
+      .finally(() => {
+        this.sampling = null;
+      });
+    return this.sampling;
+  }
+
+  // -------------------------------------------------------------------------
   // Devices
   // -------------------------------------------------------------------------
 
@@ -671,22 +873,62 @@ export class BoxDeviceHost implements DeviceHost {
       );
     }
     const name = leaseSimulatorName(request.leaseId);
+    this.poolProfiles.add(request.profile.id);
+    // A refill holding the boot slot gives it up now, and none starts until this boot is done.
+    this.leaseBoots += 1;
+    this.simPool?.preempt();
+    try {
+      return await this.bootNew(link, request, target, name, signal, progress);
+    } finally {
+      this.leaseBoots -= 1;
+      this.simPool?.kick();
+    }
+  }
+
+  private async bootNew(
+    link: BoxConnection,
+    request: DeviceBootRequest,
+    target: SimTarget,
+    name: string,
+    signal: AbortSignal,
+    progress: (step: string, label: string) => void
+  ): Promise<DeviceBootResult> {
     // A retry after a restart may find the lease's earlier simulator.
     for (const device of await this.simDevices(link, signal)) {
       if (device.name === name) await this.deleteSimulator(link, device.udid, signal);
     }
-    const udid = (await this.simctl(link, ["create", name, target.deviceTypeId, target.runtimeId], signal)).stdout.trim();
-    if (!/^[0-9A-F-]{36}$/i.test(udid)) throw new DeviceError("UNAVAILABLE", `simctl create returned no simulator id on ${this.label}.`);
+    const slim = this.slim && slimmableIos(target.osVersion) ? this.slim : null;
+    const pooled = slim ? await this.takePooled(link, request.profile.id, target.runtimeId, name, signal) : null;
+    const udid = pooled ?? (await this.createSimulator(link, name, target.deviceTypeId, target.runtimeId, signal));
     this.leaseProfiles.set(request.leaseId, request.profile.id);
     try {
-      await this.bootAndAttach(link, udid, signal, progress);
+      await this.bootAndAttach(link, udid, signal, progress, false, pooled ? "pooled" : slim ? "slim" : "stock");
     } catch (error) {
       this.leaseProfiles.delete(request.leaseId);
       await this.deleteSimulator(link, udid, AbortSignal.timeout(this.timing.commandMs)).catch(() => undefined);
       throw error;
     }
     this.emitChange();
+    if (slim) void this.verifySlim(link, udid);
+    this.afterDeviceChange(link);
     return { deviceId: udid, name: request.profile.label, osVersion: `iOS ${target.osVersion}`, stream: { kind: "serve-sim", deviceParam: udid } };
+  }
+
+  private async createSimulator(link: BoxConnection, name: string, deviceTypeId: string, runtimeId: string, signal: AbortSignal): Promise<string> {
+    const udid = (await this.simctl(link, ["create", name, deviceTypeId, runtimeId], signal)).stdout.trim();
+    if (!/^[0-9A-F-]{36}$/i.test(udid)) throw new DeviceError("UNAVAILABLE", `simctl create returned no simulator id on ${this.label}.`);
+    return udid;
+  }
+
+  /** A ready pool simulator of the profile renamed for the lease, or null (none, or the rename failed). */
+  private async takePooled(link: BoxConnection, profileId: string, runtimeId: string, name: string, signal: AbortSignal): Promise<string | null> {
+    const sim = this.simPool?.take(profileId, runtimeId);
+    if (!sim) return null;
+    const renamed = await this.simctl(link, ["rename", sim.udid, name], signal, this.timing.commandMs, true);
+    if (renamed.exitCode === 0) return sim.udid;
+    this.deps.logger.warn(`[devices] renaming pool simulator ${sim.udid} on ${this.id} failed`, outputTail(renamed.stderr));
+    await this.deleteSimulator(link, sim.udid, signal).catch(() => undefined);
+    return null;
   }
 
   private async attachExisting(link: BoxConnection, request: DeviceBootRequest, signal: AbortSignal, progress: (step: string, label: string) => void): Promise<DeviceBootResult> {
@@ -697,9 +939,30 @@ export class BoxDeviceHost implements DeviceHost {
     return { deviceId: device.udid, name: device.name, osVersion: `iOS ${device.osVersion}`, stream: { kind: "serve-sim", deviceParam: device.udid } };
   }
 
-  private async bootAndAttach(link: BoxConnection, udid: string, signal: AbortSignal, progress: (step: string, label: string) => void, booted = false): Promise<void> {
+  /**
+   * `mode`: `stock` boots it; `slim` (a new simulator) slims it while shut down, which boots it
+   * (stock when slimming fails); `pooled` boots a pool simulator, already slim.
+   */
+  private async bootAndAttach(
+    link: BoxConnection,
+    udid: string,
+    signal: AbortSignal,
+    progress: (step: string, label: string) => void,
+    booted = false,
+    mode: "stock" | "slim" | "pooled" = "stock"
+  ): Promise<void> {
     await this.oneBootAtATime(signal, () => progress("boot-queue", "Waiting for another device on this host to finish booting"), async () => {
-      if (!booted) {
+      if (!booted && mode === "slim" && this.slim) {
+        progress("boot", "Booting iOS (slim)");
+        const slimmed = await this.runSimslim(link, simslimOnArgs({ udid, profilePath: this.slim.profilePath }), signal, this.timing.slimMs);
+        if (slimmed.exitCode !== 0) {
+          this.deps.logger.warn(`[devices] slimming ${udid} on ${this.id} failed; booting it stock`, outputTail(slimmed.stderr || slimmed.stdout));
+          const boot = await this.simctl(link, ["boot", udid], signal, this.timing.commandMs, true);
+          if (boot.exitCode !== 0 && !/current state: Booted/i.test(boot.stderr)) {
+            throw new DeviceError("UNAVAILABLE", `simctl boot failed on ${this.label}: ${outputTail(boot.stderr || boot.stdout) || `exit ${boot.exitCode}`}`);
+          }
+        }
+      } else if (!booted) {
         progress("boot", "Booting iOS");
         await this.simctl(link, ["boot", udid], signal);
       }
@@ -777,6 +1040,7 @@ export class BoxDeviceHost implements DeviceHost {
     if (owned || options.shutdown) await this.stopDevice(link, udid, signal).catch((error) => this.deps.logger.warn(`[devices] stopping ${udid} on ${this.id} failed`, errorText(error)));
     if (owned) await this.deleteSimulator(link, udid, signal);
     this.emitChange();
+    this.afterDeviceChange(link);
   }
 
   async run(command: "simctl" | "adb", args: readonly string[], options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<DeviceCommandResult> {
@@ -830,6 +1094,7 @@ export class BoxDeviceHost implements DeviceHost {
   async stopHelpers(): Promise<void> {
     const link = this.deps.connection();
     const probe = this.probe;
+    this.simPool?.stop();
     await this.closeHub();
     await this.closeAgent();
     if (link?.connected) {
@@ -855,6 +1120,7 @@ export class BoxDeviceHost implements DeviceHost {
   /** Stop watching: the hub and simulators keep running in the box (a restart reattaches). */
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.simPool?.stop();
     await this.closeHub();
     await this.closeAgent();
     if (this.configPath) await removeAgentDeviceConfig(this.configPath).catch(() => undefined);
@@ -905,6 +1171,13 @@ export class BoxDeviceHost implements DeviceHost {
         label: "agent-device on this machine",
         state: this.working === "tool:agent-device-local" ? "working" : this.localCli ? "ok" : "missing",
         detail: this.localCli ? DEVICE_TOOL_VERSIONS["agent-device"] : "Not installed",
+        fixActionId: BOX_FIX_ACTIONS.tools
+      },
+      {
+        id: "tool:simslim",
+        label: "simslim (slim simulators)",
+        state: state("tool:simslim", this.slimCheck?.ok ?? null),
+        detail: this.slimCheck?.detail ?? notChecked,
         fixActionId: BOX_FIX_ACTIONS.tools
       },
       { id: "hub", label: "Device hub", state: state("hub", hubOk), detail: hubOk ? "Running" : "Not running", fixActionId: BOX_FIX_ACTIONS.hub },
