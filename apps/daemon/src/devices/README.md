@@ -30,7 +30,9 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `leases.ts` | Pure lease and controller rules: acquire, boot, handoff, agent-action checks, handles, idle, host loss. |
 | `action-log.ts` | Per-lease ring buffer of `DeviceActionEntry` (last 200, memory only). |
 | `screenshots.ts` | Last 20 screenshots per lease on disk (`deviceRef.screenshotId`), dropped when the chat closes. |
-| `pool.ts` | `choosePlacement`: where a new lease goes (local first, best fit, wait, setup, provision, full). Phase 2 grows it into `decidePool`. |
+| `pool.ts` | `choosePlacement` (phase 1 rules: named hosts, setup, off) and the pure phase 2 scheduler `decidePool` (placement local-first/best-fit/starting hosts, queue with deadlines, scale up within `maxHosts`/`maxHourlyUsd` and the standing approval or an approved card, warm minimum, idle/drain teardown, Android ≤ 16 per host). |
+| `pool-actor.ts` | `DevicePool`: runs `decidePool` on every host/lease/settings change and at queue deadlines; rents through the factories' `provision` (one at a time per platform), destroys idle/drained rented hosts, learns capacity per provider+size, drained ids, cache warms (`cache-warm` jobs; miss → once a day; weekly refresh), publishes `devices.pool`. Spend comes from the box records (`hosts/box/rental.ts` `deviceHostSpend`). Persisted in `device-pool.json` (`DevicePoolStore`). |
+| `thumbnails.ts` | Lease thumbnails for the fleet view: the hub's screenshot → downscaled JPEG, ≤ 1 s cache per lease. |
 | `service.ts` | `DeviceService`: hosts, settings, leases, setup jobs, action log, the agent tools' operations. |
 | `tools-port.ts` | `DeviceToolsPort` and `runDeviceTool` (principal → thread, `DeviceError` → outcome). |
 | `http-routes.ts` | `deviceRoutes` on both transports (`user-action` refuses agent and external principals); the hub proxy route on remote only (raw bodies, `?token=` accepted). |
@@ -56,7 +58,6 @@ inside it, keep the exported signature `wiring.ts` calls):
 | `toolchain/` (`index.ts`, `../tool-versions.json`) | toolchain: pinned npm tools, Android SDK, AVDs | implemented (below) |
 | `hosts/local-android.ts` | local Android host: emulators, supervised hub, capacity, readiness with fix actions | implemented (below) |
 | `hosts/box-host.ts` | Mac device hosts (box purpose `device-host`, setup step `devices`), `provision`, `provisionQuote`, `destroy` | implemented (above) |
-| `pool.ts` | phase 2 scheduler (`decidePool`), keeping `choosePlacement`'s contract | phase 1 rules |
 | `service.ts`, `leases.ts`, `http-routes.ts`, `ws-routes.ts`, `wiring.ts` | shared: extend, don't fork | complete for phase 1 |
 
 ## Local Android (toolchain, `android/`, `hosts/local-android.ts`)
@@ -96,8 +97,14 @@ cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/inte
 - `device-leases.json` is the durable record; the action log and lease progress are memory only.
 - A factory's `start` adds the hosts it has synchronously (before it resolves): leases on hosts
   that are missing afterwards are marked lost by the reconcile.
-- Renting fails closed: a `provision` placement needs `provisionQuote(...).needsApproval === false`
-  or an approved rental (the panel's Open, or `open_device`'s spend card).
+- Renting fails closed: a rental needs the standing approval (`pool.rentWithoutAsking` — the ONE
+  switch for every platform — within `pool.monthlyCapUsd`, counting this month's device-host spend
+  plus what running hosts are committed to until their deadline) or an approved rental (the panel's
+  Open, or `open_device`'s spend card: one per host).
+- Every unnamed open queues in the pool (`pool-actor.ts`); the lease is recorded only after a
+  synchronous capacity re-check on the placed host (no over-placement).
+- Leases whose device vanished from the host's `listDevices` (two lists in a row; on host changes
+  and every 5 min) become `lost`.
 - Secrets (hub and agent-device tokens) stay in host-side files; never in summaries, events,
   logs or process arguments. `DeviceError` messages are shown to the owner or the agent.
 - Agent tools act for the calling chat only: `runDeviceTool` takes the thread from the principal;

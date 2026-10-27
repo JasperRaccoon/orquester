@@ -222,9 +222,9 @@ describe("the Devices fleet view", () => {
     }
     assert.ok(text.includes("no longer listed"), "a lease on an unknown host gets its own group");
 
-    // Each live card polls its hub's screenshot route through the authenticated media URL (POST).
-    assert.ok(fetched.includes("POST http://daemon.test/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?device=emulator-5554&token=t"));
-    assert.ok(fetched.includes("POST http://daemon.test/api/devices/hosts/box%3Abs-mac-1/hub/vendor/serve-sim/api/screenshot?device=A1B2-ios-1&token=t"));
+    // Each live card polls the daemon's downscaled thumbnail of its lease through the authenticated media URL (GET).
+    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/emulator-5554/thumbnail?w=320&token=t"));
+    assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/A1B2-ios-1/thumbnail?w=320&token=t"));
     assert.ok(!fetched.some((line) => line.includes("A1B2-ios-3")), "a starting device has nothing to poll");
     const card = document.querySelector('[data-lease-id="emulator-5554"]')!;
     assert.equal(card.querySelector("img")?.getAttribute("src"), "blob:frame");

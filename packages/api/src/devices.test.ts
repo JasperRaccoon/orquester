@@ -70,6 +70,8 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.pool, "/api/devices/pool");
   assert.equal(deviceRoutes.cacheWarm, "/api/devices/pool/caches/warm");
   assert.equal(deviceRoutes.userAction("l/1"), "/api/devices/leases/l%2F1/user-action");
+  assert.equal(deviceRoutes.thumbnail("l/1"), "/api/devices/leases/l%2F1/thumbnail?w=320");
+  assert.equal(deviceRoutes.thumbnail("l1", 200.4), "/api/devices/leases/l1/thumbnail?w=200");
 });
 
 test("drain and cache-warm requests", () => {

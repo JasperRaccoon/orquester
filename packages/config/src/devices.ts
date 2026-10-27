@@ -53,9 +53,13 @@ export interface DevicesIosSettings {
   idleTeardownMinutes: number;
   /** Simulators one Mac host runs at once (phase 2 computes it with simslim). */
   maxSimulatorsPerHost: number;
-  /** "Rent Mac hosts without asking": no spend card while the month's estimate stays under the cap. */
+  /**
+   * Superseded by `pool.rentWithoutAsking` (one switch for every platform's rentals). Kept for
+   * older builds: a file that has only this one carries it into `pool` when read, and a patch
+   * naming it sets `pool.rentWithoutAsking` too.
+   */
   rentWithoutAsking: boolean;
-  /** The month's cap for renting without asking, in USD. */
+  /** Superseded by `pool.monthlyCapUsd` (kept and mirrored like `rentWithoutAsking`). */
   monthlyCapUsd: number;
   profiles: string[];
 }
@@ -86,9 +90,15 @@ export interface DevicePoolSettings {
   idleTeardownMinutes: number;
   /** How long a request above the caps waits for room before `DEVICE_CAPACITY`. */
   capacityWaitSeconds: number;
-  /** "Rent device hosts without asking": within the caps, no spend card. */
+  /**
+   * "Rent device hosts without asking": the ONE standing approval for renting device hosts of any
+   * platform (Mac and Linux): within the caps, no spend card.
+   */
   rentWithoutAsking: boolean;
-  /** The month's cap for renting pool hosts without asking, in USD (above it each rental needs a card). */
+  /**
+   * The month's cap for renting without asking, in USD: this month's device-host spend + what
+   * running hosts are committed to + the new host's whole lifetime must stay within it.
+   */
   monthlyCapUsd: number;
 }
 
@@ -306,9 +316,28 @@ export const devicesSettingsSchema = z
   })
   .passthrough();
 
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` existed: its Mac switch and cap become the pool's. */
+function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, unknown> {
+  const ios = isPlainRecord(record.ios) ? record.ios : null;
+  if (!ios) return record;
+  const pool = isPlainRecord(record.pool) ? { ...record.pool } : {};
+  let changed = false;
+  if (typeof pool.rentWithoutAsking !== "boolean" && ios.rentWithoutAsking === true) {
+    pool.rentWithoutAsking = true;
+    changed = true;
+  }
+  if (typeof pool.monthlyCapUsd !== "number" && typeof ios.monthlyCapUsd === "number") {
+    pool.monthlyCapUsd = ios.monthlyCapUsd;
+    changed = true;
+  }
+  return changed ? { ...record, pool } : record;
+}
+
 /** Any value → valid settings, field by field (unknown keys kept). Never throws. */
 export function readDevicesSettings(value: unknown): DevicesSettings {
-  const record = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const record = isPlainRecord(value) ? adoptLegacyRentSwitch(value) : {};
   return devicesSettingsSchema.parse(record) as DevicesSettings;
 }
 
@@ -362,6 +391,13 @@ export type DevicesSettingsPatch = {
  * re-read through the schema. Keys the patch does not name — unknown ones included — are kept.
  */
 export function mergeDevicesSettings(current: DevicesSettings, patch: DevicesSettingsPatch): DevicesSettings {
+  // An older client's Mac switch / cap sets the one pool switch / cap too (unless the patch names those).
+  if (patch.ios && (patch.ios.rentWithoutAsking !== undefined || patch.ios.monthlyCapUsd !== undefined)) {
+    const pool = { ...patch.pool };
+    if (patch.ios.rentWithoutAsking !== undefined && pool.rentWithoutAsking === undefined) pool.rentWithoutAsking = patch.ios.rentWithoutAsking;
+    if (patch.ios.monthlyCapUsd !== undefined && pool.monthlyCapUsd === undefined) pool.monthlyCapUsd = patch.ios.monthlyCapUsd;
+    patch = { ...patch, pool };
+  }
   return readDevicesSettings(mergeObject(structuredClone(current) as unknown as Record<string, unknown>, patch as Record<string, unknown>));
 }
 

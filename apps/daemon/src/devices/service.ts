@@ -87,7 +87,8 @@ import {
   userInput,
   withController
 } from "./leases.ts";
-import { choosePlacement, type PlacementHost } from "./pool.ts";
+import { choosePlacement, hostCap, type PlacementHost } from "./pool.ts";
+import { DeviceThumbnails, ThumbnailError } from "./thumbnails.ts";
 import { DevicePool, PoolRefusal, type DeviceCacheWarmer, type PoolAcquired } from "./pool-actor.ts";
 import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 import type { DeviceScreenshots } from "./screenshots.ts";
@@ -143,7 +144,9 @@ export interface DeviceServiceDeps {
   /** The box service's device-cache runs ("Warm caches"); null while unavailable. */
   cacheWarmer?: () => DeviceCacheWarmer | null;
   /** Spend on device-host boxes today and this month (UTC), from the box records. */
-  poolSpend?: () => { todayUsd: number; monthUsd: number };
+  poolSpend?: () => { todayUsd: number; monthUsd: number; committedUsd?: number };
+  /** Tests: how thumbnails reach a hub. */
+  thumbnailFetch?: typeof fetch;
 }
 
 /** One running or finished setup job, with its promise. */
@@ -192,6 +195,7 @@ export class DeviceService implements DeviceToolsPort {
   private deviceSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The pool scheduler: queue, rentals, teardown, spend, drains, cache warms. */
   readonly pool: DevicePool;
+  private readonly thumbnails: DeviceThumbnails;
   /** Device reconciles in flight per host (one at a time; `again`: run once more after). */
   private readonly deviceChecks = new Map<string, { again: boolean; done: Promise<void> }>();
   /** `start` finished (host changes then reconcile devices). */
@@ -203,6 +207,7 @@ export class DeviceService implements DeviceToolsPort {
   constructor(private readonly deps: DeviceServiceDeps) {
     this.logger = deps.logger ?? console;
     this.actionLog = new DeviceActionLog({ now: () => new Date(this.nowMs()) });
+    this.thumbnails = new DeviceThumbnails({ now: () => this.nowMs(), ...(deps.thumbnailFetch ? { fetch: deps.thumbnailFetch } : {}) });
     this.pool = new DevicePool({
       store: deps.poolStore ?? new DevicePoolStore({ file: null, logger: this.logger }),
       hosts: this.hosts,
@@ -498,7 +503,14 @@ export class DeviceService implements DeviceToolsPort {
     const refused = checkAcquire(this.leases, request, limits);
     if (refused) throw refused;
 
-    const placed = await this.place(request, profile, signal);
+    let placed = await this.place(request, profile, signal);
+    // Atomic with the lease's record (no await in between): the host must still have a slot —
+    // its capacity may have shrunk, or another open landed there while this one waited.
+    for (let round = 1; !this.hostHasRoom(placed); round += 1) {
+      placed.done();
+      if (round >= PLACEMENT_ROUNDS) throw this.capacityError(request.platform);
+      placed = await this.place(request, profile, signal);
+    }
     const host = placed.host;
     // Placement may have waited: check again right before the lease exists (no await in between).
     const late = checkAcquire(this.leases, request, limits);
@@ -602,7 +614,7 @@ export class DeviceService implements DeviceToolsPort {
         case "host": {
           if (!named) return this.acquire(request, profile, signal);
           const host = this.hosts.get(placement.hostId);
-          if (host) return { host, done: () => undefined };
+          if (host) return { host, reserved: false, done: () => undefined };
           continue;
         }
         case "wait":
@@ -672,6 +684,16 @@ export class DeviceService implements DeviceToolsPort {
     }
   }
 
+  /** Whether a placed host still has a slot for one more lease: its live leases plus other pending placements stay under its capacity (Android: never above 16). */
+  private hostHasRoom(placed: PoolAcquired): boolean {
+    const { host } = placed;
+    if (!this.hosts.get(host.id)) return false;
+    const leases = this.leases.filter((lease) => lease.hostId === host.id && isLiveLease(lease)).length;
+    const others = this.pool.reservedOn(host.id) - (placed.reserved ? 1 : 0);
+    const total = host.platforms.includes("android") ? hostCap("android", host.capacity().total) : host.capacity().total;
+    return leases + Math.max(0, others) < total;
+  }
+
   /** `DEVICE_CAPACITY`, naming the leases on the platform's hosts (or on `hostIds`). */
   private capacityError(platform: DevicePlatform, hostIds?: readonly string[]): DeviceError {
     const busy = this.leases.filter((lease) => isLiveLease(lease) && (hostIds ? hostIds.includes(lease.hostId) : lease.platform === platform));
@@ -738,6 +760,7 @@ export class DeviceService implements DeviceToolsPort {
     this.opening.get(leaseId)?.abort();
     this.progress.delete(leaseId);
     this.launchNotes.delete(leaseId);
+    this.thumbnails.forget(leaseId);
     this.actionLog.forget(leaseId);
     void this.deps.leaseStore.persist();
     this.pool.kick();
@@ -792,6 +815,29 @@ export class DeviceService implements DeviceToolsPort {
 
   poolSummary(): DevicePoolSummary {
     return this.pool.summary();
+  }
+
+  /**
+   * The fleet view's card image: the leased device's screen as a JPEG at most `width` px wide,
+   * taken through its host's hub (cached ≤ 1 s per lease). Only a ready lease on a hub stream.
+   */
+  async thumbnail(leaseId: string, width: number): Promise<Buffer> {
+    this.assertRunning();
+    const lease = this.requireLease(leaseId);
+    if (!isLiveLease(lease)) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_LOST, "The device is gone.");
+    const kind = lease.stream?.kind;
+    if (lease.state !== "ready" || !lease.stream || (kind !== "serve-emu" && kind !== "serve-sim")) {
+      throw new DeviceError("UNAVAILABLE", "The device has no screen to show yet.");
+    }
+    const host = this.hosts.get(lease.hostId);
+    const origin = host?.hubOrigin() ?? null;
+    if (!host || !origin) throw new DeviceError("UNAVAILABLE", "The device hub is not running.");
+    try {
+      return await this.thumbnails.get(lease.id, { origin, token: host.hubToken?.() ?? null, streamKind: kind, deviceParam: lease.stream.deviceParam }, width);
+    } catch (error) {
+      if (error instanceof ThumbnailError) throw new DeviceError("UNAVAILABLE", error.message);
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------

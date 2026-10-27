@@ -24,13 +24,12 @@ import { DEVICE_ERROR_CODES, boxDeviceHostId, type BoxSizeOffer, type DevicePlat
 import type { StoredBox } from "@orquester/config";
 
 import type { BoxConnection } from "../../boxes/contracts.ts";
-import { monthCostUsd } from "../../boxes/service/summary.ts";
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { DeviceError, isDeviceError } from "../errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProvisionRequest, DeviceRentalQuote } from "../host.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
 import { BoxDeviceHost, type BoxHostTiming } from "./box/host.ts";
-import { iosRentalSpec, rentalNeedsApproval } from "./box/rental.ts";
+import { deviceHostSpend, iosRentalSpec, rentalNeedsApproval } from "./box/rental.ts";
 
 export interface BoxHostDeps {
   appDir: string;
@@ -84,6 +83,8 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
   let ctx: DeviceHostFactoryContext | null = null;
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
   let provisioning: Promise<DeviceHost> | null = null;
+  /** The shared rental's own abort (the factory stopping), never one caller's. */
+  let rentalAbort = new AbortController();
   let sizeOffers: BoxSizeOffer[] = [];
   /** The settings as last read (hosts read them after `stop` too, while they are disposed). */
   let lastSettings: DevicesSettings | null = null;
@@ -197,14 +198,11 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     });
   };
 
-  const monthSpentUsd = (): number => {
+  /** This month's device-host spend plus what running device hosts are committed to until their deadline. */
+  const spend = (): { monthUsd: number; committedUsd: number } => {
     const boxes = deps.boxes();
-    if (!boxes) return 0;
-    const at = now();
-    return boxes.registry
-      .list()
-      .filter((record) => record.purpose === "device-host")
-      .reduce((sum, record) => sum + monthCostUsd(record, at), 0);
+    if (!boxes) return { monthUsd: 0, committedUsd: 0 };
+    return deviceHostSpend(boxes.registry.list(), now());
   };
 
   const quote = (platform: DevicePlatform): DeviceRentalQuote | null => {
@@ -228,7 +226,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       sizeLabel: spec.sizeLabel,
       hourlyUsd: spec.hourlyUsd,
       lifetimeMinutes: spec.lifetimeMinutes,
-      needsApproval: rentalNeedsApproval(current, spec, monthSpentUsd())
+      needsApproval: rentalNeedsApproval(current, spec, spend())
     };
   };
 
@@ -288,9 +286,14 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const rental = quote("ios");
     if (!rental) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Renting a Mac host needs ${current.ios.provider === "blacksmith" ? "Blacksmith" : current.ios.provider} set up in Settings → Ephemeral AI VMs.`);
     if (rental.needsApproval && !request.approved) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Opening this device rents a ${rental.providerLabel} Mac host (${rental.sizeLabel}), which needs the owner's approval.`);
-    // One rental at a time: a second request waits for the first host.
-    if (provisioning) return provisioning;
+    // One rental at a time: a second request waits for the first host. Each caller's abort ends
+    // only its own wait; the rental goes on for the others (and the host joins the pool).
+    if (provisioning) return untilAborted(provisioning, signal);
     const run = (async () => {
+      // Re-checked while holding the rental slot: nothing else may rent in between.
+      const held = quote("ios");
+      if (!held) throw new DeviceError(DEVICE_ERROR_PLATFORM, "Renting a Mac host is not possible right now (its provider is off or not set up).");
+      if (held.needsApproval && !request.approved) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Opening this device rents a ${held.providerLabel} Mac host (${held.sizeLabel}), which needs the owner's approval.`);
       const spec = iosRentalSpec(current, sizeOffers);
       request.onProgress?.({ step: "rent-host", label: `Renting a ${rental.providerLabel} Mac host`, state: "running" });
       let summary;
@@ -309,14 +312,14 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       const record = boxes.registry.get(summary.id);
       const host = hosts.get(summary.id) ?? (record ? addHost(record, "box") : null);
       if (!host) throw new DeviceError("UNAVAILABLE", "Renting a Mac host failed: its box record is gone.");
-      const ready = await whenReady(host, signal, request.onProgress);
+      const ready = await whenReady(host, rentalAbort.signal, request.onProgress);
       request.onProgress?.({ step: "prepare-host", label: "Mac host ready", state: "done" });
       return ready;
     })().finally(() => {
       provisioning = null;
     });
     provisioning = run;
-    return run;
+    return untilAborted(run, signal);
   };
 
   const sweepIdle = async (): Promise<void> => {
@@ -325,8 +328,20 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const at = now();
     for (const host of [...hosts.values()]) {
       const leases = ctx.activeLeases(host.id).length;
-      // The pool keeps it warm (`pool.minWarmHosts`): not idle for teardown.
-      if (leases > 0 || !host.isReady() || ctx.keepWarm?.(host.id) === true) {
+      const status = host.state().status;
+      // A rented host bills whatever its state: with no lease it is idle (only one still being
+      // rented and prepared is not), and a failed one goes at once. The pool's warm hosts stay.
+      if (host.kind === "box" && leases === 0 && status === "failed") {
+        idleSince.delete(host.boxId);
+        logger.info(`[devices] ${host.label} failed: destroying it`);
+        await deps
+          .boxes()
+          ?.service.destroyBox(host.boxId, "deleted", `Failed: ${host.state().detail ?? "the device host failed"} (Settings → Devices).`)
+          .catch((error) => logger.warn(`[devices] destroying failed ${host.id} failed`, error instanceof Error ? error.message : String(error)));
+        continue;
+      }
+      const notIdle = host.kind === "box" ? status === "starting" || status === "installing" : !host.isReady();
+      if (leases > 0 || notIdle || ctx.keepWarm?.(host.id) === true) {
         idleSince.delete(host.boxId);
         continue;
       }
@@ -389,9 +404,30 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
       deps.boxes()?.service.setDeviceHostPreparer(null);
       for (const boxId of [...hosts.keys()]) removeHost(boxId);
+      rentalAbort.abort();
+      rentalAbort = new AbortController();
       ctx = null;
     }
   };
 }
 
 const DEVICE_ERROR_PLATFORM = DEVICE_ERROR_CODES.PLATFORM_NOT_READY;
+
+/** `promise`, or `CANCELLED` once this caller's `signal` aborts (the shared work goes on). */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DeviceError("CANCELLED", "The request was cancelled (the Mac host keeps starting)."));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DeviceError("CANCELLED", "The request was cancelled (the Mac host keeps starting)."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}

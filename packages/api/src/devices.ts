@@ -611,7 +611,9 @@ export interface DevicePoolSpend {
   /** `YYYY-MM` (UTC). */
   month: string;
   monthUsd: number;
-  /** `pool.monthlyCapUsd`: renting without asking stops at it. */
+  /** What running device hosts are committed to until their time limit (counted against the cap). */
+  committedUsd?: number;
+  /** `pool.monthlyCapUsd`: renting without asking stops at it (month spend + committed + the new host's lifetime). */
   monthlyCapUsd: number;
   /** `pool.maxHourlyUsd`: the hard cap on the pool's summed $/h. */
   maxHourlyUsd: number;
@@ -696,7 +698,11 @@ export const DEVICE_SCREENSHOT_ROUTE_PATTERN = `${LEASES}/:leaseId/screenshots/:
  * Routes that also accept the bearer as `?token=` (an `<img>`, a media element or a fetch the
  * browser starts cannot send a header); the daemon redacts it from logs and never forwards it.
  */
-export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN];
+/** A lease's downscaled JPEG thumbnail (the fleet view's ~1 fps cards). */
+export const DEVICE_THUMBNAIL_ROUTE_PATTERN = `${LEASES}/:leaseId/thumbnail`;
+/** Thumbnail widths (`?w=`): default, and the allowed range (px; never upscaled). */
+export const DEVICE_THUMBNAIL_WIDTH = { default: 320, min: 64, max: 720 } as const;
+export const DEVICE_QUERY_TOKEN_ROUTES: readonly string[] = [DEVICE_HUB_ROUTE_PATTERN, DEVICE_SCREENSHOT_ROUTE_PATTERN, DEVICE_THUMBNAIL_ROUTE_PATTERN];
 
 /**
  * Every devices route, on both transports (bearer on HTTP). Hub streams need HTTP: the desktop
@@ -736,6 +742,12 @@ export const deviceRoutes = {
    * the appearance, power off). The user takes control first; the action log shows it as theirs.
    */
   userAction: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/user-action`,
+  /**
+   * GET → `image/jpeg` (`no-store`): the leased device's screen now, at most `width` px wide
+   * ({@link DEVICE_THUMBNAIL_WIDTH}); the daemon takes it from the hub and caches it ≤ 1 s per lease.
+   * Accepts `?token=` ({@link DEVICE_QUERY_TOKEN_ROUTES}).
+   */
+  thumbnail: (leaseId: string, width: number = DEVICE_THUMBNAIL_WIDTH.default): string => `${LEASES}/${enc(leaseId)}/thumbnail?w=${Math.round(width)}`,
   /** GET → the image (`image/png` or `image/jpeg`) a `deviceRef` names. */
   screenshot: (leaseId: string, screenshotId: string): string => `${LEASES}/${enc(leaseId)}/screenshots/${enc(screenshotId)}`,
   /** GET / PUT ({@link DevicesSettingsPatch}) → {@link DevicesSettingsResponse}. */

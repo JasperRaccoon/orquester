@@ -104,6 +104,8 @@ export interface PoolAcquireRequest {
 /** A placed request: its host, and the slot held until the lease exists. */
 export interface PoolAcquired {
   host: DeviceHost;
+  /** It holds one of the pool's reserved slots on `host` (until `done()`). */
+  reserved: boolean;
   /** The lease was recorded (or the open gave up): the reserved slot is freed. */
   done(): void;
 }
@@ -117,8 +119,11 @@ export interface DevicePoolDeps {
   leasesOn(hostId: string): number;
   /** Publish the summary (`devices.pool`). */
   publish(summary: DevicePoolSummary): void;
-  /** Spend on device-host boxes today and this month (UTC), from their records; absent: 0. */
-  spend?: () => { todayUsd: number; monthUsd: number };
+  /**
+   * Spend on device-host boxes today and this month (UTC), and what running ones are committed to
+   * until their deadline — from the box records (`deviceHostSpend`); absent: 0.
+   */
+  spend?: () => { todayUsd: number; monthUsd: number; committedUsd?: number };
   /** The box service's cache runs; null while unavailable. */
   cacheWarmer?: () => DeviceCacheWarmer | null;
   now(): number;
@@ -292,6 +297,11 @@ export class DevicePool {
   // -------------------------------------------------------------------------
   // Drain
   // -------------------------------------------------------------------------
+
+  /** Slots the pool holds on a host for placed requests whose lease is not recorded yet. */
+  reservedOn(hostId: string): number {
+    return this.reserved.get(hostId) ?? 0;
+  }
 
   isDraining(hostId: string): boolean {
     return this.deps.store.state().drainingHostIds.includes(hostId);
@@ -504,12 +514,14 @@ export class DevicePool {
       now,
       offers,
       learned: state.learnedCapacity,
-      monthSpentUsd: this.spent().monthUsd
+      // Spent this month plus what running hosts are committed to (the factories' rule too).
+      monthSpentUsd: this.spent().monthUsd + this.spent().committedUsd
     });
   }
 
-  private spent(): { todayUsd: number; monthUsd: number } {
-    return this.deps.spend?.() ?? { todayUsd: 0, monthUsd: 0 };
+  private spent(): { todayUsd: number; monthUsd: number; committedUsd: number } {
+    const spend = this.deps.spend?.() ?? { todayUsd: 0, monthUsd: 0 };
+    return { todayUsd: spend.todayUsd, monthUsd: spend.monthUsd, committedUsd: spend.committedUsd ?? 0 };
   }
 
   /** The pool keeps this host (warm minimum, or draining it itself): a factory's idle teardown spares it. */
@@ -652,6 +664,7 @@ export class DevicePool {
       this.finish(waiter, null);
       waiter.resolve({
         host,
+        reserved: true,
         done: () => {
           if (!held) return;
           held = false;
@@ -770,7 +783,7 @@ export class DevicePool {
       maxHosts: settings.pool.maxHosts,
       hourlyUsd: round(hosts.reduce((sum, host) => sum + (host.hourlyUsd ?? 0), 0)),
       maxHourlyUsd: settings.pool.maxHourlyUsd,
-      monthSpentUsd: round(this.spent().monthUsd),
+      monthSpentUsd: round(this.spent().monthUsd + this.spent().committedUsd),
       monthlyCapUsd: settings.pool.monthlyCapUsd
     };
   }
@@ -835,6 +848,7 @@ export class DevicePool {
         todayUsd: round(this.spent().todayUsd),
         month: monthKey(now),
         monthUsd: round(this.spent().monthUsd),
+        committedUsd: round(this.spent().committedUsd),
         monthlyCapUsd: settings.pool.monthlyCapUsd,
         maxHourlyUsd: settings.pool.maxHourlyUsd
       },

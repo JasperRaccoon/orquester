@@ -242,7 +242,10 @@ describe("box device host factory", () => {
       lifetimeMinutes: 240,
       needsApproval: true
     });
+    // The superseded Mac switch approves nothing: the pool's one switch does.
     settings = { ...settings, ios: { ...settings.ios, rentWithoutAsking: true, monthlyCapUsd: 100 } };
+    assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
+    settings = { ...settings, pool: { ...settings.pool, rentWithoutAsking: true, monthlyCapUsd: 100 } };
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, false);
     // A device host that ran 17 h this month ($81.6) leaves no room for 4 h more ($19.2) under $100.
     boxes.records.set("old", record("old", { state: "destroyed", providerRef: { runId: 1 }, createdAt: new Date(T0 - 17 * 3_600_000).toISOString(), destroyedAt: new Date(T0).toISOString() }));
@@ -250,6 +253,59 @@ describe("box device host factory", () => {
     assert.equal(factory.provisionQuote!("android"), null);
     boxes.configured = false;
     assert.equal(factory.provisionQuote!("ios"), null);
+  });
+
+  it("counts what running Macs are committed to until their deadline against the monthly cap", async () => {
+    settings = { ...settings, pool: { ...settings.pool, rentWithoutAsking: true, monthlyCapUsd: 40 } };
+    await factory.start(context());
+    assert.equal(factory.provisionQuote!("ios")!.needsApproval, false);
+    // A live Mac with 4 h left at $4.80/h: $19.20 committed (plus the new one's $19.20 > $30).
+    boxes.records.set("live", record("live", { createdAt: new Date(now).toISOString(), deadlineAt: new Date(now + 4 * 3_600_000).toISOString() }));
+    settings = { ...settings, pool: { ...settings.pool, monthlyCapUsd: 30 } };
+    assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
+    // And `provision` re-checks it while holding the rental slot.
+    await assert.rejects(factory.provision!({ platform: "ios", approved: false, threadId: "t1" }, new AbortController().signal), /approval/);
+    assert.equal(boxes.started.length, 0);
+  });
+
+  it("one caller cancelling stops only its own wait: the shared rental goes on for the others", async () => {
+    await factory.start(context());
+    const first = new AbortController();
+    const cancelled = factory.provision!({ platform: "ios", approved: true, threadId: "t1" }, first.signal);
+    const joined = factory.provision!({ platform: "ios", approved: true, threadId: "t2" }, new AbortController().signal);
+    await eventually(() => added.has("box:new1"), "the renting host");
+    first.abort();
+    await assert.rejects(cancelled, (error) => isDeviceError(error) && error.code === "CANCELLED");
+    boxes.mac("new1", new FakeMacBox());
+    await boxes.preparer!({ boxId: "new1", connection: boxes.wiring().hub.get("new1")!, signal: new AbortController().signal, log: () => undefined });
+    boxes.set({ ...boxes.records.get("new1")!, state: "ready", setup: [] });
+    assert.equal(await joined, added.get("box:new1"));
+    assert.equal(boxes.started.length, 1);
+  });
+
+  it("a rented host with no lease is idle whatever its state (unreachable too); a failed one goes at once; pool-warm ones stay", async () => {
+    boxes.records.set("a", record("a"));
+    boxes.records.set("f", record("f"));
+    boxes.mac("f");
+    let warm = false;
+    await factory.start({ ...context(), keepWarm: (hostId) => warm && hostId === "box:a" });
+    await eventually(() => factory.host("f")!.isReady(), "f ready");
+    // `a` never connects (unreachable): it still bills, so its idle clock runs.
+    assert.equal(added.get("box:a")!.state().status, "unreachable");
+    const failed = factory.host("f")!;
+    failed.state = () => ({ status: "failed", detail: "its hub crashed" });
+    await factory.sweepIdle();
+    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"]);
+    assert.match(boxes.destroyed[0]!.message ?? "", /its hub crashed/);
+    warm = true;
+    now += 25 * 60_000;
+    await factory.sweepIdle();
+    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"], "kept warm by the pool");
+    warm = false;
+    await factory.sweepIdle();
+    now += 21 * 60_000;
+    await factory.sweepIdle();
+    assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f", "a"]);
   });
 
   it("rents a Mac host: refuses without approval, then rents, prepares and resolves it ready", async () => {

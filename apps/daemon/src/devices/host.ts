@@ -257,7 +257,7 @@ export interface DeviceRentalCaps {
   /** The pool's summed $/h now, and `pool.maxHourlyUsd`. */
   hourlyUsd: number;
   maxHourlyUsd: number;
-  /** Spend on device hosts this month (UTC), and `pool.monthlyCapUsd`. */
+  /** Spend on device hosts this month (UTC) plus what running ones are committed to until their deadline, and `pool.monthlyCapUsd`. */
   monthSpentUsd: number;
   monthlyCapUsd: number;
 }

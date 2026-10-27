@@ -8,6 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
+import { deflateSync } from "node:zlib";
 
 import type { DeviceActionInput, DeviceHostKind, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
@@ -45,6 +46,7 @@ export class FakeDeviceHost implements DeviceHost {
   agentDeviceCommand?: DeviceHost["agentDeviceCommand"];
   performAction?: DeviceHost["performAction"];
   installApp?: DeviceHost["installApp"];
+  cacheState?: DeviceHost["cacheState"];
   /** What `hubOrigin` answers while ready, and `hubToken`. */
   hubOriginValue = "http://127.0.0.1:9";
   hubTokenValue: string | null = null;
@@ -287,4 +289,25 @@ export async function startTestDeviceService(
       await rm(dir, { recursive: true, force: true });
     }
   };
+}
+
+/** A solid RGBA PNG (filter 0 rows). */
+export function solidPng(width: number, height: number, rgba: [number, number, number, number] = [200, 40, 40, 255]): Buffer {
+  const raw = Buffer.alloc(height * (width * 4 + 1));
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) Buffer.from(rgba).copy(raw, y * (width * 4 + 1) + 1 + x * 4);
+  }
+  const chunk = (type: string, body: Buffer) => {
+    const out = Buffer.alloc(12 + body.length);
+    out.writeUInt32BE(body.length, 0);
+    out.write(type, 4, "latin1");
+    body.copy(out, 8);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }

@@ -187,6 +187,20 @@ test("leases: defaults fill optional fields; a broken outer shape throws", () =>
   assert.throws(() => parseDeviceLeasesFile("nope"));
 });
 
+test("rent without asking: one pool switch; a legacy Mac switch is adopted on read and mirrored from patches", () => {
+  const legacy = readDevicesSettings({ ios: { rentWithoutAsking: true, monthlyCapUsd: 40 } });
+  assert.equal(legacy.pool.rentWithoutAsking, true);
+  assert.equal(legacy.pool.monthlyCapUsd, 40);
+  // A file that already has the pool's keeps them.
+  const both = readDevicesSettings({ ios: { rentWithoutAsking: true, monthlyCapUsd: 40 }, pool: { rentWithoutAsking: false, monthlyCapUsd: 70 } });
+  assert.equal(both.pool.rentWithoutAsking, false);
+  assert.equal(both.pool.monthlyCapUsd, 70);
+  const merged = mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true, monthlyCapUsd: 25 } });
+  assert.equal(merged.pool.rentWithoutAsking, true);
+  assert.equal(merged.pool.monthlyCapUsd, 25);
+  assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true }, pool: { rentWithoutAsking: false } }).pool.rentWithoutAsking, false);
+});
+
 test("pool settings: the monthly cap defaults, clamps and falls back alone", () => {
   assert.equal(readDevicesSettings({}).pool.monthlyCapUsd, 100);
   assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: -5 } }).pool.monthlyCapUsd, 0);

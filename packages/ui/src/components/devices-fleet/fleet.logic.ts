@@ -362,18 +362,16 @@ export function leaseStateNote(lease: Pick<DeviceLeaseSummary, "state" | "progre
 }
 
 /**
- * The hub path a lease's ~1 fps thumbnail is polled from (POST, through the hub proxy): the
- * screenshot route of serve-emu (Android) or serve-sim (iOS) for its device. Null while it has
- * nothing to show (not ready, no stream yet, or a stream kind without a screenshot route).
+ * The route a lease's ~1 fps thumbnail is polled from (GET `deviceRoutes.thumbnail`: the daemon
+ * takes the hub's screenshot, downscales it and answers a small JPEG). Null while it has nothing
+ * to show (not ready, no stream yet, or a stream kind without a hub screenshot).
  */
-export function thumbnailPath(lease: Pick<DeviceLeaseSummary, "state" | "hostId" | "stream">): string | null {
+export function thumbnailPath(lease: Pick<DeviceLeaseSummary, "id" | "state" | "stream">, width?: number): string | null {
   if (lease.state !== "ready" || !lease.stream || lease.stream.deviceParam.length === 0) return null;
-  const device = encodeURIComponent(lease.stream.deviceParam);
   switch (lease.stream.kind) {
     case "serve-emu":
-      return deviceRoutes.hub(lease.hostId, `vendor/serve-emu/api/screenshot?device=${device}`);
     case "serve-sim":
-      return deviceRoutes.hub(lease.hostId, `vendor/serve-sim/api/screenshot?device=${device}`);
+      return deviceRoutes.thumbnail(lease.id, width);
     case "vphone":
       return null;
   }
