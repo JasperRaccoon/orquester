@@ -16,7 +16,7 @@ import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/pan
 import { AgentChatView } from "../agent-chat";
 import { ChatLoadingScreen } from "../agent-chat/ChatLoadingScreen";
 import { SecretFilesProjectBar } from "../secret-files/SecretFilesProjectBar";
-import { activeChatSessionIdFor, setActiveChatTab } from "../../lib/agent-chat-active-tab";
+import { activeChatSessionIdFor, holdActiveChatTab, setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
   tabSession,
@@ -178,9 +178,7 @@ const ProjectMain: React.FC<{ hidden: boolean }> = ({ hidden }) => {
     () => (hidden ? null : activeChatSessionIdFor(tabs, activeId)),
     [hidden, tabs, activeId]
   );
-  React.useEffect(() => {
-    setActiveChatTab(activeChatSessionId);
-  }, [activeChatSessionId]);
+  React.useEffect(() => holdActiveChatTab(activeChatSessionId), [activeChatSessionId]);
   // Unmounting the whole main view (signing out, switching daemon) leaves no
   // visible chat tab, so nothing should keep the keyboard.
   React.useEffect(() => () => setActiveChatTab(null), []);
