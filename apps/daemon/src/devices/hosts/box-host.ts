@@ -113,6 +113,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       label: deviceHostLabel(record),
       platform: "ios",
       appDir: deps.appDir,
+      toolchain: deps.toolchain,
       record: () => deps.boxes()?.registry.get(boxId),
       connection: () => connection(boxId),
       settings: () => settings()!,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -9,6 +9,7 @@ import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
 import { isDeviceError } from "../../errors.ts";
+import type { DeviceToolchain } from "../../toolchain/index.ts";
 import type { DeviceHostProgress } from "../../host.ts";
 import { BoxDeviceHost, type BoxDeviceHostDeps } from "./host.ts";
 import { FakeMacBox } from "./testing.ts";
@@ -57,6 +58,8 @@ describe("BoxDeviceHost", () => {
   let box: FakeMacBox;
   let leases: StoredDeviceLease[];
   let settings: DevicesSettings;
+  /** The agent-device CLI "installed" on this machine. */
+  let localCli: string;
 
   const makeHost = (overrides: Partial<BoxDeviceHostDeps> = {}) => {
     const connection = box.connection();
@@ -66,6 +69,7 @@ describe("BoxDeviceHost", () => {
       label: "Mac host (Blacksmith, 6 vCPU M4)",
       platform: "ios",
       appDir,
+      toolchain: { toolBin: () => localCli } as unknown as DeviceToolchain,
       record: () => boxRecord(),
       connection: () => connection,
       settings: () => settings,
@@ -87,6 +91,8 @@ describe("BoxDeviceHost", () => {
 
   beforeEach(async () => {
     appDir = await mkdtemp(join(tmpdir(), "orq-box-host-"));
+    localCli = join(appDir, "agent-device.mjs");
+    await writeFile(localCli, "");
     box = new FakeMacBox();
     leases = [];
     settings = { ...DEFAULT_DEVICES_SETTINGS, ios: { ...DEFAULT_DEVICES_SETTINGS.ios, enabled: true } };
@@ -114,6 +120,8 @@ describe("BoxDeviceHost", () => {
     assert.equal(host.hubToken(), box.hubToken);
     assert.deepEqual(host.streamCapabilities(), { iosH264: false });
     assert.ok(progress.some((entry) => entry.step === "ready" && entry.percent === 100));
+    // The actions layer runs agent-device here, against the box's daemon through the config file.
+    assert.deepEqual(host.agentDeviceCommand(), { command: process.execPath, args: [localCli], env: {} });
 
     // Warm-up: a scratch simulator opens Settings and snapshots through this host's daemon, then goes.
     const warm = box.log.slice(box.log.indexOf("agent-device-start") + 1);

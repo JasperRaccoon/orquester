@@ -42,7 +42,9 @@ import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 import type { BoxConnection, BoxHostForward, BoxProcess } from "../../../boxes/contracts.ts";
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
 import { DeviceError, isDeviceError } from "../../errors.ts";
+import type { DeviceToolchain } from "../../toolchain/index.ts";
 import type {
+  AgentDeviceCommand,
   DeviceBootRequest,
   DeviceBootResult,
   DeviceCommandResult,
@@ -51,6 +53,7 @@ import type {
   DeviceHostState
 } from "../../host.ts";
 import { boxAgentDeviceConfigPath, removeAgentDeviceConfig, writeAgentDeviceConfig } from "./agent-device-config.ts";
+import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
 import {
   AGENT_DEVICE_START_SCRIPT,
   HUB_PROC_ID,
@@ -127,6 +130,8 @@ export interface BoxDeviceHostDeps {
   /** Phase 1: iOS on Macs. */
   platform: "ios";
   appDir: string;
+  /** This machine's pinned tools (the agent-device CLI the actions layer runs here). */
+  toolchain?: DeviceToolchain;
   /** The box's record now. */
   record(): StoredBox | undefined;
   /** Its link (whether or not connected now); undefined before it ever connected. */
@@ -175,6 +180,8 @@ export class BoxDeviceHost implements DeviceHost {
   private hub: HubRuntime | null = null;
   private agent: Forwarded | null = null;
   private configPath: string | null = null;
+  /** The agent-device CLI on this machine (entry script), once found or installed. */
+  private localCli: string | null = null;
   private checkedAt: string | null = null;
   private preparing: Promise<void> | null = null;
   private readonly progressListeners = new Set<(progress: DeviceHostProgress) => void>();
@@ -294,6 +301,17 @@ export class BoxDeviceHost implements DeviceHost {
     return this.agent ? this.configPath : null;
   }
 
+  /**
+   * The agent-device CLI runs on this machine (this daemon's Node and the pinned install under
+   * `devicesToolsDir`) and reaches the box's daemon through the `--config` file's forwarded URL.
+   */
+  agentDeviceCommand(): AgentDeviceCommand {
+    const entry = this.localCli ?? localAgentDeviceEntry(this.deps.appDir, this.deps.toolchain);
+    if (!entry) throw new DeviceError("UNAVAILABLE", `agent-device is not installed on this machine yet; it installs when ${this.label} is prepared. Try again shortly.`);
+    this.localCli = entry;
+    return { command: process.execPath, args: [entry], env: {} };
+  }
+
   isReady(): boolean {
     return this.phase === "ready" && this.deps.connection()?.connected === true;
   }
@@ -366,7 +384,14 @@ export class BoxDeviceHost implements DeviceHost {
       this.step("agent-device", "Starting agent-device", "running", 75);
       this.setDetail("Starting agent-device…");
       await this.ensureAgentDevice(link, probe, layout, signal);
-      this.step("agent-device", "Starting agent-device", "done", 95);
+      this.step("agent-device", "Starting agent-device", "done", 90);
+
+      this.working = "tool:agent-device-local";
+      this.step("tool:agent-device-local", "agent-device on this machine", "running", 92);
+      this.localCli = await ensureLocalAgentDevice({ appDir: this.deps.appDir, ...(this.deps.toolchain ? { toolchain: this.deps.toolchain } : {}), signal }).catch((error: unknown) => {
+        throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Installing agent-device on this machine failed: ${errorText(error)}`);
+      });
+      this.step("tool:agent-device-local", "agent-device on this machine", "done", 97);
 
       this.working = null;
       await this.removeLeftovers(link, signal).catch((error) => this.deps.logger.warn(`[devices] cleaning ${this.id}'s leftover simulators failed`, errorText(error)));
@@ -833,6 +858,13 @@ export class BoxDeviceHost implements DeviceHost {
           fixActionId: BOX_FIX_ACTIONS.tools
         };
       }),
+      {
+        id: "tool:agent-device-local",
+        label: "agent-device on this machine",
+        state: this.working === "tool:agent-device-local" ? "working" : this.localCli ? "ok" : "missing",
+        detail: this.localCli ? DEVICE_TOOL_VERSIONS["agent-device"] : "Not installed",
+        fixActionId: BOX_FIX_ACTIONS.tools
+      },
       { id: "hub", label: "Device hub", state: state("hub", hubOk), detail: hubOk ? "Running" : "Not running", fixActionId: BOX_FIX_ACTIONS.hub },
       { id: "agent-device", label: "agent-device daemon", state: state("agent-device", agentOk), detail: agentOk ? "Running" : "Not running", fixActionId: BOX_FIX_ACTIONS.agent }
     ];

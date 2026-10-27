@@ -161,7 +161,7 @@ describe("box device host factory", () => {
     createBoxHostFactory({
       appDir,
       boxes: () => boxes.wiring(),
-      toolchain: {} as DeviceToolchain,
+      toolchain: { toolBin: () => process.execPath } as unknown as DeviceToolchain,
       logger: quiet,
       now: () => now,
       idleSweep: false,
