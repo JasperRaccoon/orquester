@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { KnowledgeEntryDetail, KnowledgeSimilarEntry, UpdateKnowledgeEntryRequest } from "@orquester/api";
+import { knowledgeMergeKeep, type KnowledgeEntryDetail, type KnowledgeMergeRequest, type KnowledgeSimilarEntry } from "@orquester/api";
 
 import { collections, entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import { knowledgeStore, resetKnowledge, type KnowledgeApi } from "../../lib/knowledge/store.ts";
 import {
-  KnowledgeMergeError,
   MARKDOWN_BODY_PREVIEW_CHARS,
   SIMILAR_MAX,
   entryPanelIds,
@@ -146,16 +145,26 @@ describe("merging a possible duplicate", () => {
   it("says in the confirmation which entry stays and which is deleted", () => {
     const deletesOpen = mergeConfirmMessage(knowledgeMergePlan(newer, older));
     assert.match(deletesOpen, /Keeps the older entry, “Original” \(saved Oct 1, 2026\), and deletes this one \(saved Oct 20, 2026\)/);
-    assert.match(deletesOpen, /adds its collections to the one kept/);
-    assert.match(deletesOpen, /If adding the collections fails, nothing is deleted\./);
+    assert.match(deletesOpen, /adds its collections to the one kept\.$/);
     const deletesOther = mergeConfirmMessage(knowledgeMergePlan(older, { ...newer, collections: ["kc_seo"] }));
     assert.match(deletesOther, /Keeps this entry, the older one \(saved Oct 1, 2026\), and deletes “Copy”/);
     assert.match(deletesOther, /already has all its collections/);
   });
 
+  it("picks the entry the daemon keeps by default (the shared rule)", () => {
+    for (const [a, b] of [
+      [newer, older],
+      [older, newer],
+      [{ ...newer, savedAt: older.savedAt }, older],
+      [{ ...older, savedAt: "not a date" }, newer]
+    ] as const) {
+      assert.equal(knowledgeMergePlan(a, b).keep, knowledgeMergeKeep([a, b]));
+    }
+  });
+
   describe("running it", () => {
     let calls: string[];
-    let fail: { update?: unknown; delete?: unknown };
+    let fail: unknown;
     const api: KnowledgeApi = {
       connection: { id: "c1" },
       getKnowledgeStatus: async () => {
@@ -165,65 +174,42 @@ describe("merging a possible duplicate", () => {
       createKnowledgeCollection: async () => ({}),
       updateKnowledgeCollection: async () => ({}),
       deleteKnowledgeCollection: async () => ({}),
-      updateKnowledgeEntry: async (id: string, req: UpdateKnowledgeEntryRequest) => {
-        calls.push(`patch:${id}:${JSON.stringify(req)}`);
-        if (fail.update) throw fail.update;
-        return {};
-      },
-      deleteKnowledgeEntry: async (id: string) => {
-        calls.push(`delete:${id}`);
-        if (fail.delete) throw fail.delete;
+      updateKnowledgeEntry: async (id: string) => (calls.push(`patch:${id}`), {}),
+      deleteKnowledgeEntry: async (id: string) => (calls.push(`delete:${id}`), {}),
+      mergeKnowledgeEntries: async (req: KnowledgeMergeRequest) => {
+        calls.push(`merge:${JSON.stringify(req)}`);
+        if (fail) throw fail;
         return {};
       }
     };
-    const refused = (message: string) =>
-      Object.assign(new Error(message), { body: { code: "KNOWLEDGE_UNKNOWN_COLLECTION", message } });
+    const refusal = (status: number, code: string, message: string) => Object.assign(new Error(message), { status, body: { code, message } });
 
     beforeEach(() => {
       calls = [];
-      fail = {};
+      fail = undefined;
       resetKnowledge();
     });
 
-    it("updates the kept entry first, then deletes the other, and answers the kept id", async () => {
+    it("is one merge call naming the entry kept, and answers the kept id", async () => {
       const kept = await runKnowledgeMerge(api, knowledgeMergePlan(newer, older));
       assert.equal(kept, older.id);
-      const writes = calls.filter((c) => c !== "collections");
-      assert.deepEqual(writes, [`patch:${older.id}:{"collections":["kc_seo","kc_ads"]}`, `delete:${newer.id}`]);
+      assert.deepEqual(calls.filter((c) => c !== "collections"), [`merge:{"ids":["${older.id}","${newer.id}"],"keep":"${older.id}"}`]);
       const state = knowledgeStore.getState();
-      assert.deepEqual(state.changedEntryIds, [newer.id], "the deleted entry's panels and citations read again");
+      assert.deepEqual(state.changedEntryIds, [older.id, newer.id], "both entries' panels and citations read again");
     });
 
-    it("only deletes when the kept entry already has every collection", async () => {
-      await runKnowledgeMerge(api, knowledgeMergePlan(older, { ...newer, collections: ["kc_seo"] }));
-      assert.deepEqual(calls.filter((c) => c !== "collections"), [`delete:${newer.id}`]);
-    });
-
-    it("deletes nothing when the update fails", async () => {
-      fail.update = refused("No collection kc_ads.");
-      const plan = knowledgeMergePlan(newer, older);
-      const error = await runKnowledgeMerge(api, plan).then(
+    it("says nothing was merged when the daemon refuses, and that it may not have finished otherwise", async () => {
+      fail = refusal(404, "KNOWLEDGE_NOT_FOUND", `No such entry: ${older.id}.`);
+      const error = await runKnowledgeMerge(api, knowledgeMergePlan(newer, older)).then(
         () => assert.fail("rejects"),
         (e: unknown) => e
       );
-      assert.ok(error instanceof KnowledgeMergeError);
-      assert.equal(error.stage, "update");
-      assert.deepEqual(calls, [`patch:${older.id}:{"collections":["kc_seo","kc_ads"]}`]);
-      assert.equal(mergeErrorText(plan, error), "Nothing was merged: No collection kc_ads.");
-    });
-
-    it("says what happened when the delete fails after the update", async () => {
-      fail.delete = refused("Busy.");
-      const plan = knowledgeMergePlan(newer, older);
-      const error = await runKnowledgeMerge(api, plan).then(
-        () => assert.fail("rejects"),
-        (e: unknown) => e
+      assert.equal(mergeErrorText(error), `Nothing was merged: No such entry: ${older.id}.`);
+      assert.equal(
+        mergeErrorText(refusal(500, "KNOWLEDGE_ERROR", "The merge stopped part-way.")),
+        "The merge may not have finished: The merge stopped part-way."
       );
-      assert.ok(error instanceof KnowledgeMergeError);
-      assert.equal(error.stage, "delete");
-      assert.equal(mergeErrorText(plan, error), "The collections were added to the older entry, but “Copy” could not be deleted: Busy.");
-      const noUpdate = knowledgeMergePlan(older, { ...newer, collections: ["kc_seo"] });
-      assert.equal(mergeErrorText(noUpdate, new KnowledgeMergeError("delete", refused("Busy."))), "“Copy” could not be deleted: Busy.");
+      assert.equal(mergeErrorText(new Error("Network down")), "The merge may not have finished: Network down");
     });
   });
 });

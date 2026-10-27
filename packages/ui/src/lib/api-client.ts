@@ -134,6 +134,7 @@ import type {
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeItemResponse,
+  KnowledgeMergeRequest,
   KnowledgeRebuildEstimate,
   KnowledgeSaveRequest,
   KnowledgeSaveResponse,
@@ -1090,6 +1091,11 @@ export class ApiClient {
 
   deleteKnowledgeEntry(id: string): Promise<unknown> {
     return this.send("DELETE", knowledgeRoutes.entry(id));
+  }
+
+  /** Duplicates into one entry: the kept one gets every collection, the others are deleted, in one step. */
+  mergeKnowledgeEntries(req: KnowledgeMergeRequest): Promise<unknown> {
+    return this.send("POST", knowledgeRoutes.entriesMerge, { body: req });
   }
 
   /** An entry (`ke_…`) or a concept, with what it links to. */

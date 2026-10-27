@@ -5,6 +5,7 @@ import {
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_COLORS,
   KNOWLEDGE_GRAPH_MAX_NODES,
+  KNOWLEDGE_MERGE_MAX_ENTRIES,
   KNOWLEDGE_SIMILARITY_GRAPH_MAX_K,
   KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES,
   knowledgeRoutes,
@@ -18,6 +19,7 @@ import {
   type KnowledgeFacetsResponse,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
+  type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
   type KnowledgeSimilarityGraphResponse,
@@ -101,6 +103,14 @@ const updateEntrySchema = z.object({
   url: nullableText,
   postedAt: nullableText,
   collections: z.array(z.string()).optional()
+});
+/** The store checks the rest (distinct ids, keep among them, title and text limits). */
+const mergeEntriesSchema = z.object({
+  ids: z.array(z.string().min(1).max(200)).min(2).max(KNOWLEDGE_MERGE_MAX_ENTRIES),
+  keep: z.string().min(1).max(200).optional(),
+  title: z.string().optional(),
+  body: z.string().optional(),
+  sessionId
 });
 const saveSchema = z.object({
   entries: z.array(
@@ -420,6 +430,36 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
       await deps.store.deleteEntry(id);
       changed({ entryIds: [id], collections: true });
       return reply.code(204).send();
+    })
+  );
+
+  // Merge: the kept entry edited as a PATCH edits it, the others deleted as DELETE deletes them,
+  // in one step. Every id must be visible (a hidden one answers like an unknown one, naming it);
+  // the store checks the rest before it changes anything.
+  app.post(
+    knowledgeRoutes.entriesMerge,
+    { bodyLimit: ENTRY_BODY_LIMIT },
+    handle(async (request): Promise<KnowledgeMergeResponse> => {
+      const body = parse(mergeEntriesSchema, request.body, "merge");
+      const visibility = await visibilityOf(request, body.sessionId);
+      const scope = deps.search.scope(visibility);
+      for (const id of body.ids) {
+        const meta = deps.store.getMeta(id);
+        if (!meta || !entryInScope(meta, scope)) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", `No such entry: ${id.slice(0, 80)}.`);
+      }
+      const outcome = await deps.store.mergeEntries({ ids: body.ids, keep: body.keep, title: body.title, body: body.body });
+      const keptId = outcome.kept.id;
+      if (outcome.keptChanged) await deps.search.indexEntries([keptId]);
+      const touched = [...(outcome.keptChanged ? [keptId] : []), ...outcome.deleted];
+      if (touched.length > 0) changed({ entryIds: touched, ...(outcome.deleted.length > 0 || outcome.collectionsChanged ? { collections: true } : {}) });
+      if (outcome.notDeleted.length > 0) {
+        const kept = outcome.keptChanged ? `${keptId} was updated` : `${keptId} was kept unchanged`;
+        const deleted = outcome.deleted.length > 0 ? `deleted ${outcome.deleted.join(", ")}` : "deleted none";
+        const left = outcome.notDeleted.map((item) => `${item.id} (${item.message})`).join(", ");
+        throw new KnowledgeError("KNOWLEDGE_ERROR", `The merge stopped part-way: ${kept}; ${deleted}; still there: ${left}. Delete those to finish.`);
+      }
+      // The merge only adds collections to the kept entry, so it stays visible; answer it as an edit does.
+      return { kept: await entryDetail(keptId, visibility, { evenIfHidden: true }), deleted: outcome.deleted };
     })
   );
 

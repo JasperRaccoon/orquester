@@ -2,15 +2,16 @@
 // entries and their reason chips, the possible-duplicate merge, the long-body cut for the Markdown
 // view, and what the panel remembers for the session ("Plain text", "Keep both"). No React.
 
-import type {
-  KnowledgeEntryDetail,
-  KnowledgeEntryMeta,
-  KnowledgeEntrySummary,
-  KnowledgeRelatedReason,
-  KnowledgeSimilarEntry
+import {
+  knowledgeMergeKeep,
+  type KnowledgeEntryDetail,
+  type KnowledgeEntryMeta,
+  type KnowledgeEntrySummary,
+  type KnowledgeRelatedReason,
+  type KnowledgeSimilarEntry
 } from "@orquester/api";
 
-import { deleteKnowledgeEntry, updateKnowledgeEntry, type KnowledgeApi } from "../../lib/knowledge/store";
+import { mergeKnowledgeEntries, type KnowledgeApi } from "../../lib/knowledge/store";
 import { formatKnowledgeDate, knowledgeErrorText } from "./knowledge.logic";
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ export function visibleDuplicates(detail: Pick<KnowledgeEntryDetail, "entry" | "
 export type MergeSide = Pick<KnowledgeEntryMeta, "id" | "title" | "savedAt" | "collections">;
 
 export interface KnowledgeMergePlan {
-  /** The older entry (by `savedAt`; the same instant keeps the smaller id). */
+  /** The older entry (by `savedAt`; the same instant keeps the smaller id): the daemon's own rule, `knowledgeMergeKeep`. */
   keep: MergeSide;
   /** The newer one, deleted. */
   remove: MergeSide;
@@ -140,9 +141,7 @@ export interface KnowledgeMergePlan {
 
 /** Which of `open` and `other` is kept and which deleted, and the kept one's collections. */
 export function knowledgeMergePlan(open: MergeSide, other: MergeSide): KnowledgeMergePlan {
-  const a = time(open.savedAt);
-  const b = time(other.savedAt);
-  const openIsOlder = a !== b ? a < b : open.id <= other.id;
+  const openIsOlder = knowledgeMergeKeep([open, other]) === open;
   const keep = openIsOlder ? open : other;
   const remove = openIsOlder ? other : open;
   const added = remove.collections.filter((id, i, all) => !keep.collections.includes(id) && all.indexOf(id) === i);
@@ -159,52 +158,28 @@ export function mergeConfirmMessage(plan: KnowledgeMergePlan): string {
   const newer = removedSaved ? ` (saved ${removedSaved})` : "";
   const moves = plan.collections ? "adds its collections to the one kept" : "the one kept already has all its collections";
   return plan.removesOpen
-    ? `Keeps the older entry, ${kept}${older}, and deletes this one${newer}: ${moves}. If adding the collections fails, nothing is deleted.`
-    : `Keeps this entry, the older one${older}, and deletes ${removed}${newer}: ${moves}. If adding the collections fails, nothing is deleted.`;
-}
-
-/** A merge that stopped: at `update`, nothing changed; at `delete`, the kept entry has the collections but both remain. */
-export class KnowledgeMergeError extends Error {
-  constructor(
-    readonly stage: "update" | "delete",
-    cause: unknown
-  ) {
-    super(knowledgeErrorText(cause), { cause });
-    this.name = "KnowledgeMergeError";
-  }
+    ? `Keeps the older entry, ${kept}${older}, and deletes this one${newer}: ${moves}.`
+    : `Keeps this entry, the older one${older}, and deletes ${removed}${newer}: ${moves}.`;
 }
 
 /**
- * Merge: first give the kept entry the deleted one's collections (PATCH), then delete the newer
- * (DELETE). A failed update deletes nothing. Resolves with the kept entry's id; rejects with a
- * {@link KnowledgeMergeError} naming the step that failed.
+ * Merge in one daemon call: the kept entry gets the other's collections and the other is deleted
+ * (the daemon checks both are there and visible before it changes anything). `keep` is passed, so
+ * the entry kept is the one the confirmation named. Resolves with the kept entry's id.
  */
 export async function runKnowledgeMerge(api: KnowledgeApi, plan: KnowledgeMergePlan): Promise<string> {
-  if (plan.collections) {
-    try {
-      await updateKnowledgeEntry(api, plan.keep.id, { collections: plan.collections });
-    } catch (error) {
-      throw new KnowledgeMergeError("update", error);
-    }
-  }
-  try {
-    await deleteKnowledgeEntry(api, plan.remove.id);
-  } catch (error) {
-    throw new KnowledgeMergeError("delete", error);
-  }
+  await mergeKnowledgeEntries(api, { ids: [plan.keep.id, plan.remove.id], keep: plan.keep.id });
   return plan.keep.id;
 }
 
-/** What the banner says when a merge fails. */
-export function mergeErrorText(plan: KnowledgeMergePlan, error: unknown): string {
-  const reason = knowledgeErrorText(error instanceof KnowledgeMergeError ? error.cause : error);
-  if (error instanceof KnowledgeMergeError && error.stage === "delete") {
-    const removed = `“${plan.remove.title || "Untitled"}”`;
-    return plan.collections
-      ? `The collections were added to the older entry, but ${removed} could not be deleted: ${reason}`
-      : `${removed} could not be deleted: ${reason}`;
-  }
-  return `Nothing was merged: ${reason}`;
+/**
+ * What the banner says when a merge fails: a refusal (4xx) was checked before anything changed;
+ * anything else may have stopped part-way (the daemon's message then says what was done).
+ */
+export function mergeErrorText(error: unknown): string {
+  const reason = knowledgeErrorText(error);
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500 ? `Nothing was merged: ${reason}` : `The merge may not have finished: ${reason}`;
 }
 
 // ---------------------------------------------------------------------------

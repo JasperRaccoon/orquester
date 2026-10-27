@@ -23,6 +23,8 @@ import type { AccountPolicy } from "@orquester/config";
 export const KNOWLEDGE_ENTRY_MAX_BYTES = 200_000;
 /** Items in one save request (a bulk import is split by the agent). */
 export const KNOWLEDGE_SAVE_MAX_ENTRIES = 100;
+/** Entries one merge combines: 2..KNOWLEDGE_MERGE_MAX_ENTRIES. */
+export const KNOWLEDGE_MERGE_MAX_ENTRIES = 10;
 export const KNOWLEDGE_TITLE_MAX = 200;
 export const KNOWLEDGE_COLLECTIONS_MAX = 100;
 export const KNOWLEDGE_COLLECTION_NAME_MAX = 60;
@@ -190,6 +192,54 @@ export interface UpdateKnowledgeEntryRequest {
   postedAt?: string | null;
   /** Collection ids or names. Changing only these never queues a linking run. */
   collections?: string[];
+}
+
+/**
+ * POST /api/knowledge/entries/merge — duplicates into one entry, in one step. The kept entry gets
+ * the union of every merged entry's collections (its own first, then the others' in `ids` order),
+ * and `title`/`body` when given; the others are deleted. Every id must be visible to the caller
+ * (else `KNOWLEDGE_NOT_FOUND`), and everything is checked before anything changes.
+ */
+export interface KnowledgeMergeRequest {
+  /** 2..KNOWLEDGE_MERGE_MAX_ENTRIES distinct entry ids. */
+  ids: string[];
+  /** The entry kept, one of `ids`; absent: {@link knowledgeMergeKeep}. */
+  keep?: string;
+  title?: string;
+  /** The combined text when the caller rewrote it; absent: the kept entry's text stays. */
+  body?: string;
+  /** The calling chat (set by the daemon for tool calls). */
+  sessionId?: string;
+}
+
+export interface KnowledgeMergeResponse {
+  /** The kept entry, as an entry edit answers it. */
+  kept: KnowledgeEntryDetail;
+  /** The other ids, all deleted. */
+  deleted: string[];
+}
+
+/**
+ * The entry a merge keeps when the caller names none: the oldest by `savedAt` (an unreadable date
+ * counts as oldest), the same instant keeping the smaller id. The daemon and the Knowledge tab's
+ * duplicate banner both use it, so the banner's confirmation names the entry the daemon keeps.
+ */
+export function knowledgeMergeKeep<T extends Pick<KnowledgeEntryMeta, "id" | "savedAt">>(entries: readonly T[]): T | null {
+  const time = (iso: string): number => {
+    const at = Date.parse(iso);
+    return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+  };
+  let keep: T | null = null;
+  for (const entry of entries) {
+    if (!keep) {
+      keep = entry;
+      continue;
+    }
+    const a = time(entry.savedAt);
+    const b = time(keep.savedAt);
+    if (a < b || (a === b && entry.id < keep.id)) keep = entry;
+  }
+  return keep;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +824,8 @@ export const knowledgeRoutes = {
   collection: (id: string): string => `/api/knowledge/collections/${enc(id)}`,
   entries: "/api/knowledge/entries",
   entry: (id: string): string => `/api/knowledge/entries/${enc(id)}`,
+  /** POST; static, so it never reaches `entries/:id` (entry ids are `ke_…`). */
+  entriesMerge: "/api/knowledge/entries/merge",
   item: (id: string): string => `/api/knowledge/items/${enc(id)}`,
   graph: "/api/knowledge/graph",
   similarityGraph: "/api/knowledge/similarity-graph",

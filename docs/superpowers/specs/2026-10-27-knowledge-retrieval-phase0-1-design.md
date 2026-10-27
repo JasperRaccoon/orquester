@@ -239,7 +239,12 @@ No new tools. In `apps/daemon/src/mcp/tools/knowledge.ts`:
   `- ke_… "Title" · meaning 0.91 · shares concepts A, B · same author` + cite) and
   `Possible duplicates:` lines.
 - `knowledge_save`: each saved item with `similar` gets
-  `  possible duplicate of ke_… "Title" (0.95) — if it is the same content, keep one (knowledge_update / knowledge_delete)`.
+  `  possible duplicate of ke_… "Title" (0.95) — if it is the same content, knowledge_merge the two`.
+- `knowledge_merge(ids[2..10], keep?, title?, body?)` (A2): one `POST /api/knowledge/entries/merge`.
+  The kept entry (`keep`, else the oldest by `savedAt`, ties to the smaller id — `knowledgeMergeKeep`,
+  shared with the panel) gets the union of all collections (its own first) and `title`/`body` when
+  given; the others are deleted. Every id must be visible; everything is checked before anything
+  changes. Act tier, no card, advertised with search and get.
 - Descriptions stay within the registry budgets; the knowledge family budget may rise to 7 KiB
   if needed, with the reason in the test comment. Field descriptions ≤ 160 bytes.
 
@@ -279,7 +284,7 @@ Graph view search box, and the panel's "More like this". Props between component
   (`onFindSimilar`).
 - Possible duplicates banner: "Looks like the same content as <Title> (95%)", actions Open,
   Merge (confirm dialog: keeps the older entry, adds this entry's collections to it, deletes this
-  one — PATCH then DELETE through the existing routes; on failure nothing is deleted), and Keep
+  one — one call to the merge route, which refuses before changing anything), and Keep
   both (hides the banner for this entry for the session).
 - Knowledge citation chips in chat get a hover/focus card: title, byline, date, collections, a
   2-line snippet (entry detail fetched lazily, cached with the existing citation cache); a deleted

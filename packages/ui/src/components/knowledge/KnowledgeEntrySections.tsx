@@ -118,7 +118,7 @@ export const DuplicatesBanner: React.FC<{
     try {
       await onMerge(plan);
     } catch (err) {
-      setError(mergeErrorText(plan, err));
+      setError(mergeErrorText(err));
     } finally {
       setBusy(null);
     }
