@@ -3,12 +3,13 @@
  * docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md, "Agent tools", "Citations";
  * retrieval spec docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md, "Agent tools (A1)"):
  * the shared knowledge base for in-chat agents — `knowledge_search`, `knowledge_get`,
- * `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`
- * — and the two tools of the plugin's own indexing sessions, `knowledge_worker_next_task` and
+ * `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`,
+ * `knowledge_insights` (phase 2 spec docs/superpowers/specs/2026-10-27-knowledge-phase2-cross-graph-design.md,
+ * "Agent tools") — and the two tools of the plugin's own indexing sessions, `knowledge_worker_next_task` and
  * `knowledge_worker_submit`. Chat-only.
  *
  * - **Gating** is the manifest's (`session-tools/manifest.ts`): the family only while the plugin is
- *   on; search, get, update, delete and merge only to a chat that sees a collection; the worker tools
+ *   on; search, get, insights, update, delete and merge only to a chat that sees a collection; the worker tools
  *   only — and alone — to a worker session. The routes enforce the same on the server (visibility,
  *   `KNOWLEDGE_NOT_A_WORKER`), and every refusal they answer comes back here as a clean tool error.
  * - **Visibility** is resolved by the daemon from the calling session: every request names it
@@ -16,8 +17,9 @@
  * - **Results are compact text** (spec "Light on tokens"): a few short lines per hit — collections by
  *   name, how strongly and by which signals it matched, a one-line snippet, the entry's ready-made
  *   citation — and a paging footer; full text only through `knowledge_get`, in windows of a body.
- * - **Older daemons** answer without the retrieval fields (match, total, cursor, similar entries):
- *   whatever is absent is left out of the text, never guessed.
+ * - **Older daemons** answer without the retrieval fields (match, total, cursor, similar entries) or
+ *   the phase 2 ones (disagreements, novelty, clusters, merged and similar concepts): whatever is
+ *   absent is left out of the text, never guessed; a daemon without the insights route says so.
  * - **No card**: saving, editing, deleting and merging are Act; they change only the knowledge base,
  *   and saving must stay fast. Editing, deleting and merging reach the same routes as the Knowledge tab.
  *
@@ -39,10 +41,13 @@ import {
   knowledgeRoutes,
   type KnowledgeCollectionsResponse,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptRef,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
+  type KnowledgeInsightsResponse,
   type KnowledgeItemResponse,
+  type KnowledgeNovelty,
   type KnowledgeMergeRequest,
   type KnowledgeMergeResponse,
   type KnowledgeRelatedReason,
@@ -116,6 +121,13 @@ const KNOWLEDGE_WORKER_ANSWER_MAX_CHARS = 2_000_000;
 const COLLECTION_REF_MAX = 64;
 /** Entries one `knowledge_delete` call removes. */
 const KNOWLEDGE_DELETE_MAX_IDS = 50;
+/** Items per `knowledge_insights` list: at most (the route takes up to 50), and by default. */
+const KNOWLEDGE_INSIGHTS_MAX_LIMIT = 20;
+const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 10;
+/** Contradicting concept pairs shown for one disagreement; concepts shown for one bridge; an entry's new concepts (the daemon sends up to 8). */
+const CONTRADICTION_PAIRS_MAX = 3;
+const INSIGHT_CONCEPTS_MAX = 5;
+const NOVELTY_CONCEPTS_MAX = 8;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -311,12 +323,14 @@ function windowFooter(start: number, end: number, length: number, from: number):
   return start > 0 ? `[chars ${start}–${end} of ${length}, the end]` : null;
 }
 
-/** "meaning 0.91", "shares concepts A, B +2 more", "same author". */
+/** "meaning 0.91", "shares concepts A (distinctive), B +2 more", "same author". */
 function reasonText(reason: KnowledgeRelatedReason): string {
   if (reason.kind === "meaning") return `meaning ${reason.similarity.toFixed(2)}`;
   if (reason.kind === "author") return "same author";
-  if (reason.kind === "contradicts") return reason.note ? `disagrees: ${reason.note}` : "disagrees";
-  const named = reason.concepts.slice(0, 3).map((concept) => label(concept.name));
+  if (reason.kind === "contradicts") return reason.note ? `disagrees: ${clipText(oneLine(reason.note), DESCRIPTION_CHARS)}` : "disagrees";
+  // Few entries have a distinctive concept (absent from an older daemon): it says more than a common one.
+  const distinctive = new Set((reason.distinctive ?? []).map((concept) => concept.id));
+  const named = reason.concepts.slice(0, 3).map((concept) => `${label(concept.name)}${distinctive.has(concept.id) ? " (distinctive)" : ""}`);
   if (named.length === 0) return `shares ${reason.shared} concept${reason.shared === 1 ? "" : "s"}`;
   const more = reason.shared - named.length;
   return `shares concept${reason.shared === 1 ? "" : "s"} ${named.join(", ")}${more > 0 ? ` +${more} more` : ""}`;
@@ -325,6 +339,56 @@ function reasonText(reason: KnowledgeRelatedReason): string {
 /** One similar entry: id, title and every reason on one line, its citation on the next. */
 function similarLines(item: KnowledgeSimilarEntry): string[] {
   return [[`- ${item.entry.id} ${quotedTitle(item.entry.title)}`, ...item.reasons.map(reasonText)].join(" · "), `  cite: ${item.entry.citation}`];
+}
+
+/** "Alternatives pages (Tactic)". */
+const conceptName = (concept: KnowledgeConceptRef): string => `${label(concept.name)} (${label(concept.type)})`;
+/** "ke_… "Title"". */
+const entryRef = (entry: Pick<KnowledgeEntrySummary, "id" | "title">): string => `${entry.id} ${quotedTitle(entry.title)}`;
+const entriesCount = (size: number): string => `${size} entr${size === 1 ? "y" : "ies"}`;
+/** `cluster "Paid ads" (12 entries)`, or `an unlabelled cluster (3 entries)`. */
+const clusterText = (cluster: { label: string | null; size: number }): string =>
+  `${cluster.label ? `cluster "${label(cluster.label)}"` : "an unlabelled cluster"} (${entriesCount(cluster.size)})`;
+/** Where a disagreement comes from: the concept graph's `contradicts` edges, or an LLM pair check. */
+const contradictionSource = (source: "graph" | "checked"): string => (source === "graph" ? "concept graph" : "LLM-checked");
+
+/** "A (Tactic) vs B (Tactic); C (Rule) vs D (Rule) +1 more", or null when there is none. */
+function contradictionPairs(pairs: readonly { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[]): string | null {
+  if (pairs.length === 0) return null;
+  const shown = pairs.slice(0, CONTRADICTION_PAIRS_MAX).map((pair) => `${conceptName(pair.from)} vs ${conceptName(pair.to)}`);
+  const more = pairs.length - shown.length;
+  return `${shown.join("; ")}${more > 0 ? ` +${more} more` : ""}`;
+}
+
+/** A disagreement's note, its concept pairs, indented under its head line. */
+function contradictionDetail(note: string | null, pairs: readonly { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[], indent: string): string[] {
+  const lines: string[] = [];
+  if (note) lines.push(`${indent}note: ${clipText(oneLine(note), DESCRIPTION_CHARS)}`);
+  const concepts = contradictionPairs(pairs);
+  if (concepts) lines.push(`${indent}concepts: ${concepts}`);
+  return lines;
+}
+
+/** One entry this one disagrees with: id, title, source and its other reasons; the note, concept pairs and citation below. */
+function disagreeLines(item: KnowledgeSimilarEntry): string[] {
+  const contradicts = item.reasons.flatMap((reason) => (reason.kind === "contradicts" ? [reason] : []));
+  const others = item.reasons.filter((reason) => reason.kind !== "contradicts").map(reasonText);
+  const sources = [...new Set(contradicts.map((reason) => contradictionSource(reason.source)))];
+  const lines = [[`- ${entryRef(item.entry)}`, ...sources, ...others].join(" · ")];
+  for (const reason of contradicts) lines.push(...contradictionDetail(reason.note, reason.pairs, "  "));
+  lines.push(`  cite: ${item.entry.citation}`);
+  return lines;
+}
+
+const disagrees = (item: KnowledgeSimilarEntry): boolean => item.reasons.some((reason) => reason.kind === "contradicts");
+
+/** "New here: A (Tactic), B (Rule) · in cluster "Paid ads" (12 entries)". */
+function noveltyLine(novelty: KnowledgeNovelty): string {
+  const shown = novelty.newConcepts.slice(0, NOVELTY_CONCEPTS_MAX).map(conceptName);
+  const more = novelty.newConcepts.length - shown.length;
+  const parts = [shown.length > 0 ? `${shown.join(", ")}${more > 0 ? ` +${more} more` : ""}` : "no concept of its own"];
+  if (novelty.cluster) parts.push(`in ${clusterText(novelty.cluster)}`);
+  return `New here: ${parts.join(" · ")}`;
 }
 
 /**
@@ -342,11 +406,17 @@ function entryLines(detail: KnowledgeEntryDetail, names: ReadonlyMap<string, str
       const more = detail.concepts.length - shown.length;
       lines.push(`Concepts: ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`);
     }
+    // Absent from an older daemon.
+    if (detail.novelty) lines.push(noveltyLine(detail.novelty));
     const duplicates = detail.possibleDuplicates ?? [];
     if (detail.similar !== undefined) {
+      const similarMax = several ? GET_SIMILAR_MAX_SEVERAL : GET_SIMILAR_MAX;
+      // An entry it disagrees with is listed first, and only there.
+      const disagreeing = detail.similar.filter(disagrees).slice(0, similarMax);
+      if (disagreeing.length > 0) lines.push("Disagrees with:", ...disagreeing.flatMap(disagreeLines));
       // A possible duplicate is listed once, below.
       const duplicateIds = new Set(duplicates.map((duplicate) => duplicate.entry.id));
-      const similar = detail.similar.filter((item) => !duplicateIds.has(item.entry.id)).slice(0, several ? GET_SIMILAR_MAX_SEVERAL : GET_SIMILAR_MAX);
+      const similar = detail.similar.filter((item) => !duplicateIds.has(item.entry.id) && !disagrees(item)).slice(0, similarMax);
       if (similar.length > 0) lines.push("Similar:", ...similar.flatMap(similarLines));
     } else if (detail.related.length > 0) {
       // An older daemon: the concept-related entries only.
@@ -371,6 +441,16 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   if (concept.aliases.length > 0) {
     const more = concept.aliases.length - listMax;
     lines.push(`Aliases: ${concept.aliases.slice(0, listMax).map(label).join(", ")}${more > 0 ? `, +${more} more` : ""}`);
+  }
+  // Both absent from an older daemon.
+  const merged = detail.mergedFrom ?? [];
+  if (merged.length > 0) {
+    const more = merged.length - listMax;
+    lines.push(`Merged from: ${merged.slice(0, listMax).map((other) => `${conceptName(other)} [${other.id}]`).join(", ")}${more > 0 ? `, +${more} more` : ""}`);
+  }
+  const similarConcepts = detail.similarConcepts ?? [];
+  if (similarConcepts.length > 0) {
+    lines.push(`Similar concepts: ${similarConcepts.slice(0, 5).map(({ concept: other, similarity }) => `${conceptName(other)} [${other.id}] ${similarity.toFixed(2)}`).join(", ")}`);
   }
   if (concept.description) lines.push(clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS));
   const attributes = Object.entries(concept.attributes).slice(0, listMax);
@@ -451,8 +531,10 @@ function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<string, 
   for (const result of response.results) {
     const where = inCollections(result.collections, all);
     lines.push(result.status === "saved" ? `- saved ${result.entryId} · ${where} · cite: ${result.citation}` : `- already saved as ${result.entryId} (not saved again; the collections it is in now) · ${where} · cite: ${result.citation}`);
-    // Close in meaning to an entry already there (absent from an older daemon).
     if (result.status === "saved") {
+      // The similarity cluster it joins (absent from an older daemon; null when none yet).
+      if (result.cluster) lines.push(`  joins ${clusterText(result.cluster)}`);
+      // Close in meaning to an entry already there (absent from an older daemon).
       for (const similar of result.similar ?? []) {
         lines.push(`  possible duplicate of ${similar.entryId} ${quotedTitle(similar.title)} (${similar.similarity.toFixed(2)}) — if it is the same content, knowledge_merge the two`);
       }
@@ -502,6 +584,48 @@ function renderCollections(response: KnowledgeCollectionsResponse): string {
   }
   if (response.collections.length === 0) lines.push("None yet: knowledge_save can create one (newCollections).");
   return lines.join("\n");
+}
+
+/** One insights list: a head with what it is and how many (of how many before the limit), its items numbered; "none" when empty. */
+function insightsSection<T>(name: string, gloss: string, items: readonly T[], total: number | undefined, render: (item: T) => string[]): string[] {
+  const all = Math.max(total ?? 0, items.length);
+  if (all === 0) return [`${name}: none.`];
+  const count = items.length === all ? `${all}` : `${items.length} of ${all}`;
+  return [`${name}, ${gloss} (${count}):`, ...items.flatMap((item, index) => {
+    const [head, ...rest] = render(item);
+    return [`${index + 1}. ${head}`, ...rest];
+  })];
+}
+
+/** The insights answer: contradictions first, then bridges, single-source concepts and link gaps. */
+function renderInsights(response: KnowledgeInsightsResponse, over: readonly string[]): string {
+  const where = over.length > 0 ? ` (in ${over.join(", ")})` : "";
+  const totals = response.totals;
+  const lists = [response.contradictions, response.bridges, response.singleSource, response.gaps];
+  if (lists.every((list) => list.length === 0) && Object.values(totals ?? {}).every((count) => !count)) {
+    return `No knowledge insights${where}: no contradictions, bridges, single-source concepts or link gaps found.`;
+  }
+  return [
+    `Knowledge insights${where}. Read an entry with knowledge_get; cite each entry you use with its cite link, verbatim.`,
+    ...insightsSection("Contradictions", "entries that disagree", response.contradictions, totals?.contradictions, (item) => [
+      `${entryRef(item.a)} ↔ ${entryRef(item.b)} · ${contradictionSource(item.source)}${item.similarity === null ? "" : ` · meaning ${item.similarity.toFixed(2)}`}`,
+      ...contradictionDetail(item.note, item.pairs, "   "),
+      `   cite: ${item.a.citation}`,
+      `   cite: ${item.b.citation}`
+    ]),
+    ...insightsSection("Bridges", "entries tying clusters together", response.bridges, totals?.bridges, (item) => [
+      `${entryRef(item.entry)} · links ${item.clusters.map((cluster) => `${cluster.label ? `"${label(cluster.label)}"` : "unlabelled"} (${cluster.size})`).join(", ")}`,
+      ...(item.concepts.length > 0 ? [`   via: ${item.concepts.slice(0, INSIGHT_CONCEPTS_MAX).map(conceptName).join(", ")}${item.concepts.length > INSIGHT_CONCEPTS_MAX ? ` +${item.concepts.length - INSIGHT_CONCEPTS_MAX} more` : ""}`] : []),
+      `   cite: ${item.entry.citation}`
+    ]),
+    ...insightsSection("Single source", "claims only one entry backs", response.singleSource, totals?.singleSource, (item) => [
+      `${conceptName(item.concept)} [${item.concept.id}] → only ${entryRef(item.entry)}${item.cluster ? ` · in ${clusterText(item.cluster)}` : ""}`,
+      `   cite: ${item.entry.citation}`
+    ]),
+    ...insightsSection("Link gaps", "close in meaning, no shared concept", response.gaps, totals?.gaps, (item) => [
+      `${entryRef(item.a)} ↔ ${entryRef(item.b)} · meaning ${item.similarity.toFixed(2)} · ${item.queued ? "queued for re-linking" : "not queued"}`
+    ])
+  ].join("\n");
 }
 
 /** A worker's next task (or the word to stop). */
@@ -719,7 +843,7 @@ const knowledgeGet = defineTool({
   name: "knowledge_get",
   title: "Read a knowledge entry",
   description:
-    "Read knowledge entries whole — text, metadata, concepts, similar entries, possible duplicates — or a concept (description, entries, links). A cut body's footer gives the from to read on with. Paste the `cite` link of each entry you use, verbatim.",
+    "Read knowledge entries whole — text, metadata, concepts, similar or disagreeing entries, possible duplicates — or a concept (description, entries, links). A cut body's footer gives the from to read on with. Paste the `cite` link of each entry you use, verbatim.",
   input: {
     id: itemId().optional().describe("An entry id (ke_…) or a concept id."),
     ids: z.array(itemId()).min(1).max(KNOWLEDGE_GET_MAX_IDS).optional().describe("Up to 5, instead of id."),
@@ -891,6 +1015,57 @@ const knowledgeCollections = defineTool({
   }
 });
 
+/**
+ * The insights query's comma-joined collections. The route splits on commas, so a name holding one
+ * goes by its collection's id (a name matches case-insensitively, as the daemon's do).
+ */
+async function insightsCollections(api: DaemonApi, refs: readonly string[]): Promise<string> {
+  const names = refs.some((ref) => ref.includes(",")) ? await collectionNames(api) : new Map<string, string>();
+  return refs
+    .map((ref) => {
+      if (!ref.includes(",")) return ref;
+      const wanted = ref.toLowerCase();
+      for (const [id, name] of names) if (name.toLowerCase() === wanted) return id;
+      throw new ToolError("INVALID_ARGUMENT", `No collection named "${clipText(ref, COLLECTION_REF_MAX)}": knowledge_collections lists them.`);
+    })
+    .join(",");
+}
+
+/** A 404 that names no knowledge code: the daemon predates the route (a knowledge refusal has its own code). */
+function missingRoute(status: number, body: unknown): boolean {
+  const code = body !== null && typeof body === "object" ? (body as { code?: unknown }).code : undefined;
+  return status === 404 && !(typeof code === "string" && code.startsWith("KNOWLEDGE_"));
+}
+
+const knowledgeInsights = defineTool({
+  name: "knowledge_insights",
+  title: "Knowledge insights",
+  description:
+    "What crossing the knowledge base's concepts and similarity shows: entries that contradict each other (with why), bridge entries tying topic clusters, claims only one entry backs, close entries sharing no concept.",
+  input: {
+    collections: z.array(collectionRef).max(KNOWLEDGE_COLLECTIONS_MAX).optional().describe("Names or ids."),
+    limit: z.number().int().min(1).max(KNOWLEDGE_INSIGHTS_MAX_LIMIT).optional().describe(`Per list; default ${KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT}.`)
+  },
+  audiences: ["chat"],
+  toolset: "knowledge",
+  tier: "read",
+  scope: async () => knowledgeScope("content", false),
+  annotations: READ_ONLY,
+  resultKind: "text",
+  async run(args, { api, caller }: CallContext) {
+    const sessionId = sessionIdOf(caller, "knowledge_insights");
+    const refs = [...new Set(args.collections ?? [])];
+    const query: Record<string, string> = { sessionId, limit: String(args.limit ?? KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT) };
+    if (refs.length > 0) query.collections = await insightsCollections(api, refs);
+    const res = await api.request("GET", knowledgeRoutes.insights, { query });
+    if (missingRoute(res.status, res.body)) {
+      throw new ToolError("NOT_FOUND", "This Orquester server has no insights yet (it predates them): use knowledge_search and knowledge_get.");
+    }
+    if (res.status >= 400) throw daemonError(res);
+    return text(renderInsights(res.body as KnowledgeInsightsResponse, refs));
+  }
+});
+
 const workerNextTask = defineTool({
   name: "knowledge_worker_next_task",
   title: "Next indexing task",
@@ -939,4 +1114,4 @@ const workerSubmit = defineTool({
 });
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeUpdate, knowledgeDelete, knowledgeMerge, knowledgeCollections, workerNextTask, workerSubmit];
+export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeUpdate, knowledgeDelete, knowledgeMerge, knowledgeCollections, knowledgeInsights, workerNextTask, workerSubmit];

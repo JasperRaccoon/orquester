@@ -4,7 +4,8 @@
  * are compact text with collections by name and each entry's citation, and the daemon's refusals
  * (plugin off, not a worker, an invalid worker answer) come back as clean tool errors. The retrieval
  * spec's additions (filters, examples, paging, match explanations, body windows, similar entries and
- * duplicates) render when the daemon sends them and are left out when an older one does not.
+ * duplicates) render when the daemon sends them and are left out when an older one does not; so do
+ * the phase 2 ones (insights, disagreements, novelty, clusters, merged and similar concepts).
  */
 
 import assert from "node:assert/strict";
@@ -21,8 +22,10 @@ import {
   knowledgeCitation,
   knowledgeRoutes,
   type KnowledgeCollectionsResponse,
+  type KnowledgeConceptRef,
   type KnowledgeEntryDetail,
   type KnowledgeEntrySummary,
+  type KnowledgeInsightsResponse,
   type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
@@ -814,4 +817,275 @@ test("knowledge_save: a saved entry close in meaning to one already there gets a
     `- saved ke_eeeeeeeeeeee · in SEO · cite: ${saved.results[1]!.citation}`
   ]);
   assert.equal(out.match(/possible duplicate/g)?.length, 2, "only where the daemon named one");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 (docs/superpowers/specs/2026-10-27-knowledge-phase2-cross-graph-design.md, "Agent tools")
+// ---------------------------------------------------------------------------
+
+const concept = (id: string, name: string, type = "Tactic"): KnowledgeConceptRef => ({ id, name, type });
+
+const INSIGHTS: KnowledgeInsightsResponse = {
+  contradictions: [
+    {
+      a: meta({ id: "ke_aaaaaaaaaaaa", title: "Cap the budget" }),
+      b: meta({ id: "ke_bbbbbbbbbbbb", title: "Never cap\nthe budget" }),
+      similarity: 0.842,
+      source: "graph",
+      pairs: [
+        { from: concept("tactic-cap", "Daily cap"), to: concept("tactic-uncapped", "Uncapped spend") },
+        { from: concept("rule-a", "A", "Rule"), to: concept("rule-b", "B", "Rule") },
+        { from: concept("rule-c", "C", "Rule"), to: concept("rule-d", "D", "Rule") },
+        { from: concept("rule-e", "E", "Rule"), to: concept("rule-f", "F", "Rule") }
+      ],
+      note: "Capping\nslows learning"
+    },
+    { a: meta({ id: "ke_cccccccccccc", title: "Long pages" }), b: meta({ id: "ke_dddddddddddd", title: "Short pages" }), similarity: null, source: "checked", pairs: [], note: null }
+  ],
+  bridges: [
+    {
+      entry: meta({ id: "ke_eeeeeeeeeeee", title: "Ads feed SEO" }),
+      clusters: [{ label: "Paid ads", size: 12 }, { label: "SEO", size: 8 }, { label: null, size: 3 }],
+      concepts: [concept("tactic-alternatives", "Alternatives pages"), concept("metric-cpc", "CPC", "Metric")]
+    }
+  ],
+  singleSource: [{ concept: concept("rule-48h", "Wait 48 hours", "Rule"), entry: meta({ id: "ke_ffffffffffff", title: "Learning phase" }), cluster: { label: "Paid ads", size: 12 } }],
+  gaps: [
+    { a: meta({ id: "ke_aaaaaaaaaaaa", title: "Cap the budget" }), b: meta({ id: "ke_gggggggggggg", title: "Budget pacing" }), similarity: 0.931, queued: true },
+    { a: meta({ id: "ke_cccccccccccc", title: "Long pages" }), b: meta({ id: "ke_hhhhhhhhhhhh", title: "Pillar pages" }), similarity: 0.9, queued: false }
+  ],
+  totals: { contradictions: 5, bridges: 1, singleSource: 1, gaps: 2 }
+};
+
+test("knowledge_insights: one GET with the session, the limit (default 10) and the collections once, comma-joined; four sections, contradictions first, with totals", async () => {
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.insights, { status: 200, body: INSIGHTS });
+  const r = await run(api, "knowledge_insights", { collections: ["SEO", "Ads", "SEO"], limit: 5 });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(r.structuredContent, undefined, "a text result");
+  assert.deepEqual(api.calls, [{ method: "GET", path: knowledgeRoutes.insights, query: { sessionId: "chat-1", limit: "5", collections: "SEO,Ads" } }], "no collections read: no name holds a comma");
+  const c = (id: string, title: string) => meta({ id, title }).citation;
+  assert.equal(
+    textOf(r),
+    [
+      "Knowledge insights (in SEO, Ads). Read an entry with knowledge_get; cite each entry you use with its cite link, verbatim.",
+      "Contradictions, entries that disagree (2 of 5):",
+      '1. ke_aaaaaaaaaaaa "Cap the budget" ↔ ke_bbbbbbbbbbbb "Never cap the budget" · concept graph · meaning 0.84',
+      "   note: Capping slows learning",
+      "   concepts: Daily cap (Tactic) vs Uncapped spend (Tactic); A (Rule) vs B (Rule); C (Rule) vs D (Rule) +1 more",
+      `   cite: ${c("ke_aaaaaaaaaaaa", "Cap the budget")}`,
+      `   cite: ${c("ke_bbbbbbbbbbbb", "Never cap\nthe budget")}`,
+      '2. ke_cccccccccccc "Long pages" ↔ ke_dddddddddddd "Short pages" · LLM-checked',
+      `   cite: ${c("ke_cccccccccccc", "Long pages")}`,
+      `   cite: ${c("ke_dddddddddddd", "Short pages")}`,
+      "Bridges, entries tying clusters together (1):",
+      '1. ke_eeeeeeeeeeee "Ads feed SEO" · links "Paid ads" (12), "SEO" (8), unlabelled (3)',
+      "   via: Alternatives pages (Tactic), CPC (Metric)",
+      `   cite: ${c("ke_eeeeeeeeeeee", "Ads feed SEO")}`,
+      "Single source, claims only one entry backs (1):",
+      '1. Wait 48 hours (Rule) [rule-48h] → only ke_ffffffffffff "Learning phase" · in cluster "Paid ads" (12 entries)',
+      `   cite: ${c("ke_ffffffffffff", "Learning phase")}`,
+      "Link gaps, close in meaning, no shared concept (2):",
+      '1. ke_aaaaaaaaaaaa "Cap the budget" ↔ ke_gggggggggggg "Budget pacing" · meaning 0.93 · queued for re-linking',
+      '2. ke_cccccccccccc "Long pages" ↔ ke_hhhhhhhhhhhh "Pillar pages" · meaning 0.90 · not queued'
+    ].join("\n")
+  );
+  await run(api, "knowledge_insights", {});
+  assert.deepEqual(api.calls.at(-1)!.query, { sessionId: "chat-1", limit: "10" }, "no collections: every visible one; the tool's default limit");
+});
+
+test("knowledge_insights: an empty list says none; nothing anywhere is one line; a collection name holding a comma goes by its id", async () => {
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.insights, { status: 200, body: { ...INSIGHTS, contradictions: [], singleSource: [], totals: { contradictions: 0, bridges: 1, singleSource: 0, gaps: 2 } } });
+  const some = textOf(await run(api, "knowledge_insights", {})).split("\n");
+  assert.equal(some[0], "Knowledge insights. Read an entry with knowledge_get; cite each entry you use with its cite link, verbatim.");
+  assert.equal(some[1], "Contradictions: none.");
+  assert.ok(some.includes("Single source: none."));
+  assert.ok(some.indexOf("Contradictions: none.") < some.indexOf("Bridges, entries tying clusters together (1):"));
+
+  api.on("GET", knowledgeRoutes.insights, { status: 200, body: { contradictions: [], bridges: [], singleSource: [], gaps: [], totals: { contradictions: 0, bridges: 0, singleSource: 0, gaps: 0 } } });
+  assert.equal(textOf(await run(api, "knowledge_insights", { collections: ["SEO"] })), "No knowledge insights (in SEO): no contradictions, bridges, single-source concepts or link gaps found.");
+
+  api.on("GET", knowledgeRoutes.collections, { status: 200, body: { ...COLLECTIONS, collections: [...COLLECTIONS.collections, { ...COLLECTIONS.collections[0]!, id: "kc_comma00000", name: "Growth, paid" }] } });
+  await run(api, "knowledge_insights", { collections: ["growth, PAID", "Ads"] });
+  assert.equal(api.calls.at(-1)!.query!.collections, "kc_comma00000,Ads");
+  const unknown = await run(api, "knowledge_insights", { collections: ["Nope, none"] });
+  assert.equal(errorOf(unknown).code, "INVALID_ARGUMENT");
+  assert.match(errorOf(unknown).message, /No collection named "Nope, none"/);
+});
+
+test("knowledge_insights: inputs (limit 1..20, collection refs) are checked before any request; an older daemon's 404 says it has no insights; knowledge refusals pass through", async () => {
+  const api = withCollections(new FakeDaemonApi());
+  for (const args of [{ limit: 0 }, { limit: 21 }, { limit: 1.5 }, { limit: "5" }, { collections: [""] }, { collections: ["c".repeat(65)] }, { collections: "SEO" }, { sessionId: "other" }]) {
+    assert.equal(errorOf(await run(api, "knowledge_insights", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
+  }
+  assert.equal(api.calls.length, 0, "nothing invalid reaches the daemon");
+
+  // An older daemon: no such route (the daemon's own 404 shape, Fastify's, or none; the fake's own when unrouted).
+  const old = await run(api, "knowledge_insights", { limit: 20 });
+  assert.deepEqual(errorOf(old), { code: "NOT_FOUND", message: "This Orquester server has no insights yet (it predates them): use knowledge_search and knowledge_get." });
+  for (const body of [{ code: "NOT_FOUND", message: "Route not found." }, { statusCode: 404, error: "Not Found", message: "Route GET:/api/knowledge/insights not found" }, null]) {
+    api.on("GET", knowledgeRoutes.insights, { status: 404, body });
+    const r = await run(api, "knowledge_insights", {});
+    assert.equal(r.isError, true);
+    assert.deepEqual(errorOf(r), errorOf(old));
+  }
+  for (const [status, code] of [[400, "KNOWLEDGE_UNKNOWN_COLLECTION"], [403, "KNOWLEDGE_DISABLED"], [404, "KNOWLEDGE_NOT_FOUND"]] as const) {
+    api.on("GET", knowledgeRoutes.insights, { status, body: { code, message: `refused: ${code}` } });
+    assert.deepEqual(errorOf(await run(api, "knowledge_insights", { collections: ["Marketing"] })), { code, message: `refused: ${code}` });
+  }
+});
+
+test("knowledge_get: entries it disagrees with come first (source, note, concept pairs, cite) and leave Similar; New here; distinctive shared concepts", async () => {
+  const entry = meta();
+  const other = (id: string, title: string) => meta({ id, title });
+  const similar: KnowledgeSimilarEntry[] = [
+    {
+      entry: other("ke_bbbbbbbbbbbb", "Competitor pages"),
+      similarity: 0.912,
+      reasons: [
+        { kind: "meaning", similarity: 0.912 },
+        { kind: "concepts", concepts: [concept("tactic-alternatives", "Alternatives pages"), concept("channel-seo", "SEO", "Channel")], shared: 2, distinctive: [concept("tactic-alternatives", "Alternatives pages")] }
+      ]
+    },
+    {
+      entry: other("ke_cccccccccccc", "Never build comparison pages"),
+      similarity: 0.71,
+      reasons: [
+        { kind: "meaning", similarity: 0.71 },
+        { kind: "contradicts", source: "graph", pairs: [{ from: concept("tactic-alternatives", "Alternatives pages"), to: concept("tactic-no-comparisons", "No comparison pages") }], note: "Comparison pages\ncannibalise" }
+      ]
+    },
+    { entry: other("ke_dddddddddddd", "Thin pages"), similarity: null, reasons: [{ kind: "contradicts", source: "checked", pairs: [], note: null }] }
+  ];
+  const detail: KnowledgeEntryDetail = {
+    entry: { ...entry, body: "Body." },
+    concepts: [concept("tactic-alternatives", "Alternatives pages"), concept("metric-x", "Rank in 6 weeks", "Metric")],
+    related: [],
+    similar,
+    possibleDuplicates: [],
+    novelty: { newConcepts: [concept("metric-x", "Rank in 6 weeks", "Metric")], cluster: { label: "Comparison pages", size: 7 } },
+    citation: entry.citation
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
+  const lines = out.split("\n");
+  const at = lines.findIndex((line) => line.startsWith("Concepts:"));
+  assert.deepEqual(lines.slice(at + 1), [
+    'New here: Rank in 6 weeks (Metric) · in cluster "Comparison pages" (7 entries)',
+    "Disagrees with:",
+    '- ke_cccccccccccc "Never build comparison pages" · concept graph · meaning 0.71',
+    "  note: Comparison pages cannibalise",
+    "  concepts: Alternatives pages (Tactic) vs No comparison pages (Tactic)",
+    `  cite: ${similar[1]!.entry.citation}`,
+    '- ke_dddddddddddd "Thin pages" · LLM-checked',
+    `  cite: ${similar[2]!.entry.citation}`,
+    "Similar:",
+    '- ke_bbbbbbbbbbbb "Competitor pages" · meaning 0.91 · shares concepts Alternatives pages (distinctive), SEO',
+    `  cite: ${similar[0]!.entry.citation}`,
+    "---",
+    "Body."
+  ]);
+  assert.equal(out.split("ke_cccccccccccc").length - 1, 2, "a disagreeing entry is listed once (its id, and its citation)");
+
+  // Nothing new, no cluster yet; only disagreements: no Similar head.
+  api.on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: { ...detail, similar: similar.slice(2), novelty: { newConcepts: [], cluster: null } } } });
+  const bare = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
+  assert.ok(bare.includes("\nNew here: no concept of its own\nDisagrees with:\n"), bare);
+  assert.ok(!bare.includes("Similar:"));
+});
+
+test("knowledge_get: a concept shows what was merged into it and its similar concepts; an older daemon's concept renders as before", async () => {
+  const base = {
+    concept: { id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic", confidence: 0.9, description: null, aliases: ["vs pages"], attributes: {} },
+    collections: ["kc_seo0000000"],
+    entries: [],
+    neighbors: []
+  };
+  const api = withCollections(new FakeDaemonApi());
+  api.on("GET", knowledgeRoutes.item("tactic-alternatives"), { status: 200, body: { kind: "concept", concept: base } });
+  const old = textOf(await run(api, "knowledge_get", { id: "tactic-alternatives" }));
+  assert.equal(old, 'concept tactic-alternatives "Alternatives pages" (Tactic) · confidence 0.90 · in SEO\nAliases: vs pages');
+
+  api.on("GET", knowledgeRoutes.item("tactic-alternatives"), {
+    status: 200,
+    body: {
+      kind: "concept",
+      concept: {
+        ...base,
+        mergedFrom: [concept("tactic-alternative-pages", "Alternative pages"), concept("tactic-vs-pages", "VS pages")],
+        similarConcepts: [{ concept: concept("tactic-comparison", "Comparison pages"), similarity: 0.812 }, ...Array.from({ length: 6 }, (_, i) => ({ concept: concept(`t-${i}`, `T${i}`), similarity: 0.7 }))]
+      }
+    }
+  });
+  const lines = textOf(await run(api, "knowledge_get", { id: "tactic-alternatives" })).split("\n");
+  assert.deepEqual(lines.slice(1), [
+    "Aliases: vs pages",
+    "Merged from: Alternative pages (Tactic) [tactic-alternative-pages], VS pages (Tactic) [tactic-vs-pages]",
+    "Similar concepts: Comparison pages (Tactic) [tactic-comparison] 0.81, T0 (Tactic) [t-0] 0.70, T1 (Tactic) [t-1] 0.70, T2 (Tactic) [t-2] 0.70, T3 (Tactic) [t-3] 0.70"
+  ]);
+  api.on("GET", knowledgeRoutes.item("tactic-alternatives"), { status: 200, body: { kind: "concept", concept: { ...base, mergedFrom: [], similarConcepts: [] } } });
+  assert.equal(textOf(await run(api, "knowledge_get", { id: "tactic-alternatives" })), old, "empty lists: no lines");
+});
+
+test("knowledge_get: an older daemon's entry (no novelty, no contradicts or distinctive) renders exactly as before", async () => {
+  const entry = meta();
+  const detail: KnowledgeEntryDetail = {
+    entry: { ...entry, body: "Body." },
+    concepts: [concept("tactic-alternatives", "Alternatives pages")],
+    related: [],
+    similar: [{ entry: meta({ id: "ke_bbbbbbbbbbbb", title: "Competitor pages" }), similarity: 0.9, reasons: [{ kind: "meaning", similarity: 0.9 }, { kind: "concepts", concepts: [concept("tactic-alternatives", "Alternatives pages")], shared: 1 }] }],
+    possibleDuplicates: [],
+    citation: entry.citation
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail } });
+  assert.equal(
+    textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" })),
+    [
+      `cite: ${entry.citation}`,
+      "entry ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads",
+      "Title: Alternatives pages",
+      "Concepts: Alternatives pages (Tactic) [tactic-alternatives]",
+      "Similar:",
+      '- ke_bbbbbbbbbbbb "Competitor pages" · meaning 0.90 · shares concept Alternatives pages',
+      `  cite: ${detail.similar![0]!.entry.citation}`,
+      "---",
+      "Body."
+    ].join("\n")
+  );
+});
+
+test("knowledge_save: a saved entry names the cluster it joins; none when the daemon sends null or nothing, or for a duplicate", async () => {
+  const saved: KnowledgeSaveResponse = {
+    results: [
+      {
+        entryId: "ke_aaaaaaaaaaaa",
+        status: "saved",
+        title: "Alternatives pages",
+        collections: ["kc_seo0000000"],
+        citation: meta().citation,
+        cluster: { label: "Comparison pages", size: 7 },
+        similar: [{ entryId: "ke_cccccccccccc", title: "Alternatives pages (copy)", similarity: 0.953, citation: "[c](orquester-knowledge:entry/ke_cccccccccccc)" }]
+      },
+      { entryId: "ke_eeeeeeeeeeee", status: "saved", title: "New", collections: ["kc_seo0000000"], citation: "[New](orquester-knowledge:entry/ke_eeeeeeeeeeee)", cluster: { label: null, size: 3 } },
+      { entryId: "ke_ffffffffffff", status: "saved", title: "Alone", collections: ["kc_seo0000000"], citation: "[Alone](orquester-knowledge:entry/ke_ffffffffffff)", cluster: null },
+      { entryId: "ke_gggggggggggg", status: "saved", title: "Older daemon", collections: ["kc_seo0000000"], citation: "[Older daemon](orquester-knowledge:entry/ke_gggggggggggg)" },
+      { entryId: "ke_bbbbbbbbbbbb", status: "duplicate", title: "Old", collections: ["kc_ads0000000"], citation: "[Old](orquester-knowledge:entry/ke_bbbbbbbbbbbb)", cluster: { label: "Paid ads", size: 9 } }
+    ],
+    createdCollections: [],
+    linking: "queued"
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.save, { status: 200, body: saved });
+  assert.equal(
+    textOf(await run(api, "knowledge_save", { entries: [{ body: "text", collections: ["SEO"] }] })),
+    [
+      "Saved 4 entries, 1 already saved; linking queued.",
+      `- saved ke_aaaaaaaaaaaa · in SEO · cite: ${meta().citation}`,
+      '  joins cluster "Comparison pages" (7 entries)',
+      '  possible duplicate of ke_cccccccccccc "Alternatives pages (copy)" (0.95) — if it is the same content, knowledge_merge the two',
+      "- saved ke_eeeeeeeeeeee · in SEO · cite: [New](orquester-knowledge:entry/ke_eeeeeeeeeeee)",
+      "  joins an unlabelled cluster (3 entries)",
+      "- saved ke_ffffffffffff · in SEO · cite: [Alone](orquester-knowledge:entry/ke_ffffffffffff)",
+      "- saved ke_gggggggggggg · in SEO · cite: [Older daemon](orquester-knowledge:entry/ke_gggggggggggg)",
+      "- already saved as ke_bbbbbbbbbbbb (not saved again; the collections it is in now) · in Ads · cite: [Old](orquester-knowledge:entry/ke_bbbbbbbbbbbb)"
+    ].join("\n")
+  );
 });

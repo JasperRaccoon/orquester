@@ -173,10 +173,10 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       act("destroy_box")
     ]
   },
-  // Knowledge Graph: advertised only while the plugin is on (`session-tools/manifest.ts`); search and
-  // get, update, delete and merge only to a chat that sees a collection; the two worker tools only to
-  // the plugin's own indexing sessions, which get nothing else. Saving, editing, deleting and merging
-  // raise no card.
+  // Knowledge Graph: advertised only while the plugin is on (`session-tools/manifest.ts`); search,
+  // get, insights, update, delete and merge only to a chat that sees a collection; the two worker
+  // tools only to the plugin's own indexing sessions, which get nothing else. Saving, editing,
+  // deleting and merging raise no card.
   {
     id: "knowledge",
     label: "Knowledge base",
@@ -188,6 +188,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       act("knowledge_delete"),
       act("knowledge_merge"),
       read("knowledge_collections"),
+      read("knowledge_insights"),
       act("knowledge_worker_next_task"),
       act("knowledge_worker_submit")
     ]

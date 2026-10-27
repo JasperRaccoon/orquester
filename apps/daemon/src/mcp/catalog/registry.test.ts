@@ -119,9 +119,10 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 6_144, `box tools: ${added(boxRows)} bytes`);
-  // Knowledge search filters, body windows and merging share an 8 KiB budget.
+  // Knowledge search filters, body windows and merging share an 8 KiB budget; 8.5 KiB since
+  // knowledge_insights (~620 bytes, phase 2 spec "Agent tools"): the cross-graph findings get one tool.
   const knowledgeBytes = added(knowledgeRows.filter((tool) => !workerRows.includes(tool)));
-  assert.ok(knowledgeBytes <= 8_192, `knowledge tools: ${knowledgeBytes} bytes`);
+  assert.ok(knowledgeBytes <= 8_704, `knowledge tools: ${knowledgeBytes} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);
   assert.deepEqual(deviceRows.map((tool) => tool.name), ["list_devices", "open_device", "device_action", "device_install", "close_device"]);
   assert.ok(added(deviceRows) <= 6_144, `device tools: ${added(deviceRows)} bytes`);

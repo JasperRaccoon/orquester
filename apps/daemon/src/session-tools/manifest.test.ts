@@ -130,7 +130,7 @@ test("the manifest: tools, the composed block and the deny list; no legacy tools
 // Knowledge Graph plugin: the `knowledge` toolset's gating and the knowledge line
 // ---------------------------------------------------------------------------
 
-const USER_KNOWLEDGE = ["knowledge_search", "knowledge_get", "knowledge_save", "knowledge_update", "knowledge_delete", "knowledge_merge", "knowledge_collections"];
+const USER_KNOWLEDGE = ["knowledge_search", "knowledge_get", "knowledge_save", "knowledge_update", "knowledge_delete", "knowledge_merge", "knowledge_collections", "knowledge_insights"];
 const WORKER_KNOWLEDGE = ["knowledge_worker_next_task", "knowledge_worker_submit"];
 const KNOWLEDGE_LINE = /\nKnowledge: .*knowledge_search/;
 
