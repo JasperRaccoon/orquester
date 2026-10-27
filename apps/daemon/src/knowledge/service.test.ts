@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import Fastify from "fastify";
-import { KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeLinkingState, type KnowledgeStatus, type SessionOwner } from "@orquester/api";
+import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeLinkingState, type KnowledgeStatus, type SessionOwner } from "@orquester/api";
 import { knowledgeEntriesDir, knowledgeGraphPluginDir } from "@orquester/config";
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
@@ -464,4 +464,74 @@ test("linking's `contradicting` reads the graph's adjacency, never a concept det
   assert.deepEqual(view.contradicting("tactic-48h"), ["tactic-72h"], "two edges, one concept");
   assert.deepEqual(view.contradicting("tactic-72h"), ["tactic-48h"]);
   assert.equal(similarCalls, 0);
+});
+
+test("pair checks that change which entries contradict announce the graph once; checks that change nothing announce nothing", async (t) => {
+  let checks: KnowledgePairCheck[] = [];
+  const listeners = new Set<() => void>();
+  const pairChecks: KnowledgePairChecksPort = {
+    all: () => checks,
+    get: () => null,
+    onChange: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  };
+  const record = (next: KnowledgePairCheck[]): void => {
+    checks = next;
+    for (const listener of [...listeners]) listener();
+  };
+  let ids: string[] = [];
+  const factory: KnowledgeLinkingFactory = ({ store, graph }) => ({
+    events: new EventEmitter<{ status: [] }>(),
+    // Three entries; the graph says the first two contradict.
+    start: async () => {
+      const outcome = await store.save({
+        entries: [
+          { body: "Wait 48 hours.", collections: ["SEO"] },
+          { body: "Wait 72 hours.", collections: ["SEO"] },
+          { body: "Post daily.", collections: ["SEO"] }
+        ],
+        newCollections: [{ name: "SEO", description: "Search" }]
+      });
+      ids = outcome.results.map((r) => r.entryId!);
+      await loadGraph(
+        graph,
+        [node("tactic-48h", "Wait 48 hours", [`${ids[0]}.md`]), node("tactic-72h", "Wait 72 hours", [`${ids[1]}.md`]), node("tactic-daily", "Post daily", [`${ids[2]}.md`])],
+        [edge("x1", "tactic-48h", "tactic-72h", null, "contradicts")]
+      );
+    },
+    stop: async () => undefined,
+    status: () => ({ state: "idle" }),
+    entriesChanged: () => undefined,
+    pairChecks,
+    gapQueued: () => new Set(),
+    snapshot: () => ({ linking: { state: "idle" }, lastRun: null, recentRuns: [], workers: [], tokens: { week: { in: 0, out: 0 }, total: { in: 0, out: 0 } }, lastError: null }),
+    rebuild: async () => ({ queued: false, running: false }),
+    rebuildEstimate: async () => ({ entries: 0, tasks: 0 }),
+    isActiveWorker: () => false,
+    workerNext: async () => ({ kind: "done", reason: "run-finished" }),
+    workerSubmit: async () => ({ accepted: false, error: "x" })
+  });
+  const h = await harness(t, { enabled: true, over: { linking: factory } });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  const graphEvents = () => h.events.filter((e) => e.channel === KNOWLEDGE_CHANNEL && e.type === KNOWLEDGE_CHANGED_EVENT && (e.payload as { graph?: boolean }).graph === true).length;
+  const check = (x: string, y: string, verdict: KnowledgePairCheck["verdict"]): KnowledgePairCheck => {
+    const [a, b] = x < y ? [x, y] : [y, x];
+    return { a, b, verdict, note: null, checkedAt: "2026-10-27T10:00:00.000Z" };
+  };
+  const [e48, e72, daily] = ids as [string, string, string];
+  let before = graphEvents();
+  record([check(e48, e72, "contradicts")]);
+  assert.equal(graphEvents() - before, 0, "it confirms what the graph said");
+  record([check(e48, e72, "contradicts"), check(e72, daily, "unrelated")]);
+  assert.equal(graphEvents() - before, 0, "nothing contradicted there");
+  record([check(e48, e72, "contradicts"), check(e72, daily, "unrelated"), check(e48, daily, "contradicts")]);
+  assert.equal(graphEvents() - before, 1, "a new contradiction");
+  before = graphEvents();
+  record([check(e48, e72, "consistent"), check(e72, daily, "unrelated"), check(e48, daily, "contradicts")]);
+  assert.equal(graphEvents() - before, 1, "the checker overrides the graph's guess");
+  await h.knowledge.settled();
+  assert.ok(h.statuses().length > 0);
 });
