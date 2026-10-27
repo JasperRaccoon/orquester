@@ -11,13 +11,13 @@ import { posix } from "node:path";
 
 import type { BoxSizeOffer, DeviceProfile, DevicesSettings, DeviceScreen } from "@orquester/api";
 
-import { ANDROID_EMULATOR_GPU, ANDROID_GOLDEN_SNAPSHOT, BOX_DEVICES_DIR } from "../../../boxes/github/device-cache.ts";
+import { ANDROID_CACHE_SOURCE, ANDROID_GOLDEN_SNAPSHOT, ANDROID_RENTED_GPU_MODES, BOX_DEVICES_DIR, BOX_GOLDEN_MARKER } from "../../../boxes/github/device-cache.ts";
 import { BLACKSMITH_LINUX_IMAGES, BLACKSMITH_LINUX_SIZES, blacksmithRunnerLabel } from "../../../boxes/github/workflow-template.ts";
 import { avdName, avdScreen, parseIni } from "../../android/avd-config.ts";
 import { localCapacity } from "../../android/capacity.ts";
 import type { DeviceExecutor } from "../../android/executor.ts";
 import type { KvmProbe } from "../../android/readiness.ts";
-import { avdDir, avdReady, profileHash } from "../../toolchain/android-sdk.ts";
+import { type AvdMarker, avdDir, profileHash } from "../../toolchain/android-sdk.ts";
 import type { DeviceHostRentalSpec } from "./rental.ts";
 
 /** Where a Linux box keeps its device state: the device caches' dir on rented boxes, `~/.orquester/devices` on an owner's own machine. */
@@ -147,13 +147,13 @@ ffmpeg -hide_banner -encoders 2> /dev/null | grep -q libx264
 
 /** Every box golden snapshot is this named one (the device cache's layout too). */
 export const BOX_GOLDEN_SNAPSHOT = ANDROID_GOLDEN_SNAPSHOT;
-/** GPU modes tried for a golden made in the box, in order: rented runners first the device cache's mode; own machines the fastest one. */
+/** GPU modes tried for a golden made in the box, in order: rented runners the device cache's order; own machines the fastest one first. */
 export const BOX_GPU_MODES: Readonly<Record<"box" | "byo", readonly string[]>> = {
-  box: [ANDROID_EMULATOR_GPU, "swangle_indirect"],
-  byo: ["swangle_indirect", ANDROID_EMULATOR_GPU]
+  box: ANDROID_RENTED_GPU_MODES,
+  byo: ["swangle_indirect", "swiftshader_indirect"]
 };
 
-/** `<avd>/orq-<profile>.avd/orq-box-golden.json`: a golden snapshot made in the box. */
+/** `<avd>/orq-<profile>.avd/orq-box-golden.json` ({@link BOX_GOLDEN_MARKER}): a box golden snapshot, made in the box or by the device cache's script. */
 export interface BoxGoldenMarker {
   snapshot: string;
   /** The GPU mode it was saved with (a snapshot loads only with it). */
@@ -161,11 +161,16 @@ export interface BoxGoldenMarker {
   configHash: string;
   emulatorRevision: string | null;
   createdAt: string;
+  /** `"cache"`: made by the device-cache workflow (`boxes/github/device-cache.ts`). */
+  source?: string;
 }
 
-export const BOX_GOLDEN_MARKER = "orq-box-golden.json";
+export { BOX_GOLDEN_MARKER };
 
-/** A profile's AVD in the box: from the device cache (`cache`), made here and current (`built`), made for an older config (`outdated`), or none. */
+/**
+ * A profile's AVD in the box: from the device cache (`cache`), made here (`built`) — both current —,
+ * made for an older config or without a marker (`outdated`: an untuned AVD of an older cache), or none.
+ */
 export type BoxAvdState = "cache" | "built" | "outdated" | "missing";
 
 /** A usable golden snapshot: its name, the GPU mode leases boot with, and where it came from. */
@@ -178,31 +183,36 @@ export interface BoxGolden {
 export async function boxAvdState(x: DeviceExecutor, avdHome: string, profile: DeviceProfile): Promise<BoxAvdState> {
   const dir = avdDir(avdHome, profile.id);
   if (!(await x.exists(posix.join(avdHome, `${avdName(profile.id)}.ini`))) || !(await x.exists(posix.join(dir, "config.ini")))) return "missing";
-  // The device cache's AVDs carry no Orquester marker (made by its workflow script).
-  if (!(await x.exists(posix.join(dir, "orq-avd.json")))) return "cache";
-  return (await avdReady(avdHome, profile, x)) ? "built" : "outdated";
+  // The device cache's AVDs carry the same marker as ours (its script makes them the same way), with `source: "cache"`.
+  const marker = await readMarker<AvdMarker>(x, posix.join(dir, "orq-avd.json"));
+  if (marker?.configHash !== profileHash(profile)) return "outdated";
+  return marker.source === ANDROID_CACHE_SOURCE ? "cache" : "built";
 }
 
-/** The profile's golden snapshot when it is usable now, else null. */
-export async function boxGolden(x: DeviceExecutor, avdHome: string, profile: DeviceProfile, state: BoxAvdState, emulatorRevision: string | null): Promise<BoxGolden | null> {
-  const dir = avdDir(avdHome, profile.id);
-  if (!(await x.exists(posix.join(dir, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb")))) return null;
-  if (state === "cache") {
-    // Restored with the SDK it was made with (one cache entry): the cache's GPU mode.
-    return (await x.exists(posix.join(dir, BOX_GOLDEN_MARKER))) ? null : { snapshot: BOX_GOLDEN_SNAPSHOT, gpu: ANDROID_EMULATOR_GPU, source: "cache" };
-  }
-  if (state !== "built") return null;
-  const text = await x.readText(posix.join(dir, BOX_GOLDEN_MARKER));
+async function readMarker<T>(x: DeviceExecutor, path: string): Promise<Partial<T> | null> {
   try {
-    const marker = JSON.parse(text ?? "") as BoxGoldenMarker;
-    if (marker.snapshot !== BOX_GOLDEN_SNAPSHOT || marker.configHash !== profileHash(profile) || marker.emulatorRevision !== emulatorRevision || typeof marker.gpu !== "string") return null;
-    return { snapshot: marker.snapshot, gpu: marker.gpu, source: "built" };
+    const value: unknown = JSON.parse((await x.readText(path)) ?? "");
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Partial<T>) : null;
   } catch {
     return null;
   }
 }
 
-/** A lease's screen from the AVD's own `config.ini` (a cache AVD keeps its device's full resolution). */
+/** The profile's golden snapshot when it is usable now, else null. */
+/**
+ * The profile's golden snapshot when it is usable now, else null: its marker names this config, the
+ * installed emulator and the GPU mode it was saved with (the cache's or the box's own probing).
+ */
+export async function boxGolden(x: DeviceExecutor, avdHome: string, profile: DeviceProfile, state: BoxAvdState, emulatorRevision: string | null): Promise<BoxGolden | null> {
+  if (state !== "cache" && state !== "built") return null;
+  const dir = avdDir(avdHome, profile.id);
+  if (!(await x.exists(posix.join(dir, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb")))) return null;
+  const marker = await readMarker<BoxGoldenMarker>(x, posix.join(dir, BOX_GOLDEN_MARKER));
+  if (!marker || marker.snapshot !== BOX_GOLDEN_SNAPSHOT || marker.configHash !== profileHash(profile) || marker.emulatorRevision !== emulatorRevision || typeof marker.gpu !== "string" || !marker.gpu) return null;
+  return { snapshot: marker.snapshot, gpu: marker.gpu, source: marker.source === ANDROID_CACHE_SOURCE ? "cache" : "built" };
+}
+
+/** A lease's screen from the AVD's own `config.ini` (what it really runs, whoever made it). */
 export function screenOfConfig(configText: string): DeviceScreen | null {
   const config = parseIni(configText);
   const width = Number(config.get("hw.lcd.width"));

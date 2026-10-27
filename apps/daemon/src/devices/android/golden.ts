@@ -45,6 +45,8 @@ export const LEASE_BOOT_SCRIPT = `${ANIMATIONS_OFF_SCRIPT}; ${CLOSE_SYSTEM_DIALO
 export const SETTLE_CPU_PERCENT = 60;
 export const SETTLE_WINDOW_MS = 10_000;
 export const SETTLE_MAX_MS = 5 * 60_000;
+/** How long a golden cold boot may take to reach `sys.boot_completed` (absent `bootTimeoutMs`). */
+export const GOLDEN_BOOT_TIMEOUT_MS = 10 * 60_000;
 const CLOCK_TICKS = 100;
 
 export interface GoldenDeps {
@@ -88,6 +90,11 @@ export interface GoldenDeps {
 /** The fabricated overlay that carries a snapshot's display cutout in dp. */
 export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
 
+/** The guest command (as root) that fabricates {@link CUTOUT_OVERLAY} with the dp cutout `dp` (no `'` in it). */
+export function fabricateCutoutCommand(dp: string): string {
+  return `cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 '${dp}'`;
+}
+
 /**
  * Re-express the running device's display cutout in dp: the system image's device emulation
  * overlay (`com.android.internal.emulation.<device>`) defines it in pixels of the real panel, so
@@ -112,7 +119,7 @@ export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: 
   await delay(1_000, signal);
   await adbRun(["wait-for-device"], 60_000);
   try {
-    const made = await shell(`cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 '${dp}'`);
+    const made = await shell(fabricateCutoutCommand(dp));
     if (made.exitCode !== 0 || /error|exception/i.test(made.stdout + made.stderr)) throw new Error(`fabricating the cutout overlay failed: ${lastLine(made)}`);
     for (const overlay of emulation) await shell(`cmd overlay disable ${overlay}`);
     const enabled = await shell(`cmd overlay enable ${CUTOUT_OVERLAY}`);
@@ -200,7 +207,7 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
     startTicks = (await x.procStat(pid))?.startTicks ?? null;
     await deps.track({ serial, pid, pgid, consolePort: ports.consolePort, grpcPort: ports.grpcPort, logPath, ...(startTicks !== null ? { startTicks } : {}) });
     const qemu = pid;
-    await waitForBootCompleted({ exec: deps.exec, adb, env: deps.env, serial, alive: () => isProcessAlive(qemu, x), signal, timeoutMs: deps.bootTimeoutMs ?? 10 * 60_000 });
+    await waitForBootCompleted({ exec: deps.exec, adb, env: deps.env, serial, alive: () => isProcessAlive(qemu, x), signal, timeoutMs: deps.bootTimeoutMs ?? GOLDEN_BOOT_TIMEOUT_MS });
     deps.logger.info(`[devices] golden ${profile.id}: booted in ${Math.round((Date.now() - started) / 1000)} s`);
     report("Waiting for first-boot work to settle", 25);
     const settleStart = Date.now();

@@ -172,6 +172,8 @@ export interface AvdMarker {
   createdAt: string;
   /** avdmanager's `hw.lcd.density` of the device definition (the system image's cutout is in its pixels). */
   deviceDensity?: number;
+  /** `"cache"`: made by the Linux device-cache workflow (`boxes/github/device-cache.ts`), the same way. */
+  source?: string;
 }
 
 /** `<avd>/orq-<profile>.avd/orq-golden.json`: its golden snapshot was saved for this config and emulator. */

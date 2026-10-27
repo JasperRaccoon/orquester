@@ -432,19 +432,12 @@ const ANDROID_MISS = "steps.android.outputs.cache-hit != 'true'";
 const TOOLS_MISS = "steps.tools.outputs.cache-hit != 'true'";
 const RUNNER_MISS = "steps.xcode.outputs.build != '' && steps.runner.outputs.cache-hit != 'true'";
 
-/** Restore (or look up) the tools cache, install on a miss, save. */
-function toolsSteps(os: BlacksmithOs, lookupOnly: boolean): string {
+/** Restore the tools cache (the Linux job's AVD script pre-installs agent-device's helper APKs from it), install on a miss, save. */
+function toolsSteps(os: BlacksmithOs): string {
   const key = deviceToolsCacheKey(os);
   return [
     setupNodeStep(null),
-    cacheStep({
-      name: lookupOnly ? "Look up the device tools cache" : "Restore the device tools",
-      id: "tools",
-      action: "restore",
-      paths: DEVICE_TOOLS_CACHE_PATHS,
-      key,
-      lookupOnly
-    }),
+    cacheStep({ name: "Restore the device tools", id: "tools", action: "restore", paths: DEVICE_TOOLS_CACHE_PATHS, key }),
     runStep({ name: "Install the device tools", if: TOOLS_MISS, script: DEVICE_TOOLS_STEP_SCRIPT }),
     cacheStep({ name: "Save the device tools", if: TOOLS_MISS, action: "save", paths: DEVICE_TOOLS_CACHE_PATHS, key })
   ].join("\n");
@@ -505,6 +498,7 @@ jobs:
 ${cacheJobHead("linux")}
 ${runStep({ name: "Enable KVM", script: KVM_STEP_SCRIPT })}
 ${runStep({ name: "Prepare paths", env: { PREPARE: "devices" }, script: PATHS_STEP_SCRIPT })}
+${toolsSteps("linux")}
 ${cacheStep({ name: "Look up the Android cache", id: "android", action: "restore", paths: ANDROID_CACHE_PATHS, key: ANDROID_CACHE_KEY, lookupOnly: true })}
       - name: Set up Java for the Android SDK tools
         if: ${ANDROID_MISS}
@@ -515,11 +509,10 @@ ${cacheStep({ name: "Look up the Android cache", id: "android", action: "restore
 ${runStep({ name: "Install the Android SDK", if: ANDROID_MISS, script: ANDROID_SDK_STEP_SCRIPT })}
 ${runStep({ name: "Create the AVDs and their golden snapshots", if: ANDROID_MISS, script: ANDROID_AVD_STEP_SCRIPT })}
 ${cacheStep({ name: "Save the Android cache", if: ANDROID_MISS, action: "save", paths: ANDROID_CACHE_PATHS, key: ANDROID_CACHE_KEY })}
-${toolsSteps("linux", true)}
 
 ${cacheJobHead("macos")}
 ${runStep({ name: "Prepare paths", env: { PREPARE: "devices" }, script: PATHS_STEP_SCRIPT })}
-${toolsSteps("macos", false)}
+${toolsSteps("macos")}
 ${runStep({ name: "Find the Xcode build", id: "xcode", script: XCODE_BUILD_STEP_SCRIPT })}
 ${cacheStep({
   name: "Look up agent-device's iOS runner",

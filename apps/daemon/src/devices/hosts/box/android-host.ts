@@ -657,7 +657,7 @@ export class BoxAndroidHost implements DeviceHost {
               gpu,
               snapshotName: BOX_GOLDEN_SNAPSHOT,
               bootTimeoutMs: this.timing.goldenBootMs,
-              ...(state === "built" ? { density: avdHardware(profile).density, ...(deviceDensity ? { cutoutDensity: deviceDensity } : {}) } : {})
+              ...(state === "built" || state === "cache" ? { density: avdHardware(profile).density, ...(deviceDensity ? { cutoutDensity: deviceDensity } : {}) } : {})
             },
             signal,
             onProgress

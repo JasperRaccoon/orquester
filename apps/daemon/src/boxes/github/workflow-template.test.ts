@@ -211,20 +211,20 @@ test("the device-cache workflow builds what is missing and saves it under the ke
     "Check inputs",
     "Enable KVM",
     "Prepare paths",
+    "Set up Node for the device tools",
+    "Restore the device tools",
+    "Install the device tools",
+    "Save the device tools",
     "Look up the Android cache",
     "Set up Java for the Android SDK tools",
     "Install the Android SDK",
     "Create the AVDs and their golden snapshots",
-    "Save the Android cache",
-    "Set up Node for the device tools",
-    "Look up the device tools cache",
-    "Install the device tools",
-    "Save the device tools"
+    "Save the Android cache"
   ]);
   const hit = stepsFor(linux, { os: "linux" }, { "steps.android.outputs.cache-hit": "true", "steps.tools.outputs.cache-hit": "true" });
   assert.deepEqual(
     hit.map((step) => step.name),
-    ["Check inputs", "Enable KVM", "Prepare paths", "Look up the Android cache", "Set up Node for the device tools", "Look up the device tools cache"]
+    ["Check inputs", "Enable KVM", "Prepare paths", "Set up Node for the device tools", "Restore the device tools", "Look up the Android cache"]
   );
   const lookup = linux.find((step) => step.id === "android")!;
   const save = linux.find((step) => step.name === "Save the Android cache")!;
@@ -251,8 +251,9 @@ test("the device-cache workflow builds what is missing and saves it under the ke
   const runnerSave = macos.find((step) => step.name === "Save agent-device's iOS runner")!;
   const boxRunner = parsed().jobs.box.steps.find((step) => step.name === "Restore agent-device's iOS runner")!;
   assert.deepEqual([runnerSave.with!.key, runnerSave.with!.path], [boxRunner.with!.key, boxRunner.with!.path]);
-  // The macOS tools are restored for real (the runner build needs agent-device), Linux's only looked up.
+  // The tools are restored for real on both: the runner build needs agent-device, the AVD script its helper APKs.
   assert.equal(macos.find((step) => step.id === "tools")!.with!["lookup-only"], undefined);
+  assert.equal(linux.find((step) => step.id === "tools")!.with!["lookup-only"], undefined);
 });
 
 test("the templates are deterministic", () => {
