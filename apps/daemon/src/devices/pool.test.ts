@@ -65,3 +65,10 @@ test("placement modes and a named host", () => {
   assert.deepEqual(choosePlacement({ platform: "android", hosts, settings: settings(), canProvision: true, hostId: "box:l" }), { kind: "host", hostId: "box:l" });
   assert.deepEqual(choosePlacement({ platform: "android", hosts: [host("local", { draining: true })], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: "local", missing: [] });
 });
+
+test("a research host (vphone) takes only a request that names it", () => {
+  const research = host("vphone:mac1", { kind: "byo", research: true });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: null, missing: [] });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research, host("box:a", { used: 1 })], settings: settings(), canProvision: false }), { kind: "host", hostId: "box:a" });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research], settings: settings(), canProvision: false, hostId: "vphone:mac1" }), { kind: "host", hostId: "vphone:mac1" });
+});

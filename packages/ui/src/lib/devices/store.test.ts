@@ -177,4 +177,13 @@ describe("devices validation", () => {
     assert.equal(sanitizeDeviceLease({ ...lease("a"), state: "parked" }), null);
     assert.deepEqual(sanitizeDeviceLease({ ...lease("a"), stream: { kind: "webrtc", deviceParam: "x" } })?.stream, undefined);
   });
+
+  it("keeps a research host's flag and notice", () => {
+    const parsed = sanitizeDeviceHost({ ...host(), kind: "byo", research: true, notice: "Research — real iOS in a VM" });
+    assert.equal(parsed?.research, true);
+    assert.equal(parsed?.notice, "Research — real iOS in a VM");
+    const plain = sanitizeDeviceHost({ ...host(), research: "yes", notice: 3 });
+    assert.equal(plain?.research, undefined);
+    assert.equal(plain?.notice, undefined);
+  });
 });

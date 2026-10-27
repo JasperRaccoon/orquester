@@ -594,7 +594,8 @@ export class DeviceService implements DeviceToolsPort {
       checks: host.readiness.checks,
       used: host.capacity.used,
       total: host.capacity.total,
-      ...(host.pool?.draining ? { draining: true } : {})
+      ...(host.pool?.draining ? { draining: true } : {}),
+      ...(host.research ? { research: true } : {})
     }));
   }
 

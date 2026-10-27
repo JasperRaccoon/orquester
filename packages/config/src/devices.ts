@@ -90,6 +90,32 @@ export interface DevicePoolSettings {
   rentWithoutAsking: boolean;
 }
 
+/**
+ * One bring-your-own Mac's "Virtual iPhones (research)" switch (phase 3 §2.3): vphone-cli research
+ * VMs on that machine. Keyed by box id in {@link DevicesResearchSettings.vphoneHosts}.
+ */
+export interface DevicesVphoneHostSettings {
+  /** "Virtual iPhones (research)" is on for this machine (its "Use for device simulators" must be on too). */
+  enabled: boolean;
+  /** The iPhone restore IPSW (a path on that Mac, or a URL) the vphone template is built from; null: none set. */
+  iphoneSource: string | null;
+  /** The matching PCC/cloudOS IPSW (a path on that Mac, or a URL); null: none set. */
+  cloudosSource: string | null;
+}
+
+/** Phase 3 research hosts. */
+export interface DevicesResearchSettings {
+  /** Box id → its vphone switch. A box without an entry is off. */
+  vphoneHosts: Record<string, DevicesVphoneHostSettings>;
+}
+
+/** A key of {@link DevicesResearchSettings.vphoneHosts}: a box id. */
+export const DEVICES_VPHONE_HOST_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** At most this many machines carry a vphone switch. */
+export const DEVICES_VPHONE_HOSTS_MAX = 64;
+/** Longest IPSW source (path or URL). */
+export const DEVICES_VPHONE_SOURCE_MAX = 2000;
+
 export interface DevicesSettings {
   android: DevicesAndroidSettings;
   ios: DevicesIosSettings;
@@ -99,6 +125,8 @@ export interface DevicesSettings {
   /** Leases one chat may hold at once (spec §2 goal 6). */
   maxLeasesPerChat: number;
   pool: DevicePoolSettings;
+  /** Phase 3 research hosts (vphone-cli). */
+  research: DevicesResearchSettings;
 }
 
 /** Inclusive ranges of the numeric settings: the persisted schema clamps to them, the PUT route refuses outside them. */
@@ -143,7 +171,8 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     idleTeardownMinutes: 20,
     capacityWaitSeconds: 120,
     rentWithoutAsking: false
-  }
+  },
+  research: { vphoneHosts: {} }
 }) as DevicesSettings;
 
 /** A fresh, mutable copy of the defaults. */
@@ -232,6 +261,31 @@ const poolSchema = z
   })
   .passthrough();
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+const vphoneSource = z.string().trim().min(1).max(DEVICES_VPHONE_SOURCE_MAX).nullable().catch(null);
+const vphoneHostSchema = z
+  .object({
+    enabled: bool(false),
+    iphoneSource: vphoneSource.default(null),
+    cloudosSource: vphoneSource.default(null)
+  })
+  .passthrough();
+
+// Entries keyed by something that is not a box id, or that are not objects (a patch's `null`), are dropped.
+const vphoneHostsSchema = z.unknown().transform((value) => {
+  const out: Record<string, DevicesVphoneHostSettings> = {};
+  if (!isPlainObject(value)) return out;
+  for (const [key, entry] of Object.entries(value)) {
+    if (Object.keys(out).length >= DEVICES_VPHONE_HOSTS_MAX) break;
+    if (!DEVICES_VPHONE_HOST_KEY.test(key) || !isPlainObject(entry)) continue;
+    out[key] = vphoneHostSchema.parse(entry) as DevicesVphoneHostSettings;
+  }
+  return out;
+});
+
+const researchSchema = z.object({ vphoneHosts: vphoneHostsSchema }).passthrough();
+
 // A missing or non-object section reads as `{}`, so each of its fields takes its own default.
 const section = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess((value) => (value !== null && typeof value === "object" && !Array.isArray(value) ? value : {}), schema);
@@ -243,7 +297,8 @@ export const devicesSettingsSchema = z
     agents: section(agentsSchema),
     leaseIdleMinutes: intIn(L.leaseIdleMinutes, D.leaseIdleMinutes),
     maxLeasesPerChat: intIn(L.maxLeasesPerChat, D.maxLeasesPerChat),
-    pool: section(poolSchema)
+    pool: section(poolSchema),
+    research: section(researchSchema)
   })
   .passthrough();
 
@@ -294,6 +349,8 @@ export type DevicesSettingsPatch = {
   leaseIdleMinutes?: number;
   maxLeasesPerChat?: number;
   pool?: Partial<Omit<DevicePoolSettings, "minWarmHosts">> & { minWarmHosts?: Partial<DevicePoolSettings["minWarmHosts"]> };
+  /** A box's entry merges field-wise; `null` forgets it. */
+  research?: { vphoneHosts?: Record<string, Partial<DevicesVphoneHostSettings> | null> };
 };
 
 /**
@@ -301,25 +358,17 @@ export type DevicesSettingsPatch = {
  * re-read through the schema. Keys the patch does not name — unknown ones included — are kept.
  */
 export function mergeDevicesSettings(current: DevicesSettings, patch: DevicesSettingsPatch): DevicesSettings {
-  const next = structuredClone(current) as unknown as Record<string, unknown>;
+  return readDevicesSettings(mergeObject(structuredClone(current) as unknown as Record<string, unknown>, patch as Record<string, unknown>));
+}
+
+/** `patch` over `target`, object by object (arrays and other values replace). */
+function mergeObject(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...target };
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const target = { ...((next[key] as Record<string, unknown> | undefined) ?? {}) };
-      for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
-        if (fieldValue === undefined) continue;
-        if (fieldValue !== null && typeof fieldValue === "object" && !Array.isArray(fieldValue)) {
-          target[field] = { ...((target[field] as Record<string, unknown> | undefined) ?? {}), ...(fieldValue as Record<string, unknown>) };
-        } else {
-          target[field] = fieldValue;
-        }
-      }
-      next[key] = target;
-    } else {
-      next[key] = value;
-    }
+    next[key] = isPlainObject(value) ? mergeObject(isPlainObject(next[key]) ? next[key] : {}, value) : value;
   }
-  return readDevicesSettings(next);
+  return next;
 }
 
 // ---------------------------------------------------------------------------
