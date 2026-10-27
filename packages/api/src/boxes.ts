@@ -198,6 +198,8 @@ export interface BoxSummary {
   /** Known once `orq-agent` connected. */
   os: BoxOs | null;
   arch: BoxArch | null;
+  /** Whether the box's `/dev/kvm` is usable (reported by `orq-agent` at connect; absent: unknown). */
+  kvm?: boolean;
   state: BoxState;
   /** One line explaining the state (e.g. "Reconnecting…", "Gone in the Vultr dashboard"). */
   stateReason: string | null;

@@ -54,7 +54,8 @@ const sysLinux: BoxSysInfo = {
   gpus: ["NVIDIA L4"],
   agentPath: "/usr/local/bin/orq-agent",
   dataDir: "/var/lib/orq-agent",
-  container: false
+  container: false,
+  kvm: true
 };
 
 const sysWindows: BoxSysInfo = {
@@ -69,7 +70,8 @@ const sysWindows: BoxSysInfo = {
   tmux: false,
   gpus: [],
   agentPath: "C:\\orq\\bin\\orq-agent.exe",
-  dataDir: "C:\\orq\\agent"
+  dataDir: "C:\\orq\\agent",
+  kvm: false
 };
 
 const fsChange: BoxFsChangeEvent = {
@@ -120,7 +122,7 @@ export const controlFixture: ByT = {
       protocol: 1,
       agentVersion: "0.1.0+abc1234",
       auth: { kind: "github-oidc", boxId: "box2", jwt: "eyJ.eyJ.sig" },
-      sys: { ...sysLinux, os: "darwin", arch: "arm64", libc: null },
+      sys: { ...sysLinux, os: "darwin", arch: "arm64", libc: null, kvm: false },
       procs: []
     }
   ],

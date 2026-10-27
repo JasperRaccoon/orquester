@@ -488,6 +488,8 @@ export class BoxLifecycle {
           next.os = sys.os;
           next.arch = sys.arch;
           next.libc = sys.libc;
+          // Older orq-agents do not report KVM: leave it unknown.
+          if (typeof sys.kvm === "boolean") next.kvm = sys.kvm;
           next.lastSeenAt = new Date(this.deps.clock.now()).toISOString();
         });
         linked.connection = connection;
