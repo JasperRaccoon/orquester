@@ -675,9 +675,11 @@ export class DeviceService implements DeviceToolsPort {
         (progress) => this.setProgress(lease.id, progress.step, progress.label)
       );
     } catch (error) {
+      // Read before the release below: releasing aborts this very signal.
+      const cancelled = signal.aborted;
       const current = this.leases.find((entry) => entry.id === lease.id);
       if (current) await this.releaseLease(lease.id, "failed", { shutdown: true });
-      if (signal.aborted) throw new DeviceError("CANCELLED", "The device was released before it finished starting.");
+      if (cancelled) throw new DeviceError("CANCELLED", "The device was released before it finished starting.");
       if (isDeviceError(error)) throw error;
       this.logger.error(`[devices] booting ${profile.id} on ${host.id} failed`, errorText(error));
       throw new DeviceError("UNAVAILABLE", `${profile.label} did not start. Try again, or ask the owner to check Settings → Devices.`);

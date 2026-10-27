@@ -87,6 +87,9 @@ export interface GoldenDeps {
   density?: number;
 }
 
+/** How long a restarted SystemUI gets to draw its status bar and cutout before going on. */
+export const SYSTEM_UI_SETTLE_MS = 5_000;
+
 /** The fabricated overlay that carries a snapshot's display cutout in dp. */
 export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
 
@@ -99,8 +102,10 @@ export function fabricateCutoutCommand(dp: string): string {
  * Re-express the running device's display cutout in dp: the system image's device emulation
  * overlay (`com.android.internal.emulation.<device>`) defines it in pixels of the real panel, so
  * on a scaled framebuffer the camera hole lands off-centre. Reads `cutoutSpec` from `dumpsys
- * display`, fabricates `config_mainBuiltInDisplayCutout` in dp (needs `adb root`, Google APIs
- * images allow it; `adb unroot` after), disables the pixel one. Resolves what it did.
+ * display`, fabricates `config_mainBuiltInDisplayCutout` in dp — with the overlay's rect
+ * approximation in dp and its fill, so the hole is drawn whole — (needs `adb root`, Google APIs
+ * images allow it; `adb unroot` after), disables the pixel one, and restarts SystemUI so it draws
+ * the new hole. Resolves what it did.
  */
 export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: NodeJS.ProcessEnv; serial: string; cutoutDensity: number; signal: AbortSignal }): Promise<"kept" | "fixed"> {
   const { exec, adb, env, serial, signal } = input;
@@ -119,11 +124,36 @@ export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: 
   await delay(1_000, signal);
   await adbRun(["wait-for-device"], 60_000);
   try {
-    const made = await shell(fabricateCutoutCommand(dp));
-    if (made.exitCode !== 0 || /error|exception/i.test(made.stdout + made.stderr)) throw new Error(`fabricating the cutout overlay failed: ${lastLine(made)}`);
+    // What the emulation overlay also sets for the hole, read before it goes: the rect SystemUI
+    // sizes its cutout window by (left out, the hole is drawn cut in half) and the fill (left out,
+    // no hole is drawn at all).
+    const lookup = async (resource: string) => (await shell(`cmd overlay lookup android android:${resource}`)).stdout.trim().replace(/^@\S+ -> /, "");
+    const rect = cutoutSpecInDp(await lookup("string/config_mainBuiltInDisplayCutoutRectApproximation"), input.cutoutDensity);
+    const fill = (await lookup("bool/config_fillMainBuiltInDisplayCutout")) === "true";
+    const overlays: [name: string, resource: string, value: string][] = [["OrqCutout", "string/config_mainBuiltInDisplayCutout", `0x03 '${dp}'`]];
+    if (rect && !/'/.test(rect)) overlays.push(["OrqCutoutRect", "string/config_mainBuiltInDisplayCutoutRectApproximation", `0x03 '${rect}'`]);
+    if (fill) overlays.push(["OrqCutoutFill", "bool/config_fillMainBuiltInDisplayCutout", "0x12 0xffffffff"]);
+    for (const [name, resource, value] of overlays) {
+      const made = await shell(`cmd overlay fabricate --target android --name ${name} android:${resource} ${value}`);
+      if (made.exitCode !== 0 || /error|exception/i.test(made.stdout + made.stderr)) throw new Error(`fabricating the cutout overlay failed: ${lastLine(made)}`);
+    }
     for (const overlay of emulation) await shell(`cmd overlay disable ${overlay}`);
-    const enabled = await shell(`cmd overlay enable ${CUTOUT_OVERLAY}`);
-    if (enabled.exitCode !== 0 || /exception/i.test(enabled.stdout + enabled.stderr)) throw new Error(`enabling the cutout overlay failed: ${lastLine(enabled)}`);
+    for (const [name] of overlays) {
+      const enabled = await shell(`cmd overlay enable com.android.shell:${name}`);
+      if (enabled.exitCode !== 0 || /exception/i.test(enabled.stdout + enabled.stderr)) throw new Error(`enabling the cutout overlay failed: ${lastLine(enabled)}`);
+    }
+    // SystemUI keeps drawing the hole it drew at boot (the pixel one) until it starts again.
+    const systemUi = async () => (await shell("pidof com.android.systemui")).stdout.trim();
+    const before = await systemUi();
+    if (before) {
+      await shell(`kill ${before.split(/\s+/)[0]}`);
+      for (let tries = 0; tries < 60; tries++) {
+        await delay(500, signal);
+        const now = await systemUi();
+        if (now && now !== before) break;
+      }
+      await delay(SYSTEM_UI_SETTLE_MS, signal);
+    }
   } finally {
     await adbRun(["unroot"]).catch(() => undefined);
     await delay(1_000, signal);

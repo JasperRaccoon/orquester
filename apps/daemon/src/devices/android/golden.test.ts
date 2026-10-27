@@ -46,11 +46,17 @@ test("dialogs a loaded first boot raised are closed: before the snapshot is save
 test("cutout: the pixel spec of the device emulation overlay is replaced by a dp one, as root, then adbd unroots", async () => {
   const calls: string[] = [];
   let spec = "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left";
+  let systemUiPid = 996;
   const exec: ExecFn = async (_adb, args) => {
     const command = args.slice(2).join(" ");
     calls.push(command);
     if (command === "shell dumpsys display") return { exitCode: 0, stdout: `mCutout cutoutSpec={${spec}} x`, stderr: "" };
     if (command === "shell cmd overlay list") return { exitCode: 0, stdout: "android\n[x] com.android.internal.emulation.pixel_9\n[ ] com.android.internal.emulation.pixel_8\n", stderr: "" };
+    // What Pixel 9's emulation overlay answers (the rect is in pixels of the real panel too).
+    if (command === "shell cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation") return { exitCode: 0, stdout: "m 484.5,0 h 110 v 141.5 h -110 z @left\n", stderr: "" };
+    if (command === "shell cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout") return { exitCode: 0, stdout: "true\n", stderr: "" };
+    if (command === "shell pidof com.android.systemui") return { exitCode: 0, stdout: `${systemUiPid}\n`, stderr: "" };
+    if (command === "shell kill 996") systemUiPid = 1204;
     if (command.startsWith("shell cmd overlay enable com.android.shell:OrqCutout")) spec = "m 221 33 @left @dp";
     return { exitCode: 0, stdout: "", stderr: "" };
   };
@@ -58,7 +64,17 @@ test("cutout: the pixel spec of the device emulation overlay is replaced by a dp
   assert.equal(how, "fixed");
   assert.deepEqual(calls.slice(2, 4), ["root", "wait-for-device"]);
   assert.ok(calls.includes("shell cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 'm 221.524 32.952 a 16 16 0 0 0 -32 0 16 16 0 0 0 32 0 z @left @dp'"));
+  // The rect SystemUI sizes the hole's window by, and the fill: without them the hole is cut in half, or not drawn.
+  assert.ok(calls.includes("shell cmd overlay fabricate --target android --name OrqCutoutRect android:string/config_mainBuiltInDisplayCutoutRectApproximation 0x03 'm 184.571 0 h 41.905 v 53.905 h -41.905 z @left @dp'"));
+  assert.ok(calls.includes("shell cmd overlay fabricate --target android --name OrqCutoutFill android:bool/config_fillMainBuiltInDisplayCutout 0x12 0xffffffff"));
+  for (const name of ["OrqCutout", "OrqCutoutRect", "OrqCutoutFill"]) {
+    assert.ok(calls.indexOf(`shell cmd overlay enable com.android.shell:${name}`) > calls.indexOf("shell cmd overlay disable com.android.internal.emulation.pixel_9"));
+  }
   assert.ok(calls.includes("shell cmd overlay disable com.android.internal.emulation.pixel_9"));
+  // SystemUI draws the new hole only once it starts again: killed (as root) after the overlays changed.
+  assert.ok(calls.indexOf("shell kill 996") > calls.indexOf("shell cmd overlay enable com.android.shell:OrqCutoutFill"));
+  assert.ok(calls.indexOf("shell kill 996") < calls.indexOf("unroot"));
+  assert.equal(systemUiPid, 1204);
   assert.ok(!calls.some((call) => call.includes("pixel_8")));
   assert.ok(calls.indexOf("unroot") > calls.indexOf(`shell cmd overlay enable ${CUTOUT_OVERLAY}`));
   // Already in dp (or none): nothing to do.

@@ -941,8 +941,9 @@ export class BoxAndroidHost implements DeviceHost {
     // Every lease's emulator is a read-only instance made for it: it always goes. Unreachable: the
     // next prepare reaps it (no live lease holds it then).
     if (lease.deviceId === null || !this.deps.connection()?.connected) return;
+    // Only the emulator booted for THIS lease: a lost lease's serial may name a golden boot now.
     const record = this.emulators.get(lease.deviceId);
-    if (!record || (record.leaseId !== null && record.leaseId !== lease.id)) return;
+    if (!record || record.golden || record.leaseId !== lease.id) return;
     await this.stopRecord(record);
   }
 

@@ -290,6 +290,8 @@ export class LocalAndroidHost implements DeviceHost {
     for (const record of [...this.emulators.values()]) await this.stopRecord(record).catch((error) => this.deps.logger.warn(`[devices] stopping ${record.serial} failed`, errorText(error)));
     this.disposed = true;
     for (const timer of this.timers.splice(0)) clearInterval(timer);
+    // A start still in flight (the host was just added) would start the hub or agent-device after the stops below.
+    await this.servicesStarting?.catch(() => undefined);
     await this.hub.stop().catch(() => undefined);
     await this.agentDevice.stop().catch(() => undefined);
     await this.exec(join(this.layout.sdk, "platform-tools", "adb"), ["kill-server"], { env: this.env, timeoutMs: 10_000 }).catch(() => undefined);
@@ -474,7 +476,10 @@ export class LocalAndroidHost implements DeviceHost {
       await mkdir(this.layout.logs, { recursive: true });
       await mkdir(this.layout.runtime, { recursive: true, mode: 0o700 });
       this.changed();
+      // Android was switched off meanwhile: nothing more starts (the teardown waits for this).
+      if (this.tearingDown) return;
       await this.hub.start();
+      if (this.tearingDown) return;
       await this.agentDevice.ensure(signal).catch((error) => this.deps.logger.warn("[devices] agent-device did not start", errorText(error)));
       this.changed();
     })().finally(() => {
@@ -484,7 +489,7 @@ export class LocalAndroidHost implements DeviceHost {
   }
 
   private async checkAgentDevice(): Promise<void> {
-    if (this.disposed || this.hub.status() !== "running") return;
+    if (this.disposed || this.tearingDown || this.hub.status() !== "running") return;
     if (await this.agentDevice.check()) return;
     await this.agentDevice.ensure().catch(() => undefined);
     this.changed();
@@ -769,8 +774,10 @@ export class LocalAndroidHost implements DeviceHost {
   async release(lease: StoredDeviceLease, _options: { shutdown: boolean }): Promise<void> {
     // Every lease's emulator is a read-only instance made for it: it always goes.
     if (lease.deviceId === null) return;
+    // Only the emulator booted for THIS lease: a lost lease's serial may name a golden boot or
+    // another lease's emulator now (console ports are reused).
     const record = this.emulators.get(lease.deviceId);
-    if (!record || (record.leaseId !== null && record.leaseId !== lease.id)) return;
+    if (!record || record.golden || record.leaseId !== lease.id) return;
     await this.stopRecord(record);
   }
 

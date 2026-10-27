@@ -190,6 +190,23 @@ test("restart: reattach to an emulator a live lease holds, reap one no lease hol
   });
 });
 
+test("release: a lost lease whose serial now names a golden boot leaves that emulator running", async () => {
+  await withHost({}, async ({ appDir, host }) => {
+    const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
+    const golden = await fakeEmulator(appDir, avd.avd);
+    try {
+      // The golden boot took the console port the lost lease's emulator had (emulator-5588).
+      const emulators = (host as unknown as { emulators: Map<string, unknown> }).emulators;
+      emulators.set("emulator-5588", { serial: "emulator-5588", pid: golden.pid!, pgid: golden.pid!, consolePort: 5588, grpcPort: 8570, profile: "pixel-9", avd: "orq-pixel-9", leaseId: null, golden: true, startedAt: "", logPath: "" });
+      await host.release({ ...lease("lost-one", "emulator-5588"), state: "lost" }, { shutdown: true });
+      assert.equal(await isProcessAlive(golden.pid!), true);
+      assert.equal(emulators.has("emulator-5588"), true);
+    } finally {
+      golden.kill("SIGKILL");
+    }
+  });
+});
+
 test("teardown (plugin off): every emulator stops, then the hub, agent-device and the adb server; no boot starts after", async () => {
   await withHost({}, async ({ appDir, host, leases, emulators, exec }) => {
     const avd = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null }).layout;
@@ -214,6 +231,23 @@ test("teardown (plugin off): every emulator stops, then the hub, agent-device an
     } finally {
       kept.kill("SIGKILL");
     }
+  });
+});
+
+test("teardown while the services are still starting: agent-device never starts after it", async () => {
+  await withHost({}, async ({ host }) => {
+    const calls: string[] = [];
+    let hubStarted!: () => void;
+    const hubStarting = new Promise<void>((resolve) => (hubStarted = resolve));
+    const fakes = host as unknown as { hub: Record<string, unknown>; agentDevice: Record<string, unknown>; startServices(): Promise<void> };
+    Object.assign(fakes.hub, { start: async () => (calls.push("hub.start"), hubStarting), stop: async () => void calls.push("hub.stop") });
+    Object.assign(fakes.agentDevice, { ensure: async () => void calls.push("agentDevice.ensure"), stop: async () => void calls.push("agentDevice.stop") });
+    const starting = fakes.startServices();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const tearingDown = host.teardown();
+    hubStarted();
+    await Promise.all([starting, tearingDown]);
+    assert.deepEqual(calls, ["hub.start", "hub.stop", "agentDevice.stop"]);
   });
 });
 
