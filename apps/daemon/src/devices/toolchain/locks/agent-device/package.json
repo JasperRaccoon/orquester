@@ -1,0 +1,7 @@
+{
+  "name": "orquester-device-tool",
+  "private": true,
+  "dependencies": {
+    "agent-device": "0.21.31"
+  }
+}

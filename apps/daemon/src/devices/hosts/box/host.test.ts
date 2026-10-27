@@ -110,6 +110,9 @@ describe("BoxDeviceHost", () => {
     const prep = box.log.slice(0, box.log.indexOf("agent-device-start") + 1);
     assert.deepEqual(prep, [
       "probe",
+      // The shipped lockfile first: the install is `npm ci --ignore-scripts` from it.
+      "write /var/lib/orquester/devices/tools/package.json",
+      "write /var/lib/orquester/devices/tools/package-lock.json",
       "install-tools",
       "hub-start --port 0 --host 127.0.0.1 --require-token --hide-sidebar --hide-boot-device --platform ios --transport mjpeg --max-dimension 1000 --mjpeg-quality 0.6",
       "agent-device-start"

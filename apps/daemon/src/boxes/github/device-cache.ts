@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 
 import toolVersions from "../../devices/tool-versions.json" with { type: "json" };
+import { BOX_TOOLS_LOCK, NPM_CI_SCRIPT } from "../../devices/toolchain/npm-tools.ts";
 
 /** Which OS a Blacksmith box runs. */
 export type BlacksmithOs = "macos" | "linux";
@@ -106,7 +107,13 @@ export const ANDROID_CACHE_PATHS: readonly string[] = [BOX_ANDROID_SDK_DIR, BOX_
 
 /** The tools cache key for an OS (native modules differ per OS and Node major). */
 export function deviceToolsCacheKey(os: BlacksmithOs): string {
-  return `orq-devices-tools-${os}-node${DEVICE_NODE_VERSION}-${shortHash(DEVICE_TOOL_VERSIONS)}-${DEVICE_CACHE_VERSION}`;
+  return `orq-devices-tools-${os}-node${DEVICE_NODE_VERSION}-${shortHash({ tools: DEVICE_TOOL_VERSIONS, lock: deviceToolsLock().packageLock })}-${DEVICE_CACHE_VERSION}`;
+}
+
+/** The shipped lockfile both tools install from (box installs and the cache alike). */
+function deviceToolsLock(): NonNullable<typeof BOX_TOOLS_LOCK> {
+  if (!BOX_TOOLS_LOCK) throw new Error("the device tools lockfile is missing from this build");
+  return BOX_TOOLS_LOCK;
 }
 export const DEVICE_TOOLS_CACHE_PATHS: readonly string[] = [BOX_DEVICE_TOOLS_DIR];
 
@@ -149,15 +156,20 @@ esac
 echo "build=$build" >> "$GITHUB_OUTPUT"
 `;
 
-/** Install the pinned device tools into {@link BOX_DEVICE_TOOLS_DIR}. */
+/**
+ * Install the pinned device tools into {@link BOX_DEVICE_TOOLS_DIR} from the shipped lockfile
+ * (`npm ci --ignore-scripts`: every dependency pinned with its integrity, no lifecycle script).
+ */
 export const DEVICE_TOOLS_STEP_SCRIPT = `set -eu
 mkdir -p ${BOX_DEVICE_TOOLS_DIR}
 cd ${BOX_DEVICE_TOOLS_DIR}
-[ -f package.json ] || printf '{ "private": true }\\n' > package.json
-npm install --no-audit --no-fund --save-exact ${Object.entries(DEVICE_TOOL_VERSIONS)
-  .map(([name, version]) => sq(`${name}@${version}`))
-  .join(" ")}
-./node_modules/.bin/agent-device --version
+cat > package.json << 'ORQ_PACKAGE_JSON'
+${deviceToolsLock().packageJson.trimEnd()}
+ORQ_PACKAGE_JSON
+cat > package-lock.json << 'ORQ_PACKAGE_LOCK'
+${deviceToolsLock().packageLock.trimEnd()}
+ORQ_PACKAGE_LOCK
+${NPM_CI_SCRIPT}./node_modules/.bin/agent-device --version
 `;
 
 /** Install cmdline-tools and {@link ANDROID_SDK_PACKAGES} into {@link BOX_ANDROID_SDK_DIR} (needs Java 17+). */

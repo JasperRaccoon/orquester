@@ -28,7 +28,10 @@ test("the pinned tool versions are the device service's tool-versions.json", () 
   assert.deepEqual({ ...DEVICE_TOOL_VERSIONS }, json);
   assert.equal(DEVICE_TOOL_VERSIONS["agent-device"], "0.21.31");
   assert.equal(DEVICE_TOOL_VERSIONS["expo-device-hub"], "0.19.0-canary-20261023-1357114");
-  for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes(`'${name}@${version}'`));
+  // From the shipped lockfile, with no lifecycle script.
+  for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes(`"${name}": "${version}"`));
+  assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes("npm ci --ignore-scripts"));
+  assert.ok(!/npm install/.test(DEVICE_TOOLS_STEP_SCRIPT));
 });
 
 test("box paths live under /var/lib/orquester/devices, which the paths step hands to the runner user", () => {
