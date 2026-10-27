@@ -38,8 +38,9 @@
  * The task shows each entry's title and body; a body longer than {@link PAIR_CHECK_BODY_CHARS} as
  * its opening and the passages most relevant to the other entry ({@link pairCheckExcerpt},
  * `search/excerpts.ts`), the pair's focus concepts' first. A check records its input version
- * ({@link PAIR_CHECK_INPUT_VERSION}); a `consistent` or `unrelated` one asked on version 1 (each
- * body's opening only) of a body that version cut is a candidate again, once
+ * ({@link PAIR_CHECK_INPUT_VERSION}); a `contradicts` one asked before version 3 (whose prompt
+ * counted claims an entry only quotes or reports), and a `consistent` or `unrelated` one asked on
+ * version 1 (each body's opening only) of a body that version cut, is a candidate again, once
  * ({@link pairCheckNeedsRecheck}).
  */
 
@@ -74,9 +75,12 @@ export const PAIR_CHECK_MAX_PER_RUN = 30;
 export const PAIR_CHECK_BODY_CHARS = 3_000;
 /**
  * The version of a check's input, recorded with it (`inputVersion`). 1 (absent): each body's first
- * {@link PAIR_CHECK_V1_BODY_CHARS} characters. 2: relevant excerpts ({@link pairCheckInput}).
+ * {@link PAIR_CHECK_V1_BODY_CHARS} characters. 2: relevant excerpts ({@link pairCheckInput}). 3: the
+ * same input under a prompt where only the claims each entry itself makes count (one quoting or
+ * agreeing with the other, tension inside one entry, or a research note refining a post is no
+ * contradiction: {@link PAIR_CHECK_SYSTEM}), and notes of one or two whole sentences.
  */
-export const PAIR_CHECK_INPUT_VERSION = 2;
+export const PAIR_CHECK_INPUT_VERSION = 3;
 /** What input version 1 showed of a body: a longer one was cut there (see {@link pairCheckNeedsRecheck}). */
 export const PAIR_CHECK_V1_BODY_CHARS = 2_000;
 /** Weights of the other entry's concept names when choosing excerpts: a concept both are linked to counts double. */
@@ -84,7 +88,8 @@ const OTHER_CONCEPT_WEIGHT = 1;
 const SHARED_CONCEPT_WEIGHT = 2;
 /** Concept types whose sharing makes two close entries worth checking (claims that can disagree). */
 export const PAIR_CHECK_TYPES: ReadonlySet<string> = new Set(["Tactic", "Rule", "Guideline", "Metric", "Result"]);
-const NOTE_MAX = 500;
+/** A note's length at most: one or two whole sentences that state each side's claim. */
+const NOTE_MAX = 400;
 const YIELD_EVERY_MS = 40;
 /**
  * Rounds that may hand out one item (the same input) and end without an acceptable answer before
@@ -106,11 +111,15 @@ export function pairCheckItemKey(pair: PairKey): string {
 export const PAIR_CHECK_SYSTEM = [
   "You compare two saved knowledge entries and decide whether they contradict each other.",
   "A long entry is shown as excerpts: its opening and the passages chosen for their relevance to the other entry, in document order, with […] where text is left out. A disagreement in any excerpt counts, wherever it is; text that is left out is no sign that the entries agree.",
-  'Answer with ONLY a JSON object, no prose and no other keys: {"verdict": "contradicts" | "consistent" | "unrelated", "note": "<one sentence>"}.',
-  "- contradicts: they make claims, numbers or recommendations about the same thing that cannot both hold. The note names the point of disagreement.",
+  "Only the claims each entry itself makes count:",
+  "- When one entry quotes, cites, summarises or agrees with the other (or its author), they do not contradict each other on that point, even if the quoted claim is in tension with something else.",
+  "- Tension inside one entry (it says two things that pull against each other) is not a contradiction between the two entries.",
+  "- A research note that qualifies, refines, adds conditions to or updates a post is consistent with it, unless it states that the post's claim is wrong.",
+  'Answer with ONLY a JSON object, no prose and no other keys: {"verdict": "contradicts" | "consistent" | "unrelated", "note": "<one or two sentences>"}.',
+  "- contradicts: each entry itself makes a claim, number or recommendation about the same thing, and the two cannot both hold. The note states what A claims and what B claims.",
   "- consistent: they are about the same thing and agree with or complement each other. The note says what they share.",
   "- unrelated: they are not about the same thing. The note says why.",
-  `The note is one sentence of at most ${NOTE_MAX} characters.`
+  `The note is one or two complete sentences of at most ${NOTE_MAX} characters that state each side's claim; it must read whole, never cut off mid-claim.`
 ].join("\n");
 
 export type PairCheckVerdict = (typeof KNOWLEDGE_PAIR_CHECK_VERDICTS)[number];
@@ -125,7 +134,7 @@ export function validatePairCheckAnswer(value: unknown): string | null {
     return '"verdict" must be one of "contradicts", "consistent", "unrelated".';
   }
   if (typeof record.note !== "string" || record.note.trim() === "") return '"note" must be a one-sentence string.';
-  if (record.note.length > NOTE_MAX) return `"note" must be at most ${NOTE_MAX} characters.`;
+  if (record.note.length > NOTE_MAX) return `"note" must be at most ${NOTE_MAX} characters: one or two whole sentences that state each side's claim.`;
   return null;
 }
 
@@ -285,7 +294,8 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
 
   /**
    * The entries of current checks that may need asking again ({@link pairCheckNeedsRecheck}): those
-   * of `consistent` or `unrelated` checks on input version 1. Their bodies' lengths decide.
+   * of `contradicts` checks before version 3 and of `consistent` or `unrelated` checks on version 1
+   * (their bodies' lengths decide).
    */
   recheckEntryIds(): string[] {
     const out = new Set<string>();
@@ -367,17 +377,19 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
 }
 
 /**
- * Whether a check is asked again: a `consistent` or `unrelated` verdict on input version 1 where
- * either body was longer than that version showed ({@link PAIR_CHECK_V1_BODY_CHARS}), so the check
- * saw a cut text. A `contradicts` verdict stands (the next check of the pair replaces it anyway).
- * A check asked again is recorded on the current version: it is asked again once.
+ * Whether a check is asked again: a `contradicts` verdict asked before input version 3 (its prompt
+ * counted claims an entry only quotes or reports: {@link PAIR_CHECK_INPUT_VERSION}); a `consistent`
+ * or `unrelated` verdict on input version 1 where either body was longer than that version showed
+ * ({@link PAIR_CHECK_V1_BODY_CHARS}), so the check saw a cut text. The other verdicts stand. A check
+ * asked again is recorded on the current version: it is asked again once.
  */
 export function pairCheckNeedsRecheck(
   record: Pick<KnowledgePairCheckRecord, "a" | "b" | "verdict" | "inputVersion">,
   longBody: (entryId: string) => boolean
 ): boolean {
-  if ((record.inputVersion ?? 1) >= 2 || record.verdict === "contradicts") return false;
-  return longBody(record.a) || longBody(record.b);
+  const version = record.inputVersion ?? 1;
+  if (record.verdict === "contradicts") return version < 3;
+  return version < 2 && (longBody(record.a) || longBody(record.b));
 }
 
 function toCheck(record: KnowledgePairCheckRecord): KnowledgePairCheck {

@@ -69,6 +69,18 @@ describe("pair-check answers", () => {
     assert.equal(parsePairCheckAnswer("not json"), null);
     assert.equal(parsePairCheckAnswer('{"verdict":"no"}'), null);
   });
+
+  it("the prompt counts only the claims each entry itself makes, and asks for whole notes of at most 400 characters", () => {
+    // A live false positive: a research note that quotes and agrees with Alex's guide was judged to
+    // contradict it over a tension inside the guide itself.
+    assert.match(PAIR_CHECK_SYSTEM, /Only the claims each entry itself makes count/);
+    assert.match(PAIR_CHECK_SYSTEM, /quotes, cites, summarises or agrees with the other[^\n]*do not contradict each other on that point/);
+    assert.match(PAIR_CHECK_SYSTEM, /Tension inside one entry[^\n]*is not a contradiction between the two entries/);
+    assert.match(PAIR_CHECK_SYSTEM, /research note that qualifies, refines[^\n]*is consistent with it, unless it states that the post's claim is wrong/);
+    assert.match(PAIR_CHECK_SYSTEM, /one or two complete sentences of at most 400 characters that state each side's claim/);
+    assert.equal(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(400) }), null);
+    assert.match(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(401) }) ?? "", /at most 400 characters/);
+  });
 });
 
 describe("KnowledgePairChecks (the port)", () => {
@@ -415,14 +427,40 @@ describe("the task's input: excerpts chosen for relevance", () => {
 
 describe("re-asking checks judged on cut text", () => {
   const long = (id: string) => id === "ke_long" || id === "ke_long2";
-  it("a consistent or unrelated verdict on input version 1 with a body past the old cut is asked again; contradicts, short bodies and version 2 stand", () => {
+  it("a consistent or unrelated verdict on input version 1 with a body past the old cut is asked again; short bodies and later versions stand", () => {
     const base = { a: "ke_long", b: "ke_short" };
     assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent" }, long), true);
     assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: 1 }, long), true);
     assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_long", verdict: "unrelated" }, long), true, "either side");
-    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "contradicts" }, long), false, "contradicts stands");
     assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_short2", verdict: "consistent" }, long), false, "both whole: nothing was cut");
-    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent", inputVersion: 2 }, long), false);
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
+  });
+
+  it("every contradicts verdict asked before version 3 is asked again once under the stricter prompt; consistent and unrelated version-2 verdicts stand", async () => {
+    assert.equal(PAIR_CHECK_INPUT_VERSION, 3);
+    const short = () => false;
+    for (const inputVersion of [undefined, 1, 2]) {
+      assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict: "contradicts", ...(inputVersion ? { inputVersion } : {}) }, short), true, `contradicts on ${inputVersion ?? "no"} version`);
+    }
+    for (const verdict of ["consistent", "unrelated"] as const) assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict, inputVersion: 2 }, short), false, verdict);
+
+    const root = await dir();
+    const path = join(root, "pair-checks.json");
+    const hashOf = (id: string) => `h-${id}`;
+    const v2 = (a: string, b: string, verdict: string) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b), verdict, note: "n", checkedAt: "t", inputVersion: 2 });
+    await writeFile(path, JSON.stringify({ version: 1, checks: [v2("ke_a", "ke_b", "contradicts"), v2("ke_a", "ke_c", "consistent"), v2("ke_b", "ke_c", "unrelated")] }));
+    const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
+    await checks.load();
+    const pair = (a: string, b: string) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b) });
+    const index = new FakeVectorIndex(); // good = 0.5
+    for (const [i, id] of ["ke_a", "ke_b", "ke_c"].entries()) index.set(id, around(8, 0, 1 + i, 0.9));
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: () => [{ id: "t", type: "Tactic", name: "Warm up" }], contradicting: () => [] };
+    const round = await pairCheckCandidates({ ids: ["ke_a", "ke_b", "ke_c"], view, hashOf, isChecked: (p) => checks.isChecked(p, short), limit: 30 });
+    assert.deepEqual(round.map((c) => [c.a, c.b]), [["ke_a", "ke_b"]], "only the contradicts verdict is asked again");
+    assert.equal(checks.get("ke_a", "ke_b")?.verdict, "contradicts", "it shows until the new answer replaces it");
+    await checks.record(pair("ke_a", "ke_b"), "consistent", "B quotes A's guide and agrees with it.");
+    assert.equal(checks.isChecked(pair("ke_a", "ke_b"), short), true, "asked once");
   });
 
   it("the pair is a candidate again once: its new check is recorded on the current version; bounded by the round's limit, tiers first", async () => {
@@ -434,7 +472,7 @@ describe("re-asking checks judged on cut text", () => {
       path,
       JSON.stringify({
         version: 1,
-        checks: [v1("ke_long", "ke_short", "consistent"), v1("ke_long2", "ke_short", "contradicts"), v1("ke_short", "ke_short2", "unrelated"), { ...v1("ke_long", "ke_long2", "consistent"), inputVersion: 2 }]
+        checks: [v1("ke_long", "ke_short", "consistent"), { ...v1("ke_long2", "ke_short", "contradicts"), inputVersion: 3 }, v1("ke_short", "ke_short2", "unrelated"), { ...v1("ke_long", "ke_long2", "consistent"), inputVersion: 2 }]
       })
     );
     const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
@@ -444,7 +482,7 @@ describe("re-asking checks judged on cut text", () => {
     assert.equal(checks.isChecked(pair), true, "without body lengths: checked, as before");
     assert.equal(checks.isChecked(pair, long), false, "asked again");
     assert.equal(checks.isChecked({ ...pair, b: "ke_long2", hashB: hashOf("ke_long2") }, long), true, "version 2");
-    assert.equal(checks.isChecked({ a: "ke_long2", b: "ke_short", hashA: hashOf("ke_long2"), hashB: hashOf("ke_short") }, long), true, "contradicts kept");
+    assert.equal(checks.isChecked({ a: "ke_long2", b: "ke_short", hashA: hashOf("ke_long2"), hashB: hashOf("ke_short") }, long), true, "a version-3 contradicts kept");
     assert.equal(checks.isChecked({ a: "ke_short", b: "ke_short2", hashA: hashOf("ke_short"), hashB: hashOf("ke_short2") }, long), true, "nothing was cut");
     assert.equal(checks.get("ke_long", "ke_short")?.verdict, "consistent", "the old verdict shows until it is replaced");
 
