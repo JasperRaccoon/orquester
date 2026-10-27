@@ -1,0 +1,137 @@
+{
+ "success": true,
+ "data": {
+  "x": 324,
+  "y": 205,
+  "text": "[REDACTED]",
+  "message": "Filled 9 chars",
+  "delayMs": 0,
+  "referenceWidth": 720,
+  "referenceHeight": 1280,
+  "targetKind": "ref",
+  "ref": "e64",
+  "refLabel": "Search web and more",
+  "selectorChain": [
+   "id=\"com.google.android.apps.nexuslauncher:id/input\"",
+   "role=\"edittext\" label=\"Search web and more\" editable=true",
+   "label=\"Search web and more\" editable=true"
+  ],
+  "settle": {
+   "settled": true,
+   "waitedMs": 5071,
+   "captures": 2,
+   "quietMs": 500,
+   "timeoutMs": 10000,
+   "diff": {
+    "summary": {
+     "additions": 7,
+     "removals": 15,
+     "unchanged": 41
+    },
+    "lines": [
+     {
+      "kind": "removed",
+      "text": "@e2 [group] \"Sticker Keyboard\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e3 [group] \"GIF Keyboard\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e4 [group] \"Clipboard\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e5 [group] \"Settings\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e6 [group] \"Theme settings\""
+     },
+     {
+      "kind": "added",
+      "text": "@e2 [group] \"orq\"",
+      "ref": "e2"
+     },
+     {
+      "kind": "added",
+      "text": "@e3 [group] \"otw\"",
+      "ref": "e3"
+     },
+     {
+      "kind": "added",
+      "text": "@e4 [group] \"Ora\"",
+      "ref": "e4"
+     },
+     {
+      "kind": "removed",
+      "text": "@e55 [text] \"Settings\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e56 [text] \"Photos\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e57 [text] \"Clock\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e58 [text] \"Contacts\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e59 [text] \"YouTube\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e60 [text] \"Search web and more\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e61 [text] \"You can search for web and app content from logged in accounts, including Play, Settings and Contacts. Selected suggestions may be saved in your Google app or Google Play search history. You can make updates in search settings.\" [covered]"
+     },
+     {
+      "kind": "added",
+      "text": "@e53 [button] \"Learn more about search on your device\"",
+      "ref": "e53"
+     },
+     {
+      "kind": "added",
+      "text": "@e54 [button] \"Search settings\"",
+      "ref": "e54"
+     },
+     {
+      "kind": "removed",
+      "text": "@e64 [text-field] \"Search web and more\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e65 [image] \"Voice search\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e66 [button] \"Google Lens\""
+     },
+     {
+      "kind": "added",
+      "text": "@e57 [text-field] \"[REDACTED]\"",
+      "ref": "e57"
+     },
+     {
+      "kind": "added",
+      "text": "@e58 [button] \"Clear search box\"",
+      "ref": "e58"
+     }
+    ]
+   },
+   "refsGeneration": 604577
+  },
+  "resolution": {
+   "source": "ref",
+   "phase": "pre-action",
+   "kind": "exact"
+  }
+ }
+}

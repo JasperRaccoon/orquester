@@ -80,6 +80,7 @@ import {
   withController
 } from "./leases.ts";
 import { choosePlacement, type PlacementHost } from "./pool.ts";
+import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 import type { DeviceScreenshots } from "./screenshots.ts";
 import type { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
 import type {
@@ -102,8 +103,7 @@ const IDLE_SWEEP_MS = 60_000;
 const HOST_WAIT_MS = 10 * 60_000;
 /** Placement rounds before giving up (wait, setup and provision each take one). */
 const PLACEMENT_ROUNDS = 6;
-/** As `html_preview`'s cap: a larger screenshot is kept but not inlined. */
-export const DEVICE_SCREENSHOT_MAX_BASE64_CHARS = 4 * 1024 * 1024;
+export { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 
 export interface DeviceServiceDeps {
   settingsStore: DeviceSettingsStore;
@@ -641,6 +641,8 @@ export class DeviceService implements DeviceToolsPort {
     this.publishHosts();
     const host = this.hosts.get(lease.hostId);
     if (host && lease.deviceId !== null) {
+      // Its agent-device session ends first (Android gets its own keyboard back).
+      await this.deps.actions.end?.({ host, lease }).catch(() => undefined);
       await host.release(lease, { shutdown: options.shutdown === true }).catch((error) => this.logger.warn(`[devices] releasing ${describeLease(lease)} failed`, errorText(error)));
     }
     return summary;

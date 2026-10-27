@@ -1,0 +1,39 @@
+{
+ "success": true,
+ "data": {
+  "kind": "fling",
+  "durationMs": 100,
+  "pointerCount": 1,
+  "from": {
+   "x": 360,
+   "y": 900
+  },
+  "to": {
+   "x": 360,
+   "y": 400
+  },
+  "backend": "android-helper",
+  "helperVersion": "0.21.31",
+  "installReason": "current",
+  "helperKind": "swipe",
+  "helperApiVersion": "2",
+  "injectedEvents": 8,
+  "elapsedMs": 409,
+  "helperTransport": "persistent-session",
+  "x1": 360,
+  "y1": 900,
+  "x2": 360,
+  "y2": 400,
+  "effectiveDurationMs": 100,
+  "timingMode": "direct",
+  "executionProfile": "endpoint-hold",
+  "count": 1,
+  "pauseMs": 0,
+  "pattern": "one-way",
+  "timing": {
+   "executionProfile": "endpoint-hold",
+   "gestureDurationMs": 100
+  },
+  "message": "Flung"
+ }
+}

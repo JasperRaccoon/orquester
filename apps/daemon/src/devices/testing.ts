@@ -42,6 +42,9 @@ export class FakeDeviceHost implements DeviceHost {
   };
   destroyed = false;
   destroy?: () => Promise<void>;
+  agentDeviceCommand?: DeviceHost["agentDeviceCommand"];
+  performAction?: DeviceHost["performAction"];
+  installApp?: DeviceHost["installApp"];
   /** What `hubOrigin` answers while ready, and `hubToken`. */
   hubOriginValue = "http://127.0.0.1:9";
   hubTokenValue: string | null = null;
