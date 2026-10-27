@@ -11,6 +11,8 @@ import type { DockPanelId } from "./types";
 export interface RightRailProps {
   /** The docked panel, or `null` with the dock closed. */
   open: DockPanelId | null;
+  /** The panels to offer, top to bottom (default: all of `RIGHT_RAIL_PANEL_ORDER`). */
+  panels?: readonly DockPanelId[];
   /** A button was clicked: open its panel, switch to it, or close it when it is the open one. */
   onToggle: (id: DockPanelId) => void;
 }
@@ -23,6 +25,7 @@ export interface RightRailProps {
  */
 export const RightRail: React.FC<RightRailProps> = ({
   open,
+  panels = RIGHT_RAIL_PANEL_ORDER,
   onToggle
 }) => (
   <div
@@ -30,7 +33,7 @@ export const RightRail: React.FC<RightRailProps> = ({
     aria-label="Side panels"
     className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-neutral-800 bg-neutral-900/40 py-2"
   >
-    {RIGHT_RAIL_PANEL_ORDER.map((id) => {
+    {panels.map((id) => {
       const { title, Icon } = RIGHT_RAIL_PANEL_REGISTRY[id];
       const active = open === id;
       return (

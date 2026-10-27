@@ -330,7 +330,12 @@ describe("box hub authentication", () => {
   });
 
   test("the user-auth exemption names exactly the box routes", () => {
-    assert.deepEqual([...BOX_HUB_PUBLIC_ROUTES].sort(), ["/api/boxes/agent/:platform", "/api/boxes/bootstrap/:variant", "/api/boxes/connect"]);
+    assert.deepEqual([...BOX_HUB_PUBLIC_ROUTES].sort(), [
+      "/api/boxes/agent/:platform",
+      "/api/boxes/bootstrap/:variant",
+      "/api/boxes/connect",
+      "/api/boxes/pair/:code"
+    ]);
     assert.equal(boxRoutes.bootstrapScript("container"), "/api/boxes/bootstrap/container");
   });
 });

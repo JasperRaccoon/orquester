@@ -28,7 +28,8 @@ const timeOf = (value: string | null): number => {
  * {@link RECENTLY_DESTROYED_MS} (latest first).
  */
 export function listedBoxes(boxes: readonly BoxSummary[], now: number, liveOnly = false): BoxSummary[] {
-  const live = boxes.filter((box) => box.state !== "destroyed").sort((a, b) => timeOf(b.createdAt) - timeOf(a.createdAt));
+  // The owner's idle machines have their own card ("Your machines"); lent ones are listed here.
+  const live = boxes.filter((box) => box.state !== "destroyed" && box.purpose !== "machine").sort((a, b) => timeOf(b.createdAt) - timeOf(a.createdAt));
   if (liveOnly) return live;
   const gone = boxes
     .filter((box) => box.state === "destroyed" && now - timeOf(box.destroyedAt ?? box.createdAt) <= RECENTLY_DESTROYED_MS)
@@ -42,7 +43,9 @@ const STATE_VIEW: Record<BoxState, { tone: Tone; label: string }> = {
   unreachable: { tone: "warn", label: "Reconnecting…" },
   destroying: { tone: "neutral", label: "Destroying…" },
   "destroy-failed": { tone: "danger", label: "Destroy failed" },
-  destroyed: { tone: "neutral", label: "Destroyed" }
+  destroyed: { tone: "neutral", label: "Destroyed" },
+  pairing: { tone: "info", label: "Pairing…" },
+  offline: { tone: "warn", label: "Offline" }
 };
 
 const DESTROYED_REASON: Record<BoxDestroyedReason, string> = {
@@ -67,8 +70,9 @@ export function boxStateView(box: BoxSummary): { tone: Tone; label: string; titl
   return { ...view, title: box.stateReason ?? (reason ? `Destroyed: ${reason}` : null) };
 }
 
-/** "Linux VM · Hetzner · CX22 · Falkenstein". */
+/** "Linux VM · Hetzner · CX22 · Falkenstein"; the owner's own machine: "macOS · Mac mini (your machine)". */
 export function boxTitle(box: BoxSummary): string {
+  if (box.byo) return `${BOX_KIND_LABELS[box.kind]} · ${box.byo.name} (your machine)`;
   return [BOX_KIND_LABELS[box.kind], box.providerLabel, box.sizeLabel, box.regionLabel].filter(Boolean).join(" · ");
 }
 
@@ -76,11 +80,13 @@ export function boxTitle(box: BoxSummary): string {
 export function boxOwner(box: BoxSummary): string {
   if (box.project) return box.project.workspace ? `${box.project.workspace} / ${box.project.name}` : box.project.name;
   if (box.purpose === "temporary") return box.purposeNote ? `Agent chat: ${box.purposeNote}` : "Agent chat";
+  if (box.purpose === "machine") return "Not in use";
   return "Project";
 }
 
 /** "$0.0119/h · $0.42 so far" (estimates); the price part left out when the provider gave none. */
 export function boxCostLine(box: BoxSummary): string {
+  if (box.provider === "byo") return "Free";
   const parts = [box.hourlyUsd === null ? null : formatHourlyRate(box.hourlyUsd), `${formatUsd(box.estimatedCostUsd)} so far`];
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -121,4 +127,9 @@ export function setupProgress(box: BoxSummary): SetupProgress {
  */
 export function canDestroyBox(box: BoxSummary): boolean {
   return box.purpose === "temporary" && box.state !== "destroyed" && box.state !== "destroying";
+}
+
+/** The button: the owner's own machine lent to a chat is given back ("Release"), anything else destroyed. */
+export function destroyBoxLabel(box: BoxSummary): "Release" | "Destroy" {
+  return box.provider === "byo" ? "Release" : "Destroy";
 }

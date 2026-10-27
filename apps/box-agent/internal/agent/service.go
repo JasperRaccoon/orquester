@@ -18,6 +18,26 @@ func writeServiceEnv(cfg Config) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return err
 	}
+	env, token, err := serviceEnv(cfg)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		tokenFile := filepath.Join(cfg.DataDir, "bootstrap-token")
+		if err := writeFileAtomic(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+			return err
+		}
+		if cfg.BootstrapTokenFile != "" && cfg.BootstrapTokenFile != tokenFile {
+			_ = os.Remove(cfg.BootstrapTokenFile)
+		}
+	}
+	return writeFileAtomic(filepath.Join(cfg.DataDir, "agent.env"), []byte(env), 0o600)
+}
+
+// serviceEnv renders agent.env and returns the bootstrap token to store beside
+// it in `<dataDir>/bootstrap-token` ("" when there is none). It writes nothing,
+// so install-service --dry-run can show agent.env.
+func serviceEnv(cfg Config) (string, string, error) {
 	values := map[string]string{"ORQ_DATA_DIR": cfg.DataDir}
 	for _, key := range serviceEnvKeys {
 		if value := os.Getenv(key); value != "" {
@@ -35,14 +55,7 @@ func writeServiceEnv(cfg Config) error {
 		}
 	}
 	if token != "" {
-		tokenFile := filepath.Join(cfg.DataDir, "bootstrap-token")
-		if err := writeFileAtomic(tokenFile, []byte(token+"\n"), 0o600); err != nil {
-			return err
-		}
-		values["ORQ_BOOTSTRAP_TOKEN_FILE"] = tokenFile
-		if cfg.BootstrapTokenFile != "" && cfg.BootstrapTokenFile != tokenFile {
-			_ = os.Remove(cfg.BootstrapTokenFile)
-		}
+		values["ORQ_BOOTSTRAP_TOKEN_FILE"] = filepath.Join(cfg.DataDir, "bootstrap-token")
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -53,9 +66,9 @@ func writeServiceEnv(cfg Config) error {
 	b.WriteString("# Written by `orq-agent install-service`.\n")
 	for _, key := range keys {
 		if strings.ContainsAny(values[key], "\r\n") {
-			return fmt.Errorf("%s contains a newline", key)
+			return "", "", fmt.Errorf("%s contains a newline", key)
 		}
 		fmt.Fprintf(&b, "%s=%s\n", key, values[key])
 	}
-	return writeFileAtomic(filepath.Join(cfg.DataDir, "agent.env"), []byte(b.String()), 0o600)
+	return b.String(), token, nil
 }

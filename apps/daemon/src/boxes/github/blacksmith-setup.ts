@@ -10,7 +10,7 @@
  */
 
 import type { ProviderCredentials } from "../contracts.ts";
-import { BLACKSMITH_CREDENTIAL_KEYS } from "../providers/blacksmith.ts";
+import { BLACKSMITH_CREDENTIAL_KEYS, deviceCacheWarmStatus, dispatchDeviceCacheWarm } from "../providers/blacksmith.ts";
 import { ProviderHttpError } from "../providers/http.ts";
 import type { BlacksmithCheck, BlacksmithSetupDriver } from "../service/settings.ts";
 import {
@@ -18,12 +18,12 @@ import {
   checkGithubToken,
   detectBlacksmithApp,
   ensureControlRepo,
-  ensureWorkflowFile,
+  ensureControlWorkflows,
   waitWorkflowReady,
   type GithubCallOptions
 } from "./control-repo.ts";
 import { githubOidcAudience } from "./oidc.ts";
-import { BLACKSMITH_CONTROL_REPO_NAME, BLACKSMITH_WORKFLOW_FILE, BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate } from "./workflow-template.ts";
+import { BLACKSMITH_CONTROL_REPO_NAME, BLACKSMITH_WORKFLOW_FILE } from "./workflow-template.ts";
 
 const TOKENS_URL = "https://github.com/settings/tokens";
 
@@ -122,17 +122,32 @@ export function createBlacksmithSetupDriver(options: BlacksmithSetupDriverOption
       const github = call(token, signal);
       const repo = await ensureControlRepo(org, github);
       // Over the tailnet, each run joins it first with the federated identity (no secret in the repo).
-      await ensureWorkflowFile(repo, BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate(tailscale ? { tailscale } : {}), github);
+      await ensureControlWorkflows(repo, tailscale ? { tailscale } : {}, github);
       await waitWorkflowReady(repo.repository, BLACKSMITH_WORKFLOW_FILE, github);
       return { repo: repo.repository, workflowFile: BLACKSMITH_WORKFLOW_FILE };
     },
 
-    adapterCredentials({ token, org, repo }): ProviderCredentials {
+    adapterCredentials({ token, org, repo, tailscale }): ProviderCredentials {
       return {
         [BLACKSMITH_CREDENTIAL_KEYS.githubToken]: token,
         [BLACKSMITH_CREDENTIAL_KEYS.org]: org,
-        [BLACKSMITH_CREDENTIAL_KEYS.repo]: repo
+        [BLACKSMITH_CREDENTIAL_KEYS.repo]: repo,
+        // The adapter re-commits the workflow from the same template the setup committed.
+        ...(tailscale
+          ? {
+              [BLACKSMITH_CREDENTIAL_KEYS.tailscaleClientId]: tailscale.oauthClientId,
+              [BLACKSMITH_CREDENTIAL_KEYS.tailscaleAudience]: tailscale.audience
+            }
+          : {})
       };
+    },
+
+    dispatchDeviceCacheWarm(credentials, request, signal) {
+      return dispatchDeviceCacheWarm(credentials, request, { signal, ...(options.fetch ? { fetch: options.fetch } : {}) });
+    },
+
+    deviceCacheWarmStatus(credentials, runId, signal) {
+      return deviceCacheWarmStatus(credentials, runId, { signal, ...(options.fetch ? { fetch: options.fetch } : {}) });
     }
   };
 }

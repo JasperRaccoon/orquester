@@ -81,11 +81,15 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
 
   const offers = await settings.offers(adapter.id, kind);
   let size: BoxSizeOffer | undefined;
+  // The owner's own machines: each free, connected machine is a "size".
+  const byo = adapter.id === "byo";
   if (sizeId) {
     size = offers.sizes.find((candidate) => candidate.id === sizeId);
+    if (!size && byo) throw new BoxError(409, "BOX_NOT_READY", "That machine of yours is in use or not connected right now.");
     if (!size) throw invalid(`${adapter.label} does not offer the size "${sizeId}" for ${BOX_KIND_LABELS[kind]} boxes.`);
   } else {
     size = [...offers.sizes].sort(bySizePrice)[0];
+    if (!size && byo) throw new BoxError(409, "BOX_NOT_READY", `None of your ${kind === "macos" ? "macOS" : "Linux"} machines is free and connected right now.`);
     if (!size) throw new BoxError(409, "BOX_PROVIDER_ERROR", `${adapter.label} offers no ${BOX_KIND_LABELS[kind]} size right now.`);
   }
   const inSize = (id: string) => size!.regions.length === 0 || size!.regions.includes(id);

@@ -122,6 +122,27 @@ import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { boxRoutes } from "@orquester/api";
+// Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
+import { deviceRoutes } from "@orquester/api";
+import type {
+  DeviceActionsResponse,
+  DeviceCacheWarmResponse,
+  DeviceController,
+  DeviceHostResponse,
+  DeviceHostsResponse,
+  DeviceLeaseResponse,
+  DeviceLeasesResponse,
+  DeviceOpenRequest,
+  DevicePlatform,
+  DevicesListResponse,
+  DevicesSettingsPatch,
+  DevicesSettingsResponse,
+  DevicesStateResponse,
+  DeviceSetupRequest,
+  DeviceSetupResponse,
+  DeviceUserActionRequest,
+  DeviceUserActionResponse
+} from "@orquester/api";
 // The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
 import { knowledgeRoutes } from "@orquester/api";
 import type {
@@ -188,6 +209,8 @@ import type {
 } from "@orquester/api";
 // boxes: Global MCP servers' "Run in box" switch.
 import type { BoxMcpRunInBoxResponse, SetBoxMcpRunInBoxRequest } from "@orquester/api";
+// boxes: bring-your-own machines.
+import type { AddByoMachineRequest, ByoPairingResponse, RemoveByoMachineResponse, UpdateByoMachineRequest } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -348,6 +371,14 @@ function serverFieldFromBody(body: unknown): string | null {
     }
   }
   return null;
+}
+
+/** A device request the caller sends with `fetch` (see {@link ApiClient.deviceHttpRequest}). */
+export interface DeviceHttpRequest {
+  /** Absolute URL, without credentials. */
+  url: string;
+  /** The transport's auth headers (`Authorization`), `{}` without a credential. */
+  headers: Record<string, string>;
 }
 
 /**
@@ -927,6 +958,117 @@ export class ApiClient {
     return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
   }
 
+  // --- Devices (`deviceRoutes`; answers are validated by `lib/devices/store.ts`) ---
+
+  /** Everything the Device panel and Settings → Devices start from (`enabled: false` while the plugin is off). */
+  devicesState(signal?: AbortSignal): Promise<DevicesStateResponse> {
+    return this.send("GET", deviceRoutes.state, { signal });
+  }
+
+  listDeviceHosts(signal?: AbortSignal): Promise<DeviceHostsResponse> {
+    return this.send("GET", deviceRoutes.hosts, { signal });
+  }
+
+  /** Settings → Devices "Destroy" on a rented host. */
+  destroyDeviceHost(hostId: string): Promise<void> {
+    return this.send("DELETE", deviceRoutes.host(hostId));
+  }
+
+  /** The fleet view's Drain (no new leases; destroyed once empty), or `false` to take the host back. */
+  setDeviceHostDraining(hostId: string, draining: boolean): Promise<DeviceHostResponse> {
+    return this.send("PUT", deviceRoutes.hostDrain(hostId), { body: { draining } });
+  }
+
+  /** "Warm caches": dispatch the run that builds and saves the platform's device-host caches. */
+  warmDeviceCaches(platform: DevicePlatform): Promise<DeviceCacheWarmResponse> {
+    return this.send("POST", deviceRoutes.cacheWarm, { body: { platform } });
+  }
+
+  listDevices(signal?: AbortSignal): Promise<DevicesListResponse> {
+    return this.send("GET", deviceRoutes.devices, { signal });
+  }
+
+  listDeviceLeases(threadId?: string, signal?: AbortSignal): Promise<DeviceLeasesResponse> {
+    return this.send("GET", deviceRoutes.leases, { query: threadId ? { threadId } : undefined, signal });
+  }
+
+  /** The panel's picker: the lease answers `starting`; its boot arrives as `devices.lease` events. */
+  openDeviceLease(req: DeviceOpenRequest): Promise<DeviceLeaseResponse> {
+    return this.send("POST", deviceRoutes.leases, { body: req });
+  }
+
+  releaseDeviceLease(leaseId: string, shutdown = false): Promise<DeviceLeaseResponse> {
+    return this.send("DELETE", deviceRoutes.lease(leaseId), { query: shutdown ? { shutdown: "1" } : undefined });
+  }
+
+  /** Take over (`user`) or give back (`agent`). */
+  setDeviceController(leaseId: string, controller: DeviceController): Promise<DeviceLeaseResponse> {
+    return this.send("PUT", deviceRoutes.controller(leaseId), { body: { controller } });
+  }
+
+  /** The panel's buttons that are not hub input: rotate (Android), restart the app, appearance, power off. */
+  deviceUserAction(leaseId: string, req: DeviceUserActionRequest): Promise<DeviceUserActionResponse> {
+    return this.send("POST", deviceRoutes.userAction(leaseId), { body: req });
+  }
+
+  deviceLeaseActions(leaseId: string, signal?: AbortSignal): Promise<DeviceActionsResponse> {
+    return this.send("GET", deviceRoutes.actions(leaseId), { signal });
+  }
+
+  devicesSettings(signal?: AbortSignal): Promise<DevicesSettingsResponse> {
+    return this.send("GET", deviceRoutes.settings, { signal });
+  }
+
+  updateDevicesSettings(patch: DevicesSettingsPatch): Promise<DevicesSettingsResponse> {
+    return this.send("PUT", deviceRoutes.settings, { body: patch });
+  }
+
+  deviceSetup(platform: DevicePlatform, signal?: AbortSignal): Promise<DeviceSetupResponse> {
+    return this.send("GET", deviceRoutes.setup(platform), { signal });
+  }
+
+  /** Settings → Devices "Install all" / "Repair" (`actions` limits it to those fixes). */
+  startDeviceSetup(platform: DevicePlatform, req: DeviceSetupRequest = {}): Promise<DeviceSetupResponse> {
+    return this.send("POST", deviceRoutes.setup(platform), { body: req });
+  }
+
+  /**
+   * Authenticated ws(s):// URL for a device hub path (`deviceRoutes.socket(hostId, path)`), or null
+   * on transports without WebSockets (the desktop app's unix socket: live devices need a server
+   * connection). The bearer rides as ?token=, as for desktops.
+   */
+  deviceSocketUrl(path: string): string | null {
+    return this.desktopSocketUrl(path);
+  }
+
+  /**
+   * Authenticated http(s):// URL for a device image an `<img>` loads (`deviceRoutes.screenshot(...)`,
+   * a kept screenshot), or null off HTTP. The bearer rides as ?token= because an `<img>` cannot send
+   * a header; the daemon accepts `?token=` on exactly those GET image routes and never forwards it.
+   * Anything this app fetches itself goes through {@link deviceHttpRequest} instead.
+   */
+  deviceImageUrl(path: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const token = this.connection.password ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.connection.password)}` : "";
+    return `${base}${path}${token}`;
+  }
+
+  /**
+   * A device path this app fetches itself (hub streams, screenshots, thumbnails, the fold route):
+   * the absolute http(s):// URL — no token in it — and the transport's auth headers to send with
+   * it. Null off HTTP (the desktop app's unix socket shows no live devices).
+   */
+  deviceHttpRequest(path: string): DeviceHttpRequest | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    return { url: `${base}${path}`, headers: this.transporter.authHeaders?.() ?? {} };
+  }
+
   // boxes: --- Ephemeral AI VMs (`boxRoutes`; answers are validated by `lib/boxes/store.ts`) ---
 
   listBoxes(signal?: AbortSignal): Promise<BoxesResponse> {
@@ -940,6 +1082,26 @@ export class ApiClient {
   /** Destroy a temporary box (a project box answers 409 `BOX_IS_PROJECT`: delete its project instead). */
   destroyBox(id: string): Promise<BoxResponse | undefined> {
     return this.send("DELETE", boxRoutes.box(id));
+  }
+
+  /** "Add your machine": its `pairing` record and one-time command. */
+  addByoMachine(req: AddByoMachineRequest): Promise<ByoPairingResponse> {
+    return this.send("POST", boxRoutes.byoMachines, { body: req });
+  }
+
+  /** Rename one of your machines, or switch "Use for device simulators". */
+  updateByoMachine(id: string, req: UpdateByoMachineRequest): Promise<BoxResponse> {
+    return this.send("PATCH", boxRoutes.byoMachine(id), { body: req });
+  }
+
+  /** Remove one of your machines (cancels a pairing; a connected machine uninstalls its service). */
+  removeByoMachine(id: string): Promise<RemoveByoMachineResponse> {
+    return this.send("DELETE", boxRoutes.byoMachine(id));
+  }
+
+  /** A new pairing command for a machine still pairing (the previous one stops working). */
+  newByoPairing(id: string): Promise<ByoPairingResponse> {
+    return this.send("POST", boxRoutes.byoPairing(id));
   }
 
   /** A box's setup log. The daemon serves text/plain, so this reads bytes rather than JSON. */

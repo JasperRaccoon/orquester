@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { Readable } from "node:stream";
-import type { BoxSummary, EventMessage } from "@orquester/api";
+import type { BoxSummary, DeviceActionInput, DeviceLeaseSummary, DevicePlatform, EventMessage } from "@orquester/api";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
@@ -13,6 +13,22 @@ import { mintPrincipalToken } from "./principal.ts";
 // boxes: the temporary-box operations (Ephemeral AI VMs spec §13), types only.
 import type { BoxExecRequest, BoxExecResult, BoxForwardResult, BoxJobOutput, BoxTransferResult } from "../boxes/temporary/contract.ts";
 import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
+// Devices: the device tools' operations (devices spec §9), types and the outcome adapter.
+import {
+  runDeviceTool,
+  type DeviceCallOptions,
+  type DeviceOpenPlan,
+  type DeviceToolActionResult,
+  type DeviceToolCloseInput,
+  type DeviceToolInstallInput,
+  type DeviceToolInstallResult,
+  type DeviceToolList,
+  type DeviceToolOpenInput,
+  type DeviceToolOpenResult,
+  type DeviceToolsPort
+} from "../devices/tools-port.ts";
+
+export type { DeviceCallOptions };
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
@@ -99,6 +115,21 @@ export interface DaemonApi {
   /** A box port on a host loopback port, until the box is destroyed. */
   boxForwardPort?(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>>;
   // boxes: end
+  // Devices (devices spec §9): the calling chat's devices, for an agent principal only (the chat is
+  // the principal's, never an argument). Optional like the box operations; the device tools answer
+  // DEVICES_DISABLED without them, and they answer it themselves while the plugin is off.
+  /** `list_devices`: hosts, profiles, this chat's leases, other chats' devices as busy. */
+  devicesList?(opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolList>>;
+  /** What `open_device` would rent first (its spend card), or nothing. */
+  devicesPlanOpen?(platform: DevicePlatform, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceOpenPlan>>;
+  /** Lease and boot a device (waits up to 9 min, then answers `starting`). */
+  deviceOpen?(input: DeviceToolOpenInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolOpenResult>>;
+  /** One `device_action` on one of the chat's devices (`device`: key or lease id; absent: its only one). */
+  deviceAction?(device: string | undefined, input: DeviceActionInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolActionResult>>;
+  /** Stream a build from the chat's project to the device's host and install it. */
+  deviceInstall?(input: DeviceToolInstallInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolInstallResult>>;
+  /** Release one of the chat's devices. */
+  deviceClose?(input: DeviceToolCloseInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<{ lease: DeviceLeaseSummary }>>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -148,6 +179,8 @@ export class InjectDaemonApi implements DaemonApi {
       boxes?: TemporaryBoxTools | null;
       // boxes: which paths live in a box project, for the file reads (absent: all host).
       boxRegistry?: () => BoxRegistry | undefined;
+      // Devices: the device service (null while the plugin is off; absent: not wired here).
+      devices?: () => DeviceToolsPort | null;
     }
   ) {}
 
@@ -263,6 +296,35 @@ export class InjectDaemonApi implements DaemonApi {
   }
   // boxes: end
 
+  // Devices: each operation acts for the principal's chat (`runDeviceTool`).
+  private devices(): DeviceToolsPort | null {
+    return this.opts.devices?.() ?? null;
+  }
+
+  devicesList(opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolList>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolList(threadId));
+  }
+
+  devicesPlanOpen(platform: DevicePlatform, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceOpenPlan>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolPlanOpen(threadId, platform));
+  }
+
+  deviceOpen(input: DeviceToolOpenInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolOpenResult>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId, signal) => port.toolOpen(threadId, input, signal));
+  }
+
+  deviceAction(device: string | undefined, input: DeviceActionInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolActionResult>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId, signal) => port.toolAction(threadId, device, input, signal));
+  }
+
+  deviceInstall(input: DeviceToolInstallInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<DeviceToolInstallResult>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId, signal) => port.toolInstall(threadId, input, signal));
+  }
+
+  deviceClose(input: DeviceToolCloseInput, opts?: DeviceCallOptions): Promise<DaemonOutcome<{ lease: DeviceLeaseSummary }>> {
+    return runDeviceTool(this.devices(), opts, (port, threadId) => port.toolClose(threadId, input));
+  }
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
@@ -292,6 +354,15 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
     ...(api.boxUpload ? { boxUpload: (boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions) => api.boxUpload!(boxId, request, { ...opts, principal }) } : {}),
     ...(api.boxDownload ? { boxDownload: (boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions) => api.boxDownload!(boxId, request, { ...opts, principal }) } : {}),
     ...(api.boxForwardPort ? { boxForwardPort: (boxId: string, port: number, opts?: DaemonBoxCallOptions) => api.boxForwardPort!(boxId, port, { ...opts, principal }) } : {}),
+    // Devices: each device operation acts for the bound principal's chat too.
+    ...(api.devicesList ? { devicesList: (opts?: DeviceCallOptions) => api.devicesList!({ ...opts, principal }) } : {}),
+    ...(api.devicesPlanOpen ? { devicesPlanOpen: (platform: DevicePlatform, opts?: DeviceCallOptions) => api.devicesPlanOpen!(platform, { ...opts, principal }) } : {}),
+    ...(api.deviceOpen ? { deviceOpen: (input: DeviceToolOpenInput, opts?: DeviceCallOptions) => api.deviceOpen!(input, { ...opts, principal }) } : {}),
+    ...(api.deviceAction
+      ? { deviceAction: (device: string | undefined, input: DeviceActionInput, opts?: DeviceCallOptions) => api.deviceAction!(device, input, { ...opts, principal }) }
+      : {}),
+    ...(api.deviceInstall ? { deviceInstall: (input: DeviceToolInstallInput, opts?: DeviceCallOptions) => api.deviceInstall!(input, { ...opts, principal }) } : {}),
+    ...(api.deviceClose ? { deviceClose: (input: DeviceToolCloseInput, opts?: DeviceCallOptions) => api.deviceClose!(input, { ...opts, principal }) } : {}),
     get fsRoot() { return api.fsRoot; },
     get workspacesDir() { return api.workspacesDir; }
   };

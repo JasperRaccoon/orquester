@@ -4,6 +4,7 @@ import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { ActivityBar } from "./ActivityBar";
+import { DevicesDrawerEntry } from "../devices-fleet/DevicesFleetEntry";
 import { ProjectsView } from "./ProjectsView";
 import { SidebarPanel } from "./SidebarPanel";
 import { useSidebarView } from "./sidebar-view";
@@ -46,8 +47,8 @@ export const KnowledgeDrawerEntry: React.FC = () => {
  * Left navigation. Desktop: the activity bar, then the resizable panel it
  * picks — the projects tree (search, opened agents, workspaces) or workflows —
  * over the server footer. Mobile: an off-canvas drawer (with backdrop) toggled
- * from the top bar, holding the projects tree, then Knowledge (the activity
- * bar's one non-view button); a phone reaches workflows from its bottom
+ * from the top bar, holding the projects tree, then Knowledge and Devices (the
+ * activity bar's non-view buttons); a phone reaches workflows from its bottom
  * section bar. Back closes the drawer.
  */
 export const Sidebar: React.FC = () => {
@@ -103,6 +104,7 @@ export const Sidebar: React.FC = () => {
       >
         <ProjectsView />
         <KnowledgeDrawerEntry />
+        <DevicesDrawerEntry />
         <ServerSwitcher />
       </aside>
     </>

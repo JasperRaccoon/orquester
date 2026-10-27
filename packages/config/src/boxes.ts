@@ -73,6 +73,8 @@ export const storedBoxSchema = z
     os: z.string().nullable().optional(),
     arch: z.string().nullable().optional(),
     libc: z.string().nullable().optional(),
+    /** Whether `/dev/kvm` was usable by `orq-agent` at connect (Linux; absent: not reported). */
+    kvm: z.boolean().optional(),
     hourlyUsd: z.number().nullable().optional(),
     createdAt: isoString,
     readyAt: isoString.nullable().optional(),
@@ -92,6 +94,13 @@ export const storedBoxSchema = z
     bootstrapExpiresAt: isoString.optional(),
     /** Which route the box was told to dial: "public-url" | "tailscale". */
     connectRoute: z.string().optional(),
+    /** Bring-your-own machines (`provider: "byo"`): the owner's name for it. */
+    machineName: z.string().optional(),
+    /** Bring-your-own machines: "Use for device simulators" (consumed by the device service). */
+    deviceHost: z.boolean().optional(),
+    /** Bring-your-own machines: SHA-256 (hex) of the one-time pairing code, until fetched or expired. */
+    pairingCodeHash: z.string().optional(),
+    pairingExpiresAt: isoString.optional(),
     setup: z.array(storedBoxSetupStepSchema).optional()
   })
   .passthrough();

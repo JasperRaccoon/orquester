@@ -4,8 +4,14 @@ import test from "node:test";
 import { buildBootstrap } from "../bootstrap/bootstrap.ts";
 import type { ProviderCreateRequest } from "../contracts.ts";
 import { FakeGithub } from "../github/fake-github.ts";
-import { BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate } from "../github/workflow-template.ts";
-import { BLACKSMITH_ADAPTER } from "./blacksmith.ts";
+import { gitBlobSha } from "../github/control-repo.ts";
+import {
+  BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH,
+  BLACKSMITH_WORKFLOW_PATH,
+  blacksmithDeviceCacheWorkflowTemplate,
+  blacksmithWorkflowTemplate
+} from "../github/workflow-template.ts";
+import { BLACKSMITH_ADAPTER, deviceCacheWarmStatus, dispatchDeviceCacheWarm } from "./blacksmith.ts";
 
 const TOKEN = "ghp_TESTTOKEN0123456789";
 const signal = new AbortController().signal;
@@ -61,7 +67,7 @@ function createRequest(overrides: Partial<ProviderCreateRequest> = {}): Provider
 
 test("describes macOS M4 sizes, images and the 5-day limit without credential fields", async () => {
   assert.equal(BLACKSMITH_ADAPTER.id, "blacksmith");
-  assert.deepEqual(BLACKSMITH_ADAPTER.kinds, ["macos"]);
+  assert.deepEqual(BLACKSMITH_ADAPTER.kinds, ["macos", "linux"]);
   assert.deepEqual(BLACKSMITH_ADAPTER.credentialFields, []);
   assert.equal(BLACKSMITH_ADAPTER.maxLifetimeMinutes, 7200);
   const offers = await BLACKSMITH_ADAPTER.offers(credentials, "macos", { signal });
@@ -74,7 +80,24 @@ test("describes macOS M4 sizes, images and the 5-day limit without credential fi
   );
   assert.deepEqual(offers.images.map((image) => image.id), ["macos-26", "macos-15", "macos-27"]);
   assert.equal(offers.priceSource, "table");
-  assert.deepEqual((await BLACKSMITH_ADAPTER.offers(credentials, "linux", { signal })).sizes, []);
+  assert.deepEqual((await BLACKSMITH_ADAPTER.offers(credentials, "windows", { signal })).sizes, []);
+  assert.deepEqual((await BLACKSMITH_ADAPTER.offers(credentials, "linux-gpu", { signal })).sizes, []);
+});
+
+test("describes x64 Linux sizes at $0.004 per 2 vCPU-minute and the Ubuntu 24.04 image", async () => {
+  const offers = await BLACKSMITH_ADAPTER.offers(credentials, "linux", { signal });
+  assert.deepEqual(
+    offers.sizes.map((size) => [size.id, size.vcpu, size.ramGb, size.hourlyUsd, size.label]),
+    [
+      ["2vcpu", 2, 8, 0.24, "2 vCPU x64 · 8 GB"],
+      ["4vcpu", 4, 16, 0.48, "4 vCPU x64 · 16 GB"],
+      ["8vcpu", 8, 32, 0.96, "8 vCPU x64 · 32 GB"],
+      ["16vcpu", 16, 64, 1.92, "16 vCPU x64 · 64 GB"],
+      ["32vcpu", 32, 128, 3.84, "32 vCPU x64 · 128 GB"]
+    ]
+  );
+  assert.deepEqual(offers.images, [{ id: "ubuntu-2404", label: "Ubuntu 24.04" }]);
+  assert.deepEqual(offers.regions.map((region) => region.id), ["blacksmith"]);
 });
 
 test("validate checks the account and the control repo without throwing", async () => {
@@ -97,7 +120,9 @@ test("create dispatches a run named orq-<boxId> with only non-secret inputs", as
     box_id: "box-0123456789ab",
     lifetime_minutes: "120",
     daemon_url: "https://orq.example.com:8443",
-    runner: "blacksmith-12vcpu-macos-15"
+    runner: "blacksmith-12vcpu-macos-15",
+    os: "macos",
+    prepare: "none"
   });
   assert.equal(run.displayTitle, "orq-box-0123456789ab");
   assert.deepEqual(result.ref, {
@@ -119,10 +144,109 @@ test("create dispatches a run named orq-<boxId> with only non-secret inputs", as
   assert.equal(second.inputs.runner, "blacksmith-6vcpu-macos-26");
 
   await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ size: "huge" }), { signal, fetch: github.fetch }), /unknown size/);
-  await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux" }), { signal, fetch: github.fetch }), /macOS boxes only/);
+  await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "windows" }), { signal, fetch: github.fetch }), /macOS and Linux boxes only/);
+  await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux" }), { signal, fetch: github.fetch }), /unknown Linux size 12vcpu/);
   // Nothing in the dispatch carries the GitHub token or the bootstrap token.
   const dispatches = JSON.stringify(github.calls.filter((entry) => entry.path.endsWith("/dispatches")));
   assert.ok(!dispatches.includes(TOKEN) && !dispatches.includes("obt_unused"));
+});
+
+test("create rents a Linux box (linux-x64 orq-agent, KVM) and a device host that restores the caches", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-20T12:00:00Z") });
+  const github = setUp();
+  const options = { signal, fetch: github.fetch };
+  const linux = await drive(t, BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux", size: "16vcpu", image: null }), options));
+  const run = github.runs.get(Number(linux.ref.runId))!;
+  assert.deepEqual(run.inputs, {
+    box_id: "box-0123456789ab",
+    lifetime_minutes: "120",
+    daemon_url: "https://orq.example.com:8443",
+    runner: "blacksmith-16vcpu-ubuntu-2404",
+    os: "linux",
+    prepare: "none"
+  });
+  assert.equal(linux.ref.runner, "blacksmith-16vcpu-ubuntu-2404");
+  assert.equal(linux.hourlyUsd, 1.92);
+
+  const host = await drive(t, BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux", size: "8vcpu", image: "ubuntu-2404", prepare: "devices" }), options));
+  assert.deepEqual([github.runs.get(Number(host.ref.runId))!.inputs.prepare, host.hourlyUsd], ["devices", 0.96]);
+  const mac = await drive(t, BLACKSMITH_ADAPTER.create(credentials, createRequest({ prepare: "devices" }), options));
+  assert.deepEqual(github.runs.get(Number(mac.ref.runId))!.inputs.prepare, "devices");
+
+  await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux", size: "8vcpu", image: "macos-26" }), options), /unknown Linux image/);
+  await assert.rejects(BLACKSMITH_ADAPTER.create(credentials, createRequest({ size: "8vcpu" }), options), /unknown size 8vcpu/);
+});
+
+test("create re-commits workflows whose content changed before it dispatches (old orgs gain the new inputs)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-20T12:00:00Z") });
+  const github = setUp();
+  const files = github.repos.get("Org/orquester-macos-boxes")!.files;
+  // Set up by an older build: a box workflow without os/prepare, no device-cache workflow.
+  const old = blacksmithWorkflowTemplate().replace(/\n {6}os:\n[\s\S]*?(?=\npermissions:)/, "\n");
+  files.set(BLACKSMITH_WORKFLOW_PATH, { content: old, sha: gitBlobSha(old) });
+  await drive(t, BLACKSMITH_ADAPTER.create(credentials, createRequest({ kind: "linux", size: "4vcpu", image: null }), { signal, fetch: github.fetch }));
+  assert.equal(files.get(BLACKSMITH_WORKFLOW_PATH)!.content, blacksmithWorkflowTemplate());
+  assert.equal(files.get(BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH)!.content, blacksmithDeviceCacheWorkflowTemplate());
+  const order = github.calls.filter((entry) => entry.method !== "GET").map((entry) => entry.path.replace(/^\/repos\/Org\/orquester-macos-boxes/, ""));
+  assert.deepEqual(order, [
+    `/contents/${BLACKSMITH_WORKFLOW_PATH}`,
+    `/contents/${BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH}`,
+    "/actions/workflows/orquester-box.yml/dispatches"
+  ]);
+
+  // Up to date: no write before the next dispatch.
+  const before = github.calls.length;
+  await drive(t, BLACKSMITH_ADAPTER.create(credentials, createRequest(), { signal, fetch: github.fetch }));
+  assert.deepEqual(
+    github.calls.slice(before).filter((entry) => entry.method !== "GET").map((entry) => entry.method + " " + entry.path.split("/").at(-1)),
+    ["POST dispatches"]
+  );
+
+  // The setup's Tailscale join travels in the credentials: the template keeps its step.
+  const join = { ...credentials, tailscaleClientId: "kClient123", tailscaleAudience: "api.tailscale.com/kClient123" };
+  await drive(t, BLACKSMITH_ADAPTER.create(join, createRequest(), { signal, fetch: github.fetch }));
+  assert.equal(
+    files.get(BLACKSMITH_WORKFLOW_PATH)!.content,
+    blacksmithWorkflowTemplate({ tailscale: { oauthClientId: "kClient123", audience: "api.tailscale.com/kClient123" } })
+  );
+});
+
+test("dispatchDeviceCacheWarm starts the device-cache workflow; deviceCacheWarmStatus follows it", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-20T12:00:00Z") });
+  const github = setUp();
+  const options = { signal, fetch: github.fetch };
+  const linux = await drive(t, dispatchDeviceCacheWarm(credentials, { os: "linux" }, options));
+  const run = github.runs.get(Number(linux.runId))!;
+  assert.equal(run.workflowFile, "orquester-device-cache.yml");
+  assert.equal(run.inputs.os, "linux");
+  assert.equal(run.inputs.runner, "blacksmith-8vcpu-ubuntu-2404");
+  assert.match(run.inputs.request_id!, /^[0-9a-f-]{36}$/);
+  assert.equal(run.displayTitle, `orq-cache-linux-${run.inputs.request_id}`);
+  assert.equal(linux.runner, "blacksmith-8vcpu-ubuntu-2404");
+  assert.equal(github.repos.get("Org/orquester-macos-boxes")!.files.get(BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH)!.content, blacksmithDeviceCacheWorkflowTemplate());
+
+  const mac = await drive(t, dispatchDeviceCacheWarm(credentials, { os: "macos", size: "12vcpu" }, options));
+  assert.equal(github.runs.get(Number(mac.runId))!.inputs.runner, "blacksmith-12vcpu-macos-26");
+  await assert.rejects(dispatchDeviceCacheWarm(credentials, { os: "linux", size: "6vcpu" }, options), /unknown Linux size/);
+  await assert.rejects(dispatchDeviceCacheWarm(credentials, { os: "windows" as "linux" }, options), /unknown OS/);
+
+  assert.deepEqual(await deviceCacheWarmStatus(credentials, linux.runId, options), {
+    runId: linux.runId,
+    state: "queued",
+    conclusion: null,
+    htmlUrl: `https://github.com/x/actions/runs/${linux.runId}`
+  });
+  run.status = "in_progress";
+  assert.equal((await deviceCacheWarmStatus(credentials, linux.runId, options)).state, "running");
+  run.status = "completed";
+  run.conclusion = "success";
+  assert.deepEqual(
+    [(await deviceCacheWarmStatus(credentials, linux.runId, options)).state, (await deviceCacheWarmStatus(credentials, linux.runId, options)).conclusion],
+    ["completed", "success"]
+  );
+  assert.equal((await deviceCacheWarmStatus(credentials, "1", options)).state, "gone");
+  // Box listing never shows cache runs.
+  assert.deepEqual(await BLACKSMITH_ADAPTER.listManaged(credentials, options), []);
 });
 
 test("status follows the run and its job", async () => {
@@ -142,6 +266,13 @@ test("status follows the run and its job", async () => {
   run.conclusion = "timed_out";
   assert.deepEqual(await BLACKSMITH_ADAPTER.status(credentials, ref, options), { state: "gone", detail: "macOS time limit reached", publicIp: null, hourlyUsd: null });
   assert.equal((await BLACKSMITH_ADAPTER.status(credentials, { ...ref, runId: "1" }, options)).state, "gone");
+  // A Linux box's run reads as Linux (its runner label).
+  run.status = "in_progress";
+  run.jobStatus = "queued";
+  assert.equal(
+    (await BLACKSMITH_ADAPTER.status(credentials, { ...ref, runner: "blacksmith-8vcpu-ubuntu-2404" }, options)).detail,
+    "Waiting for a Blacksmith Linux runner"
+  );
   await assert.rejects(BLACKSMITH_ADAPTER.status(credentials, {}, options), /no workflow run reference/);
 });
 

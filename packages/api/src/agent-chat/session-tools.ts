@@ -182,8 +182,13 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  *   grant that allowed it (`ToolApprovalReference`, `tool-approvals.ts`,
  *   unified MCP design 2026-10-15 §7.3) — never arguments or card secrets —
  *   read back with `toolApprovalReferenceOfActivityData`.
+ * - `deviceRef`: the device a devices tool acted on, and a screenshot it kept
+ *   (`DeviceToolReference`, `../devices.ts`: `{device, leaseId?, screenshotId?}`),
+ *   read back with `deviceToolReferenceOfActivityData`.
  */
 export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
+  // Devices: `open_device`, `device_action`, … (`DeviceToolReference`).
+  "deviceRef",
   "htmlRender",
   // `request_secret`: name, purpose and outcome — the card's record, never the value (`secret-requests.ts`).
   "secretRequest",

@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Dev-only harness for the Devices fleet view (served by `vite` at /dev/devices-fleet.html; the
+     production build's only input is index.html). Query: ?mode=light|dark, ?scheme=<name>,
+     ?empty=1 (no leases), ?fail=1 (the load fails). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Devices fleet — dev harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./devices-fleet.tsx"></script>
+  </body>
+</html>

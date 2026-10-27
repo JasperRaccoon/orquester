@@ -99,6 +99,8 @@ export interface SessionToolsRefreshDeps {
   catalog(): readonly AnyOrquesterTool[];
   /** boxes: whether temporary boxes can be rented now (their tools are advertised only then). Absent: never. */
   boxesAvailable?(): boolean;
+  /** Devices: whether the device tools are usable now (plugin on, agents allowed, a platform enabled). Absent: never. */
+  devicesAvailable?(): boolean;
   /**
    * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
@@ -374,6 +376,8 @@ export class SessionToolsRefresher {
       daemonPointing,
       // boxes: the box tools only while a box can be rented.
       boxesAvailable: this.deps.boxesAvailable?.() === true,
+      // Devices: the device tools only while devices can be used.
+      devicesAvailable: this.deps.devicesAvailable?.() === true,
       ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };

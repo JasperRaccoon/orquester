@@ -142,7 +142,7 @@ export interface ScopeClaim {
    * saved prompt is agent-made or used by a workflow): read by the tool's `tier(args, scope)` /
    * `adminFamily(args, scope)`. Ignored for a tool whose tier is fixed.
    */
-  resolved?: { tier: Tier; adminFamily?: AdminFamily };
+  resolved?: { tier: Tier; adminFamily?: AdminFamily; spendFamily?: SpendFamily };
 }
 
 /** What `scope` and `approval` may use: the call context before any approval exists. */
@@ -379,8 +379,11 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
    * `spend` card of this family in EVERY permission mode — workflow-owned and agent-to-agent chats
    * included (nobody may be watching: the card waits, a push goes out, and it expires as
    * `APPROVAL_TIMEOUT`) — never covered or offered a grant, refused while planning. Requires `approval`.
+   * Per call (devices: `open_device` spends only when it must rent a host the owner did not
+   * pre-approve, which its `scope` looks up into `ScopeClaim.resolved.spendFamily`): undefined = no
+   * spend card for this call.
    */
-  spendFamily?: SpendFamily;
+  spendFamily?: SpendFamily | ((args: z.infer<z.ZodObject<Shape>>, scope: ScopeClaim) => SpendFamily | undefined);
   scope(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ScopeClaim>;
   /** The card's content; required when the tier can be `admin`, and with `spendFamily`. */
   approval?(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ApprovalPreview>;

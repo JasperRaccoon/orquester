@@ -1,0 +1,25 @@
+{
+ "success": true,
+ "data": {
+  "devices": [
+   {
+    "platform": "android",
+    "id": "emulator-5610",
+    "name": "spike35s",
+    "kind": "emulator",
+    "target": "mobile",
+    "model": "sdk_gphone64_x86_64",
+    "osVersion": "15",
+    "booted": true
+   },
+   {
+    "platform": "android",
+    "id": "spike35",
+    "name": "spike35",
+    "kind": "emulator",
+    "target": "mobile",
+    "booted": false
+   }
+  ]
+ }
+}

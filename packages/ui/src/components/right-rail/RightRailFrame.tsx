@@ -2,11 +2,14 @@ import React from "react";
 
 import { useIsDesktop } from "../../hooks";
 import { cn } from "../../lib/cn";
-import { useAppStore, useCurrentContext, type TabContext } from "../../store/app";
+import { serverViewOpen, useAppStore, useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
+import { useDevicesEnabled } from "../../lib/devices/hooks";
+import { useFollowAgentDevices } from "../../lib/devices/use-follow-agent";
 import { MobileSectionOverlay } from "./MobileSections";
-import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
+import { RIGHT_RAIL_PANEL_ORDER, visibleRailPanels } from "./panels";
+import { rightRailWidthOf, toggleRightRailPanel, useRightRailState } from "./right-rail-state";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 import type { DockPanelId } from "./types";
 
@@ -30,8 +33,10 @@ export interface RightRailRowProps {
   projectPath: string | null;
   /** The docked panel, or `null` with the dock closed. */
   open: DockPanelId | null;
-  /** The dock's stored width (px). */
+  /** The docked panel's stored width (px). */
   width: number;
+  /** The panels the rail offers (default: all of them). */
+  panels?: readonly DockPanelId[];
   /**
    * Drawn over the tab content (the row is its containing block): a phone's
    * section, full screen (`MobileSections.tsx`).
@@ -61,6 +66,7 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
   projectPath,
   open,
   width,
+  panels,
   overlay,
   isolateContent = false
 }) => {
@@ -84,7 +90,7 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
         />
       ) : null}
       {projectPath !== null ? (
-        <RightRail open={open} onToggle={toggleRightRailPanel} />
+        <RightRail open={open} {...(panels ? { panels } : {})} onToggle={toggleRightRailPanel} />
       ) : null}
     </div>
   );
@@ -94,20 +100,27 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
  * {@link RightRailRow} wired to the app: the rail — and the dock, while a
  * panel is open — appears only on desktop and only with a project open. Phones
  * reach the same panels through the bottom section bar, which shows them over
- * the tab content (`MobileSections.tsx`). The server-level Knowledge view
- * belongs to no project, so neither shows beside it.
+ * the tab content (`MobileSections.tsx`). The server-level views (Knowledge,
+ * the Devices fleet) belong to no project, so neither shows beside them.
  */
 export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isDesktop = useIsDesktop();
   const openProjectPath = useOpenProjectPath();
-  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
-  const projectPath = knowledgeOpen ? null : openProjectPath;
-  const { open, width } = useRightRailState();
+  const serverView = useAppStore(serverViewOpen);
+  const projectPath = serverView ? null : openProjectPath;
+  const railState = useRightRailState();
+  // Devices: the Device panel exists only while its plugin is on.
+  const devicesOn = useDevicesEnabled();
+  const panels = React.useMemo(() => visibleRailPanels(RIGHT_RAIL_PANEL_ORDER, { devices: devicesOn }), [devicesOn]);
+  const open = railState.open !== null && panels.includes(railState.open) ? railState.open : null;
+  // Devices §10.2: the rail opens on a device an agent opened for the visible chat (desktop only).
+  useFollowAgentDevices(devicesOn && isDesktop && projectPath !== null);
   return (
     <RightRailRow
       projectPath={isDesktop ? projectPath : null}
       open={open}
-      width={width}
+      width={open ? rightRailWidthOf(railState, open) : railState.width}
+      panels={panels}
       overlay={<MobileSectionOverlay projectPath={isDesktop ? null : projectPath} />}
       isolateContent={!isDesktop}
     >

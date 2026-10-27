@@ -1,0 +1,29 @@
+{
+ "success": false,
+ "error": {
+  "code": "COMMAND_FAILED",
+  "message": "Ref @e999 needs a complete snapshot — the current frame only authorizes its emitted refs",
+  "hint": "Capture a fresh interactive snapshot (snapshot -i) or use a stable selector, then retry.",
+  "diagnosticId": "mvq6s2u8-64e33254",
+  "logPath": "/tmp/orq-smoke/ad-state/sessions/orq-fixture/requests/39993ebd31a9d04c.ndjson",
+  "diagnosticsRecord": {
+   "session": "orq-fixture",
+   "requestId": "39993ebd31a9d04c"
+  },
+  "details": {
+   "reason": "plain_ref_requires_complete_frame",
+   "ref": "@e999",
+   "currentGeneration": 604577,
+   "scope": [
+    "e2",
+    "e3",
+    "e4",
+    "e53",
+    "e54",
+    "e57",
+    "e58"
+   ],
+   "dispatched": "no"
+  }
+ }
+}

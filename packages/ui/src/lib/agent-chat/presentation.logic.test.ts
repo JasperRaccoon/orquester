@@ -3,6 +3,7 @@ import { describe,it } from "node:test";
 
 import type { WorkLogEntry } from "./contracts";
 import {
+singleToolCallLabel,
 toolApprovalOutcomeText,
 workEntryDisplayIndicatesToolFailure,
 workEntryDisplayLabel
@@ -57,5 +58,38 @@ describe("session tool labels (unified MCP §4)", () => {
     assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "project" }), "Allowed by a project grant");
     // No card: the tool's own label.
     assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_projects" })), "Listed projects");
+  });
+});
+
+describe("device tool rows (devices §10.3)", () => {
+  const device = { device: "local/emulator-5554", leaseId: "l1" };
+
+  it("read as what they did to which device, the store's name as a fallback", () => {
+    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: { ...device, name: "Pixel 9" } })), "Opened Pixel 9");
+    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: device }), undefined, () => "Pixel Fold"), "Opened Pixel Fold");
+    assert.equal(
+      singleToolCallLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, action: "tap", summary: "Tapped @e7 “Search”" } })),
+      "Tapped “Search”"
+    );
+    assert.equal(
+      workEntryDisplayLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, name: "Pixel 9", action: "screenshot" } })),
+      "Took a screenshot of Pixel 9"
+    );
+    // Without a reference: the tool's generic words.
+    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "device_action" })), "Used a device");
+    assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_devices", deviceLink: device })), "Listed devices");
+  });
+
+  it("keep the approval suffix of a gated call", () => {
+    assert.equal(
+      workEntryDisplayLabel(
+        entry({
+          sessionTool: "open_device",
+          deviceLink: { ...device, name: "iPhone 17 Pro" },
+          toolApproval: { kind: "spend", family: "devices", title: "t", outcome: "approved", approvalId: "a" } as WorkLogEntry["toolApproval"]
+        })
+      ),
+      "Opened iPhone 17 Pro · Approved by you"
+    );
   });
 });

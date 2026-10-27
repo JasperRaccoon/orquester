@@ -40,7 +40,8 @@ export const PROVIDER_ABBREVIATIONS: Readonly<Record<BoxProviderId, string>> = {
   massed: "MC",
   jarvislabs: "JL",
   tensordock: "TD",
-  blacksmith: "BS"
+  blacksmith: "BS",
+  byo: "MY"
 };
 
 /** The provider whose setup is the Blacksmith checklist rather than an API key. */
@@ -50,9 +51,12 @@ export function providerAbbreviation(provider: Pick<BoxProviderInfo, "id" | "lab
   return PROVIDER_ABBREVIATIONS[provider.id] ?? provider.label.slice(0, 2).toUpperCase();
 }
 
-/** The providers that take credentials, in the daemon's order (Blacksmith has its own row). */
+/** The owner's own machines: no credentials, their own card ("Your machines"). */
+export const BYO_PROVIDER: BoxProviderId = "byo";
+
+/** The providers that take credentials, in the daemon's order (Blacksmith has its own row; the owner's machines their own card). */
 export function keyProviders(providers: readonly BoxProviderInfo[] | null): BoxProviderInfo[] {
-  return (providers ?? []).filter((provider) => provider.id !== BLACKSMITH_PROVIDER_ID);
+  return (providers ?? []).filter((provider) => provider.id !== BLACKSMITH_PROVIDER_ID && provider.id !== BYO_PROVIDER);
 }
 
 /** The line under a provider's name: its key, the kinds it unlocks, a one-time account step. */

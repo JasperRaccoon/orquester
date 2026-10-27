@@ -9,6 +9,12 @@
  *   never grantable) showing provider, size, region, the estimated $/h, the time limit and the
  *   worst-case cost. The provider, size and region are resolved BEFORE the card (from the plugin's
  *   kinds and offers routes) and pinned: what the owner approved is what is rented.
+ * - **The owner's own machines** (`provider: "byo"`, paired in the plugin's settings) cost nothing,
+ *   but an agent must not run commands on them unseen: `create_box` with that provider opens a
+ *   "Use your machine" card (same family, same rules, never grantable) naming the machine; the
+ *   approved machine is lent to the chat until its time limit, `destroy_box` or the chat closing,
+ *   then given back (never destroyed). It is used only when asked for by provider, or when no
+ *   rented provider rents the kind.
  * - **Ownership** is the daemon's: the temporary-box routes and the `DaemonApi` box operations reach
  *   only the calling chat's own boxes (`boxes/temporary/tools.ts`).
  * - **Nothing is copied into a box**: the agent moves what it needs with `box_upload` /
@@ -24,6 +30,7 @@ import { z } from "zod";
 import {
   BOX_KIND_LABELS,
   BOX_KINDS,
+  BYO_PROVIDER_ID,
   boxRoutes,
   isBoxProviderId,
   TEMPORARY_BOX_DEFAULT_LIFETIME_MINUTES,
@@ -221,6 +228,12 @@ export async function planBox(
   }
   let providerId: BoxProviderId;
   if (args.provider !== undefined) {
+    if (args.provider === BYO_PROVIDER_ID && !connected.includes(BYO_PROVIDER_ID)) {
+      throw new ToolError(
+        "BOX_NOT_READY",
+        `None of the owner's own ${KIND_WORDS[args.kind]} machines is free and online right now (they are paired in ${SETUP_HINT}). Ask the owner, or rent one${connected.length > 0 ? ` from ${connected.join(", ")}` : ""}.`
+      );
+    }
     if (!isBoxProviderId(args.provider) || !connected.includes(args.provider)) {
       throw new ToolError("INVALID_ARGUMENT", `provider must be one of the connected providers for ${label}: ${connected.join(", ")}.`);
     }
@@ -264,8 +277,39 @@ export async function planBox(
   };
 }
 
+const UNATTENDED_WARNING =
+  "This chat runs unattended (an automated workflow, or a turn another agent started). It waits for your answer here; unanswered, it is denied after 30 minutes.";
+
+/**
+ * The card for one of the owner's own machines: nothing is billed, but the agent gets a shell on
+ * their machine, so it says whose machine, as which user, and until when.
+ */
+export function byoMachineCard(plan: BoxPlan, purpose: string, unattended: boolean): ApprovalPreview {
+  const sections: ApprovalPreviewSection[] = [
+    { kind: "text", title: "Purpose", text: purpose },
+    {
+      kind: "fields",
+      title: "Your machine",
+      rows: [
+        { label: "Machine", value: plan.size.label },
+        { label: "Kind", value: BOX_KIND_LABELS[plan.kind] },
+        { label: "Time limit", value: durationLabel(plan.lifetimeMinutes) },
+        { label: "Cost", value: "Free (your own machine)" }
+      ]
+    }
+  ];
+  if (unattended) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
+  sections.push({
+    kind: "warning",
+    level: "caution",
+    text: `The agent can run any command on ${plan.size.label} as the user orq-agent runs as there, and read or change what that user can, until it calls destroy_box, the time limit passes, or this chat closes. The machine is then given back, not wiped: what the agent left there stays.`
+  });
+  return { title: `Use your machine: ${plan.size.label}`, scopeLabel: "Runs on your own machine", sections, pins: planPins(plan), ungrantable: true };
+}
+
 /** The card (spec §13.2): what is rented, what it costs per hour and at worst. */
 export function boxCard(plan: BoxPlan, purpose: string, unattended: boolean): ApprovalPreview {
+  if (plan.provider.id === BYO_PROVIDER_ID) return byoMachineCard(plan, purpose, unattended);
   const worst = plan.hourlyUsd !== null ? (plan.hourlyUsd * plan.lifetimeMinutes) / 60 : null;
   const sections: ApprovalPreviewSection[] = [
     { kind: "text", title: "Purpose", text: purpose },
@@ -286,13 +330,7 @@ export function boxCard(plan: BoxPlan, purpose: string, unattended: boolean): Ap
   if (plan.hourlyUsd === null) {
     sections.push({ kind: "warning", level: "caution", text: `${plan.provider.label} reported no price for this size: check its pricing before approving.` });
   }
-  if (unattended) {
-    sections.push({
-      kind: "warning",
-      level: "caution",
-      text: "This chat runs unattended (an automated workflow, or a turn another agent started). It waits for your answer here; unanswered, it is denied after 30 minutes."
-    });
-  }
+  if (unattended) sections.push({ kind: "warning", level: "caution", text: UNATTENDED_WARNING });
   sections.push({
     kind: "warning",
     level: "caution",
@@ -328,7 +366,13 @@ const createBox = defineTool({
     "Rent a cloud machine for this chat when the host can't do the job (another OS, a GPU, isolation). It COSTS the owner money: every box needs their approval on a card (up to 30 min); if denied, don't retry — ask. Then waits until it is ready (minutes; Windows and macOS longer). Orquester copies nothing in: send what you need with box_upload (e.g. a git bundle), run with box_exec, fetch results with box_download. Destroy it with destroy_box as soon as you are done; it is also destroyed at its time limit and when this chat closes.",
   input: {
     kind: z.enum(BOX_KINDS as unknown as [BoxKind, ...BoxKind[]]),
-    provider: z.string().trim().min(1).max(40).optional().describe("A connected provider id; default: the cheapest for the kind."),
+    provider: z
+      .string()
+      .trim()
+      .min(1)
+      .max(40)
+      .optional()
+      .describe('A connected provider id; default: the cheapest for the kind. "byo": one of the owner\'s own paired machines (free; still needs approval).'),
     size: z.string().trim().min(1).max(200).optional().describe("A size id; default: the cheapest."),
     region: z.string().trim().min(1).max(200).optional().describe("A region id; default: the first the size is offered in."),
     lifetime_minutes: z
@@ -393,7 +437,10 @@ const createBox = defineTool({
       arch: box.arch,
       hourly_usd: box.hourlyUsd,
       deadline: box.deadlineAt,
-      note: "Ready and empty: Orquester copied nothing into it. It bills until destroy_box, its deadline, or this chat closing."
+      note:
+        box.provider === BYO_PROVIDER_ID
+          ? "The owner's own machine, lent to this chat: it is not empty, so touch only what the task needs. destroy_box gives it back (nothing is deleted); so do its deadline and this chat closing."
+          : "Ready and empty: Orquester copied nothing into it. It bills until destroy_box, its deadline, or this chat closing."
     };
   }
 });

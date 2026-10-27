@@ -12,7 +12,8 @@
  * itself and nothing here can throw on what it reads.
  *
  * Stored under `orquester:right-rail` as
- * `{ "v": 1, "open": "prompts" | "history" | null, "width": <px> }`. (Earlier
+ * `{ "v": 1, "open": "prompts" | "history" | "device" | null, "width": <px>, "deviceWidth": <px> }`:
+ * the Device panel keeps its own, wider width (`RIGHT_RAIL_WIDTH_RANGES`). (Earlier
  * bundles also wrote a `sheet` field, the mobile sheet's last tab, and could
  * dock `"workflows"` or `"profile"`, which moved to the left sidebar: both read
  * as nothing now, and are gone at the next write.)
@@ -36,6 +37,23 @@ const RIGHT_RAIL_STATE_VERSION = 1;
 export const RIGHT_RAIL_WIDTH_DEFAULT = 320;
 export const RIGHT_RAIL_WIDTH_MIN = 260;
 export const RIGHT_RAIL_WIDTH_MAX = 560;
+/** The Device panel's own width (px): a phone frame and its toolbar need more room (devices spec §10.1). */
+export const RIGHT_RAIL_DEVICE_WIDTH_DEFAULT = 420;
+export const RIGHT_RAIL_DEVICE_WIDTH_MIN = 320;
+export const RIGHT_RAIL_DEVICE_WIDTH_MAX = 900;
+
+export interface RightRailWidthRange {
+  readonly min: number;
+  readonly max: number;
+  readonly default: number;
+}
+
+/** Each docked panel's width range. The prompts and history panels share one stored width. */
+export const RIGHT_RAIL_WIDTH_RANGES: Readonly<Record<DockPanelId, RightRailWidthRange>> = Object.freeze({
+  prompts: { min: RIGHT_RAIL_WIDTH_MIN, max: RIGHT_RAIL_WIDTH_MAX, default: RIGHT_RAIL_WIDTH_DEFAULT },
+  history: { min: RIGHT_RAIL_WIDTH_MIN, max: RIGHT_RAIL_WIDTH_MAX, default: RIGHT_RAIL_WIDTH_DEFAULT },
+  device: { min: RIGHT_RAIL_DEVICE_WIDTH_MIN, max: RIGHT_RAIL_DEVICE_WIDTH_MAX, default: RIGHT_RAIL_DEVICE_WIDTH_DEFAULT }
+});
 /** The icon rail's own width (`w-11`). */
 const RIGHT_RAIL_BAR_WIDTH = 44;
 /**
@@ -47,17 +65,28 @@ const RIGHT_RAIL_CONTENT_MIN = 360;
 export interface RightRailState {
   /** The panel docked beside the tab content (desktop), or `null` with the dock closed. */
   readonly open: DockPanelId | null;
-  /** The dock's width in px, within `[RIGHT_RAIL_WIDTH_MIN, RIGHT_RAIL_WIDTH_MAX]`. */
+  /** The prompts and history panels' width in px, within `[RIGHT_RAIL_WIDTH_MIN, RIGHT_RAIL_WIDTH_MAX]`. */
   readonly width: number;
+  /** The Device panel's width in px, within `[RIGHT_RAIL_DEVICE_WIDTH_MIN, RIGHT_RAIL_DEVICE_WIDTH_MAX]`. */
+  readonly deviceWidth: number;
 }
 
 export const RIGHT_RAIL_DEFAULT_STATE: RightRailState = Object.freeze({
   open: null,
-  width: RIGHT_RAIL_WIDTH_DEFAULT
+  width: RIGHT_RAIL_WIDTH_DEFAULT,
+  deviceWidth: RIGHT_RAIL_DEVICE_WIDTH_DEFAULT
 });
 
 function isDockPanelId(value: unknown): value is DockPanelId {
-  return value === "prompts" || value === "history";
+  return value === "prompts" || value === "history" || value === "device";
+}
+
+/** The state field a panel's width is stored in. */
+const widthField = (panel: DockPanelId): "width" | "deviceWidth" => (panel === "device" ? "deviceWidth" : "width");
+
+/** The stored width of `panel` (the dock draws it, capped against the row). */
+export function rightRailWidthOf(state: RightRailState, panel: DockPanelId): number {
+  return state[widthField(panel)];
 }
 
 /* ── Clamps ─────────────────────────────────────────────────────────────── */
@@ -74,8 +103,8 @@ const ROW_RESERVE = RIGHT_RAIL_BAR_WIDTH + RIGHT_RAIL_CONTENT_MIN;
  * (`RIGHT_RAIL_CSS_MIN_WIDTH` / `RIGHT_RAIL_CSS_MAX_WIDTH`). No (usable)
  * measurement → the maximum alone.
  */
-function rightRailWidthCap(rowWidth?: number | null): number {
-  let max = RIGHT_RAIL_WIDTH_MAX;
+function rightRailWidthCap(rowWidth?: number | null, panel: DockPanelId = "prompts"): number {
+  let max = RIGHT_RAIL_WIDTH_RANGES[panel].max;
   if (typeof rowWidth === "number" && Number.isFinite(rowWidth) && rowWidth > 0) {
     max = Math.min(max, rowWidth - ROW_RESERVE);
   }
@@ -91,19 +120,29 @@ function rightRailWidthCap(rowWidth?: number | null): number {
 export const RIGHT_RAIL_CSS_MIN_WIDTH = `max(0px, min(${RIGHT_RAIL_WIDTH_MIN}px, 100% - ${ROW_RESERVE}px))`;
 export const RIGHT_RAIL_CSS_MAX_WIDTH = `max(0px, min(${RIGHT_RAIL_WIDTH_MAX}px, 100% - ${ROW_RESERVE}px))`;
 
+/** {@link RIGHT_RAIL_CSS_MIN_WIDTH} / {@link RIGHT_RAIL_CSS_MAX_WIDTH} for one panel's range. */
+export function rightRailCssBounds(panel: DockPanelId): { minWidth: string; maxWidth: string } {
+  const range = RIGHT_RAIL_WIDTH_RANGES[panel];
+  return {
+    minWidth: `max(0px, min(${range.min}px, 100% - ${ROW_RESERVE}px))`,
+    maxWidth: `max(0px, min(${range.max}px, 100% - ${ROW_RESERVE}px))`
+  };
+}
+
 /**
- * Round to whole pixels and clamp to what the dock can be drawn at:
- * `[MIN, rightRailWidthCap(rowWidth)]`, or the cap alone when the row is too
- * narrow for the minimum. A non-finite value falls back to the default
- * (capped the same way).
+ * Round to whole pixels and clamp to what the dock can be drawn at for
+ * `panel` (default: the prompts/history range): `[min, rightRailWidthCap(rowWidth)]`,
+ * or the cap alone when the row is too narrow for the minimum. A non-finite
+ * value falls back to the default (capped the same way).
  */
-export function clampRightRailWidth(px: number, rowWidth?: number | null): number {
-  const max = rightRailWidthCap(rowWidth);
+export function clampRightRailWidth(px: number, rowWidth?: number | null, panel: DockPanelId = "prompts"): number {
+  const range = RIGHT_RAIL_WIDTH_RANGES[panel];
+  const max = rightRailWidthCap(rowWidth, panel);
   const rounded = Math.round(px);
   if (!Number.isFinite(rounded)) {
-    return Math.min(RIGHT_RAIL_WIDTH_DEFAULT, max);
+    return Math.min(range.default, max);
   }
-  return Math.min(max, Math.max(RIGHT_RAIL_WIDTH_MIN, rounded));
+  return Math.min(max, Math.max(range.min, rounded));
 }
 
 /* ── Parse / serialize ──────────────────────────────────────────────────── */
@@ -119,12 +158,9 @@ function sanitizeRightRailState(value: unknown): RightRailState {
       ? (value as Record<string, unknown>)
       : {};
   const open = isDockPanelId(record.open) ? record.open : RIGHT_RAIL_DEFAULT_STATE.open;
-  const rawWidth = record.width;
-  const width =
-    typeof rawWidth === "number" && Number.isFinite(rawWidth) && rawWidth > 0
-      ? clampRightRailWidth(rawWidth)
-      : RIGHT_RAIL_DEFAULT_STATE.width;
-  return { open, width };
+  const widthOf = (raw: unknown, panel: DockPanelId): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? clampRightRailWidth(raw, null, panel) : RIGHT_RAIL_WIDTH_RANGES[panel].default;
+  return { open, width: widthOf(record.width, "prompts"), deviceWidth: widthOf(record.deviceWidth, "device") };
 }
 
 /** The stored string → a valid state. Nothing stored, or anything unparsable, is the defaults. */
@@ -145,7 +181,8 @@ function serializeRightRailState(state: RightRailState): string {
   return JSON.stringify({
     v: RIGHT_RAIL_STATE_VERSION,
     open: state.open,
-    width: state.width
+    width: state.width,
+    deviceWidth: state.deviceWidth
   });
 }
 
@@ -221,7 +258,7 @@ export function useRightRailState(): RightRailState {
 function update(patch: Partial<RightRailState>, persist: boolean): void {
   const previous = rightRailState();
   const next: RightRailState = { ...previous, ...patch };
-  const changed = next.open !== previous.open || next.width !== previous.width;
+  const changed = next.open !== previous.open || next.width !== previous.width || next.deviceWidth !== previous.deviceWidth;
   if (changed) {
     current = next;
   }
@@ -246,21 +283,23 @@ export function setRightRailOpen(id: DockPanelId | null): void {
 }
 
 /**
- * The dock's width. A live drag passes `persist: false` on every frame and
- * `persist: true` once, on release (the sidebar's pattern); `rowWidth` caps it
- * so the tab content keeps its floor. The state keeps the width the dock gets
- * when there is room — never below the minimum: a row too narrow for it draws
- * the dock narrower (the CSS bounds) without storing that.
+ * A panel's width (default: the prompts/history one). A live drag passes
+ * `persist: false` on every frame and `persist: true` once, on release (the
+ * sidebar's pattern); `rowWidth` caps it so the tab content keeps its floor.
+ * The state keeps the width the dock gets when there is room — never below the
+ * panel's minimum: a row too narrow for it draws the dock narrower (the CSS
+ * bounds) without storing that.
  */
 export function setRightRailWidth(
   px: number,
-  options: { persist: boolean; rowWidth?: number | null }
+  options: { persist: boolean; rowWidth?: number | null; panel?: DockPanelId }
 ): void {
-  const width = Math.max(RIGHT_RAIL_WIDTH_MIN, clampRightRailWidth(px, options.rowWidth));
-  update({ width }, options.persist);
+  const panel = options.panel ?? "prompts";
+  const width = Math.max(RIGHT_RAIL_WIDTH_RANGES[panel].min, clampRightRailWidth(px, options.rowWidth, panel));
+  update({ [widthField(panel)]: width }, options.persist);
 }
 
-/** Double-click on the resize handle: back to the default width. */
-export function resetRightRailWidth(): void {
-  update({ width: RIGHT_RAIL_WIDTH_DEFAULT }, true);
+/** Double-click on the resize handle: back to the panel's default width. */
+export function resetRightRailWidth(panel: DockPanelId = "prompts"): void {
+  update({ [widthField(panel)]: RIGHT_RAIL_WIDTH_RANGES[panel].default }, true);
 }
