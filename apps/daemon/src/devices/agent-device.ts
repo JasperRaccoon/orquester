@@ -6,8 +6,8 @@
  *
  * - the global flags come first, so a `--` before user text (`type -- "--x"`) cannot swallow them;
  * - `--config` is the host's file pinned to its agent-device daemon (`DeviceHost.agentDeviceConfigPath`,
- *   0600, its token inside): a token is never in argv, and inherited `AGENT_DEVICE_*` variables are
- *   scrubbed so nothing else can retarget the call;
+ *   0600, its token inside): a token is never in argv, and only an allowlist of the daemon's
+ *   environment is inherited ({@link agentDeviceEnv}): no daemon secret, no `AGENT_DEVICE_*` retarget;
  * - `--session` is stable per chat, host and device ({@link agentDeviceSession});
  * - no shell; a timeout, the caller's abort, and output caps bound every run.
  *
@@ -100,12 +100,19 @@ export function agentDeviceArgv(input: {
   ];
 }
 
-/** The environment a run gets: the daemon's minus every `AGENT_DEVICE_*`, then the host's additions. */
+/**
+ * The daemon variables a run inherits (as `android/env.ts`): the path, locale, time zone and the
+ * user's home and temp dirs. Nothing else of the daemon's environment (its secrets, provider keys,
+ * `AGENT_DEVICE_*` overrides) reaches the CLI.
+ */
+export const AGENT_DEVICE_ENV_PASSTHROUGH = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TERM", "SHELL", "XDG_RUNTIME_DIR"] as const;
+
+/** The environment a run gets: the allowlisted daemon variables, then the host's additions (`AgentDeviceCommand.env`). */
 export function agentDeviceEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
-    if (value === undefined || key.startsWith("AGENT_DEVICE_")) continue;
-    env[key] = value;
+  for (const key of AGENT_DEVICE_ENV_PASSTHROUGH) {
+    const value = base[key];
+    if (value !== undefined) env[key] = value;
   }
   env.NO_COLOR = "1";
   env.ELECTRON_RUN_AS_NODE = "1";
