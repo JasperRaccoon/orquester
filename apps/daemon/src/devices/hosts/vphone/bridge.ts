@@ -8,6 +8,7 @@
  * |---|---|
  * | `GET /vendor/serve-sim/helper/<id>/stream.avcc` | `WS /v1/host/screen`: one `{codec:"h264", box, fps, bitrate, key}` pull per frame; each answer re-emitted as avcc envelopes (`screen-protocol.ts`) |
  * | `GET /vendor/serve-sim/helper/<id>/stream.mjpeg` | `screen.screenshot` JPEGs as `multipart/x-mixed-replace` parts |
+ * | `POST /vendor/serve-sim/api/screenshot?device=<id>` | one `screen.screenshot` JPEG (the fleet view's thumbnail, through the daemon or the hub proxy) |
  * | `WS /vendor/serve-sim/helper/ws?device=<id>` | `WS /v1/events`: `0x83` admitted and `0x82` screen config down; `0x03` touch → `input.touch {phase, x, y, normalized: true}`, `0x04` button → `input.button`, `0x06` key → `input.hid {page: 7, usage, down}`, a text frame `{"type":"text","text"}` → `input.type` |
  *
  * Input is sent one request at a time (vphoned runs requests concurrently; touches must stay in
@@ -62,6 +63,8 @@ const MAX_IN_FLIGHT = 2;
 const MAX_INPUT_QUEUE = 256;
 const STREAM_PATH = /^\/vendor\/serve-sim\/helper\/([^/]+)\/(stream\.avcc|stream\.mjpeg)$/;
 const INPUT_PATH = "/vendor/serve-sim/helper/ws";
+const SCREENSHOT_PATH = "/vendor/serve-sim/api/screenshot";
+const SCREENSHOT_TIMEOUT_MS = 30_000;
 
 export class VphoneBridge {
   private server: Server | null = null;
@@ -126,6 +129,7 @@ export class VphoneBridge {
   private handleHttp(request: IncomingMessage, response: ServerResponse): void {
     if (!this.authorized(request)) return void response.writeHead(401, { "content-type": "text/plain" }).end("unauthorized");
     const url = new URL(request.url ?? "/", "http://bridge");
+    if (url.pathname === SCREENSHOT_PATH) return void this.screenshot(request, response, url.searchParams.get("device") ?? "");
     const match = STREAM_PATH.exec(url.pathname);
     if (!match) return void response.writeHead(404, { "content-type": "text/plain" }).end("not found");
     if (request.method !== "GET" && request.method !== "HEAD") return void response.writeHead(405, { allow: "GET, HEAD" }).end();
@@ -144,6 +148,29 @@ export class VphoneBridge {
       const pump: MjpegPump = new MjpegPump(device, response, this.tuning, this.options.logger, () => this.sessions.delete(pump));
       this.sessions.add(pump);
       pump.start();
+    }
+  }
+
+  /** serve-sim's `POST /api/screenshot?device=`: the device's screen as one JPEG (`screen.screenshot`). */
+  private async screenshot(request: IncomingMessage, response: ServerResponse, id: string): Promise<void> {
+    request.resume();
+    if (request.method !== "POST") return void response.writeHead(405, { allow: "POST" }).end();
+    if (id === "") return void response.writeHead(400, { "content-type": "text/plain" }).end("name the device");
+    const device = this.options.device(id);
+    if (!device) return void response.writeHead(404, { "content-type": "text/plain" }).end("unknown device");
+    const abort = new AbortController();
+    response.once("close", () => abort.abort());
+    try {
+      const result = await device.client.call("screen.screenshot", {}, { signal: abort.signal, timeoutMs: SCREENSHOT_TIMEOUT_MS });
+      const jpeg = typeof result.data === "string" ? Buffer.from(result.data, "base64") : null;
+      if (!jpeg || jpeg.length < 3 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+        return void response.writeHead(502, { "content-type": "text/plain" }).end("the research iPhone answered no JPEG");
+      }
+      response.writeHead(200, { "content-type": "image/jpeg", "content-length": String(jpeg.length), "cache-control": "no-store" }).end(jpeg);
+    } catch (error) {
+      if (abort.signal.aborted || response.headersSent) return void response.destroy();
+      this.options.logger.warn("[devices] vphone screenshot failed", error instanceof Error ? error.message : String(error));
+      response.writeHead(502, { "content-type": "text/plain" }).end("the research iPhone did not answer");
     }
   }
 

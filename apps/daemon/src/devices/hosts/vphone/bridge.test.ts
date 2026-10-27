@@ -5,6 +5,7 @@ import { after, before, test } from "node:test";
 import { WebSocket } from "ws";
 
 import { mapPanelInput, SERVE_SIM_TAG, VphoneBridge } from "./bridge.ts";
+import { DeviceThumbnails } from "../../thumbnails.ts";
 import { VphoneGuestClient } from "./guest-client.ts";
 import { avccDemux, FIXTURE_AVCC, FIXTURE_DELTA_AU, FIXTURE_JPEG, FIXTURE_KEY_AU, startFakeVphoned, type FakeVphoned } from "./testing.ts";
 
@@ -91,6 +92,24 @@ test("stream.mjpeg: screenshots as multipart parts", async () => {
   const text = bytes.toString("latin1");
   assert.ok(text.startsWith(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${FIXTURE_JPEG.length}\r\n\r\n`));
   assert.ok(bytes.includes(FIXTURE_JPEG));
+});
+
+test("POST /vendor/serve-sim/api/screenshot?device=: one JPEG of that device (the fleet thumbnail)", async () => {
+  const post = (path: string, headers: Record<string, string> = { authorization: `Bearer ${BRIDGE_TOKEN}` }, method = "POST") =>
+    fetch(`${origin}${path}`, { method, headers, ...(method === "POST" ? { body: "{}" } : {}) });
+  const shot = await post("/vendor/serve-sim/api/screenshot?device=orq-lease1");
+  assert.equal(shot.status, 200);
+  assert.equal(shot.headers.get("content-type"), "image/jpeg");
+  assert.deepEqual(Buffer.from(await shot.arrayBuffer()), FIXTURE_JPEG);
+  assert.equal((await post("/vendor/serve-sim/api/screenshot")).status, 400, "serve-sim's first-booted fallback is never taken");
+  assert.equal((await post("/vendor/serve-sim/api/screenshot?device=orq-other")).status, 404);
+  assert.equal((await post("/vendor/serve-sim/api/screenshot?device=orq-lease1", {})).status, 401);
+  assert.equal((await post("/vendor/serve-sim/api/screenshot?device=orq-lease1", { authorization: `Bearer ${BRIDGE_TOKEN}` }, "GET")).status, 405);
+
+  // The daemon's lease thumbnail route captures a research iPhone the same way (its hub is this bridge).
+  const thumbnails = new DeviceThumbnails({ now: () => 0 });
+  const thumb = await thumbnails.get("lease1", { origin, token: BRIDGE_TOKEN, streamKind: "serve-sim", deviceParam: "orq-lease1" }, 320);
+  assert.deepEqual(thumb, FIXTURE_JPEG);
 });
 
 test("every bridge request needs the bridge token; unknown devices and paths are 404", async () => {
