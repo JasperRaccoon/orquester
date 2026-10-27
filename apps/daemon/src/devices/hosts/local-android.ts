@@ -640,7 +640,7 @@ export class LocalAndroidHost implements DeviceHost {
       await rm(logPath, { force: true });
       if (!this.kvm) throw new DeviceError("PLATFORM_NOT_READY", "/dev/kvm is not usable; see Settings → Devices.");
       await this.exec(join(this.layout.sdk, "platform-tools", "adb"), ["start-server"], { env: this.env, timeoutMs: 30_000 });
-      pgid = spawnEmulator({ sdk: this.layout.sdk, env: this.env, kvm: this.kvm, launch: { avd: avdName(profile.id), consolePort: ports.consolePort, grpcPort: ports.grpcPort }, logPath }).pgid;
+      pgid = (await spawnEmulator({ sdk: this.layout.sdk, env: this.env, kvm: this.kvm, launch: { avd: avdName(profile.id), consolePort: ports.consolePort, grpcPort: ports.grpcPort }, logPath })).pgid;
       let pid: number | null = null;
       for (let tries = 0; tries < 150 && pid === null; tries++) {
         pid = await findQemuPid(pgid);

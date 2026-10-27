@@ -2,17 +2,18 @@
  * The Android SDK under `androidSdkDir` (devices spec §5): Google's cmdline-tools archive (pinned
  * URL and SHA-256), the licences (`sdkmanager --licenses`, answered yes: the owner's Install click
  * is the acceptance), then `platform-tools`, `emulator` and the API 35 system image; and one AVD per
- * profile under `androidAvdDir` (`avdmanager create avd`, then the tuned `config.ini`).
+ * profile under `androidAvdDir` (`avdmanager create avd`, then the tuned `config.ini`). Files and
+ * programs go through a {@link DeviceExecutor}: this machine by default, or a Linux box host's SDK.
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ANDROID_SYSTEM_IMAGE, type DeviceProfile } from "@orquester/api";
 
 import { avdConfigHash, avdHardware, avdName, hasAvdPlaceholders, patchAvdConfig } from "../android/avd-config.ts";
 import { type ExecFn, lastLine } from "../android/exec.ts";
+import { type DeviceExecutor, LOCAL_EXECUTOR } from "../android/executor.ts";
 import type { DownloadFn, PinnedDownload } from "./download.ts";
 
 /** cmdline-tools 15859902 (rev 22.0), the build the spike measured; SHA-256 of Google's archive. */
@@ -41,28 +42,39 @@ export function packageDir(sdk: string, id: string): string {
   return join(sdk, ...id.split(";"));
 }
 
-/** Whether a package is installed (its marker file exists). */
-export function packageInstalled(sdk: string, id: string): boolean {
+/** The files that mark a package installed: any group whose files all exist. */
+function packageMarkers(sdk: string, id: string): string[][] {
   switch (id) {
     case "cmdline-tools":
-      return existsSync(sdkmanagerPath(sdk)) && existsSync(avdmanagerPath(sdk));
+      return [[sdkmanagerPath(sdk), avdmanagerPath(sdk)]];
     case "platform-tools":
-      return existsSync(adbPath(sdk));
+      return [[adbPath(sdk)]];
     case "emulator":
-      return existsSync(emulatorPath(sdk));
+      return [[emulatorPath(sdk)]];
     default:
-      return existsSync(join(packageDir(sdk, id), "system.img")) || existsSync(join(packageDir(sdk, id), "package.xml"));
+      return [[join(packageDir(sdk, id), "system.img")], [join(packageDir(sdk, id), "package.xml")]];
   }
 }
 
-/** `Pkg.Revision` of an installed package (the emulator's version is part of a snapshot's identity). */
-export async function packageRevision(sdk: string, id: string): Promise<string | null> {
-  try {
-    const text = await readFile(join(packageDir(sdk, id), "source.properties"), "utf8");
-    return /^Pkg\.Revision=(.+)$/m.exec(text)?.[1]?.trim() ?? null;
-  } catch {
-    return null;
+/** Whether a package is installed on this machine (its marker file exists). */
+export function packageInstalled(sdk: string, id: string): boolean {
+  return packageMarkers(sdk, id).some((group) => group.every((path) => existsSync(path)));
+}
+
+/** {@link packageInstalled} where `executor` runs. */
+export async function packageInstalledOn(executor: DeviceExecutor, sdk: string, id: string): Promise<boolean> {
+  for (const group of packageMarkers(sdk, id)) {
+    let all = true;
+    for (const path of group) if (!(await executor.exists(path))) all = false;
+    if (all) return true;
   }
+  return false;
+}
+
+/** `Pkg.Revision` of an installed package (the emulator's version is part of a snapshot's identity). */
+export async function packageRevision(sdk: string, id: string, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<string | null> {
+  const text = await executor.readText(join(packageDir(sdk, id), "source.properties"));
+  return text === null ? null : (/^Pkg\.Revision=(.+)$/m.exec(text)?.[1]?.trim() ?? null);
 }
 
 /** sdkmanager progress: `[====    ] 45% Downloading …`. */
@@ -78,34 +90,37 @@ export interface SdkDeps {
   download: DownloadFn;
   env: NodeJS.ProcessEnv;
   downloads: string;
+  /** Where the SDK is (absent: this machine); `exec` and `download` must act there too. */
+  executor?: DeviceExecutor;
 }
 
 /** Download, verify and unpack cmdline-tools into `<sdk>/cmdline-tools/latest`. */
 export async function installCmdlineTools(paths: SdkPaths, deps: SdkDeps, signal: AbortSignal, onProgress: (percent: number | null, line: string) => void): Promise<void> {
-  if (packageInstalled(paths.sdk, "cmdline-tools")) return;
-  await mkdir(paths.sdk, { recursive: true });
+  const x = deps.executor ?? LOCAL_EXECUTOR;
+  if (await packageInstalledOn(x, paths.sdk, "cmdline-tools")) return;
+  await x.mkdir(paths.sdk);
   const zip = join(deps.downloads, "commandlinetools-linux.zip");
   await deps.download(CMDLINE_TOOLS, zip, {
     signal,
     onProgress: (received, total) => onProgress(total ? Math.round((received / total) * 100) : null, `Downloading Android command-line tools (${Math.round(received / 1e6)} MB)`)
   });
   const staging = join(paths.sdk, ".staging-cmdline-tools");
-  await rm(staging, { recursive: true, force: true });
-  await mkdir(staging, { recursive: true });
+  await x.remove(staging);
+  await x.mkdir(staging);
   try {
     const unzip = await deps.exec("unzip", ["-q", "-o", zip, "-d", staging], { env: deps.env, signal, timeoutMs: 5 * 60_000 });
     if (unzip.exitCode !== 0) {
       throw new Error(unzip.exitCode === -1 ? "unzip is not installed on this machine (apt install unzip)." : `Unpacking the command-line tools failed: ${lastLine(unzip)}`);
     }
     const unpacked = join(staging, "cmdline-tools");
-    if (!existsSync(join(unpacked, "bin", "sdkmanager"))) throw new Error("The command-line tools archive has no bin/sdkmanager.");
-    await mkdir(join(paths.sdk, "cmdline-tools"), { recursive: true });
-    await rm(join(paths.sdk, "cmdline-tools", "latest"), { recursive: true, force: true });
-    await rename(unpacked, join(paths.sdk, "cmdline-tools", "latest"));
+    if (!(await x.exists(join(unpacked, "bin", "sdkmanager")))) throw new Error("The command-line tools archive has no bin/sdkmanager.");
+    await x.mkdir(join(paths.sdk, "cmdline-tools"));
+    await x.remove(join(paths.sdk, "cmdline-tools", "latest"));
+    await x.rename(unpacked, join(paths.sdk, "cmdline-tools", "latest"));
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    await x.remove(staging);
   }
-  await rm(zip, { force: true });
+  await x.remove(zip);
 }
 
 /** Accept the SDK licences (the owner's Install click is the acceptance). */
@@ -127,7 +142,9 @@ export async function installSdkPackages(
   signal: AbortSignal,
   onProgress: (percent: number | null, line: string) => void
 ): Promise<void> {
-  const missing = ids.filter((id) => !packageInstalled(paths.sdk, id));
+  const x = deps.executor ?? LOCAL_EXECUTOR;
+  const missing: string[] = [];
+  for (const id of ids) if (!(await packageInstalledOn(x, paths.sdk, id))) missing.push(id);
   if (missing.length === 0) return;
   const result = await deps.exec(sdkmanagerPath(paths.sdk), [`--sdk_root=${paths.sdk}`, "--install", ...missing], {
     env: deps.env,
@@ -137,7 +154,8 @@ export async function installSdkPackages(
     onLine: (line) => onProgress(parseSdkPercent(line), line)
   });
   signal.throwIfAborted();
-  const still = missing.filter((id) => !packageInstalled(paths.sdk, id));
+  const still: string[] = [];
+  for (const id of missing) if (!(await packageInstalledOn(x, paths.sdk, id))) still.push(id);
   if (result.exitCode !== 0 || still.length > 0) {
     throw new Error(`Installing ${still.join(", ") || missing.join(", ")} failed: ${lastLine(result) || `exit ${result.exitCode}`}`);
   }
@@ -163,9 +181,10 @@ export interface GoldenMarker {
 
 export const avdDir = (avdHome: string, profileId: string) => join(avdHome, `${avdName(profileId)}.avd`);
 
-async function readJson<T>(path: string): Promise<T | null> {
+async function readJson<T>(path: string, executor: DeviceExecutor): Promise<T | null> {
   try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
+    const text = await executor.readText(path);
+    return text === null ? null : (JSON.parse(text) as T);
   } catch {
     return null;
   }
@@ -176,58 +195,63 @@ export function profileHash(profile: DeviceProfile): string {
 }
 
 /** The AVD exists, was patched, and matches the current hardware table. */
-export async function avdReady(avdHome: string, profile: DeviceProfile): Promise<boolean> {
+export async function avdReady(avdHome: string, profile: DeviceProfile, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<boolean> {
   const dir = avdDir(avdHome, profile.id);
-  if (!existsSync(join(avdHome, `${avdName(profile.id)}.ini`)) || !existsSync(join(dir, "config.ini"))) return false;
-  const marker = await readJson<AvdMarker>(join(dir, "orq-avd.json"));
+  if (!(await executor.exists(join(avdHome, `${avdName(profile.id)}.ini`))) || !(await executor.exists(join(dir, "config.ini")))) return false;
+  const marker = await readJson<AvdMarker>(join(dir, "orq-avd.json"), executor);
   return marker?.configHash === profileHash(profile);
 }
 
 /** The golden snapshot exists and was saved for this AVD config and emulator revision. */
-export async function goldenReady(avdHome: string, profile: DeviceProfile, emulatorRevision: string | null): Promise<boolean> {
+export async function goldenReady(avdHome: string, profile: DeviceProfile, emulatorRevision: string | null, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<boolean> {
   const dir = avdDir(avdHome, profile.id);
-  if (!existsSync(join(dir, "snapshots", "default_boot", "snapshot.pb"))) return false;
-  const marker = await readJson<GoldenMarker>(join(dir, "orq-golden.json"));
+  if (!(await executor.exists(join(dir, "snapshots", "default_boot", "snapshot.pb")))) return false;
+  const marker = await readJson<GoldenMarker>(join(dir, "orq-golden.json"), executor);
   return marker?.configHash === profileHash(profile) && marker.emulatorRevision === emulatorRevision;
 }
 
-export async function writeGoldenMarker(avdHome: string, profile: DeviceProfile, emulatorRevision: string | null): Promise<void> {
+export async function writeGoldenMarker(avdHome: string, profile: DeviceProfile, emulatorRevision: string | null, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<void> {
   const marker: GoldenMarker = { configHash: profileHash(profile), emulatorRevision, createdAt: new Date().toISOString() };
-  await writeFile(join(avdDir(avdHome, profile.id), "orq-golden.json"), `${JSON.stringify(marker)}\n`);
+  await executor.writeText(join(avdDir(avdHome, profile.id), "orq-golden.json"), `${JSON.stringify(marker)}\n`);
 }
 
 /** Drop a stale snapshot so the next golden boot starts cold and clean. */
-export async function clearGolden(avdHome: string, profileId: string): Promise<void> {
+export async function clearGolden(avdHome: string, profileId: string, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<void> {
   const dir = avdDir(avdHome, profileId);
-  await rm(join(dir, "snapshots"), { recursive: true, force: true });
-  await rm(join(dir, "orq-golden.json"), { force: true });
+  await executor.remove(join(dir, "snapshots"));
+  await executor.remove(join(dir, "orq-golden.json"));
 }
 
 /** (Re)create a profile's AVD and patch its config. The caller makes sure no instance of it runs. */
-export async function createAvd(paths: SdkPaths, profile: DeviceProfile, deps: Pick<SdkDeps, "exec" | "env">, signal: AbortSignal): Promise<void> {
+export async function createAvd(paths: SdkPaths, profile: DeviceProfile, deps: Pick<SdkDeps, "exec" | "env" | "executor">, signal: AbortSignal): Promise<void> {
+  const x = deps.executor ?? LOCAL_EXECUTOR;
   const name = avdName(profile.id);
   const hardware = avdHardware(profile);
   const dir = avdDir(paths.avd, profile.id);
-  await mkdir(paths.avd, { recursive: true });
-  await rm(dir, { recursive: true, force: true });
-  await rm(join(paths.avd, `${name}.ini`), { force: true });
+  await x.mkdir(paths.avd);
+  await x.remove(dir);
+  await x.remove(join(paths.avd, `${name}.ini`));
   const result = await deps.exec(
     avdmanagerPath(paths.sdk),
     ["create", "avd", "--force", "--name", name, "--package", profile.systemImage ?? ANDROID_SYSTEM_IMAGE, "--device", hardware.device, "--path", dir],
     { env: deps.env, signal, input: "no\n", timeoutMs: 2 * 60_000 }
   );
-  if (result.exitCode !== 0 || !existsSync(join(dir, "config.ini"))) {
+  const configPath = join(dir, "config.ini");
+  if (result.exitCode !== 0 || !(await x.exists(configPath))) {
     throw new Error(`Creating the ${profile.label} emulator failed: ${lastLine(result) || `exit ${result.exitCode}`}`);
   }
-  const configPath = join(dir, "config.ini");
-  const patched = patchAvdConfig(await readFile(configPath, "utf8"), { name, hardware });
+  // Older avdmanagers write the .ini under ~/.android/avd whatever ANDROID_AVD_HOME says.
+  const ini = join(paths.avd, `${name}.ini`);
+  const stray = deps.env.ANDROID_USER_HOME ? join(deps.env.ANDROID_USER_HOME, "avd", `${name}.ini`) : null;
+  if (!(await x.exists(ini)) && stray && (await x.exists(stray))) await x.rename(stray, ini);
+  const patched = patchAvdConfig((await x.readText(configPath)) ?? "", { name, hardware });
   if (hasAvdPlaceholders(patched)) throw new Error(`The ${profile.label} emulator's config.ini still has avdmanager placeholders.`);
-  await writeFile(configPath, patched);
+  await x.writeText(configPath, patched);
   const marker: AvdMarker = { profile: profile.id, configHash: profileHash(profile), createdAt: new Date().toISOString() };
-  await writeFile(join(dir, "orq-avd.json"), `${JSON.stringify(marker)}\n`);
+  await x.writeText(join(dir, "orq-avd.json"), `${JSON.stringify(marker)}\n`);
 }
 
 /** AVD names Orquester made (`orq-*.ini`) in the AVD home. */
-export async function listOrqAvds(avdHome: string): Promise<string[]> {
-  return (await readdir(avdHome).catch(() => [] as string[])).filter((entry) => entry.startsWith("orq-") && entry.endsWith(".ini")).map((entry) => entry.slice(0, -4));
+export async function listOrqAvds(avdHome: string, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<string[]> {
+  return (await executor.list(avdHome)).filter((entry) => entry.startsWith("orq-") && entry.endsWith(".ini")).map((entry) => entry.slice(0, -4));
 }

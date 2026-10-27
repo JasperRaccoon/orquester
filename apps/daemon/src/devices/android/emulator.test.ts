@@ -60,3 +60,17 @@ test("kvm: direct runs the binary; sg wraps it in one quoted exec", () => {
   assert.deepEqual(kvmCommand("sg", "/a b/emulator", ["-avd", "it's"]), { command: "sg", args: ["kvm", "-c", `exec '/a b/emulator' -avd 'it'\\''s'`] });
   assert.equal(shellQuote(["-port", "5554", "a=b"]), "-port 5554 a=b");
 });
+
+test("flags: a box lease boots its named snapshot with the snapshot's GPU mode, or cold when that failed", () => {
+  const named = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570, gpu: "swiftshader_indirect", snapshot: "orq-golden" });
+  assert.equal(named[0], "-read-only");
+  assert.equal(named[named.indexOf("-gpu") + 1], "swiftshader_indirect");
+  assert.deepEqual(named.slice(-3), ["-snapshot", "orq-golden", "-no-snapshot-save"]);
+  const cold = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5586, grpcPort: 8570, snapshot: "orq-golden", coldBoot: true });
+  assert.deepEqual(cold.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+  assert.equal(cold.includes("-snapshot"), false);
+  // A named golden is cold and writable, and saves nothing on exit (`adb emu avd snapshot save` does).
+  const golden = emulatorArgs({ avd: "orq-pixel-9", consolePort: 5554, grpcPort: 8554, golden: true, snapshot: "orq-golden" });
+  assert.equal(golden.includes("-read-only"), false);
+  assert.deepEqual(golden.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+});

@@ -44,6 +44,36 @@ export interface AndroidLayout {
   stateFile: string;
 }
 
+/**
+ * The same layout under one device root (a Linux box host: `/var/lib/orquester/devices` on
+ * Blacksmith, where the device caches restore `android-sdk`, `avd` and `tools`;
+ * `~/.orquester/devices` on an owner's own machine). `agentDeviceConfig` is not used there: a box
+ * host's `--config` file lives on this machine.
+ */
+export function androidLayoutAt(root: string): AndroidLayout {
+  const agentDevice = join(root, "agent-device");
+  return {
+    devices: root,
+    tools: join(root, "tools"),
+    sdk: join(root, "android-sdk"),
+    avd: join(root, "avd"),
+    runtime: join(root, "runtime"),
+    tmp: join(root, "tmp"),
+    home: join(root, "home"),
+    androidUser: join(root, "android-user"),
+    hubState: join(root, "hub-state"),
+    agentDeviceState: join(agentDevice, "state"),
+    agentDeviceHome: join(agentDevice, "home"),
+    agentDeviceClaims: join(agentDevice, "claims"),
+    agentDeviceConfig: join(agentDevice, "config.json"),
+    logs: join(root, "logs"),
+    uploads: join(root, "uploads"),
+    npmCache: join(root, "cache", "npm"),
+    downloads: join(root, "cache", "downloads"),
+    stateFile: join(root, "android-host.json")
+  };
+}
+
 export function androidLayout(appDir: string): AndroidLayout {
   const devices = devicesDir(appDir);
   const agentDevice = join(devices, "agent-device");

@@ -7,6 +7,13 @@
 
 import { readdir, readFile } from "node:fs/promises";
 
+/** Where `/proc` is read: this machine by default, or a box's executor (`executor.ts`). */
+export interface ProcSource {
+  procStat(pid: number): Promise<ProcStat | null>;
+  environ(pid: number): Promise<Map<string, string> | null>;
+  cmdline(pid: number): Promise<string[]>;
+}
+
 export interface ProcStat {
   pid: number;
   comm: string;
@@ -43,9 +50,9 @@ export async function readProcStat(pid: number): Promise<ProcStat | null> {
 }
 
 /** Alive and not a zombie. */
-export async function isProcessAlive(pid: number): Promise<boolean> {
+export async function isProcessAlive(pid: number, on?: Pick<ProcSource, "procStat">): Promise<boolean> {
   if (!Number.isInteger(pid) || pid <= 1) return false;
-  const stat = await readProcStat(pid);
+  const stat = await (on ? on.procStat(pid) : readProcStat(pid));
   return stat !== null && stat.state !== "Z" && stat.state !== "X";
 }
 
@@ -73,12 +80,12 @@ export async function readEnviron(pid: number): Promise<Map<string, string> | nu
 }
 
 /** Whether `pid` runs with `key=value` in its environment and its argv contains every `argvIncludes` (the pid was not reused). */
-export async function processMatches(pid: number, marker: { key: string; value: string }, argvIncludes: readonly string[] = []): Promise<boolean> {
-  if (!(await isProcessAlive(pid))) return false;
-  const env = await readEnviron(pid);
+export async function processMatches(pid: number, marker: { key: string; value: string }, argvIncludes: readonly string[] = [], on?: ProcSource): Promise<boolean> {
+  if (!(await isProcessAlive(pid, on))) return false;
+  const env = await (on ? on.environ(pid) : readEnviron(pid));
   if (!env || env.get(marker.key) !== marker.value) return false;
   if (argvIncludes.length === 0) return true;
-  const argv = await readCmdline(pid);
+  const argv = await (on ? on.cmdline(pid) : readCmdline(pid));
   return argvIncludes.every((part) => argv.some((arg) => arg.includes(part)));
 }
 
@@ -135,13 +142,13 @@ export function signalGroup(pgid: number | null, pid: number, signal: NodeJS.Sig
 }
 
 /** Resolves once `pid` exited (true) or `timeoutMs` passed (false). Polls: the pid may not be our child. */
-export async function waitForExit(pid: number, timeoutMs: number, pollMs = 200): Promise<boolean> {
+export async function waitForExit(pid: number, timeoutMs: number, pollMs = 200, on?: Pick<ProcSource, "procStat">): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await isProcessAlive(pid))) return true;
+    if (!(await isProcessAlive(pid, on))) return true;
     await delay(pollMs);
   }
-  return !(await isProcessAlive(pid));
+  return !(await isProcessAlive(pid, on));
 }
 
 export function delay(ms: number, signal?: AbortSignal): Promise<void> {
