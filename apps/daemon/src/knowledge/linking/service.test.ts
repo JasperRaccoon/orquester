@@ -11,7 +11,16 @@ import type { KnowledgeConceptRef, KnowledgeEntry, KnowledgeEntryMeta, Knowledge
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
 import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
-import type { KnowledgeEntryChange, KnowledgeGraphPort, KnowledgeRuntime, KnowledgeRuntimePort, KnowledgeSettingsPort, KnowledgeStorePort } from "../ports.ts";
+import type {
+  KnowledgeEntryChange,
+  KnowledgeGraphPort,
+  KnowledgeRoundTask,
+  KnowledgeRoundTaskSource,
+  KnowledgeRuntime,
+  KnowledgeRuntimePort,
+  KnowledgeSettingsPort,
+  KnowledgeStorePort
+} from "../ports.ts";
 import { FAKE_THRESHOLDS, FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } from "./context.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
@@ -1327,6 +1336,76 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     await h.service.pairChecksIdle();
     assert.equal(h.service.pairChecks.all().length, 1);
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check").length, 1, "each pair is checked once per pair of content hashes");
+    await h.service.stop();
+  });
+});
+
+/** A round task source that asks for the items it is given, once each, and records the answers. */
+function fakeRoundSource(items: string[]) {
+  const listeners = new Set<() => void>();
+  const asked = new Set<string>();
+  const recorded: string[] = [];
+  const calls: string[] = [];
+  let probe: () => string = () => "";
+  const source: KnowledgeRoundTaskSource = {
+    step: "round-test",
+    async tasks(): Promise<KnowledgeRoundTask[]> {
+      calls.push(probe());
+      const fresh = items.filter((item) => !asked.has(item) && !recorded.includes(item)).slice(0, 2);
+      return fresh.map((item) => ({ label: `round-test ${item}`, system: "Answer {\"ok\": true}.", user: `Item ${item}`, payload: { item } }));
+    },
+    validate: (value) => ((value as { ok?: unknown } | null)?.ok === true ? null : 'Answer {"ok": true}.'),
+    async record(payload) {
+      const item = (payload as { item: string }).item;
+      asked.add(item);
+      recorded.push(item);
+    },
+    onWork(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  };
+  return {
+    source,
+    recorded,
+    calls,
+    work: () => [...listeners].forEach((listener) => listener()),
+    watch: (read: () => string) => (probe = read)
+  };
+}
+
+describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 }, () => {
+  it("answers a source's capped tasks in the idle rounds only, counts their tokens, and asks each item once", async () => {
+    const graph = fakeGraphView();
+    const round = fakeRoundSource(["x", "y", "z"]);
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [round.source] } });
+    round.watch(() => h.service.status().state);
+    const ids = [ID(1), ID(2)];
+    graph.ready(ids);
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    // New work while a save waits: no round yet.
+    round.work();
+    await flushAsync(20);
+    assert.equal(round.calls.length, 0, "no round while entries wait to be linked");
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await h.until(() => round.recorded.length >= 2);
+    await h.service.pairChecksIdle();
+    assert.deepEqual(round.recorded.sort(), ["x", "y"], "the source's own cap: 2 a round");
+    assert.ok(round.calls.length > 0 && round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
+    const state = await readState(h);
+    const runTokens = state.recentRuns.reduce((sum, run) => sum + run.tokensIn, 0);
+    assert.ok(state.tokens.total.in > runTokens, "the round's chats count");
+    // More work: the next round takes the rest; then nothing is asked again.
+    round.work();
+    await h.until(() => round.recorded.length >= 3);
+    await h.service.pairChecksIdle();
+    round.work();
+    await flushAsync(20);
+    await h.service.pairChecksIdle();
+    const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").map((i) => i.input);
+    assert.equal(asked.length, 3, "each item once");
     await h.service.stop();
   });
 });

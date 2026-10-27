@@ -200,6 +200,38 @@ export interface KnowledgePairChecksPort {
   onChange(listener: () => void): () => void;
 }
 
+/**
+ * One LLM task a {@link KnowledgeRoundTaskSource} asks for: written into the pair checks' inbox
+ * (`linking/pair-checks.ts` `writeRoundTask`) and answered by the same worker chats, in the same
+ * idle rounds, as a pair check. `payload` (JSON) comes back with the answer.
+ */
+export interface KnowledgeRoundTask {
+  /** Unique per item, e.g. `concept-check <a> <b>`; part of the task id. */
+  label: string;
+  system: string;
+  user: string;
+  payload: unknown;
+}
+
+/**
+ * LLM work beside the pair checks (concept merge checks, cluster names): linking writes a source's
+ * tasks in its idle rounds (never while a linking run is active, paused with linking's pause
+ * reasons, its tokens counted with linking's) and hands each validated answer back. A source asks
+ * for each item at most once per input: it leaves out of {@link tasks} what it has an answer for.
+ */
+export interface KnowledgeRoundTaskSource {
+  /** The inbox step of its tasks (unique among the sources). */
+  readonly step: string;
+  /** New tasks for one round, at most the source's own cap; [] when there is nothing to ask. */
+  tasks(): Promise<KnowledgeRoundTask[]>;
+  /** `null` when `value` (the parsed answer) is acceptable for this task, else why not (the worker answers again). */
+  validate(value: unknown, payload: unknown): string | null;
+  /** A validated answer (JSON text) of a task with this payload. */
+  record(payload: unknown, answer: string): Promise<void>;
+  /** The source has new work: linking considers a round once it is idle. */
+  onWork?(listener: () => void): () => void;
+}
+
 // ---------------------------------------------------------------------------
 // visibility
 // ---------------------------------------------------------------------------

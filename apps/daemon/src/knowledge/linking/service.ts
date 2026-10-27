@@ -60,6 +60,10 @@
  *   once nothing is left to link or re-link, a round of up to 30 daemon-written tasks is answered
  *   by worker chats of its own (own inbox, broker and pool, `kp_` id); a run that wants to start
  *   ends the round first, and a pool that finds no account ends it. Its tokens count.
+ * - Round task sources (`roundTasks`: concept merge checks, cluster names): each round also takes
+ *   every source's own capped tasks; a source with new work (`onWork`) makes a round due, started
+ *   once linking is idle (after the round in progress, if any). Nothing else starts a round, so
+ *   rounds follow graph loads and new work, never loop on their own.
  */
 
 import { randomBytes } from "node:crypto";
@@ -99,6 +103,7 @@ import type {
   KnowledgeEntryChange,
   KnowledgeGraphPort,
   KnowledgeLinkingPort,
+  KnowledgeRoundTaskSource,
   KnowledgeRuntimePort,
   KnowledgeSettingsPort,
   KnowledgeStorePort
@@ -116,6 +121,7 @@ import {
   readMykgProgress
 } from "./mykg-files.ts";
 import {
+  acceptedRoundAnswer,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_MAX_PER_RUN,
@@ -125,6 +131,7 @@ import {
   removePairCheckTask,
   validatePairCheckAnswer,
   writePairCheckTask,
+  writeRoundTask,
   type PairKey
 } from "./pair-checks.ts";
 import {
@@ -181,6 +188,11 @@ export interface KnowledgeLinkingOptions {
    * re-linking, link gaps and pair checks. Absent: none of them (linking as before phase 2).
    */
   graphView?: KnowledgeLinkGraphView;
+  /**
+   * LLM work answered in the pair-check rounds beside the pair checks (concept merge checks, cluster
+   * names; `KnowledgeRoundTaskSource`). Needs `graphView` (the rounds run only with it).
+   */
+  roundTasks?: readonly KnowledgeRoundTaskSource[];
 }
 
 interface ActiveRun {
@@ -197,13 +209,16 @@ interface ActiveRun {
   finished: Promise<void>;
 }
 
+/** One task of a pair-check round: a pair check, or a round task source's item. */
+type RoundItem = { kind: "pair"; pair: PairKey } | { kind: "source"; source: KnowledgeRoundTaskSource; payload: unknown };
+
 /** A round of pair checks between linking runs (see the module header). */
 interface PairRound {
   id: string;
   broker: InboxBroker;
   pool: WorkerPool<WorkerCandidate>;
-  /** Task id → the pair it checks. */
-  tasks: Map<string, PairKey>;
+  /** Task id → what it asks. */
+  tasks: Map<string, RoundItem>;
   ending: boolean;
   /** Resolves once the round's chats ended and its inbox was cleaned. */
   ended: Promise<void>;
@@ -304,6 +319,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     this.offs.push(this.opts.runtime.onChange(() => this.onEnvironmentChanged()));
     if (this.opts.graphView) {
       await this.pairChecks.load().catch((error: unknown) => this.opts.logger?.warn("knowledge linking: pair-checks.json could not be read", { error: String(error) }));
+      // A source with new work (concept checks after planning, clusters to name) asks for a round.
+      for (const source of this.opts.roundTasks ?? []) {
+        const off = source.onWork?.(() => this.roundWorkArrived());
+        if (off) this.offs.push(off);
+      }
     }
     const session = this.state.session;
     if (session && isMykgSessionName(session)) {
@@ -1160,31 +1180,60 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     this.emitStatus();
   }
 
-  /** Starts a round of pair checks when one is due and linking is idle (see the module header). */
+  /** A round task source has new work: a round is due, started now if linking is idle. */
+  private roundWorkArrived(): void {
+    if (this.stopped) return;
+    this.pairRoundDue = true;
+    void this.maybeStartPairRound().catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair-check round could not start", { error: String(error) }));
+  }
+
+  /** The round task sources by step. */
+  private roundSources(): Map<string, KnowledgeRoundTaskSource> {
+    return new Map((this.opts.roundTasks ?? []).map((source) => [source.step, source]));
+  }
+
+  /**
+   * Starts a round when one is due and linking is idle (see the module header): up to
+   * {@link PAIR_CHECK_MAX_PER_RUN} pair checks, then each round task source's own capped tasks.
+   */
   private async maybeStartPairRound(): Promise<void> {
     if (!this.pairRoundDue || this.pairRound || this.pairStarting || !this.idleForPairChecks()) return;
     const view = this.opts.graphView!;
     // Vectors are still being computed after a start: wait for the next chance.
     if (view.vectors().embeddedIds().length === 0) return;
     this.pairStarting = true;
+    const tasks = new Map<string, RoundItem>();
     try {
       this.pairRoundDue = false;
-      await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks);
+      await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources());
       const store = this.opts.store;
       const candidates = await pairCheckCandidates({
         ids: store.listMeta().filter((meta) => meta.linkState === "linked").map((meta) => meta.id),
         view,
         hashOf: (id) => store.getMeta(id)?.contentHash ?? null,
+        entryOf: (id) => {
+          const meta = store.getMeta(id);
+          return meta ? { kind: meta.kind, author: meta.author, handle: meta.handle } : null;
+        },
         isChecked: (pair) => this.pairChecks.isChecked(pair),
         limit: PAIR_CHECK_MAX_PER_RUN
       });
-      if (candidates.length === 0 || !this.idleForPairChecks()) return;
-      const tasks = new Map<string, PairKey>();
+      if (!this.idleForPairChecks()) return;
       for (const candidate of candidates) {
         const [a, b] = await Promise.all([store.getEntry(candidate.a), store.getEntry(candidate.b)]);
         if (!a || !b || a.contentHash !== candidate.hashA || b.contentHash !== candidate.hashB) continue;
         const pair: PairKey = { a: candidate.a, b: candidate.b, hashA: candidate.hashA, hashB: candidate.hashB };
-        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, { a, b }, this.opts.clock.now()), pair);
+        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, { a, b }, this.opts.clock.now()), { kind: "pair", pair });
+      }
+      for (const source of this.opts.roundTasks ?? []) {
+        if (!this.idleForPairChecks()) break;
+        const items = await source.tasks().catch((error: unknown) => {
+          this.opts.logger?.warn("knowledge linking: a round task source failed", { step: source.step, error: String(error) });
+          return [];
+        });
+        for (const item of items) {
+          tasks.set(await writeRoundTask(this.pairInboxDir, source.step, item, this.opts.clock.now()), { kind: "source", source, payload: item.payload });
+        }
       }
       if (tasks.size === 0 || !this.idleForPairChecks()) {
         for (const id of tasks.keys()) await removePairCheckTask(this.pairInboxDir, id);
@@ -1193,14 +1242,24 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       await this.startPairRound(tasks);
     } finally {
       this.pairStarting = false;
+      // Work that arrived while this one was being put together and did not start a round: try once more.
+      if (this.pairRoundDue && !this.pairRound && !this.stopped) {
+        void Promise.resolve()
+          .then(() => this.maybeStartPairRound())
+          .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair-check round could not start", { error: String(error) }));
+      }
     }
   }
 
-  private async startPairRound(tasks: Map<string, PairKey>): Promise<void> {
+  private async startPairRound(tasks: Map<string, RoundItem>): Promise<void> {
     const broker = new InboxBroker({
       clock: this.opts.clock,
       ...(this.opts.logger ? { logger: this.opts.logger } : {}),
-      validate: (step, value) => (step === PAIR_CHECK_STEP ? validatePairCheckAnswer(value) : null)
+      validate: (step, value, taskId) => {
+        const item = tasks.get(taskId);
+        if (item?.kind === "source") return item.source.validate(value, item.payload);
+        return step === PAIR_CHECK_STEP ? validatePairCheckAnswer(value) : null;
+      }
     });
     const id = `kp_${randomBytes(6).toString("hex")}`;
     let round!: PairRound;
@@ -1216,13 +1275,19 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     round = { id, broker, pool, tasks, ending: false, ended: Promise.resolve() };
     this.pairRound = round;
     broker.events.on("answered", ({ taskId, answer }) => {
-      const pair = tasks.get(taskId);
-      const parsed = parsePairCheckAnswer(answer);
-      if (pair && parsed) {
-        void this.pairChecks
-          .record(pair, parsed.verdict, parsed.note)
+      const item = tasks.get(taskId);
+      let recording: Promise<void> | null = null;
+      if (item?.kind === "pair") {
+        const parsed = parsePairCheckAnswer(answer);
+        if (parsed) recording = this.pairChecks.record(item.pair, parsed.verdict, parsed.note);
+      } else if (item?.kind === "source") {
+        const accepted = acceptedRoundAnswer(item.source, item.payload, answer);
+        if (accepted !== null) recording = item.source.record(item.payload, accepted);
+      }
+      if (recording) {
+        void recording
           .then(() => removePairCheckTask(this.pairInboxDir, taskId))
-          .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair check could not be recorded", { error: String(error) }));
+          .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a round answer could not be recorded", { error: String(error) }));
       }
       const counts = broker.counts();
       if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
@@ -1234,7 +1299,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       this.endPairRound(round, { interrupt: false });
       return;
     }
-    this.opts.logger?.info?.("knowledge linking: pair checks started", { roundId: round.id, pairs: tasks.size });
+    const counts = new Map<string, number>();
+    for (const item of tasks.values()) {
+      const step = item.kind === "pair" ? PAIR_CHECK_STEP : item.source.step;
+      counts.set(step, (counts.get(step) ?? 0) + 1);
+    }
+    this.opts.logger?.info?.("knowledge linking: pair checks started", { roundId: round.id, tasks: Object.fromEntries(counts) });
     pool.reconcile();
     this.emitStatus();
   }
@@ -1256,7 +1326,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       .then(async () => {
         round.broker.dispose();
         await this.pairChecks.flush();
-        await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks);
+        await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources());
       })
       .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: ending a pair-check round failed", { error: String(error) }))
       .finally(() => {
@@ -1268,6 +1338,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           this.persist();
         }
         this.emitStatus();
+        // Work that arrived during the round (it was due again): the next round, once linking is idle.
+        if (this.pairRoundDue && !this.stopped) {
+          void this.maybeStartPairRound().catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair-check round could not start", { error: String(error) }));
+        }
       });
   }
 

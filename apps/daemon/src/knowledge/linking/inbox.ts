@@ -145,8 +145,8 @@ export interface InboxBrokerOptions {
    * before it is first handed out. Never changes the task file, its id, or myKG's cache.
    */
   contextFor?: (envelope: InboxTaskEnvelope) => Promise<string | null>;
-  /** A stricter check of a parsed answer for some steps: an error message refuses it like a parse error. */
-  validate?: (step: string, value: unknown) => string | null;
+  /** A stricter check of a parsed answer for some steps (or tasks): an error message refuses it like a parse error. */
+  validate?: (step: string, value: unknown, taskId: string) => string | null;
 }
 
 export type ParsedAnswer = { ok: true; text: string } | { ok: false; error: string };
@@ -428,7 +428,7 @@ export class InboxBroker {
     }
     let parsed = parseWorkerAnswer(answer);
     if (parsed.ok && this.validate) {
-      const error = this.validate(task.envelope!.step, JSON.parse(parsed.text));
+      const error = this.validate(task.envelope!.step, JSON.parse(parsed.text), task.id);
       if (error !== null) parsed = { ok: false, error };
     }
     if (!parsed.ok) {
