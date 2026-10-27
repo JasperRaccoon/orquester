@@ -575,7 +575,9 @@ export class BoxLifecycle {
           bootstrap,
           sshPublicKey: throwawaySshPublicKey(),
           windowsPassword,
-          lifetimeMinutes
+          lifetimeMinutes,
+          // Device hosts start from the device caches (Devices phase 2 §5).
+          ...(record.purpose === "device-host" ? { prepare: "devices" as const } : {})
         },
         // Not `signal`: aborting a create the provider may already have accepted leaves an instance without a ref.
         { signal: this.shutdown.signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }

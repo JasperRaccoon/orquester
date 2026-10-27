@@ -392,7 +392,7 @@ export interface BoxKindAvailability {
   /** Connected providers that rent this kind, cheapest first. */
   providers: BoxProviderId[];
   fromHourlyUsd: number | null;
-  /** The smallest provider maximum among `providers` (macOS: 7200). Null = none. */
+  /** The smallest provider maximum among `providers` (macOS: 7200). Null = none, or not every provider has one. */
   maxLifetimeMinutes: number | null;
   /** Why the kind is unavailable even with providers (e.g. "Tailscale is not set up on this desktop"). */
   unavailableReason: string | null;

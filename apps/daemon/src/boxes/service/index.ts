@@ -32,6 +32,7 @@ import type {
   BuildBootstrap,
   TailscaleKeys
 } from "../contracts.ts";
+import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
 import type { DaemonHttpAddress, LocalTailscale } from "../tailscale/local.ts";
 import { BoxSetupLog } from "./box-exec.ts";
 import { BoxError, errorLine } from "./errors.ts";
@@ -51,6 +52,7 @@ export { isBoxLocation } from "./projects.ts";
 export type { BoxRecordStore } from "./store.ts";
 export type { BlacksmithCheck, BlacksmithSetupDriver, BoxHostingAccounts, TailscaleCredentials } from "./settings.ts";
 export type { BoxGitAccess, ManagedAgentHome } from "./lifecycle.ts";
+export type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
 
 export interface BoxServiceDeps {
   baseDir: string;
@@ -122,6 +124,13 @@ export interface BoxService {
   createTemporaryBox(request: CreateTemporaryBoxRequest, signal?: AbortSignal): Promise<BoxSummary>;
   destroyBox(boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary>;
   startBlacksmithTest(): Promise<void>;
+  /**
+   * Start the Blacksmith device-cache workflow for one OS (the device service's "Warm caches");
+   * resolves its run id. Bills the org for the run.
+   */
+  dispatchDeviceCacheWarm(request: DeviceCacheWarmRequest): Promise<DeviceCacheWarmRun>;
+  /** A device-cache run's state, by the run id {@link dispatchDeviceCacheWarm} returned. */
+  deviceCacheWarmStatus(runId: string): Promise<DeviceCacheWarmStatus>;
   reconcileNow(): Promise<void>;
   /** Every background setup, destroy and image build has finished (tests). */
   settled(): Promise<void>;
@@ -364,6 +373,13 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
       blacksmithTest = run;
       track(run);
     },
+
+    async dispatchDeviceCacheWarm(request) {
+      if (!enabled) throw new BoxError(409, "BOXES_DISABLED", "Ephemeral AI VMs is turned off in Settings → Plugins.");
+      return settings.dispatchDeviceCacheWarm(request);
+    },
+
+    deviceCacheWarmStatus: (runId) => settings.deviceCacheWarmStatus(runId),
 
     reconcileNow: async () => {
       await reconciler.runOnce();

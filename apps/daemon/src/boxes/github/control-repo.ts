@@ -5,14 +5,25 @@
  * sent only to api.github.com and never appears in errors.
  *
  * Setup: {@link checkGithubAccount} → {@link detectBlacksmithApp} →
- * {@link ensureControlRepo} → {@link ensureWorkflowFile} → {@link waitWorkflowReady}.
- * Boxes: {@link dispatchBoxRun}, {@link getRun}, {@link getRunJobs},
- * {@link cancelRun} / {@link forceCancelRun}, {@link listRecentRuns}.
+ * {@link ensureControlRepo} → {@link ensureControlWorkflows} → {@link waitWorkflowReady}.
+ * Boxes: {@link ensureControlWorkflows} (each create: a changed template is re-committed),
+ * {@link dispatchBoxRun}, {@link getRun}, {@link getRunJobs}, {@link cancelRun} /
+ * {@link forceCancelRun}, {@link listRecentRuns}. Device caches: {@link dispatchWorkflowRun}.
  */
+
+import { createHash } from "node:crypto";
 
 import type { ProviderCallOptions } from "../contracts.ts";
 import { providerRequest, ProviderHttpError } from "../providers/http.ts";
-import { BLACKSMITH_CONTROL_REPO_NAME, type BlacksmithWorkflowInputs } from "./workflow-template.ts";
+import {
+  BLACKSMITH_CONTROL_REPO_NAME,
+  BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH,
+  BLACKSMITH_WORKFLOW_PATH,
+  blacksmithDeviceCacheWorkflowTemplate,
+  blacksmithWorkflowTemplate,
+  type BlacksmithWorkflowInputs,
+  type BlacksmithWorkflowOptions
+} from "./workflow-template.ts";
 
 const PROVIDER = "GitHub";
 const DEFAULT_API = "https://api.github.com";
@@ -306,13 +317,25 @@ export interface WorkflowFileResult {
   commitSha: string | null;
 }
 
-/** Commit `content` at `path` on the default branch unless it is already there (idempotent, updates when the template changes). */
+/** The git blob id of `content` (what the contents API reports as a file's `sha`). */
+export function gitBlobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+
+/**
+ * Commit `content` at `path` on the default branch unless it is already there (idempotent,
+ * updates when the template changes). The committed file's blob sha is compared with the
+ * content's first; the decoded content decides when they differ.
+ */
 export async function ensureWorkflowFile(
   repo: ControlRepo,
   path: string,
   content: string,
-  options: GithubCallOptions
+  options: GithubCallOptions & { label?: string }
 ): Promise<WorkflowFileResult> {
+  const label = options.label ?? "the Orquester box workflow";
+  const wanted = gitBlobSha(content);
   const filePath = `${repoPath(repo.repository)}/contents/${path.split("/").map(encodeURIComponent).join("/")}`;
   for (let attempt = 0; attempt < 3; attempt++) {
     const current = await gh<{ sha?: string; content?: string; encoding?: string }>(options, {
@@ -322,6 +345,7 @@ export async function ensureWorkflowFile(
     let sha: string | undefined;
     if (current.status === 200) {
       sha = current.data.sha;
+      if (sha === wanted) return { changed: false, commitSha: null };
       const existing = current.data.encoding === "base64" ? Buffer.from(current.data.content ?? "", "base64").toString("utf8") : null;
       if (existing === content) return { changed: false, commitSha: null };
     }
@@ -329,7 +353,7 @@ export async function ensureWorkflowFile(
       method: "PUT",
       path: filePath,
       body: {
-        message: sha === undefined ? "Add the Orquester box workflow" : "Update the Orquester box workflow",
+        message: sha === undefined ? `Add ${label}` : `Update ${label}`,
         content: Buffer.from(content, "utf8").toString("base64"),
         branch: repo.defaultBranch,
         ...(sha === undefined ? {} : { sha })
@@ -341,6 +365,32 @@ export async function ensureWorkflowFile(
     if (written.status === 200 || written.status === 201) return { changed: true, commitSha: written.data.commit?.sha ?? null };
   }
   throw new Error(`${PROVIDER}: could not write ${path} in ${repo.repository} (it keeps changing)`);
+}
+
+/** The control repo's workflow files and their contents for these options. */
+export function controlWorkflowFiles(options: BlacksmithWorkflowOptions = {}): Array<{ path: string; label: string; content: string }> {
+  return [
+    { path: BLACKSMITH_WORKFLOW_PATH, label: "the Orquester box workflow", content: blacksmithWorkflowTemplate(options) },
+    { path: BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH, label: "the Orquester device cache workflow", content: blacksmithDeviceCacheWorkflowTemplate() }
+  ];
+}
+
+/**
+ * Commit every control-repo workflow whose committed content differs from this build's
+ * template (setup, and each box create: orgs set up by an older build pick up new inputs).
+ * Resolves the paths it wrote.
+ */
+export async function ensureControlWorkflows(
+  repo: ControlRepo,
+  templateOptions: BlacksmithWorkflowOptions,
+  options: GithubCallOptions
+): Promise<{ changed: string[] }> {
+  const changed: string[] = [];
+  for (const file of controlWorkflowFiles(templateOptions)) {
+    const result = await ensureWorkflowFile(repo, file.path, file.content, { ...options, label: file.label });
+    if (result.changed) changed.push(file.path);
+  }
+  return { changed };
 }
 
 /** Wait until GitHub has registered the workflow file (it 404s for a short while after the commit). */
@@ -434,6 +484,17 @@ export async function dispatchBoxRun(
   request: { repository: string; workflowFile: string; ref: string; inputs: BlacksmithWorkflowInputs },
   options: GithubCallOptions & { deadlineMs?: number }
 ): Promise<DispatchResult> {
+  return dispatchWorkflowRun({ ...request, inputs: { ...request.inputs }, runName: `orq-${request.inputs.box_id}` }, options);
+}
+
+/**
+ * Start a run of any control-repo workflow ({@link dispatchBoxRun}'s rules); `runName` is the
+ * run name its `run-name` gives these inputs, to find the run when GitHub answers 204.
+ */
+export async function dispatchWorkflowRun(
+  request: { repository: string; workflowFile: string; ref: string; inputs: Readonly<Record<string, string>>; runName: string },
+  options: GithubCallOptions & { deadlineMs?: number }
+): Promise<DispatchResult> {
   const dispatchedAfter = Date.now() - 5_000;
   const dispatched = await pollUntil<{ status: number; data: { workflow_run_id?: number; html_url?: string } | null }>(
     async () => {
@@ -459,7 +520,7 @@ export async function dispatchBoxRun(
   const runId = dispatched.data?.workflow_run_id;
   if (typeof runId === "number") return { runId, htmlUrl: dispatched.data?.html_url ?? null };
 
-  const name = `orq-${request.inputs.box_id}`;
+  const name = request.runName;
   const run = await pollUntil(
     async () => (await listRecentRuns(request.repository, request.workflowFile, { ...options, since: new Date(dispatchedAfter) })).find(
       (candidate) => candidate.displayTitle === name

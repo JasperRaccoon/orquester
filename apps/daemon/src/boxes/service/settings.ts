@@ -29,6 +29,7 @@ import {
 } from "@orquester/api";
 
 import type { BoxProviderAdapter, BoxProviderRegistry, BuildBootstrap, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
 import type { BoxSetupLog } from "./box-exec.ts";
 import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
@@ -40,6 +41,8 @@ import { isActiveRecord } from "./summary.ts";
 /** How long a provider's offers are reused. */
 export const OFFERS_TTL_MS = 10 * 60_000;
 const PROVIDER_CALL_TIMEOUT_MS = 30_000;
+/** A device-cache dispatch may first re-commit the workflows and wait for GitHub to index them. */
+const DEVICE_CACHE_CALL_TIMEOUT_MS = 120_000;
 const MAX_CREDENTIAL_CHARS = 16 * 1024;
 
 export interface TailscaleCredentials extends TailscaleSecrets {
@@ -79,8 +82,15 @@ export interface BlacksmithSetupDriver {
     org: string,
     options: { daemonUrl: string; tailscale?: BlacksmithTailnetJoin | null; signal: AbortSignal }
   ): Promise<{ repo: string; workflowFile: string }>;
-  /** The credentials the Blacksmith adapter takes for this setup. */
-  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string }): ProviderCredentials;
+  /**
+   * The credentials the Blacksmith adapter takes for this setup. `tailscale`: the identity runs
+   * join the tailnet with now (the adapter re-commits the workflow when its template changed).
+   */
+  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string; tailscale?: BlacksmithTailnetJoin | null }): ProviderCredentials;
+  /** Start the device-cache workflow for one OS (Devices phase 2); resolves its run. */
+  dispatchDeviceCacheWarm(credentials: ProviderCredentials, request: DeviceCacheWarmRequest, signal: AbortSignal): Promise<DeviceCacheWarmRun>;
+  /** A device-cache run's state. */
+  deviceCacheWarmStatus(credentials: ProviderCredentials, runId: string, signal: AbortSignal): Promise<DeviceCacheWarmStatus>;
 }
 
 export type BlacksmithCheck = { ok: true; message?: string } | { ok: false; message: string; actionUrl: string | null };
@@ -368,7 +378,13 @@ export class BoxSettings implements BoxConnectivity {
     if (!driver || !setup.gitAccountId || !setup.org || !setup.repo || !setup.workflowFile) return null;
     const token = await this.deps.accounts.token(setup.gitAccountId);
     if (!token) return null;
-    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile });
+    let tailscale: BlacksmithTailnetJoin | null = null;
+    try {
+      tailscale = this.blacksmithRoute().join;
+    } catch {
+      // No route: creates fail on it before they need the workflow.
+    }
+    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile, tailscale });
   }
 
   // ---- offers and kinds --------------------------------------------------------------------------
@@ -452,7 +468,11 @@ export class BoxSettings implements BoxConnectivity {
         const priced = await Promise.all(usable.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
         priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
-        const lifetimes = usable.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
+        // A kind caps lifetimes only when every provider does: Blacksmith's Linux runners (5 days)
+        // next to clouds without a cap must not put a deadline on every Linux box. A box still
+        // gets its own provider's maximum (placement).
+        const caps = usable.map((adapter) => adapter.maxLifetimeMinutes);
+        const lifetimes = caps.every((value) => value !== null) ? (caps as number[]) : [];
         // macOS runners route differently: a kind is blocked only when none of its providers has a route.
         const routeProblems = usable.map((adapter) => this.routeProblem(adapter.id));
         const routeProblem = routeProblems.every((problem) => problem !== null) ? (routeProblems[0] ?? null) : null;
@@ -782,6 +802,38 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   // ---- Blacksmith ---------------------------------------------------------------------------------
+
+  /**
+   * Start the Blacksmith device-cache workflow (Devices phase 2 §2 goal 6): builds and saves the
+   * device caches of `request.os` that are missing. Resolves the run id for {@link deviceCacheWarmStatus}.
+   */
+  async dispatchDeviceCacheWarm(request: DeviceCacheWarmRequest): Promise<DeviceCacheWarmRun> {
+    if (request?.os !== "macos" && request?.os !== "linux") throw new BoxError(400, "BOX_INVALID_REQUEST", '`os` must be "macos" or "linux".');
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.dispatchDeviceCacheWarm(credentials, request, AbortSignal.timeout(DEVICE_CACHE_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not start the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  /** A device-cache run's state (`queued` → `running` → `completed`, `conclusion: "success"` when the caches exist). */
+  async deviceCacheWarmStatus(runId: string): Promise<DeviceCacheWarmStatus> {
+    if (typeof runId !== "string" || !/^\d{1,20}$/.test(runId)) throw new BoxError(400, "BOX_INVALID_REQUEST", "`runId` must be a workflow run id.");
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.deviceCacheWarmStatus(credentials, runId, AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not read the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  private async blacksmithCalls(): Promise<{ driver: BlacksmithSetupDriver; credentials: ProviderCredentials }> {
+    const driver = this.deps.blacksmith;
+    const credentials = await this.credentials("blacksmith");
+    if (!driver || !credentials) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", "Finish the Blacksmith setup steps first.");
+    return { driver, credentials };
+  }
 
   blacksmithReady(): boolean {
     const setup = this.deps.store.blacksmith();
