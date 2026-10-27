@@ -345,6 +345,19 @@ test("cache warming: the owner's Warm caches, a cache miss (once a day) and the 
   }
 });
 
+test("no host and none rentable (the factory cannot quote): PLATFORM_NOT_READY, not a full fleet", async () => {
+  const box = boxFactory();
+  box.factory.quote = null;
+  const { t } = await start({ local: null, box, pool: { placement: "pool-only", rentWithoutAsking: true } });
+  try {
+    assert.equal(t.service.toolPlanOpen("t1", "android").rental, null);
+    await assert.rejects(t.service.toolOpen("t1", { platform: "android" }, signal()), (error: DeviceError) => error.code === "PLATFORM_NOT_READY" && /can be rented/.test(error.message));
+    assert.equal(box.factory.provisioned.length, 0);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("Warm caches without the box service is refused", async () => {
   const { t } = await start({});
   try {

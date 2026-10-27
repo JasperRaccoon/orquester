@@ -657,6 +657,12 @@ export class DeviceService implements DeviceToolsPort {
       const label = DEVICE_PLATFORM_LABELS[request.platform];
       switch (error.code) {
         case "DEVICE_CAPACITY":
+          // No host of the platform at all, and none could be rented (its provider is off or not set up).
+          if (!this.hosts.list().some((host) => host.platforms.includes(request.platform) && host.research?.() == null)) {
+            return Promise.reject(
+              new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `No ${label} host can be rented right now. Ask the owner to check Settings → Devices and Settings → Ephemeral AI VMs.`)
+            );
+          }
           return Promise.reject(this.capacityError(request.platform));
         case "budget": {
           const settings = this.settings();
