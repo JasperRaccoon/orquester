@@ -397,3 +397,43 @@ export function outputTail(text: string, lines = 3): string {
     .join(" · ")
     .slice(0, 400);
 }
+
+/**
+ * Why an uploaded archive must not be unpacked, from `bsdtar -tf` (`names`) and `bsdtar -tvf`
+ * (`verbose`) of it (bsdtar reads zip, ipa and tarballs alike), or null when every entry stays
+ * inside the directory it is unpacked into: no absolute path, no `..` segment, no control
+ * character in a name; links (symbolic, or a tarball's hard links) only to a relative target that
+ * resolves inside; only files, directories and links. Both listings must agree entry by entry
+ * (a name with a newline in it does not).
+ */
+export function archiveListingProblem(names: string, verbose: string): string | null {
+  const entries = names.split("\n");
+  const lines = verbose.split("\n");
+  if (entries.at(-1) === "") entries.pop();
+  if (lines.at(-1) === "") lines.pop();
+  if (entries.length === 0) return "it is empty";
+  if (entries.length !== lines.length) return "its entry list cannot be read";
+  const outside = (path: string): boolean => {
+    if (path.startsWith("/")) return true;
+    const resolved = posix.normalize(path);
+    return resolved === ".." || resolved.startsWith("../");
+  };
+  for (let i = 0; i < entries.length; i += 1) {
+    const name = entries[i]!;
+    const line = lines[i]!;
+    // eslint-disable-next-line no-control-regex
+    if (name === "" || /[\u0000-\u001f\u007f]/.test(name)) return "an entry has an unreadable name";
+    if (name.startsWith("/") || name.split("/").includes("..")) return `the entry ${JSON.stringify(name.slice(0, 120))} points outside the archive`;
+    const type = line[0];
+    if (type === "-" || type === "d") continue;
+    const marker = type === "l" ? ` ${name} -> ` : type === "h" ? ` ${name} link to ` : null;
+    if (!marker) return `the entry ${JSON.stringify(name.slice(0, 120))} is not a file, directory or link`;
+    const at = line.indexOf(marker);
+    if (at < 0) return "its entry list cannot be read";
+    const target = line.slice(at + marker.length);
+    // A symbolic link resolves from its own directory; a hard link names an entry of the archive.
+    const resolved = type === "l" ? (target.startsWith("/") ? target : posix.join(posix.dirname(name), target)) : target;
+    if (target === "" || outside(resolved)) return `the link ${JSON.stringify(name.slice(0, 120))} points outside the archive`;
+  }
+  return null;
+}

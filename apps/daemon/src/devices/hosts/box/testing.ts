@@ -138,6 +138,14 @@ export class FakeMacBox {
   nodeVersion: string | null;
   /** Make the next `simctl <verb>` (or `simslim <verb>`) fail. */
   failNext: string | null = null;
+  /** What `bsdtar -tf` / `-tvf` list for an uploaded archive. */
+  archiveListing = {
+    names: "Payload/\nPayload/Demo.app/\nPayload/Demo.app/Info.plist\n",
+    verbose:
+      "drwxr-xr-x  0 runner staff       0 Oct 27 07:32 Payload/\n" +
+      "drwxr-xr-x  0 runner staff       0 Oct 27 07:32 Payload/Demo.app/\n" +
+      "-rw-r--r--  0 runner staff       3 Oct 27 07:32 Payload/Demo.app/Info.plist\n"
+  };
   /** Hold every `simslim on` until released (tests of preemption); null: answer at once. */
   holdSlim: Promise<void> | null = null;
   private readonly status = new EventEmitter();
@@ -347,6 +355,7 @@ export class FakeMacBox {
       }
       box.log.push(`${options.command} ${args.join(" ")}`);
       if (options.command === "find") proc.finish(0, `${args[0]}/Payload/Demo.app\n`);
+      else if (options.command === "bsdtar") proc.finish(0, args[0] === "-tvf" ? box.archiveListing.verbose : box.archiveListing.names);
       else proc.finish(0);
       return proc;
     };
