@@ -223,6 +223,11 @@ export interface DeviceHostFactoryContext {
   addHost(host: DeviceHost): void;
   removeHost(hostId: string): void;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /**
+   * Phase 2: the pool keeps this idle host for `pool.minWarmHosts`, or is draining it itself: a
+   * factory's own idle teardown leaves it alone (absent: none kept).
+   */
+  keepWarm?(hostId: string): boolean;
 }
 
 /** What renting one more host would cost, for the spend card and Settings. */

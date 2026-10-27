@@ -325,7 +325,8 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const at = now();
     for (const host of [...hosts.values()]) {
       const leases = ctx.activeLeases(host.id).length;
-      if (leases > 0 || !host.isReady()) {
+      // The pool keeps it warm (`pool.minWarmHosts`): not idle for teardown.
+      if (leases > 0 || !host.isReady() || ctx.keepWarm?.(host.id) === true) {
         idleSince.delete(host.boxId);
         continue;
       }

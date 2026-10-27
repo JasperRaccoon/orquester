@@ -142,6 +142,8 @@ export interface DeviceServiceDeps {
   poolStore?: DevicePoolStore;
   /** The box service's device-cache runs ("Warm caches"); null while unavailable. */
   cacheWarmer?: () => DeviceCacheWarmer | null;
+  /** Spend on device-host boxes today and this month (UTC), from the box records. */
+  poolSpend?: () => { todayUsd: number; monthUsd: number };
 }
 
 /** One running or finished setup job, with its promise. */
@@ -209,6 +211,7 @@ export class DeviceService implements DeviceToolsPort {
       leasesOn: (hostId) => this.leases.filter((lease) => lease.hostId === hostId && isLiveLease(lease)).length,
       publish: (summary) => this.deps.publish(DEVICES_POOL_EVENT, summary),
       ...(deps.cacheWarmer ? { cacheWarmer: deps.cacheWarmer } : {}),
+      ...(deps.poolSpend ? { spend: deps.poolSpend } : {}),
       now: () => this.nowMs(),
       id: () => this.newId(),
       logger: this.logger,
@@ -237,7 +240,8 @@ export class DeviceService implements DeviceToolsPort {
       activeLeases: (hostId) => this.leases.filter((lease) => lease.hostId === hostId && isLiveLease(lease)),
       addHost: (host) => this.hosts.add(host),
       removeHost: (hostId) => this.hosts.remove(hostId),
-      logger: this.logger
+      logger: this.logger,
+      keepWarm: (hostId) => this.pool.keepWarm(hostId)
     };
     for (const factory of this.deps.factories) {
       await factory.start(ctx).catch((error) => this.logger.error(`[devices] the ${factory.kind} host factory failed to start`, errorText(error)));

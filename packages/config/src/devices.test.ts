@@ -199,7 +199,7 @@ test("device-pool.json: tolerant per section; rejected entries and unknown keys 
   const raw = {
     version: 1,
     future: { keep: true },
-    spend: { days: { "2026-10-27": 1.5, bad: "x" }, months: { "2026-10": 12 }, note: "kept" },
+    spend: { note: "an older build's key, kept" },
     rentals: [
       { hostId: "box:a", platform: "android", provider: "blacksmith", size: "16vcpu", hourlyUsd: 1.92, rentedAt: "2026-10-27T00:00:00.000Z", extra: 1 },
       { hostId: 7 }
@@ -209,10 +209,8 @@ test("device-pool.json: tolerant per section; rejected entries and unknown keys 
     cache: { linux: { lastWarmAt: "2026-10-20T00:00:00.000Z" }, macos: 5, other: { x: 1 } }
   };
   const file = parseDevicePoolStateFile(raw);
-  assert.deepEqual(file.state.spend.days, { "2026-10-27": 1.5 });
-  assert.deepEqual(file.state.spend.months, { "2026-10": 12 });
   assert.equal(file.state.rentals.length, 1);
-  assert.equal(file.state.rentals[0]!.accruedUntil, null);
+  assert.equal(file.state.rentals[0]!.measured, false);
   assert.equal(file.state.learnedCapacity[0]!.samples, 1);
   assert.deepEqual(file.state.drainingHostIds, ["box:a"]);
   assert.equal(file.state.cache.linux?.lastAutoWarmAt, null);
@@ -221,7 +219,7 @@ test("device-pool.json: tolerant per section; rejected entries and unknown keys 
   assert.deepEqual(out.future, { keep: true });
   assert.equal((out.rentals as unknown[]).length, 2);
   assert.deepEqual((out.learnedCapacity as unknown[])[1], "junk");
-  assert.equal((out.spend as Record<string, unknown>).note, "kept");
+  assert.deepEqual(out.spend, { note: "an older build's key, kept" });
   assert.deepEqual((out.cache as Record<string, unknown>).other, { x: 1 });
   assert.equal((out.rentals as Record<string, unknown>[])[0]!.extra, 1);
   assert.throws(() => parseDevicePoolStateFile({ version: 2 }));

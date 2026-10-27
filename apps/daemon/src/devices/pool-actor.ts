@@ -5,13 +5,16 @@
  * - **Queue.** `acquire` queues one request (its deadline is the decision's); a placement resolves it
  *   with the host and a slot reserved until the service has recorded the lease (`done()`); a failure
  *   rejects it with a {@link PoolRefusal} the service words for the agent or the panel.
- * - **Scale up.** One `provision` per new host on the factory that rents the platform; while in
- *   flight it is a `pending` host (its future slots count). A host the factory adds while renting
- *   takes the pending one's place. A failed rental fails the requests it was for, and holds back
- *   rentals ahead of demand for {@link RENTAL_BACKOFF_MS}.
- * - **Scale down.** `destroy()` on idle and drained rented hosts.
- * - **Spend.** Every rented host's $/h accrues into `device-pool.json` per UTC day and month (from
- *   where it was last counted, so a restart loses nothing of a host that came back).
+ * - **Scale up.** `provision` on the factory that rents the platform (it owns the rental: provider,
+ *   size, its spend rules), one rental in flight per platform (factories rent one at a time); while
+ *   in flight it is a `pending` host whose future slots count, and the decision's further hosts
+ *   follow once it resolves. A host the factory adds while renting takes the pending one's place.
+ *   A failed rental fails the requests it was for, and holds back rentals ahead of demand for
+ *   {@link RENTAL_BACKOFF_MS}.
+ * - **Scale down.** `destroy()` on idle and drained rented hosts; hosts kept for `minWarmHosts` (or
+ *   drained) are reported to the factories (`keepWarm`) so their own idle teardown spares them.
+ * - **Spend.** Read from `deps.spend` (the box records: the factories' own source), never counted
+ *   twice.
  * - **Learned capacity.** A host the pool rented reports its capacity once ready: recorded per
  *   platform + provider + size, and new hosts are planned with it.
  * - **Drain.** Drained host ids persist; a drained rented host is destroyed once empty.
@@ -40,7 +43,7 @@ import {
   type DeviceSetupJob,
   type DevicesSettings
 } from "@orquester/api";
-import type { DevicePoolCacheState, DevicePoolRental } from "@orquester/config";
+import type { DevicePoolCacheState } from "@orquester/config";
 
 import { DeviceError, isDeviceError } from "./errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostRegistry, DeviceRentalCaps, DeviceRentalQuote } from "./host.ts";
@@ -114,6 +117,8 @@ export interface DevicePoolDeps {
   leasesOn(hostId: string): number;
   /** Publish the summary (`devices.pool`). */
   publish(summary: DevicePoolSummary): void;
+  /** Spend on device-host boxes today and this month (UTC), from their records; absent: 0. */
+  spend?: () => { todayUsd: number; monthUsd: number };
   /** The box service's cache runs; null while unavailable. */
   cacheWarmer?: () => DeviceCacheWarmer | null;
   now(): number;
@@ -221,10 +226,7 @@ export class DevicePool {
     this.abort.abort();
     for (const run of this.cacheRuns.values()) if (run.timer) clearTimeout(run.timer);
     for (const waiter of [...this.waiters.values()]) this.finish(waiter, new PoolRefusal("stopped", waiter.request.platform));
-    if (this.started) {
-      this.accrue(this.deps.now());
-      await this.deps.store.persist();
-    }
+    if (this.started) await this.deps.store.persist();
   }
 
   /** Something changed (a host, a lease, the settings): tick once soon. */
@@ -476,7 +478,6 @@ export class DevicePool {
     const now = this.deps.now();
     const settings = this.deps.settings();
     this.track(now);
-    this.accrue(now);
     this.learn(now);
     const decision = this.decide(this.requests());
     this.lastDecision = decision;
@@ -503,8 +504,17 @@ export class DevicePool {
       now,
       offers,
       learned: state.learnedCapacity,
-      monthSpentUsd: state.spend.months[monthKey(now)] ?? 0
+      monthSpentUsd: this.spent().monthUsd
     });
+  }
+
+  private spent(): { todayUsd: number; monthUsd: number } {
+    return this.deps.spend?.() ?? { todayUsd: 0, monthUsd: 0 };
+  }
+
+  /** The pool keeps this host (warm minimum, or draining it itself): a factory's idle teardown spares it. */
+  keepWarm(hostId: string): boolean {
+    return (this.lastDecision?.warmHostIds.includes(hostId) ?? false) || this.isDraining(hostId);
   }
 
   private offer(platform: DevicePlatform): PoolRentalOffer | null {
@@ -606,61 +616,6 @@ export class DevicePool {
     if (changed) void this.deps.store.persist();
   }
 
-  /** Accrue every rented host's $/h since it was last counted (split at UTC day boundaries). */
-  private accrue(now: number): void {
-    const state = this.deps.store.state();
-    let changed = false;
-    for (const host of this.deps.hosts.list()) {
-      if (host.kind !== "box") continue;
-      const box = host.box?.() ?? null;
-      let rental = state.rentals.find((entry) => entry.hostId === host.id);
-      if (!rental) {
-        // A box host the pool did not rent (from before a restart, or rented elsewhere): counted from now.
-        rental = {
-          hostId: host.id,
-          platform: host.platforms[0] ?? "ios",
-          provider: box?.provider ?? "unknown",
-          size: "unknown",
-          hourlyUsd: box?.hourlyUsd ?? null,
-          rentedAt: box?.startedAt ?? new Date(now).toISOString(),
-          accruedUntil: new Date(now).toISOString(),
-          measured: true
-        } satisfies DevicePoolRental;
-        state.rentals.push(rental);
-        changed = true;
-        continue;
-      }
-      const hourly = box?.hourlyUsd ?? rental.hourlyUsd;
-      const from = parseMs(rental.accruedUntil) ?? parseMs(rental.rentedAt) ?? now;
-      if (hourly === null || hourly <= 0 || now <= from) {
-        if (rental.accruedUntil === null) {
-          rental.accruedUntil = new Date(now).toISOString();
-          changed = true;
-        }
-        continue;
-      }
-      let at = from;
-      while (at < now) {
-        const nextDay = Date.UTC(new Date(at).getUTCFullYear(), new Date(at).getUTCMonth(), new Date(at).getUTCDate() + 1);
-        const end = Math.min(now, nextDay);
-        const usd = (hourly * (end - at)) / 3_600_000;
-        const day = dayKey(at);
-        const month = monthKey(at);
-        state.spend.days[day] = round((state.spend.days[day] ?? 0) + usd);
-        state.spend.months[month] = round((state.spend.months[month] ?? 0) + usd);
-        at = end;
-      }
-      rental.accruedUntil = new Date(now).toISOString();
-      changed = true;
-    }
-    if (changed) {
-      // Keep about a year of days.
-      const days = Object.keys(state.spend.days).sort();
-      for (const day of days.slice(0, Math.max(0, days.length - 400))) delete state.spend.days[day];
-      void this.deps.store.persist();
-    }
-  }
-
   /** A ready host the pool rented reports its capacity once: recorded for its provider + size. */
   private learn(now: number): void {
     const state = this.deps.store.state();
@@ -728,6 +683,8 @@ export class DevicePool {
   }
 
   private rent(platform: DevicePlatform, requestIds: string[], now: number): void {
+    // Factories rent one host at a time: the next waits for this one (the decision asks again).
+    if ([...this.pending.values()].some((entry) => entry.platform === platform)) return;
     const factory = this.provisioner(platform);
     const offer = this.offer(platform);
     if (!factory?.provision || !offer) return;
@@ -739,8 +696,8 @@ export class DevicePool {
       .provision({ platform, approved: true, threadId }, this.abort.signal)
       .then((host) => {
         const state = this.deps.store.state();
+        // A factory renting one at a time may answer an earlier rental's host: recorded once.
         if (!state.rentals.some((entry) => entry.hostId === host.id)) {
-          state.rentals = state.rentals.filter((entry) => entry.hostId !== host.id);
           state.rentals.push({
             hostId: host.id,
             platform,
@@ -748,13 +705,8 @@ export class DevicePool {
             size: offer.size,
             hourlyUsd: offer.hourlyUsd,
             rentedAt: new Date(rental.startedAt).toISOString(),
-            accruedUntil: new Date(this.deps.now()).toISOString(),
             measured: false
           });
-        } else {
-          // The accrual adopted it before the rental resolved: it is the pool's.
-          const adopted = state.rentals.find((entry) => entry.hostId === host.id)!;
-          Object.assign(adopted, { platform, provider: offer.provider, size: offer.size, hourlyUsd: adopted.hourlyUsd ?? offer.hourlyUsd, measured: false });
         }
         this.seen.add(host.id);
         void this.deps.store.persist();
@@ -818,7 +770,7 @@ export class DevicePool {
       maxHosts: settings.pool.maxHosts,
       hourlyUsd: round(hosts.reduce((sum, host) => sum + (host.hourlyUsd ?? 0), 0)),
       maxHourlyUsd: settings.pool.maxHourlyUsd,
-      monthSpentUsd: round(this.deps.store.state().spend.months[monthKey(this.deps.now())] ?? 0),
+      monthSpentUsd: round(this.spent().monthUsd),
       monthlyCapUsd: settings.pool.monthlyCapUsd
     };
   }
@@ -880,9 +832,9 @@ export class DevicePool {
       platforms,
       spend: {
         day: dayKey(now),
-        todayUsd: round(state.spend.days[dayKey(now)] ?? 0),
+        todayUsd: round(this.spent().todayUsd),
         month: monthKey(now),
-        monthUsd: round(state.spend.months[monthKey(now)] ?? 0),
+        monthUsd: round(this.spent().monthUsd),
         monthlyCapUsd: settings.pool.monthlyCapUsd,
         maxHourlyUsd: settings.pool.maxHourlyUsd
       },

@@ -20,7 +20,7 @@
 import { mkdir } from "node:fs/promises";
 
 import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID, type DevicesEventType, type PluginsResponse } from "@orquester/api";
-import { deviceLeasesPath, deviceScreenshotsDir, devicesDir, devicesSettingsPath } from "@orquester/config";
+import { deviceLeasesPath, devicePoolPath, deviceScreenshotsDir, devicesDir, devicesSettingsPath, type StoredBox } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 
@@ -37,7 +37,9 @@ import { registerDeviceHttpRoutes } from "./http-routes.ts";
 import { createHubProxy, type HubProxy } from "./hub-proxy.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService } from "./service.ts";
-import { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
+import { DeviceLeaseStore, DevicePoolStore, DeviceSettingsStore } from "./store.ts";
+import type { DeviceCacheWarmer } from "./pool-actor.ts";
+import { monthCostUsd } from "../boxes/service/summary.ts";
 import { createDeviceToolchain, type DeviceToolchain } from "./toolchain/index.ts";
 import { registerDeviceWsRoutes } from "./ws-routes.ts";
 
@@ -81,6 +83,40 @@ export interface DaemonDevices {
   registerWsRoutes(app: FastifyInstance, deps: { authorize(token: string | undefined, socket: WebSocket): boolean }): Promise<void>;
 }
 
+/**
+ * Spend on device-host boxes today and this month (UTC), from the box records — the same source
+ * the box host factory's spend rules read, so the pool never counts it twice.
+ */
+export function deviceHostSpendUsd(records: readonly StoredBox[], now: number): { todayUsd: number; monthUsd: number } {
+  const date = new Date(now);
+  const dayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  let todayUsd = 0;
+  let monthUsd = 0;
+  for (const record of records) {
+    if (record.purpose !== "device-host") continue;
+    const month = monthCostUsd(record, now);
+    monthUsd += month;
+    // The month's cost up to midnight is in the same month (midnight is never before its start).
+    todayUsd += Math.max(0, month - monthCostUsd(record, dayStart));
+  }
+  return { todayUsd, monthUsd };
+}
+
+/** The box service's device-cache runs, while the box wiring is there. */
+function boxCacheWarmer(boxes: Pick<DaemonBoxes, "service"> | null): DeviceCacheWarmer | null {
+  if (!boxes) return null;
+  return {
+    dispatch: async (request) => {
+      const run = await boxes.service.dispatchDeviceCacheWarm(request);
+      return { runId: run.runId, htmlUrl: run.htmlUrl };
+    },
+    status: async (runId) => {
+      const status = await boxes.service.deviceCacheWarmStatus(runId);
+      return { state: status.state, conclusion: status.conclusion, htmlUrl: status.htmlUrl };
+    }
+  };
+}
+
 export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
   const { logger } = deps;
   const toolchain = createDeviceToolchain({ appDir: deps.baseDir, env: deps.env, logger });
@@ -115,6 +151,7 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
     const built = new DeviceService({
       settingsStore: new DeviceSettingsStore({ file: devicesSettingsPath(deps.baseDir), logger }),
       leaseStore: new DeviceLeaseStore({ file: deviceLeasesPath(deps.baseDir), logger }),
+      poolStore: new DevicePoolStore({ file: devicePoolPath(deps.baseDir), logger }),
       factories,
       actions,
       screenshots: new DeviceScreenshots(deviceScreenshotsDir(deps.baseDir), logger),
@@ -122,6 +159,8 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
       threadTitle: deps.threadTitle,
       threadProject: deps.threadProject,
       threadExists: deps.threadExists,
+      cacheWarmer: () => boxCacheWarmer(deps.boxes()),
+      poolSpend: () => deviceHostSpendUsd(deps.boxes()?.registry.list() ?? [], Date.now()),
       logger,
       ...(deps.idleTimer === false ? { idleTimer: false } : {})
     });

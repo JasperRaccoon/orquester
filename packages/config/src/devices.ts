@@ -488,7 +488,7 @@ export const deviceLearnedCapacitySchema = z
   .passthrough();
 export type DeviceLearnedCapacity = z.infer<typeof deviceLearnedCapacitySchema>;
 
-/** A host the pool rented: what it was rented as (provider, size, price) and how far its spend is counted. */
+/** A host the pool rented: what it was rented as (provider, size, price), for learned capacity. */
 export const devicePoolRentalSchema = z
   .object({
     hostId: z.string().min(1),
@@ -497,8 +497,6 @@ export const devicePoolRentalSchema = z
     size: z.string().min(1),
     hourlyUsd: z.number().finite().min(0).nullable().default(null),
     rentedAt: z.string(),
-    /** Spend is counted up to here (ISO). */
-    accruedUntil: z.string().nullable().default(null),
     /** Its capacity was learned already. */
     measured: z.boolean().default(false)
   })
@@ -519,22 +517,12 @@ export const devicePoolCacheSchema = z
   .passthrough();
 export type DevicePoolCacheState = z.infer<typeof devicePoolCacheSchema>;
 
-const usdBuckets = z
-  .record(z.string(), z.unknown())
-  .transform((record) => {
-    const out: Record<string, number> = {};
-    for (const [key, value] of Object.entries(record)) if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[key] = value;
-    return out;
-  })
-  .catch({});
-
 /**
- * `device-pool.json`: spend so far (USD per UTC day `YYYY-MM-DD` and month `YYYY-MM`), the hosts
- * the pool rented, learned capacities, drained host ids and cache-warm state. Tolerant like
+ * `device-pool.json`: the hosts the pool rented, learned capacities, drained host ids and
+ * cache-warm state (spend is not kept here: the box records are its one source). Tolerant like
  * `devices.json`: each section falls back alone, unknown keys and entries are kept on rewrite.
  */
 export interface DevicePoolState {
-  spend: { days: Record<string, number>; months: Record<string, number> };
   rentals: DevicePoolRental[];
   learnedCapacity: DeviceLearnedCapacity[];
   drainingHostIds: string[];
@@ -551,7 +539,7 @@ export interface DevicePoolStateFile {
 }
 
 export function createDefaultDevicePoolState(): DevicePoolState {
-  return { spend: { days: {}, months: {} }, rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} };
+  return { rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} };
 }
 
 export function createDefaultDevicePoolStateFile(): DevicePoolStateFile {
@@ -569,7 +557,7 @@ function entries<T>(value: unknown, schema: z.ZodType<T, z.ZodTypeDef, unknown>)
   return { ok, rejected };
 }
 
-const POOL_KEYS = ["version", "spend", "rentals", "learnedCapacity", "drainingHostIds", "cache"];
+const POOL_KEYS = ["version", "rentals", "learnedCapacity", "drainingHostIds", "cache"];
 
 /** Tolerant read of `device-pool.json`; the OUTER shape throws (not an object, another version), like the other device stores. */
 export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
@@ -578,7 +566,6 @@ export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
   if (record.version !== undefined && record.version !== DEVICE_POOL_STATE_VERSION) {
     throw new Error(`Not a version-${DEVICE_POOL_STATE_VERSION} device pool file (version ${JSON.stringify(record.version)})`);
   }
-  const spendRaw = record.spend !== null && typeof record.spend === "object" && !Array.isArray(record.spend) ? (record.spend as Record<string, unknown>) : {};
   const rentals = entries(record.rentals, devicePoolRentalSchema);
   const learned = entries(record.learnedCapacity, deviceLearnedCapacitySchema);
   const cacheRaw = record.cache !== null && typeof record.cache === "object" && !Array.isArray(record.cache) ? (record.cache as Record<string, unknown>) : {};
@@ -593,7 +580,6 @@ export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
   return {
     version: DEVICE_POOL_STATE_VERSION,
     state: {
-      spend: { ...spendRaw, days: usdBuckets.parse(spendRaw.days ?? {}), months: usdBuckets.parse(spendRaw.months ?? {}) },
       rentals: rentals.ok,
       learnedCapacity: learned.ok,
       drainingHostIds: [...new Set(draining)],
@@ -608,7 +594,6 @@ export function serializeDevicePoolStateFile(file: DevicePoolStateFile): Record<
   return {
     ...file.extra,
     version: DEVICE_POOL_STATE_VERSION,
-    spend: file.state.spend,
     rentals: [...file.state.rentals, ...file.rejected.rentals],
     learnedCapacity: [...file.state.learnedCapacity, ...file.rejected.learnedCapacity],
     drainingHostIds: file.state.drainingHostIds,

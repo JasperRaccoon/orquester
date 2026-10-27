@@ -235,7 +235,9 @@ test("decidePool approval: standing approval within the monthly cap, else one ap
   assert.deepEqual(failed(approved), {});
   // The factory's own standing approval counts (an iOS quote with needsApproval false).
   assert.equal(decide({ requests: [req("r1")], settings: noStanding, offers: { android: offer({ preApproved: true }) } }).scaleUp[0]!.approvedBy, "standing");
-  // Over the monthly cap: a card again (unknown price too).
+  // The factory's approval stands on its own rules (its own cap), even past the pool's.
+  assert.equal(decide({ requests: [req("r1")], settings: noStanding, monthSpentUsd: 995, offers: { android: offer({ preApproved: true }) } }).scaleUp[0]!.approvedBy, "standing");
+  // Over the pool's monthly cap: a card again (unknown price too).
   assert.deepEqual(failed(decide({ requests: [req("r1")], monthSpentUsd: 995 })), { r1: "approval" });
   assert.deepEqual(failed(decide({ requests: [req("r1")], offers: { android: offer({ hourlyUsd: null }) } })), { r1: "approval" });
   assert.equal(decide({ requests: [req("r1", { rentalApproved: true })], monthSpentUsd: 995 }).scaleUp[0]!.approvedBy, "request");

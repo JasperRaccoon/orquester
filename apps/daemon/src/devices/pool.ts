@@ -112,8 +112,9 @@ export function choosePlacement(input: PlacementInput): Placement {
 //   4. otherwise it needs a new host.
 // Scale up, per platform: unless `local-only` and only when a factory quotes a rental —
 //   - demand: one host per `perHostCapacity` unmet requests, while `maxHosts` and `maxHourlyUsd`
-//     allow. Covered by the owner's standing approval ("Rent device hosts without asking", a known
-//     price, this month's spend + the host's whole lifetime within `monthlyCapUsd`), or by a
+//     allow. Covered by a standing approval — the factory's own (its quote needs no approval) or the
+//     pool's ("Rent device hosts without asking", a known price, this month's spend + the host's
+//     whole lifetime within `monthlyCapUsd`) — or by a
 //     request whose rental the owner approved (its spend card; one card per host). Unapproved
 //     requests with no standing approval fail `approval` at once (the agent's next call asks).
 //   - ahead of demand (standing approval only): while the pool is in use and fewer than a quarter
@@ -376,10 +377,11 @@ export function decidePool(input: PoolInput): PoolDecision {
   /** New hosts planned per platform, and their slots left after the demand they take. */
   const planned = new Map<DevicePlatform, { hosts: number; spare: number }>();
   const offerOf = (platform: DevicePlatform): PoolRentalOffer | null => (mode === "local-only" ? null : (input.offers[platform] ?? null));
+  // The factory's own standing approval (its spend rules: e.g. "Rent Mac hosts without asking" within
+  // `ios.monthlyCapUsd`), or the pool's ("Rent device hosts without asking" within `pool.monthlyCapUsd`).
   const standing = (offer: PoolRentalOffer): boolean =>
-    offer.hourlyUsd !== null &&
-    (pool.rentWithoutAsking || offer.preApproved) &&
-    input.monthSpentUsd + plannedWorstUsd + worstCaseUsd(offer) <= pool.monthlyCapUsd + EPSILON;
+    offer.preApproved ||
+    (offer.hourlyUsd !== null && pool.rentWithoutAsking && input.monthSpentUsd + plannedWorstUsd + worstCaseUsd(offer) <= pool.monthlyCapUsd + EPSILON);
   /** What blocks one more rental (a hard cap), or null. */
   const capBlock = (offer: PoolRentalOffer): "capacity" | "budget" | null => {
     if (hostCount + 1 > pool.maxHosts) return "capacity";
