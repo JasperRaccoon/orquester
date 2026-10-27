@@ -544,6 +544,7 @@ export class DevicePool {
         startedAt: parseMs(box?.startedAt) ?? parseMs(rental?.rentedAt) ?? pendingFor?.startedAt ?? null,
         idleSince: this.idleSince.get(host.id) ?? null,
         destroyable: host.kind === "box" && typeof host.destroy === "function",
+        ...(host.research?.() ? { research: true } : {}),
         provider: rental?.provider ?? pendingFor?.offer.provider ?? box?.provider ?? null,
         size: rental?.size ?? pendingFor?.offer.size ?? null
       });

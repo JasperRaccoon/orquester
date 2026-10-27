@@ -115,6 +115,21 @@ test("settings: a patch merges field-wise and keeps the keys it does not name", 
   assert.equal(current.android.enabled, false);
 });
 
+test("settings: research vphone hosts are keyed by box id, merge field-wise, and a null entry is forgotten", () => {
+  const read = readDevicesSettings({
+    research: { vphoneHosts: { box1: { enabled: true, extra: 1 }, "../bad": { enabled: true }, box2: "nope" }, future: true }
+  });
+  assert.deepEqual(read.research.vphoneHosts, { box1: { enabled: true, iphoneSource: null, cloudosSource: null, extra: 1 } });
+  assert.equal((read.research as unknown as Record<string, unknown>).future, true);
+
+  const next = mergeDevicesSettings(read, { research: { vphoneHosts: { box1: { cloudosSource: "https://example.test/cloudOS.ipsw" }, box3: { enabled: true } } } });
+  assert.deepEqual(next.research.vphoneHosts.box1, { enabled: true, iphoneSource: null, cloudosSource: "https://example.test/cloudOS.ipsw", extra: 1 });
+  assert.equal(next.research.vphoneHosts.box3?.enabled, true);
+  const forgotten = mergeDevicesSettings(next, { research: { vphoneHosts: { box1: null } } });
+  assert.deepEqual(Object.keys(forgotten.research.vphoneHosts), ["box3"]);
+  assert.deepEqual(readDevicesSettings({ research: "x" }).research, { vphoneHosts: {} });
+});
+
 const lease = (id: string, extra: Record<string, unknown> = {}) => ({
   id,
   threadId: "t1",

@@ -21,7 +21,7 @@ import {
 import { agentRepo, groupAgentSessionsByRepo, matchesAgentQuery } from "../../lib/opened-agents";
 import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { RepoIcon } from "../repo/RepoIcon";
-import { useAppStore, useThreadUnread } from "../../store/app";
+import { serverViewOpen, useAppStore, useThreadUnread } from "../../store/app";
 import { WorkflowAttention, useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import {
   attentionKey,
@@ -65,8 +65,8 @@ const AgentCard: React.FC<{
     (s) => s.activeTabByProject[entry.session.projectPath] === entry.session.id
   );
   const inOpenProject = useAppStore((s) => s.currentProject?.path === entry.session.projectPath);
-  const knowledgeShowing = useAppStore((s) => s.knowledgeView.open);
-  const onScreen = activeInProject && inOpenProject && !knowledgeShowing;
+  const serverViewShowing = useAppStore(serverViewOpen);
+  const onScreen = activeInProject && inOpenProject && !serverViewShowing;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Right-click, or a long press on a touch screen (iOS fires no `contextmenu`).
   const press = useLongPress((point) => setMenu(point));

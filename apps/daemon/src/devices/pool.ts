@@ -4,7 +4,7 @@
  *
  * Phase 1 rules, in order:
  * 1. the platform is off in Settings → Devices → `disabled`;
- * 2. a named host (`hostId`) is used alone;
+ * 2. a named host (`hostId`) is used alone; research hosts (phase 3 vphone) are used only so;
  * 3. otherwise local first (unless `pool-only`), then the busiest ready box host that still has
  *    room (best fit packs hosts, so idle ones can be torn down);
  * 4. no room, but a host is starting or installing → `wait` for it;
@@ -32,6 +32,8 @@ export interface PlacementHost {
   total: number;
   /** Phase 2: draining hosts take no new lease. */
   draining?: boolean;
+  /** Phase 3: a research host (vphone): only a request naming it lands there. */
+  research?: boolean;
 }
 
 export type Placement =
@@ -70,8 +72,11 @@ export function choosePlacement(input: PlacementInput): Placement {
   const mode = settings.pool.placement;
   let hosts = input.hosts.filter((host) => host.platforms.includes(platform));
   if (input.hostId !== undefined) hosts = hosts.filter((host) => host.id === input.hostId);
-  else if (mode === "pool-only") hosts = hosts.filter((host) => host.kind !== "local");
-  else if (mode === "local-only") hosts = hosts.filter((host) => host.kind === "local");
+  else {
+    hosts = hosts.filter((host) => host.research !== true);
+    if (mode === "pool-only") hosts = hosts.filter((host) => host.kind !== "local");
+    else if (mode === "local-only") hosts = hosts.filter((host) => host.kind === "local");
+  }
 
   const local = hosts.find((host) => host.kind === "local" && hasRoom(host));
   if (local) return { kind: "host", hostId: local.id };
@@ -100,6 +105,7 @@ export function choosePlacement(input: PlacementInput): Placement {
 // (and every rental in flight, as a `pending` host) and the clock, and acts on the answer. Rules:
 //
 // Placement, per request, oldest first (each takes one slot; the next sees what is left):
+// Research hosts (phase 3 vphone) are never placed on.
 //   1. this host, unless `pool-only` (a slot is free: ready, not draining, used < total);
 //   2. best fit: the most loaded ready pool host with a free slot (packs hosts so idle ones go);
 //   3. a starting host's future slot (its total, else the learned/default capacity), soonest first;
@@ -151,6 +157,8 @@ export interface PoolHost {
   size?: string | null;
   /** A rental in flight that has no host yet. */
   pending?: boolean;
+  /** Phase 3: a research host (vphone): the pool never places on it (only a request naming it, outside the pool). */
+  research?: boolean;
 }
 
 /** A lease request waiting for a host. */
@@ -290,7 +298,7 @@ export function decidePool(input: PoolInput): PoolDecision {
   }
 
   const inScope = (host: PoolHost, platform: DevicePlatform): boolean =>
-    host.platforms.includes(platform) && (mode === "pool-only" ? host.kind !== "local" : mode === "local-only" ? host.kind === "local" : true);
+    host.platforms.includes(platform) && host.research !== true && (mode === "pool-only" ? host.kind !== "local" : mode === "local-only" ? host.kind === "local" : true);
   /** Slots left per host this round (ready hosts now; starting ones later). */
   const free = new Map<string, number>();
   const future = new Map<string, number>();

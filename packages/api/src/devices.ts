@@ -16,8 +16,12 @@ import {
   DEFAULT_IOS_DEVICE_PROFILE_IDS,
   DEVICE_PLACEMENT_MODES,
   DEVICES_SETTINGS_LIMITS,
+  DEVICES_VPHONE_HOST_KEY,
+  DEVICES_VPHONE_HOSTS_MAX,
+  DEVICES_VPHONE_SOURCE_MAX,
   type DevicesSettings,
-  type DevicesSettingsPatch
+  type DevicesSettingsPatch,
+  type DevicesVphoneHostSettings
 } from "@orquester/config";
 
 import { sessionToolNameOfData, sessionToolReferences } from "./agent-chat/session-tools.ts";
@@ -28,8 +32,10 @@ export type {
   DevicesAgentSettings,
   DevicesAndroidSettings,
   DevicesIosSettings,
+  DevicesResearchSettings,
   DevicesSettings,
-  DevicesSettingsPatch
+  DevicesSettingsPatch,
+  DevicesVphoneHostSettings
 } from "@orquester/config";
 export { DEFAULT_DEVICES_SETTINGS, DEVICES_SETTINGS_LIMITS, DEVICE_PLACEMENT_MODES } from "@orquester/config";
 
@@ -211,7 +217,19 @@ export interface DeviceHostSummary {
   capacity: DeviceCapacity;
   box?: DeviceHostBoxInfo;
   pool?: DeviceHostPoolInfo;
+  /**
+   * Phase 3: a research host (vphone-cli VMs running real iOS). Never chosen for a lease unless
+   * the request names it; the picker and Settings show {@link notice} beside it.
+   */
+  research?: boolean;
+  /** What the owner must know before using it ({@link VPHONE_RESEARCH_NOTICE} on a vphone host). */
+  notice?: string;
 }
+
+/** The per-machine switch's label in Settings (phase 3 §2.3). */
+export const VPHONE_RESEARCH_LABEL = "Virtual iPhones (research)";
+/** Shown with every vphone research host, in Settings and in the device picker. */
+export const VPHONE_RESEARCH_NOTICE = "Research — real iOS in a VM; not for App Store apps; Apple's licence terms may not allow this use";
 
 // ---------------------------------------------------------------------------
 // Devices and leases
@@ -505,8 +523,8 @@ export interface DeviceSetupStep {
 
 /**
  * An install or repair (Settings → Devices "Install all", or an agent's first request), or —
- * `kind: "cache-warm"` — a device-cache warm run on the box provider (Settings → Devices → Fleet
- * "Warm caches"; listed in {@link DevicePoolSummary.cacheJobs}, never in `setupJobs`).
+ * `kind: "cache-warm"` — a device-cache warm run on the box provider (POST {@link deviceRoutes.cacheWarm};
+ * listed in {@link DevicePoolSummary.cacheJobs}, never in `setupJobs`).
  */
 export interface DeviceSetupJob {
   id: string;
@@ -680,6 +698,17 @@ export const deviceRoutes = {
   hosts: HOSTS,
   /** GET → `{host}`; DELETE destroys a box host (its leases end `host-lost`). */
   host: (hostId: string): string => `${HOSTS}/${enc(hostId)}`,
+  /**
+   * PUT {@link DeviceHostDrainRequest} → {@link DeviceHostResponse} (phase 2, the fleet view's
+   * Drain): a draining host takes no new lease and is destroyed once empty (`pool.draining`);
+   * `draining: false` takes it back into placement.
+   */
+  hostDrain: (hostId: string): string => `${HOSTS}/${enc(hostId)}/drain`,
+  /**
+   * POST {@link DeviceCacheWarmRequest} → {@link DeviceCacheWarmResponse} (phase 2 §2.6, "Warm
+   * caches"): dispatch the run that builds and saves a platform's device-host caches.
+   */
+  cacheWarm: "/api/devices/pool/caches/warm",
   /** GET → {@link DevicesListResponse}: every device of every ready host. */
   devices: "/api/devices/list",
   /** GET (`?threadId=`) → {@link DeviceLeasesResponse}; POST {@link DeviceOpenRequest} → {@link DeviceLeaseResponse}. */
@@ -696,12 +725,8 @@ export const deviceRoutes = {
   settings: "/api/devices/settings",
   /** POST {@link DeviceSetupRequest} starts (or joins) the platform's setup job; GET → {@link DeviceSetupResponse}. */
   setup: (platform: DevicePlatform): string => `/api/devices/setup/${platform}`,
-  /** POST drains the host (no new leases; a rented one is destroyed once empty); DELETE undrains it. Both → {@link DeviceHostResponse}. */
-  drain: (hostId: string): string => `${HOSTS}/${enc(hostId)}/drain`,
   /** GET → {@link DevicePoolResponse}. */
   pool: "/api/devices/pool",
-  /** POST {@link DeviceWarmCachesRequest} → {@link DeviceWarmCachesResponse} (202): Settings → Devices → Fleet "Warm caches". */
-  warmCaches: "/api/devices/pool/warm-caches",
   /** The hub proxy: `path` is the hub's own path (`api/devices`, `vendor/serve-emu/ws`, …). */
   hub: (hostId: string, path: string): string => `${HOSTS}/${enc(hostId)}/hub/${path.replace(/^\/+/, "")}`,
   /** The WebSocket relay to a hub path (append `?token=` on HTTP; see `ApiClient.deviceSocketUrl`). */
@@ -756,7 +781,12 @@ export interface DeviceHostsResponse {
   hosts: DeviceHostSummary[];
 }
 
-/** GET {@link deviceRoutes.host}; POST / DELETE {@link deviceRoutes.drain}. */
+/** PUT {@link deviceRoutes.hostDrain}. */
+export interface DeviceHostDrainRequest {
+  draining: boolean;
+}
+
+/** One host (GET {@link deviceRoutes.host}, PUT {@link deviceRoutes.hostDrain}). */
 export interface DeviceHostResponse {
   host: DeviceHostSummary;
 }
@@ -766,14 +796,16 @@ export interface DevicePoolResponse {
   pool: DevicePoolSummary;
 }
 
-/** POST {@link deviceRoutes.warmCaches}: one platform's caches; absent: every platform the pool can rent hosts for. */
-export interface DeviceWarmCachesRequest {
-  platform?: DevicePlatform;
+/** POST {@link deviceRoutes.cacheWarm}: the platform whose pool-host caches to build and save. */
+export interface DeviceCacheWarmRequest {
+  platform: DevicePlatform;
 }
 
-export interface DeviceWarmCachesResponse {
-  /** The started (or already running) cache-warm jobs. */
-  jobs: DeviceSetupJob[];
+export interface DeviceCacheWarmResponse {
+  /** A run was dispatched (false: one is already running, or there is nothing to warm). */
+  started: boolean;
+  /** One line for the owner (why nothing started, or what runs now); null for none. */
+  message: string | null;
 }
 
 export interface DevicesListResponse {
@@ -908,13 +940,15 @@ export function parseDeviceOpenRequest(value: unknown): DeviceParseResult<Device
   return { ok: true, value: out };
 }
 
-/** The body of POST {@link deviceRoutes.warmCaches} (an empty body warms every platform). */
-export function parseDeviceWarmCachesRequest(value: unknown): DeviceParseResult<DeviceWarmCachesRequest> {
-  if (value === undefined || value === null) return { ok: true, value: {} };
-  if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
-  for (const key of Object.keys(value)) if (key !== "platform") return { ok: false, message: `Unknown field \`${key}\`.` };
-  if (value.platform === undefined) return { ok: true, value: {} };
-  if (!isDevicePlatform(value.platform)) return { ok: false, message: "`platform` must be ios or android." };
+/** The body of PUT {@link deviceRoutes.hostDrain}. */
+export function parseDeviceHostDrainRequest(value: unknown): DeviceParseResult<DeviceHostDrainRequest> {
+  if (!isRecord(value) || typeof value.draining !== "boolean") return { ok: false, message: "`draining` must be true or false." };
+  return { ok: true, value: { draining: value.draining } };
+}
+
+/** The body of POST {@link deviceRoutes.cacheWarm}. */
+export function parseDeviceCacheWarmRequest(value: unknown): DeviceParseResult<DeviceCacheWarmRequest> {
+  if (!isRecord(value) || !isDevicePlatform(value.platform)) return { ok: false, message: "`platform` must be ios or android." };
   return { ok: true, value: { platform: value.platform } };
 }
 
@@ -1010,11 +1044,53 @@ function checkField(rule: FieldRule, value: unknown, path: string): string | nul
   }
 }
 
+/** `research` of a settings patch: `{vphoneHosts: {<boxId>: {enabled?, iphoneSource?, cloudosSource?} | null}}`. */
+function parseResearchPatch(value: unknown): DeviceParseResult<NonNullable<DevicesSettingsPatch["research"]>> {
+  if (!isRecord(value)) return { ok: false, message: "`research` must be an object." };
+  const out: NonNullable<DevicesSettingsPatch["research"]> = {};
+  for (const [field, entry] of Object.entries(value)) {
+    if (field !== "vphoneHosts") return { ok: false, message: `Unknown setting \`research.${field}\`.` };
+    if (!isRecord(entry) || Object.keys(entry).length > DEVICES_VPHONE_HOSTS_MAX) return { ok: false, message: "`research.vphoneHosts` must be an object keyed by machine id." };
+    const hosts: Record<string, Partial<DevicesVphoneHostSettings> | null> = {};
+    for (const [boxId, host] of Object.entries(entry)) {
+      const path = `research.vphoneHosts.${boxId}`;
+      if (!DEVICES_VPHONE_HOST_KEY.test(boxId)) return { ok: false, message: `\`${path}\`: not a machine id.` };
+      if (host === null) {
+        hosts[boxId] = null;
+        continue;
+      }
+      if (!isRecord(host)) return { ok: false, message: `\`${path}\` must be an object or null.` };
+      const parsed: Partial<DevicesVphoneHostSettings> = {};
+      for (const [name, fieldValue] of Object.entries(host)) {
+        if (name === "enabled") {
+          if (typeof fieldValue !== "boolean") return { ok: false, message: `\`${path}.enabled\` must be true or false.` };
+          parsed.enabled = fieldValue;
+        } else if (name === "iphoneSource" || name === "cloudosSource") {
+          const ok = fieldValue === null || (typeof fieldValue === "string" && fieldValue.trim().length > 0 && fieldValue.length <= DEVICES_VPHONE_SOURCE_MAX && !/[\u0000-\u001f]/.test(fieldValue));
+          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be a path or URL, or null.` };
+          parsed[name] = fieldValue === null ? null : (fieldValue as string).trim();
+        } else {
+          return { ok: false, message: `Unknown setting \`${path}.${name}\`.` };
+        }
+      }
+      hosts[boxId] = parsed;
+    }
+    out.vphoneHosts = hosts;
+  }
+  return { ok: true, value: out };
+}
+
 /** The body of PUT {@link deviceRoutes.settings}: every named field checked; unknown fields refused. */
 export function parseDevicesSettingsPatch(value: unknown): DeviceParseResult<DevicesSettingsPatch> {
   if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
   const patch: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
+    if (key === "research") {
+      const research = parseResearchPatch(entry);
+      if (!research.ok) return research;
+      patch.research = research.value;
+      continue;
+    }
     const top = TOP_RULES[key];
     if (top) {
       const error = checkField(top, entry, key);

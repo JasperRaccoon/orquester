@@ -79,6 +79,13 @@ test("placement modes and a named host", () => {
   assert.deepEqual(choosePlacement({ platform: "android", hosts: [host("local", { draining: true })], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: "local", missing: [] });
 });
 
+test("a research host (vphone) takes only a request that names it", () => {
+  const research = host("vphone:mac1", { kind: "byo", research: true });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research], settings: settings(), canProvision: false }), { kind: "not-ready", hostId: null, missing: [] });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research, host("box:a", { used: 1 })], settings: settings(), canProvision: false }), { kind: "host", hostId: "box:a" });
+  assert.deepEqual(choosePlacement({ platform: "ios", hosts: [research], settings: settings(), canProvision: false, hostId: "vphone:mac1" }), { kind: "host", hostId: "vphone:mac1" });
+});
+
 // ---------------------------------------------------------------------------
 // decidePool
 // ---------------------------------------------------------------------------
@@ -151,8 +158,8 @@ function decision(d: PoolDecision) {
   return { placements: placed(d), queue: queued(d), failures: failed(d), scaleUp: d.scaleUp.map((entry) => `${entry.platform}:${entry.reason}:${entry.count}:${entry.approvedBy}`) };
 }
 
-test("decidePool: draining hosts and hosts that are not ready take no new lease", () => {
-  const hosts = [poolHost("box:a", { draining: true }), poolHost("box:b", { status: "unreachable" }), poolHost("box:c", { status: "failed" })];
+test("decidePool: draining, research and not-ready hosts take no new lease", () => {
+  const hosts = [poolHost("box:a", { draining: true }), poolHost("vphone:m", { kind: "byo", research: true }), poolHost("box:b", { status: "unreachable" }), poolHost("box:c", { status: "failed" })];
   const d = decide({ hosts, requests: [req("r1")] });
   assert.deepEqual(placed(d), {});
   assert.deepEqual(queued(d), { r1: "host-starting:-" });

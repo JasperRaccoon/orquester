@@ -190,6 +190,8 @@ export interface DeviceHost {
    * `install`); resolves the bundle id / package when known.
    */
   installApp?(lease: StoredDeviceLease, uploadedPath: string, signal: AbortSignal): Promise<{ appId: string | null; summary: string }>;
+  /** Phase 3: a research host (vphone VMs). Placement never picks it unless asked by id; its notice is shown with it. */
+  research?(): { notice: string } | null;
 
   listDevices(signal?: AbortSignal): Promise<DeviceSummary[]>;
   /** Boot (or attach to) a device; resolves once the OS finished booting. */
@@ -332,6 +334,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
   const state = host.state();
   const box = host.box?.() ?? null;
   const pool = host.pool?.() ?? null;
+  const research = host.research?.() ?? null;
   return {
     id: host.id,
     kind: host.kind,
@@ -342,6 +345,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
     readiness: host.readiness(),
     capacity: host.capacity(),
     ...(box ? { box } : {}),
-    ...(pool ? { pool } : {})
+    ...(pool ? { pool } : {}),
+    ...(research ? { research: true, notice: research.notice } : {})
   };
 }

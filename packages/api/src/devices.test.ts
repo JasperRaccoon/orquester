@@ -21,7 +21,8 @@ import {
   parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
-  parseDeviceWarmCachesRequest,
+  parseDeviceCacheWarmRequest,
+  parseDeviceHostDrainRequest,
   parseDevicesSettingsPatch,
   readDeviceToolReference,
   validateDeviceActionInput
@@ -64,18 +65,18 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.hub("box:x1", "/vendor/serve-emu/ws"), "/api/devices/hosts/box%3Ax1/hub/vendor/serve-emu/ws");
   assert.equal(deviceRoutes.socket("local", "vendor/serve-sim/helper/ws"), "/ws-device/local/vendor/serve-sim/helper/ws");
   assert.equal(deviceRoutes.setup("android"), "/api/devices/setup/android");
-  assert.equal(deviceRoutes.drain("box:x1"), "/api/devices/hosts/box%3Ax1/drain");
+  assert.equal(deviceRoutes.hostDrain("box:x1"), "/api/devices/hosts/box%3Ax1/drain");
   assert.equal(deviceRoutes.pool, "/api/devices/pool");
-  assert.equal(deviceRoutes.warmCaches, "/api/devices/pool/warm-caches");
+  assert.equal(deviceRoutes.cacheWarm, "/api/devices/pool/caches/warm");
 });
 
-test("warm-caches request: an optional platform, nothing else", () => {
-  assert.deepEqual(parseDeviceWarmCachesRequest(undefined), { ok: true, value: {} });
-  assert.deepEqual(parseDeviceWarmCachesRequest({}), { ok: true, value: {} });
-  assert.deepEqual(parseDeviceWarmCachesRequest({ platform: "android" }), { ok: true, value: { platform: "android" } });
-  assert.equal(parseDeviceWarmCachesRequest({ platform: "windows" }).ok, false);
-  assert.equal(parseDeviceWarmCachesRequest({ os: "linux" }).ok, false);
-  assert.equal(parseDeviceWarmCachesRequest([]).ok, false);
+test("drain and cache-warm requests", () => {
+  assert.deepEqual(parseDeviceHostDrainRequest({ draining: true }), { ok: true, value: { draining: true } });
+  assert.equal(parseDeviceHostDrainRequest({ draining: "yes" }).ok, false);
+  assert.equal(parseDeviceHostDrainRequest(undefined).ok, false);
+  assert.deepEqual(parseDeviceCacheWarmRequest({ platform: "android" }), { ok: true, value: { platform: "android" } });
+  assert.equal(parseDeviceCacheWarmRequest({ platform: "windows" }).ok, false);
+  assert.equal(parseDeviceCacheWarmRequest({}).ok, false);
 });
 
 test("open request: platform-matched profile, deviceId needs hostId, junk refused", () => {
@@ -132,6 +133,25 @@ test("settings patch: each field checked against its range; unknown fields refus
     { surprise: 1 },
     { maxLeasesPerChat: 99 },
     []
+  ]) {
+    assert.equal(parseDevicesSettingsPatch(bad).ok, false, JSON.stringify(bad));
+  }
+});
+
+test("settings patch: research.vphoneHosts takes per-machine entries field by field, null forgets one", () => {
+  assert.deepEqual(
+    parseDevicesSettingsPatch({ research: { vphoneHosts: { box1: { enabled: true, iphoneSource: " /Users/me/iPhone17,3.ipsw " }, box2: null } } }),
+    { ok: true, value: { research: { vphoneHosts: { box1: { enabled: true, iphoneSource: "/Users/me/iPhone17,3.ipsw" }, box2: null } } } }
+  );
+  for (const bad of [
+    { research: [] },
+    { research: { other: {} } },
+    { research: { vphoneHosts: { "../x": { enabled: true } } } },
+    { research: { vphoneHosts: { box1: { enabled: "yes" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "a\nb" } } } },
+    { research: { vphoneHosts: { box1: { force: true } } } },
+    { research: { vphoneHosts: { box1: 1 } } }
   ]) {
     assert.equal(parseDevicesSettingsPatch(bad).ok, false, JSON.stringify(bad));
   }

@@ -15,7 +15,7 @@ import { RightRailEditorHost, RightRailFrame } from "../right-rail/RightRailFram
 import { WorkflowsHost } from "../workflows/WorkflowsHost";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
 import { LazyBoundary, LoadingOverlay, lazyNamed, useOpenedOnce } from "../ui/lazy";
-import { useAppStore } from "../../store/app";
+import { serverViewOpen, useAppStore } from "../../store/app";
 
 // Settings and the desktop's launch dialog load the first time they open.
 const SettingsModal = lazyNamed(() => import("../settings/SettingsModal"), "SettingsModal");
@@ -51,9 +51,9 @@ const LaunchAppDialogHost: React.FC = () => {
  */
 const MobileBottomBars: React.FC = () => {
   const section = useMobileSection();
-  // The Knowledge view covers the project: its key bar and sections go with it.
-  const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
-  if (knowledgeOpen) return null;
+  // A server-level view (Knowledge, the Devices fleet) covers the project: its key bar and sections go with it.
+  const serverView = useAppStore(serverViewOpen);
+  if (serverView) return null;
   return (
     <>
       {section === null && <MobileKeyBar />}

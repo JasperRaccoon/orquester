@@ -126,7 +126,9 @@ import { boxRoutes } from "@orquester/api";
 import { deviceRoutes } from "@orquester/api";
 import type {
   DeviceActionsResponse,
+  DeviceCacheWarmResponse,
   DeviceController,
+  DeviceHostResponse,
   DeviceHostsResponse,
   DeviceLeaseResponse,
   DeviceLeasesResponse,
@@ -954,6 +956,16 @@ export class ApiClient {
   /** Settings → Devices "Destroy" on a rented host. */
   destroyDeviceHost(hostId: string): Promise<void> {
     return this.send("DELETE", deviceRoutes.host(hostId));
+  }
+
+  /** The fleet view's Drain (no new leases; destroyed once empty), or `false` to take the host back. */
+  setDeviceHostDraining(hostId: string, draining: boolean): Promise<DeviceHostResponse> {
+    return this.send("PUT", deviceRoutes.hostDrain(hostId), { body: { draining } });
+  }
+
+  /** "Warm caches": dispatch the run that builds and saves the platform's device-host caches. */
+  warmDeviceCaches(platform: DevicePlatform): Promise<DeviceCacheWarmResponse> {
+    return this.send("POST", deviceRoutes.cacheWarm, { body: { platform } });
   }
 
   listDevices(signal?: AbortSignal): Promise<DevicesListResponse> {
