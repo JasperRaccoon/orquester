@@ -71,7 +71,7 @@ function codexGlobalConfigPath(ctx: Pick<CodexPrepareContext, "systemHomes">): s
 }
 
 /** The roots Codex reads user skills (and plugin marketplaces) from outside `CODEX_HOME`. */
-export function codexUserSkillRoots(home: string): string[] {
+function codexUserSkillRoots(home: string): string[] {
   return [join(home, ".agents", "skills"), join(home, ".agents", "plugins")];
 }
 

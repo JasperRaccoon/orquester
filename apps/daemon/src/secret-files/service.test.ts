@@ -791,7 +791,7 @@ test("unmanage and exclude retire a file with its history; adding it again start
 test("content tokens: per clone copy, stable for the same content, changing with it, absent without a copy", async () => {
   const h = await makeHarness();
   const a = h.clone("a");
-  const b = h.clone("b");
+  h.clone("b");
   const c = h.clone("c");
   h.fs.put(`${a}/.env`, "KEY=one\n");
   h.fs.mkdir(`${c}/api`);

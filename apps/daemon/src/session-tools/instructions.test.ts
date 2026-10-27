@@ -6,7 +6,8 @@ import {
   composeOrquesterInstructions,
   DEVICES_LINE,
   DEVICES_LINE_MAX_BYTES,
-  orquesterInstructionsCap
+  KNOWLEDGE_LINE_MAX_BYTES,
+  ORQUESTER_INSTRUCTIONS_MAX_BYTES
 } from "./instructions.ts";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
@@ -15,7 +16,6 @@ const knowledge = (names: string[]): string => composeOrquesterInstructions({ wo
 test("the worst case — workflow-owned — stays under 2 048 bytes", () => {
   const worst = composeOrquesterInstructions({ workflowOwned: true });
   assert.ok(bytes(worst) <= 2_048, `${bytes(worst)} bytes`);
-  assert.equal(orquesterInstructionsCap(false), 2_048);
 });
 
 test("knowledge line: names only, last; absent for no collection — a chat without knowledge pays nothing", () => {
@@ -48,7 +48,6 @@ test("knowledge line: capped at 256 bytes — names that do not fit become '… 
 });
 
 test("the worst case with the knowledge line — workflow-owned, many collections — stays under 2 048 + 256 bytes", () => {
-  assert.equal(orquesterInstructionsCap(true), 2_304);
   for (const names of [Array.from({ length: 100 }, (_, index) => `${"名".repeat(50)}${index}`), Array.from({ length: 100 }, () => "n".repeat(60))]) {
     const worst = composeOrquesterInstructions({ workflowOwned: true, knowledgeCollections: names });
     assert.ok(bytes(worst) <= 2_304, `${bytes(worst)} bytes`);
@@ -61,9 +60,8 @@ test("devices line: present only with the device tools, under its own cap, and t
   assert.doesNotMatch(composeOrquesterInstructions({ workflowOwned: false }), /list_devices/);
   const block = composeOrquesterInstructions({ workflowOwned: false, devices: true });
   assert.ok(block.includes(DEVICES_LINE));
-  assert.equal(orquesterInstructionsCap(false, true), 2_048 + DEVICES_LINE_MAX_BYTES);
   const worst = composeOrquesterInstructions({ workflowOwned: true, devices: true, knowledgeCollections: Array.from({ length: 100 }, () => "n".repeat(60)) });
-  assert.ok(bytes(worst) <= orquesterInstructionsCap(true, true), `${bytes(worst)} bytes`);
+  assert.ok(bytes(worst) <= ORQUESTER_INSTRUCTIONS_MAX_BYTES + KNOWLEDGE_LINE_MAX_BYTES + DEVICES_LINE_MAX_BYTES, `${bytes(worst)} bytes`);
   // The knowledge line stays last.
   assert.match(worst, /\nKnowledge:[^\n]*$/);
 });

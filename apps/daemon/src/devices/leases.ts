@@ -31,7 +31,7 @@ import type { StoredDeviceLease } from "@orquester/config";
 
 import { DeviceError } from "./errors.ts";
 
-export interface LeaseLimits {
+interface LeaseLimits {
   /** `maxLeasesPerChat`. */
   maxPerThread: number;
 }
@@ -244,7 +244,6 @@ export function hostLeasesChanged(
   leases: readonly StoredDeviceLease[],
   hostId: string,
   change: "lost" | "suspended" | "ready",
-  now: string,
   reason?: string
 ): StoredDeviceLease[] {
   const changed: StoredDeviceLease[] = [];

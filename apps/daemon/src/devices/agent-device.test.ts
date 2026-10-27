@@ -32,8 +32,6 @@ function readFixture(name: string): string {
   return readFileSync(new URL(`./fixtures/agent-device/${name}.json`, import.meta.url), "utf8");
 }
 
-const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
-
 function lease(overrides: Partial<StoredDeviceLease> = {}): StoredDeviceLease {
   return {
     id: "lease-1",
@@ -168,7 +166,7 @@ test("the runner: the toolchain's CLI under this Node, the host's config, no tok
   t.after(() => rm(cli.dir, { recursive: true, force: true }));
   const host = new FakeDeviceHost();
   host.agentDeviceConfigPath = () => "/state/agent-device/local.json";
-  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: { ...process.env, AGENT_DEVICE_DAEMON_AUTH_TOKEN: "leak" }, logger: quiet });
+  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: { ...process.env, AGENT_DEVICE_DAEMON_AUTH_TOKEN: "leak" } });
   const result = await client.run({ host, lease: lease() }, "fill", ["@e3", "--text-stdin", "--settle"], { signal: new AbortController().signal, stdin: "secret words" });
   const data = agentDeviceData(result, "fill") as { argv: string[]; input: string; env: string[] };
   assert.deepEqual(data.argv, [
@@ -196,7 +194,7 @@ test("the runner: a one-step batch reads its steps from /dev/stdin", async (t) =
   t.after(() => rm(cli.dir, { recursive: true, force: true }));
   const host = new FakeDeviceHost();
   host.agentDeviceConfigPath = () => "/state/agent-device/local.json";
-  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: process.env, logger: quiet });
+  const client = createAgentDeviceClient({ toolchain: toolchain(cli.path), env: process.env });
   const steps = JSON.stringify([{ command: "type", input: { text: " saver" } }]);
   const result = await client.run({ host, lease: lease() }, "batch", ["--steps-file", "/dev/stdin"], { signal: new AbortController().signal, stdin: steps });
   assert.equal((result.json as { data: { steps: string } }).data.steps, steps);
@@ -206,7 +204,7 @@ test("the runner: a host's own command wins; missing config, missing CLI, timeou
   const slow = await fakeCli(`setTimeout(() => console.log("{}"), 30_000);`);
   t.after(() => rm(slow.dir, { recursive: true, force: true }));
   const host = new FakeDeviceHost();
-  const client = createAgentDeviceClient({ toolchain: toolchain(null), env: process.env, logger: quiet });
+  const client = createAgentDeviceClient({ toolchain: toolchain(null), env: process.env });
   const signal = new AbortController().signal;
 
   const noConfig = await client.run({ host, lease: lease() }, "snapshot", [], { signal }).catch((error: unknown) => error);

@@ -7,7 +7,6 @@ import test from "node:test";
 
 import type { ProviderModel, ProviderSnapshot } from "./adapter-types.ts";
 import {
-  defaultOptionValues,
   modelPickerHint,
   providerPickerView,
   resolveLaunchModel,
@@ -78,11 +77,6 @@ test("a legacy model is never the default, but one named explicitly is honoured 
   assert.equal(resolveSelectedModel([OLD], null)?.slug, "claude-3", "only legacy models: the first");
   assert.equal(resolveSelectedModel([], null), null);
   assert.equal(modelPickerHint(OLD), "legacy");
-});
-
-test("option defaults resolve as the composer's chips do", () => {
-  assert.deepEqual(defaultOptionValues(OPUS), { effort: "high", fastMode: false });
-  assert.deepEqual(defaultOptionValues(null), {});
 });
 
 test("an empty catalogue from a ready provider reads as still loading", () => {

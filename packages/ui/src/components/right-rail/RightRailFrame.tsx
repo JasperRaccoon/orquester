@@ -90,7 +90,7 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
         />
       ) : null}
       {projectPath !== null ? (
-        <RightRail open={open} {...(panels ? { panels } : {})} onToggle={toggleRightRailPanel} />
+        <RightRail open={open} panels={panels} onToggle={toggleRightRailPanel} />
       ) : null}
     </div>
   );
@@ -111,7 +111,7 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
   const railState = useRightRailState();
   // Devices: the Device panel exists only while its plugin is on.
   const devicesOn = useDevicesEnabled();
-  const panels = React.useMemo(() => visibleRailPanels(RIGHT_RAIL_PANEL_ORDER, { devices: devicesOn }), [devicesOn]);
+  const panels = React.useMemo(() => visibleRailPanels(RIGHT_RAIL_PANEL_ORDER, devicesOn), [devicesOn]);
   const open = railState.open !== null && panels.includes(railState.open) ? railState.open : null;
   // Devices §10.2: the rail opens on a device an agent opened for the visible chat (desktop only).
   useFollowAgentDevices(devicesOn && isDesktop && projectPath !== null);

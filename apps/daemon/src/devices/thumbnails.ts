@@ -9,8 +9,6 @@
 
 import { deviceImages, ImagePoolBusyError, type ImageWorkerPool } from "./image-pool.ts";
 
-export { thumbnailJpeg } from "./screenshot-image.ts";
-
 /** A thumbnail is reused for this long. */
 export const THUMBNAIL_CACHE_MS = 1_000;
 const HUB_TIMEOUT_MS = 10_000;

@@ -65,8 +65,6 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
     }
     if (!adapter.kinds.includes(kind)) throw new BoxError(400, "BOX_UNSUPPORTED", `${adapter.label} does not rent ${BOX_KIND_LABELS[kind]} boxes.`);
     if (!settings.configured(adapter.id)) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", `${adapter.label} is not connected.`);
-    const blocker = settings.kindBlocker(adapter, kind);
-    if (blocker) throw new BoxError(409, "BOX_UNSUPPORTED", blocker);
   } else {
     const kinds = await settings.kinds();
     const available = kinds.find((entry) => entry.kind === kind);
@@ -103,15 +101,8 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
     if (!region) throw new BoxError(409, "BOX_PROVIDER_ERROR", `${size.label} is not available in any region right now.`);
   }
 
-  let image: string | null = settings.windowsImageId(adapter, kind);
-  if (image === null) {
-    if (imageId) {
-      if (!offers.images.some((candidate) => candidate.id === imageId)) throw invalid(`${adapter.label} has no image "${imageId}".`);
-      image = imageId;
-    } else {
-      image = offers.images[0]?.id ?? null;
-    }
-  }
+  if (imageId && !offers.images.some((candidate) => candidate.id === imageId)) throw invalid(`${adapter.label} has no image "${imageId}".`);
+  const image = imageId ?? offers.images[0]?.id ?? null;
 
   const max = adapter.maxLifetimeMinutes;
   let lifetimeMinutes: number | null;

@@ -25,7 +25,6 @@ export const CMDLINE_TOOLS: PinnedDownload & { revision: string } = {
 };
 
 export const SDK_PACKAGES = ["platform-tools", "emulator"] as const;
-export const ANDROID_LICENSE_URL = "https://developer.android.com/studio/terms";
 
 export interface SdkPaths {
   sdk: string;
@@ -271,9 +270,4 @@ export async function createAvd(paths: SdkPaths, profile: DeviceProfile, deps: P
     ...(Number.isInteger(deviceDensity) && deviceDensity > 0 ? { deviceDensity } : {})
   };
   await x.writeText(join(dir, "orq-avd.json"), `${JSON.stringify(marker)}\n`);
-}
-
-/** AVD names Orquester made (`orq-*.ini`) in the AVD home. */
-export async function listOrqAvds(avdHome: string, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<string[]> {
-  return (await executor.list(avdHome)).filter((entry) => entry.startsWith("orq-") && entry.endsWith(".ini")).map((entry) => entry.slice(0, -4));
 }

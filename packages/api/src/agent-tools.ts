@@ -29,7 +29,6 @@ import type { ApprovalFamily, ToolApprovalGrantScope } from "./agent-chat/tool-a
  * runs code outside the agent's sandbox, and always raises a card.
  */
 export type ToolTier = "read" | "act" | "admin";
-export const TOOL_TIERS: readonly ToolTier[] = ["read", "act", "admin"];
 
 /** The groups chat tools are filed under (a label and the `orquester/toolset` tag; never a switch). */
 export const TOOLSET_IDS = [
@@ -74,8 +73,8 @@ const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
 /**
- * Every toolset, with its tools in catalog order (spec §9.1): 65 chat tools, all advertised to every
- * chat (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
+ * Every toolset, with its tools in catalog order (spec §9.1), advertised to every chat
+ * (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
  * plugin is on, the `devices` ones while a device platform is on).
  */
 export const TOOLSETS: readonly ToolsetSpec[] = [

@@ -67,7 +67,6 @@ describe("BoxDeviceHost", () => {
       boxId: "mac1",
       kind: "box",
       label: "Mac host (Blacksmith, 6 vCPU M4)",
-      platform: "ios",
       appDir,
       toolchain: { toolBin: () => localCli } as unknown as DeviceToolchain,
       record: () => boxRecord(),

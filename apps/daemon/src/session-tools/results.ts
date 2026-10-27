@@ -20,11 +20,6 @@ export function jsonResult(value: Record<string, unknown>): SessionToolResult {
   return ok(value);
 }
 
-/** A plain-text result. */
-export function textResult(text: string): SessionToolResult {
-  return { content: [{ type: "text", text }] };
-}
-
 /** One image, inline. */
 export interface SessionToolImage {
   /** Base64, no `data:` prefix. */

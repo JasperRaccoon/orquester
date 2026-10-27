@@ -62,7 +62,7 @@ if (reuse) {
   log(`reused the SDK from ${reuse} (hard links): exit ${copy.exitCode} ${copy.stderr.trim()}`);
 }
 
-let host = new LocalAndroidHost({ appDir, env: process.env, toolchain, logger }, ctx);
+let host = new LocalAndroidHost({ toolchain, logger }, ctx);
 await host.reattach();
 await host.start();
 const before = host.readiness();
@@ -123,7 +123,7 @@ if (config && entry) {
 
 // A daemon restart: the host is disposed with devices running; a new one reattaches.
 await host.dispose();
-host = new LocalAndroidHost({ appDir, env: process.env, toolchain, logger }, ctx);
+host = new LocalAndroidHost({ toolchain, logger }, ctx);
 await timed("reattach after a restart", () => host.reattach());
 await host.start();
 log("after restart:", host.state().status, host.capacity(), "same hub:", host.hubOrigin() === origin, "same token:", host.hubToken() === token);
@@ -134,11 +134,11 @@ leases.length = 0;
 
 // Through the device service, as an agent's tools reach it.
 await writeFile(devicesSettingsPath(appDir), JSON.stringify({ version: 1, settings }));
-const agentDevice = createAgentDeviceClient({ toolchain, env: process.env, logger });
+const agentDevice = createAgentDeviceClient({ toolchain, env: process.env });
 const service = new DeviceService({
   settingsStore: new DeviceSettingsStore({ file: devicesSettingsPath(appDir), logger }),
   leaseStore: new DeviceLeaseStore({ file: deviceLeasesPath(appDir), logger }),
-  factories: [createLocalAndroidHostFactory({ appDir, env: process.env, toolchain, logger })],
+  factories: [createLocalAndroidHostFactory({ toolchain, logger })],
   actions: createDeviceActionExecutor({ agentDevice, logger }),
   screenshots: new DeviceScreenshots(deviceScreenshotsDir(appDir), logger),
   publish: () => undefined,

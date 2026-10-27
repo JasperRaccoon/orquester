@@ -25,12 +25,12 @@ import { GitRemoteError, MAX_RETRY_AFTER_MS } from "./types";
 export type RequestMode = "background" | "interactive";
 
 /** Requests in flight per host and account (Bitbucket). */
-export const RATE_GATE_SLOTS = 4;
+const RATE_GATE_SLOTS = 4;
 
 /** How long a 429 without a usable Retry-After pauses the host. */
 export const DEFAULT_RATE_PAUSE_MS = 60_000;
 
-export interface HostRateGateOptions {
+interface HostRateGateOptions {
   /** Concurrent requests; `Infinity` leaves concurrency alone and keeps only the pause. */
   slots?: number;
   defaultPauseMs?: number;

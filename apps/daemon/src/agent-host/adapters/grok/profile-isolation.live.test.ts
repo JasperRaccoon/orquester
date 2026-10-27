@@ -261,7 +261,7 @@ describe("Grok profile isolation (live)", { skip }, () => {
   });
 
   it("a real session (no prompt): the catalog includes profile/repo skills, excludes Global skills and runs the profile hook", { skip: skipSession }, async () => {
-    const { root, repo, preparedDir, profile, env, hookMark, globalGrok } = await world();
+    const { root, repo, preparedDir, profile, env, hookMark } = await world();
     let commandsSeen: (names: string[]) => void = () => undefined;
     const commandsReady = new Promise<string[]>((resolve) => (commandsSeen = resolve));
     const controller = new AbortController();

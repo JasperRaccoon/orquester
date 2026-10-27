@@ -14,21 +14,12 @@
  * `AGENT_DEVICE_IOS_SIMULATOR_DEVICE_SET`) can both use a custom set, but serve-sim (the hub's iOS
  * capture, expo-device-hub 0.19) cannot: its native module only opens
  * `SimServiceContext.defaultDeviceSetWithError:` and its `simctl io/list/launch` calls pass no
- * `--set`, so a simulator in another set would never stream. {@link ORQ_DEVICE_SET} is the one
- * switch the builders here honour once it can.
+ * `--set`, so a simulator in another set would never stream.
  */
 
 import { posix } from "node:path";
 
 import { SIMSLIM_RELEASE, SIMSLIM_TOOL_PATH } from "../../../boxes/github/device-cache.ts";
-
-/** The device set Orquester's simulators live in; null: the default set (see the module comment). */
-export const ORQ_DEVICE_SET: string | null = null;
-
-/** `xcrun simctl` argv for a device set: `--set <path>` goes before the subcommand. */
-export function simctlArgs(set: string | null, args: readonly string[]): string[] {
-  return set ? ["simctl", "--set", set, ...args] : ["simctl", ...args];
-}
 
 /** simslim's binary under a tools dir. */
 export function simslimBin(toolsDir: string): string {
@@ -73,19 +64,13 @@ export function slimmableIos(osVersion: string): boolean {
   return major > minMajor || (major === minMajor && minor >= minMinor);
 }
 
-/** simslim's global flags: `--set` must precede the subcommand. */
-function globalArgs(set: string | null): string[] {
-  return set ? ["--set", set] : [];
-}
-
 /**
  * `simslim on`: apply the profile. On a shut-down simulator it writes the overrides offline, boots
  * it once and reads them back; with `preserveBootState` it then shuts it down again (a pool
  * simulator), without it the simulator is left booted (a lease's first boot).
  */
-export function simslimOnArgs(input: { udid: string; profilePath: string; preserveBootState?: boolean; noReboot?: boolean; set?: string | null }): string[] {
+export function simslimOnArgs(input: { udid: string; profilePath: string; preserveBootState?: boolean; noReboot?: boolean }): string[] {
   return [
-    ...globalArgs(input.set ?? ORQ_DEVICE_SET),
     "on",
     input.udid,
     "--profile",
@@ -96,13 +81,13 @@ export function simslimOnArgs(input: { udid: string; profilePath: string; preser
 }
 
 /** `simslim verify --json`: a booted simulator's overrides against the profile (exit 1 on drift, JSON either way). */
-export function simslimVerifyArgs(input: { udid: string; profilePath: string; set?: string | null }): string[] {
-  return [...globalArgs(input.set ?? ORQ_DEVICE_SET), "verify", input.udid, "--profile", input.profilePath, "--json"];
+export function simslimVerifyArgs(input: { udid: string; profilePath: string }): string[] {
+  return ["verify", input.udid, "--profile", input.profilePath, "--json"];
 }
 
 /** `simslim top --json`: every booted simulator's footprint (all sets scanned) and their total. */
-export function simslimTopArgs(set: string | null = ORQ_DEVICE_SET): string[] {
-  return [...globalArgs(set), "top", "--json"];
+export function simslimTopArgs(): string[] {
+  return ["top", "--json"];
 }
 
 /** `simslim measure --json`: one booted simulator's footprint. */
@@ -186,10 +171,6 @@ function measurementOf(value: unknown): SimslimMeasurement | null {
   const bytes = num(entry.bytes);
   if (bytes === null) return null;
   return { processes: num(entry.processes) ?? 0, bytes, cpu: num(entry.cpu) ?? 0 };
-}
-
-export function parseSimslimMeasure(stdout: string): SimslimMeasurement | null {
-  return measurementOf(json(stdout));
 }
 
 export function parseSimslimVerify(stdout: string): SimslimVerify | null {

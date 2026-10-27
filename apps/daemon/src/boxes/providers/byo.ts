@@ -12,21 +12,18 @@ import type { StoredBox } from "@orquester/config";
 
 import type { BoxProviderAdapter, ProviderOffers } from "../contracts.ts";
 
-export const BYO_LABEL = "Your machines";
-
 /** The one "region" of every machine. */
 export const BYO_REGION: BoxRegionOffer = { id: "own", label: "Your machine", country: null };
 
 export const byoAdapter: BoxProviderAdapter = {
   id: "byo",
-  label: BYO_LABEL,
+  label: "Your machines",
   kinds: BYO_MACHINE_KINDS,
   website: "",
   credentialsUrl: "",
   credentialFields: [],
   accountNote: "Your own always-on Mac or Linux machine, paired with a one-line command. Free; Orquester never deletes it.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
   validate: async () => ({ ok: true }),
   offers: async (): Promise<ProviderOffers> => ({ sizes: [], regions: [BYO_REGION], images: [], priceSource: "table" }),
   create: async () => {

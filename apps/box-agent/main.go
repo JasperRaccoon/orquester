@@ -75,7 +75,7 @@ func parseServiceArgs(args []string) (agent.ServiceOptions, error) {
 		case arg == "--dry-run":
 			opts.DryRun = true
 		case arg == "--data-dir":
-			if i+1 >= len(args) || args[i+1] == "" {
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
 				return opts, errors.New("--data-dir needs a directory")
 			}
 			opts.DataDir = args[i+1]

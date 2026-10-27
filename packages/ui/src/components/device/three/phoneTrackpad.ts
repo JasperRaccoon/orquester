@@ -78,7 +78,6 @@ export function bindPhoneTrackpad(
       deltaX: event.deltaX,
       deltaY: event.deltaY,
       deltaMode: event.deltaMode,
-      ctrlKey: event.ctrlKey,
     });
     if (navigation && interaction.navigate(navigation)) {
       orbitActive = true;

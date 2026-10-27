@@ -83,8 +83,7 @@ export function actionLogRows(
     });
   }
   // Stable: equal times keep their arrival order.
-  const ordered = rows.map((row, index) => ({ row, index })).sort((a, b) => a.row.at - b.row.at || a.index - b.index).map(({ row }) => row);
-  return ordered.slice(-limit);
+  return rows.sort((a, b) => a.at - b.at).slice(-limit);
 }
 
 /** The collapsed drawer's one line: "12 actions · Tapped “Search”" (null with nothing logged). */

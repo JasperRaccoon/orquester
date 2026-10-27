@@ -16,6 +16,8 @@ func TestParseServiceArgs(t *testing.T) {
 		{[]string{"--data-dir", "/a b"}, agent.ServiceOptions{DataDir: "/a b"}},
 		{[]string{"--data-dir=/d", "--dry-run"}, agent.ServiceOptions{DataDir: "/d", DryRun: true}},
 		{[]string{"--dry-run", "--data-dir", "/d"}, agent.ServiceOptions{DataDir: "/d", DryRun: true}},
+		{[]string{"--data-dir=--dry-run"}, agent.ServiceOptions{DataDir: "--dry-run"}},
+		{[]string{"--data-dir", "./--dry-run"}, agent.ServiceOptions{DataDir: "./--dry-run"}},
 	}
 	for _, c := range ok {
 		got, err := parseServiceArgs(c.args)
@@ -29,6 +31,9 @@ func TestParseServiceArgs(t *testing.T) {
 		{"--data-dir"},
 		{"--data-dir="},
 		{"--data-dir", ""},
+		{"--data-dir", "--dry-run"},
+		{"--data-dir", "--data-dir"},
+		{"--data-dir", "--data-dir=/d"},
 		{"extra"},
 		{"-n"},
 	} {

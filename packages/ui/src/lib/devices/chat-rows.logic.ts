@@ -8,9 +8,6 @@
 import { isDeviceActionKind, readDeviceToolReference, DEVICE_TOOL_REFERENCE_KEY, type DeviceActionKind, type DeviceToolReference } from "@orquester/api";
 import { sessionToolReferences } from "@orquester/api/agent-chat";
 
-/** The session tools whose rows these words are for. */
-export const DEVICE_SESSION_TOOLS: readonly string[] = ["list_devices", "open_device", "device_action", "device_install", "close_device"];
-
 /** The device's display name from somewhere other than the reference (the devices store). */
 export type DeviceNameResolver = (reference: DeviceToolReference) => string | undefined;
 

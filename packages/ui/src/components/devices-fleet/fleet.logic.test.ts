@@ -10,7 +10,6 @@ import {
   canWarmCaches,
   chatRef,
   costSharers,
-  countFleetLeases,
   formatAgo,
   formatUptime,
   groupFleet,
@@ -44,7 +43,7 @@ describe("grouping and order", () => {
       ["A1B2-ios-1", "A1B2-ios-2", "A1B2-ios-3"],
       "ready (oldest first) before starting"
     );
-    assert.equal(countFleetLeases(groups), leases.length);
+    assert.equal(groups.flatMap((group) => group.leases).length, leases.length);
   });
 
   it("orders leases live first: ready, starting, suspended, lost", () => {

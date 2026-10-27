@@ -94,7 +94,6 @@ export function mountDeviceViewer<V extends MountableViewer>(
         screenPoint: (point, captured) => viewer.screenPoint(point.x, point.y, captured),
         touch: options.touch,
         orbit: viewer.orbit,
-        zoomBy: () => {},
         onInteractionActive: viewer.setInteractionActive,
       });
       interactionRef.current = interaction;

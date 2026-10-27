@@ -31,7 +31,7 @@ const DEFAULT_API = "https://api.github.com";
 export const BLACKSMITH_APP_SLUG = "blacksmith-sh";
 export const BLACKSMITH_APP_INSTALL_URL = "https://github.com/apps/blacksmith-sh/installations/new";
 /** Scopes the classic token needs: create the private repo, commit a workflow file, dispatch and cancel runs. */
-export const REQUIRED_GITHUB_SCOPES: readonly string[] = ["repo", "workflow"];
+const REQUIRED_GITHUB_SCOPES: readonly string[] = ["repo", "workflow"];
 
 export interface GithubCallOptions extends ProviderCallOptions {
   token: string;
@@ -135,13 +135,6 @@ export interface GithubAccountCheck {
   problem: string | null;
 }
 
-/** `X-OAuth-Scopes` grants `scope` (`repo` covers nothing broader; `admin:org` covers `read:org`). */
-function hasScope(scopes: string[], scope: string): boolean {
-  if (scopes.includes(scope)) return true;
-  if (scope === "read:org") return scopes.includes("admin:org") || scopes.includes("write:org");
-  return false;
-}
-
 export type GithubTokenCheck = Pick<GithubAccountCheck, "login" | "scopes" | "missingScopes" | "problem">;
 
 /** Check the token's scopes alone (one `GET /user`, no org). Throws on network/server failures and a rejected token. */
@@ -149,7 +142,7 @@ export async function checkGithubToken(options: GithubCallOptions): Promise<Gith
   const user = await gh<{ login: string }>(options, { path: "/user" });
   const header = user.headers.get("x-oauth-scopes");
   const scopes = header === null ? null : header.split(",").map((scope) => scope.trim()).filter((scope) => scope.length > 0);
-  const missingScopes = REQUIRED_GITHUB_SCOPES.filter((scope) => scopes === null || !hasScope(scopes, scope));
+  const missingScopes = REQUIRED_GITHUB_SCOPES.filter((scope) => scopes === null || !scopes.includes(scope));
   let problem: string | null = null;
   if (scopes === null) {
     problem = `Use a classic personal access token with the ${REQUIRED_GITHUB_SCOPES.join(" and ")} scopes.`;

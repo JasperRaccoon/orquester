@@ -19,7 +19,7 @@ import { isDeviceError } from "./errors.ts";
 import type { DeviceRentalQuote } from "./host.ts";
 
 /** An answer or a refusal written for the agent (the same shape as `DaemonOutcome`). */
-export type DeviceOutcome<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
+type DeviceOutcome<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
 
 /** One device operation's options: who acts (`withPrincipal` forces the caller's) and its abort. */
 export interface DeviceCallOptions {

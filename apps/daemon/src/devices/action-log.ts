@@ -47,8 +47,4 @@ export class DeviceActionLog {
   forget(leaseId: string): void {
     this.logs.delete(leaseId);
   }
-
-  clear(): void {
-    this.logs.clear();
-  }
 }

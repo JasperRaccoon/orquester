@@ -288,17 +288,14 @@ export function newBoxId(): string {
   return randomBytes(6).toString("hex");
 }
 
-/** The `procId` prefix of a chat's background jobs (`boxes/temporary/tools.ts`). */
-export const CHAT_JOB_PREFIX = "job-";
-
-export const BYO_OFFLINE_REASON = "Offline: orq-agent on this machine is not connected.";
+const BYO_OFFLINE_REASON = "Offline: orq-agent on this machine is not connected.";
 
 /**
  * A bring-your-own machine's record after `orq-agent` connected or dropped: the first connect ends
  * `pairing` (the pairing code is spent by then; any left is dropped); later ones toggle `ready` ⇄
  * `offline`. A setup in progress keeps `provisioning`.
  */
-export function byoConnectionChanged(record: StoredBox, connected: boolean, at: string, sys?: Pick<BoxSysInfo, "os" | "arch" | "libc" | "kvm">): void {
+function byoConnectionChanged(record: StoredBox, connected: boolean, at: string, sys?: Pick<BoxSysInfo, "os" | "arch" | "libc" | "kvm">): void {
   if (connected) {
     if (sys) {
       record.os = sys.os;
@@ -1248,7 +1245,7 @@ export class BoxLifecycle {
       const procs = await connection.request("proc.list", {}, { timeoutMs: 10_000 });
       await Promise.all(
         procs
-          .filter((proc) => proc.procId.startsWith(CHAT_JOB_PREFIX) && proc.running)
+          .filter((proc) => proc.procId.startsWith("job-") && proc.running)
           .map((proc) => connection.request("proc.signal", { procId: proc.procId, signal: "SIGKILL" }, { timeoutMs: 10_000 }).catch(() => undefined))
       );
     } catch (error) {

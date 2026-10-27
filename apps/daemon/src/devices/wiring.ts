@@ -43,7 +43,7 @@ import { deviceHostSpend } from "./hosts/box/rental.ts";
 import { createDeviceToolchain, type DeviceToolchain } from "./toolchain/index.ts";
 import { registerDeviceWsRoutes } from "./ws-routes.ts";
 
-export interface DaemonDevicesDeps {
+interface DaemonDevicesDeps {
   /** The appdir base. */
   baseDir: string;
   env: NodeJS.ProcessEnv;
@@ -101,7 +101,7 @@ function boxCacheWarmer(boxes: Pick<DaemonBoxes, "service"> | null): DeviceCache
 export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
   const { logger } = deps;
   const toolchain = createDeviceToolchain({ appDir: deps.baseDir, env: deps.env, logger });
-  const agentDevice = createAgentDeviceClient({ toolchain, env: deps.env, logger });
+  const agentDevice = createAgentDeviceClient({ toolchain, env: deps.env });
   const actions = deps.actions ?? createDeviceActionExecutor({ agentDevice, logger });
   const toolListeners = new Set<() => void>();
   const notifyTools = () => {
@@ -125,7 +125,7 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
 
   const build = (): DeviceService => {
     const factories = deps.factories?.(toolchain) ?? [
-      createLocalAndroidHostFactory({ appDir: deps.baseDir, env: deps.env, toolchain, logger }),
+      createLocalAndroidHostFactory({ toolchain, logger }),
       createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger }),
       createVphoneHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, logger })
     ];

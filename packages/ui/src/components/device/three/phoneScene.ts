@@ -220,8 +220,6 @@ export function createPhoneScene(
   return {
     root,
     orientation,
-    width,
-    height,
     screenPoint,
     viewPoint,
     setDisplay(nextTexture: Texture, nextLayout: PhoneDisplayLayout) {

@@ -138,11 +138,6 @@ export function boxDeviceHostId(boxId: string): string {
   return `box:${boxId}`;
 }
 
-/** The box a host id names, or null for the local host or anything else. */
-export function boxIdOfDeviceHost(hostId: string): string | null {
-  return hostId.startsWith("box:") && hostId.length > 4 ? hostId.slice(4) : null;
-}
-
 /**
  * - `disabled` — its platform is off in Settings → Devices.
  * - `needs-setup` — a readiness check is missing or failed; nothing runs until it is fixed.
@@ -257,13 +252,6 @@ export const VPHONE_RESEARCH_NOTICE = "Research — real iOS in a VM; not for Ap
 /** `<hostId>/<deviceId>`: how a device is named everywhere (tools, the panel, the action log). */
 export function deviceKey(hostId: string, deviceId: string): string {
   return `${hostId}/${deviceId}`;
-}
-
-/** The parts of a device key (split at the first `/`), or null when it is not one. */
-export function parseDeviceKey(key: string): { hostId: string; deviceId: string } | null {
-  const at = key.indexOf("/");
-  if (at <= 0 || at === key.length - 1) return null;
-  return { hostId: key.slice(0, at), deviceId: key.slice(at + 1) };
 }
 
 export interface DeviceScreen {
@@ -1186,14 +1174,14 @@ export function parseDevicesSettingsPatch(value: unknown): DeviceParseResult<Dev
       patch.research = research.value;
       continue;
     }
-    const top = TOP_RULES[key];
+    const top = Object.hasOwn(TOP_RULES, key) ? TOP_RULES[key] : undefined;
     if (top) {
       const error = checkField(top, entry, key);
       if (error) return { ok: false, message: error };
       patch[key] = entry;
       continue;
     }
-    const rules = SETTINGS_RULES[key];
+    const rules = Object.hasOwn(SETTINGS_RULES, key) ? SETTINGS_RULES[key] : undefined;
     if (!rules) return { ok: false, message: `Unknown setting \`${key}\`.` };
     if (!isRecord(entry)) return { ok: false, message: `\`${key}\` must be an object.` };
     const section: Record<string, unknown> = {};
@@ -1210,7 +1198,7 @@ export function parseDevicesSettingsPatch(value: unknown): DeviceParseResult<Dev
         section[field] = warm;
         continue;
       }
-      const rule = rules[field];
+      const rule = Object.hasOwn(rules, field) ? rules[field] : undefined;
       if (!rule) return { ok: false, message: `Unknown setting \`${key}.${field}\`.` };
       const error = checkField(rule, fieldValue, `${key}.${field}`);
       if (error) return { ok: false, message: error };

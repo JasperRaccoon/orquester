@@ -58,9 +58,8 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     broadcaster: opts.broadcaster,
     fsRoot: opts.fsRoot,
     workspacesDir: opts.workspacesDir,
-    // boxes: passed through when wired.
-    ...(opts.boxes ? { boxes: opts.boxes } : {}),
-    ...(opts.boxRegistry ? { boxRegistry: opts.boxRegistry } : {}),
-    ...(opts.devices ? { devices: opts.devices } : {})
+    boxes: opts.boxes,
+    boxRegistry: opts.boxRegistry,
+    devices: opts.devices
   });
 }

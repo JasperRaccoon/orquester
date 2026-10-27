@@ -198,7 +198,6 @@ async function readMarker<T>(x: DeviceExecutor, path: string): Promise<Partial<T
   }
 }
 
-/** The profile's golden snapshot when it is usable now, else null. */
 /**
  * The profile's golden snapshot when it is usable now, else null: its marker names this config, the
  * installed emulator and the GPU mode it was saved with (the cache's or the box's own probing).

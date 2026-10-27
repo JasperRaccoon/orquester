@@ -5,12 +5,10 @@ import {
   CanvasTexture,
   DirectionalLight,
   LinearFilter,
-  Matrix4,
   PerspectiveCamera,
   Quaternion,
   Scene,
   SRGBColorSpace,
-  Vector3,
   WebGLRenderer,
 } from "three";
 import {
@@ -65,7 +63,6 @@ export function createPhoneViewer(options: {
   readonly source: HTMLCanvasElement;
   readonly onUnavailable: () => void;
   readonly onModelError?: (cause: unknown) => void;
-  readonly onFramingAspect?: (aspect: number) => void;
   readonly profile?: DeviceShapeProfile;
   readonly model?: DeviceModelSource | null;
   readonly accessory?: DeviceAccessorySource | null;
@@ -116,7 +113,6 @@ export function createPhoneViewer(options: {
   let imported: Awaited<ReturnType<typeof loadDeviceModel>> | null = null;
   let modelSource = options.model ?? null;
   let accessory: Awaited<ReturnType<typeof loadDeviceModel>> | null = null;
-  let accessoryBounds: Box3 | null = null;
   let foldTurn: { from: number; to: number; startedAt: number } | null = null;
   const rawAspect = () => options.source.width / options.source.height;
   let foldAspect = isFoldInnerAspect(rawAspect()) ? rawAspect() : DEFAULT_FOLD_INNER_ASPECT;
@@ -150,22 +146,9 @@ export function createPhoneViewer(options: {
   let viewport = { width: 0, height: 0, pixelRatio: 1 };
   let drawingBuffer = { width: 0, height: 0, pixelRatio: 0 };
 
-  let framingAspect: number | null = null;
   const fit = (immediate = false) => {
     if (!viewport.width || !viewport.height) return;
     camera.aspect = viewport.width / viewport.height;
-    const bounds = new Box3(
-      new Vector3(-phone.width / 2, -phone.height / 2, 0),
-      new Vector3(phone.width / 2, phone.height / 2, 0),
-    );
-    if (imported && accessoryBounds) bounds.union(accessoryBounds);
-    bounds.applyMatrix4(new Matrix4().makeRotationZ(orientationAngle));
-    const size = bounds.getSize(new Vector3());
-    const aspect = size.x / size.y;
-    if (aspect !== framingAspect) {
-      framingAspect = aspect;
-      options.onFramingAspect?.(aspect);
-    }
     phone.root.updateMatrixWorld(true);
     framing.setBounds(
       new Box3().setFromObject(phone.root),
@@ -342,7 +325,6 @@ export function createPhoneViewer(options: {
         throw new Error("Device accessory has invalid bounds");
       accessory?.asset.removeFromParent();
       accessory = model;
-      accessoryBounds = bounds;
       if (disposed) return;
       if (imported && accessory) phone.orientation.add(accessory.asset);
       fit(true);

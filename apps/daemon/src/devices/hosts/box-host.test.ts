@@ -190,7 +190,6 @@ describe("box device host factory", () => {
     assert.equal(deviceHostOfRecord(record("a", { purpose: "temporary" })), null);
     assert.deepEqual(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: true })), { kind: "byo", platform: "ios" });
     assert.equal(deviceHostOfRecord(record("b", { provider: "byo", purpose: "machine", deviceHost: false })), null);
-    // Own Linux machines with KVM wait for the phase 2 Android driver.
     // Linux: rented device hosts run Android; an own Linux machine only with a usable /dev/kvm.
     assert.deepEqual(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: true })), { kind: "byo", platform: "android" });
     assert.equal(deviceHostOfRecord(record("c", { provider: "byo", purpose: "machine", deviceHost: true, os: "linux", kind: "linux", kvm: false })), null);

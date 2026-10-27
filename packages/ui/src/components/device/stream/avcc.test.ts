@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AvccDemuxer, encodeAvccEnvelope, MAX_AVCC_ENVELOPE_BYTES } from "./avcc.ts";
+import { AvccDemuxer, MAX_AVCC_ENVELOPE_BYTES } from "./avcc.ts";
+import { encodeAvccEnvelope } from "./testing/fakes.ts";
 
 const concat = (...parts: Uint8Array[]) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));

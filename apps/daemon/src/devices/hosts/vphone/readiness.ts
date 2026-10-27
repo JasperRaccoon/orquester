@@ -26,8 +26,8 @@ import {
 export const VPHONE_TEMPLATE_ACTION = "vphone-template";
 
 /** Where vphone-cli may be (besides `$VPHONE_CLI_PATH` and PATH). */
-export const VPHONE_CLI_CANDIDATES = ["/opt/homebrew/bin/vphone-cli", "/usr/local/bin/vphone-cli"];
-export const VPHONE_LAUNCHPAD_CANDIDATES = [
+const VPHONE_CLI_CANDIDATES = ["/opt/homebrew/bin/vphone-cli", "/usr/local/bin/vphone-cli"];
+const VPHONE_LAUNCHPAD_CANDIDATES = [
   "/opt/homebrew/bin/vphone-launchpad-cli",
   "/usr/local/bin/vphone-launchpad-cli",
   "/Applications/vphone-launchpad.app/Contents/MacOS/vphone-launchpad-cli"
@@ -68,7 +68,7 @@ export function locateVphoneCli(found: { envPath: string | null; whichCli: strin
   return launchpad ? { command: launchpad, prefix: ["exec"] } : null;
 }
 
-export function checkCli(cli: VphoneCliLocation | null): DeviceReadinessCheck {
+function checkCli(cli: VphoneCliLocation | null): DeviceReadinessCheck {
   if (cli) {
     return { id: "vphone-cli", label: "vphone-cli", state: "ok", detail: cli.prefix.length > 0 ? `${cli.command} (through Launchpad)` : cli.command };
   }

@@ -20,10 +20,10 @@ import { Worker } from "node:worker_threads";
 
 import type { FittedScreenshot } from "./screenshot-image.ts";
 
-export const IMAGE_WORKERS = 2;
-export const IMAGE_QUEUE_CAP = 32;
-export const IMAGE_JOB_TIMEOUT_MS = 30_000;
-export const IMAGE_WORKER_IDLE_MS = 60_000;
+const IMAGE_WORKERS = 2;
+const IMAGE_QUEUE_CAP = 32;
+const IMAGE_JOB_TIMEOUT_MS = 30_000;
+const IMAGE_WORKER_IDLE_MS = 60_000;
 
 export type ImageJob = { kind: "thumbnail"; image: Uint8Array; width: number } | { kind: "fit"; png: Uint8Array; maxBase64Chars: number };
 

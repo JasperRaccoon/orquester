@@ -276,7 +276,6 @@ export const ionosAdapter: BoxProviderAdapter = {
   accountNote:
     "New IONOS Cloud accounts are checked manually (up to 24 hours) before resources can be created, and each contract has resource limits (cores, RAM, storage) that IONOS support raises on request.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => ionos(credentials, { url: `${API}/datacenters?depth=0&limit=1` }, options));

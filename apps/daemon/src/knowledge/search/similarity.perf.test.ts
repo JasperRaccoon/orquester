@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { KnowledgeVisibility } from "@orquester/api";
-import type { KnowledgeVectorIndex } from "../ports.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
 import { FakeVectorIndex } from "./fake-vector-index.ts";
 import { parseKnowledgeFilters, entryMatchesFilter } from "./filters.ts";
@@ -66,7 +65,7 @@ async function corpus(t: test.TestContext) {
   );
   const indexDir = await mkdtemp(join(tmpdir(), "kg-similarity-perf-"));
   const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(null), indexDir, logger: silentLogger() });
-  (search as unknown as { similarityIndex: () => KnowledgeVectorIndex }).similarityIndex = () => index;
+  search.vectorIndex = () => index;
   t.after(async () => {
     await search.stop();
     await rm(indexDir, { recursive: true, force: true });

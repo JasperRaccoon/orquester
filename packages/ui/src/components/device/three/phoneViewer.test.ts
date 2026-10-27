@@ -97,12 +97,10 @@ function fixture(profile?: DeviceShapeProfile) {
   const canvas = Object.assign(new EventTarget(), { width: 0, height: 0 }) as HTMLCanvasElement;
   const source = { width: 1206, height: 2622 } as HTMLCanvasElement;
   const onUnavailable = mock.fn();
-  const onFramingAspect = mock.fn((_aspect: number) => {});
   const viewer = createPhoneViewer({
     canvas,
     source,
     onUnavailable,
-    onFramingAspect,
     createRenderer: () => new FakeRenderer() as unknown as DeviceRenderer,
     loadModel,
     ...(profile ? { profile } : {}),
@@ -121,7 +119,6 @@ function fixture(profile?: DeviceShapeProfile) {
     pending,
     source,
     onUnavailable,
-    onFramingAspect,
     state: gpu.instances[0]!,
   };
 }

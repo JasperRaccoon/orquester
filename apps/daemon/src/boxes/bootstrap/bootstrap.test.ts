@@ -338,8 +338,7 @@ test("containerCommand takes its secrets from env, unsets them and stays in the 
   const daemon = await startFakeDaemon(t);
   const box = await sandbox(t);
   const boot = buildBootstrap(input({ daemonUrl: daemon.url, container: true }));
-  const shell = has("busybox") ? ["busybox", "sh"] : ["sh"];
-  const { code, output } = await runScript(box, [...shell, ...boot.containerCommand.slice(1)], { env: boot.env });
+  const { code, output } = await runScript(box, ["sh", ...boot.containerCommand.slice(1)], { env: boot.env });
   assert.equal(code, 0, output);
   await assertAgentStarted(box, daemon, output);
   const agentEnv = await readFile(`${box.result}.env`, "utf8");

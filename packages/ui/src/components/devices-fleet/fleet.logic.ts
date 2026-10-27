@@ -93,11 +93,6 @@ export function groupFleet(hosts: readonly DeviceHostSummary[] | null, leases: r
   return groups;
 }
 
-/** How many leases the grid shows (released ones never do). */
-export function countFleetLeases(groups: readonly FleetGroup[]): number {
-  return groups.reduce((sum, group) => sum + group.leases.length, 0);
-}
-
 // ---------------------------------------------------------------------------
 // Hosts: kind, status
 // ---------------------------------------------------------------------------
@@ -351,11 +346,6 @@ export function meterFill(used: number, total: number): number {
 /** The newest action-log row, or null. */
 export function lastAction(log: readonly DeviceActionEntry[] | undefined): DeviceActionEntry | null {
   return log && log.length > 0 ? log[log.length - 1]! : null;
-}
-
-/** Who drives it now, in the card's words. */
-export function controllerLabel(lease: Pick<DeviceLeaseSummary, "controller">): string {
-  return lease.controller === "user" ? "You" : "Agent";
 }
 
 /** What covers the thumbnail for a lease that is not live, or null when it streams. */

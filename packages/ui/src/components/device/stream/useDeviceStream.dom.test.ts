@@ -9,9 +9,9 @@ import { after, afterEach, before, beforeEach, describe, it, mock } from "node:t
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { encodeAvccEnvelope } from "./avcc.ts";
 import type { BrowserStreamCaps } from "./capabilities.ts";
 import {
+  encodeAvccEnvelope,
   fakeImageBitmaps,
   fakeStreamingFetch,
   fakeVideoDecoderClass,

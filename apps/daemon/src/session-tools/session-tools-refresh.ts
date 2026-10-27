@@ -5,7 +5,7 @@
  * - **The manifest route** (`daemonRoutesForHost.sessionToolsManifest`, socket-only, the agent
  *   host's bearer): `{tools, instructions, deny}` for one provider session of a thread, built from
  *   the thread's tab, the workflow-owned trait (owner + lineage walk) and the daemon-pointing MCP
- *   servers (`GET /api/agent-profile/daemon-mcp-servers`, Task 11's read; none until it answers).
+ *   servers (`GET /api/agent-profile/daemon-mcp-servers`; none until it answers).
  *   Every chat tool is advertised to every chat (no always-Admin one to a workflow-owned chat).
  * - **Push** (`agentHostRoutes.sessionToolsRefresh`): a chat whose launch manifest was refused
  *   (503, its denials unknown) gets its manifest pushed once a daemon-pointing read succeeds — the
@@ -182,7 +182,7 @@ export class SessionToolsRefresher {
   }
 
   /**
-   * The daemon-pointing servers (Task 11's read) — of every project, or with `scope`, of a chat's
+   * The daemon-pointing servers — of every project, or with `scope`, of a chat's
    * project down to its cwd — reused for {@link DAEMON_POINTING_CACHE_MS}. Concurrent callers share
    * ONE read per scope, which outlives a caller's bound ({@link DAEMON_POINTING_READ_TIMEOUT_MS}):
    * when it lands it is cached, and the chats refused meanwhile get their manifest pushed.

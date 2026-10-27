@@ -48,7 +48,7 @@ export interface BoxProjectsDeps {
   enabled(): boolean;
   now(): number;
   /** Place the project on one of the owner's own machines (`provider: "byo"`, the size is the machine's id). */
-  leaseMachine?(boxId: string, project: StoredBoxProject): Promise<StoredBox>;
+  leaseMachine(boxId: string, project: StoredBoxProject): Promise<StoredBox>;
 }
 
 function invalid(message: string, status: 400 | 409 = 400): BoxError {
@@ -158,7 +158,6 @@ export class BoxProjects {
     let record;
     try {
       if (placement.adapter.id === "byo") {
-        if (!this.deps.leaseMachine) throw new BoxError(409, "BOX_UNSUPPORTED", "Projects cannot use your own machines in this build.");
         record = await this.deps.leaseMachine(placement.size.id, project);
       } else {
         record = await this.deps.lifecycle.create({

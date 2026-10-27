@@ -1732,17 +1732,6 @@ export interface SessionUploadResponse {
   size: number;
 }
 
-/** Frames pushed from daemon to client over the session stream. */
-export type SessionStreamMessage =
-  | { type: "buffer"; data: string }
-  | { type: "output"; data: string }
-  | { type: "exit"; exitCode: number };
-
-/** Frames sent from client to daemon over the session stream. */
-export type SessionInputMessage =
-  | { type: "input"; data: string }
-  | { type: "resize"; cols: number; rows: number };
-
 // Browsers — a server-side headless Chromium tab owned by the daemon (one
 // Chromium PROCESS per project, one CDP page per tab). Streamed over /ws-browser.
 

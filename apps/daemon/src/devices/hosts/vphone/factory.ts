@@ -15,7 +15,7 @@ import type { DaemonBoxes } from "../../../boxes/wiring.ts";
 import type { DeviceHostFactory, DeviceHostFactoryContext } from "../../host.ts";
 import { VphoneDeviceHost, vphoneHostId, type VphoneBoxLink, type VphoneHostDeps } from "./host.ts";
 
-export interface VphoneHostFactoryDeps {
+interface VphoneHostFactoryDeps {
   appDir: string;
   /** The box wiring (registry and hub); null while the boxes plugin is unavailable. */
   boxes: () => Pick<DaemonBoxes, "registry" | "hub"> | null;

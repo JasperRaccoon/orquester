@@ -7,7 +7,6 @@ import {
   activeLeaseOf,
   bootElapsed,
   bootSteps,
-  controllerLabel,
   controllerPill,
   deviceFoldRequest,
   deviceKeyOf,
@@ -18,8 +17,6 @@ import {
   hostStreamCaps,
   inputTakesOver,
   leaseName,
-  leaseStateLabel,
-  leaseSubtitle,
   lostDeviceText,
   NO_TRANSPORT_MESSAGE,
   nextRotation,
@@ -76,20 +73,11 @@ const settings = (patch: (s: DevicesSettings) => void = () => {}): DevicesSettin
 };
 
 describe("lease words", () => {
-  it("states, controller pill, subtitle and names", () => {
-    assert.equal(leaseStateLabel({ state: "starting" }), "Starting…");
-    assert.equal(leaseStateLabel({ state: "starting", progress: { step: "rent-host", label: "Renting Mac host", startedAt: "x" } }), "Renting Mac host…");
-    assert.equal(leaseStateLabel({ state: "lost", error: "box destroyed" }), "Lost — box destroyed");
+  it("lost-device reasons, names and keys", () => {
     // The daemon's reasons are sentences: one full stop, not two.
     assert.equal(lostDeviceText("Its host is gone."), "Its host is gone. Open a fresh one to keep going.");
     assert.equal(lostDeviceText("box destroyed"), "box destroyed. Open a fresh one to keep going.");
     assert.equal(lostDeviceText(null), "Its host or emulator stopped. Open a fresh one to keep going.");
-    assert.equal(leaseStateLabel({ state: "ready" }), "Ready");
-    assert.equal(controllerLabel({ state: "ready", controller: "user" }), "You have control");
-    assert.equal(controllerLabel({ state: "ready", controller: "agent" }, "Claude"), "Claude is controlling");
-    assert.equal(controllerLabel({ state: "starting", controller: "agent" }), null);
-    assert.equal(leaseSubtitle({ platform: "ios", osVersion: "" }), "iPhone & iPad");
-    assert.equal(leaseSubtitle({ platform: "android", osVersion: "Android 15" }), "Android 15");
     assert.equal(leaseName({ name: "", profile: "pixel-9" }, DEVICE_PROFILES), "Pixel 9");
     assert.equal(leaseName({ name: "", profile: "" }), "Device");
     assert.equal(deviceKeyOf({ key: null, id: "l9" }), "l9");

@@ -4,14 +4,11 @@ import { beforeEach, describe, it } from "node:test";
 import type { RepoIdentitiesResponse, RepoIdentity, RepoIdentityResponse } from "@orquester/api";
 
 import {
-  applyRepoIdentity,
   applyRepoIdentityEvent,
   clearRepoIcon,
   fetchRepoFavicon,
-  getRepoIdentity,
   loadRepoIdentities,
   repoIdentitiesStore,
-  repoLabelOf,
   resetRepoIdentities,
   sanitizeRepoIdentity,
   setRepoEmoji,
@@ -106,47 +103,42 @@ describe("wire validation", () => {
       null
     );
   });
-
-  it("repoLabelOf falls back to the remote's name", () => {
-    const map = new Map([[KEY, identity()]]);
-    assert.equal(repoLabelOf(map, KEY, "JasperRaccoon/JasperEngine"), "Engine");
-    assert.equal(repoLabelOf(map, OTHER, "JasperRaccoon/orquester"), "JasperRaccoon/orquester");
-  });
 });
 
 describe("events", () => {
   it("apply a change and a delete; ignore malformed and unknown ones", () => {
     applyRepoIdentityEvent(event({ identity: identity() }));
-    assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+    assert.equal(held().get(KEY)?.label, "Engine");
     applyRepoIdentityEvent(event({ identity: { ...identity(), repoKey: 7 } }));
     applyRepoIdentityEvent(event({ repoKey: KEY, deleted: "yes" }));
     applyRepoIdentityEvent(event({ repoKey: KEY, deleted: true }, "repoIdentity.other"));
     applyRepoIdentityEvent(event("nonsense"));
-    assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+    assert.equal(held().get(KEY)?.label, "Engine");
     applyRepoIdentityEvent(event({ repoKey: KEY, deleted: true }));
-    assert.equal(getRepoIdentity(KEY), undefined);
+    assert.equal(held().get(KEY), undefined);
   });
 
   it("never go backwards by updatedAt", () => {
     applyRepoIdentityEvent(event({ identity: identity({ label: "New", updatedAt: at(5) }) }));
     applyRepoIdentityEvent(event({ identity: identity({ label: "Old", updatedAt: at(1) }) }));
-    assert.equal(getRepoIdentity(KEY)?.label, "New");
+    assert.equal(held().get(KEY)?.label, "New");
     applyRepoIdentityEvent(event({ identity: identity({ label: "Newer", updatedAt: at(6) }) }));
-    assert.equal(getRepoIdentity(KEY)?.label, "Newer");
+    assert.equal(held().get(KEY)?.label, "Newer");
   });
 
-  it("a stale answer does not bring a deleted identity back; a newer one does", () => {
+  it("a stale mutation answer does not bring a deleted identity back; a newer one does", async () => {
+    const { api, mutations } = fakeApi();
     applyRepoIdentityEvent(event({ identity: identity({ updatedAt: at(5) }) }));
+    const stale = setRepoEmoji(api, KEY, "🦝");
     applyRepoIdentityEvent(event({ repoKey: KEY, deleted: true }));
-    applyRepoIdentity(KEY, identity({ updatedAt: at(5) }));
-    assert.equal(getRepoIdentity(KEY), undefined);
-    applyRepoIdentity(KEY, identity({ label: "Again", updatedAt: at(7) }));
-    assert.equal(getRepoIdentity(KEY)?.label, "Again");
-  });
+    mutations[0].answer.resolve({ identity: identity({ updatedAt: at(5) }) });
+    await stale;
+    assert.equal(held().get(KEY), undefined);
 
-  it("applyRepoIdentity ignores an identity for another repo", () => {
-    applyRepoIdentity(OTHER, identity());
-    assert.equal(held().size, 0);
+    const newer = setRepoEmoji(api, KEY, "🦝");
+    mutations[1].answer.resolve({ identity: identity({ label: "Again", updatedAt: at(7) }) });
+    await newer;
+    assert.equal(held().get(KEY)?.label, "Again");
   });
 });
 
@@ -167,7 +159,7 @@ describe("loads", () => {
     const load = loadRepoIdentities(api);
     lists[0].resolve({ nope: true } as unknown as RepoIdentitiesResponse);
     await assert.rejects(load, /unexpected shape/);
-    assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+    assert.equal(held().get(KEY)?.label, "Engine");
   });
 
   it("an answer never undoes a change that landed while it was in flight", async () => {
@@ -182,8 +174,8 @@ describe("loads", () => {
     // The list predates both.
     lists[0].resolve({ identities: [identity({ updatedAt: at(0) }), identity({ repoKey: OTHER, updatedAt: at(1) })] });
     await load;
-    assert.deepEqual(getRepoIdentity(KEY)?.icon, { kind: "emoji", value: "🦝" });
-    assert.equal(getRepoIdentity(OTHER), undefined);
+    assert.deepEqual(held().get(KEY)?.icon, { kind: "emoji", value: "🦝" });
+    assert.equal(held().get(OTHER), undefined);
   });
 
   it("an untouched repo takes the list as it is (a reload repairs it)", async () => {
@@ -192,7 +184,7 @@ describe("loads", () => {
     const load = loadRepoIdentities(api);
     lists[0].resolve({ identities: [identity({ label: "Real" })] });
     await load;
-    assert.equal(getRepoIdentity(KEY)?.label, "Real");
+    assert.equal(held().get(KEY)?.label, "Real");
   });
 
   it("an older load answering after a newer one is dropped", async () => {
@@ -203,7 +195,7 @@ describe("loads", () => {
     await second;
     lists[0].resolve({ identities: [] });
     await first;
-    assert.equal(getRepoIdentity(KEY)?.label, "Second");
+    assert.equal(held().get(KEY)?.label, "Second");
   });
 });
 
@@ -241,7 +233,7 @@ describe("per connection", () => {
     applyRepoIdentityEvent(event({ repoKey: KEY, deleted: true }));
     resetRepoIdentities();
     applyRepoIdentityEvent(event({ identity: identity({ updatedAt: at(5) }) }));
-    assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+    assert.equal(held().get(KEY)?.label, "Engine");
   });
 });
 
@@ -253,12 +245,12 @@ describe("mutations", () => {
     const answered = identity({ icon: { kind: "image", contentType: "image/png", version: "v1", source: { kind: "favicon", domain: "matssmile.com" } } });
     mutations[0].answer.resolve({ identity: answered });
     assert.deepEqual(await favicon, answered);
-    assert.deepEqual(getRepoIdentity(KEY), answered);
+    assert.deepEqual(held().get(KEY), answered);
 
     const clear = clearRepoIcon(api, KEY);
     mutations[1].answer.resolve({ identity: null });
     assert.equal(await clear, null);
-    assert.equal(getRepoIdentity(KEY), undefined);
+    assert.equal(held().get(KEY), undefined);
   });
 
   it("reject with the daemon's error and change nothing", async () => {
@@ -268,7 +260,7 @@ describe("mutations", () => {
     const refusal = Object.assign(new Error("refused"), { status: 400, body: { code: "INVALID_EMOJI" } });
     mutations[0].answer.reject(refusal);
     await assert.rejects(emoji, refusal);
-    assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+    assert.equal(held().get(KEY)?.label, "Engine");
   });
 
   it("an answer that does not parse reloads the list", async () => {

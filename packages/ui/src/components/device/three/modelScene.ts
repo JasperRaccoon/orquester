@@ -82,7 +82,6 @@ export function createImportedPhoneScene(
   const orientation = new Group();
   orientation.add(asset);
   root.add(orientation);
-  const bounds = new Box3().setFromObject(asset);
   let layout = initial;
   const projection = createDisplayProjection(
     display,
@@ -101,8 +100,6 @@ export function createImportedPhoneScene(
   return {
     root,
     orientation,
-    width: bounds.max.x - bounds.min.x,
-    height: bounds.max.y - bounds.min.y,
     setDisplay(nextTexture: Texture, nextLayout: PhoneDisplayLayout) {
       layout = nextLayout;
       screenMaterial.map = nextTexture;

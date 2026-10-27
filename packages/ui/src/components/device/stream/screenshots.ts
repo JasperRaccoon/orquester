@@ -99,11 +99,15 @@ export class ScreenshotPollSession implements DeviceVideoSession {
       }
       const wait = Math.max(0, this.intervalMs - (this.deps.now() - started));
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, wait);
-        attempt.signal.addEventListener("abort", () => {
+        const onAbort = () => {
           clearTimeout(timer);
           resolve();
-        }, { once: true });
+        };
+        const timer = setTimeout(() => {
+          attempt.signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, wait);
+        attempt.signal.addEventListener("abort", onAbort, { once: true });
       });
     }
   }

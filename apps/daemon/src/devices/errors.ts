@@ -43,7 +43,7 @@ export function isDeviceError(error: unknown): error is DeviceError {
   return error instanceof DeviceError;
 }
 
-export const DEVICES_DISABLED_MESSAGE = "Device simulators are off. Ask the owner to turn the plugin on in Settings → Plugins.";
+const DEVICES_DISABLED_MESSAGE = "Device simulators are off. Ask the owner to turn the plugin on in Settings → Plugins.";
 
 export function devicesDisabled(): DeviceError {
   return new DeviceError(DEVICE_ERROR_CODES.DEVICES_DISABLED, DEVICES_DISABLED_MESSAGE);

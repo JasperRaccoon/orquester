@@ -14,7 +14,7 @@ it("keeps a captured screen gesture separate from orbit and ends it once on canc
     { x: 1, y: 0.6 },
   ];
   const screenPoint = mock.fn((_point: Point, _captured: boolean) => returns.shift() ?? null);
-  const input = createPhoneInteraction({ screenPoint, touch, orbit, zoomBy: mock.fn() });
+  const input = createPhoneInteraction({ screenPoint, touch, orbit });
   assert.equal(input.begin(1, { x: 0.4, y: 0.3 }), true);
   assert.equal(input.begin(2, { x: 0.2, y: 0.2 }), false);
   input.move(2, { x: 0.8, y: 0.8 });
@@ -37,26 +37,18 @@ it("keeps a captured screen gesture separate from orbit and ends it once on canc
 it("blocks navigation during either captured gesture, then resumes without sending device touches", () => {
   const touch = mock.fn((_phase: Phase, _point: Point) => {});
   const orbit = mock.fn((_x: number, _y: number) => {});
-  const zoomBy = mock.fn((_delta: number) => {});
   const input = createPhoneInteraction({
     screenPoint: () => ({ x: 0.5, y: 0.5 }),
     touch,
     orbit,
-    zoomBy,
   });
   input.begin(1, { x: 0.5, y: 0.5 });
-  assert.equal(input.navigate({ type: "zoom", delta: 0.2 }), false);
   assert.equal(input.navigate({ type: "orbit", x: 0.1, y: 0.2 }), false);
   input.end();
   input.begin(2, { x: 0.5, y: 0.5 }, true);
-  assert.equal(input.navigate({ type: "zoom", delta: 0.2 }), false);
+  assert.equal(input.navigate({ type: "orbit", x: 0.1, y: 0.2 }), false);
   input.end();
-  assert.equal(input.navigate({ type: "zoom", delta: 0.2 }), true);
   assert.equal(input.navigate({ type: "orbit", x: 0.1, y: 0.2 }), true);
-  assert.deepEqual(
-    zoomBy.mock.calls.map((call) => call.arguments),
-    [[0.2]],
-  );
   assert.deepEqual(
     orbit.mock.calls.map((call) => call.arguments),
     [[0.1, 0.2]],
@@ -73,7 +65,6 @@ it("ends wheel orbit without ending a captured screen touch", () => {
     screenPoint: () => ({ x: 0.5, y: 0.5 }),
     touch: mock.fn(),
     orbit: mock.fn(),
-    zoomBy: mock.fn(),
     onInteractionActive,
   });
   const calledWith = (...args: unknown[]) =>
@@ -95,8 +86,8 @@ it("ends wheel orbit without ending a captured screen touch", () => {
   assert.ok(calledWith(false, "touch"));
 });
 
-it("normalizes wheel units, distinguishes pinch, and bounds jumps from coarse scroll wheels", () => {
-  const wheel = { width: 400, height: 800, deltaX: 16, deltaY: 32, deltaMode: 0, ctrlKey: false };
+it("normalizes wheel units and bounds jumps from coarse scroll wheels", () => {
+  const wheel = { width: 400, height: 800, deltaX: 16, deltaY: 32, deltaMode: 0 };
   assert.deepEqual(phoneWheelNavigation(wheel), { type: "orbit", x: -0.04, y: -0.04 });
   assert.deepEqual(
     phoneWheelNavigation({ ...wheel, deltaX: 1, deltaY: 2, deltaMode: 1 }),
@@ -106,14 +97,6 @@ it("normalizes wheel units, distinguishes pinch, and bounds jumps from coarse sc
     type: "orbit",
     x: -0.25,
     y: -0.25,
-  });
-  assert.deepEqual(phoneWheelNavigation({ ...wheel, ctrlKey: true }), {
-    type: "zoom",
-    delta: -0.32,
-  });
-  assert.deepEqual(phoneWheelNavigation({ ...wheel, deltaY: -10000, ctrlKey: true }), {
-    type: "zoom",
-    delta: 1,
   });
   assert.equal(phoneWheelNavigation({ ...wheel, width: 0 }), null);
   assert.equal(phoneWheelNavigation({ ...wheel, deltaY: NaN }), null);

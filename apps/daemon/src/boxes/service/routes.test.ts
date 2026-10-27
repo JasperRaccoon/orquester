@@ -240,6 +240,12 @@ test("plugin routes: boxes, providers, kinds and offers, connection, refusals", 
   assert.ok(!good.body.includes(h.adapter.validKey), "the key never comes back");
   const providers = (await h.inject({ method: "GET", url: "/api/boxes/providers" })).json() as BoxProvidersResponse;
   assert.equal(providers.providers[0]!.status, "connected");
+  assert.equal(providers.providers[0]!.windowsImage, undefined);
+  const image = await h.inject({ method: "POST", url: "/api/boxes/providers/hetzner/windows-image" });
+  assert.equal(image.statusCode, 409);
+  assert.equal(image.json().code, "BOX_UNSUPPORTED");
+  assert.equal(image.json().message, "Fake Cloud needs no prepared Windows image.");
+  assert.equal((await h.inject({ method: "POST", url: "/api/boxes/providers/nope/windows-image" })).statusCode, 404);
 
   const kinds = (await h.inject({ method: "GET", url: "/api/boxes/kinds" })).json();
   const linux = kinds.kinds.find((entry: { kind: string }) => entry.kind === "linux");

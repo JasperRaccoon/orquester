@@ -645,8 +645,6 @@ const ManageView: React.FC<{ api: SecretFilesAdminApi; vault: SecretVaultDetail;
   const [compare, setCompare] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAdd | null>(null);
   const disabled = busy !== null;
-  const clonesRef: CloneRef[] = vault.clones;
-
   const update = (key: string, req: Omit<Parameters<typeof updateSecretFiles>[1], "workspace" | "repoKey">) =>
     run(key, async () => {
       await updateSecretFiles(api, { workspace, repoKey, ...req });

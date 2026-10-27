@@ -161,6 +161,8 @@ import type {
   KnowledgeSaveResponse,
   KnowledgeSearchRequest,
   KnowledgeSearchResponse,
+  KnowledgeSimilarityGraphQuery,
+  KnowledgeSimilarityGraphResponse,
   KnowledgeStatus,
   UpdateKnowledgeCollectionRequest,
   UpdateKnowledgeEntryRequest,
@@ -175,11 +177,10 @@ import {
   parseKnowledgeRebuildEstimate,
   parseKnowledgeSearchResponse,
   parseKnowledgeSettings,
+  parseKnowledgeSimilarityGraphResponse,
   parseKnowledgeStatus,
   type KnowledgeSettingsAnswer
 } from "./knowledge/validate";
-import type { KnowledgeSimilarityGraphQuery, KnowledgeSimilarityGraphResponse } from "@orquester/api";
-import { parseKnowledgeSimilarityGraphResponse } from "./knowledge/validate";
 import {
   authRoutes,
   authSessionPath,

@@ -143,7 +143,8 @@ test("open → act → screenshot → install → close, acting for the calling 
     t.actions.result = () => ({ log: { summary: "Took a screenshot" }, image: { mimeType: "image/png", data: Buffer.from("png"), width: 2, height: 4 } });
     const shot = await call(api, "device_action", { device: "local/dev-1", action: "screenshot" });
     assert.ok(shot.ok);
-    assert.equal(shot.result.content[0]!.type, "image");
+    assert.deepEqual(shot.result.content[0], { type: "image", data: Buffer.from("png").toString("base64"), mimeType: "image/png" });
+    assert.deepEqual(JSON.parse((shot.result.content[1] as { text: string }).text), shot.value);
     const ref = readDeviceToolReference(shot.value[DEVICE_TOOL_REFERENCE_KEY]);
     assert.ok(ref?.screenshotId);
     assert.equal(ref?.action, "screenshot");

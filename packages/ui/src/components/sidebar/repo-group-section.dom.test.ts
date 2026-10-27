@@ -19,7 +19,7 @@ import {
 import { OrquesterProvider } from "../../context/orquester-context";
 import type { ApiClient } from "../../lib/api-client";
 import type { RepoProjectGroup } from "../../lib/repo-groups";
-import { applyRepoIdentity, resetRepoIdentities } from "../../lib/repo-identities/store";
+import { applyRepoIdentityEvent, resetRepoIdentities } from "../../lib/repo-identities/store";
 import { applySecretVault, resetSecretFiles } from "../../lib/secret-files/store";
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
@@ -174,7 +174,10 @@ describe("a repo group header", () => {
     await openMenu();
     assert.ok(!menuLabels().includes("Reset label"));
     await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
-    await act(async () => applyRepoIdentity(KEY, { repoKey: KEY, label: "Engine", updatedAt: "x" }));
+    await act(async () => applyRepoIdentityEvent({
+      type: "repoIdentity.changed",
+      payload: { identity: { repoKey: KEY, label: "Engine", updatedAt: "x" } }
+    }));
     await openMenu();
     assert.ok(menuLabels().includes("Reset label"));
     await pick("Reset label");

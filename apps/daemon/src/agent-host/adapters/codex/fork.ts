@@ -48,7 +48,7 @@ export function codexThreadIdOf(cursor: unknown): string | null {
   return isUsableConversationId(threadId) ? threadId : null;
 }
 
-export interface ForkCodexThreadInput {
+interface ForkCodexThreadInput {
   bin: string;
   /** The complete child env — the SOURCE's `CODEX_HOME` included. */
   env: Record<string, string>;

@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const SCREENSHOTS_PER_LEASE = 20;
+const SCREENSHOTS_PER_LEASE = 20;
 
 const LEASE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SHOT_ID = /^[A-Za-z0-9_-]{1,64}$/;

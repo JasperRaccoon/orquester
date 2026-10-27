@@ -101,8 +101,8 @@ test("idle: live and lost leases past the idle time; host changes mark leases lo
     lease("other-host", { hostId: "box:b1" })
   ];
   assert.deepEqual(idleLeases(leases, now, 60).map((entry) => entry.id), ["old", "lost", "other-host"]);
-  assert.deepEqual(hostLeasesChanged(leases, "box:b1", "lost", T0, "gone").map((entry) => [entry.id, entry.state, entry.error]), [["other-host", "lost", "gone"]]);
-  const suspended = hostLeasesChanged(leases, "local", "suspended", T0);
+  assert.deepEqual(hostLeasesChanged(leases, "box:b1", "lost", "gone").map((entry) => [entry.id, entry.state, entry.error]), [["other-host", "lost", "gone"]]);
+  const suspended = hostLeasesChanged(leases, "local", "suspended");
   assert.deepEqual(suspended.map((entry) => entry.id), ["old", "recent"]);
-  assert.deepEqual(hostLeasesChanged(suspended, "local", "ready", T0).map((entry) => entry.state), ["ready", "ready"]);
+  assert.deepEqual(hostLeasesChanged(suspended, "local", "ready").map((entry) => entry.state), ["ready", "ready"]);
 });

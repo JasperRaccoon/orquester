@@ -583,7 +583,7 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
     if (!names) claimed.set(target, (names = { mcp: [], skill: [], command: [] }));
     return names;
   };
-  const claim = (index: number, target: Agent, kind: "mcp" | "skill" | "command", name: string, policy: ProfileConflictPolicy) => {
+  const claim = (index: number, target: Agent, kind: "mcp" | "skill" | "command", name: string) => {
     const names = takenOf(target)[kind];
     if (names.includes(name)) {
       // Only keep-both steps aside; "fail" would stop the batch half-way, "replace" overwrite an earlier change.
@@ -633,7 +633,7 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
           refuseMoved(index, agent, kind, [name]);
           fact.writtenName = policy === "keep-both" ? (await client.keepBothName(agent, kind, name, takenOf(agent))).name : name;
           refuseMoved(index, agent, kind, [fact.writtenName]);
-          claim(index, agent, kind, fact.writtenName, policy);
+          claim(index, agent, kind, fact.writtenName);
           pin("name", fact.writtenName);
         }
         if (name !== undefined && policy === "replace") {
@@ -682,7 +682,7 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
           // What the target gets: converted, named by the target's own keep-both naming.
           fact.copy = await client.copyPreview(agent, change.id!, change.toAgent!, change.onConflict ?? "fail", takenOf(change.toAgent!));
           refuseMoved(index, change.toAgent!, fact.copy.kind, [fact.item.name, fact.copy.name]);
-          claim(index, change.toAgent!, fact.copy.kind, fact.copy.name, change.onConflict ?? "fail");
+          claim(index, change.toAgent!, fact.copy.kind, fact.copy.name);
           pin("name", fact.copy.name);
           if (fact.copy.tree) pin("files", treeDigest(fact.copy.tree));
         }
@@ -724,7 +724,7 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         for (const ref of new Set(change.picks!)) {
           const candidate = byRef.get(ref)!;
           refuseMoved(index, agent, candidate.kind, [candidate.name, candidate.writtenName ?? candidate.name]);
-          claim(index, agent, candidate.kind, candidate.writtenName ?? candidate.name, change.onConflict ?? "fail");
+          claim(index, agent, candidate.kind, candidate.writtenName ?? candidate.name);
         }
         for (const candidate of fact.importDetail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
           pin(`pick.${candidate.ref}`, treeDigest(candidate));

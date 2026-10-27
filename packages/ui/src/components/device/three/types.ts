@@ -3,15 +3,10 @@
 import type { WebGLRenderer } from "three";
 import type { DuoPose } from "./duoControl.ts";
 import type { DeviceFrameSink } from "./frame.ts";
+import type { DeviceOrientation } from "../stream/types.ts";
 
-/** Local until the Devices contracts land in `@orquester/api`. */
-export type DevicePlatform = "ios" | "android";
-
-export type DeviceOrientation =
-  | "portrait"
-  | "portrait_upside_down"
-  | "landscape_left"
-  | "landscape_right";
+export type { DevicePlatform } from "@orquester/api";
+export type { DeviceOrientation } from "../stream/types.ts";
 
 export interface DeviceScreenSize {
   readonly width: number;

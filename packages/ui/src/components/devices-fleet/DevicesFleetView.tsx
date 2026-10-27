@@ -23,7 +23,7 @@ import { Button } from "../ui";
 import { HostCard, UnknownHostCard } from "./HostCard";
 import { LeaseCard } from "./LeaseCard";
 import { PoolHeader } from "./PoolHeader";
-import { chatRef, costSharers, countFleetLeases, groupFleet, lastAction, poolView, thumbnailPath } from "./fleet.logic";
+import { chatRef, costSharers, groupFleet, lastAction, poolView, thumbnailPath } from "./fleet.logic";
 import type { ThumbnailDeps } from "./thumbnail-poller";
 import type { DeviceThumbnailRequest } from "./use-device-thumbnail";
 
@@ -135,7 +135,7 @@ export const DevicesFleetView: React.FC<DevicesFleetViewProps> = ({ thumbnailDep
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-devices-fleet="">
       <PoolHeader view={header} onOpenSettings={openDeviceSettings} />
       <div className="mx-auto w-full max-w-[1400px] space-y-7 px-3 py-4 md:px-6 md:py-6">
-        {countFleetLeases(groups) === 0 ? <EmptyFleet onOpenSettings={openDeviceSettings} /> : null}
+        {groups.every((group) => group.leases.length === 0) ? <EmptyFleet onOpenSettings={openDeviceSettings} /> : null}
         {groups.map((group) => {
           const sharers = costSharers(group.leases);
           return (

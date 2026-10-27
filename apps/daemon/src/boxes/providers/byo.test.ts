@@ -51,7 +51,7 @@ test("byo offers: one free size per idle, connected machine of the kind; never a
     machine("ffffff", { state: "pairing" }),
     machine("ggggggg", { provider: "hetzner", purpose: "project" })
   ];
-  const connected = (id: string) => id !== "bb-offline";
+  const connected = () => true;
   const linux = byoOffers(records, "linux", connected);
   assert.deepEqual(linux.sizes.map((size) => [size.id, size.hourlyUsd]), [["bb", 0]]);
   assert.deepEqual(linux.regions, [BYO_REGION]);

@@ -33,7 +33,7 @@ import { WebSocket, type RawData } from "ws";
 import { repeatStillFrame } from "./mjpeg-still-frame.ts";
 
 /** Where one proxied request goes. */
-export interface HubProxyTarget {
+interface HubProxyTarget {
   hostId: string;
   /** The hub's loopback origin (`http://127.0.0.1:<port>`; a box host's `forwardToHost` port). */
   origin: string;
@@ -52,7 +52,7 @@ export interface HubProxy {
   handleWebSocket(socket: WebSocket, request: FastifyRequest, target: HubProxyTarget): void;
 }
 
-export interface HubProxyDeps {
+interface HubProxyDeps {
   /** The live lease on a device (its id or stream `device` parameter) of the host, or null. */
   leaseOnDevice(hostId: string, deviceParam: string): { id: string } | null;
   /** The panel's input on a device: the user takes control at once (spec §7). */
@@ -65,7 +65,7 @@ export interface HubProxyDeps {
 }
 
 /** Above this many bytes queued toward one side, the other side is paused. */
-export const HUB_SEND_HWM = 8 * 1024 * 1024;
+const HUB_SEND_HWM = 8 * 1024 * 1024;
 const PENDING_MAX_BYTES = 8 * 1024 * 1024;
 const PENDING_MAX_MSGS = 512;
 /** How often an open stream restarts its lease's idle clock. */
@@ -86,7 +86,7 @@ interface HttpRoute {
 
 const READ = ["GET", "HEAD"] as const;
 
-export const HUB_HTTP_ROUTES: readonly HttpRoute[] = [
+const HUB_HTTP_ROUTES: readonly HttpRoute[] = [
   { pattern: /^\/api\/devices$/, methods: READ, device: "none" },
   { pattern: /^\/vendor\/serve-sim\/helper\/([^/]+)\/(?:stream\.mjpeg|stream\.avcc)$/, methods: READ, device: "path", stream: true },
   // serve-sim screenshots the first booted simulator when `device` is missing: always name a leased one.
@@ -103,7 +103,7 @@ interface WsRoute {
   control?: (data: RawData, isBinary: boolean) => boolean;
 }
 
-export const HUB_WS_ROUTES: readonly WsRoute[] = [
+const HUB_WS_ROUTES: readonly WsRoute[] = [
   { pattern: /^\/vendor\/serve-sim\/helper\/ws$/ },
   { pattern: /^\/vendor\/serve-emu\/ws$/, control: (data, isBinary) => !isBinary && isResetVideo(data) }
 ];
@@ -131,7 +131,7 @@ const FORWARDED_RESPONSE_HEADERS = ["content-type", "content-length", "content-e
 const TOKEN_SUBPROTOCOL = /^serve-(?:sim|emu)\.token\./;
 
 /** What the client sends upstream: allowlisted headers, the hub's Origin when one was sent, the hub's bearer. */
-export function upstreamHeaders(headers: FastifyRequest["headers"], target: Pick<HubProxyTarget, "origin" | "token">): Record<string, string> {
+function upstreamHeaders(headers: FastifyRequest["headers"], target: Pick<HubProxyTarget, "origin" | "token">): Record<string, string> {
   const out: Record<string, string> = {};
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = headers[name];
@@ -144,7 +144,7 @@ export function upstreamHeaders(headers: FastifyRequest["headers"], target: Pick
 }
 
 /** The response headers the client sees. */
-export function downstreamHeaders(headers: IncomingMessage["headers"]): Record<string, string> {
+function downstreamHeaders(headers: IncomingMessage["headers"]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const name of FORWARDED_RESPONSE_HEADERS) {
     const value = headers[name];

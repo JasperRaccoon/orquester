@@ -490,10 +490,9 @@ export class VphoneDeviceHost implements DeviceHost {
   private async teardown(
     link: VphoneBoxLink,
     cli: VphoneCli | null,
-    record: Pick<VphoneMachineRecord, "name" | "procId" | "forward" | "process"> | null,
+    record: Pick<VphoneMachineRecord, "name" | "procId" | "forward" | "process">,
     created: boolean
   ): Promise<void> {
-    if (!record) return;
     const name = record.name;
     if (cli) await cli.stop(name).catch(() => undefined);
     if (record.process && record.process.exitCode === null) record.process.kill("SIGTERM");
@@ -507,12 +506,11 @@ export class VphoneDeviceHost implements DeviceHost {
       gone = deleted.exitCode === 0 || (await cli.machineInfo(name).catch(() => undefined)) === null;
       if (!gone) this.deps.logger.warn(`[devices] deleting research iPhone ${name} failed; retrying on the next check`, lastLine(deleted));
     }
-    if (gone) await this.forget(name, null);
+    if (gone) await this.forget(name);
     else await this.markReleased(name, record.procId, null);
   }
 
-  private async forget(name: string, record: Pick<VphoneMachineRecord, "forward"> | null): Promise<void> {
-    await record?.forward?.close().catch(() => undefined);
+  private async forget(name: string): Promise<void> {
     this.machines.delete(name);
     await rm(this.recordPath(name), { force: true }).catch(() => undefined);
     this.emit();
@@ -753,7 +751,7 @@ async function readScreen(client: VphoneGuestClient, signal?: AbortSignal): Prom
   }
 }
 
-export function parseScreen(result: Record<string, unknown>): { width: number; height: number; scale: number } | null {
+function parseScreen(result: Record<string, unknown>): { width: number; height: number; scale: number } | null {
   const source = asRecord(result.screen) ?? result;
   const pick = (...keys: string[]) => keys.map((key) => source[key]).find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
   const scale = pick("scale", "native_scale", "nativeScale") ?? 3;

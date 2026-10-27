@@ -155,7 +155,7 @@ try {
   summary.hub = { withToken: authed.status, withoutToken: bare.status };
   log(`hub /api/devices: ${authed.status} with the token, ${bare.status} without →`, (await authed.text()).slice(0, 300));
 
-  const agent = createAgentDeviceClient({ toolchain: {} as DeviceToolchain, env: process.env, logger });
+  const agent = createAgentDeviceClient({ toolchain: {} as DeviceToolchain, env: process.env });
   const snapshot = await timed("agent-device snapshot -i", () => agent.run({ host, lease: leases[0]! }, "snapshot", ["-i"], { signal, timeoutMs: 180_000 }));
   summary.snapshot = { exitCode: snapshot.exitCode, head: snapshot.stdout.split("\n").slice(0, 6).join(" | ").slice(0, 400), stderr: snapshot.stderr.slice(0, 300) };
   log("snapshot:", summary.snapshot);

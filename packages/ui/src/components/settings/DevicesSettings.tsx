@@ -47,6 +47,7 @@ import {
 } from "@orquester/api";
 
 import { cn } from "../../lib/cn";
+import { boxesErrorText } from "../../lib/boxes/errors";
 import { formatHourlyRate } from "../../lib/boxes/format";
 import { useBoxesEnabled, useNow, useOpenBoxesSettings } from "../../lib/boxes/hooks";
 import { loadBoxOffers, loadBoxProviders, useBoxProviders } from "../../lib/boxes/store";
@@ -75,12 +76,6 @@ import {
 import { Badge, EmptyState, Notice, SegmentedControl, SettingRow, SettingsPage, SettingsSection } from "./primitives";
 
 const ANDROID_LICENCE_URL = "https://developer.android.com/studio/terms";
-
-const errorText = (err: unknown): string => {
-  const server = (err as { serverMessage?: unknown } | null)?.serverMessage;
-  if (typeof server === "string" && server) return server;
-  return err instanceof Error && err.message ? err.message : "The request failed.";
-};
 
 const selectClass =
   "h-7 min-w-0 max-w-full rounded-md border border-neutral-700 bg-neutral-900 px-1.5 text-base text-neutral-100 disabled:opacity-50 sm:text-xs";
@@ -373,7 +368,7 @@ const AndroidSection: React.FC<{ settings: DevicesSettingsValue; host: DeviceHos
     if (!api) return;
     setStarting(true);
     void startDeviceSetup(api, "android", actions)
-      .catch((err) => onError(errorText(err)))
+      .catch((err) => onError(boxesErrorText(err)))
       .finally(() => setStarting(false));
   };
   const busy = starting || jobRunning;
@@ -500,7 +495,7 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
     setDestroying(host.id);
     void api
       .destroyDeviceHost(host.id)
-      .catch((err) => onError(errorText(err)))
+      .catch((err) => onError(boxesErrorText(err)))
       .finally(() => setDestroying(null));
   };
   const enabled = ios.enabled;
@@ -873,7 +868,7 @@ export const DevicesSettings: React.FC = () => {
   const [saving, setSaving] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    if (enabled && api && !loaded) void loadDevices(api).catch((err) => setError(errorText(err)));
+    if (enabled && api && !loaded) void loadDevices(api).catch((err) => setError(boxesErrorText(err)));
   }, [enabled, api, loaded]);
 
   const ctx = React.useMemo<SaveContext>(
@@ -884,7 +879,7 @@ export const DevicesSettings: React.FC = () => {
         setSaving(key);
         setError(null);
         void updateDevicesSettings(api, patch)
-          .catch((err) => setError(errorText(err)))
+          .catch((err) => setError(boxesErrorText(err)))
           .finally(() => setSaving((current) => (current === key ? null : current)));
       }
     }),

@@ -157,9 +157,6 @@ export interface BoxAndroidHostDeps {
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
 
-/** Every step of `prepare`; all fix actions run it (it does only what is missing). */
-export const BOX_ANDROID_STEPS = ["kvm", "node", "ffmpeg", "tools", "android-sdk", "avds", "golden", "hub", "agent-device", "tool:agent-device-local"] as const;
-
 /** One at a time per key. */
 class KeyedQueue {
   private readonly tails = new Map<string, Promise<unknown>>();
@@ -208,7 +205,7 @@ export class BoxAndroidHost implements DeviceHost {
   private localCli: string | null = null;
   private toolVersions: { hub: string | null; agent: string | null } | null = null;
   private readonly emulators = new Map<string, EmulatorRecord>();
-  /** The GPU mode and snapshot each running emulator booted with (memory only). */
+  /** Open proxied streams per device. */
   private readonly viewers = new Map<string, number>();
   private readonly reserved = new Set<number>();
   private readonly queue = new KeyedQueue();
@@ -575,17 +572,13 @@ export class BoxAndroidHost implements DeviceHost {
     const report = (percent: number | null, line: string) =>
       this.emitProgress({ step: "android-sdk", label, state: "running", logLine: line, ...(percent !== null ? { detail: `${percent} %` } : {}), percent: 20 + Math.round(((percent ?? 0) / 100) * 30) });
     this.step("android-sdk", label, "running", 20);
-    const deps = this.sdkDeps();
+    const deps: SdkDeps = { exec: this.x.exec, download: this.x.download, env: this.env!, downloads: layout.downloads, executor: this.x };
     const sdkSignal = AbortSignal.any([signal, AbortSignal.timeout(this.timing.sdkMs)]);
     await installCmdlineTools({ sdk: layout.sdk, avd: layout.avd }, deps, sdkSignal, report);
     await acceptLicenses({ sdk: layout.sdk, avd: layout.avd }, deps, sdkSignal);
     await installSdkPackages({ sdk: layout.sdk, avd: layout.avd }, [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE], deps, sdkSignal, report);
     this.step("android-sdk", label, "done", 50);
     return false;
-  }
-
-  private sdkDeps(): SdkDeps {
-    return { exec: this.x.exec, download: this.x.download, env: this.env!, downloads: this.layout().downloads, executor: this.x };
   }
 
   /** An AVD for every configured profile (the cache's are kept; outdated ones of ours are made again while none of their instances runs). */
@@ -657,7 +650,8 @@ export class BoxAndroidHost implements DeviceHost {
               gpu,
               snapshotName: BOX_GOLDEN_SNAPSHOT,
               bootTimeoutMs: this.timing.goldenBootMs,
-              ...(state === "built" || state === "cache" ? { density: avdHardware(profile).density, ...(deviceDensity ? { cutoutDensity: deviceDensity } : {}) } : {})
+              density: avdHardware(profile).density,
+              ...(deviceDensity ? { cutoutDensity: deviceDensity } : {})
             },
             signal,
             onProgress

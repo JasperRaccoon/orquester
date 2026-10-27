@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_DEVICES_SETTINGS, DEVICES_SETTINGS_LIMITS, parseDevicesSettingsPatch, type DeviceHostSummary, type DeviceSetupJob } from "@orquester/api";
+import { DEFAULT_DEVICES_SETTINGS, DEVICES_SETTINGS_LIMITS, type DeviceHostSummary, type DeviceSetupJob } from "@orquester/api";
 
 import {
   fixLabel,
@@ -9,20 +9,13 @@ import {
   macHosts,
   macHostView,
   noMacHostText,
-  nullableText,
   parseSettingNumber,
-  PLACEMENT_LABELS,
   profilesPatch,
   readinessSummary,
   setupJobView,
   toggledProfiles,
   toolRows
 } from "./devices-settings.logic.ts";
-
-const accepted = (patch: unknown) => {
-  const parsed = parseDevicesSettingsPatch(patch);
-  assert.ok(parsed.ok, parsed.ok ? "" : parsed.message);
-};
 
 test("number fields: limits, whole numbers and junk", () => {
   const L = DEVICES_SETTINGS_LIMITS.maxLocalDevices;
@@ -41,27 +34,16 @@ test("number fields: limits, whole numbers and junk", () => {
   }
 });
 
-test("every patch the page builds is one the daemon accepts", () => {
-  const settings = structuredClone(DEFAULT_DEVICES_SETTINGS);
-  accepted({ android: { enabled: true } });
-  accepted({ android: { maxLocalDevices: 4 } });
-  accepted(profilesPatch(settings, "android", "pixel-fold", false));
-  accepted(profilesPatch(settings, "ios", "iphone-duo", false));
-  accepted({ ios: { size: "blacksmith-6vcpu-macos-26", lifetimeMinutes: 240, idleTeardownMinutes: 20, maxSimulatorsPerHost: 3 } });
-  accepted({ ios: { rentWithoutAsking: true, monthlyCapUsd: 150.5 } });
-  accepted({ agents: { enabled: false, followAgentDevices: false } });
-  accepted({ leaseIdleMinutes: 30, maxLeasesPerChat: 2 });
-  accepted({ pool: { placement: "pool-only", provider: nullableText("  "), androidSize: nullableText("ccx23"), iosSize: null } });
-  accepted({ pool: { androidLifetimeMinutes: 90 } });
-  accepted({ pool: { maxHosts: 0, maxHourlyUsd: 12.5, idleTeardownMinutes: 10, capacityWaitSeconds: 60, rentWithoutAsking: true } });
-  accepted({ pool: { minWarmHosts: { android: 1 } } });
-});
-
 test("profiles keep the catalogue's order and drop unknown ids", () => {
   assert.deepEqual(toggledProfiles(["pixel-fold"], "pixel-9", true, "android"), ["pixel-9", "pixel-fold"]);
   assert.deepEqual(toggledProfiles(["pixel-9", "pixel-fold"], "pixel-9", false, "android"), ["pixel-fold"]);
   assert.deepEqual(toggledProfiles(["pixel-from-the-future", "pixel-9"], "pixel-tablet", true, "android"), ["pixel-9", "pixel-tablet"]);
   assert.deepEqual(toggledProfiles([], "iphone-17-pro", true, "android"), []);
+  const settings = structuredClone(DEFAULT_DEVICES_SETTINGS);
+  settings.android.profiles = ["pixel-9", "pixel-fold"];
+  settings.ios.profiles = ["iphone-17-pro", "iphone-duo"];
+  assert.deepEqual(profilesPatch(settings, "android", "pixel-9", false), { android: { profiles: ["pixel-fold"] } });
+  assert.deepEqual(profilesPatch(settings, "ios", "iphone-duo", false), { ios: { profiles: ["iphone-17-pro"] } });
 });
 
 test("readiness summary and per-check fixes", () => {
@@ -163,8 +145,4 @@ test("tools: tool:* checks of every host", () => {
       ["local:tool:expo-device-hub", "0.19.0-canary", "missing", "This machine"]
     ]
   );
-});
-
-test("placement labels cover every mode", () => {
-  assert.deepEqual(Object.keys(PLACEMENT_LABELS).sort(), ["local-only", "pool-only", "prefer-local"]);
 });

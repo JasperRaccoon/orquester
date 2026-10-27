@@ -1,7 +1,7 @@
 /**
  * Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1, D-12): every MCP server an
  * agent CLI would load that reaches THIS daemon's full-trust `/mcp`, so Orquester can deny it
- * inside the chats it launches (the manifest's `deny`, plan Task 6) and the agent-profile panel
+ * inside the chats it launches (the manifest's `deny`) and the agent-profile panel
  * can say "Disabled inside Orquester chats".
  *
  * ## What is scanned
@@ -53,7 +53,7 @@
  *
  * Unreadable or unparsable files contribute nothing (logged by path, never by content).
  *
- * ## API (consumed by the chat manifest, plan Task 6)
+ * ## API (consumed by the chat manifest)
  *
  * - `DaemonMcpDetector.detect({projectPath?, cwd?})` → `DaemonPointingServer[]`: user-scope servers
  *   of every home, plus project-level ones — of `projectPath` only when it is given (what a chat in

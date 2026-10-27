@@ -37,7 +37,6 @@ const SessionProfilesPanel = lazyPanel(
 const DevicePanel = lazyPanel(lazyNamed(() => import("../device/DevicePanel"), "DevicePanel"));
 
 export interface RightRailPanelSpec {
-  id: RightRailPanelId;
   /** The rail button's label and tooltip, and the dock's title. */
   title: string;
   /** A phone's section bar label. */
@@ -48,34 +47,24 @@ export interface RightRailPanelSpec {
 
 export type RightRailPanelRegistry = Readonly<Record<RightRailPanelId, RightRailPanelSpec>>;
 
-/* `Component` is a getter: it is read at render, never while this module evaluates. */
 export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
   prompts: {
-    id: "prompts",
     title: "Saved prompts",
     shortTitle: "Prompts",
     Icon: Bookmark,
-    get Component() {
-      return SavedPromptsPanel;
-    }
+    Component: SavedPromptsPanel
   },
   history: {
-    id: "history",
     title: "History & checkpoints",
     shortTitle: "History",
     Icon: History,
-    get Component() {
-      return PromptHistoryPanel;
-    }
+    Component: PromptHistoryPanel
   },
   workflows: {
-    id: "workflows",
     title: "Automated workflows",
     shortTitle: "Workflows",
     Icon: Workflow,
-    get Component() {
-      return WorkflowsPanel;
-    }
+    Component: WorkflowsPanel
   },
   /*
    * The Agent Profiles library and editor (agent profiles spec §5.1), in the
@@ -84,26 +73,20 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
    * sidebar (`sidebar/sidebar-view.ts`, `sidebar/ActivityBar.tsx`).
    */
   profile: {
-    id: "profile",
     title: "Agent Profiles",
     shortTitle: "Profiles",
     Icon: Layers,
-    get Component() {
-      return SessionProfilesPanel;
-    }
+    Component: SessionProfilesPanel
   },
   /*
    * The visible chat's devices (Device simulators plugin, devices spec §10.1):
    * listed only while the plugin is on (`visibleRailPanels`).
    */
   device: {
-    id: "device",
     title: "Devices",
     shortTitle: "Device",
     Icon: Smartphone,
-    get Component() {
-      return DevicePanel;
-    }
+    Component: DevicePanel
   }
 };
 
@@ -116,15 +99,9 @@ export const RIGHT_RAIL_PANEL_ORDER: readonly DockPanelId[] = ["prompts", "histo
  */
 export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "device", "workflows", "profile"];
 
-/** What decides whether a plugin-backed panel is listed. */
-export interface RailPanelAvailability {
-  /** The Device simulators plugin is on. */
-  devices: boolean;
-}
-
 /** `order` without the panels whose plugin is off (the Device panel without Device simulators). */
-export function visibleRailPanels<T extends RightRailPanelId>(order: readonly T[], availability: RailPanelAvailability): readonly T[] {
-  return availability.devices ? order : order.filter((id) => id !== "device");
+export function visibleRailPanels<T extends RightRailPanelId>(order: readonly T[], devicesEnabled: boolean): readonly T[] {
+  return devicesEnabled ? order : order.filter((id) => id !== "device");
 }
 
 /** The dock's element id — what the active rail button `aria-controls`. */

@@ -79,26 +79,12 @@ export function androidLayoutAt(root: string): AndroidLayout {
 }
 
 export function androidLayout(appDir: string): AndroidLayout {
-  const devices = devicesDir(appDir);
-  const agentDevice = join(devices, "agent-device");
   return {
-    devices,
+    ...androidLayoutAt(devicesDir(appDir)),
     tools: devicesToolsDir(appDir),
     sdk: androidSdkDir(appDir),
     avd: androidAvdDir(appDir),
     runtime: devicesRuntimeDir(appDir),
-    tmp: join(devices, "tmp"),
-    home: join(devices, "home"),
-    androidUser: join(devices, "android-user"),
-    hubState: join(devices, "hub-state"),
-    agentDeviceState: join(agentDevice, "state"),
-    agentDeviceHome: join(agentDevice, "home"),
-    agentDeviceClaims: join(agentDevice, "claims"),
-    agentDeviceConfig: join(agentDevice, "config.json"),
-    logs: join(devices, "logs"),
-    uploads: join(devices, "uploads"),
-    npmCache: join(devices, "cache", "npm"),
-    downloads: join(devices, "cache", "downloads"),
     stateFile: devicesHubStatePath(appDir)
   };
 }

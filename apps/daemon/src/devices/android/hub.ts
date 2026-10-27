@@ -251,7 +251,6 @@ export class HubSupervisor {
 
   private async tick(): Promise<void> {
     if (!this.supervising) return;
-    let next = HUB_TICK_MS;
     try {
       if (this.statusValue === "running" && this.record) {
         const alive = await isProcessAlive(this.record.pid, this.x);
@@ -260,7 +259,7 @@ export class HubSupervisor {
           if (alive) await this.kill();
           this.record = null;
           await this.deps.persist(null).catch(() => undefined);
-          next = this.fail("The device hub stopped; restarting it.");
+          this.fail("The device hub stopped; restarting it.");
         } else {
           if (this.healthySince !== null && this.now() - this.healthySince >= HUB_HEALTHY_RESET_MS) this.failures = 0;
           await this.maybeRecycle();
@@ -269,17 +268,15 @@ export class HubSupervisor {
         await this.spawnHub();
       }
     } catch (error) {
-      next = this.fail(error instanceof Error ? error.message : String(error));
+      this.fail(error instanceof Error ? error.message : String(error));
     }
-    if (this.statusValue === "failed") next = hubBackoffMs(this.failures);
-    this.schedule(next);
+    this.schedule(this.statusValue === "failed" ? hubBackoffMs(this.failures) : HUB_TICK_MS);
   }
 
-  private fail(message: string): number {
+  private fail(message: string): void {
     this.failures += 1;
     this.healthySince = null;
     this.setStatus("failed", message);
-    return hubBackoffMs(this.failures);
   }
 
   private async maybeRecycle(): Promise<void> {

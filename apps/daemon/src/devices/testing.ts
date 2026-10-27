@@ -41,7 +41,6 @@ export class FakeDeviceHost implements DeviceHost {
     this.checks = this.checks.map((check) => ({ ...check, state: "ok" as const }));
     this.status = { status: "ready", detail: null };
   };
-  destroyed = false;
   destroy?: () => Promise<void>;
   /** What the host reports of its pool place (a box host near its deadline drains). */
   pool?: () => DeviceHostPoolInfo | null;

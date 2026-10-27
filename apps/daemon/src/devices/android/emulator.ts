@@ -9,7 +9,7 @@
 import { join } from "node:path";
 
 import type { ExecFn } from "./exec.ts";
-import { type DeviceExecutor, isLocalPortFree, LOCAL_EXECUTOR, pickLocalFreePort } from "./executor.ts";
+import { type DeviceExecutor, isLocalPortFree, LOCAL_EXECUTOR } from "./executor.ts";
 import { delay, descendantsOf, type ProcStat } from "./procs.ts";
 
 /** The GPU mode every AVD is configured, snapshotted and booted with (spikes §2: fastest without a GPU). */
@@ -89,17 +89,11 @@ export function grpcPortFor(consolePort: number): number {
   return GRPC_PORT_BASE + (consolePort - CONSOLE_PORT_MIN) / 2;
 }
 
-/** Whether nothing listens on 127.0.0.1:`port` now (this machine). */
-export const isPortFree = isLocalPortFree;
-
-/** A free port the OS picks (the hub's; this machine). */
-export const pickFreePort = pickLocalFreePort;
-
 /**
  * The first console port (and its gRPC port) not `taken` by this host and free on the machine:
  * the console port, its adb port (+1) and the gRPC port must all be unbound. Null when none is.
  */
-export async function allocateEmulatorPorts(taken: ReadonlySet<number>, isFree: (port: number) => Promise<boolean> = isPortFree): Promise<{ consolePort: number; grpcPort: number } | null> {
+export async function allocateEmulatorPorts(taken: ReadonlySet<number>, isFree: (port: number) => Promise<boolean> = isLocalPortFree): Promise<{ consolePort: number; grpcPort: number } | null> {
   for (const consolePort of consolePortCandidates()) {
     if (taken.has(consolePort)) continue;
     const grpcPort = grpcPortFor(consolePort);

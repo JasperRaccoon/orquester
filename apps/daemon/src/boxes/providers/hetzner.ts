@@ -192,7 +192,6 @@ export const hetznerAdapter: BoxProviderAdapter = {
   ],
   accountNote: "New Hetzner accounts may be asked for an ID check before the first server can be created.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () =>

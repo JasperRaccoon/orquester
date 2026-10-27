@@ -94,7 +94,7 @@ import {
   readManifestEntryIds,
   readMykgProgress
 } from "./mykg-files.ts";
-import { procMykgProbe, startMykgRun, stopStaleMykg, type MykgProcessProbe, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
+import { MykgRun, procMykgProbe, stopStaleMykg, type MykgProcessProbe, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
 
@@ -618,7 +618,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       onEvent: (event) => this.onPoolEvent(active, event),
       ...(this.opts.logger ? { logger: this.opts.logger } : {})
     });
-    const run = startMykgRun(
+    const run = new MykgRun(
       { runtime, mykgDir: this.mykgDir, homeDir: this.homeDir, inputDir: this.opts.store.mykgInputDir, mode: record.mode, session: record.session },
       { clock: this.opts.clock, ...(this.opts.spawn ? { spawn: this.opts.spawn } : {}) }
     );

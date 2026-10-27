@@ -201,17 +201,12 @@ export function knowledgeRuntimeOf(
   };
 }
 
+/** A supported `runtime.json`, unknown fields included (a rewrite keeps them); null when unreadable. */
 export async function readKnowledgeManifest(versionDir: string): Promise<KnowledgeRuntimeManifest | null> {
-  const value = (await readManifestObject(versionDir)) as Partial<KnowledgeRuntimeManifest> | null;
-  if (value?.schema !== 1 || typeof value.mykgVersion !== "string" || typeof value.overlay?.digest !== "string") return null;
-  return value as KnowledgeRuntimeManifest;
-}
-
-/** `runtime.json` as written, unknown fields included (a rewrite keeps them); null when unreadable. */
-async function readManifestObject(versionDir: string): Promise<Record<string, unknown> | null> {
   try {
-    const value = JSON.parse(await readFile(join(versionDir, MANIFEST_FILE), "utf8")) as unknown;
-    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+    const value = JSON.parse(await readFile(join(versionDir, MANIFEST_FILE), "utf8")) as Partial<KnowledgeRuntimeManifest> | null;
+    if (value?.schema !== 1 || typeof value.mykgVersion !== "string" || typeof value.overlay?.digest !== "string") return null;
+    return value as KnowledgeRuntimeManifest;
   } catch {
     return null;
   }
@@ -668,9 +663,8 @@ export async function installKnowledgeModel(
     });
     const installedAt = deps.now().toISOString();
     await step("install", 0, signal, async () => {
-      const manifest = await readManifestObject(versionDir);
-      const known = await readKnowledgeManifest(versionDir);
-      if (!manifest || known?.mykgVersion !== release.version || known.wheelSha256 !== release.wheelSha256) {
+      const manifest = await readKnowledgeManifest(versionDir);
+      if (manifest?.mykgVersion !== release.version || manifest.wheelSha256 !== release.wheelSha256) {
         throw new Error(`myKG ${release.version} is not installed from the same wheel any more`);
       }
       const models = join(versionDir, "models");
@@ -778,17 +772,6 @@ function lockWithout(lock: string, name: string): string {
     if (!dropping && line.trim() !== "") out.push(line);
   }
   return `${out.join("\n")}\n`;
-}
-
-/** `name==version[ ; marker]` of every requirement in a hashed lock (hashes and comments dropped). */
-export function parseLockVersions(lock: string): string[] {
-  const out: string[] = [];
-  for (const raw of lock.split(/\r?\n/)) {
-    if (raw.startsWith(" ") || raw.startsWith("\t") || raw.startsWith("#")) continue;
-    const line = raw.replace(/\\\s*$/, "").trim();
-    if (/^[A-Za-z0-9._-]+==[^\s;]+/.test(line)) out.push(line);
-  }
-  return out;
 }
 
 /** `<venv>/lib/python3.X/site-packages/mykg/prompts`. */

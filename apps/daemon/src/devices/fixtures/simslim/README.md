@@ -11,5 +11,4 @@ its Go structs (`output.go` `TopOutput`/`TopSim`, `verify.go` `VerifyResult`, `m
 | `top-empty.json` | `simslim top --json` with nothing booted |
 | `verify-ok.json` | `simslim verify <udid> --profile <file> --json` (exit 0) |
 | `verify-drift.json` | the same with drift (exit 1) |
-| `measure.json` | `simslim measure <udid> --json` |
 | `top-captured.json` | `simslim top --json` captured on a Blacksmith `macos-26` 6 vCPU runner (2026-10-27, iOS 27.0): three slim iPhone 17 Pro simulators 45 s after boot (pretty-printed; nothing else edited) |

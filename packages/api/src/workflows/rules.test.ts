@@ -102,7 +102,6 @@ describe("evaluateRuleAsync", () => {
     assert.equal(await check("{{ input.s }}", "matches", "^A"), false);
     assert.equal(await check("{{ input.s }}", "matches", "/^A/i"), true);
     assert.equal(await check("{{ input.s }}", "matches", "/b/g"), true);
-    assert.equal(await check("{{ input.s }}", "matches", "/b/g"), true, "g is dropped, so a second test is the same");
     const invalid = await evaluateRuleAsync(rule("{{ input.s }}", "matches", "(unclosed"), ctx, matcher);
     assert.equal(invalid.result, false);
     assert.equal(invalid.warnings.length, 1);

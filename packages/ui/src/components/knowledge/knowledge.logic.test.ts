@@ -311,6 +311,10 @@ describe("the List view's results", () => {
       ["Keyword", "Meaning", "Similar", "Concept Pricing"]
     );
     assert.deepEqual(viaBadges({ via: ["concept"], concepts: [] }).map((b) => b.label), ["Concept"]);
+    assert.deepEqual(
+      viaBadges({ via: ["concept"], concepts: [{ id: "a", name: "Paywalls", type: "T" }, { id: "b", name: "Pricing", type: "T" }] }).map((b) => b.label),
+      ["Concept Paywalls", "Concept Pricing"]
+    );
     assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 2, chunks: 12 } }), "passage 3 of 12");
     assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 0, chunks: 1 } }), null, "a short entry has one passage");
     assert.equal(passageText({ passage: null }), null);

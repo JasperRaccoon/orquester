@@ -20,38 +20,11 @@ import {
 // Words
 // ---------------------------------------------------------------------------
 
-/** "Starting…", "Ready", "Unreachable", "Lost — its host is gone". */
-export function leaseStateLabel(lease: Pick<DeviceLeaseSummary, "state" | "error" | "progress">): string {
-  switch (lease.state) {
-    case "starting":
-      return lease.progress ? `${lease.progress.label}…` : "Starting…";
-    case "ready":
-      return "Ready";
-    case "suspended":
-      return "Unreachable — still running";
-    case "lost":
-      return lease.error ? `Lost — ${lease.error}` : "Lost";
-    case "released":
-      return "Released";
-  }
-}
-
 /** The lost card's line: the lease's reason (the daemon's are sentences: "Its host is gone."), then what to do. */
 export function lostDeviceText(error: string | null | undefined): string {
   const reason = error?.trim();
   if (!reason) return "Its host or emulator stopped. Open a fresh one to keep going.";
   return `${reason}${/[.!?…]$/.test(reason) ? "" : "."} Open a fresh one to keep going.`;
-}
-
-/** Who drives it now, as the controller pill says it. */
-export function controllerLabel(lease: Pick<DeviceLeaseSummary, "controller" | "state">, agentName = "The agent"): string | null {
-  if (lease.state !== "ready") return null;
-  return lease.controller === "user" ? "You have control" : `${agentName} is controlling`;
-}
-
-/** "iPhone 17 Pro · iOS 26" with the platform group when the OS is unknown. */
-export function leaseSubtitle(lease: Pick<DeviceLeaseSummary, "platform" | "osVersion">): string {
-  return lease.osVersion || DEVICE_PLATFORM_LABELS[lease.platform];
 }
 
 /** The name a tab and the pill show: the device's, else its profile's. */

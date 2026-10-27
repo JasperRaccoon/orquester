@@ -334,7 +334,6 @@ export const exoscaleAdapter: BoxProviderAdapter = {
   ],
   accountNote: null,
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => exoRequest(credentials, { url: `${apiBase(HOME_ZONE)}/instance` }, options));

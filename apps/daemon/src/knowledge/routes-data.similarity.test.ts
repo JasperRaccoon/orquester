@@ -15,7 +15,6 @@ import {
   type KnowledgeVisibility
 } from "@orquester/api";
 import { knowledgeIndexDir } from "@orquester/config";
-import type { KnowledgeVectorIndex } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { FakeVectorIndex, around, axis } from "./search/fake-vector-index.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
@@ -48,7 +47,7 @@ async function harness(t: TestContext, options: { index?: boolean } = {}) {
   const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(embedder), indexDir: knowledgeIndexDir(appdir), logger });
   const index = new FakeVectorIndex();
   if (options.index !== false) {
-    (search as unknown as { similarityIndex: () => KnowledgeVectorIndex }).similarityIndex = () => index;
+    search.vectorIndex = () => index;
     // Embedded as soon as the store adds them (before the save route reads similarity).
     store.onChange((change) => {
       if (change.kind !== "added") return;

@@ -207,16 +207,13 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
   }, [lease, changeController]);
 
   // --- Touch -------------------------------------------------------------------------------
-  const gesture = React.useRef<{ x: number; y: number; at: number; lastX: number; lastY: number } | null>(null);
+  const gesture = React.useRef<{ x: number; y: number; at: number } | null>(null);
   const onTouch = React.useCallback(
     (phase: "begin" | "move" | "end", x: number, y: number) => {
       stream.sendTouch(phase, x, y);
       if (phase === "begin") {
         noteInput();
-        gesture.current = { x, y, at: Date.now(), lastX: x, lastY: y };
-      } else if (phase === "move" && gesture.current) {
-        gesture.current.lastX = x;
-        gesture.current.lastY = y;
+        gesture.current = { x, y, at: Date.now() };
       } else if (phase === "end" && gesture.current) {
         const start = gesture.current;
         gesture.current = null;

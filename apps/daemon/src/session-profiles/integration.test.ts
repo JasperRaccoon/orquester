@@ -40,7 +40,7 @@ import { createAgentHostServer, type AgentHostServer } from "../agent-host/serve
 import { registerThreadLaunchProfileRoute } from "../agent-chat/profile-launch-route.ts";
 import { AgentChatService, type ChatLaunchEnv } from "../agent-chat/service.ts";
 import type { AgentHomes } from "../agent-profile/adapters/types.ts";
-import { createProfileLaunchResolver, SessionProfileNames } from "./launch.ts";
+import { createProfileLaunchResolver } from "./launch.ts";
 import { SessionProfileLifecycle } from "./lifecycle.ts";
 import { SessionProfileService } from "./service.ts";
 import { SessionProfileStore } from "./store.ts";
@@ -249,8 +249,6 @@ async function startDaemon(world: World, records = "{}"): Promise<Daemon> {
   await profiles.init();
   lifecycle.attach(profiles.events);
   await lifecycle.start();
-  const names = new SessionProfileNames();
-  await names.track(profiles);
 
   const systemHome: Record<SessionProfileAgentId, string> = {
     claude: world.homes.claudeDir,
@@ -292,7 +290,7 @@ async function startDaemon(world: World, records = "{}"): Promise<Daemon> {
     sendAttachment: async (reply) => reply,
     sessionProfiles: {
       resolve: createProfileLaunchResolver({ lifecycle, accountHome: (agent, accountId) => (accountId === null ? systemHome[agent] : world.accountHome[agent]) }),
-      profileName: (profileId) => names.get(profileId)
+      profileName: (profileId) => profiles.deletedName(profileId)
     }
   });
   daemon.chat = chat;

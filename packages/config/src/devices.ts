@@ -75,7 +75,7 @@ export interface DevicesAgentSettings {
   followAgentDevices: boolean;
 }
 
-/** Phase 2 device pools on rented boxes (phase 2 §2.3–2.5). Inert in phase 1. */
+/** Device pools on rented boxes (phase 2 §2.3–2.5). */
 export interface DevicePoolSettings {
   placement: DevicePlacementMode;
   /** The box provider pool hosts are rented from; null: none chosen. */
@@ -343,7 +343,7 @@ const researchSchema = z.object({ vphoneHosts: vphoneHostsSchema }).passthrough(
 
 // A missing or non-object section reads as `{}`, so each of its fields takes its own default.
 const section = <T extends z.ZodTypeAny>(schema: T) =>
-  z.preprocess((value) => (value !== null && typeof value === "object" && !Array.isArray(value) ? value : {}), schema);
+  z.preprocess((value) => (isPlainObject(value) ? value : {}), schema);
 
 export const devicesSettingsSchema = z
   .object({
@@ -357,8 +357,6 @@ export const devicesSettingsSchema = z
   })
   .passthrough();
 
-const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
-
 /**
  * A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` / `pool.idleTeardownMinutes`
  * existed: its Mac switch, cap and idle teardown become the pool's. One written before
@@ -366,9 +364,9 @@ const isPlainRecord = (value: unknown): value is Record<string, unknown> => valu
  * stays the Linux hosts' limit.
  */
 function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, unknown> {
-  const ios = isPlainRecord(record.ios) ? record.ios : null;
+  const ios = isPlainObject(record.ios) ? record.ios : null;
   if (!ios) return record;
-  const pool = isPlainRecord(record.pool) ? { ...record.pool } : {};
+  const pool = isPlainObject(record.pool) ? { ...record.pool } : {};
   let changed = false;
   if (typeof pool.rentWithoutAsking !== "boolean" && ios.rentWithoutAsking === true) {
     pool.rentWithoutAsking = true;
@@ -391,7 +389,7 @@ function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, 
 
 /** Any value → valid settings, field by field (unknown keys kept). Never throws. */
 export function readDevicesSettings(value: unknown): DevicesSettings {
-  const record = isPlainRecord(value) ? adoptLegacyRentSwitch(value) : {};
+  const record = isPlainObject(value) ? adoptLegacyRentSwitch(value) : {};
   return devicesSettingsSchema.parse(record) as DevicesSettings;
 }
 
@@ -423,7 +421,7 @@ export function parseDevicesSettingsFile(raw: unknown): DevicesSettingsFile {
     throw new Error(`Not a version-${DEVICES_SETTINGS_VERSION} devices settings file (version ${JSON.stringify(record.version)})`);
   }
   const extra = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "version" && key !== "settings"));
-  const research = isPlainRecord(record.settings) && isPlainRecord(record.settings.research) ? record.settings.research : null;
+  const research = isPlainObject(record.settings) && isPlainObject(record.settings.research) ? record.settings.research : null;
   const dropped = splitVphoneHosts(research?.vphoneHosts).dropped;
   return {
     version: DEVICES_SETTINGS_VERSION,
@@ -648,12 +646,13 @@ export interface DevicePoolStateFile {
   extra: Record<string, unknown>;
 }
 
-export function createDefaultDevicePoolState(): DevicePoolState {
-  return { rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} };
-}
-
 export function createDefaultDevicePoolStateFile(): DevicePoolStateFile {
-  return { version: DEVICE_POOL_STATE_VERSION, state: createDefaultDevicePoolState(), rejected: { rentals: [], learnedCapacity: [] }, extra: {} };
+  return {
+    version: DEVICE_POOL_STATE_VERSION,
+    state: { rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} },
+    rejected: { rentals: [], learnedCapacity: [] },
+    extra: {}
+  };
 }
 
 function entries<T>(value: unknown, schema: z.ZodType<T, z.ZodTypeDef, unknown>): { ok: T[]; rejected: unknown[] } {

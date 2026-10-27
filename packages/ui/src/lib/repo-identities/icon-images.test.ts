@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import type { RepoIcon, RepoIdentitiesResponse, RepoIdentity } from "@orquester/api";
 
-import { ensureRepoIconImage, getRepoIconImage } from "./icon-images.ts";
+import { ensureRepoIconImage, repoIconImagesStore } from "./icon-images.ts";
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities, type RepoIdentitiesApi } from "./store.ts";
 
 const KEY = "github.com/jasperraccoon/jasperengine";
@@ -75,10 +75,10 @@ describe("the icon image cache", () => {
     const fetched = ensureRepoIconImage(api, KEY, icon);
     await ensureRepoIconImage(api, KEY, icon);
     assert.equal(reads.length, 1);
-    assert.equal(getRepoIconImage(KEY)?.status, "loading");
+    assert.equal(repoIconImagesStore.getState().images.get(KEY)?.status, "loading");
     reads[0].resolve(new ArrayBuffer(4));
     await fetched;
-    const image = getRepoIconImage(KEY);
+    const image = repoIconImagesStore.getState().images.get(KEY);
     assert.equal(image?.status, "ready");
     assert.equal(image?.url, "blob:test/0");
     assert.equal(blobs.get("blob:test/0")?.type, "image/svg+xml");
@@ -94,7 +94,7 @@ describe("the icon image cache", () => {
     await first;
     set(imageIcon("v2"), 2);
     assert.deepEqual(revoked, ["blob:test/0"]);
-    assert.equal(getRepoIconImage(KEY), undefined);
+    assert.equal(repoIconImagesStore.getState().images.get(KEY), undefined);
     const second = ensureRepoIconImage(api, KEY, imageIcon("v2"));
     reads[1].resolve(new ArrayBuffer(1));
     await second;
@@ -127,7 +127,7 @@ describe("the icon image cache", () => {
     const failing = ensureRepoIconImage(api, KEY, imageIcon("v1"));
     reads[0].reject(new Error("offline"));
     await failing;
-    assert.equal(getRepoIconImage(KEY)?.status, "failed");
+    assert.equal(repoIconImagesStore.getState().images.get(KEY)?.status, "failed");
     ensureRepoIconImage(api, KEY, imageIcon("v1"));
     assert.equal(reads.length, 1);
 
@@ -138,7 +138,7 @@ describe("the icon image cache", () => {
     const load = loadRepoIdentities(loader);
     answer({ identities: [identity(imageIcon("v1"), 1)] });
     await load;
-    assert.equal(getRepoIconImage(KEY), undefined);
+    assert.equal(repoIconImagesStore.getState().images.get(KEY), undefined);
     ensureRepoIconImage(api, KEY, imageIcon("v1"));
     assert.equal(reads.length, 2);
   });
@@ -151,6 +151,6 @@ describe("the icon image cache", () => {
     await first;
     resetRepoIdentities();
     assert.deepEqual(revoked, ["blob:test/0"]);
-    assert.equal(getRepoIconImage(KEY), undefined);
+    assert.equal(repoIconImagesStore.getState().images.get(KEY), undefined);
   });
 });

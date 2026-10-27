@@ -101,11 +101,11 @@ export const MobileSectionView: React.FC<MobileSectionViewProps> = ({
  */
 export const MobileSectionOverlay: React.FC<{ projectPath: string | null }> = ({ projectPath }) => {
   const section = useMobileSection();
-  const available = projectPath !== null;
+  const devicesOn = useDevicesEnabled();
+  const available = projectPath !== null && (section !== "device" || devicesOn);
   React.useEffect(() => {
-    // Nothing to show a section over (the landing view, a workspace's to-dos)
-    // or no bar to leave it by (a desktop viewport): back to the tab content,
-    // so it does not come back by itself later.
+    // No project, no mobile bar to leave it by, or its plugin turned off:
+    // close the section so it does not come back by itself later.
     if (!available) setMobileSection(null);
   }, [available]);
   // One entry for the whole visit: moving between sections keeps it, so Back
@@ -263,7 +263,7 @@ export const MobileSectionNav: React.FC = () => {
   const keyboardOpen = useSoftKeyboardOpen();
   // Devices: the Device section exists only while its plugin is on.
   const devicesOn = useDevicesEnabled();
-  const sections = React.useMemo(() => visibleRailPanels(MOBILE_SECTION_ORDER, { devices: devicesOn }), [devicesOn]);
+  const sections = React.useMemo(() => visibleRailPanels(MOBILE_SECTION_ORDER, devicesOn), [devicesOn]);
   if (isDesktop || !projectOpen || keyboardOpen) return null;
   return <MobileSectionBar active={section} onSelect={setMobileSection} chatTab={chatTab} sections={sections} />;
 };

@@ -119,10 +119,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   const added = (rows: readonly Tool[]) => rows.reduce((sum, row) => sum + total([row]) - 1, 0);
   assert.ok(total(baseRows) <= 57_344, `chat tools/list: ${total(baseRows)} bytes`);
   assert.ok(added(boxRows) <= 6_144, `box tools: ${added(boxRows)} bytes`);
-  // Six user tools since knowledge_update and knowledge_delete. 7 KiB since the retrieval spec (2026-10-27,
-  // "Agent tools (A1)"): knowledge_search's typed filters, examples, sort and cursor, and knowledge_get's ids
-  // and from, grow the existing tools instead of adding new ones. 8 KiB since knowledge_merge (~700 bytes):
-  // one atomic merge of duplicates instead of an edit and a delete.
+  // Knowledge search filters, body windows and merging share an 8 KiB budget.
   const knowledgeBytes = added(knowledgeRows.filter((tool) => !workerRows.includes(tool)));
   assert.ok(knowledgeBytes <= 8_192, `knowledge tools: ${knowledgeBytes} bytes`);
   assert.ok(total(workerRows) <= 1_280, `worker tools/list: ${total(workerRows)} bytes`);

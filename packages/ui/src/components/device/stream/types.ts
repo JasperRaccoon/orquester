@@ -4,7 +4,7 @@
  * let Node tests drive a session without a DOM.
  */
 
-export type DevicePlatform = "ios" | "android";
+export type { DevicePlatform } from "@orquester/api";
 
 /** `connecting` until the first painted frame; `stalled` keeps the last frame after silence. */
 export type DeviceStreamState = "connecting" | "live" | "stalled" | "error" | "closed";

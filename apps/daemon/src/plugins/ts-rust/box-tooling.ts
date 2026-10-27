@@ -28,7 +28,6 @@ import { type ToolingPlan, type ToolingPlugin, ToolingStepError, type ToolingTar
 import {
   TS_CHECKER_ENGINE_SPECS,
   type TsRustInstallerDeps,
-  TsRustInstallError,
   resolveTsRustRelease,
   tsRustInstallerDepsWithFetch
 } from "./installer.ts";
@@ -114,7 +113,7 @@ export function createTsRustToolingPlugin(options: TsRustToolingPluginOptions): 
       try {
         release = await resolveTsRustRelease(spec, platformPackage, registry, signal, state.current[engine] ?? undefined);
       } catch (error) {
-        throw new ToolingStepError("resolve", error instanceof TsRustInstallError || error instanceof Error ? error.message : String(error));
+        throw new ToolingStepError("resolve", error instanceof Error ? error.message : String(error));
       }
       const preloadPath = context.path.join(context.pluginDir, TS_RUST_BOX_PRELOAD);
       const preload = renderTsRustBoxPreload({

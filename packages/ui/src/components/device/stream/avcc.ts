@@ -70,12 +70,3 @@ export class AvccDemuxer {
     this.length = 0;
   }
 }
-
-/** Build one envelope (tests and fixtures). */
-export function encodeAvccEnvelope(tag: number, payload: Uint8Array): Uint8Array {
-  const out = new Uint8Array(5 + payload.length);
-  new DataView(out.buffer).setUint32(0, payload.length + 1, false);
-  out[4] = tag;
-  out.set(payload, 5);
-  return out;
-}

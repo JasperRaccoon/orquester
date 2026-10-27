@@ -47,7 +47,7 @@ import {
 } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
-import type { BoxConnection, BoxHostForward, BoxProcess } from "../../../boxes/contracts.ts";
+import type { BoxConnection, BoxHostForward } from "../../../boxes/contracts.ts";
 import { DEVICE_TOOL_VERSIONS, SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE } from "../../../boxes/github/device-cache.ts";
 import { DeviceError, isDeviceError } from "../../errors.ts";
 import type { DeviceToolchain } from "../../toolchain/index.ts";
@@ -162,8 +162,6 @@ export interface BoxDeviceHostDeps {
   boxId: string;
   kind: "box" | "byo";
   label: string;
-  /** Phase 1: iOS on Macs. */
-  platform: "ios";
   appDir: string;
   /** This machine's pinned tools (the agent-device CLI the actions layer runs here). */
   toolchain?: DeviceToolchain;
@@ -193,7 +191,6 @@ export const DEFAULT_SIM_POOL_SIZE = 2;
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
 
 interface Forwarded {
-  boxPort: number;
   token: string;
   forward: BoxHostForward;
 }
@@ -255,7 +252,7 @@ export class BoxDeviceHost implements DeviceHost {
     this.id = `box:${deps.boxId}`;
     this.kind = deps.kind;
     this.label = deps.label;
-    this.platforms = [deps.platform];
+    this.platforms = ["ios"];
     this.timing = { ...DEFAULT_BOX_HOST_TIMING, ...deps.timing };
   }
 
@@ -268,7 +265,7 @@ export class BoxDeviceHost implements DeviceHost {
   // -------------------------------------------------------------------------
 
   state(): DeviceHostState {
-    if (!this.platformEnabled()) return { status: "disabled", detail: `${DEVICE_PLATFORM_LABELS[this.deps.platform]} is off in Settings → Devices.` };
+    if (!this.platformEnabled()) return { status: "disabled", detail: `${DEVICE_PLATFORM_LABELS.ios} is off in Settings → Devices.` };
     const record = this.deps.record();
     if (!record || record.state === "destroyed" || record.state === "destroying" || record.state === "destroy-failed") {
       return { status: "stopping", detail: "The host is being torn down." };
@@ -501,7 +498,7 @@ export class BoxDeviceHost implements DeviceHost {
         `${this.label} needs Node.js 22 or newer${probe.nodeVersion ? ` (it has ${probe.nodeVersion})` : ""}: install it there, then try again.`
       );
     }
-    if (this.deps.platform === "ios" && (probe.os !== "Darwin" || !probe.simctl)) {
+    if (probe.os !== "Darwin" || !probe.simctl) {
       throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `${this.label} has no Xcode with iOS simulators (xcrun simctl): install Xcode there, then try again.`);
     }
   }
@@ -541,7 +538,7 @@ export class BoxDeviceHost implements DeviceHost {
       if (state?.token) {
         const forward = await link.forwardToHost(state.port);
         if (await this.healthy(forward.hostPort, "/readyz")) {
-          this.hub = { boxPort: state.port, token: state.token, forward, pid: state.pid };
+          this.hub = { token: state.token, forward, pid: state.pid };
           return;
         }
         await forward.close().catch(() => undefined);
@@ -552,8 +549,8 @@ export class BoxDeviceHost implements DeviceHost {
     }
     await this.clearHubStates(link, layout);
 
-    const flags = this.deps.platform === "ios" ? (probe.vm === false ? IOS_HARDWARE_STREAM_FLAGS : IOS_VM_STREAM_FLAGS) : [];
-    const proc = link.exec(hubCommand({ nodePath: probe.nodePath!, layout, platform: this.deps.platform, streamFlags: flags, env: remoteEnv(probe) }));
+    const flags = probe.vm === false ? IOS_HARDWARE_STREAM_FLAGS : IOS_VM_STREAM_FLAGS;
+    const proc = link.exec(hubCommand({ nodePath: probe.nodePath!, layout, platform: "ios", streamFlags: flags, env: remoteEnv(probe) }));
     let stderr = "";
     let exited: string | null = null;
     proc.stdout.resume();
@@ -575,7 +572,7 @@ export class BoxDeviceHost implements DeviceHost {
       if (state?.token) {
         const forward = await link.forwardToHost(state.port);
         if (await this.healthy(forward.hostPort, "/readyz")) {
-          this.hub = { boxPort: state.port, token: state.token, forward, pid: state.pid };
+          this.hub = { token: state.token, forward, pid: state.pid };
           return;
         }
         await forward.close().catch(() => undefined);
@@ -635,7 +632,7 @@ export class BoxDeviceHost implements DeviceHost {
         await forward.close().catch(() => undefined);
         throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `agent-device on ${this.label} is not reachable through the box link.`);
       }
-      this.agent = { boxPort: started.httpPort, token: started.token, forward };
+      this.agent = { token: started.token, forward };
     }
     this.configPath = await writeAgentDeviceConfig(boxAgentDeviceConfigPath(this.deps.appDir, this.id), {
       baseUrl: `http://127.0.0.1:${this.agent.forward.hostPort}`,
@@ -667,7 +664,7 @@ export class BoxDeviceHost implements DeviceHost {
    * is deleted. Background; a failure only means the first agent snapshot is slow.
    */
   private startWarm(link: BoxConnection): void {
-    if (this.deps.platform !== "ios" || this.warmed || this.warming) return;
+    if (this.warmed || this.warming) return;
     this.warming = this.warmRunner(link)
       .then(
         () => {
@@ -735,7 +732,6 @@ export class BoxDeviceHost implements DeviceHost {
    * and read the Mac's RAM. Never fails the prepare: without simslim, simulators boot stock.
    */
   private async ensureSimslim(link: BoxConnection, probe: RemoteProbe, layout: RemoteLayout, signal: AbortSignal): Promise<void> {
-    if (this.deps.platform !== "ios") return;
     this.hostBytes = await this.readHostBytes(link, signal);
     try {
       const result = await execRemote(
@@ -998,17 +994,16 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   /** Until a screenshot is a rendered screen, not the boot logo (bounded: the boot goes on after {@link BoxHostTiming.frameWaitMs}). */
-  private async waitForFrame(link: BoxConnection, udid: string, signal: AbortSignal): Promise<{ bytes: number; waitedMs: number; real: boolean }> {
+  private async waitForFrame(link: BoxConnection, udid: string, signal: AbortSignal): Promise<void> {
     const started = this.now();
     const file = posix.join(this.layout(link).root, `frame-${udid}.png`);
-    let bytes = 0;
     for (;;) {
       const result = await execRemote(link, { command: "/bin/sh", args: ["-c", FRAME_SIZE_SCRIPT, "frame", udid, file] }, { signal, timeoutMs: this.timing.commandMs });
-      bytes = Number(result.stdout.trim()) || 0;
-      if (isRealFrame(bytes)) return { bytes, waitedMs: this.now() - started, real: true };
+      const bytes = Number(result.stdout.trim()) || 0;
+      if (isRealFrame(bytes)) return;
       if (this.now() - started >= this.timing.frameWaitMs) {
         this.deps.logger.warn(`[devices] ${udid} on ${this.id} showed no rendered frame within ${Math.round(this.timing.frameWaitMs / 1000)} s (last ${bytes} bytes); going on`);
-        return { bytes, waitedMs: this.now() - started, real: false };
+        return;
       }
       // simctl has no "first frame" signal: look again shortly.
       await delay(this.timing.framePollMs, undefined, { signal });
@@ -1144,8 +1139,7 @@ export class BoxDeviceHost implements DeviceHost {
   // -------------------------------------------------------------------------
 
   private platformEnabled(): boolean {
-    const settings = this.deps.settings();
-    return this.deps.platform === "ios" ? settings.ios.enabled : settings.android.enabled;
+    return this.deps.settings().ios.enabled;
   }
 
   private checks(): DeviceReadinessCheck[] {

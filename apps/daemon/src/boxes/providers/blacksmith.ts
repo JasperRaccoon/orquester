@@ -61,8 +61,6 @@ import {
   blacksmithRunnerOs,
   isBlacksmithImage,
   isBlacksmithLinuxImage,
-  isBlacksmithLinuxSize,
-  isBlacksmithSize,
   type BlacksmithDeviceCacheInputs,
   type BlacksmithOs,
   type BlacksmithSizeInfo,
@@ -88,7 +86,7 @@ const CANCEL_WAIT_MS = 90_000;
 const FORCE_CANCEL_WAIT_MS = 120_000;
 
 /** The runner the cache-warming run uses when the device service names none. */
-export const DEVICE_CACHE_DEFAULT_SIZES: Readonly<Record<BlacksmithOs, string>> = { linux: "8vcpu", macos: "6vcpu" };
+const DEVICE_CACHE_DEFAULT_SIZES: Readonly<Record<BlacksmithOs, string>> = { linux: "8vcpu", macos: "6vcpu" };
 
 interface BlacksmithAccess {
   token: string;
@@ -124,10 +122,6 @@ async function readyControlRepo(credentials: ProviderCredentials, call: GithubCa
   return repo;
 }
 
-function sizesFor(os: BlacksmithOs): ReadonlyArray<BlacksmithSizeInfo<string>> {
-  return os === "linux" ? BLACKSMITH_LINUX_SIZES : BLACKSMITH_SIZES;
-}
-
 function hourly(size: BlacksmithSizeInfo<string>): number {
   return Math.round(size.perMinuteUsd * 60 * 100) / 100;
 }
@@ -136,16 +130,16 @@ function hourly(size: BlacksmithSizeInfo<string>): number {
 function runnerFor(os: BlacksmithOs, size: string, image: string | null): { runner: string; size: BlacksmithSizeInfo<string> } {
   if (os === "linux") {
     const info = BLACKSMITH_LINUX_SIZES.find((candidate) => candidate.id === size);
-    if (!isBlacksmithLinuxSize(size) || info === undefined) throw new Error(`Blacksmith: unknown Linux size ${size}`);
+    if (info === undefined) throw new Error(`Blacksmith: unknown Linux size ${size}`);
     const chosen = image ?? BLACKSMITH_DEFAULT_LINUX_IMAGE;
     if (!isBlacksmithLinuxImage(chosen)) throw new Error(`Blacksmith: unknown Linux image ${chosen}`);
-    return { runner: blacksmithRunnerLabel(size, chosen), size: info };
+    return { runner: blacksmithRunnerLabel(info.id, chosen), size: info };
   }
   const info = BLACKSMITH_SIZES.find((candidate) => candidate.id === size);
-  if (!isBlacksmithSize(size) || info === undefined) throw new Error(`Blacksmith: unknown size ${size}`);
+  if (info === undefined) throw new Error(`Blacksmith: unknown size ${size}`);
   const chosen = image ?? BLACKSMITH_DEFAULT_IMAGE;
   if (!isBlacksmithImage(chosen)) throw new Error(`Blacksmith: unknown macOS version ${chosen}`);
-  return { runner: blacksmithRunnerLabel(size, chosen), size: info };
+  return { runner: blacksmithRunnerLabel(info.id, chosen), size: info };
 }
 
 /** "macOS" or "Linux" for a box's run (its runner label; macOS for refs without one). */
@@ -203,7 +197,6 @@ export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
   accountNote:
     "macOS and Linux (x64, with KVM) boxes run as GitHub Actions jobs on Blacksmith in a private repo of your GitHub org. Set it up here with a connected Git hosting account; Blacksmith bills the org.",
   maxLifetimeMinutes: BLACKSMITH_MAX_LIFETIME_MINUTES,
-  needsWindowsImage: false,
 
   async validate(credentials, options) {
     let call: GithubCallOptions & BlacksmithAccess;
@@ -228,7 +221,7 @@ export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
   async offers(_credentials, kind): Promise<ProviderOffers> {
     if (kind !== "macos" && kind !== "linux") return { sizes: [], regions: [], images: [], priceSource: "table" };
     return {
-      sizes: sizesFor(kind).map((size) => ({
+      sizes: (kind === "linux" ? BLACKSMITH_LINUX_SIZES : BLACKSMITH_SIZES).map((size) => ({
         id: size.id,
         label: size.label,
         vcpu: size.vcpu,

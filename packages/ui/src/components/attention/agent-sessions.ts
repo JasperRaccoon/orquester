@@ -185,16 +185,6 @@ export function attentionKey(entry: AgentSessionEntry): string {
   return `${entry.session.id}@${entry.flaggedAt}`;
 }
 
-/**
- * An episode counts as *unseen* only while the daemon's `attention` is still
- * raised. Focusing the tab nulls it (`clearSessionAttention`), which is exactly
- * the acknowledgement the badge should respect — bucket membership alone would
- * keep badging a session parked at a permission prompt the user is looking at.
- */
-function isUnseeable(entry: AgentSessionEntry): boolean {
-  return entry.activity?.attention != null;
-}
-
 export interface AttentionSummary {
   /** Live agent sessions — exited ones live in Finished and don't count. */
   total: number;
@@ -217,7 +207,7 @@ export function summarizeAgentSessions(
     total,
     flaggedCount,
     unseenCount: flagged.filter(
-      (entry) => isUnseeable(entry) && !seenKeys.has(attentionKey(entry))
+      (entry) => entry.activity?.attention != null && !seenKeys.has(attentionKey(entry))
     ).length,
     label:
       `${total} agent session${total === 1 ? "" : "s"}` +

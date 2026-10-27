@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { describe, test } from "node:test";
 
 import type { AccountSummary, BlacksmithSetupResponse, BlacksmithSetupStep, BoxConnectionSettings } from "@orquester/api";
 
@@ -418,9 +418,7 @@ test("only temporary boxes that still exist offer Destroy", () => {
 // Your machines (bring-your-own)
 // ---------------------------------------------------------------------------
 
-describeByo();
-
-function describeByo(): void {
+describe("bring-your-own machines", () => {
   const NOW = Date.parse("2026-10-27T10:00:00.000Z");
   const machine = (overrides: Partial<Parameters<typeof box>[0]> = {}) =>
     box({
@@ -508,4 +506,4 @@ function describeByo(): void {
     assert.ok(!keyProviders([provider(), provider({ id: "byo" }), provider({ id: "blacksmith" })]).some((entry) => entry.id === "byo"));
     assert.equal(providerAbbreviation({ id: "byo", label: "Your machines" }), "MY");
   });
-}
+});

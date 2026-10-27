@@ -42,7 +42,7 @@ import type { DeviceToolList } from "../../devices/tools-port.ts";
 import { defineTool, DESTRUCTIVE, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonOutcome } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
-import { ok } from "../result.ts";
+import { imageResult } from "../../session-tools/results.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -106,7 +106,7 @@ function refText(text: string, max: number): string | undefined {
  * the words a reloaded chat row reads ("Opened Pixel 9", "Tapped “Search”") — the device's name,
  * and for `device_action` the action and its action-log summary.
  */
-export function deviceRef(lease: DeviceLeaseSummary, extra: { screenshotId?: string; action?: DeviceActionKind; summary?: string } = {}): DeviceToolReference {
+function deviceRef(lease: DeviceLeaseSummary, extra: { screenshotId?: string; action?: DeviceActionKind; summary?: string } = {}): DeviceToolReference {
   const name = refText(lease.name, REF_NAME_MAX);
   const summary = extra.summary !== undefined ? refText(extra.summary, REF_SUMMARY_MAX) : undefined;
   return {
@@ -367,7 +367,7 @@ const deviceAction = defineTool({
   // Snapshots, screenshots, logs and waits change nothing.
   tier: (args) => (isReadOnlyDeviceAction(args.action) ? "read" : "act"),
   planSafe: false,
-  scope: async (args, ctx) => (isReadOnlyDeviceAction(args.action) ? ownScope(ctx, "content", false) : ownScope(ctx, "content", true)),
+  scope: async (args, ctx) => ownScope(ctx, "content", !isReadOnlyDeviceAction(args.action)),
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   resultKind: "image",
   async run(args, ctx): Promise<Record<string, unknown> | CallToolResult> {
@@ -384,8 +384,7 @@ const deviceAction = defineTool({
       deviceRef: deviceRef(result.lease, { ...(result.screenshotId ? { screenshotId: result.screenshotId } : {}), action: args.action, summary: result.entry.summary })
     };
     if (!result.image) return value;
-    const json = ok(value);
-    return { content: [{ type: "image", data: result.image.base64, mimeType: result.image.mimeType }, ...json.content], structuredContent: json.structuredContent };
+    return imageResult({ data: result.image.base64, mimeType: result.image.mimeType }, value);
   }
 });
 

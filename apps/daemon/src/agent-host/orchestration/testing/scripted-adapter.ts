@@ -70,8 +70,6 @@ export interface ScriptedAdapterOptions {
   /** Fail the next `startSession` with this error, then clear it. */
   failStartSession?: Error | null;
   failSendTurn?: Error | null;
-  failCompact?: Error | null;
-  failInterrupt?: Error | null;
   failApproval?: Error | null;
   failStopTask?: Error | null;
   version?: string | null;
@@ -131,8 +129,6 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
   const failures: Record<string, Error | null> = {
     failStartSession: options.failStartSession ?? null,
     failSendTurn: options.failSendTurn ?? null,
-    failCompact: options.failCompact ?? null,
-    failInterrupt: options.failInterrupt ?? null,
     failApproval: options.failApproval ?? null,
     failStopTask: options.failStopTask ?? null
   };
@@ -242,8 +238,6 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
 
     async interruptTurn(threadId: string, turnId?: string): Promise<void> {
       calls.push({ kind: "interruptTurn", threadId, detail: turnId ?? null });
-      const failure = take("failInterrupt");
-      if (failure) throw failure;
     },
 
     async respondToApproval(
@@ -281,8 +275,6 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
 
     async compact(threadId: string): Promise<void> {
       calls.push({ kind: "compact", threadId });
-      const failure = take("failCompact");
-      if (failure) throw failure;
     },
     async backgroundTasks(threadId: string, toolUseId?: string): Promise<boolean> {
       calls.push({ kind: "backgroundTasks", threadId, detail: { toolUseId } });

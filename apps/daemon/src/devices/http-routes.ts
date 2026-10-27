@@ -46,7 +46,7 @@ import { DeviceError, devicesDisabled, isDeviceError } from "./errors.ts";
 import type { HubProxy } from "./hub-proxy.ts";
 import type { DeviceService } from "./service.ts";
 
-export interface DeviceHttpRoutesDeps {
+interface DeviceHttpRoutesDeps {
   /** The running service, or null while the plugin is off (read per request). */
   devices(): DeviceService | null;
   hubProxy(): HubProxy;

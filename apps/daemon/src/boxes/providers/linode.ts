@@ -268,7 +268,6 @@ export const linodeAdapter: BoxProviderAdapter = {
   ],
   accountNote: "GPU plans need a one-time account review: open a support ticket asking for GPU access before renting a Linux + GPU box.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => linodeRequest({ url: `${API}/linode/instances?page=1&page_size=25`, headers: headers(credentials) }, options));

@@ -42,10 +42,6 @@ export function useThreadDeviceLeases(threadId: string | null | undefined): read
   return useMemo(() => leasesOfThread(leases, threadId), [leases, threadId]);
 }
 
-export function useDeviceLease(leaseId: string | null | undefined): DeviceLeaseSummary | undefined {
-  return useDevicesState((state) => (leaseId ? state.leases?.find((lease) => lease.id === leaseId) : undefined));
-}
-
 /** A lease's action log as loaded and followed (empty until `loadDeviceActions`). */
 export function useDeviceActions(leaseId: string | null | undefined): readonly DeviceActionEntry[] {
   return useDevicesState((state) => (leaseId ? (state.actions[leaseId] ?? EMPTY_ACTIONS) : EMPTY_ACTIONS));

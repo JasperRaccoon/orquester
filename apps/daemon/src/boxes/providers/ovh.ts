@@ -439,7 +439,6 @@ export const ovhAdapter: BoxProviderAdapter = {
   accountNote:
     "New Public Cloud projects start with small quotas; GPU flavors in particular may need a quota increase in the Control Panel before they are offered.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, async () => {

@@ -68,7 +68,10 @@ func TestKVMUsableForTheWorkUserFollowsTheModeBits(t *testing.T) {
 func TestDetectSysInfoReportsKVM(t *testing.T) {
 	a := &Agent{}
 	info := detectSysInfo(a)
-	_, err := os.OpenFile(kvmDevice, os.O_RDWR, 0)
+	f, err := os.OpenFile(kvmDevice, os.O_RDWR, 0)
+	if err == nil {
+		defer f.Close()
+	}
 	if want := err == nil; info.KVM != want {
 		t.Fatalf("sys.kvm = %v, want %v (open /dev/kvm: %v)", info.KVM, want, err)
 	}

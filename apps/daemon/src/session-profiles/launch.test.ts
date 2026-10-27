@@ -166,32 +166,12 @@ describe("createProfileLaunchResolver", () => {
 });
 
 describe("SessionProfileNames", () => {
-  it("knows every listed profile, follows changes, and keeps a deleted one's name for the notice", async () => {
-    const events = new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>();
-    const names = new SessionProfileNames();
-    let current = "Editing";
-    await names.track({
-      list: async () => ({ profiles: [{ id: "p1", name: "Developer" }, { id: "p2", name: current }] }),
-      get: async (profileId) => (profileId === "p2" ? { name: current } : Promise.reject(new Error("gone"))),
-      events
-    });
-    assert.equal(names.get("p1"), "Developer");
-    current = "Video";
-    events.emit("changed", { profileId: "p2" });
-    await names.idle();
-    assert.equal(names.get("p2"), "Video");
-    events.emit("changed", { profileId: "p1" });
-    await names.idle();
-    assert.equal(names.get("p1"), "Developer", "a failed read keeps what was known");
-  });
-
   it("liveIds: unknown until the first list lands, then the existing profiles (unreadable ones too), following creates and deletes", async () => {
     const events = new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>();
     const names = new SessionProfileNames();
     let answer!: (value: { profiles: { id: string; name: string }[]; errors: { profileId: string }[] }) => void;
     const tracked = names.track({
       list: () => new Promise((resolve) => (answer = resolve)),
-      get: async () => ({ name: "New" }),
       events
     });
     assert.equal(names.liveIds(), undefined, "not listed yet: unknown, never none");
@@ -199,16 +179,16 @@ describe("SessionProfileNames", () => {
     events.emit("deleted", { profileId: "p2" });
     answer({ profiles: [{ id: "p1", name: "A" }, { id: "p2", name: "B" }], errors: [{ profileId: "p-broken" }] });
     await tracked;
-    await names.idle();
     assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p1", "p3"], "a list read older than the delete does not revive p2");
     events.emit("deleted", { profileId: "p1" });
     assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p3"]);
-    assert.equal(names.get("p1"), "A", "the name is kept for the notice");
+    events.emit("changed", { profileId: "p1" });
+    assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p1", "p3"], "a recreated profile becomes live again");
   });
 
   it("liveIds stays unknown when the list cannot be read", async () => {
     const names = new SessionProfileNames();
-    await names.track({ list: () => Promise.reject(new Error("EACCES")), get: async () => ({ name: "x" }), events: new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>() });
+    await names.track({ list: () => Promise.reject(new Error("EACCES")), events: new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>() });
     assert.equal(names.liveIds(), undefined);
   });
 });

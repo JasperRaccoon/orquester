@@ -146,16 +146,12 @@ export class ThumbnailPoller {
       return;
     }
     if (this.timer !== null || this.request !== null) return;
-    const wait = this.lastStartAt === null ? 0 : Math.max(0, this.pauseMs() - (this.deps.now() - this.lastStartAt));
+    const wait = this.lastStartAt === null ? 0 : Math.max(0, thumbnailBackoffMs(this.failures) - (this.deps.now() - this.lastStartAt));
     if (wait === 0) void this.fetchFrame();
     else this.schedule(wait);
     if (this.current.status === "paused" || this.current.status === "off") {
       this.emit({ ...this.current, status: this.current.src ? "live" : "loading" });
     }
-  }
-
-  private pauseMs(): number {
-    return this.failures > 0 ? thumbnailBackoffMs(this.failures) : THUMBNAIL_INTERVAL_MS;
   }
 
   private schedule(ms: number): void {
@@ -209,7 +205,7 @@ export class ThumbnailPoller {
       this.failures += 1;
       this.emit({ ...this.current, status: "error", error: thumbnailErrorText(failedStatus) });
     }
-    if (this.active) this.schedule(Math.max(0, this.pauseMs() - (this.deps.now() - (this.lastStartAt ?? 0))));
+    if (this.active) this.schedule(Math.max(0, thumbnailBackoffMs(this.failures) - (this.deps.now() - (this.lastStartAt ?? 0))));
   }
 
   /** Revoke the frame on show unless it is `keep` (the frame replacing it). */

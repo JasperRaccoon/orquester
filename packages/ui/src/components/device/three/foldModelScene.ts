@@ -140,13 +140,10 @@ export function createImportedFoldScene(
     display.mesh.geometry.setAttribute("uv", new BufferAttribute(uv, 2));
   }
 
-  const restBounds = new Box3();
   asset.traverse((object) => {
     if (!(object instanceof Mesh)) return;
     if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
-    restBounds.union(object.geometry.boundingBox!.clone().applyMatrix4(toAsset(object)));
   });
-  const restSize = restBounds.getSize(new Vector3());
   // Closed, the spine's inner face (its front, behind the hinge axis) meets the fold edge.
   const spineRest = spine?.position.clone() ?? null;
   let spineInset = 0;
@@ -213,9 +210,6 @@ export function createImportedFoldScene(
   return {
     root,
     orientation,
-    hinge,
-    width: restSize.x,
-    height: restSize.y,
     setAngle,
     setDisplay(nextTexture: Texture, nextLayout: PhoneDisplayLayout) {
       layout = nextLayout;

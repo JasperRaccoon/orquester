@@ -19,7 +19,7 @@ import { pipeline } from "node:stream/promises";
 import { WebSocket } from "ws";
 
 /** Where a VM's API answers on this machine, and its token (never logged, never in argv). */
-export interface VphoneGuestEndpoint {
+interface VphoneGuestEndpoint {
   /** The loopback port that forwards to the VM's API. */
   port: number;
   token: string;
@@ -48,7 +48,7 @@ const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 let nextId = 1;
 
 export class VphoneGuestClient {
-  constructor(readonly endpoint: VphoneGuestEndpoint) {}
+  constructor(private readonly endpoint: VphoneGuestEndpoint) {}
 
   /** `GET /v1/health`: resolves its JSON once vphoned answers 200. */
   async health(options: VphoneCallOptions = {}): Promise<Record<string, unknown>> {

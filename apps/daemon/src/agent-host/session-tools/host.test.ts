@@ -604,7 +604,7 @@ test("a refresh landing while a session's manifest is read is judged against wha
 });
 
 test("pushes finishing out of order never roll a list back (`superseded`)", async (t) => {
-  const service = testHost(recordingForward().forward, async (threadId) => ({
+  const service = testHost(recordingForward().forward, async () => ({
     kind: "manifest",
     manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10 }
   }));

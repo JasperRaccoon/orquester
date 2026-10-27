@@ -18,7 +18,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { ANDROID_SYSTEM_IMAGE as API_ANDROID_SYSTEM_IMAGE, deviceProfile, type DeviceProfile } from "@orquester/api";
+import { ANDROID_SYSTEM_IMAGE, deviceProfile, type DeviceProfile } from "@orquester/api";
 import { DEFAULT_ANDROID_DEVICE_PROFILE_IDS } from "@orquester/config";
 
 import { avdHardware, avdName, CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP } from "../../devices/android/avd-config.ts";
@@ -78,8 +78,6 @@ export function boxDeviceToolBin(tool: keyof typeof DEVICE_TOOL_VERSIONS): strin
 // Android (Linux boxes)
 // ---------------------------------------------------------------------------
 
-/** The system image every profile runs (the API's; the box host installs the same one). */
-export const ANDROID_SYSTEM_IMAGE = API_ANDROID_SYSTEM_IMAGE;
 /** sdkmanager packages installed next to cmdline-tools: the box host's list ({@link SDK_PACKAGES} and the image). */
 export const ANDROID_SDK_PACKAGES: readonly string[] = [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE];
 /**
@@ -104,7 +102,7 @@ export const BOX_GOLDEN_MARKER = "orq-box-golden.json";
 /** The cache's AVDs and golden snapshots carry this as their markers' `source`. */
 export const ANDROID_CACHE_SOURCE = "cache";
 /** Bump to drop the Android cache alone (a change its script does not show); 2: AVDs tuned like a box host's. */
-export const ANDROID_CACHE_VERSION = "v2";
+const ANDROID_CACHE_VERSION = "v2";
 
 /** The box layout the Android tools run with (`android-host.ts` uses the same for a rented host). */
 const BOX_ANDROID_LAYOUT = androidLayoutAt(BOX_DEVICES_DIR);

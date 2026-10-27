@@ -6,11 +6,9 @@
 // flushed, and a new runtime resumes the runs it left.
 
 import { watch } from "node:fs";
-import type { TestContext } from "node:test";
-import { dirname } from "node:path";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import Fastify, { type FastifyInstance, type InjectOptions, type LightMyRequestResponse } from "fastify";
 import type { AgentAccountsResponse, EventMessage, UsageResponse } from "@orquester/api";
@@ -44,14 +42,6 @@ export async function tempAppdir(projects: string[] = ["acme/app"]): Promise<{ r
   return { root, workspacesDir, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 
-/** Retain already-asserted public results outside the appdir removed by cleanup(). */
-export async function retainWorkflowArtifact(t: TestContext, result: unknown): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "orq-workflow-artifact-"));
-  const path = join(dir, "result.json");
-  await writeFile(path, JSON.stringify({ scenario: t.name, result }, null, 2), { mode: 0o600 });
-  t.diagnostic(`Verified artifact: ${path}`);
-}
-
 /** A git remote nobody polls unless a test says so. */
 export class FakeGitRemote implements GitRemoteReader {
   heads: Record<string, string> = {};
@@ -76,7 +66,6 @@ export interface BootOptions {
   gitRemote?: GitRemoteReader;
   usage?: UsageReader;
   accounts?: AccountsReader;
-  workspaceAccounts?: Record<string, string>;
 }
 
 export interface Booted {
@@ -162,10 +151,7 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     accounts,
     git: new GitService(),
     gitRemote: opts.gitRemote ?? new FakeGitRemote(),
-    readWorkspaceMeta: async (workspace) => {
-      const id = opts.workspaceAccounts?.[workspace];
-      return id ? { gitAccountId: id } : null;
-    },
+    readWorkspaceMeta: async () => null,
     savedPrompts: { get: () => undefined },
     workspacesDir: () => workspacesDir,
     fsRoot: () => workspacesDir,

@@ -51,7 +51,6 @@ export async function evaluate(rank: EvalRanker, queries: readonly EvalQuery[], 
 }
 
 export interface EvalSearch {
-  search: KnowledgeSearch;
   /** Entry hits of a search (visibility "all"), best first, up to `limit`. */
   rank(query: string, limit?: number): Promise<string[]>;
   close(): Promise<void>;
@@ -75,15 +74,12 @@ export async function openEvalSearch(entries: readonly EvalEntry[], embedder: Kn
   };
   try {
     await search.start();
-    // The first query starts the backfill of the entries saved before the model was there.
-    await search.search({ query: "warm up" }, { kind: "all" });
     await search.idle();
   } catch (error) {
     await close();
     throw error;
   }
   return {
-    search,
     async rank(query, limit = 10) {
       const response = await search.search({ query, limit }, { kind: "all" });
       return response.hits.flatMap((hit) => (hit.kind === "entry" ? [hit.entry.id] : []));

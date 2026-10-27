@@ -356,9 +356,6 @@ export function createAndroidFoldScene(
   return {
     root,
     orientation,
-    width: halfWidth * 2,
-    height: HEIGHT,
-    innerAspect,
     setAngle,
     setDisplay,
     screenPoint(x: number, y: number, camera: Camera, captured = false) {

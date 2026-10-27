@@ -48,7 +48,6 @@ import { canonicalProject, projectNamesFor, type CanonicalProject } from "./addr
 import type {
   AnyOrquesterTool,
   ApprovalCancelReason,
-  ApprovalOutcome,
   ApprovalPort,
   ApprovalPreview,
   ApprovalRequest,

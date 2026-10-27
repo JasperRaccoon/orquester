@@ -114,7 +114,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.includes("/vendor/serve-emu/api/screenshot")) {
     tick += 1;
     const fold = url.includes("fold");
-    return new Response(await blobOf(paintScreen(fold ? 1080 : 1080, fold ? 1150 : 2400, tick), "image/png"), { headers: { "content-type": "image/png" } });
+    return new Response(await blobOf(paintScreen(1080, fold ? 1150 : 2400, tick), "image/png"), { headers: { "content-type": "image/png" } });
   }
   if (url.includes("/vendor/serve-emu/api/fold")) {
     const posture = init?.method === "POST" ? (JSON.parse(String(init.body)) as { posture: string }).posture : "opened";
@@ -353,9 +353,6 @@ useAppStore.setState({
   openSettings: (() => console.info("openSettings")) as never
 });
 devicesStore.setState({ enabled: true, hosts, leases, profiles: DEVICE_PROFILES, settings, setupJobs: {}, pool: null, actions: {} });
-if (scene === "booting-ios") {
-  devicesStore.setState({ setupJobs: {} });
-}
 
 // The agent keeps acting on the Android device: taps, swipes and typing for the overlay.
 if (scene === "live-android" || scene === "live-fold") {

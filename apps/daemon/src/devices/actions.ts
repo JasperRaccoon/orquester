@@ -44,7 +44,7 @@ export interface DeviceActionContext {
 }
 
 /** What the action log shows for it (the service adds actor, kind and `ok`). */
-export interface DeviceActionLogFields {
+interface DeviceActionLogFields {
   summary: string;
   point?: DevicePoint;
   from?: DevicePoint;
@@ -62,7 +62,7 @@ export interface DeviceActionResult {
   details?: Record<string, unknown>;
 }
 
-export interface DeviceInstallResult {
+interface DeviceInstallResult {
   /** The installed app's bundle id / package, when it could be read. */
   appId: string | null;
   summary: string;
@@ -89,7 +89,7 @@ export interface DeviceActionExecutor {
   end?(ctx: DeviceActionContext): Promise<void>;
 }
 
-export interface DeviceActionExecutorDeps {
+interface DeviceActionExecutorDeps {
   agentDevice: AgentDeviceClient;
   logger: Pick<Console, "info" | "warn" | "error">;
 }
@@ -99,7 +99,7 @@ export interface DeviceActionExecutorDeps {
 // ---------------------------------------------------------------------------
 
 /** How one action runs. */
-export type ActionPlan =
+type ActionPlan =
   | { via: "agent-device"; command: string; args: string[]; stdin?: string; timeoutMs?: number }
   /** The host's own tool, one call per entry, in order. */
   | { via: "host"; tool: "adb" | "simctl"; calls: string[][] }
@@ -116,7 +116,7 @@ export interface PlanContext {
 }
 
 /** Permissions `settings permission` takes. */
-export const DEVICE_PERMISSIONS = [
+const DEVICE_PERMISSIONS = [
   "camera",
   "microphone",
   "photos",
@@ -360,7 +360,7 @@ export function resolvePoint(input: Pick<DeviceActionInput, "ref" | "x" | "y">, 
 }
 
 /** The action log's line for an action that succeeded. */
-export function defaultSummary(input: DeviceActionInput, data: Record<string, unknown> = {}): string {
+function defaultSummary(input: DeviceActionInput, data: Record<string, unknown> = {}): string {
   const label = typeof data.refLabel === "string" && data.refLabel !== "" ? ` “${data.refLabel.slice(0, 60)}”` : "";
   const where = input.ref !== undefined ? `${input.ref}${label}` : `(${input.x}, ${input.y})`;
   const chars = (text: string | undefined) => `${[...(text ?? "")].length} character${[...(text ?? "")].length === 1 ? "" : "s"}`;
@@ -388,7 +388,8 @@ export function defaultSummary(input: DeviceActionInput, data: Record<string, un
     case "open_url": {
       let host = input.url ?? "";
       try {
-        host = new URL(host).host || new URL(host).protocol;
+        const url = new URL(host);
+        host = url.host || url.protocol;
       } catch {
         // keep it
       }
@@ -412,7 +413,7 @@ export function defaultSummary(input: DeviceActionInput, data: Record<string, un
 }
 
 /** An outcome (agent-device's, or a host's own) as the service's result. */
-export function toActionResult(input: DeviceActionInput, outcome: DeviceActionOutcome): DeviceActionResult {
+function toActionResult(input: DeviceActionInput, outcome: DeviceActionOutcome): DeviceActionResult {
   return {
     log: {
       summary: outcome.summary ?? defaultSummary(input),
@@ -482,7 +483,7 @@ function lastLines(text: string): string {
 const ORQUESTER_SESSION = /^orq-[0-9a-f]{16}$/;
 
 /** The stale Orquester session a `DEVICE_IN_USE` names, when it is not the lease's own. */
-export function staleHolder(error: unknown, lease: StoredDeviceLease): string | null {
+function staleHolder(error: unknown, lease: StoredDeviceLease): string | null {
   if (!(error instanceof AgentDeviceError) || error.cliCode !== "DEVICE_IN_USE" || lease.deviceId === null) return null;
   const holder = error.details?.session;
   if (typeof holder !== "string" || !ORQUESTER_SESSION.test(holder)) return null;
@@ -495,7 +496,7 @@ export function staleHolder(error: unknown, lease: StoredDeviceLease): string | 
  * after it runs), so this is not a failure: the agent drives the whole device. A permission dialog
  * over the app is a real stop and stays an error.
  */
-export function leftSessionApp(error: unknown): { expected: string; foreground: string } | null {
+function leftSessionApp(error: unknown): { expected: string; foreground: string } | null {
   if (!(error instanceof AgentDeviceError) || error.cliCode !== "COMMAND_FAILED" || !error.details) return null;
   const { expectedPackage, foregroundPackage, permissionDialog } = error.details;
   if (typeof expectedPackage !== "string" || typeof foregroundPackage !== "string" || permissionDialog === true) return null;

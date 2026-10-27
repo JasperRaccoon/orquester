@@ -436,12 +436,13 @@ const codexTomlCodec: SyncCodec = {
   ...tomlCodec,
   boxView(box, host, ctx) {
     const hostView = host === null ? null : tomlCodec.hostView(host, ctx);
+    const hostDoc = hostView === null ? null : parseTomlDoc(hostView.toString("utf8"));
     const boxText = box.toString("utf8");
-    const text = withTrust(boxText, trustLevels(hostView === null ? null : parseTomlDoc(hostView.toString("utf8"))));
+    const text = withTrust(boxText, trustLevels(hostDoc));
     if (text === null || text === boxText) return box;
     // Its own trust set aside, a box copy that says what the host says is the host's view (taking
     // trust tables out of the text need not give back the host's exact layout).
-    if (hostView !== null && canonicalJson(parseTomlDoc(text)) === canonicalJson(parseTomlDoc(hostView.toString("utf8")))) return hostView;
+    if (hostView !== null && canonicalJson(parseTomlDoc(text)) === canonicalJson(hostDoc)) return hostView;
     return Buffer.from(text, "utf8");
   },
   toBox(host, box, ctx) {

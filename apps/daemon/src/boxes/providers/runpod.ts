@@ -188,7 +188,6 @@ export const runpodAdapter: BoxProviderAdapter = {
   ],
   accountNote: "GPU boxes are RunPod pods (Docker containers): no systemd and no Docker inside the box.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () =>

@@ -25,7 +25,7 @@ import type { FinishedCall, ToolTrack } from "./tool-calls.ts";
 export const ACP_RAW_SOURCE: RuntimeEventRawSource = "acp.jsonrpc";
 export const XAI_RAW_SOURCE: RuntimeEventRawSource = "acp.grok.extension";
 
-export interface GrokEventStamp {
+interface GrokEventStamp {
   eventId: string;
   createdAt: string;
 }

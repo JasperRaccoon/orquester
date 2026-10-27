@@ -306,8 +306,3 @@ export function bestSnippet(body: string, queryTerms: readonly string[], span?: 
   if (next && snippet.length + 1 + next.length <= SNIPPET_MAX) snippet = `${snippet} ${next}`;
   return cut(snippet);
 }
-
-/** The body's opening, one or two lines (list views). */
-export function leadSnippet(body: string): string {
-  return bestSnippet(body, []);
-}

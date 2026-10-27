@@ -242,7 +242,7 @@ function MarkdownImage({ src, alt }: { src?: string | undefined; alt?: string | 
   const source = resolveMarkdownImageSource(src ?? "", workspaceRoot);
   if (source.kind === "local") return <LocalMarkdownImage path={source.path} alt={alt ?? ""} />;
   if (source.kind === "unresolved") return <MissingImage label={alt || source.src} />;
-  if (remoteImages === "click") return <ClickToLoadImage src={source.src} alt={alt ?? ""} />;
+  if (remoteImages === "click") return <ClickToLoadImage key={source.src} src={source.src} alt={alt ?? ""} />;
   return <img src={source.src} alt={alt ?? ""} className={IMAGE_CLASS} />;
 }
 

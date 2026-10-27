@@ -107,7 +107,7 @@ export function layoutGraph<T extends GraphCommit>(commits: T[]): GraphLayout<T>
       colorIndex = lanes[col].colorIndex;
     }
 
-    const lanesBefore = lanes.map((lane) => ({ ...lane }));
+    const lanesBefore = lanes.slice();
     lanes[col] = { sha: null, colorIndex };
 
     const edgesOut: GraphEdge[] = [];
@@ -140,12 +140,10 @@ export function layoutGraph<T extends GraphCommit>(commits: T[]): GraphLayout<T>
     // Only the consumed commit's lane is replaced on this row. A parent that was
     // already waiting in another lane must keep its vertical line as well as
     // receive the joining curve; otherwise merge lines appear to stop halfway.
-    const replaced = new Set<number>([col]);
-
     // Passthrough verticals for every unchanged lane still alive on both sides of this row.
     const maxLen = Math.max(lanesBefore.length, lanes.length);
     for (let i = 0; i < maxLen; i++) {
-      if (replaced.has(i)) continue;
+      if (i === col) continue;
       const before = lanesBefore[i];
       const after = lanes[i];
       if (before?.sha && after?.sha && before.sha === after.sha) {

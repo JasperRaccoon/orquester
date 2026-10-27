@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import { knowledgeMergeKeep, type KnowledgeEntryDetail, type KnowledgeMergeRequest, type KnowledgeSimilarEntry } from "@orquester/api";
+import { knowledgeMergeKeep, type KnowledgeEntryDetail, type KnowledgeSimilarEntry } from "@orquester/api";
 
-import { collections, entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
-import { knowledgeStore, resetKnowledge, type KnowledgeApi } from "../../lib/knowledge/store.ts";
+import { entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
   MARKDOWN_BODY_PREVIEW_CHARS,
   SIMILAR_MAX,
@@ -21,7 +20,6 @@ import {
   reasonLabel,
   reasonTitle,
   resetPanelSession,
-  runKnowledgeMerge,
   setPlainTextBody,
   similarSection,
   subscribePanelSession,
@@ -163,55 +161,14 @@ describe("merging a possible duplicate", () => {
     }
   });
 
-  describe("running it", () => {
-    let calls: string[];
-    let fail: unknown;
-    const api: KnowledgeApi = {
-      connection: { id: "c1" },
-      getKnowledgeStatus: async () => {
-        throw new Error("unused");
-      },
-      listKnowledgeCollections: async () => (calls.push("collections"), collections()),
-      createKnowledgeCollection: async () => ({}),
-      updateKnowledgeCollection: async () => ({}),
-      deleteKnowledgeCollection: async () => ({}),
-      updateKnowledgeEntry: async (id: string) => (calls.push(`patch:${id}`), {}),
-      deleteKnowledgeEntry: async (id: string) => (calls.push(`delete:${id}`), {}),
-      mergeKnowledgeEntries: async (req: KnowledgeMergeRequest) => {
-        calls.push(`merge:${JSON.stringify(req)}`);
-        if (fail) throw fail;
-        return {};
-      }
-    };
+  it("says nothing was merged when the daemon refuses, and that it may not have finished otherwise", () => {
     const refusal = (status: number, code: string, message: string) => Object.assign(new Error(message), { status, body: { code, message } });
-
-    beforeEach(() => {
-      calls = [];
-      fail = undefined;
-      resetKnowledge();
-    });
-
-    it("is one merge call naming the entry kept, and answers the kept id", async () => {
-      const kept = await runKnowledgeMerge(api, knowledgeMergePlan(newer, older));
-      assert.equal(kept, older.id);
-      assert.deepEqual(calls.filter((c) => c !== "collections"), [`merge:{"ids":["${older.id}","${newer.id}"],"keep":"${older.id}"}`]);
-      const state = knowledgeStore.getState();
-      assert.deepEqual(state.changedEntryIds, [older.id, newer.id], "both entries' panels and citations read again");
-    });
-
-    it("says nothing was merged when the daemon refuses, and that it may not have finished otherwise", async () => {
-      fail = refusal(404, "KNOWLEDGE_NOT_FOUND", `No such entry: ${older.id}.`);
-      const error = await runKnowledgeMerge(api, knowledgeMergePlan(newer, older)).then(
-        () => assert.fail("rejects"),
-        (e: unknown) => e
-      );
-      assert.equal(mergeErrorText(error), `Nothing was merged: No such entry: ${older.id}.`);
-      assert.equal(
-        mergeErrorText(refusal(500, "KNOWLEDGE_ERROR", "The merge stopped part-way.")),
-        "The merge may not have finished: The merge stopped part-way."
-      );
-      assert.equal(mergeErrorText(new Error("Network down")), "The merge may not have finished: Network down");
-    });
+    assert.equal(mergeErrorText(refusal(404, "KNOWLEDGE_NOT_FOUND", `No such entry: ${older.id}.`)), `Nothing was merged: No such entry: ${older.id}.`);
+    assert.equal(
+      mergeErrorText(refusal(500, "KNOWLEDGE_ERROR", "The merge stopped part-way.")),
+      "The merge may not have finished: The merge stopped part-way."
+    );
+    assert.equal(mergeErrorText(new Error("Network down")), "The merge may not have finished: Network down");
   });
 });
 

@@ -58,7 +58,6 @@ const api = {
 // A drawn app screen per device, changing every second, as the hub's screenshot would.
 const HUES = [212, 152, 28, 280, 340, 190, 48];
 function drawScreen(device: string): Promise<Blob> {
-  const ios = /ios/i.test(device);
   const canvas = document.createElement("canvas");
   canvas.width = 270;
   canvas.height = 585;
@@ -72,7 +71,7 @@ function drawScreen(device: string): Promise<Blob> {
   ctx.font = "600 13px system-ui";
   ctx.fillText(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), 20, 26);
   ctx.font = "700 22px system-ui";
-  ctx.fillText(ios ? "Acme Shop" : "Acme Shop", 20, 82);
+  ctx.fillText("Acme Shop", 20, 82);
   for (let i = 0; i < 6; i += 1) {
     const y = 130 + i * 70;
     ctx.fillStyle = "#fff";
@@ -92,9 +91,8 @@ function drawScreen(device: string): Promise<Blob> {
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob!), "image/png"));
 }
 
-const realDeps = defaultThumbnailDeps();
 const thumbnailDeps: ThumbnailDeps = {
-  ...realDeps,
+  ...defaultThumbnailDeps(),
   fetch: async (url) => {
     await new Promise((resolve) => setTimeout(resolve, 120 + Math.random() * 200));
     const device = new URL(url.replace(/^harness:/, "http://h")).searchParams.get("device") ?? "";

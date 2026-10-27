@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
-import { encodeAvccEnvelope } from "./avcc.ts";
 import { simulatorAvcConfig } from "./avcConfig.ts";
 import { ServeSimH264Session } from "./serveSimH264.ts";
 import {
+  encodeAvccEnvelope,
   fakeCanvas,
   fakeImageBitmaps,
   fakeStreamingFetch,

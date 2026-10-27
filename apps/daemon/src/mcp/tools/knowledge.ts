@@ -64,7 +64,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonMethod } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
-import { capText, clipText } from "../result.ts";
+import { clipText } from "../result.ts";
 
 // ---------------------------------------------------------------------------
 // Limits of what the tools render
@@ -187,22 +187,6 @@ function entryBlock(entry: KnowledgeEntrySummary, names: ReadonlyMap<string, str
   return lines;
 }
 
-/** At most `max` UTF-8 bytes of `body`, never splitting a character. */
-function clipBytes(body: string, max: number): { text: string; omitted: number } {
-  const total = Buffer.byteLength(body, "utf8");
-  if (total <= max) return { text: body, omitted: 0 };
-  // Every character is at most 4 bytes: start from a safe length and grow.
-  let lo = 0;
-  let hi = Math.min(body.length, max);
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(capText(body, mid).text, "utf8") <= max) lo = mid;
-    else hi = mid - 1;
-  }
-  const kept = capText(body, lo).text;
-  return { text: kept, omitted: total - Buffer.byteLength(kept, "utf8") };
-}
-
 /** A title quoted on one line, clipped. */
 const quotedTitle = (title: string, max = LIST_TITLE_CHARS): string => `"${clipText(oneLine(title), max)}"`;
 
@@ -257,13 +241,13 @@ function pagingFooter(total: number, shown: number, nextCursor: string | null | 
 }
 
 /** What the call asked beyond its words: the cursor it paged with, and whether filters narrowed it. */
-export interface KnowledgeSearchAsked {
+interface KnowledgeSearchAsked {
   cursor?: string;
   filtered: boolean;
 }
 
 /** The search answer as the agent reads it. */
-export function renderSearch(response: KnowledgeSearchResponse, names: ReadonlyMap<string, string>, asked: KnowledgeSearchAsked = { filtered: false }): string {
+function renderSearch(response: KnowledgeSearchResponse, names: ReadonlyMap<string, string>, asked: KnowledgeSearchAsked = { filtered: false }): string {
   const searched = response.searched.map((id) => names.get(id) ?? id);
   const over = searched.length > 0 ? `over ${searched.join(", ")}` : "over no collection";
   if (response.hits.length === 0) {
@@ -408,7 +392,7 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
 }
 
 /** One id of a get call: what the daemon answered, or its refusal. */
-export type KnowledgeGetOutcome = { id: string; response: KnowledgeItemResponse } | { id: string; error: ToolError };
+type KnowledgeGetOutcome = { id: string; response: KnowledgeItemResponse } | { id: string; error: ToolError };
 
 /** Room kept for a body window's footer line (its numbers are at most six digits each). */
 const WINDOW_FOOTER_BYTES = 100;
@@ -418,7 +402,7 @@ const WINDOW_FOOTER_BYTES = 100;
  * entry's body in a window from `from`. The windows share KNOWLEDGE_GET_BODY_MAX_BYTES — less when
  * the text around them needs the room to stay under KNOWLEDGE_GET_OUTPUT_MAX_BYTES.
  */
-export function renderItems(outcomes: readonly KnowledgeGetOutcome[], names: ReadonlyMap<string, string>, from = 0): string {
+function renderItems(outcomes: readonly KnowledgeGetOutcome[], names: ReadonlyMap<string, string>, from = 0): string {
   const several = outcomes.length > 1;
   const pieces = outcomes.map((outcome, index) => {
     const separator = several ? [`=== ${index + 1}/${outcomes.length} ${outcome.id} ===`] : [];
@@ -449,11 +433,11 @@ export function renderItems(outcomes: readonly KnowledgeGetOutcome[], names: Rea
     .join(several ? "\n\n" : "\n");
   // Only the text around the bodies can still be too long (several large concepts): cut it, and say so.
   if (Buffer.byteLength(out, "utf8") <= KNOWLEDGE_GET_OUTPUT_MAX_BYTES) return out;
-  return `${clipBytes(out, KNOWLEDGE_GET_OUTPUT_MAX_BYTES - 100).text}\n[… the rest is cut at the result limit: read fewer ids at once]`;
+  return `${bodyWindow(out, 0, KNOWLEDGE_GET_OUTPUT_MAX_BYTES - 100).text}\n[… the rest is cut at the result limit: read fewer ids at once]`;
 }
 
 /** The save answer: what was saved, what was already there (or may be: close in meaning), what was created. */
-export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<string, string>): string {
+function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<string, string>): string {
   const all = new Map(names);
   for (const created of response.createdCollections) all.set(created.id, created.name);
   const saved = response.results.filter((result) => result.status === "saved").length;
@@ -477,16 +461,16 @@ export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<s
 }
 
 /** The edit answer: what changed, the entry as it is now, its citation (relinking shows in the head). */
-export function renderUpdate(detail: KnowledgeEntryDetail, changed: readonly string[], names: ReadonlyMap<string, string>): string {
+function renderUpdate(detail: KnowledgeEntryDetail, changed: readonly string[], names: ReadonlyMap<string, string>): string {
   const entry = detail.entry;
   return [`Updated ${changed.join(", ")}.`, `entry ${entryHead(entry, names)}`, `Title: ${oneLine(entry.title)}`, `cite: ${detail.citation}`].join("\n");
 }
 
 /** One id of a delete call: deleted (with what it was), or refused (with the daemon's words). */
-export type KnowledgeDeleteOutcome = { id: string; deleted: true; title: string } | { id: string; deleted: false; message: string };
+type KnowledgeDeleteOutcome = { id: string; deleted: true; title: string } | { id: string; deleted: false; message: string };
 
 /** The delete answer: what was deleted, what was not and why. */
-export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): string {
+function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): string {
   const deleted = outcomes.filter((outcome) => outcome.deleted).length;
   const failed = outcomes.length - deleted;
   const lines = [`Deleted ${deleted} entr${deleted === 1 ? "y" : "ies"}${failed > 0 ? `; ${failed} not deleted` : ""}. Their cite links no longer resolve.`];
@@ -497,7 +481,7 @@ export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): strin
 }
 
 /** The merge answer: the entry kept as it is now, its citation, and what was deleted. */
-export function renderMerge(response: KnowledgeMergeResponse, names: ReadonlyMap<string, string>): string {
+function renderMerge(response: KnowledgeMergeResponse, names: ReadonlyMap<string, string>): string {
   const entry = response.kept.entry;
   const count = response.deleted.length;
   return [
@@ -509,7 +493,7 @@ export function renderMerge(response: KnowledgeMergeResponse, names: ReadonlyMap
 }
 
 /** Every collection, one line each. */
-export function renderCollections(response: KnowledgeCollectionsResponse): string {
+function renderCollections(response: KnowledgeCollectionsResponse): string {
   const lines = [`${response.collections.length} collection${response.collections.length === 1 ? "" : "s"}, ${response.totalEntries} entries (${response.unfiledCount} unfiled).`];
   for (const collection of response.collections) {
     const description = collection.description ? `: ${clipText(oneLine(collection.description), DESCRIPTION_CHARS)}` : "";
@@ -576,7 +560,7 @@ interface SearchFilterArgs {
 }
 
 /** A search call's filters as the route takes them: each list once and only when not empty, absent bounds left out; undefined when there are none. */
-export function toSearchFilters(args: SearchFilterArgs): KnowledgeSearchFilters | undefined {
+function toSearchFilters(args: SearchFilterArgs): KnowledgeSearchFilters | undefined {
   const filters: KnowledgeSearchFilters = {};
   for (const key of ["kinds", "authors", "years"] as const) {
     const values = args[key];
@@ -622,7 +606,7 @@ const newCollection = z
   .strict();
 
 /** A save item as the route takes it: a handle without its "@", absent fields left out. */
-export function toSaveItem(item: z.infer<typeof saveItem>): KnowledgeSaveItem {
+function toSaveItem(item: z.infer<typeof saveItem>): KnowledgeSaveItem {
   const handle = item.handle?.replace(/^@+/, "");
   return {
     body: item.body,
@@ -649,7 +633,7 @@ const updateFields = {
 type UpdateFields = z.infer<z.ZodObject<typeof updateFields>>;
 
 /** An edit as the route takes it: only the fields passed, a handle without its "@", collections once each. */
-export function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
+function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
   const request: UpdateKnowledgeEntryRequest = {};
   if (fields.title !== undefined) request.title = fields.title;
   if (fields.body !== undefined) request.body = fields.body;

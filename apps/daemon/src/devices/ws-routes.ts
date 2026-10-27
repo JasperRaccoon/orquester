@@ -12,7 +12,7 @@ import { hubSearch } from "./http-routes.ts";
 import type { HubProxy } from "./hub-proxy.ts";
 import type { DeviceService } from "./service.ts";
 
-export interface DeviceWsDeps {
+interface DeviceWsDeps {
   /**
    * True when `token` (the `?token=` query value) is a valid credential. `socket` is the accepted
    * connection, so the caller can close it when that credential is revoked.
@@ -24,7 +24,7 @@ export interface DeviceWsDeps {
 }
 
 /** The WebSocket route (`deviceRoutes.socket`). */
-export const DEVICE_WS_ROUTE = "/ws-device/:hostId/*";
+const DEVICE_WS_ROUTE = "/ws-device/:hostId/*";
 
 function tokenOf(query: unknown): string | undefined {
   const token = (query as { token?: unknown } | undefined)?.token;

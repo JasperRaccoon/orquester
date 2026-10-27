@@ -38,16 +38,11 @@ export class H264Decoder {
   private awaitingKeyframe = true;
   private timestamp = 0;
   private epoch = 0;
-  private codecValue: string | null = null;
 
   constructor(private readonly options: H264DecoderOptions) {}
 
   get configured(): boolean {
     return this.decoder?.state === "configured";
-  }
-
-  get codec(): string | null {
-    return this.codecValue;
   }
 
   /**
@@ -70,7 +65,6 @@ export class H264Decoder {
       if (!this.decoder || this.decoder.state === "closed") this.decoder = this.create(VideoDecoderCtor);
       this.decoder.configure(config);
       this.awaitingKeyframe = true;
-      this.codecValue = codec;
       return true;
     } catch {
       this.reset();
@@ -107,7 +101,6 @@ export class H264Decoder {
     const decoder = this.decoder;
     this.decoder = null;
     this.awaitingKeyframe = true;
-    this.codecValue = null;
     try {
       if (decoder && decoder.state !== "closed") decoder.close();
     } catch {

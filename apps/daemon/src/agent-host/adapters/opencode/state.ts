@@ -52,21 +52,9 @@ function commonPrefixLength(left: string, right: string): number {
   return index;
 }
 
-/** A truncated snapshot must never rewind output that already went out. */
-function resolveLatestAssistantText(previousText: string | undefined, nextText: string): string {
-  if (
-    previousText !== undefined &&
-    previousText.length > nextText.length &&
-    previousText.startsWith(nextText)
-  ) {
-    return previousText;
-  }
-  return nextText;
-}
-
 /**
- * Snapshot → delta. Keeps the **previous** text when it is longer *and* a
- * prefix of the incoming one; the prefix length is `previous.length` when the
+ * Snapshot → delta. Keeps the **previous** text when the incoming text is
+ * a shorter prefix of it; the prefix length is `previous.length` when the
  * latest starts with it, otherwise a real common-prefix length.
  *
  * In 1.18.5 this is the *defensive* path, not the primary one: text arrives as
@@ -81,7 +69,10 @@ export function mergeOpenCodeAssistantText(
   previousText: string | undefined,
   nextText: string
 ): { latestText: string; deltaToEmit: string } {
-  const latestText = resolveLatestAssistantText(previousText, nextText);
+  const latestText =
+    previousText !== undefined && previousText.length > nextText.length && previousText.startsWith(nextText)
+      ? previousText
+      : nextText;
   const previous = previousText ?? "";
   const prefixLength = latestText.startsWith(previous)
     ? previous.length

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import test from "node:test";
 
 import { descendantsOf, establishedOnPort, isProcessAlive, parseMemAvailable, parseProcNetTcp, parseProcStat, processMatches, waitForExit } from "./procs.ts";
@@ -35,7 +36,7 @@ test("meminfo: MemAvailable in bytes", () => {
 test("processMatches: a live process is ours only with the appdir marker in its environment", async () => {
   const child = spawn("sleep", ["30"], { env: { ...process.env, ANDROID_AVD_HOME: "/tmp/orq-marker-test" } });
   try {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await once(child, "spawn");
     assert.equal(await processMatches(child.pid!, { key: "ANDROID_AVD_HOME", value: "/tmp/orq-marker-test" }, ["sleep"]), true);
     assert.equal(await processMatches(child.pid!, { key: "ANDROID_AVD_HOME", value: "/elsewhere" }), false);
     assert.equal(await processMatches(child.pid!, { key: "ANDROID_AVD_HOME", value: "/tmp/orq-marker-test" }, ["qemu"]), false);

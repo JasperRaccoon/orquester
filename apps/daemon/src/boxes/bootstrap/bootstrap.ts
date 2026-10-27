@@ -606,7 +606,7 @@ function compactShell(script: string): string {
 }
 
 /** What a bring-your-own machine's pairing script needs (`service/byo.ts`). */
-export interface ByoPairingScriptInput {
+interface ByoPairingScriptInput {
   boxId: string;
   daemonUrl: string;
   /** The single-use bootstrap token minted when the pairing code was spent. */
@@ -617,9 +617,9 @@ export interface ByoPairingScriptInput {
 }
 
 /** Where a bring-your-own machine keeps `orq-agent` when the pairing script runs as its user. */
-export const BYO_MACOS_AGENT_PATH = '$HOME/Library/Application Support/Orquester/orq-agent';
-export const BYO_LINUX_ROOT_AGENT_PATH = "/usr/local/bin/orq-agent";
-export const BYO_LINUX_USER_AGENT_PATH = "$HOME/.local/bin/orq-agent";
+const BYO_MACOS_AGENT_PATH = '$HOME/Library/Application Support/Orquester/orq-agent';
+const BYO_LINUX_ROOT_AGENT_PATH = "/usr/local/bin/orq-agent";
+const BYO_LINUX_USER_AGENT_PATH = "$HOME/.local/bin/orq-agent";
 
 /**
  * The script `curl -fsSL <daemon>/api/boxes/pair/<code> | sh` runs on the owner's own machine: the

@@ -55,8 +55,5 @@ Known behaviour and provider limits:
   no snapshot API for a prepared image.
 - **Scaleway and UpCloud offer no Windows boxes.** Their Windows images run no cloud-init or
   first-boot script; the only automation path is SSH.
-- **Prepared Windows images are unused.** No adapter sets `needsWindowsImage`, so
-  `BoxProviderAdapter.prepareWindowsImage` and the settings route that calls it are never reached.
-  Every Windows-capable provider bootstraps a fresh box from its startup script. A provider that
-  needs one later must also teach the PowerShell bootstrap an install-only mode: the image is
-  built without a per-box token, and `buildBootstrap` refuses an empty token.
+- **Windows boxes bootstrap directly.** Every Windows-capable provider uses its startup script;
+  no provider needs a prepared image.

@@ -67,7 +67,7 @@ export interface DesktopAudioEncoderProcess {
 export type DesktopAudioSpawn = (args: string[]) => DesktopAudioEncoderProcess;
 
 /** Queued bytes above which a sink misses packets (~250 ms of 96 kbit/s audio). */
-export const DESKTOP_AUDIO_SINK_MAX_BUFFERED = 32 * 1024;
+const DESKTOP_AUDIO_SINK_MAX_BUFFERED = 32 * 1024;
 const DEFAULT_STOP_GRACE_MS = 2000;
 const DEFAULT_RESTART_BACKOFF_MS = [250, 500, 1000, 2000, 5000] as const;
 /** Consecutive failed starts before subscribers are told audio is unavailable. */

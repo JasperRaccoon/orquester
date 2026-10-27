@@ -171,11 +171,6 @@ export function isAuthError(error: unknown): boolean {
   return error instanceof ProviderHttpError && (error.status === 401 || error.status === 403);
 }
 
-/** The standard tags every provider applies (where it supports tags/labels). */
-export function boxTags(boxId: string, extra: Record<string, string> = {}): Record<string, string> {
-  return { "orquester-box": boxId, ...extra };
-}
-
 /** `orq-<boxId>` → boxId; null for names Orquester did not create. */
 export function boxIdFromInstanceName(name: string): string | null {
   const match = /^orq-([A-Za-z0-9-]{8,64})$/.exec(name);

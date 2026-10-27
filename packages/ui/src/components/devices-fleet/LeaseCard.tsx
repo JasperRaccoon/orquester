@@ -14,7 +14,6 @@ import { formatHourlyRate, formatUsd } from "../../lib/boxes/format";
 import { cn } from "../../lib/cn";
 import { openLeaseInChat } from "./actions";
 import {
-  controllerLabel,
   formatAgo,
   formatUptime,
   leaseCostShare,
@@ -171,7 +170,7 @@ export const LeaseCard: React.FC<LeaseCardProps> = ({ lease, host, sharers, chat
           {chat.agentName ? <span className="min-w-0 truncate">{chat.agentName}</span> : null}
           <StatusPill
             tone={userDrives ? "info" : "muted"}
-            label={userDrives ? "You drive" : `${controllerLabel(lease)} drives`}
+            label={userDrives ? "You drive" : "Agent drives"}
             className="py-0"
           />
         </div>

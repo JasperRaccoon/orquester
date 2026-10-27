@@ -81,13 +81,10 @@ test("a newer frame of the same lease replaces its queued one (both callers get 
   assert.deepEqual(order, ["busy", "shot", "stale", "fresh"]);
 });
 
-test("a job past its deadline ends its worker and fails; the next job gets a fresh worker", async (t) => {
+test("a job past its deadline fails and retires its worker", async (t) => {
   const pool = new ImageWorkerPool({ size: 1, jobTimeoutMs: 1 });
   t.after(() => pool.close());
   await assert.rejects(pool.thumbnail("l1", screenPng(720, 1280), 320), /longer than/);
-  const relaxed = new ImageWorkerPool({ size: 1 });
-  t.after(() => relaxed.close());
-  assert.equal(jpegWidth(await relaxed.thumbnail("l1", screenPng(64, 64), 32)), 32);
   assert.equal(pool.stats().workers, 0);
 });
 

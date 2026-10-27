@@ -27,11 +27,6 @@ export interface ProfileImportActionHandlers {
   addPlugin?: (profile: SessionProfileDetail) => void;
 }
 
-export function hasImportActions(handlers: ProfileImportActionHandlers | undefined): boolean {
-  if (handlers === undefined) return false;
-  return Boolean(handlers.importFromGlobal || handlers.importFromGit || handlers.importFromZip || handlers.copyFromProfile);
-}
-
 export const ProfileImportActions: React.FC<{
   profile: SessionProfileDetail;
   kind: SessionProfileItemKind;

@@ -414,10 +414,8 @@ func TestApplyPlan(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(dir, "a", "unit")); err != nil || string(data) != "content\n" {
 		t.Fatalf("write: %q %v", data, err)
 	}
-	if !isWindows {
-		if info, _ := os.Stat(filepath.Join(dir, "a", "unit")); info.Mode().Perm() != 0o640 {
-			t.Fatalf("mode %v", info.Mode())
-		}
+	if info, _ := os.Stat(filepath.Join(dir, "a", "unit")); info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode %v", info.Mode())
 	}
 	if !reflect.DeepEqual(ran, []string{"fail ignored", "ok", "detach agent > /log"}) {
 		t.Fatalf("ran %v", ran)

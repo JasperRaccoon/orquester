@@ -26,7 +26,7 @@ import { boxesStore, resetBoxes } from "./boxes/store.ts";
 import { box, change, kind, provider } from "./boxes/fixtures.test-helpers.ts";
 import { knowledgeStore, resetKnowledge } from "./knowledge/store.ts";
 import { collections, knowledgePlugin, status } from "./knowledge/fixtures.test-helpers.ts";
-import { getRepoIdentity, resetRepoIdentities } from "./repo-identities/store.ts";
+import { repoIdentitiesStore, resetRepoIdentities } from "./repo-identities/store.ts";
 import { resetSavedPrompts, savedPromptsStore } from "./saved-prompts/store.ts";
 import { getSecretVault, resetSecretFiles } from "./secret-files/store.ts";
 import { getConnectionLog, resetConnectionLog } from "./connection/connection-log.ts";
@@ -502,15 +502,15 @@ afterEach(async () => {
     it("a change and a delete on the repo-identities channel reach the store", () => {
       resetRepoIdentities();
       useAppStore.getState().applyEvent(event("repo-identities", "repoIdentity.changed", { identity: record }));
-      assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY)?.label, "Engine");
       useAppStore.getState().applyEvent(event("repo-identities", "repoIdentity.changed", { repoKey: KEY, deleted: true }));
-      assert.equal(getRepoIdentity(KEY), undefined);
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY), undefined);
     });
 
     it("the same message on another channel does not", () => {
       resetRepoIdentities();
       useAppStore.getState().applyEvent(event("elsewhere", "repoIdentity.changed", { identity: record }));
-      assert.equal(getRepoIdentity(KEY), undefined);
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY), undefined);
     });
   });
 }

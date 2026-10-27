@@ -182,7 +182,6 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       boxId,
       kind,
       label: deviceHostLabel(record),
-      platform: "ios",
       appDir: deps.appDir,
       toolchain: deps.toolchain,
       record: () => deps.boxes()?.registry.get(boxId),
@@ -350,8 +349,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const word = hostWord(platform);
     const current = settings();
     const boxes = deps.boxes();
-    if (!current || !boxes) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Renting a ${word} host needs the Ephemeral AI VMs plugin: turn it on in Settings → Plugins.`);
-    if (!boxes.service.enabled()) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Renting a ${word} host needs the Ephemeral AI VMs plugin: turn it on in Settings → Plugins.`);
+    if (!current || !boxes || !boxes.service.enabled()) throw new DeviceError(DEVICE_ERROR_PLATFORM, `Renting a ${word} host needs the Ephemeral AI VMs plugin: turn it on in Settings → Plugins.`);
     const rental = quote(platform);
     if (!rental) {
       const provider = platform === "ios" ? current.ios.provider : (current.pool.provider ?? "blacksmith");

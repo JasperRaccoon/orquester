@@ -3,6 +3,15 @@
 import { readFileSync } from "node:fs";
 import type { StreamDeps } from "../types.ts";
 
+/** Build one envelope (tests and fixtures). */
+export function encodeAvccEnvelope(tag: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + payload.length);
+  new DataView(out.buffer).setUint32(0, payload.length + 1, false);
+  out[4] = tag;
+  out.set(payload, 5);
+  return out;
+}
+
 export function fixtureBytes(name: string): Uint8Array {
   return new Uint8Array(readFileSync(new URL(`../__fixtures__/${name}`, import.meta.url)));
 }

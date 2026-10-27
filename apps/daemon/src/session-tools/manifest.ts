@@ -78,11 +78,6 @@ export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next
 /** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
 export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
-/** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
-function alwaysAdmin(tool: AnyOrquesterTool): boolean {
-  return tool.tier === "admin";
-}
-
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
  * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
@@ -108,15 +103,13 @@ function advertisedChatTools(
   return catalog
     .filter(
       (tool) =>
-        !(workflowOwned && alwaysAdmin(tool)) &&
+        !(workflowOwned && tool.tier === "admin") &&
         (boxesAvailable || tool.toolset !== "boxes") &&
         (devicesAvailable || tool.toolset !== "devices") &&
         knowledgeTool(tool)
     )
     .map((tool) => tool.name);
 }
-
-const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
 
 /** `dir` is `parent` or a directory inside it (lexically). */
 export const isWithinDir = (dir: string, parent: string): boolean => {
@@ -133,8 +126,7 @@ export const isWithinDir = (dir: string, parent: string): boolean => {
 const loadsProjectConfigIn = (thread: ManifestThread, dir: string): boolean =>
   thread.projectPaths.some(
     (root) =>
-      samePath(root, dir) ||
-      // An ancestor of the project (Codex reads from its project root — the git root, maybe above).
+      // The project root or an ancestor (Codex's git root may be above it).
       isWithinDir(root, dir) ||
       (isWithinDir(dir, root) && (thread.cwdPaths ?? []).some((cwd) => isWithinDir(cwd, dir)))
   );

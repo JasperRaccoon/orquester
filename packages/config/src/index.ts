@@ -214,7 +214,7 @@ export function knowledgeMykgHomeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
 }
 
-// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
+// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target path helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
 export function boxesStorePath(baseDir: string): string {
@@ -337,7 +337,7 @@ export function deviceLeasesPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "device-leases.json");
 }
 
-/** The device pool's record (`device-pool.json`): spend, rented hosts, learned capacity, drains, cache warms. */
+/** The device pool's record (`device-pool.json`): rented hosts, learned capacity, drains, cache warms. */
 export function devicePoolPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "device-pool.json");
 }

@@ -11,7 +11,6 @@ import {
   type KnowledgeSimilarEntry
 } from "@orquester/api";
 
-import { mergeKnowledgeEntries, type KnowledgeApi } from "../../lib/knowledge/store";
 import { formatKnowledgeDate, knowledgeErrorText } from "./knowledge.logic";
 
 // ---------------------------------------------------------------------------
@@ -160,16 +159,6 @@ export function mergeConfirmMessage(plan: KnowledgeMergePlan): string {
   return plan.removesOpen
     ? `Keeps the older entry, ${kept}${older}, and deletes this one${newer}: ${moves}.`
     : `Keeps this entry, the older one${older}, and deletes ${removed}${newer}: ${moves}.`;
-}
-
-/**
- * Merge in one daemon call: the kept entry gets the other's collections and the other is deleted
- * (the daemon checks both are there and visible before it changes anything). `keep` is passed, so
- * the entry kept is the one the confirmation named. Resolves with the kept entry's id.
- */
-export async function runKnowledgeMerge(api: KnowledgeApi, plan: KnowledgeMergePlan): Promise<string> {
-  await mergeKnowledgeEntries(api, { ids: [plan.keep.id, plan.remove.id], keep: plan.keep.id });
-  return plan.keep.id;
 }
 
 /**

@@ -42,7 +42,7 @@ const STRUCTURAL_PUSH_VERB = {
 export const AGENT_PUSH_THREAD_INTERVAL_MS = 5 * 60_000;
 export const AGENT_PUSH_CREDENTIAL_INTERVAL_MS = 60_000;
 /** 429 code of a rate-limited `POST /api/push/notify`. */
-export const PUSH_RATE_LIMITED = "RATE_LIMITED";
+const PUSH_RATE_LIMITED = "RATE_LIMITED";
 
 /** Where an agent push counts against a limit: the calling chat, or the external credential; null — not limited. */
 export function pushRateKey(principal: CallerPrincipal | undefined): { key: string; intervalMs: number } | null {

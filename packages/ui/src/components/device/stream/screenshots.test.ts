@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, it, mock } from "node:test";
 import { ScreenshotPollSession } from "./screenshots.ts";
 import { fakeCanvas, fakeImageBitmaps, settle, testDeps } from "./testing/fakes.ts";
@@ -9,6 +10,34 @@ beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
   mock.timers.reset();
+});
+
+it("retains only the current wait's abort listener across successful polls", async () => {
+  const signals: AbortSignal[] = [];
+  const fetch = (async (_url: string, init?: RequestInit) => {
+    if (init?.signal) signals.push(init.signal);
+    return new Response(new Blob([Uint8Array.of(0x89, 0x50, 0x4e, 0x47)]));
+  }) as unknown as typeof globalThis.fetch;
+  const bitmaps = fakeImageBitmaps(() => ({ width: 720, height: 1280 }));
+  const session = new ScreenshotPollSession({
+    url: URL,
+    canvas: fakeCanvas(),
+    deps: testDeps({ fetch, createImageBitmap: bitmaps.createImageBitmap })
+  });
+  sessions.push(session);
+  await settle();
+  const signal = signals[0];
+  assert.ok(signal);
+  const listeners = getEventListeners(signal, "abort").length;
+  for (let poll = 0; poll < 3; poll++) {
+    mock.timers.tick(1_000);
+    await settle();
+    assert.equal(getEventListeners(signal, "abort").length, listeners, "completed waits release their abort listeners");
+  }
+  session.close();
+  assert.equal(signal.aborted, true);
+  await settle();
+  assert.equal(getEventListeners(signal, "abort").length, 0);
 });
 
 it("polls with POST about once a second and paints each screenshot", async () => {

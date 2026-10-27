@@ -7,16 +7,13 @@ import { describe, it } from "node:test";
 
 import { SIMSLIM_INSTALL_SCRIPT, SIMSLIM_RELEASE, deviceToolsCacheKey, DEVICE_TOOLS_STEP_SCRIPT } from "../../../boxes/github/device-cache.ts";
 import {
-  ORQ_DEVICE_SET,
   ORQ_SLIM_PROFILE,
   ORQ_SLIM_PROFILE_JSON,
   isPinnedSimslim,
   isSlim,
   parseSimslimInstall,
-  parseSimslimMeasure,
   parseSimslimTop,
   parseSimslimVerify,
-  simctlArgs,
   simslimBin,
   simslimMeasureArgs,
   simslimOnArgs,
@@ -29,7 +26,7 @@ import {
 const fixture = (name: string) => readFileSync(new URL(`../../fixtures/simslim/${name}`, import.meta.url), "utf8");
 
 describe("simslim", () => {
-  it("builds the commands the host runs (global --set before the subcommand)", () => {
+  it("builds the commands the host runs in the default device set", () => {
     const profilePath = simslimProfilePath("/var/lib/orquester/devices");
     assert.equal(profilePath, "/var/lib/orquester/devices/simslim-profile.json");
     assert.equal(simslimBin("/var/lib/orquester/devices/tools"), "/var/lib/orquester/devices/tools/simslim/v0.13.0/simslim");
@@ -39,15 +36,6 @@ describe("simslim", () => {
     assert.deepEqual(simslimVerifyArgs({ udid: "U1", profilePath }), ["verify", "U1", "--profile", profilePath, "--json"]);
     assert.deepEqual(simslimTopArgs(), ["top", "--json"]);
     assert.deepEqual(simslimMeasureArgs("U1"), ["measure", "U1", "--json"]);
-    // A custom set (not used while serve-sim reads only the default set) goes before the subcommand.
-    assert.deepEqual(simslimOnArgs({ udid: "U1", profilePath, set: "/sims" }), ["--set", "/sims", "on", "U1", "--profile", profilePath]);
-    assert.deepEqual(simslimTopArgs("/sims"), ["--set", "/sims", "top", "--json"]);
-  });
-
-  it("keeps Orquester's simulators in the default set, where serve-sim can stream them", () => {
-    assert.equal(ORQ_DEVICE_SET, null);
-    assert.deepEqual(simctlArgs(ORQ_DEVICE_SET, ["list", "-j", "devices"]), ["simctl", "list", "-j", "devices"]);
-    assert.deepEqual(simctlArgs("/var/lib/orquester/devices/sims", ["boot", "U1"]), ["simctl", "--set", "/var/lib/orquester/devices/sims", "boot", "U1"]);
   });
 
   it("writes a profile simslim accepts: known fields only, managed labels kept", () => {
@@ -93,7 +81,7 @@ describe("simslim", () => {
     assert.equal(parseSimslimTop(JSON.stringify({ sims: [{ udid: "A", memory: { bytes: 5 } }, { udid: "B", memory: { bytes: 7 } }] }))?.totalBytes, 12);
   });
 
-  it("parses `verify --json` (VerifyResult) and `measure --json` (Measurement)", () => {
+  it("parses `verify --json` (VerifyResult)", () => {
     assert.deepEqual(parseSimslimVerify(fixture("verify-ok.json")), { udid: "6F1C2E9A-3B7D-4E21-9C55-0A8B1D2E3F40", ok: true, missing: [], extra: [] });
     assert.deepEqual(parseSimslimVerify(fixture("verify-drift.json")), {
       udid: "6F1C2E9A-3B7D-4E21-9C55-0A8B1D2E3F40",
@@ -102,8 +90,6 @@ describe("simslim", () => {
       extra: ["com.apple.apsd"]
     });
     assert.equal(parseSimslimVerify("simulator must be booted to read its state"), null);
-    assert.deepEqual(parseSimslimMeasure(fixture("measure.json")), { processes: 71, bytes: 966_367_641, cpu: 3.4 });
-    assert.equal(parseSimslimMeasure("{}"), null);
   });
 
   it("reads the install script's answer", () => {

@@ -19,7 +19,7 @@
  * not decide (a platform that is off, a host it can set up, a named host).
  */
 
-import type { DeviceHostKind, DeviceHostStatus, DevicePlatform, DevicePoolWaitReason, DeviceReadinessCheck, DevicesSettings } from "@orquester/api";
+import { DEVICE_PLATFORMS, type DeviceHostKind, type DeviceHostStatus, type DevicePlatform, type DevicePoolWaitReason, type DeviceReadinessCheck, type DevicesSettings } from "@orquester/api";
 
 /** A host as placement sees it. */
 export interface PlacementHost {
@@ -131,11 +131,11 @@ export function choosePlacement(input: PlacementInput): Placement {
 /** No host runs more Android emulators than this (the 17th aborts and may take others down; spike §3). */
 export const ANDROID_HOST_HARD_CAP = 16;
 /** Devices a new Android pool host is planned with before one was measured (16 vCPU Blacksmith Linux: 8; spike §3). */
-export const DEFAULT_ANDROID_POOL_CAPACITY = 8;
+const DEFAULT_ANDROID_POOL_CAPACITY = 8;
 /** Seconds from renting a host to its first device (spike §3: ~30–40 s Linux with caches; a Mac takes minutes). */
 export const HOST_START_SECONDS: Readonly<Record<DevicePlatform, number>> = { android: 40, ios: 300 };
 /** How long a request may wait on a starting host before it fails. */
-export const DEFAULT_HOST_WAIT_SECONDS = 600;
+const DEFAULT_HOST_WAIT_SECONDS = 600;
 
 /** A host as the pool sees it (a rental in flight is a `pending` one). */
 export interface PoolHost {
@@ -259,7 +259,6 @@ export interface PoolDecision {
   perHostCapacity: Record<DevicePlatform, number>;
 }
 
-const PLATFORMS: readonly DevicePlatform[] = ["ios", "android"];
 const EPSILON = 1e-9;
 
 /** The capacity a host may use: Android never above the hard cap. */
@@ -275,8 +274,6 @@ export function plannedCapacity(platform: DevicePlatform, settings: DevicesSetti
 }
 
 const isStarting = (host: PoolHost): boolean => host.pending === true || host.status === "starting" || host.status === "installing";
-const isPoolHost = (host: PoolHost): boolean => host.kind === "box";
-const platformOn = (settings: DevicesSettings, platform: DevicePlatform): boolean => (platform === "android" ? settings.android.enabled : settings.ios.enabled);
 
 /** The worst case of one rental: its $/h over its whole lifetime. */
 const worstCaseUsd = (offer: PoolRentalOffer): number => ((offer.hourlyUsd ?? 0) * offer.lifetimeMinutes) / 60;
@@ -295,7 +292,7 @@ export function decidePool(input: PoolInput): PoolDecision {
     warmHostIds: [],
     perHostCapacity: { ios: 0, android: 0 }
   };
-  for (const platform of PLATFORMS) {
+  for (const platform of DEVICE_PLATFORMS) {
     const offer = input.offers[platform];
     decision.perHostCapacity[platform] = plannedCapacity(platform, settings, input.learned, offer?.provider, offer?.size);
   }
@@ -319,7 +316,7 @@ export function decidePool(input: PoolInput): PoolDecision {
   const requests = [...input.requests].sort((a, b) => a.requestedAt - b.requestedAt || a.id.localeCompare(b.id));
   for (const request of requests) {
     const { platform } = request;
-    if (!platformOn(settings, platform)) {
+    if (!platformEnabled(settings, platform)) {
       decision.failures.push({ requestId: request.id, code: "disabled" });
       continue;
     }
@@ -372,7 +369,7 @@ export function decidePool(input: PoolInput): PoolDecision {
   }
 
   // --- Scale up ----------------------------------------------------------------------------------
-  const poolHosts = input.hosts.filter(isPoolHost);
+  const poolHosts = input.hosts.filter((host) => host.kind === "box");
   let hostCount = poolHosts.length;
   let hourly = poolHosts.reduce((sum, host) => sum + (host.hourlyUsd ?? 0), 0);
   let plannedWorstUsd = 0;
@@ -405,7 +402,7 @@ export function decidePool(input: PoolInput): PoolDecision {
     }
   };
 
-  for (const platform of PLATFORMS) {
+  for (const platform of DEVICE_PLATFORMS) {
     let remaining = unmet.get(platform) ?? [];
     if (remaining.length === 0) continue;
     const offer = offerOf(platform);
@@ -456,9 +453,9 @@ export function decidePool(input: PoolInput): PoolDecision {
   }
 
   // Ahead of demand: headroom while in use, and the warm minimum (standing approval only).
-  for (const platform of PLATFORMS) {
+  for (const platform of DEVICE_PLATFORMS) {
     const offer = offerOf(platform);
-    if (!offer || !platformOn(settings, platform)) continue;
+    if (!offer || !platformEnabled(settings, platform)) continue;
     const mine = poolHosts.filter((host) => host.platforms.includes(platform) && !host.draining && (host.status === "ready" || isStarting(host)));
     const plan = planned.get(platform) ?? { hosts: 0, spare: 0 };
     const up = mine.length + plan.hosts;
@@ -492,7 +489,7 @@ export function decidePool(input: PoolInput): PoolDecision {
       gone.add(host.id);
     }
   }
-  for (const platform of PLATFORMS) {
+  for (const platform of DEVICE_PLATFORMS) {
     const keep = mode === "local-only" ? 0 : pool.minWarmHosts[platform];
     const up = poolHosts.filter((host) => host.platforms.includes(platform) && !host.draining && !gone.has(host.id) && (host.status === "ready" || isStarting(host)));
     let count = up.length + (planned.get(platform)?.hosts ?? 0);

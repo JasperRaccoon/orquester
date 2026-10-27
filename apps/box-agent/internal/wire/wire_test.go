@@ -205,18 +205,3 @@ func TestDataFrames(t *testing.T) {
 		t.Error("oversized payload must be rejected")
 	}
 }
-
-func TestShutdownUninstallFlag(t *testing.T) {
-	var removed ShutdownParams
-	if err := Unmarshal([]byte(`{"reason":"removed","uninstall":true}`), &removed, true); err != nil || !removed.Uninstall || removed.Reason != "removed" {
-		t.Fatalf("removed = %+v, err %v", removed, err)
-	}
-	// An older daemon sends no flag: shutting down must not uninstall anything.
-	var destroyed ShutdownParams
-	if err := Unmarshal([]byte(`{"reason":"destroyed"}`), &destroyed, true); err != nil || destroyed.Uninstall {
-		t.Fatalf("destroyed = %+v, err %v", destroyed, err)
-	}
-	if out, _ := json.Marshal(destroyed); string(out) != `{"reason":"destroyed"}` {
-		t.Fatalf("encoded %s", out)
-	}
-}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import test from "node:test";
 
 import { MjpegPartTracker, repeatStillFrame } from "./mjpeg-still-frame.ts";
@@ -25,13 +26,21 @@ test("the tracker keeps the last complete part, across chunk splits, and stops o
   assert.equal(other.still, null);
 });
 
-test("a quiet stream re-sends its last part once; a new part cancels the repeat", async () => {
+test("a quiet stream re-sends its last part once; a new part cancels the repeat", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const stream = repeatStillFrame(20);
   const out: Buffer[] = [];
   stream.on("data", (chunk: Buffer) => out.push(chunk));
+  const firstFrame = once(stream, "data");
   stream.write(part("a"));
+  await firstFrame;
+  t.mock.timers.tick(10);
   stream.write(part("b"));
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  t.mock.timers.tick(19);
+  assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b")]));
+  t.mock.timers.tick(1);
+  assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b"), part("b")]));
+  t.mock.timers.tick(80);
   stream.end();
   await new Promise((resolve) => stream.once("end", resolve));
   assert.deepEqual(Buffer.concat(out), Buffer.concat([part("a"), part("b"), part("b")]));

@@ -58,14 +58,12 @@ export type SearchNavAction =
   | { type: "results"; count: number }
   | { type: "down" }
   | { type: "up" }
-  | { type: "first" }
-  | { type: "last" }
   /** The pointer moved over an option. */
   | { type: "point"; index: number };
 
 export const SEARCH_NAV_EMPTY: SearchNavState = { count: 0, index: -1 };
 
-/** ↑/↓ move the highlight round the list (wrapping), Home/End jump to its ends. */
+/** ↑/↓ move the highlight round the list (wrapping). */
 export function searchNavReducer(state: SearchNavState, action: SearchNavAction): SearchNavState {
   if (action.type === "results") {
     const count = Math.max(0, Math.floor(action.count));
@@ -78,10 +76,6 @@ export function searchNavReducer(state: SearchNavState, action: SearchNavAction)
       return { count, index: index < 0 ? 0 : (index + 1) % count };
     case "up":
       return { count, index: index < 0 ? count - 1 : (index - 1 + count) % count };
-    case "first":
-      return { count, index: 0 };
-    case "last":
-      return { count, index: count - 1 };
     case "point":
       return action.index >= 0 && action.index < count && action.index !== index ? { count, index: action.index } : state;
   }
@@ -122,19 +116,6 @@ const BAND_LABEL: Record<KnowledgeMatchBand, string> = { strong: "Strong", good:
 
 export function bandLabel(band: KnowledgeMatchBand): string {
   return BAND_LABEL[band];
-}
-
-/** The via badges: "Keyword", "Meaning", "Similar", and one "Concept X" per concept that led to it ("Concept" without names). */
-export function viaBadges(match: Pick<KnowledgeEntryMatch, "via" | "concepts">): string[] {
-  const out: string[] = [];
-  for (const signal of match.via) {
-    if (signal === "keyword") out.push("Keyword");
-    else if (signal === "meaning") out.push("Meaning");
-    else if (signal === "similar") out.push("Similar");
-    else if (match.concepts.length === 0) out.push("Concept");
-    else for (const concept of match.concepts.slice(0, 3)) out.push(`Concept ${concept.name}`);
-  }
-  return out;
 }
 
 export interface TextPart {

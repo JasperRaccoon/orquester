@@ -70,8 +70,6 @@ import { clearGolden, goldenReady, readAvdMarker, writeGoldenMarker } from "../t
 import { DEVICE_TOOL_NAMES, type LocalDeviceToolchain } from "../toolchain/index.ts";
 
 export interface LocalAndroidHostDeps {
-  appDir: string;
-  env: NodeJS.ProcessEnv;
   toolchain: LocalDeviceToolchain;
   logger: Pick<Console, "info" | "warn" | "error">;
   /** Tests: the program runner and the KVM probe. */
@@ -442,7 +440,7 @@ export class LocalAndroidHost implements DeviceHost {
         run: (signal) =>
           this.profileQueue.run(profileId, async () => {
             // Asked for an AVD that is fine: a repair, made again from scratch.
-            const repair = this.checkFor(`avd:${profileId}`)?.state === "ok";
+            const repair = this.checks.find((check) => check.id === `avd:${profileId}`)?.state === "ok";
             if (this.instancesOf(profileId) > 0) {
               if (repair) throw new DeviceError("DEVICE_BUSY", `${profile.label} devices are running; release them before repairing its emulator.`);
               return;
@@ -458,10 +456,6 @@ export class LocalAndroidHost implements DeviceHost {
       steps.push({ id: `snapshot:${profileId}`, label: `Preparing ${profile.label} for first use`, weight: 30, run: (signal, progress) => this.ensureGolden(profile, signal, progress, { force: true }) });
     }
     return steps;
-  }
-
-  private checkFor(id: string): DeviceReadinessCheck | undefined {
-    return this.checks.find((check) => check.id === id);
   }
 
   private requireProfile(id: string): DeviceProfile {
@@ -738,7 +732,7 @@ export class LocalAndroidHost implements DeviceHost {
       // The details (the log path, emulator output) go to the daemon log only.
       const reason = error instanceof Error ? error.message : String(error);
       this.deps.logger.warn(`[devices] ${profile.id} on ${serial} did not boot: ${reason} (log: ${logPath})`);
-      throw new DeviceError("UNAVAILABLE", bootFailedMessage(profile.label));
+      throw new DeviceError("UNAVAILABLE", `${profile.label} did not start. Try opening it again; if it keeps failing, ask the owner to check Settings → Devices (the daemon log has the details).`);
     }
     return this.bootResult(record);
   }
@@ -911,11 +905,6 @@ export class LocalAndroidHost implements DeviceHost {
       if (info && now - info.mtimeMs > UPLOAD_MAX_AGE_MS) await rm(join(this.layout.uploads, entry), { recursive: true, force: true });
     }
   }
-}
-
-/** What an agent or the panel reads when an emulator did not boot (no host paths or emulator output). */
-export function bootFailedMessage(label: string): string {
-  return `${label} did not start. Try opening it again; if it keeps failing, ask the owner to check Settings → Devices (the daemon log has the details).`;
 }
 
 function errorText(error: unknown): string {

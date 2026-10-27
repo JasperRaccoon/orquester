@@ -17,14 +17,12 @@ import {
   deviceQueryTokenAllowed,
   DEVICES_PLUGIN_ID,
   boxDeviceHostId,
-  boxIdOfDeviceHost,
   deviceKey,
   deviceProfile,
   deviceRoutes,
   deviceToolReferenceOfActivityData,
   parseDeviceControllerRequest,
   parseDeviceUserActionRequest,
-  parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
   parseDeviceCacheWarmRequest,
@@ -56,14 +54,9 @@ test("profiles: ids are unique, each platform's defaults are known profiles of t
   }
 });
 
-test("keys and host ids round-trip; a box host id names its box", () => {
+test("device keys and box host ids name their host", () => {
   assert.equal(deviceKey("local", "emulator-5554"), "local/emulator-5554");
-  assert.deepEqual(parseDeviceKey("box:ab12/1A2B-UDID"), { hostId: "box:ab12", deviceId: "1A2B-UDID" });
-  assert.deepEqual(parseDeviceKey("local/a/b"), { hostId: "local", deviceId: "a/b" });
-  for (const bad of ["", "/x", "local/", "nokey"]) assert.equal(parseDeviceKey(bad), null, bad);
-  assert.equal(boxIdOfDeviceHost(boxDeviceHostId("ab12")), "ab12");
-  assert.equal(boxIdOfDeviceHost("local"), null);
-  assert.equal(boxIdOfDeviceHost("box:"), null);
+  assert.equal(boxDeviceHostId("ab12"), "box:ab12");
 });
 
 test("routes encode their parameters", () => {
@@ -174,6 +167,25 @@ test("settings patch: each field checked against its range; unknown fields refus
     assert.equal(parseDevicesSettingsPatch(bad).ok, false, JSON.stringify(bad));
   }
 });
+
+for (const [name, json] of [
+  ["top-level constructor", '{"constructor":{}}'],
+  ["top-level __proto__", '{"__proto__":{}}'],
+  ["top-level toString", '{"toString":{}}'],
+  ["android constructor", '{"android":{"constructor":true}}'],
+  ["android __proto__", '{"android":{"__proto__":{}}}'],
+  ["pool constructor", '{"pool":{"constructor":true}}'],
+  ["pool __proto__", '{"pool":{"__proto__":{}}}'],
+  ["warm-host constructor", '{"pool":{"minWarmHosts":{"constructor":1}}}'],
+  ["research constructor", '{"research":{"constructor":{}}}'],
+  ["research host constructor", '{"research":{"vphoneHosts":{"box1":{"constructor":true}}}}']
+] as const) {
+  test(`settings patch: refuses inherited property name ${name}`, () => {
+    const parsed = parseDevicesSettingsPatch(JSON.parse(json));
+    assert.equal(parsed.ok, false);
+    if (!parsed.ok) assert.match(parsed.message, /Unknown setting/);
+  });
+}
 
 test("settings patch: research.vphoneHosts takes per-machine entries field by field, null forgets one", () => {
   assert.deepEqual(

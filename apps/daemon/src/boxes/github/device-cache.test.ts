@@ -35,11 +35,7 @@ import {
   KVM_STEP_SCRIPT
 } from "./device-cache.ts";
 
-test("the pinned tool versions are the device service's tool-versions.json", () => {
-  const json = JSON.parse(readFileSync(new URL("../../devices/tool-versions.json", import.meta.url), "utf8")) as Record<string, string>;
-  assert.deepEqual({ ...DEVICE_TOOL_VERSIONS }, json);
-  assert.equal(DEVICE_TOOL_VERSIONS["agent-device"], "0.21.31");
-  assert.equal(DEVICE_TOOL_VERSIONS["expo-device-hub"], "0.19.0-canary-20261023-1357114");
+test("the device tools install the pinned versions from the shipped lockfile without lifecycle scripts", () => {
   // From the shipped lockfile, with no lifecycle script.
   for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes(`"${name}": "${version}"`));
   assert.ok(DEVICE_TOOLS_STEP_SCRIPT.includes("npm ci --ignore-scripts"));

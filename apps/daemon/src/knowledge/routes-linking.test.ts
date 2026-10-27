@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
-import { KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type SessionOwner } from "@orquester/api";
+import { knowledgeRoutes, type SessionOwner } from "@orquester/api";
 import type { KnowledgeLinkingSnapshot } from "./linking/service.ts";
 import {
   KNOWLEDGE_WORKER_ANSWER_MAX,
-  publishKnowledgeStatus,
   registerKnowledgeLinkingRoutes,
   type KnowledgeLinkingRouteService,
   type KnowledgeStatusCounts
@@ -136,23 +134,5 @@ describe("knowledge linking routes", () => {
     const ok = await app.inject({ method: "POST", url: knowledgeRoutes.workerSubmit, headers: { "x-test-agent": "worker" }, payload: { taskId: "t", answer: "{}" } });
     assert.deepEqual(ok.json(), { accepted: false, error: "nope" });
     assert.deepEqual(calls, [{ method: "submit", args: ["worker", "t", "{}"] }]);
-  });
-
-  it("publishes the whole status on every linking change", () => {
-    const events = new EventEmitter<{ status: [] }>();
-    const published: { channel: string; type: string; payload: unknown }[] = [];
-    const off = publishKnowledgeStatus(
-      { events, snapshot: () => SNAPSHOT },
-      { publish: (channel, type, payload) => published.push({ channel, type, payload }) },
-      () => ({ enabled: true, installed: false, entries: 0, concepts: 0, edges: 0, collections: 0, failedEntries: 0 })
-    );
-    events.emit("status");
-    assert.equal(published.length, 1);
-    assert.equal(published[0]!.channel, KNOWLEDGE_CHANNEL);
-    assert.equal(published[0]!.type, KNOWLEDGE_STATUS_EVENT);
-    assert.equal((published[0]!.payload as { installed: boolean }).installed, false);
-    off();
-    events.emit("status");
-    assert.equal(published.length, 1);
   });
 });

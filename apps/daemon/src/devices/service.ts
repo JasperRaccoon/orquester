@@ -81,7 +81,6 @@ import {
   isLiveLease,
   leaseBooted,
   leaseKeyOf,
-  leasesOfThread,
   newLease,
   resolveLeaseHandle,
   toLeaseSummary,
@@ -109,11 +108,11 @@ import type {
 import { runUserAction } from "./user-actions.ts";
 
 /** How long `open_device` waits for a device before answering `starting` (spec §9: 9 min). */
-export const OPEN_DEVICE_WAIT_MS = 9 * 60_000;
+const OPEN_DEVICE_WAIT_MS = 9 * 60_000;
 /** The idle sweep's period. */
 const IDLE_SWEEP_MS = 60_000;
 /** The slow safety sweep of every host's live devices (hosts' changes trigger one per host too). */
-export const DEVICE_SWEEP_MS = 5 * 60_000;
+const DEVICE_SWEEP_MS = 5 * 60_000;
 /** One placement wait (a host starting) at most. */
 const HOST_WAIT_MS = 10 * 60_000;
 /** Placement rounds before giving up (wait, setup and provision each take one). */
@@ -159,7 +158,7 @@ interface SetupRun {
 }
 
 /** What `openLease` is asked for. */
-export interface OpenLeaseRequest {
+interface OpenLeaseRequest {
   threadId: string;
   platform: DevicePlatform;
   profile?: string;
@@ -187,7 +186,7 @@ interface WaitingOpen {
 }
 
 /** A lease being opened: its record now, and the boot finishing. */
-export interface OpeningLease {
+interface OpeningLease {
   lease: DeviceLeaseSummary;
   /** Resolves the ready lease; rejects with a `DeviceError` (the lease is then gone). */
   done: Promise<DeviceLeaseSummary>;
@@ -692,9 +691,7 @@ export class DeviceService implements DeviceToolsPort {
     }
     this.progress.delete(lease.id);
     const ready = leaseBooted(current, booted, this.iso());
-    this.replace(ready);
-    void this.deps.leaseStore.persist();
-    this.publishLease(ready);
+    this.commit(ready);
     this.publishHosts();
     if (request.app) {
       // Best effort: the device is ready either way; a failed launch is noted for the agent.
@@ -1452,7 +1449,7 @@ export class DeviceService implements DeviceToolsPort {
     const status = host?.state().status;
     const change = !host ? "lost" : status === "unreachable" ? "suspended" : status === "ready" ? "ready" : null;
     if (change) {
-      for (const lease of hostLeasesChanged(this.leases, hostId, change, this.iso(), "Its host is gone.")) this.commit(lease);
+      for (const lease of hostLeasesChanged(this.leases, hostId, change, "Its host is gone.")) this.commit(lease);
     }
     this.publishHosts();
   }

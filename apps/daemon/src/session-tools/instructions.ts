@@ -27,11 +27,6 @@ export const KNOWLEDGE_LINE_MAX_BYTES = 256;
  */
 export const DEVICES_LINE_MAX_BYTES = 160;
 
-/** The block's cap for one thread: {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES}, plus each optional line's when it has it. */
-export function orquesterInstructionsCap(hasKnowledgeLine: boolean, hasDevicesLine = false): number {
-  return ORQUESTER_INSTRUCTIONS_MAX_BYTES + (hasKnowledgeLine ? KNOWLEDGE_LINE_MAX_BYTES : 0) + (hasDevicesLine ? DEVICES_LINE_MAX_BYTES : 0);
-}
-
 /**
  * The fixed part: spec §10, revised with T3 Code's orchestration wording — tools a harness loads on
  * demand, which chat to open for delegated work, and when to show a visual instead of offering one.

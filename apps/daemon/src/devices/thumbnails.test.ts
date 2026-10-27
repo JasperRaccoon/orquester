@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { ImagePoolBusyError } from "./image-pool.ts";
 import { solidPng } from "./testing.ts";
-import { DeviceThumbnails, THUMBNAIL_CACHE_MS, ThumbnailError, thumbnailJpeg } from "./thumbnails.ts";
+import { DeviceThumbnails, THUMBNAIL_CACHE_MS, ThumbnailError } from "./thumbnails.ts";
+import { thumbnailJpeg } from "./screenshot-image.ts";
 
 /** A JPEG's SOF0 width and height. */
 function jpegSize(jpeg: Buffer): { width: number; height: number } {

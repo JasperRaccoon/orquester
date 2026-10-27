@@ -48,15 +48,14 @@ import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
 
 export const PAIRING_TTL_MS = BYO_PAIRING_TTL_MINUTES * 60_000;
 /** The bootstrap token the spent code mints: the script has this long to download and connect. */
-export const PAIRING_BOOTSTRAP_TTL_MS = 30 * 60_000;
+const PAIRING_BOOTSTRAP_TTL_MS = 30 * 60_000;
 /** 18 random bytes, base64url. */
-export const PAIRING_CODE_PATTERN = /^[A-Za-z0-9_-]{24}$/;
+const PAIRING_CODE_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const MAX_NAME_CHARS = 60;
 /** How long a removed machine gets to acknowledge the uninstall before its link is cut. */
 const UNINSTALL_ACK_MS = 15_000;
 
-export const PAIRING_WAITING_REASON = "Waiting for the pairing command to run on the machine.";
-export const PAIRING_FETCHED_REASON = "The pairing script was downloaded; waiting for orq-agent to connect…";
+const PAIRING_WAITING_REASON = "Waiting for the pairing command to run on the machine.";
 
 /** The pair route's answer: the script, or a refusal that says nothing about which codes exist. */
 export type PairingScriptOutcome =
@@ -311,7 +310,7 @@ export class ByoMachines {
         if (next.pairingCodeHash !== hash) throw new Error("spent concurrently");
         delete next.pairingCodeHash;
         delete next.pairingExpiresAt;
-        if (!expired) next.stateReason = PAIRING_FETCHED_REASON;
+        if (!expired) next.stateReason = "The pairing script was downloaded; waiting for orq-agent to connect…";
       });
     } catch {
       return fail();

@@ -109,10 +109,6 @@ export class VectorCache {
     return this.manifest.dimensions;
   }
 
-  get size(): number {
-    return this.rows.size;
-  }
-
   /** The key's chunk vectors, row after row (`count * dimensions` floats), or null. */
   get(key: string): Float32Array | null {
     return this.rows.get(key) ?? null;

@@ -177,7 +177,7 @@ export function fitScreenshot(png: Buffer, maxBase64Chars: number): FittedScreen
 }
 
 /** The fleet view's thumbnail quality. */
-export const THUMBNAIL_JPEG_QUALITY = 60;
+const THUMBNAIL_JPEG_QUALITY = 60;
 
 /** A PNG (or a JPEG passed through) as a JPEG at most `width` px wide (integer-factor box downscale; never upscaled). */
 export function thumbnailJpeg(image: Buffer, width: number): Buffer {

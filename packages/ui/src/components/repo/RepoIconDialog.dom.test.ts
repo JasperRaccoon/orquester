@@ -161,7 +161,7 @@ describe("repo icon dialog", () => {
       api.calls[0].resolve({ identity: { repoKey: KEY, icon: { kind: "emoji", value: "🦝" }, updatedAt: "2026-10-18T10:00:00.000Z" } });
       await api.calls[0].promise;
     });
-    assert.deepEqual(store.getRepoIdentity(KEY)?.icon, { kind: "emoji", value: "🦝" });
+    assert.deepEqual(store.repoIdentitiesStore.getState().identities.get(KEY)?.icon, { kind: "emoji", value: "🦝" });
     assert.equal(closes, 1);
   });
 
@@ -191,6 +191,6 @@ describe("repo icon dialog", () => {
       api.calls[0].resolve({ identity: { repoKey: KEY, icon, updatedAt: "2026-10-18T10:00:00.000Z" } });
       await api.calls[0].promise;
     });
-    assert.deepEqual(store.getRepoIdentity(KEY)?.icon, icon);
+    assert.deepEqual(store.repoIdentitiesStore.getState().identities.get(KEY)?.icon, icon);
   });
 });

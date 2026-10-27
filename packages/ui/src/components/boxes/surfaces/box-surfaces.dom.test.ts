@@ -31,8 +31,6 @@ import type { ApiClient } from "../../../lib/api-client";
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let BoxChatPanel: typeof import("./BoxChatSurfaces").BoxChatPanel;
-let BoxComposerLock: typeof import("./BoxChatSurfaces").BoxComposerLock;
-let AgentCardBoxBanner: typeof import("./BoxBadge").AgentCardBoxBanner;
 let ProjectRow: typeof import("../../sidebar/WorkspaceProjects").ProjectRow;
 let store: typeof import("../../../lib/boxes/store");
 
@@ -65,8 +63,7 @@ before(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
-  ({ BoxChatPanel, BoxComposerLock } = await import("./BoxChatSurfaces"));
-  ({ AgentCardBoxBanner } = await import("./BoxBadge"));
+  ({ BoxChatPanel } = await import("./BoxChatSurfaces"));
   ({ ProjectRow } = await import("../../sidebar/WorkspaceProjects"));
   store = await import("../../../lib/boxes/store");
 });

@@ -6,7 +6,7 @@ import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
 // make the system copy/paste/undo shortcuts reach the page on macOS, and the
 // View roles the reload, zoom and DevTools shortcuts everywhere.
 
-export interface ApplicationMenuActions {
+interface ApplicationMenuActions {
   /** Settings… — the renderer opens its Settings dialog. */
   openSettings(): void;
   /** Help → Open Logs Folder. */
@@ -99,7 +99,7 @@ export type ContextMenuInput = Pick<
   "isEditable" | "selectionText" | "misspelledWord" | "dictionarySuggestions" | "editFlags"
 >;
 
-export interface ContextMenuActions {
+interface ContextMenuActions {
   replaceMisspelling(word: string): void;
   addToDictionary(word: string): void;
 }

@@ -62,13 +62,13 @@ import {
 import type { DevicePoolStore } from "./store.ts";
 
 /** The periodic tick (spend, idle teardown, warm minimum, cache refresh). */
-export const POOL_TICK_MS = 30_000;
+const POOL_TICK_MS = 30_000;
 /** After a failed rental, no rental ahead of demand for this long. */
-export const RENTAL_BACKOFF_MS = 5 * 60_000;
+const RENTAL_BACKOFF_MS = 5 * 60_000;
 /** Caches older than this are refreshed while the pool rents without asking (evicted after 7 days unused). */
-export const CACHE_REFRESH_MS = 6 * 24 * 60 * 60_000;
+const CACHE_REFRESH_MS = 6 * 24 * 60 * 60_000;
 /** A cache miss warms at most once in this long. */
-export const CACHE_MISS_WARM_MS = 24 * 60 * 60_000;
+const CACHE_MISS_WARM_MS = 24 * 60 * 60_000;
 /** A failed automatic warm is retried after this long. */
 const CACHE_RETRY_MS = 60 * 60_000;
 /** How often a running cache warm's state is read. */
@@ -162,8 +162,6 @@ interface PendingRental {
   offer: PoolRentalOffer;
   /** The host the factory added while renting (it stands in for this placeholder). */
   hostId: string | null;
-  /** The requests it was rented for. */
-  requestIds: string[];
 }
 
 interface CacheRun {
@@ -605,7 +603,6 @@ export class DevicePool {
   private poolHosts(): PoolHost[] {
     const state = this.deps.store.state();
     const out: PoolHost[] = [];
-    const standIns = new Set([...this.pending.values()].flatMap((rental) => (rental.hostId ? [rental.hostId] : [])));
     for (const host of this.deps.hosts.list()) {
       if (this.destroying.has(host.id)) continue;
       const capacity = host.capacity();
@@ -613,7 +610,7 @@ export class DevicePool {
       const rental = state.rentals.find((entry) => entry.hostId === host.id);
       const box = host.box?.() ?? null;
       const status = host.state().status;
-      const pendingFor = standIns.has(host.id) ? [...this.pending.values()].find((entry) => entry.hostId === host.id) : undefined;
+      const pendingFor = [...this.pending.values()].find((entry) => entry.hostId === host.id);
       out.push({
         id: host.id,
         kind: host.kind,
@@ -764,7 +761,7 @@ export class DevicePool {
     const factory = this.provisioner(platform);
     const offer = this.offer(platform);
     if (!factory?.provision || !offer) return;
-    const rental: PendingRental = { id: `pending:${this.newId()}`, platform, startedAt: now, offer, hostId: null, requestIds };
+    const rental: PendingRental = { id: `pending:${this.newId()}`, platform, startedAt: now, offer, hostId: null };
     this.pending.set(rental.id, rental);
     const threadId = requestIds.map((id) => this.waiters.get(id)?.request.threadId).find((id) => id !== undefined) ?? "";
     this.deps.logger.info(`[devices] renting a ${DEVICE_PLATFORM_LABELS[platform]} pool host (${offer.provider} ${offer.size})`);
@@ -811,7 +808,7 @@ export class DevicePool {
     const host = this.deps.hosts.get(hostId);
     if (!host?.destroy || this.destroying.has(hostId)) return;
     this.destroying.add(hostId);
-    this.deps.logger.info(`[devices] destroying ${host.label}: ${reason === "idle" ? "idle" : "drained"}`);
+    this.deps.logger.info(`[devices] destroying ${host.label}: ${reason}`);
     host
       .destroy()
       .catch((error) => {

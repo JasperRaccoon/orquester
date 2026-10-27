@@ -100,7 +100,7 @@ const ROW_RESERVE = RIGHT_RAIL_BAR_WIDTH + RIGHT_RAIL_CONTENT_MIN;
  * beside the dock and the rail. The content's floor wins over the dock's
  * minimum, so in a narrow row the cap falls below `RIGHT_RAIL_WIDTH_MIN`, down
  * to 0 — the rule the dock's CSS bounds apply against the live row
- * (`RIGHT_RAIL_CSS_MIN_WIDTH` / `RIGHT_RAIL_CSS_MAX_WIDTH`). No (usable)
+ * (`rightRailCssBounds`). No (usable)
  * measurement → the maximum alone.
  */
 function rightRailWidthCap(rowWidth?: number | null, panel: DockPanelId = "prompts"): number {
@@ -117,10 +117,6 @@ function rightRailWidthCap(rowWidth?: number | null, panel: DockPanelId = "promp
  * a drag still leaves the tab content its floor. The stored width sits between
  * them when the row has room; when it has not, both collapse to what is left.
  */
-export const RIGHT_RAIL_CSS_MIN_WIDTH = `max(0px, min(${RIGHT_RAIL_WIDTH_MIN}px, 100% - ${ROW_RESERVE}px))`;
-export const RIGHT_RAIL_CSS_MAX_WIDTH = `max(0px, min(${RIGHT_RAIL_WIDTH_MAX}px, 100% - ${ROW_RESERVE}px))`;
-
-/** {@link RIGHT_RAIL_CSS_MIN_WIDTH} / {@link RIGHT_RAIL_CSS_MAX_WIDTH} for one panel's range. */
 export function rightRailCssBounds(panel: DockPanelId): { minWidth: string; maxWidth: string } {
   const range = RIGHT_RAIL_WIDTH_RANGES[panel];
   return {

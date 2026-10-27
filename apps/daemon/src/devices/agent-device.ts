@@ -27,7 +27,7 @@ import { DeviceError, type DeviceErrorCodeOrGeneric } from "./errors.ts";
 import type { AgentDeviceCommand, DeviceHost } from "./host.ts";
 import type { DeviceToolchain } from "./toolchain/index.ts";
 
-export interface AgentDeviceTarget {
+interface AgentDeviceTarget {
   host: DeviceHost;
   /** A `ready` lease (its `deviceId` set). */
   lease: StoredDeviceLease;
@@ -43,7 +43,7 @@ export interface AgentDeviceResult {
   truncated?: boolean;
 }
 
-export interface AgentDeviceRunOptions {
+interface AgentDeviceRunOptions {
   signal: AbortSignal;
   timeoutMs?: number;
   /** Written to the CLI's stdin (`fill --text-stdin`: text stays out of argv). */
@@ -59,13 +59,12 @@ export interface AgentDeviceClient {
   prepare?(host: DeviceHost, signal: AbortSignal): Promise<void>;
 }
 
-export interface AgentDeviceDeps {
+interface AgentDeviceDeps {
   toolchain: DeviceToolchain;
   env: NodeJS.ProcessEnv;
-  logger: Pick<Console, "info" | "warn" | "error">;
 }
 
-export const AGENT_DEVICE_DEFAULT_TIMEOUT_MS = 60_000;
+const AGENT_DEVICE_DEFAULT_TIMEOUT_MS = 60_000;
 const STDOUT_CAP = 8 * 1024 * 1024;
 const STDERR_CAP = 256 * 1024;
 const KILL_GRACE_MS = 3_000;
@@ -107,7 +106,7 @@ export function agentDeviceArgv(input: {
  * user's home and temp dirs. Nothing else of the daemon's environment (its secrets, provider keys,
  * `AGENT_DEVICE_*` overrides) reaches the CLI.
  */
-export const AGENT_DEVICE_ENV_PASSTHROUGH = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TERM", "SHELL", "XDG_RUNTIME_DIR"] as const;
+const AGENT_DEVICE_ENV_PASSTHROUGH = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TERM", "SHELL", "XDG_RUNTIME_DIR"] as const;
 
 /** The environment a run gets: the allowlisted daemon variables, then the host's additions (`AgentDeviceCommand.env`). */
 export function agentDeviceEnv(base: NodeJS.ProcessEnv, extra: Record<string, string> = {}): Record<string, string> {
@@ -277,7 +276,7 @@ function stdinFile(text: string): number {
 }
 
 /** Spawn without a shell, bounded by the timeout, the abort and the output caps. */
-export function runProcess(executable: string, argv: readonly string[], env: Record<string, string>, label: string, options: AgentDeviceRunOptions): Promise<AgentDeviceResult> {
+function runProcess(executable: string, argv: readonly string[], env: Record<string, string>, label: string, options: AgentDeviceRunOptions): Promise<AgentDeviceResult> {
   return new Promise((resolve, reject) => {
     if (options.signal.aborted) {
       reject(new DeviceError("CANCELLED", "The request was cancelled."));

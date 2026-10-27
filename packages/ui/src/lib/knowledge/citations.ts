@@ -59,7 +59,7 @@ export function citationSnippet(body: string, max = CITATION_SNIPPET_MAX): strin
 }
 
 /** The card's summary of a `GET /items/:id` answer, or null when it is no entry this client can read. */
-export function citationSummaryOf(answer: unknown): KnowledgeCitationSummary | null {
+function citationSummaryOf(answer: unknown): KnowledgeCitationSummary | null {
   const item = parseKnowledgeItemResponse(answer);
   if (item?.kind !== "entry") return null;
   const { id, title, author, handle, postedAt, savedAt, collections, body } = item.entry.entry;
@@ -190,18 +190,11 @@ export function subscribeKnowledgeCitations(listener: () => void): () => void {
   };
 }
 
-const subscribe = subscribeKnowledgeCitations;
-
-export function useKnowledgeCitationState(id: string): KnowledgeCitationState {
-  const snapshot = () => knowledgeCitationState(id);
-  return useSyncExternalStore(subscribe, snapshot, snapshot);
-}
-
 /** The answer about entry `id` (the same object until it changes) and whether a read is in flight. */
 export function useKnowledgeCitation(id: string): { answer: KnowledgeCitationAnswer | undefined; pending: boolean } {
   const answerOf = () => knowledgeCitationAnswer(id);
   const pendingOf = () => knowledgeCitationPending(id);
-  const answer = useSyncExternalStore(subscribe, answerOf, answerOf);
-  const pending = useSyncExternalStore(subscribe, pendingOf, pendingOf);
+  const answer = useSyncExternalStore(subscribeKnowledgeCitations, answerOf, answerOf);
+  const pending = useSyncExternalStore(subscribeKnowledgeCitations, pendingOf, pendingOf);
   return { answer, pending };
 }

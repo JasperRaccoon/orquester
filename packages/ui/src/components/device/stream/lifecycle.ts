@@ -127,11 +127,6 @@ export class StreamLifecycle {
     return this.stateValue === "closed";
   }
 
-  /** Painted at least one frame since the session started. */
-  get hasPainted(): boolean {
-    return this.everPainted;
-  }
-
   start(): void {
     if (this.started || this.closed) return;
     this.started = true;

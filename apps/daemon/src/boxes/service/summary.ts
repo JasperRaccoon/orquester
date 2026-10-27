@@ -64,17 +64,12 @@ export function setupStepIds(purpose: BoxPurpose): BoxSetupStepId[] {
 }
 
 /** A record's purpose as the API names it: one this build does not know reads as `project`. */
-export function purposeOf(record: Pick<StoredBox, "purpose">): BoxPurpose {
+function purposeOf(record: Pick<StoredBox, "purpose">): BoxPurpose {
   return isBoxPurpose(record.purpose) ? record.purpose : "project";
 }
 
-export function initialSetup(purpose: BoxPurpose): BoxSetupStep[] {
-  return setupStepIds(purpose).map((id) => ({ id, label: SETUP_STEP_LABELS[id], state: "pending", startedAt: null, finishedAt: null, message: null }));
-}
-
-/** {@link initialSetup} in the stored record's shape. */
 export function initialStoredSetup(purpose: BoxPurpose): NonNullable<StoredBox["setup"]> {
-  return initialSetup(purpose).map((step) => ({ ...step }));
+  return setupStepIds(purpose).map((id) => ({ id, label: SETUP_STEP_LABELS[id], state: "pending", startedAt: null, finishedAt: null, message: null }));
 }
 
 export function isBoxState(value: unknown): value is BoxState {

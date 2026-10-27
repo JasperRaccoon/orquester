@@ -19,7 +19,7 @@ import { useAppStore } from "../../../../store/app";
 /** The live lease a reference names (by lease id, else by device key), or undefined once released. */
 function leaseOf(leases: readonly DeviceLeaseSummary[] | null, link: DeviceToolReference): DeviceLeaseSummary | undefined {
   if (!leases) return undefined;
-  return (link.leaseId ? leases.find((lease) => lease.id === link.leaseId) : undefined) ?? leases.find((lease) => lease.key === link.device);
+  return link.leaseId ? leases.find((lease) => lease.id === link.leaseId) : leases.find((lease) => lease.key === link.device);
 }
 
 /** The device's name as the devices store knows it (a primitive, so a row re-renders only when it changes). */

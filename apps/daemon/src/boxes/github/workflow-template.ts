@@ -47,7 +47,7 @@ export const BLACKSMITH_DEVICE_CACHE_WORKFLOW_PATH = `.github/workflows/${BLACKS
  */
 export const BLACKSMITH_MAX_LIFETIME_MINUTES = 7200;
 /** The cache-warming job's time limit. */
-export const BLACKSMITH_DEVICE_CACHE_TIMEOUT_MINUTES = 90;
+const BLACKSMITH_DEVICE_CACHE_TIMEOUT_MINUTES = 90;
 
 export type BlacksmithSize = "6vcpu" | "12vcpu";
 export type BlacksmithImage = "macos-15" | "macos-26" | "macos-27";
@@ -112,7 +112,7 @@ export function blacksmithRunnerLabel(size: BlacksmithSize | BlacksmithLinuxSize
   return `blacksmith-${size}-${image}`;
 }
 
-export const BLACKSMITH_MACOS_RUNNER_LABELS: readonly string[] = BLACKSMITH_SIZES.flatMap((size) =>
+const BLACKSMITH_MACOS_RUNNER_LABELS: readonly string[] = BLACKSMITH_SIZES.flatMap((size) =>
   BLACKSMITH_IMAGES.map((image) => blacksmithRunnerLabel(size.id, image.id))
 );
 export const BLACKSMITH_LINUX_RUNNER_LABELS: readonly string[] = BLACKSMITH_LINUX_SIZES.flatMap((size) =>

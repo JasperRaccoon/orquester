@@ -29,8 +29,8 @@ import type { VphoneBoxLink } from "./host.ts";
 // Recorded-shape H.264 (an iPhone screen at 738×1600, High profile)
 // ---------------------------------------------------------------------------
 
-export const FIXTURE_SPS = Buffer.from("6764001fac d9405005 bb011000 00030010 00000303 c0f18319 60".replace(/\s/g, ""), "hex");
-export const FIXTURE_PPS = Buffer.from("68ebe3cb22c0", "hex");
+const FIXTURE_SPS = Buffer.from("6764001fac d9405005 bb011000 00030010 00000303 c0f18319 60".replace(/\s/g, ""), "hex");
+const FIXTURE_PPS = Buffer.from("68ebe3cb22c0", "hex");
 /** An AVCDecoderConfigurationRecord: version 1, High 3.1, 4-byte NAL lengths, one SPS, one PPS. */
 export const FIXTURE_AVCC = Buffer.concat([
   Buffer.from([1, 0x64, 0x00, 0x1f, 0xff, 0xe1]),
@@ -134,7 +134,7 @@ export interface FakeVphoned {
 }
 
 /** The default screen answers: a key frame with its avcC first, then deltas, an `unchanged` every fourth. */
-export function defaultScreen(request: Record<string, unknown>, index: number): { header: Record<string, unknown>; payload?: Buffer } {
+function defaultScreen(request: Record<string, unknown>, index: number): { header: Record<string, unknown>; payload?: Buffer } {
   const base = { id: request.id, session: 1, width: 738, height: 1600, sourceWidth: 1290, sourceHeight: 2796, scale: 3, captureUs: 900, encodeUs: 2100 };
   if (request.key === true || index === 0) return { header: { ...base, status: "frame", key: true, record: FIXTURE_AVCC.toString("base64") }, payload: FIXTURE_KEY_AU };
   if (index % 4 === 3) return { header: { ...base, status: "unchanged" } };
@@ -320,7 +320,7 @@ export interface FakeMacOptions {
 export const VPHONE_CLI_PATH = "/opt/homebrew/bin/vphone-cli";
 
 /** What a ready Mac answers (captured shapes). */
-export function defaultMacAnswer(command: string, args: string[]): { stdout?: string; stderr?: string; exitCode?: number } {
+function defaultMacAnswer(command: string, args: string[]): { stdout?: string; stderr?: string; exitCode?: number } {
   const joined = [command, ...args].join(" ");
   if (command === "/usr/bin/printenv") return { exitCode: 1 };
   if (joined === "/usr/bin/which vphone-cli") return { stdout: `${VPHONE_CLI_PATH}\n` };

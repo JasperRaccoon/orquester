@@ -13,7 +13,6 @@ import {
   searchIsNarrowed,
   searchNavReducer,
   showAllLabel,
-  viaBadges,
   type SearchNavAction,
   type SearchNavState
 } from "./graph-search.logic.ts";
@@ -34,8 +33,6 @@ describe("the dropdown's keyboard highlight", () => {
     assert.equal(run([{ type: "down" }, { type: "down" }], three).index, 2);
     assert.equal(run([{ type: "down" }, { type: "down" }, { type: "down" }], three).index, 0, "past the last: the first");
     assert.equal(run([{ type: "up" }], three).index, 2, "above the first: the last");
-    assert.equal(run([{ type: "last" }, { type: "first" }], three).index, 0);
-    assert.equal(run([{ type: "last" }], three).index, 2);
   });
 
   it("follows the pointer within the list, and ignores keys with nothing to move", () => {
@@ -102,20 +99,8 @@ describe("a hit's match explanation", () => {
     assert.deepEqual(readEntryMatch(hit({ band: "weak", via: "keyword", passage: { start: "0" } })), { band: "weak", via: [], terms: [], passage: null, concepts: [] });
   });
 
-  it("names the band and the signals, one badge per concept that led to it", () => {
+  it("names the match band", () => {
     assert.equal(bandLabel("good"), "Good");
-    assert.deepEqual(viaBadges({ via: ["keyword", "meaning", "similar"], concepts: [] }), ["Keyword", "Meaning", "Similar"]);
-    assert.deepEqual(
-      viaBadges({
-        via: ["concept"],
-        concepts: [
-          { id: "a", name: "Paywalls", type: "T" },
-          { id: "b", name: "Pricing", type: "T" }
-        ]
-      }),
-      ["Concept Paywalls", "Concept Pricing"]
-    );
-    assert.deepEqual(viaBadges({ via: ["concept"], concepts: [] }), ["Concept"]);
   });
 });
 

@@ -47,7 +47,7 @@ export interface VphoneStreamTuning {
   mjpegIntervalMs: number;
 }
 
-export const DEFAULT_STREAM_TUNING: VphoneStreamTuning = { box: [1600, 1600], fps: 30, bitrate: 6_000_000, mjpegIntervalMs: 250 };
+const DEFAULT_STREAM_TUNING: VphoneStreamTuning = { box: [1600, 1600], fps: 30, bitrate: 6_000_000, mjpegIntervalMs: 250 };
 
 export interface VphoneBridgeOptions {
   /** What the proxy sends as `Authorization: Bearer`. */
@@ -328,7 +328,7 @@ class MjpegPump {
 /** One panel input socket, relayed to the VM's `/v1/events` socket. */
 class InputRelay {
   private readonly guest: WebSocket;
-  private readonly pending = new Map<string, (ok: boolean) => void>();
+  private readonly pending = new Map<string, () => void>();
   private readonly queue: { method: string; params: Record<string, unknown>; move: boolean }[] = [];
   private sending = false;
   private nextId = 1;
@@ -362,7 +362,7 @@ class InputRelay {
         const error = asRecord(message.error);
         this.logger.warn(`[devices] vphone refused input: ${typeof error?.message === "string" ? error.message : "error"}`);
       }
-      done?.(!message.error);
+      done?.();
     });
     this.guest.on("error", () => this.close(1011, "device input unavailable"));
     this.guest.on("close", () => this.close(1011, "device input closed"));
@@ -399,7 +399,7 @@ class InputRelay {
     while (!this.closed && this.queue.length > 0 && this.guest.readyState === WebSocket.OPEN) {
       const next = this.queue.shift()!;
       const id = `in-${this.nextId++}`;
-      await new Promise<boolean>((resolve) => {
+      await new Promise<void>((resolve) => {
         this.pending.set(id, resolve);
         this.guest.send(JSON.stringify({ id, method: next.method, params: next.params }));
       });
@@ -413,7 +413,7 @@ class InputRelay {
     if (this.closed) return;
     this.closed = true;
     this.ended();
-    for (const resolve of this.pending.values()) resolve(false);
+    for (const resolve of this.pending.values()) resolve();
     this.pending.clear();
     this.queue.length = 0;
     if (this.guest.readyState === WebSocket.OPEN || this.guest.readyState === WebSocket.CONNECTING) this.guest.terminate();

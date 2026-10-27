@@ -66,7 +66,7 @@ async function readJsonc(path: string): Promise<Record<string, unknown> | null> 
  * The host's `auth.json`: API keys to hand the box's server, or the OAuth providers that refuse
  * a box launch. A missing file is no login at all (the provider env decides).
  */
-export async function openCodeBoxLogins(dataDir: string): Promise<{ apiKeys: Record<string, string>; oauth: string[] }> {
+async function openCodeBoxLogins(dataDir: string): Promise<{ apiKeys: Record<string, string>; oauth: string[] }> {
   const auth = await readJsonc(join(dataDir, "auth.json"));
   const apiKeys: Record<string, string> = {};
   const oauth: string[] = [];

@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CHUNKER_VERSION,
   CHUNK_TOKEN_BUDGET,
-  EMBEDDING_INPUT_VERSION,
   HEADER_TOKEN_BUDGET,
   type TextSpan,
   chunkBody,
@@ -41,10 +39,6 @@ function assertSpans(body: string, spans: readonly TextSpan[]): void {
     if (/\S/.test(body[i]!)) assert.equal(covered[i], 1, `character ${i} is in no span`);
   }
 }
-
-test("the chunker has a new version (vectors from the old chunks are recomputed)", () => {
-  assert.notEqual(CHUNKER_VERSION, "words-180-40-v1");
-});
 
 test("a short body is one span over the whole body, as before", () => {
   assert.deepEqual(chunkBody("  Annual billing with a discount lifts cash flow.  "), [{ start: 0, end: 51 }]);
@@ -115,7 +109,6 @@ test("token estimates: prose is cheap, ids and symbols cost more, CJK a token a 
 });
 
 test("a long title and byline are cut so header + prefix + chunk fits the model's 512 tokens", () => {
-  assert.notEqual(EMBEDDING_INPUT_VERSION, "ctx-v1", "headers changed: cached vectors are recomputed");
   // Unchanged for an ordinary entry.
   const plain = { title: "Cloudflare case study", author: "Kevin", handle: "kev", kind: "note" };
   assert.equal(embeddingHeader(plain), "Cloudflare case study · by Kevin @kev · note");

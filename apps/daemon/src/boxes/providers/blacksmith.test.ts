@@ -240,8 +240,9 @@ test("dispatchDeviceCacheWarm starts the device-cache workflow; deviceCacheWarmS
   assert.equal((await deviceCacheWarmStatus(credentials, linux.runId, options)).state, "running");
   run.status = "completed";
   run.conclusion = "success";
+  const completed = await deviceCacheWarmStatus(credentials, linux.runId, options);
   assert.deepEqual(
-    [(await deviceCacheWarmStatus(credentials, linux.runId, options)).state, (await deviceCacheWarmStatus(credentials, linux.runId, options)).conclusion],
+    [completed.state, completed.conclusion],
     ["completed", "success"]
   );
   assert.equal((await deviceCacheWarmStatus(credentials, "1", options)).state, "gone");

@@ -9,7 +9,7 @@
 import { Transform, type TransformCallback } from "node:stream";
 
 /** How long the stream must be quiet before the last part is sent again. */
-export const STILL_FRAME_DELAY_MS = 100;
+const STILL_FRAME_DELAY_MS = 100;
 
 const HEADER_END = Buffer.from("\r\n\r\n");
 const MAX_HEADER_BYTES = 16 * 1024;
@@ -74,7 +74,7 @@ export class MjpegPartTracker {
       rest = rest.subarray(taken.length);
       if (this.size < this.partEnd) break;
       const complete = this.pieces;
-      if (complete.length === 0 || !endsWithCrlf(complete)) {
+      if (!endsWithCrlf(complete)) {
         this.tracking = false;
         break;
       }

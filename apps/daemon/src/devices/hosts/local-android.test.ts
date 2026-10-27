@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -62,7 +63,7 @@ async function withHost(options: { kvm?: KvmProbe; java?: boolean; sdk?: boolean
     for (const file of ["cmdline-tools/latest/bin/sdkmanager", "cmdline-tools/latest/bin/avdmanager", "platform-tools/adb", "emulator/emulator", `${ANDROID_SYSTEM_IMAGE.split(";").join("/")}/system.img`]) await touch(join(sdk, file));
   }
   const host = new LocalAndroidHost(
-    { appDir, env: { PATH: process.env.PATH }, toolchain, logger: quiet, exec, probeKvm: async () => options.kvm ?? { access: "direct" } },
+    { toolchain, logger: quiet, exec, probeKvm: async () => options.kvm ?? { access: "direct" } },
     { settings: () => settings, activeLeases: () => leases }
   );
   try {
@@ -96,7 +97,7 @@ async function fakeEmulator(appDir: string, avdHome: string): Promise<ChildProce
   await mkdir(dirname(binary), { recursive: true });
   await copyFile("/bin/sleep", binary).catch(() => undefined);
   const child = spawn(binary, ["60"], { env: { ANDROID_AVD_HOME: avdHome }, stdio: "ignore", detached: true });
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await once(child, "spawn");
   return child;
 }
 
@@ -239,11 +240,20 @@ test("teardown while the services are still starting: agent-device never starts 
     const calls: string[] = [];
     let hubStarted!: () => void;
     const hubStarting = new Promise<void>((resolve) => (hubStarted = resolve));
+    let hubEntered!: () => void;
+    const hubCalled = new Promise<void>((resolve) => (hubEntered = resolve));
     const fakes = host as unknown as { hub: Record<string, unknown>; agentDevice: Record<string, unknown>; startServices(): Promise<void> };
-    Object.assign(fakes.hub, { start: async () => (calls.push("hub.start"), hubStarting), stop: async () => void calls.push("hub.stop") });
+    Object.assign(fakes.hub, {
+      start: async () => {
+        calls.push("hub.start");
+        hubEntered();
+        await hubStarting;
+      },
+      stop: async () => void calls.push("hub.stop")
+    });
     Object.assign(fakes.agentDevice, { ensure: async () => void calls.push("agentDevice.ensure"), stop: async () => void calls.push("agentDevice.stop") });
     const starting = fakes.startServices();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await hubCalled;
     const tearingDown = host.teardown();
     hubStarted();
     await Promise.all([starting, tearingDown]);

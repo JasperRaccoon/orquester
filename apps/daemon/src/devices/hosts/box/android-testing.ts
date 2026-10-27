@@ -42,7 +42,6 @@ exec "$root/android-sdk/emulator/qemu/qemu-system-x86_64" 600
 
 const FAKE_ADB = `#!/bin/sh
 root=$(cd "$(dirname "$0")/../.." && pwd)
-printf '%s\\n' "$*" >> "$root/adb.log"
 case "$1" in
   start-server|kill-server|devices) exit 0 ;;
 esac
@@ -111,8 +110,6 @@ if (command === "__serve") {
 `;
 
 export interface FakeLinuxBoxOptions {
-  /** The device caches were restored: SDK, system image, the profiles' cache AVDs with `orq-golden`, the tools. */
-  restored?: boolean;
   /**
    * How the restored AVDs were made: `tuned` (default: the cache script's markers, the GPU mode
    * `cacheGpu` recorded) or `legacy` (an older cache's untuned 1080p AVD without markers).
@@ -120,7 +117,6 @@ export interface FakeLinuxBoxOptions {
   cacheAvds?: "tuned" | "legacy";
   /** The GPU mode a tuned cache recorded (default `swiftshader_indirect`). */
   cacheGpu?: string;
-  profiles?: readonly string[];
   /** The probe's answer. */
   kvm?: "direct" | "sg" | "missing";
   ffmpeg?: "libx264" | "missing";
@@ -137,7 +133,6 @@ export interface FakeLinuxBox {
   /** Every exec's env values (secrets must never appear). */
   envValues: string[];
   emulatorArgs(): Promise<string[]>;
-  adbLog(): Promise<string[]>;
   failSnapshotLoads(): Promise<void>;
   cleanup(): Promise<void>;
 }
@@ -157,36 +152,32 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
   await mkdir(join(sdk, "emulator", "qemu"), { recursive: true });
   await copyFile("/bin/sleep", join(sdk, "emulator", "qemu", "qemu-system-x86_64"));
   await write(join(sdk, "platform-tools", "adb"), FAKE_ADB, 0o755);
-  if (options.restored !== false) {
-    await write(join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager"), "#!/bin/sh\nexit 0\n", 0o755);
-    await write(join(sdk, "cmdline-tools", "latest", "bin", "avdmanager"), "#!/bin/sh\nexit 0\n", 0o755);
-    await write(join(sdk, ...ANDROID_SYSTEM_IMAGE.split(";"), "system.img"), "");
-    for (const profile of options.profiles ?? ["pixel-9"]) {
-      const avd = join(root, "avd", `orq-${profile}.avd`);
-      await write(join(root, "avd", `orq-${profile}.ini`), `path=${avd}\n`);
-      await write(join(avd, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb"), "");
-      if (options.cacheAvds === "legacy") {
-        await write(join(avd, "config.ini"), `avd.name=orq-${profile}\nhw.lcd.width=1080\nhw.lcd.height=2424\nhw.lcd.density=420\n`);
-        continue;
-      }
-      // What the cache script writes (`boxes/github/device-cache.ts`): the tuned config and both markers.
-      const known = deviceProfile(profile)!;
-      const hardware = avdHardware(known);
-      const configHash = profileHash(known);
-      await write(join(avd, "config.ini"), `avd.name=orq-${profile}\nhw.lcd.width=${hardware.width}\nhw.lcd.height=${hardware.height}\nhw.lcd.density=${hardware.density}\n`);
-      await write(join(avd, "orq-avd.json"), JSON.stringify({ profile, configHash, createdAt: "2026-10-27T00:00:00.000Z", deviceDensity: 420, source: ANDROID_CACHE_SOURCE }));
-      await write(
-        join(avd, BOX_GOLDEN_MARKER),
-        JSON.stringify({ snapshot: BOX_GOLDEN_SNAPSHOT, gpu: options.cacheGpu ?? "swiftshader_indirect", configHash, emulatorRevision: "37.2.12", createdAt: "2026-10-27T00:00:00.000Z", source: ANDROID_CACHE_SOURCE })
-      );
-    }
-    const tools = join(root, "tools", "node_modules");
-    await write(join(tools, "expo-device-hub", "package.json"), JSON.stringify({ name: "expo-device-hub", version: DEVICE_TOOL_VERSIONS["expo-device-hub"] }));
-    await write(join(tools, "expo-device-hub", "dist", "server", "cli.mjs"), FAKE_HUB);
-    await write(join(tools, "agent-device", "package.json"), JSON.stringify({ name: "agent-device", version: DEVICE_TOOL_VERSIONS["agent-device"] }));
-    await write(join(tools, "agent-device", "bin", "agent-device.mjs"), FAKE_AGENT_DEVICE, 0o755);
-    await write(scrcpyJarPath(join(root, "tools")), "jar");
+  await write(join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager"), "#!/bin/sh\nexit 0\n", 0o755);
+  await write(join(sdk, "cmdline-tools", "latest", "bin", "avdmanager"), "#!/bin/sh\nexit 0\n", 0o755);
+  await write(join(sdk, ...ANDROID_SYSTEM_IMAGE.split(";"), "system.img"), "");
+  const profile = deviceProfile("pixel-9")!;
+  const avd = join(root, "avd", `orq-${profile.id}.avd`);
+  await write(join(root, "avd", `orq-${profile.id}.ini`), `path=${avd}\n`);
+  await write(join(avd, "snapshots", BOX_GOLDEN_SNAPSHOT, "snapshot.pb"), "");
+  if (options.cacheAvds === "legacy") {
+    await write(join(avd, "config.ini"), `avd.name=orq-${profile.id}\nhw.lcd.width=1080\nhw.lcd.height=2424\nhw.lcd.density=420\n`);
+  } else {
+    // What the cache script writes (`boxes/github/device-cache.ts`): the tuned config and both markers.
+    const hardware = avdHardware(profile);
+    const configHash = profileHash(profile);
+    await write(join(avd, "config.ini"), `avd.name=orq-${profile.id}\nhw.lcd.width=${hardware.width}\nhw.lcd.height=${hardware.height}\nhw.lcd.density=${hardware.density}\n`);
+    await write(join(avd, "orq-avd.json"), JSON.stringify({ profile: profile.id, configHash, createdAt: "2026-10-27T00:00:00.000Z", deviceDensity: 420, source: ANDROID_CACHE_SOURCE }));
+    await write(
+      join(avd, BOX_GOLDEN_MARKER),
+      JSON.stringify({ snapshot: BOX_GOLDEN_SNAPSHOT, gpu: options.cacheGpu ?? "swiftshader_indirect", configHash, emulatorRevision: "37.2.12", createdAt: "2026-10-27T00:00:00.000Z", source: ANDROID_CACHE_SOURCE })
+    );
   }
+  const tools = join(root, "tools", "node_modules");
+  await write(join(tools, "expo-device-hub", "package.json"), JSON.stringify({ name: "expo-device-hub", version: DEVICE_TOOL_VERSIONS["expo-device-hub"] }));
+  await write(join(tools, "expo-device-hub", "dist", "server", "cli.mjs"), FAKE_HUB);
+  await write(join(tools, "agent-device", "package.json"), JSON.stringify({ name: "agent-device", version: DEVICE_TOOL_VERSIONS["agent-device"] }));
+  await write(join(tools, "agent-device", "bin", "agent-device.mjs"), FAKE_AGENT_DEVICE, 0o755);
+  await write(scrcpyJarPath(join(root, "tools")), "jar");
   const probe = [
     `path=${process.env.PATH}`,
     "os=Linux",
@@ -222,7 +213,6 @@ export async function createFakeLinuxBox(options: FakeLinuxBoxOptions = {}): Pro
     execs,
     envValues,
     emulatorArgs: async () => (await readFile(join(root, "emulator-args.log"), "utf8").catch(() => "")).split("\n").filter(Boolean),
-    adbLog: async () => (await readFile(join(root, "adb.log"), "utf8").catch(() => "")).split("\n").filter(Boolean),
     failSnapshotLoads: () => writeFile(join(root, "fail-snapshot"), ""),
     async cleanup() {
       // Anything still running from this root (fake qemu, hub, agent-device daemon) goes.

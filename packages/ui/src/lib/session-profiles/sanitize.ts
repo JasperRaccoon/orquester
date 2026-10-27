@@ -31,7 +31,6 @@ import {
   type SessionProfileItemKind,
   type SessionProfileListError,
   type SessionProfileListResponse,
-  type SessionProfileMutationResponse,
   type SessionProfileGlobalItem,
   type SessionProfileGlobalSourceResponse,
   type SessionProfilePluginSource,

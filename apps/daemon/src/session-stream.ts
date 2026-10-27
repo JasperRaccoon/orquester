@@ -30,9 +30,9 @@ import type { ISessionManager } from "./sessions.ts";
  * Socket send-buffer size above which live terminal output is held instead of
  * sent; also the most a terminal holds before it is dropped and resynced.
  */
-export const SEND_HIGH_WATER = 1024 * 1024;
+const SEND_HIGH_WATER = 1024 * 1024;
 /** Send-buffer size a backed-up socket must drain below before held output is sent or terminals are resynced. */
-export const SEND_LOW_WATER = 256 * 1024;
+const SEND_LOW_WATER = 256 * 1024;
 
 /** The part of a WebSocket the stream uses (a `ws` WebSocket satisfies it). */
 export interface SessionStreamSocket {

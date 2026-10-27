@@ -30,14 +30,6 @@ import { classifyItem, type CodexThreadItem } from "./items.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 
 /**
- * The marker that says "this frame is replayed history, not live traffic" —
- * the SHARED one every adapter's projection carries, so a consumer tells
- * history from live traffic without knowing which provider produced it.
- * `method` still names the call the rows were read back from.
- */
-const CODEX_RAW_HISTORY: RuntimeEventRaw["source"] = HISTORICAL_RAW_SOURCE;
-
-/**
  * A history turn claims no usage. The provider reports per-turn usage only on
  * the live `thread/tokenUsage/updated` stream, and `turn/completed` carries
  * none at all (fixtures README obs. 6) — so `unavailable` is the honest
@@ -63,7 +55,7 @@ export function projectCodexHistory(snapshot: ThreadSnapshot): RuntimeEventDraft
 
   for (const turn of snapshot.turns) {
     const raw = (item: unknown): RuntimeEventRaw => ({
-      source: CODEX_RAW_HISTORY,
+      source: HISTORICAL_RAW_SOURCE,
       method: "thread/turns/list",
       payload: item
     });

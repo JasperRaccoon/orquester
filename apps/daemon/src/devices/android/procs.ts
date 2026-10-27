@@ -217,18 +217,6 @@ export function establishedOnPort(rows: readonly TcpRow[], port: number): number
   return rows.filter((row) => row.state === "01" && row.localPort === port).length;
 }
 
-export async function readEstablishedOnPort(port: number): Promise<number> {
-  let count = 0;
-  for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-    try {
-      count += establishedOnPort(parseProcNetTcp(await readFile(file, "utf8")), port);
-    } catch {
-      // no IPv6
-    }
-  }
-  return count;
-}
-
 /** `MemAvailable` from `/proc/meminfo`, in bytes; null when unreadable. */
 export function parseMemAvailable(text: string): number | null {
   const match = /^MemAvailable:\s+(\d+)\s+kB/m.exec(text);

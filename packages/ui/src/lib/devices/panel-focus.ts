@@ -19,10 +19,6 @@ function emit(): void {
   for (const listener of listeners) listener();
 }
 
-export function selectedDeviceLeases(): Readonly<Record<string, string>> {
-  return selected;
-}
-
 export function subscribeSelectedDeviceLeases(listener: () => void): () => void {
   listeners.add(listener);
   return () => {

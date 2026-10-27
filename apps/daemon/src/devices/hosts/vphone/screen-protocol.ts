@@ -19,7 +19,7 @@
 export const AVCC_TAG = { description: 1, keyframe: 2, delta: 3, seed: 4 } as const;
 
 /** A `/v1/host/screen` request. vphone requires every field (`bitrate` too). */
-export interface HostScreenRequest {
+interface HostScreenRequest {
   id: number;
   codec: "h264";
   box: [number, number];
@@ -28,7 +28,7 @@ export interface HostScreenRequest {
   key: boolean;
 }
 
-export interface HostScreenError {
+interface HostScreenError {
   code: string;
   message: string;
 }

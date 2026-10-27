@@ -26,7 +26,6 @@ import {
   boxShellChoices,
   boxShellRefId,
   boxTerminalTitle,
-  chatPendingConfigChanges,
   chatTemporaryBoxes,
   configChangeCard,
   configChangeDecisionFailure,
@@ -422,14 +421,13 @@ describe("box panel fold and height", () => {
 });
 
 describe("config change cards", () => {
-  it("picks a chat's pending sets, and the project row's no-turn sets of its box", () => {
+  it("picks the project row's no-turn pending sets of its box", () => {
     const sets = [
       change(),
       change({ id: "cc-2", state: "approved" }),
       change({ id: "cc-3", threadId: null }),
       change({ id: "cc-4", threadId: null, boxId: "box-2" })
     ];
-    assert.deepEqual(chatPendingConfigChanges(sets, "thread-1").map((c) => c.id), ["cc-1"]);
     assert.deepEqual(projectPendingConfigChanges(sets, "box-1").map((c) => c.id), ["cc-3"]);
     assert.deepEqual(projectPendingConfigChanges(sets, undefined), []);
     assert.equal(configChangesIndicator(1), "1 config change needs approval");

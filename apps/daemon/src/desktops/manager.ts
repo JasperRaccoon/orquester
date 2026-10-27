@@ -177,7 +177,7 @@ type BoxLinkState = "connected" | "disconnected" | "gone";
 const READY_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 5_000;
 /** The tail of an app log the log route returns, and of host.log in an error. */
-export const APP_LOG_TAIL_BYTES = 64 * 1024;
+const APP_LOG_TAIL_BYTES = 64 * 1024;
 const HOST_LOG_ERROR_TAIL_BYTES = 2048;
 /** Install progress goes out at most this often. */
 const PROGRESS_EMIT_MS = 250;

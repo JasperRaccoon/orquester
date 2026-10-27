@@ -192,7 +192,6 @@ export const cloudriftAdapter: BoxProviderAdapter = {
   credentialFields: [{ id: "apiKey", label: "API key", secret: true, help: "Console → Settings → API keys." }],
   accountNote: null,
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () => call(credentials, "/auth/me", undefined, options));

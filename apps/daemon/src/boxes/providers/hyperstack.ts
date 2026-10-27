@@ -207,7 +207,6 @@ export const hyperstackAdapter: BoxProviderAdapter = {
   credentialFields: [{ id: "apiKey", label: "API key", secret: true, help: "Console → API Keys → Generate." }],
   accountNote: null,
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () =>
