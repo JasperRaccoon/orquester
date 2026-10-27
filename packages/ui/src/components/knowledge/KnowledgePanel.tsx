@@ -1,5 +1,6 @@
-// The Knowledge view's side panel: one entry (full text, metadata, concepts,
-// related entries; edit and delete) or one concept (type and confidence,
+// The Knowledge view's side panel: one entry (full text as Markdown or plain,
+// metadata, concepts, similar entries and possible duplicates; edit, delete,
+// merge a duplicate, "More like this") or one concept (type and confidence,
 // description, the entries behind it, the concepts it links to). Shared by the
 // graph and list views.
 
@@ -22,6 +23,8 @@ import { deleteKnowledgeEntry, knowledgeStore, type KnowledgeApi } from "../../l
 import { CollectionChip, ErrorLine, Eyebrow, SectionLabel } from "./parts";
 import { KnowledgeEntryEditor } from "./KnowledgeEntryEditor";
 import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
+import { DuplicatesBanner, EntryBody, SimilarEntries } from "./KnowledgeEntrySections";
+import { entryPanelIds, runKnowledgeMerge, type KnowledgeMergePlan } from "./panel.logic";
 
 /** What the panel shows; `edit` opens an entry straight in its editor. */
 export interface KnowledgeSelection {
@@ -41,10 +44,10 @@ type Load =
   | { status: "gone" }
   | { status: "error"; message: string; item: KnowledgeItemResponse | null };
 
-/** Ids whose change makes an item stale: the entry and its related entries, or the concept's entries. */
+/** Ids whose change makes an item stale: the entry and the entries it shows, or the concept's entries. */
 function relevantIds(item: KnowledgeItemResponse | null, id: string): Set<string> {
   const ids = new Set([id]);
-  if (item?.kind === "entry") for (const r of item.entry.related) ids.add(r.id);
+  if (item?.kind === "entry") for (const shown of entryPanelIds(item.entry)) ids.add(shown);
   if (item?.kind === "concept") for (const e of item.concept.entries) ids.add(e.id);
   return ids;
 }
@@ -119,15 +122,40 @@ export interface KnowledgePanelProps {
   onBack?: () => void;
   /** The item as last read (null while none is), e.g. for the canvas to mark an entry's concepts. */
   onItem?: (item: KnowledgeItemResponse | null) => void;
+  /** "More like this" on an entry: search for entries similar to it (hidden when absent). */
+  onFindSimilar?: (entryId: string) => void;
 }
 
-export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, collections, onSelect, onClose, onBack, onItem }) => {
+export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, collections, onSelect, onClose, onBack, onItem, onFindSimilar }) => {
   const { load, retry } = useKnowledgeItem(api, selection.id);
   const item = load.status === "gone" ? null : load.item;
   const onItemRef = useRef(onItem);
   onItemRef.current = onItem;
   useEffect(() => onItemRef.current?.(item), [item]);
   const label = selection.kind === "entry" ? "Entry" : "Concept";
+
+  // A merge that deletes the open entry moves to the kept one once done; until then its
+  // "deleted" read is no news.
+  const [merging, setMerging] = useState(false);
+  const selectedId = useRef(selection.id);
+  selectedId.current = selection.id;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const merge = useCallback(
+    async (plan: KnowledgeMergePlan) => {
+      if (!api) throw new Error("Not connected.");
+      const from = selectedId.current;
+      setMerging(true);
+      try {
+        const kept = await runKnowledgeMerge(api, plan);
+        // Unless the user moved on meanwhile.
+        if (kept !== from && selectedId.current === from) onSelectRef.current({ kind: "entry", id: kept });
+      } finally {
+        setMerging(false);
+      }
+    },
+    [api]
+  );
 
   return (
     <aside
@@ -147,7 +175,11 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
         </IconButton>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        {load.status === "gone" ? (
+        {load.status === "gone" && merging ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-neutral-500">
+            <Loader2 size={14} className="motion-safe:animate-spin" /> Merging…
+          </div>
+        ) : load.status === "gone" ? (
           <p className="py-6 text-center text-sm text-neutral-500">
             {selection.kind === "entry" ? "This entry was deleted." : "This concept is no longer in the graph."}
           </p>
@@ -176,6 +208,8 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
                 startEditing={selection.edit === true}
                 onSelect={onSelect}
                 onDeleted={onClose}
+                onMerge={merge}
+                onFindSimilar={onFindSimilar}
               />
             ) : (
               <ConceptDetailView api={api} detail={item.concept} collections={collections} onSelect={onSelect} />
@@ -268,7 +302,9 @@ const EntryDetailView: React.FC<{
   startEditing: boolean;
   onSelect: (selection: KnowledgeSelection) => void;
   onDeleted: () => void;
-}> = ({ api, detail, collections, startEditing, onSelect, onDeleted }) => {
+  onMerge: (plan: KnowledgeMergePlan) => Promise<void>;
+  onFindSimilar?: ((entryId: string) => void) | undefined;
+}> = ({ api, detail, collections, startEditing, onSelect, onDeleted, onMerge, onFindSimilar }) => {
   const { entry } = detail;
   const [editing, setEditing] = useState(startEditing);
   useEffect(() => {
@@ -290,14 +326,20 @@ const EntryDetailView: React.FC<{
         </div>
       </div>
 
+      <DuplicatesBanner
+        entry={entry}
+        detail={detail}
+        canMerge={api !== null}
+        onOpen={(id) => onSelect({ kind: "entry", id })}
+        onMerge={onMerge}
+      />
+
       {editing ? (
         <KnowledgeEntryEditor api={api} entry={entry} collections={collections} onDone={() => setEditing(false)} />
       ) : (
         <>
           <EntryActions api={api} entry={entry} onEdit={() => setEditing(true)} onDeleted={onDeleted} />
-          <div className="whitespace-pre-wrap break-words rounded-md border border-neutral-800 bg-neutral-900/50 px-3 py-2.5 text-[13px] leading-relaxed text-neutral-200">
-            {entry.body}
-          </div>
+          <EntryBody body={entry.body} />
         </>
       )}
 
@@ -339,25 +381,7 @@ const EntryDetailView: React.FC<{
         )}
       </section>
 
-      {detail.related.length > 0 && (
-        <section>
-          <SectionLabel>Related entries</SectionLabel>
-          <ul className="space-y-1">
-            {detail.related.map((r) => (
-              <li key={r.id}>
-                <button
-                  type="button"
-                  onClick={() => onSelect({ kind: "entry", id: r.id })}
-                  className="w-full rounded-md px-2 py-1.5 text-left hover:bg-neutral-900"
-                >
-                  <span className="block truncate text-xs text-neutral-200">{r.title || "Untitled"}</span>
-                  {entryByline(r) && <span className="block truncate text-[11px] text-neutral-500">{entryByline(r)}</span>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <SimilarEntries detail={detail} onOpen={(id) => onSelect({ kind: "entry", id })} onFindSimilar={onFindSimilar} />
     </div>
   );
 };

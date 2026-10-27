@@ -46,6 +46,7 @@ import {
   type KnowledgeWorkerView
 } from "@orquester/api";
 import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
+import type { KnowledgeRelatedReason, KnowledgeSimilarEntry } from "@orquester/api";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -271,16 +272,71 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   };
 }
 
+/**
+ * Why an entry is shown beside another; null for one this client cannot read (an unknown kind from
+ * a newer daemon, a meaning without a similarity, an author without a value).
+ */
+export function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedReason | null {
+  if (!isRecord(value)) return null;
+  switch (value.kind) {
+    case "meaning":
+      return typeof value.similarity === "number" && Number.isFinite(value.similarity)
+        ? { kind: "meaning", similarity: Math.min(1, Math.max(-1, value.similarity)) }
+        : null;
+    case "concepts": {
+      const concepts = list(value.concepts, parseKnowledgeConceptRef) ?? [];
+      return { kind: "concepts", concepts, shared: Math.max(count(value.shared), concepts.length) };
+    }
+    case "author":
+      return typeof value.value === "string" && value.value.trim() !== "" ? { kind: "author", value: value.value } : null;
+    default:
+      return null;
+  }
+}
+
+/** One similar entry: null without a readable entry; unreadable reasons are left out (a reason kind repeats once). */
+export function parseKnowledgeSimilarEntry(value: unknown): KnowledgeSimilarEntry | null {
+  if (!isRecord(value)) return null;
+  const entry = parseKnowledgeEntrySummary(value.entry);
+  if (!entry) return null;
+  const similarity =
+    typeof value.similarity === "number" && Number.isFinite(value.similarity) ? Math.min(1, Math.max(-1, value.similarity)) : null;
+  const seen = new Set<string>();
+  const reasons = (list(value.reasons, parseKnowledgeRelatedReason) ?? []).filter((reason) => {
+    if (seen.has(reason.kind)) return false;
+    seen.add(reason.kind);
+    return true;
+  });
+  return { entry, similarity, reasons };
+}
+
+/** A similar-entries list: absent (an older daemon) when it is not an array; never the entry itself, each entry once. */
+function parseSimilarList(value: unknown, selfId: string): KnowledgeSimilarEntry[] | undefined {
+  const items = list(value, parseKnowledgeSimilarEntry);
+  if (!items) return undefined;
+  const ids = new Set<string>([selfId]);
+  return items.filter((item) => {
+    if (ids.has(item.entry.id)) return false;
+    ids.add(item.entry.id);
+    return true;
+  });
+}
+
 function parseEntryDetail(value: unknown): KnowledgeEntryDetail | null {
   if (!isRecord(value)) return null;
   const entry = parseKnowledgeEntry(value.entry);
   if (!entry) return null;
-  return {
+  const detail: KnowledgeEntryDetail = {
     entry,
     concepts: list(value.concepts, parseKnowledgeConceptRef) ?? [],
     related: (list(value.related, parseKnowledgeEntrySummary) ?? []).filter((r) => r.id !== entry.id),
     citation: typeof value.citation === "string" && value.citation ? value.citation : knowledgeCitation(entry)
   };
+  const similar = parseSimilarList(value.similar, entry.id);
+  if (similar) detail.similar = similar;
+  const possibleDuplicates = parseSimilarList(value.possibleDuplicates, entry.id);
+  if (possibleDuplicates) detail.possibleDuplicates = possibleDuplicates;
+  return detail;
 }
 
 export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemResponse | null {
