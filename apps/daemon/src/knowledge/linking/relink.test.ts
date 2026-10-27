@@ -110,6 +110,20 @@ describe("the re-link backlog", () => {
     assert.deepEqual(Object.keys(relink.attempts), [ID(1)]);
   });
 
+  it("entries linked and re-linked at context version 1 are re-linked once more at version 2, then not again", () => {
+    // The live state after the first wave: every entry at linkContext 1, its re-link recorded at version 1.
+    assert.equal(LINK_CONTEXT_VERSION, 2);
+    const s = store([{ id: ID(1), context: 1 }, { id: ID(2), context: 1 }, { id: ID(3), context: LINK_CONTEXT_VERSION }]);
+    const relink = emptyKnowledgeRelinkState();
+    for (const id of [ID(1), ID(2), ID(3)]) relink.attempts[id] = { version: 1, contentHash: `hash-${id}`, failures: 0 };
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true), [ID(1), ID(2)]);
+    recordRelinkAttempts(relink, [
+      { id: ID(1), contentHash: `hash-${ID(1)}`, failed: false },
+      { id: ID(2), contentHash: `hash-${ID(2)}`, failed: false }
+    ]);
+    assert.deepEqual(relinkBacklog(relink, s, new Set(), true), [], "once per version and content, even if the version could not be recorded");
+  });
+
   it("a run takes at most 25, the batch in flux first; a save's run carries only the batch in flux", () => {
     const relink = { ...emptyKnowledgeRelinkState(), prepared: [ID(99)] };
     const backlog = [ID(99), ...Array.from({ length: 40 }, (_, i) => ID(i + 1))];

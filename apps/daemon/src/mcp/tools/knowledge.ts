@@ -42,6 +42,7 @@ import {
   type KnowledgeCollectionsResponse,
   type KnowledgeConceptDetail,
   type KnowledgeConceptRef,
+  type KnowledgeDisagreement,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
@@ -69,7 +70,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonMethod } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
-import { clipText } from "../result.ts";
+import { capText, clipText } from "../result.ts";
 
 // ---------------------------------------------------------------------------
 // Limits of what the tools render
@@ -79,6 +80,11 @@ import { clipText } from "../result.ts";
 const KNOWLEDGE_SNIPPET_CHARS = 280;
 /** A concept description in a search hit or a list. */
 const DESCRIPTION_CHARS = 200;
+/**
+ * A disagreement's note (an LLM checker's sentence of up to 500 characters, or a graph edge's
+ * context): long enough for the point of disagreement, cut at a sentence or word end.
+ */
+const NOTE_CHARS = 400;
 /** A concept's own description in `knowledge_get` (myKG merges descriptions: they can grow). */
 const CONCEPT_DESCRIPTION_CHARS = 2_000;
 /** A concept, type, edge or attribute name, or an alias, wherever it is shown (myKG's, unbounded). */
@@ -99,6 +105,9 @@ const GET_LIST_MAX_SEVERAL = 4;
 /** Similar entries shown with an entry (the daemon sends up to 8): reading one, and each of several. */
 const GET_SIMILAR_MAX = 8;
 const GET_SIMILAR_MAX_SEVERAL = 4;
+/** Entries it disagrees with shown with an entry (the daemon sends up to 20): reading one, and each of several. */
+const GET_DISAGREEMENTS_MAX = 20;
+const GET_DISAGREEMENTS_MAX_SEVERAL = 4;
 /** A title quoted in a list line (a search hit's own title line uses KNOWLEDGE_TITLE_MAX). */
 const LIST_TITLE_CHARS = 100;
 /** A paging cursor, in characters (the daemon's is a short base64url token). */
@@ -167,6 +176,22 @@ async function collectionNames(api: DaemonApi): Promise<Map<string, string>> {
 const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
 /** A graph name on one line, clipped: concept, type, edge and attribute names come from myKG unbounded. */
 const label = (value: string): string => clipText(oneLine(value), NAME_CHARS);
+
+/**
+ * A note on one line in at most {@link NOTE_CHARS} code points; a longer one is cut after its last
+ * sentence that ends past half of that, else at its last word, and ends in "…".
+ */
+function noteText(note: string): string {
+  const text = oneLine(note);
+  const { text: head, truncated } = capText(text, NOTE_CHARS - 1);
+  if (!truncated) return text;
+  const half = Math.floor(head.length / 2);
+  let sentence = -1;
+  for (const match of head.matchAll(/[.!?;](?=\s)/g)) sentence = match.index;
+  if (sentence >= half) return `${head.slice(0, sentence + 1)} …`;
+  const space = head.lastIndexOf(" ");
+  return `${(space >= half ? head.slice(0, space) : head).replace(/[\s,;:—–-]+$/u, "")}…`;
+}
 
 /** "Om Patel (@om_patel5)", "@om_patel5", "Om Patel" or "". */
 function authorLabel(meta: Pick<KnowledgeEntryMeta, "author" | "handle">): string {
@@ -340,7 +365,7 @@ function conceptLabels(concepts: readonly KnowledgeConceptRef[]): string[] {
 function reasonText(reason: KnowledgeRelatedReason): string {
   if (reason.kind === "meaning") return `meaning ${reason.similarity.toFixed(2)}`;
   if (reason.kind === "author") return "same author";
-  if (reason.kind === "contradicts") return reason.note ? `disagrees: ${clipText(oneLine(reason.note), DESCRIPTION_CHARS)}` : "disagrees";
+  if (reason.kind === "contradicts") return reason.note ? `disagrees: ${noteText(reason.note)}` : "disagrees";
   // Few entries have a distinctive concept (absent from an older daemon): it says more than a common one.
   const distinctive = new Set((reason.distinctive ?? []).map((concept) => concept.id));
   const shown = reason.concepts.slice(0, 3);
@@ -378,7 +403,7 @@ function contradictionPairs(pairs: readonly { from: KnowledgeConceptRef; to: Kno
 /** A disagreement's note, its concept pairs, indented under its head line. */
 function contradictionDetail(note: string | null, pairs: readonly { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[], indent: string): string[] {
   const lines: string[] = [];
-  if (note) lines.push(`${indent}note: ${clipText(oneLine(note), DESCRIPTION_CHARS)}`);
+  if (note) lines.push(`${indent}note: ${noteText(note)}`);
   const concepts = contradictionPairs(pairs);
   if (concepts) lines.push(`${indent}concepts: ${concepts}`);
   return lines;
@@ -396,6 +421,13 @@ function disagreeLines(item: KnowledgeSimilarEntry): string[] {
 }
 
 const disagrees = (item: KnowledgeSimilarEntry): boolean => item.reasons.some((reason) => reason.kind === "contradicts");
+
+/** One entry of `disagreements`: id, title, source and closeness; the note, concept pairs and citation below. */
+function disagreementLines(item: KnowledgeDisagreement): string[] {
+  const head = [`- ${entryRef(item.entry)}`, contradictionSource(item.source)];
+  if (item.similarity !== null) head.push(`meaning ${item.similarity.toFixed(2)}`);
+  return [head.join(" · "), ...contradictionDetail(item.note, item.pairs, "  "), `  cite: ${item.entry.citation}`];
+}
 
 /** "New here: A (Tactic), B (Rule) · in cluster "Paid ads" (12 entries)". */
 function noveltyLine(novelty: KnowledgeNovelty): string {
@@ -426,12 +458,22 @@ function entryLines(detail: KnowledgeEntryDetail, names: ReadonlyMap<string, str
     const duplicates = detail.possibleDuplicates ?? [];
     if (detail.similar !== undefined) {
       const similarMax = several ? GET_SIMILAR_MAX_SEVERAL : GET_SIMILAR_MAX;
-      // An entry it disagrees with is listed first, and only there.
-      const disagreeing = detail.similar.filter(disagrees).slice(0, similarMax);
-      if (disagreeing.length > 0) lines.push("Disagrees with:", ...disagreeing.flatMap(disagreeLines));
+      // An entry it disagrees with is listed first, and only there: every one the daemon lists
+      // (`disagreements`), else (an older daemon) the similar entries with a `contradicts` reason.
+      const disagreeingIds = new Set<string>();
+      if (detail.disagreements !== undefined) {
+        const shown = detail.disagreements.slice(0, several ? GET_DISAGREEMENTS_MAX_SEVERAL : GET_DISAGREEMENTS_MAX);
+        const more = Math.max(detail.disagreementsTotal ?? 0, detail.disagreements.length) - shown.length;
+        for (const item of detail.disagreements) disagreeingIds.add(item.entry.id);
+        if (shown.length > 0) lines.push("Disagrees with:", ...shown.flatMap(disagreementLines), ...(more > 0 ? [`+${more} more`] : []));
+      } else {
+        const disagreeing = detail.similar.filter(disagrees).slice(0, similarMax);
+        for (const item of disagreeing) disagreeingIds.add(item.entry.id);
+        if (disagreeing.length > 0) lines.push("Disagrees with:", ...disagreeing.flatMap(disagreeLines));
+      }
       // A possible duplicate is listed once, below.
       const duplicateIds = new Set(duplicates.map((duplicate) => duplicate.entry.id));
-      const similar = detail.similar.filter((item) => !duplicateIds.has(item.entry.id) && !disagrees(item)).slice(0, similarMax);
+      const similar = detail.similar.filter((item) => !duplicateIds.has(item.entry.id) && !disagreeingIds.has(item.entry.id) && !disagrees(item)).slice(0, similarMax);
       if (similar.length > 0) lines.push("Similar:", ...similar.flatMap(similarLines));
     } else if (detail.related.length > 0) {
       // An older daemon: the concept-related entries only.

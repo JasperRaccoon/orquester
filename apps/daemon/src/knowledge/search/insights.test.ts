@@ -162,6 +162,37 @@ test("bridges: an entry whose distinctive topic concepts reach two other cluster
   assert.ok(!JSON.stringify(seo).includes(ke("h")) && !JSON.stringify(seo).includes("Hidden note"));
 });
 
+test("bridges: never a survey, nor a cluster reached through one common concept alone (a one-word name, a metric, a name other entries use)", async () => {
+  const s = await setup();
+  const bridges = async () => (await s.insights.list({}, s.seoOnly)).bridges.map((b) => [b.entry.id, b.concepts.map((c) => c.id)]);
+  const reload = (extra: Record<string, unknown>[]) =>
+    loadGraph(s.graph, [
+      node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")),
+      node("tactic-bq", "Bridge to Q", files("p1", "q1")),
+      ...extra
+    ]);
+  await reload([node("tactic-br", "Bridge to R", files("p1", "r1"))]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "tactic-br"]]]);
+
+  // P1, a synthesis, restates its sources.
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "synthesis" }, true);
+  assert.deepEqual(await bridges(), []);
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "post" }, true);
+
+  // R through a one-word tool, a metric, or a name a third entry uses as another type: no bridge.
+  for (const weak of [
+    [node("tool-ios", "iOS", files("p1", "r1"), { type: "Tool" })],
+    [node("metric-cac", "CAC payback", files("p1", "r1"), { type: "Metric" })],
+    [node("channel-ads", "Paid ads", files("p1", "r1"), { type: "Channel" }), node("platform-ads", "Paid ads", files("q2", "q3", "q4"), { type: "Platform" })]
+  ]) {
+    await reload(weak);
+    assert.deepEqual(await bridges(), [], JSON.stringify(weak[0]!.id));
+  }
+  // Two weak concepts together tie it.
+  await reload([node("tool-ios", "iOS", files("p1", "r1"), { type: "Tool" }), node("metric-cac", "CAC payback", files("p1", "r1"), { type: "Metric" })]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "tool-ios", "metric-cac"]]]);
+});
+
 test("an LLM cluster name added after insights were computed shows in them: the labels' revision is part of the cache key", async () => {
   const s = await setup();
   let label: string | null = null;
@@ -205,6 +236,42 @@ test("single-source: claims on exactly one visible entry in a cluster of 3 or mo
   assert.deepEqual((await s.insights.list({}, s.seoOnly)).singleSource.map((item) => item.concept.id), ["metric-solo3"]);
 });
 
+test("single-source: never a claim another visible entry backs in other words, nor a rule; saved posts before notes", async () => {
+  const s = await setup();
+  // Solo rule is about Pricing tables too now: a claim of its cluster's topic, yet a rule.
+  await loadGraph(
+    s.graph,
+    [
+      node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")),
+      node("topic-pa", "Pricing tables", files("p2", "p3")),
+      node("topic-ra", "Retention", files("r2", "r3")),
+      node("tactic-solo1", "Solo tactic", files("p1")),
+      node("rule-solo2", "Solo rule", files("p1"), { type: "rule" }),
+      node("metric-solo3", "Solo metric", files("r1"), { type: "metric" }),
+      node("tactic-solo1-reworded", "Solo tactic, reworded", files("q1")),
+      node("metric-solo3-hidden", "Solo metric, as H says it", files("h"))
+    ],
+    [
+      edge("t1", "tactic-solo1", "topic-pa", null, "about"),
+      edge("t1r", "rule-solo2", "topic-pa", null, "about"),
+      edge("t2", "metric-solo3", "topic-ra", null, "measures")
+    ]
+  );
+  const listed = async (scope: KnowledgeScope) => (await s.insights.list({}, scope)).singleSource.map((item) => item.concept.id);
+  assert.deepEqual(await listed(s.all), ["metric-solo3", "tactic-solo1"], "a rule restates a policy: never listed");
+
+  // Q1 says Solo tactic in other words; only H (hidden from SEO) says Solo metric in other words.
+  s.graph.setBackingConcepts((id) => (id === "tactic-solo1" ? ["tactic-solo1-reworded"] : id === "metric-solo3" ? ["metric-solo3-hidden"] : []));
+  assert.deepEqual(await listed(s.all), [], "backed elsewhere");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3"], "a hidden entry backs nothing");
+
+  // A saved post's claim comes before a research note's, however central the note's is.
+  s.graph.setBackingConcepts(null);
+  s.store.put(ke("r1"), "body r1", ["kc_seo"], { title: "R note 1", kind: "research note" }, true);
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "post" }, true);
+  assert.deepEqual(await listed(s.seoOnly), ["tactic-solo1", "metric-solo3"]);
+});
+
 test("contradictions: graph and checked, checked first; a hidden entry is never on either side", async () => {
   const s = await setup();
   s.pairChecks.push({ a: ke("p1"), b: ke("p2"), verdict: "contradicts", note: "P1 says annual, P2 monthly", checkedAt: "2026-10-27T00:00:00.000Z" });
@@ -245,6 +312,30 @@ test("link gaps: very close linked entries that share no concept, `queued` from 
   // `queued` is read per response, not cached.
   s.queued.clear();
   assert.equal((await s.insights.list({}, s.seoOnly)).gaps[0]!.queued, false);
+});
+
+test("link gaps: once concept vectors are ready, only pairs where a claim of one is close to a claim of the other; never a survey", async () => {
+  const s = await setup();
+  await loadGraph(s.graph, [
+    node("topic-qa", "Queues", files("q1", "q2", "q3")),
+    node("topic-qb", "Queue tooling", files("q1", "q2", "q4")),
+    node("tactic-retry", "Retry with backoff", files("q3")),
+    node("tactic-backoff", "Back off, then retry", files("q4")),
+    node("tool-redis", "Redis", files("q4"), { type: "Tool" })
+  ]);
+  const gaps = async () => (await s.insights.list({}, s.seoOnly)).gaps.map(pairOf);
+  const close = new Map<string, string[]>();
+  s.graph.setSimilarConcepts((id) => (close.get(id) ?? []).map((other) => ({ id: other, similarity: 0.95 })));
+  s.graph.setBackingConcepts(() => [], () => true);
+  assert.deepEqual(await gaps(), [], "close in meaning, no claim of theirs close: no gap");
+  close.set("tool-redis", ["tactic-retry"]);
+  s.graph.backingMoved(); // as a complete vector computation announces
+  assert.deepEqual(await gaps(), [], "only claims count");
+  close.set("tactic-retry", ["tactic-backoff"]);
+  s.graph.backingMoved();
+  assert.deepEqual(await gaps(), [[ke("q3"), ke("q4")]]);
+  s.store.put(ke("q3"), "body q3", ["kc_seo"], { title: "Q note 3", kind: "synthesis" }, true);
+  assert.deepEqual(await gaps(), [], "a survey is never a side");
 });
 
 test("limit applies to every list after totals are counted; a pair-check change or a narrower scope is computed anew", async () => {

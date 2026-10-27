@@ -6,9 +6,19 @@ import { after, describe, it } from "node:test";
 import type { KnowledgeConceptRef } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
-import { GMAIL_PASSAGE, LONG_GUIDE, LONG_GUIDE_CONCEPTS, SHORT_GUIDE, SHORT_GUIDE_CONCEPTS } from "./fixtures/tiktok-guides.ts";
+import {
+  GMAIL_PASSAGE,
+  LONG_GUIDE,
+  LONG_GUIDE_CONCEPTS,
+  NORDVPN_GUIDE,
+  NORDVPN_WARNING,
+  SHORT_GUIDE,
+  SHORT_GUIDE_CONCEPTS,
+  VPN_DETECTION
+} from "./fixtures/tiktok-guides.ts";
 import {
   negatedNames,
+  type PairCheckEntryInfo,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
@@ -58,6 +68,18 @@ describe("pair-check answers", () => {
     assert.deepEqual(parsePairCheckAnswer('{"verdict":"unrelated","note":" Different topics. "}'), { verdict: "unrelated", note: "Different topics." });
     assert.equal(parsePairCheckAnswer("not json"), null);
     assert.equal(parsePairCheckAnswer('{"verdict":"no"}'), null);
+  });
+
+  it("the prompt counts only the claims each entry itself makes, and asks for whole notes of at most 400 characters", () => {
+    // A live false positive: a research note that quotes and agrees with Alex's guide was judged to
+    // contradict it over a tension inside the guide itself.
+    assert.match(PAIR_CHECK_SYSTEM, /Only the claims each entry itself makes count/);
+    assert.match(PAIR_CHECK_SYSTEM, /quotes, cites, summarises or agrees with the other[^\n]*do not contradict each other on that point/);
+    assert.match(PAIR_CHECK_SYSTEM, /Tension inside one entry[^\n]*is not a contradiction between the two entries/);
+    assert.match(PAIR_CHECK_SYSTEM, /research note that qualifies, refines[^\n]*is consistent with it, unless it states that the post's claim is wrong/);
+    assert.match(PAIR_CHECK_SYSTEM, /one or two complete sentences of at most 400 characters that state each side's claim/);
+    assert.equal(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(400) }), null);
+    assert.match(validatePairCheckAnswer({ verdict: "contradicts", note: "x".repeat(401) }) ?? "", /at most 400 characters/);
   });
 });
 
@@ -308,6 +330,66 @@ describe("pair-check candidates", () => {
       "the concept and its negation; the two values"
     );
   });
+
+  it("opposite advice in the text: saved posts by different authors that name one Tool, one against it and the other using it", async () => {
+    const posts = [NORDVPN_GUIDE, NORDVPN_WARNING, VPN_DETECTION];
+    // A research note that repeats the warning: it reports, it is not a saved post taking a side.
+    const research = { ...NORDVPN_WARNING, id: "ke_research", author: "Claude (research)" };
+    const index = new FakeVectorIndex(); // good = 0.5
+    [...posts, research].forEach((entry, i) => index.set(entry.id, around(16, 0, 1 + i, 0.9 - i * 0.01)));
+    const all = [...posts, research];
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: (id) => all.find((e) => e.id === id)?.concepts ?? [], contradicting: () => [] };
+    const options = {
+      ids: all.map((e) => e.id),
+      view,
+      hashOf: (id: string) => `h-${id}`,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id: string) => {
+        const entry = all.find((e) => e.id === id)!;
+        return { kind: entry === research ? "research note" : "post", title: entry.title, author: entry.author, handle: null };
+      },
+      bodyOf: async (id: string) => all.find((e) => e.id === id)?.body ?? null
+    };
+    const found = await pairCheckCandidates(options);
+    const opposed = found.filter((c) => c.reason === "opposed");
+    assert.deepEqual(
+      opposed.map((c) => [c.a, c.b]).sort(),
+      [
+        [NORDVPN_GUIDE.id, VPN_DETECTION.id], // "install a VPN" / "tiktok knows you're using a vpn"
+        [NORDVPN_GUIDE.id, NORDVPN_WARNING.id], // "I use NordVPN" / "do not use NordVPN"
+        [VPN_DETECTION.id, NORDVPN_WARNING.id] // "tiktok knows you're using a vpn" / "host your own VPN"
+      ].map((pair) => pair.sort()).sort()
+    );
+    assert.equal(found.indexOf(opposed[0]!), 0, "the opposed tier comes before alternatives and shared claims");
+    const nord = opposed.find((c) => [c.a, c.b].includes(NORDVPN_GUIDE.id) && [c.a, c.b].includes(NORDVPN_WARNING.id))!;
+    assert.deepEqual(nord.focus.map((c) => c.id), ["tool-nordvpn"], "the Tool both name: its passages are shown first");
+    assert.ok(found.every((c) => c.reason !== "opposed" || (c.a !== research.id && c.b !== research.id)), "a research note is no side of opposite advice");
+    // Without the bodies, nothing is found that way.
+    const { bodyOf: _bodyOf, ...withoutBodies } = options;
+    assert.ok((await pairCheckCandidates(withoutBodies)).every((c) => c.reason !== "opposed"));
+  });
+
+  it("within a tier: saved posts by different authors first, then a note on one side, one author's own entries last", async () => {
+    const index = new FakeVectorIndex(); // good = 0.5
+    index.set("ke_r1", around(16, 0, 1, 0.99));
+    index.set("ke_r2", around(16, 0, 2, 0.99)); // the closest pair: one research agent's two notes
+    index.set("ke_p1", around(16, 0, 3, 0.8));
+    index.set("ke_p2", around(16, 0, 4, 0.8)); // the furthest pair: two posts by different authors
+    const shared = [{ id: "t-warm", type: "Tactic", name: "Warm up the account" }];
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: () => shared, contradicting: () => [] };
+    const info: Record<string, PairCheckEntryInfo> = {
+      ke_r1: { kind: "research note", author: "Claude (research)", handle: null },
+      ke_r2: { kind: "research note", author: "Claude (research)", handle: null },
+      ke_p1: { kind: "post", author: "jason", handle: null },
+      ke_p2: { kind: "thread", author: "Alex Nguyen", handle: null }
+    };
+    const found = await pairCheckCandidates({ ids: Object.keys(info), view, hashOf: (id) => `h-${id}`, isChecked: () => false, limit: 30, entryOf: (id) => info[id] ?? null });
+    assert.ok(found.every((c) => c.reason === "shared"));
+    assert.deepEqual(found[0] && [found[0].a, found[0].b], ["ke_p1", "ke_p2"]);
+    assert.deepEqual(found.at(-1) && [found.at(-1)!.a, found.at(-1)!.b], ["ke_r1", "ke_r2"]);
+    assert.equal(found.length, 6);
+  });
 });
 
 describe("the task's input: excerpts chosen for relevance", () => {
@@ -345,14 +427,40 @@ describe("the task's input: excerpts chosen for relevance", () => {
 
 describe("re-asking checks judged on cut text", () => {
   const long = (id: string) => id === "ke_long" || id === "ke_long2";
-  it("a consistent or unrelated verdict on input version 1 with a body past the old cut is asked again; contradicts, short bodies and version 2 stand", () => {
+  it("a consistent or unrelated verdict on input version 1 with a body past the old cut is asked again; short bodies and later versions stand", () => {
     const base = { a: "ke_long", b: "ke_short" };
     assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent" }, long), true);
     assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: 1 }, long), true);
     assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_long", verdict: "unrelated" }, long), true, "either side");
-    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "contradicts" }, long), false, "contradicts stands");
     assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_short2", verdict: "consistent" }, long), false, "both whole: nothing was cut");
-    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent", inputVersion: 2 }, long), false);
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
+  });
+
+  it("every contradicts verdict asked before version 3 is asked again once under the stricter prompt; consistent and unrelated version-2 verdicts stand", async () => {
+    assert.equal(PAIR_CHECK_INPUT_VERSION, 3);
+    const short = () => false;
+    for (const inputVersion of [undefined, 1, 2]) {
+      assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict: "contradicts", ...(inputVersion ? { inputVersion } : {}) }, short), true, `contradicts on ${inputVersion ?? "no"} version`);
+    }
+    for (const verdict of ["consistent", "unrelated"] as const) assert.equal(pairCheckNeedsRecheck({ a: "ke_a", b: "ke_b", verdict, inputVersion: 2 }, short), false, verdict);
+
+    const root = await dir();
+    const path = join(root, "pair-checks.json");
+    const hashOf = (id: string) => `h-${id}`;
+    const v2 = (a: string, b: string, verdict: string) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b), verdict, note: "n", checkedAt: "t", inputVersion: 2 });
+    await writeFile(path, JSON.stringify({ version: 1, checks: [v2("ke_a", "ke_b", "contradicts"), v2("ke_a", "ke_c", "consistent"), v2("ke_b", "ke_c", "unrelated")] }));
+    const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
+    await checks.load();
+    const pair = (a: string, b: string) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b) });
+    const index = new FakeVectorIndex(); // good = 0.5
+    for (const [i, id] of ["ke_a", "ke_b", "ke_c"].entries()) index.set(id, around(8, 0, 1 + i, 0.9));
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: () => [{ id: "t", type: "Tactic", name: "Warm up" }], contradicting: () => [] };
+    const round = await pairCheckCandidates({ ids: ["ke_a", "ke_b", "ke_c"], view, hashOf, isChecked: (p) => checks.isChecked(p, short), limit: 30 });
+    assert.deepEqual(round.map((c) => [c.a, c.b]), [["ke_a", "ke_b"]], "only the contradicts verdict is asked again");
+    assert.equal(checks.get("ke_a", "ke_b")?.verdict, "contradicts", "it shows until the new answer replaces it");
+    await checks.record(pair("ke_a", "ke_b"), "consistent", "B quotes A's guide and agrees with it.");
+    assert.equal(checks.isChecked(pair("ke_a", "ke_b"), short), true, "asked once");
   });
 
   it("the pair is a candidate again once: its new check is recorded on the current version; bounded by the round's limit, tiers first", async () => {
@@ -364,7 +472,7 @@ describe("re-asking checks judged on cut text", () => {
       path,
       JSON.stringify({
         version: 1,
-        checks: [v1("ke_long", "ke_short", "consistent"), v1("ke_long2", "ke_short", "contradicts"), v1("ke_short", "ke_short2", "unrelated"), { ...v1("ke_long", "ke_long2", "consistent"), inputVersion: 2 }]
+        checks: [v1("ke_long", "ke_short", "consistent"), { ...v1("ke_long2", "ke_short", "contradicts"), inputVersion: 3 }, v1("ke_short", "ke_short2", "unrelated"), { ...v1("ke_long", "ke_long2", "consistent"), inputVersion: 2 }]
       })
     );
     const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
@@ -374,7 +482,7 @@ describe("re-asking checks judged on cut text", () => {
     assert.equal(checks.isChecked(pair), true, "without body lengths: checked, as before");
     assert.equal(checks.isChecked(pair, long), false, "asked again");
     assert.equal(checks.isChecked({ ...pair, b: "ke_long2", hashB: hashOf("ke_long2") }, long), true, "version 2");
-    assert.equal(checks.isChecked({ a: "ke_long2", b: "ke_short", hashA: hashOf("ke_long2"), hashB: hashOf("ke_short") }, long), true, "contradicts kept");
+    assert.equal(checks.isChecked({ a: "ke_long2", b: "ke_short", hashA: hashOf("ke_long2"), hashB: hashOf("ke_short") }, long), true, "a version-3 contradicts kept");
     assert.equal(checks.isChecked({ a: "ke_short", b: "ke_short2", hashA: hashOf("ke_short"), hashB: hashOf("ke_short2") }, long), true, "nothing was cut");
     assert.equal(checks.get("ke_long", "ke_short")?.verdict, "consistent", "the old verdict shows until it is replaced");
 

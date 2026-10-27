@@ -67,7 +67,7 @@ test("numbers and item marks are read from names", () => {
 });
 
 test("thresholds exist for the calibrated model only", () => {
-  assert.deepEqual(conceptThresholdsFor(EMBEDDING_MODEL_ID), BARS);
+  assert.deepEqual(conceptThresholdsFor(EMBEDDING_MODEL_ID), { ...BARS, contained: 0.85 });
   assert.equal(conceptThresholdsFor("Xenova/all-MiniLM-L6-v2"), null);
 });
 
@@ -318,4 +318,31 @@ test("an unreadable file is moved aside and merging starts afresh", async (t) =>
   await h.merges.idle();
   assert.equal(h.merges.count(), 2);
   assert.ok(h.logger.lines.some((line) => line.includes("moved to")));
+});
+
+test("backing: the same claim in other words on the graph's concepts; never a different number, a one-word swap or another type", async (t) => {
+  // Cosine bars that let every pair through, so only the name rules decide.
+  const h = await coordinator(t, { thresholds: { merge: 0.9999, similar: 0.01, contained: 0.01 } });
+  const before = h.graph.backingRevision();
+  await h.merges.start();
+  await loadGraph(h.graph, [
+    node("tactic-limit", "Create TikTok accounts with a 2-3 account limit per device", [`${eA}.md`]),
+    node("tactic-short", "2–3 accounts per device", [`${eB}.md`]),
+    node("tactic-five", "Create TikTok accounts with a 5 account limit per device", [`${eB}.md`]),
+    node("metric-short", "2–3 accounts per device", [`${eB}.md`]),
+    node("tactic-apple", "Create a US Apple ID verified with a US number", [`${eA}.md`]),
+    node("tactic-apple-email", "Create a US Apple ID using the US phone number and new email", [`${eB}.md`]),
+    node("tactic-allow", "Allow OAI-SearchBot", [`${eA}.md`]),
+    node("tactic-block", "Block OAI-SearchBot", [`${eB}.md`]),
+    node("tactic-bumble", "Bumble annual revenue", [`${eA}.md`]),
+    node("tactic-candy", "Candy Crush annual revenue", [`${eB}.md`])
+  ]);
+  assert.deepEqual(h.graph.backingConcepts("tactic-limit"), [], "nothing before the concept vectors are complete");
+  await h.merges.idle();
+  assert.ok(h.graph.backingRevision() > before, "complete vectors move the backing revision (insights' cache key)");
+  assert.deepEqual(h.graph.backingConcepts("tactic-limit"), ["tactic-short"], "every word of the shorter name; not 5 accounts, not a Metric");
+  assert.deepEqual(h.graph.backingConcepts("tactic-short"), ["tactic-limit"]);
+  assert.deepEqual(h.graph.backingConcepts("tactic-apple"), ["tactic-apple-email"], "half their words shared");
+  assert.deepEqual(h.graph.backingConcepts("tactic-allow"), [], "a one-word swap says the opposite");
+  assert.deepEqual(h.graph.backingConcepts("tactic-bumble"), [], "fewer than half their words shared");
 });

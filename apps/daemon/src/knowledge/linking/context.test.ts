@@ -10,6 +10,7 @@ import {
   CONTEXT_HEADING,
   documentOf,
   EntryDocumentLocator,
+  LINK_CONTEXT_VERSION,
   linkContextProvider,
   nearestNeighbours,
   neighbourContextBlock,
@@ -63,8 +64,13 @@ describe("nearestNeighbours / neighbourContextBlock", () => {
     const block = neighbourContextBlock("ke_t", v)!;
     const lines = block.split("\n");
     assert.equal(lines[0], CONTEXT_HEADING);
-    assert.match(block, /reuse|exactly this type and name/);
-    assert.match(block, /Never extract a listed concept the document does not mention\./);
+    // A listed name is reused only for the same thing at the same specificity (version 1 folded a
+    // 48-hour warm-up into a listed 1-2 day one); a listed concept is never extracted unmentioned.
+    assert.equal(LINK_CONTEXT_VERSION, 2);
+    assert.match(block, /Reuse a listed type and name only when the document states the same thing at the same specificity/);
+    assert.match(block, /Keep a concept of its own[^\n]*when the document states a different number, duration, quantity, tool or condition/);
+    assert.match(block, /Never reuse a listed name whose claim differs from the document's/);
+    assert.match(block, /never extract a listed concept the document does not mention\./);
     const listed = lines.filter((line) => line.startsWith("- "));
     assert.deepEqual(listed, [
       "- Tactic: Alternatives pages",

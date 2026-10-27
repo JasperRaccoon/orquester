@@ -34,6 +34,7 @@ import type { KnowledgeEmbedderSource } from "./embedder.ts";
 import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
+import { findContradictions, isSurveyEntry } from "./contradictions.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
 import { KnowledgeInsights } from "./insights.ts";
 import { type TextSpan, bestSnippet, tokenize } from "./text.ts";
@@ -68,6 +69,20 @@ const RRF_K = 60;
 const WEIGHT = { keyword: 1, meaning: 1, similar: 1, expansion: 0.5, concept: 1 } as const;
 /** MMR's trade-off between relevance and novelty. */
 const MMR_LAMBDA = 0.7;
+/** Hits that bring up the other side of a checked disagreement ({@link KnowledgeSearch.withOtherSides}). */
+const OTHER_SIDE_WINDOW = 10;
+/** How far down the ranked list another side is found (it matched the query). */
+const OTHER_SIDE_REACH = 40;
+/** Other sides one hit brings up. */
+const OTHER_SIDE_MAX = 2;
+/** A survey's share of its score when entries are ranked by relevance, unless the query asks for one. */
+const SURVEY_RANK = 0.75;
+/** Query tokens that ask for a survey: a map, an audit, an overview, a synthesis of the base. */
+const SURVEY_QUERY_WORDS: ReadonlySet<string> = new Set(
+  tokenize("map maps audit hub register index overview synthesis summary summaries contradiction contradictions playbook cross-links")
+);
+/** What holding every query token adds to a chunk's cosine when the passage to show is chosen ({@link queryPassage}). */
+const PASSAGE_TERMS_WEIGHT = 0.1;
 /** Recency half-life of the `recent` sort, in days. */
 const RECENCY_HALF_LIFE_DAYS = 90;
 /** Body words of an example entry its keyword fallback searches with (beside its title). */
@@ -360,7 +375,7 @@ export class KnowledgeSearch {
     /** The best possible entry score (first in every list that ran), so scores land in 0..1. */
     const scale = ((query ? WEIGHT.keyword + WEIGHT.meaning + WEIGHT.expansion : 0) + (similarTo.length > 0 ? WEIGHT.similar : 0)) / (RRF_K + 1);
     const normalized = (score: number) => Math.min(1, Math.round((score / scale) * 1e4) / 1e4);
-    const ranked = this.rank(entryScores, sort, diverse);
+    const ranked = sort === "newest" ? this.rank(entryScores, sort, diverse) : this.withOtherSides(this.rank(entryScores, sort, diverse, terms), scope, terms);
 
     // --- Concept hits (first page only) ---------------------------------------
     // A concept is one ranked list, an entry the sum of up to four: their fused scores are not on one
@@ -494,8 +509,64 @@ export class KnowledgeSearch {
     return { ids: this.bm25.search(exampleTerms, accept, CANDIDATES).map((hit) => hit.key), hits: new Map() };
   }
 
-  /** The ranked entry list (≤ KNOWLEDGE_SEARCH_MAX_RESULTS): sorted, then spread apart by MMR. */
-  private rank(entryScores: ReadonlyMap<string, number>, sort: KnowledgeSearchSort, diverse: boolean): Ranked[] {
+  /**
+   * Both sides of a disagreement the query finds: each of the first {@link OTHER_SIDE_WINDOW} hits
+   * that an LLM pair check found to contradict an entry further down (within
+   * {@link OTHER_SIDE_REACH} places: the query found it too) brings it up to just after itself, at
+   * most {@link OTHER_SIDE_MAX} of them, those whose note is most about the query first (its query
+   * words, by their BM25 idf), then the higher placed. An entry brought up brings no other;
+   * the same results always come in the same order, so pages stay stable.
+   */
+  private withOtherSides(ranked: readonly Ranked[], scope: KnowledgeScope, terms: readonly string[]): Ranked[] {
+    const checks = this.linkingPorts.pairChecks;
+    if (!checks || ranked.length < 2) return [...ranked];
+    const place = new Map(ranked.slice(0, OTHER_SIDE_REACH).map((item, at) => [item.id, at]));
+    const found = findContradictions({ graph: this.graph, scope, pairChecks: checks, accept: (id) => place.has(id), entryMeta: (id) => this.store.getMeta(id) });
+    const sides = new Map<string, { id: string; at: number; noted: number }[]>();
+    const wanted = new Set(terms);
+    for (const { a, b, source, note } of found.values()) {
+      if (source !== "checked") continue;
+      // How much of the query the note is about: its query words, rare ones weighing more.
+      const noted = note === null ? 0 : [...new Set(tokenize(note))].reduce((sum, token) => sum + (wanted.has(token) ? this.bm25.idf(token) : 0), 0);
+      for (const [x, y] of [
+        [a, b],
+        [b, a]
+      ] as const) {
+        let list = sides.get(x);
+        if (!list) sides.set(x, (list = []));
+        list.push({ id: y, at: place.get(y)!, noted });
+      }
+    }
+    if (sides.size === 0) return [...ranked];
+    const out: Ranked[] = [];
+    const placed = new Set<string>();
+    const pulled = new Set<string>();
+    const byId = new Map(ranked.map((item) => [item.id, item]));
+    for (const item of ranked) {
+      if (placed.has(item.id)) continue;
+      out.push(item);
+      placed.add(item.id);
+      if (out.length > OTHER_SIDE_WINDOW || pulled.has(item.id)) continue;
+      const others = (sides.get(item.id) ?? [])
+        .filter((side) => !placed.has(side.id) && side.at > place.get(item.id)!)
+        .sort((x, y) => y.noted - x.noted || x.at - y.at)
+        .slice(0, OTHER_SIDE_MAX);
+      for (const side of others) {
+        out.push(byId.get(side.id)!);
+        placed.add(side.id);
+        pulled.add(side.id);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The ranked entry list (≤ KNOWLEDGE_SEARCH_MAX_RESULTS): sorted, then spread apart by MMR. By
+   * relevance a survey ({@link isSurveyEntry}) ranks at {@link SURVEY_RANK} of its score unless the
+   * query asks for one ({@link SURVEY_QUERY_WORDS}): it restates what the entries it surveys say,
+   * so it matches most queries on their topic, with a passage about something else.
+   */
+  private rank(entryScores: ReadonlyMap<string, number>, sort: KnowledgeSearchSort, diverse: boolean, terms: readonly string[] = []): Ranked[] {
     if (sort === "newest") {
       const dated: (Ranked & { savedAt: string })[] = [];
       for (const [id, fused] of entryScores) {
@@ -509,13 +580,15 @@ export class KnowledgeSearch {
     }
     const now = Date.now();
     const ranked: Ranked[] = [];
+    const surveysWanted = terms.some((term) => SURVEY_QUERY_WORDS.has(term));
+    const surveyRank = (id: string): number => (!surveysWanted && isSurveyEntry(this.store.getMeta(id)) ? SURVEY_RANK : 1);
     for (const [id, fused] of entryScores) {
       if (sort === "recent") {
         const meta = this.store.getMeta(id);
         if (!meta) continue;
-        ranked.push({ id, fused, rank: fused * recencyFactor(meta, now) });
+        ranked.push({ id, fused, rank: fused * recencyFactor(meta, now) * surveyRank(id) });
       } else {
-        ranked.push({ id, fused, rank: fused });
+        ranked.push({ id, fused, rank: fused * surveyRank(id) });
       }
     }
     ranked.sort((a, b) => b.rank - a.rank || (a.id < b.id ? -1 : 1));
@@ -551,18 +624,20 @@ export class KnowledgeSearch {
     const distinct = [...new Set(signals.terms)];
     const coverage = distinct.length > 0 ? distinct.filter((token) => this.bm25.contains(id, token)).length / distinct.length : 0;
     const similarity = Math.max(meaningHit?.score ?? -Infinity, similarHit?.score ?? -Infinity);
+    const body = this.bodies.get(id) ?? "";
+    const passage = meaningHit ? queryPassage(meaningHit, body, distinct) : null;
     const match: KnowledgeEntryMatch = {
       band: matchBand(Number.isFinite(similarity) ? similarity : null, coverage, via, signals.thresholds),
       via,
       terms,
-      passage: meaningHit ? { start: meaningHit.span.start, end: meaningHit.span.end, chunk: meaningHit.chunk, chunks: meaningHit.chunks } : null,
+      passage: passage ? { start: passage.span.start, end: passage.span.end, chunk: passage.chunk, chunks: meaningHit!.chunks } : null,
       concepts: (signals.expansionSeeds.get(id) ?? [])
         .map((conceptId) => this.graph.conceptRef(conceptId, scope))
         .filter((ref): ref is NonNullable<typeof ref> => ref !== null)
         .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
     };
-    const span: TextSpan | undefined = meaningHit?.span ?? similarHit?.span;
-    const snippet = bestSnippet(this.bodies.get(id) ?? "", signals.terms, span);
+    const span: TextSpan | undefined = passage?.span ?? similarHit?.span;
+    const snippet = bestSnippet(body, signals.terms, span);
     return { kind: "entry", score, entry: this.summary(meta, scope, snippet), match };
   }
 
@@ -641,7 +716,7 @@ export class KnowledgeSearch {
       .map((r) => this.store.getMeta(r.id))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .map((m) => this.summary(m, scope));
-    const { similar, possibleDuplicates } = this.similarity.forEntry(id, scope);
+    const { similar, possibleDuplicates, disagreements, disagreementsTotal } = this.similarity.forEntry(id, scope);
     const novelty = this.similarity.novelty(id, scope);
     return {
       entry: { ...entry, savedFrom: { ...entry.savedFrom }, collections: visibleCollections(entry, scope) },
@@ -650,6 +725,8 @@ export class KnowledgeSearch {
       similar,
       possibleDuplicates,
       ...(novelty ? { novelty } : {}),
+      disagreements,
+      ...(disagreementsTotal > disagreements.length ? { disagreementsTotal } : {}),
       citation: knowledgeCitation(meta)
     };
   }
@@ -886,6 +963,29 @@ function matchBand(
   if ((sim !== null && sim >= thresholds!.strong) || (c === 1 && via.length >= 2)) return "strong";
   if ((sim !== null && sim >= thresholds!.good) || c >= 0.5 || via.includes("concept")) return "good";
   return "weak";
+}
+
+/**
+ * The passage a hit shows: of an entry's chunks, the one whose cosine to the query plus
+ * {@link PASSAGE_TERMS_WEIGHT} × the share of the query's distinct tokens it holds is best (the
+ * best by cosine on a tie). Cosine alone picks, in a long survey, whichever chunk sits nearest the
+ * query's topic; the query's own words say which one answers it.
+ */
+function queryPassage(hit: KnowledgeVectorHit, body: string, tokens: readonly string[]): { chunk: number; span: TextSpan } {
+  const chunks = hit.chunkScores;
+  if (!chunks || chunks.length < 2 || tokens.length === 0) return { chunk: hit.chunk, span: hit.span };
+  const wanted = new Set(tokens);
+  let best = { chunk: hit.chunk, span: hit.span };
+  let bestScore = -Infinity;
+  chunks.forEach(({ score, span }, chunk) => {
+    const held = new Set(tokenize(body.slice(span.start, span.end)).filter((token) => wanted.has(token))).size;
+    const total = score + (PASSAGE_TERMS_WEIGHT * held) / wanted.size;
+    if (total > bestScore + 1e-9 || (Math.abs(total - bestScore) <= 1e-9 && chunk === hit.chunk)) {
+      bestScore = total;
+      best = { chunk, span };
+    }
+  });
+  return best;
 }
 
 /** Distinct query words as typed (lowercased) with their tokens; words that tokenize to nothing (stopwords) are left out. */
