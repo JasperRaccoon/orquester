@@ -23,6 +23,7 @@ import {
   type KnowledgeCollectionsResponse,
   type KnowledgeEntryDetail,
   type KnowledgeEntrySummary,
+  type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
   type KnowledgeSimilarEntry
@@ -320,6 +321,51 @@ test("knowledge_delete: reads then deletes each id once, with the session; repor
   for (const args of [{ ids: [] }, { ids: ["nope"] }, { ids: Array.from({ length: 51 }, () => "ke_aaaaaaaaaaaa") }, { id: "ke_aaaaaaaaaaaa" }]) {
     assert.equal(errorOf(await run(api, "knowledge_delete", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
   }
+});
+
+test("knowledge_merge: one POST with the session, ids once each; answers the kept entry, its citation and what was deleted; no card", async () => {
+  const entry = meta({ id: "ke_aaaaaaaaaaaa", title: "Alternatives pages", linkState: "pending" });
+  const merged: KnowledgeMergeResponse = {
+    kept: { entry: { ...entry, body: "Combined." }, concepts: [], related: [], citation: entry.citation },
+    deleted: ["ke_bbbbbbbbbbbb", "ke_cccccccccccc"]
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.entriesMerge, { status: 200, body: merged });
+  const r = await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb", "ke_aaaaaaaaaaaa", "ke_cccccccccccc"], keep: "ke_aaaaaaaaaaaa", title: " Alternatives pages ", body: "Combined." });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(r.structuredContent, undefined, "a text result: no card");
+  assert.equal(
+    textOf(r),
+    [
+      "Merged 3 entries into ke_aaaaaaaaaaaa; deleted ke_bbbbbbbbbbbb, ke_cccccccccccc. Their cite links no longer resolve: cite the kept one.",
+      "entry ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads · linking pending",
+      "Title: Alternatives pages",
+      `cite: ${entry.citation}`
+    ].join("\n")
+  );
+  const post = api.calls.find((call) => call.method === "POST")!;
+  assert.deepEqual(post.body, { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb", "ke_cccccccccccc"], sessionId: "chat-1", keep: "ke_aaaaaaaaaaaa", title: "Alternatives pages", body: "Combined." });
+  await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"] });
+  assert.deepEqual(api.calls.filter((call) => call.method === "POST").at(-1)!.body, { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], sessionId: "chat-1" }, "no keep: the daemon's rule");
+});
+
+test("knowledge_merge: 2..10 distinct entry ids, keep among them, the save limits; the daemon's refusals pass through", async () => {
+  const notFound = { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry: ke_hidden000000." } };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.entriesMerge, notFound);
+  for (const args of [
+    { ids: ["ke_aaaaaaaaaaaa"] },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_aaaaaaaaaaaa"] },
+    { ids: Array.from({ length: 11 }, (_, i) => `ke_${String(i).padStart(12, "0")}`) },
+    { ids: ["ke_aaaaaaaaaaaa", "nope"] },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], keep: "ke_cccccccccccc" },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], body: "   " },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], title: "t".repeat(KNOWLEDGE_TITLE_MAX + 1) },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], collections: ["SEO"] }
+  ]) {
+    assert.equal(errorOf(await run(api, "knowledge_merge", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 80));
+  }
+  assert.ok(!api.calls.some((call) => call.method === "POST"), "nothing invalid reaches the daemon");
+  const hidden = await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_hidden000000"] });
+  assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry: ke_hidden000000." });
 });
 
 test("knowledge_collections: every collection by name, count and description", async () => {
@@ -627,7 +673,7 @@ test("knowledge_get: similar entries with every reason, possible duplicates once
   assert.equal(lines.filter((line) => line.startsWith("- ke_")).length, 8 + 1, "8 similar, then the duplicate");
   const dup = lines.findIndex((line) => line.startsWith("Possible duplicates"));
   assert.ok(dup > from, "duplicates after similar");
-  assert.match(lines[dup]!, /knowledge_update/);
+  assert.equal(lines[dup], "Possible duplicates (if one is the same content, knowledge_merge them):");
   assert.deepEqual(lines.slice(dup + 1, dup + 3), ['- ke_dddddddddddd "Same thread" (0.97)', `  cite: ${duplicate.entry.citation}`]);
   assert.equal(out.split("ke_dddddddddddd").length - 1, 2, "a duplicate is listed once (its id, and its citation)");
   assert.ok(!out.includes("Related") && !out.includes("ke_rrrrrrrrrrrr"), "similar replaces related");
@@ -763,8 +809,8 @@ test("knowledge_save: a saved entry close in meaning to one already there gets a
   const lines = out.split("\n");
   const at = lines.findIndex((line) => line.startsWith("- saved ke_aaaaaaaaaaaa"));
   assert.deepEqual(lines.slice(at + 1, at + 4), [
-    '  possible duplicate of ke_cccccccccccc "Alternatives pages (copy)" (0.95) — if it is the same content, keep one (knowledge_update / knowledge_delete)',
-    '  possible duplicate of ke_dddddddddddd "Comparison pages" (0.90) — if it is the same content, keep one (knowledge_update / knowledge_delete)',
+    '  possible duplicate of ke_cccccccccccc "Alternatives pages (copy)" (0.95) — if it is the same content, knowledge_merge the two',
+    '  possible duplicate of ke_dddddddddddd "Comparison pages" (0.90) — if it is the same content, knowledge_merge the two',
     `- saved ke_eeeeeeeeeeee · in SEO · cite: ${saved.results[1]!.citation}`
   ]);
   assert.equal(out.match(/possible duplicate/g)?.length, 2, "only where the daemon named one");

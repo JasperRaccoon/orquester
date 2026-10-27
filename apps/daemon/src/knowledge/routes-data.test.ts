@@ -15,6 +15,7 @@ import {
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
   type KnowledgeLinkingState,
+  type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
   type KnowledgeVisibility
@@ -483,4 +484,64 @@ test("framework refusals (bad JSON, too large, wrong media type) answer { code, 
   const elsewhere = await h.inject({ method: "POST", url: "/elsewhere", headers: json, payload: "{nope" });
   assert.equal(elsewhere.statusCode, 400);
   assert.notEqual((elsewhere.json() as { code?: string }).code, "KNOWLEDGE_INVALID");
+});
+
+test("merge: one call edits the kept entry and deletes the rest; a hidden id or a bad request changes nothing", async (t) => {
+  const h = await harness(t);
+  const { seo, saas, alt, billing } = await seed(h);
+  h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
+  const merge = (payload: unknown, headers?: Record<string, string>) => h.inject({ method: "POST", url: knowledgeRoutes.entriesMerge, payload: payload as object, ...(headers ? { headers } : {}) });
+  const eventsBefore = h.events.length;
+
+  // Refusals, all before anything changes: a hidden id answers like an unknown one (by session or principal).
+  assert.match(refused(await merge({ ids: [alt, billing], sessionId: "seo-chat" }), 404, "KNOWLEDGE_NOT_FOUND"), new RegExp(billing));
+  refused(await merge({ ids: [alt, billing] }, { "x-test-agent": "seo-chat" }), 404, "KNOWLEDGE_NOT_FOUND");
+  refused(await merge({ ids: [alt] }), 400, "KNOWLEDGE_INVALID");
+  refused(await merge({ ids: [alt, ...Array.from({ length: 10 }, () => billing)] }), 400, "KNOWLEDGE_INVALID");
+  assert.match(refused(await merge({ ids: [alt, billing, alt] }), 400, "KNOWLEDGE_INVALID"), /named twice/);
+  assert.match(refused(await merge({ ids: [alt, billing], keep: "ke_zzzzzzzzzzzz" }), 400, "KNOWLEDGE_INVALID"), /keep/);
+  refused(await merge({ ids: [alt, billing], title: "x".repeat(500) }), 400, "KNOWLEDGE_INVALID");
+  refused(await merge({ ids: [alt, "ke_zzzzzzzzzzzz"] }), 404, "KNOWLEDGE_NOT_FOUND");
+  assert.equal(h.events.length, eventsBefore);
+  assert.deepEqual(h.store.getMeta(alt)!.collections, [seo.id]);
+  assert.ok(h.store.getMeta(billing));
+  // The static path does not reach `entries/:id`.
+  refused(await h.inject({ method: "GET", url: knowledgeRoutes.entriesMerge }), 404, "KNOWLEDGE_NOT_FOUND");
+
+  h.linkingSaw.length = 0;
+  const merged = ok<KnowledgeMergeResponse>(await merge({ ids: [billing, alt], keep: alt, title: "Alternatives and billing" }));
+  assert.equal(merged.kept.entry.id, alt);
+  assert.equal(merged.kept.entry.title, "Alternatives and billing");
+  assert.deepEqual(merged.kept.entry.collections, [seo.id, saas.id]);
+  assert.equal(merged.kept.citation, `[Alternatives and billing · @hridoy](orquester-knowledge:entry/${alt})`);
+  assert.deepEqual(merged.deleted, [billing]);
+  assert.deepEqual(h.linkingSaw, [
+    { kind: "edited", entryIds: [alt] },
+    { kind: "deleted", entryIds: [billing] }
+  ]);
+  assert.deepEqual(h.events.at(-1)!.payload, { entryIds: [alt, billing], collections: true });
+  refused(await h.inject({ method: "GET", url: knowledgeRoutes.entry(billing) }), 404, "KNOWLEDGE_NOT_FOUND");
+  await h.search.idle();
+  const searched = ok<KnowledgeSearchResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.search, payload: { query: "annual billing stripe proration", limit: 25 } }));
+  assert.ok(!searched.hits.some((hit) => hit.kind === "entry" && hit.entry.id === billing), "the deleted entry is out of search");
+  const retitled = ok<KnowledgeSearchResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.search, payload: { query: "Alternatives and billing" } }));
+  assert.equal(retitled.hits[0]!.kind === "entry" && retitled.hits[0]!.entry.id, alt);
+});
+
+test("merge: without keep the oldest stays (same instant: the smaller id); a kept entry that already has it all is not rewritten", async (t) => {
+  const h = await harness(t);
+  const { seo, alt, billing } = await seed(h);
+  const keptId = alt < billing ? alt : billing;
+  const goneId = keptId === alt ? billing : alt;
+  // Give the one kept the other's collection first, so the merge changes nothing on it.
+  await h.store.updateEntry(keptId, { collections: [...h.store.getMeta(keptId)!.collections, ...h.store.getMeta(goneId)!.collections] });
+  const before = h.store.getMeta(keptId)!;
+  h.linkingSaw.length = 0;
+  const merged = ok<KnowledgeMergeResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.entriesMerge, payload: { ids: [goneId, keptId] } }));
+  assert.equal(merged.kept.entry.id, keptId);
+  assert.deepEqual(merged.deleted, [goneId]);
+  assert.equal(h.store.getMeta(keptId), before, "not rewritten");
+  assert.deepEqual(h.linkingSaw, [{ kind: "deleted", entryIds: [goneId] }]);
+  assert.deepEqual(h.events.at(-1)!.payload, { entryIds: [goneId], collections: true });
+  assert.ok(merged.kept.entry.collections.includes(seo.id));
 });

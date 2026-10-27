@@ -10,7 +10,7 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement, useState } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import type { KnowledgeEntryDetail, KnowledgeItemResponse, UpdateKnowledgeEntryRequest } from "@orquester/api";
+import type { KnowledgeEntryDetail, KnowledgeItemResponse, KnowledgeMergeRequest, UpdateKnowledgeEntryRequest } from "@orquester/api";
 
 import { collection, collections, entry, summary } from "../../lib/knowledge/fixtures.test-helpers";
 import type { KnowledgeSelection } from "./KnowledgePanel";
@@ -116,7 +116,7 @@ describe("the entry panel", () => {
   let selected: KnowledgeSelection[];
   let similarAsked: string[];
   let items: Map<string, KnowledgeItemResponse>;
-  let failPatch: boolean;
+  let failMerge: boolean;
   let renders = 0;
 
   const api = {
@@ -136,12 +136,17 @@ describe("the entry panel", () => {
     },
     updateKnowledgeEntry: async (id: string, req: UpdateKnowledgeEntryRequest) => {
       calls.push(`patch:${id}:${JSON.stringify(req)}`);
-      if (failPatch) throw Object.assign(new Error("400"), { body: { code: "KNOWLEDGE_UNKNOWN_COLLECTION", message: "No collection kc_ads." } });
       return {};
     },
     deleteKnowledgeEntry: async (id: string) => {
       calls.push(`delete:${id}`);
       items.delete(id);
+      return {};
+    },
+    mergeKnowledgeEntries: async (req: KnowledgeMergeRequest) => {
+      calls.push(`merge:${JSON.stringify(req)}`);
+      if (failMerge) throw Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: `No such entry: ${OLDER}.` } });
+      for (const id of req.ids) if (id !== req.keep) items.delete(id);
       return {};
     }
   };
@@ -153,7 +158,7 @@ describe("the entry panel", () => {
     calls = [];
     selected = [];
     similarAsked = [];
-    failPatch = false;
+    failMerge = false;
     items = new Map();
     resetKnowledge();
     resetPanelSession();
@@ -288,7 +293,7 @@ describe("the entry panel", () => {
     assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null, "still hidden");
   });
 
-  it("merges into the older entry: confirm, update it, delete this one, then open the kept one", async () => {
+  it("merges into the older entry: confirm, one merge call keeping it, then open the kept one", async () => {
     items.set(OLDER, { kind: "entry", entry: openDetail({ entry: entry({ id: OLDER, title: "Original" }), possibleDuplicates: [], similar: [] }) });
     await show(openDetail());
     await click(buttonNamed("Merge", doc().querySelector('section[aria-label="Possible duplicates"]')!));
@@ -298,23 +303,20 @@ describe("the entry panel", () => {
     assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [], "nothing happens before confirming");
     await click(buttonNamed("Merge", dialog));
     await settle();
-    assert.deepEqual(
-      calls.filter((c) => !c.startsWith("get:")),
-      [`patch:${OLDER}:{"collections":["kc_seo","kc_ads"]}`, `delete:${OPEN}`]
-    );
+    assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [`merge:{"ids":["${OLDER}","${OPEN}"],"keep":"${OLDER}"}`]);
     assert.deepEqual(selected, [{ kind: "entry", id: OLDER }]);
     assert.doesNotMatch(text(), /This entry was deleted/);
   });
 
-  it("deletes nothing and says why when the update fails", async () => {
-    failPatch = true;
+  it("says why when the daemon refuses the merge, and stays on the entry", async () => {
+    failMerge = true;
     await show(openDetail());
     await click(buttonNamed("Merge", doc().querySelector('section[aria-label="Possible duplicates"]')!));
     await click(buttonNamed("Merge", doc().querySelector('[role="dialog"]')!));
     await settle();
-    assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [`patch:${OLDER}:{"collections":["kc_seo","kc_ads"]}`]);
+    assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [`merge:{"ids":["${OLDER}","${OPEN}"],"keep":"${OLDER}"}`]);
     assert.deepEqual(selected, []);
     const alert = doc().querySelector('section[aria-label="Possible duplicates"] [role="alert"]');
-    assert.equal(alert?.textContent, "Nothing was merged: No collection kc_ads.");
+    assert.equal(alert?.textContent, `Nothing was merged: No such entry: ${OLDER}.`);
   });
 });

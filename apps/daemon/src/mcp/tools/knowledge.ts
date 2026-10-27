@@ -3,12 +3,12 @@
  * docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md, "Agent tools", "Citations";
  * retrieval spec docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md, "Agent tools (A1)"):
  * the shared knowledge base for in-chat agents — `knowledge_search`, `knowledge_get`,
- * `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_collections` — and the two
- * tools of the plugin's own indexing sessions, `knowledge_worker_next_task` and
+ * `knowledge_save`, `knowledge_update`, `knowledge_delete`, `knowledge_merge`, `knowledge_collections`
+ * — and the two tools of the plugin's own indexing sessions, `knowledge_worker_next_task` and
  * `knowledge_worker_submit`. Chat-only.
  *
  * - **Gating** is the manifest's (`session-tools/manifest.ts`): the family only while the plugin is
- *   on; search, get, update and delete only to a chat that sees a collection; the worker tools
+ *   on; search, get, update, delete and merge only to a chat that sees a collection; the worker tools
  *   only — and alone — to a worker session. The routes enforce the same on the server (visibility,
  *   `KNOWLEDGE_NOT_A_WORKER`), and every refusal they answer comes back here as a clean tool error.
  * - **Visibility** is resolved by the daemon from the calling session: every request names it
@@ -18,8 +18,8 @@
  *   citation — and a paging footer; full text only through `knowledge_get`, in windows of a body.
  * - **Older daemons** answer without the retrieval fields (match, total, cursor, similar entries):
  *   whatever is absent is left out of the text, never guessed.
- * - **No card**: saving, editing and deleting are Act; they change only the knowledge base, and
- *   saving must stay fast. Editing and deleting reach the same routes as the Knowledge tab.
+ * - **No card**: saving, editing, deleting and merging are Act; they change only the knowledge base,
+ *   and saving must stay fast. Editing, deleting and merging reach the same routes as the Knowledge tab.
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
@@ -31,6 +31,7 @@ import {
   KNOWLEDGE_COLLECTIONS_MAX,
   KNOWLEDGE_ENTRY_MAX_BYTES,
   KNOWLEDGE_FILTER_MAX_VALUES,
+  KNOWLEDGE_MERGE_MAX_ENTRIES,
   KNOWLEDGE_SAVE_MAX_ENTRIES,
   KNOWLEDGE_SEARCH_MAX_LIMIT,
   KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
@@ -42,6 +43,8 @@ import {
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
   type KnowledgeItemResponse,
+  type KnowledgeMergeRequest,
+  type KnowledgeMergeResponse,
   type KnowledgeRelatedReason,
   type KnowledgeSaveItem,
   type KnowledgeSaveRequest,
@@ -366,7 +369,7 @@ function entryLines(detail: KnowledgeEntryDetail, names: ReadonlyMap<string, str
       for (const related of detail.related.slice(0, listMax)) lines.push(`- ${entryHead(related, names)}`, `  cite: ${related.citation}`);
     }
     if (duplicates.length > 0) {
-      lines.push("Possible duplicates (if one is the same content, keep one: knowledge_update / knowledge_delete):");
+      lines.push("Possible duplicates (if one is the same content, knowledge_merge them):");
       for (const duplicate of duplicates.slice(0, 3)) {
         const similarity = duplicate.similarity === null ? "" : ` (${duplicate.similarity.toFixed(2)})`;
         lines.push(`- ${duplicate.entry.id} ${quotedTitle(duplicate.entry.title)}${similarity}`, `  cite: ${duplicate.entry.citation}`);
@@ -466,7 +469,7 @@ export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<s
     // Close in meaning to an entry already there (absent from an older daemon).
     if (result.status === "saved") {
       for (const similar of result.similar ?? []) {
-        lines.push(`  possible duplicate of ${similar.entryId} ${quotedTitle(similar.title)} (${similar.similarity.toFixed(2)}) — if it is the same content, keep one (knowledge_update / knowledge_delete)`);
+        lines.push(`  possible duplicate of ${similar.entryId} ${quotedTitle(similar.title)} (${similar.similarity.toFixed(2)}) — if it is the same content, knowledge_merge the two`);
       }
     }
   }
@@ -491,6 +494,18 @@ export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): strin
     lines.push(outcome.deleted ? `- deleted ${outcome.id} "${clipText(oneLine(outcome.title), NAME_CHARS)}"` : `- not deleted ${outcome.id}: ${clipText(oneLine(outcome.message), DESCRIPTION_CHARS)}`);
   }
   return lines.join("\n");
+}
+
+/** The merge answer: the entry kept as it is now, its citation, and what was deleted. */
+export function renderMerge(response: KnowledgeMergeResponse, names: ReadonlyMap<string, string>): string {
+  const entry = response.kept.entry;
+  const count = response.deleted.length;
+  return [
+    `Merged ${count + 1} entries into ${entry.id}; deleted ${response.deleted.join(", ")}. Their cite links no longer resolve: cite the kept one.`,
+    `entry ${entryHead(entry, names)}`,
+    `Title: ${oneLine(entry.title)}`,
+    `cite: ${response.kept.citation}`
+  ].join("\n");
 }
 
 /** Every collection, one line each. */
@@ -835,6 +850,40 @@ const knowledgeDelete = defineTool({
   }
 });
 
+const knowledgeMerge = defineTool({
+  name: "knowledge_merge",
+  title: "Merge knowledge entries",
+  description:
+    "Merge duplicate entries into one: the kept one gets all their collections (and title, body if given); the others are deleted. No undo.",
+  input: {
+    ids: z.array(entryId).min(2).max(KNOWLEDGE_MERGE_MAX_ENTRIES),
+    keep: entryId.optional().describe("One of ids; default the oldest."),
+    title: optionalText(KNOWLEDGE_TITLE_MAX),
+    body: entryBody.optional().describe("The combined text; default the kept one's.")
+  },
+  audiences: ["chat"],
+  toolset: "knowledge",
+  tier: "act",
+  scope: async () => knowledgeScope("none", true),
+  annotations: closedWorld(DESTRUCTIVE),
+  resultKind: "text",
+  async run(args, { api, caller }: CallContext) {
+    const sessionId = sessionIdOf(caller, "knowledge_merge");
+    const ids = [...new Set(args.ids)];
+    if (ids.length < 2) throw new ToolError("INVALID_ARGUMENT", "Pass at least two different entry ids to merge.");
+    if (args.keep !== undefined && !ids.includes(args.keep)) throw new ToolError("INVALID_ARGUMENT", "keep must be one of ids.");
+    const body: KnowledgeMergeRequest = {
+      ids,
+      sessionId,
+      ...(args.keep !== undefined ? { keep: args.keep } : {}),
+      ...(args.title !== undefined ? { title: args.title } : {}),
+      ...(args.body !== undefined ? { body: args.body } : {})
+    };
+    const response = await call<KnowledgeMergeResponse>(api, "POST", knowledgeRoutes.entriesMerge, { body });
+    return text(renderMerge(response, await collectionNames(api)));
+  }
+});
+
 const knowledgeCollections = defineTool({
   name: "knowledge_collections",
   title: "List knowledge collections",
@@ -901,4 +950,4 @@ const workerSubmit = defineTool({
 });
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeUpdate, knowledgeDelete, knowledgeCollections, workerNextTask, workerSubmit];
+export const knowledgeFamily: readonly AnyOrquesterTool[] = [knowledgeSearch, knowledgeGet, knowledgeSave, knowledgeUpdate, knowledgeDelete, knowledgeMerge, knowledgeCollections, workerNextTask, workerSubmit];
