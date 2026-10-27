@@ -28,6 +28,13 @@ export class Bm25Index {
     return this.postings.get(term)?.has(key) ?? false;
   }
 
+  /** The term's inverse document frequency as `search` weighs it (0 for a term no document has). */
+  idf(term: string): number {
+    const n = this.lengths.size;
+    const df = this.postings.get(term)?.size ?? 0;
+    return df === 0 ? 0 : Math.log(1 + (n - df + 0.5) / (df + 0.5));
+  }
+
   add(key: string, fields: readonly Bm25Field[]): void {
     if (this.lengths.has(key)) this.remove(key);
     const tf = new Map<string, number>();

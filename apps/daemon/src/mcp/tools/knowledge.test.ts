@@ -940,6 +940,68 @@ test("knowledge_get: entries it disagrees with come first (source, note, concept
   assert.ok(!bare.includes("Similar:"));
 });
 
+test("knowledge_get: `disagreements` lists every entry it disagrees with (+N more past them), none repeated under Similar", async () => {
+  const entry = meta();
+  const other = (id: string, title: string) => meta({ id, title });
+  const detail: KnowledgeEntryDetail = {
+    entry: { ...entry, body: "Body." },
+    concepts: [],
+    related: [],
+    similar: [
+      { entry: other("ke_bbbbbbbbbbbb", "Use Outlook"), similarity: 0.95, reasons: [{ kind: "contradicts", source: "checked", pairs: [], note: "Gmail vs Outlook" }, { kind: "meaning", similarity: 0.95 }] },
+      // Not carrying the reason (the daemon keeps 3 in `similar`), yet on the disagreements list.
+      { entry: other("ke_dddddddddddd", "Three accounts a phone"), similarity: 0.92, reasons: [{ kind: "meaning", similarity: 0.92 }] },
+      { entry: other("ke_eeeeeeeeeeee", "Warm-up guide"), similarity: 0.9, reasons: [{ kind: "meaning", similarity: 0.9 }] }
+    ],
+    possibleDuplicates: [],
+    disagreements: [
+      { entry: other("ke_bbbbbbbbbbbb", "Use Outlook"), similarity: 0.95, source: "checked", pairs: [], note: "Gmail vs Outlook" },
+      { entry: other("ke_cccccccccccc", "No SIM"), similarity: null, source: "graph", pairs: [{ from: concept("t-sim", "Keep the SIM"), to: concept("t-nosim", "No SIM") }], note: null },
+      { entry: other("ke_dddddddddddd", "Three accounts a phone"), similarity: 0.92, source: "checked", pairs: [], note: "2-3 vs 5 accounts" }
+    ],
+    disagreementsTotal: 25,
+    citation: entry.citation
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail } });
+  const lines = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" })).split("\n");
+  const at = lines.indexOf("Disagrees with:");
+  assert.deepEqual(lines.slice(at, lines.indexOf("---")), [
+    "Disagrees with:",
+    '- ke_bbbbbbbbbbbb "Use Outlook" · LLM-checked · meaning 0.95',
+    "  note: Gmail vs Outlook",
+    `  cite: ${detail.disagreements![0]!.entry.citation}`,
+    '- ke_cccccccccccc "No SIM" · concept graph',
+    "  concepts: Keep the SIM (Tactic) vs No SIM (Tactic)",
+    `  cite: ${detail.disagreements![1]!.entry.citation}`,
+    '- ke_dddddddddddd "Three accounts a phone" · LLM-checked · meaning 0.92',
+    "  note: 2-3 vs 5 accounts",
+    `  cite: ${detail.disagreements![2]!.entry.citation}`,
+    "+22 more",
+    "Similar:",
+    '- ke_eeeeeeeeeeee "Warm-up guide" · meaning 0.90',
+    `  cite: ${detail.similar![2]!.entry.citation}`
+  ]);
+});
+
+test("knowledge_insights: a long note is cut at a sentence end, else a word end, with …", async () => {
+  const first = "Entry A says to sign up with an Outlook or Proton email because Gmail accounts get linked across devices by Google's own signals.";
+  const second = "Entry B says to sign up with the email and not the phone number, and that only Gmail is safe because other providers carry a much higher ban risk on TikTok.";
+  const long = `${first} ${second} ${second}`;
+  const words = Array.from({ length: 90 }, (_, i) => `word${i}`).join(" ");
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.insights, {
+    status: 200,
+    body: { ...INSIGHTS, contradictions: [{ ...INSIGHTS.contradictions[1]!, note: long }, { ...INSIGHTS.contradictions[1]!, note: words }] }
+  });
+  const notes = textOf(await run(api, "knowledge_insights", {}))
+    .split("\n")
+    .filter((line) => line.startsWith("   note: "))
+    .map((line) => line.slice("   note: ".length));
+  assert.equal(notes[0], `${first} ${second} …`, "whole sentences, past 200 characters");
+  assert.ok(notes[1]!.length <= 400 && notes[1]!.endsWith("…"), notes[1]);
+  assert.match(notes[1]!, / word\d+…$/, "a whole word before the …");
+  assert.ok(words.startsWith(notes[1]!.slice(0, -1)));
+});
+
 test("knowledge_get: a name that repeats in one list of shared concepts carries its type", async () => {
   const entry = meta();
   const detail: KnowledgeEntryDetail = {

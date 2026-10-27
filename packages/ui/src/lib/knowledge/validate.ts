@@ -24,6 +24,7 @@ import {
   type KnowledgeConcept,
   type KnowledgeConceptDetail,
   type KnowledgeConceptRef,
+  type KnowledgeDisagreement,
   type KnowledgeEdge,
   type KnowledgeEntriesResponse,
   type KnowledgeEntry,
@@ -502,7 +503,29 @@ function parseEntryDetail(value: unknown): KnowledgeEntryDetail | null {
   if (possibleDuplicates) detail.possibleDuplicates = possibleDuplicates;
   const novelty = parseKnowledgeNovelty(value.novelty);
   if (novelty) detail.novelty = novelty;
+  // Absent from an older daemon (the panel then reads the similar entries' `contradicts` reasons).
+  const disagreeing = list(value.disagreements, parseKnowledgeDisagreement);
+  if (disagreeing) {
+    const ids = new Set<string>([entry.id]);
+    detail.disagreements = disagreeing.filter((item) => !ids.has(item.entry.id) && (ids.add(item.entry.id), true));
+    const total = count(value.disagreementsTotal);
+    if (total > detail.disagreements.length) detail.disagreementsTotal = total;
+  }
   return detail;
+}
+
+/** One entry an entry disagrees with: null without a readable entry; its source, pairs and note repaired like a reason's. */
+function parseKnowledgeDisagreement(value: unknown): KnowledgeDisagreement | null {
+  if (!isRecord(value)) return null;
+  const entry = parseKnowledgeEntrySummary(value.entry);
+  if (!entry) return null;
+  return {
+    entry,
+    similarity: unitSimilarity(value.similarity),
+    source: contradictionSource(value.source),
+    pairs: list(value.pairs, parseConceptPair) ?? [],
+    note: noteOf(value.note)
+  };
 }
 
 /** What an entry adds; null (absent, as from an older daemon) when it is not an object. */

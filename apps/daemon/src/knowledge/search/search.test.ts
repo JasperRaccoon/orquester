@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeVisibility } from "@orquester/api";
-import type { KnowledgeVectorThresholds } from "../ports.ts";
+import type { KnowledgePairCheck, KnowledgeVectorThresholds } from "../ports.ts";
 import { KnowledgeError } from "../store/errors.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
@@ -616,6 +616,65 @@ test("match explanations: via in order, terms as typed, passage offsets into the
   assert.deepEqual(viaConcept.match!.terms, []);
   assert.equal(viaConcept.match!.passage, null);
   assert.equal(viaConcept.match!.band, "good", "concept expansion is at least good");
+});
+
+test("a long entry's passage is the chunk that holds the query's words when it is about as close in meaning as the closest", async (t) => {
+  const { store, search } = await setup(t);
+  const long = "ke_longsurveyaa";
+  // The first window is all ads words (closest to "cpc budget" by meaning, none of its words); the
+  // last one names them among other words.
+  const ads = Array.from({ length: 200 }, (_, i) => (i % 2 === 0 ? "campaign" : "ads")).join(" ");
+  const other = Array.from({ length: 60 }, (_, i) => `note${i}`).join(" ");
+  const body = `${ads} ${other} raise the cpc budget after learning`;
+  store.put(long, body, [ADS], { title: "Ads notes" }, true);
+  await search.indexEntries([long]);
+  await search.idle();
+  const hit = entryHits((await search.search({ query: "cpc budget", limit: 25 }, ALL)).hits).find((h) => h.entry.id === long)!;
+  const passage = hit.match!.passage!;
+  assert.ok(passage.chunks >= 2);
+  assert.equal(passage.chunk, passage.chunks - 1);
+  assert.match(body.slice(passage.start, passage.end), /cpc budget/);
+  assert.match(hit.entry.snippet, /cpc budget/);
+});
+
+test("a survey ranks below an entry that matches as well, unless the query asks for a survey", async (t) => {
+  const text = "Raise the ads budget only after the campaign learns.";
+  const { search } = await setup(t, {
+    more: (store) => {
+      // Ids in the order a tie is broken: the survey first.
+      store.put("ke_aaaasurveyaa", text, [ADS], { title: "Ads", kind: "synthesis" }, true);
+      store.put("ke_bbbbpostbbbb", text, [ADS], { title: "Ads", kind: "post" }, true);
+    }
+  });
+  await search.idle();
+  const order = async (query: string) => entryIds((await search.search({ query, diverse: false }, ALL)).hits).filter((id) => id.includes("survey") || id.includes("post"));
+  assert.deepEqual(await order("ads budget campaign"), ["ke_bbbbpostbbbb", "ke_aaaasurveyaa"]);
+  assert.deepEqual(await order("ads budget campaign overview"), ["ke_aaaasurveyaa", "ke_bbbbpostbbbb"]);
+});
+
+test("the other side of a checked disagreement the query finds comes up next to it; a consistent check moves nothing", async (t) => {
+  const { search } = await setup(t, {
+    embedder: null,
+    more: (store) => {
+      store.put("ke_gmailgmailgm", "Use Gmail: the email provider matters. Gmail is the email provider TikTok trusts.", [ADS], { title: "Email provider for TikTok" }, true);
+      store.put("ke_fillerfiller", "Which email provider? Any email provider works for newsletters.", [ADS], { title: "Newsletters" }, true);
+      store.put("ke_fillertwotwo", "An email provider with good deliverability helps cold outreach.", [ADS], { title: "Cold outreach" }, true);
+      store.put("ke_outlookoutlo", "Make an Outlook or Proton email and sign up with it.", [ADS], { title: "13 steps" }, true);
+    }
+  });
+  await search.idle();
+  const order = async () => entryIds((await search.search({ query: "email provider" }, ALL)).hits);
+  const before = await order();
+  assert.deepEqual(before.slice(0, 1), ["ke_gmailgmailgm"]);
+  assert.ok(before.indexOf("ke_outlookoutlo") > 2, before.join(" "));
+  const checks: KnowledgePairCheck[] = [];
+  search.connectLinking({ pairChecks: { all: () => checks, get: () => null, onChange: () => () => undefined } });
+  checks.push({ a: "ke_gmailgmailgm", b: "ke_outlookoutlo", verdict: "consistent", note: "Both need an email", checkedAt: "t" });
+  assert.deepEqual(await order(), before);
+  checks[0] = { ...checks[0]!, verdict: "contradicts", note: "A says only a Gmail email provider is safe, B an Outlook one" };
+  const after = await order();
+  assert.deepEqual(after.slice(0, 2), ["ke_gmailgmailgm", "ke_outlookoutlo"]);
+  assert.deepEqual([...after].sort(), [...before].sort(), "the same hits");
 });
 
 test("match bands reflect semantic thresholds and lexical coverage through search results", async (t) => {

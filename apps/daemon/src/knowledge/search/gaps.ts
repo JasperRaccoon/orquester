@@ -40,6 +40,11 @@ export interface FindLinkGapsOptions {
   exclude?: (a: string, b: string) => boolean;
   /** Each entry's nearest neighbours considered (default 5). */
   neighbours?: number;
+  /**
+   * Whether two entries are about the same thing beyond their closeness (`a` < `b`; e.g. claims of
+   * theirs close in meaning): a pair it refuses is no gap. Absent: every pair is.
+   */
+  related?: (a: string, b: string) => boolean;
 }
 
 const YIELD_EVERY_MS = 40;
@@ -112,7 +117,7 @@ export async function findLinkGaps(options: FindLinkGapsOptions): Promise<Knowle
       if (shared) continue;
       const [a, b] = row.id < other.id ? [row.id, other.id] : [other.id, row.id];
       const key = `${a} ${b}`;
-      if (pairs.has(key) || options.exclude?.(a, b)) continue;
+      if (pairs.has(key) || options.exclude?.(a, b) || (options.related && !options.related(a, b))) continue;
       pairs.set(key, { a, b, similarity });
     }
     await pause();
