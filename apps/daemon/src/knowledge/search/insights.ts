@@ -6,9 +6,12 @@
  * - Contradictions: {@link findContradictions} over every visible pair; checked ones first, then
  *   by closeness in meaning plus {@link CENTRALITY_WEIGHT} × how central the contradicting
  *   concepts are to both entries ({@link conceptCentrality}).
- * - Bridges: entries whose distinctive concepts ({@link distinctiveLimit}; never a person or an
- *   organization) are shared with entries in at least 2 other clusters of two or more; most
- *   clusters first, then most such concepts, then newest.
+ * - Bridges: entries (never a survey: {@link isSurveyEntry}) whose distinctive concepts
+ *   ({@link distinctiveLimit}, by id and by name in any type; never a person or an organization)
+ *   are shared with non-survey entries in at least 2 other clusters of two or more, each cluster
+ *   tied by a claim or a thing named in two words or more ({@link bridgeStrong}), or else by two
+ *   concepts; most clusters first, then most such concepts, then newest. 126 real entries: 36
+ *   bridges, the first eight surveys or hubs, many tied by "iOS" or "CAC" alone; 6 after.
  * - Single-source claims worth verifying: claims ({@link SINGLE_SOURCE_TYPES}) linked to exactly
  *   one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3 or more,
  *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`), and
@@ -258,29 +261,46 @@ export class KnowledgeInsights {
     // Bridges.
     const bridges: { meta: KnowledgeEntryMeta; own: number; reached: [number, Set<string>][]; concepts: KnowledgeConceptRef[] }[] = [];
     if (drawn) {
+      // Entries linked to a concept's name in any type ("iOS" as a Channel and as a Platform).
+      const entriesByName = new Map<string, Set<string>>();
+      for (const [id, concepts] of conceptsOf) {
+        for (const concept of concepts) {
+          const key = linkGapConceptKey(concept);
+          let set = entriesByName.get(key);
+          if (!set) entriesByName.set(key, (set = new Set()));
+          set.add(id);
+        }
+      }
+      const surveyOf = new Map(visible.map((meta) => [meta.id, isSurveyEntry(meta)]));
       for (const meta of visible) {
         const own = clusterOf.get(meta.id);
-        if (own === undefined) continue;
-        const reached = new Map<number, Set<string>>();
+        // A survey restates its sources: it ties clusters by construction, it bridges nothing.
+        if (own === undefined || surveyOf.get(meta.id)) continue;
+        const reached = new Map<number, { concepts: Set<string>; strong: boolean }>();
         const tying: KnowledgeConceptRef[] = [];
         for (const concept of conceptsOf.get(meta.id)!) {
           if (NON_TOPIC_CONCEPT_TYPES.has(concept.type.toLowerCase())) continue;
           const others = entriesOf.get(concept.id)!;
-          if (others.length < 2 || others.length > most) continue;
+          if (others.length < 2 || others.length > most || entriesByName.get(linkGapConceptKey(concept))!.size > most) continue;
+          const strong = bridgeStrong(concept);
           let ties = false;
           for (const other of others) {
-            const cluster = other === meta.id ? undefined : clusterOf.get(other);
+            const cluster = other === meta.id || surveyOf.get(other) ? undefined : clusterOf.get(other);
             if (cluster === undefined || cluster === own || clusterSize(cluster) < 2) continue;
-            let concepts = reached.get(cluster);
-            if (!concepts) reached.set(cluster, (concepts = new Set()));
-            concepts.add(concept.id);
+            let tie = reached.get(cluster);
+            if (!tie) reached.set(cluster, (tie = { concepts: new Set(), strong: false }));
+            tie.concepts.add(concept.id);
+            tie.strong ||= strong;
             ties = true;
           }
           if (ties) tying.push(concept);
         }
-        if (reached.size >= BRIDGE_MIN_CLUSTERS) {
-          const ordered = [...reached].sort((x, y) => y[1].size - x[1].size || x[0] - y[0]);
-          bridges.push({ meta, own, reached: ordered, concepts: tying });
+        // A cluster reached through one weak concept alone ("CAC") is no bridge to it.
+        const kept = [...reached].filter(([, tie]) => tie.strong || tie.concepts.size >= 2);
+        if (kept.length >= BRIDGE_MIN_CLUSTERS) {
+          const keptConcepts = new Set(kept.flatMap(([, tie]) => [...tie.concepts]));
+          const ordered = kept.sort((x, y) => y[1].concepts.size - x[1].concepts.size || x[0] - y[0]).map(([cluster, tie]): [number, Set<string>] => [cluster, tie.concepts]);
+          bridges.push({ meta, own, reached: ordered, concepts: tying.filter((concept) => keptConcepts.has(concept.id)).sort((x, y) => Number(bridgeStrong(y)) - Number(bridgeStrong(x))) });
         }
         await pause();
       }
@@ -386,6 +406,19 @@ export function conceptCentrality(conceptId: string, entryConcepts: ReadonlySet<
   let near = entryConcepts.has(conceptId) ? 1 : 0;
   for (const id of new Set(neighbours(conceptId))) if (entryConcepts.has(id)) near += 1;
   return near / entryConcepts.size;
+}
+
+/**
+ * Whether a concept ties two entries on its own: a claim (a tactic, rule, guideline or result), or
+ * a thing named in two words or more ("Google Ads API"). A one-word name ("iOS", "WebDriverAgent")
+ * or a metric ("CAC payback", "Session time") is common ground, not a topic: it ties a bridge's
+ * cluster only beside another concept.
+ */
+function bridgeStrong(concept: KnowledgeConceptRef): boolean {
+  const type = concept.type.toLowerCase();
+  if (type === "metric") return false;
+  if (CLAIM_CONCEPT_TYPES.has(type)) return true;
+  return (concept.name.match(/[\p{L}\p{N}]+/gu) ?? []).length >= 2;
 }
 
 /**

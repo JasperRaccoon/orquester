@@ -162,6 +162,37 @@ test("bridges: an entry whose distinctive topic concepts reach two other cluster
   assert.ok(!JSON.stringify(seo).includes(ke("h")) && !JSON.stringify(seo).includes("Hidden note"));
 });
 
+test("bridges: never a survey, nor a cluster reached through one common concept alone (a one-word name, a metric, a name other entries use)", async () => {
+  const s = await setup();
+  const bridges = async () => (await s.insights.list({}, s.seoOnly)).bridges.map((b) => [b.entry.id, b.concepts.map((c) => c.id)]);
+  const reload = (extra: Record<string, unknown>[]) =>
+    loadGraph(s.graph, [
+      node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")),
+      node("tactic-bq", "Bridge to Q", files("p1", "q1")),
+      ...extra
+    ]);
+  await reload([node("tactic-br", "Bridge to R", files("p1", "r1"))]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "tactic-br"]]]);
+
+  // P1, a synthesis, restates its sources.
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "synthesis" }, true);
+  assert.deepEqual(await bridges(), []);
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "post" }, true);
+
+  // R through a one-word tool, a metric, or a name a third entry uses as another type: no bridge.
+  for (const weak of [
+    [node("tool-ios", "iOS", files("p1", "r1"), { type: "Tool" })],
+    [node("metric-cac", "CAC payback", files("p1", "r1"), { type: "Metric" })],
+    [node("channel-ads", "Paid ads", files("p1", "r1"), { type: "Channel" }), node("platform-ads", "Paid ads", files("q2", "q3", "q4"), { type: "Platform" })]
+  ]) {
+    await reload(weak);
+    assert.deepEqual(await bridges(), [], JSON.stringify(weak[0]!.id));
+  }
+  // Two weak concepts together tie it.
+  await reload([node("tool-ios", "iOS", files("p1", "r1"), { type: "Tool" }), node("metric-cac", "CAC payback", files("p1", "r1"), { type: "Metric" })]);
+  assert.deepEqual(await bridges(), [[ke("p1"), ["tactic-bq", "tool-ios", "metric-cac"]]]);
+});
+
 test("an LLM cluster name added after insights were computed shows in them: the labels' revision is part of the cache key", async () => {
   const s = await setup();
   let label: string | null = null;
