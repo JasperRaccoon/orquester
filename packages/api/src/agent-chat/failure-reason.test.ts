@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { failureReasonOfActivity } from "./failure-reason.ts";
+import { failureReasonOfActivity, overloadOfActivity } from "./failure-reason.ts";
 import type { ThreadActivityItem } from "./thread.ts";
 
 let ids = 0;
@@ -71,6 +71,14 @@ test("an unknown reason is no failure this reader knows — and never read by it
     ),
     null
   );
+});
+
+test("an overload is the provider's failure: never an account failure, read by its own reader", () => {
+  const row = activity("runtime.error", { message: "Selected model is at capacity.", reason: "overloaded" });
+  assert.equal(failureReasonOfActivity(row), null, "no workflow fails over on it");
+  assert.deepEqual(overloadOfActivity(row), { message: "Selected model is at capacity." });
+  assert.equal(overloadOfActivity(activity("runtime.warning", { message: "retrying", reason: "overloaded" })), null);
+  assert.equal(overloadOfActivity(activity("runtime.error", { message: "x", reason: "usage_limit" })), null);
 });
 
 test("legacy: the adapters' real sentences", () => {

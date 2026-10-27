@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync
 import { createServer, connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -406,7 +407,17 @@ test("files: a box project's chat cannot move files through the host stub", asyn
 });
 
 test("download: a file replaces a file atomically (exec bit kept); a directory lands at local_path; an existing directory is refused", async () => {
-  const { tools } = world();
+  const { tools, connection } = world();
+  const readTar = connection.readTar.bind(connection);
+  connection.readTar = async (path) => {
+    const archive = await readTar(path);
+    return Readable.from((async function* () {
+      yield* archive;
+      // Legal archive padding larger than a pipe buffer: extraction must consume it through EOF.
+      const padding = Buffer.alloc(64 * 1024);
+      for (let i = 0; i < 16; i++) yield padding;
+    })());
+  };
   mkdirSync(join(BOX, "out", "logs", "nested"), { recursive: true });
   writeFileSync(join(BOX, "out", "app"), "BINARY", { mode: 0o755 });
   writeFileSync(join(BOX, "out", "logs", "build.log"), "ok\n");

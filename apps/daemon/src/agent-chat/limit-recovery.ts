@@ -22,6 +22,13 @@
  *    account cooling down it falls back to the automatic resume, woken at the earliest reset of
  *    any of them. Never for an agent without managed accounts (OpenCode).
  *
+ * A chat stopped on the provider's capacity (`kind: "overloaded"`: Codex "Selected model is at
+ * capacity", Claude's 529) is no account's fault: no cooldown, no account switch. It is retried on
+ * the same schedule machinery, {@link OVERLOAD_RETRY_BASE_MS} after the failure, doubling for each
+ * retry that met the error again (up to {@link OVERLOAD_RETRY_MAX_MS}); `resetAt` is then the
+ * retry's time. A Codex goal the failure blocked is set going again with `/goal resume` instead of
+ * the continue message.
+ *
  * A resume is skipped, and the schedule disarmed, when the chat was closed, the user wrote to it
  * (the notice clears), it is busy, or it waits on an approval or a question. A parked turn (the
  * Claude SDK holds a turn on a rejected window instead of failing it) is interrupted first, and
@@ -41,6 +48,8 @@ import type { EventEmitter } from "node:events";
 import { SYSTEM_ACCOUNT_ID, type AccountSelectionDecision, type AgentAdapterId, type SessionSummary } from "@orquester/api";
 import {
   agentChatCommandPath,
+  OVERLOAD_RETRY_BASE_MS,
+  OVERLOAD_RETRY_MAX_MS,
   TURN_NOT_IDLE,
   USAGE_LIMIT_CONTINUE_MESSAGE,
   USAGE_LIMIT_RESUME_MARGIN_MS,
@@ -75,6 +84,10 @@ const DEFAULT_SETTLE_TIMEOUT_MS = 60_000;
  * message never showed up) stops holding the banner's actions, so the user can act again.
  */
 const RESUMING_STUCK_MS = 2 * 60_000;
+/** An overload met again within this long of the last retry continues its streak (the next wait doubles). */
+const OVERLOAD_STREAK_MS = 10 * 60_000;
+/** What the retry sends into a chat whose Codex goal the overload blocked. */
+const GOAL_RESUME_COMMAND = "/goal resume";
 /** The longest command id this service mints (the routes refuse past 200). */
 const MAX_COMMAND_ID = 160;
 
@@ -165,9 +178,14 @@ export class ChatLimitRecovery {
   private readonly lanes = new Map<string, Promise<unknown>>();
   /** Chats whose persisted action must be re-run once the daemon's API is bound. */
   private readonly owed = new Set<string>();
+  /** Per chat, the automatic overload retries sent in a row and when the last went out (pacing only). */
+  private readonly overloadStreaks = new Map<string, { count: number; sentAt: number }>();
   private started = false;
   private stopped = false;
-  private readonly onClosed = ({ id }: { id: string }): void => this.forget(id);
+  private readonly onClosed = ({ id }: { id: string }): void => {
+    this.forget(id);
+    this.overloadStreaks.delete(id);
+  };
 
   constructor(private readonly opts: LimitRecoveryOptions) {}
 
@@ -243,7 +261,7 @@ export class ChatLimitRecovery {
         const before: ChatUsageLimitState = {
           ...state,
           autoResume: state.resetAt === null ? "unscheduled" : automatic ? "armed" : "off",
-          resumeAt: state.resetAt !== null && automatic ? resumeTime(state.resetAt) : null
+          resumeAt: state.resetAt !== null && automatic ? resumeTime(state.resetAt, state.kind) : null
         };
         delete before.action;
         this.opts.chat.setUsageLimit(id, before);
@@ -330,6 +348,10 @@ export class ChatLimitRecovery {
   }
 
   private async detect(id: string, tab: SessionSummary, notice: ThreadUsageLimitNotice): Promise<void> {
+    if (notice.kind === "overloaded") {
+      await this.detectOverload(id, tab, notice);
+      return;
+    }
     const now = this.opts.clock.now();
     const family = accountFamilyOf(tab.refId);
     const usageResetAt =
@@ -388,6 +410,43 @@ export class ChatLimitRecovery {
     }
     const scheduled = this.opts.chat.usageLimitOf(id);
     if (scheduled?.autoResume === "armed") this.schedule(id, scheduled);
+  }
+
+  /**
+   * The provider had no capacity: retry after the streak's wait, counted from the failure (at once
+   * when that already passed — a daemon restart). Old history is not retried, as for a limit.
+   */
+  private async detectOverload(id: string, tab: SessionSummary, notice: ThreadUsageLimitNotice): Promise<void> {
+    const now = this.opts.clock.now().getTime();
+    const limitedAt = Date.parse(notice.at);
+    if (!Number.isFinite(limitedAt) || now - limitedAt > STALE_LIMIT_MS) {
+      if (this.opts.chat.usageLimitOf(id)) {
+        this.forget(id);
+        this.opts.chat.setUsageLimit(id, null);
+      }
+      return;
+    }
+    const prefs = await this.opts.prefs();
+    this.forget(id);
+    const streak = this.overloadStreaks.get(id);
+    const retries = streak && now - streak.sentAt <= OVERLOAD_STREAK_MS ? streak.count : 0;
+    const wait = Math.min(OVERLOAD_RETRY_BASE_MS * 2 ** retries, OVERLOAD_RETRY_MAX_MS);
+    const retryAt = new Date(Math.max(limitedAt + wait, now)).toISOString();
+    const state: ChatUsageLimitState = {
+      noticeId: notice.activityId,
+      turnId: notice.turnId,
+      detectedAt: new Date(now).toISOString(),
+      limitedAt: notice.at,
+      resetAt: retryAt,
+      accountId: tab.accountId ?? "",
+      parked: notice.parked,
+      autoResume: prefs.autoResume ? "armed" : "off",
+      resumeAt: prefs.autoResume ? retryAt : null,
+      kind: "overloaded",
+      ...(notice.message ? { message: notice.message } : {})
+    };
+    this.opts.chat.setUsageLimit(id, state);
+    if (state.autoResume === "armed") this.schedule(id, state);
   }
 
   /** Cool the account down in the shared store, as a workflow's failover does (`coolDown`). */
@@ -476,7 +535,7 @@ export class ChatLimitRecovery {
     }
     const ownReset = state.resetAt === null ? Number.NaN : Date.parse(state.resetAt);
     const ownFree = Number.isFinite(ownReset) && ownReset <= now;
-    if (!ownFree && prefs.switchAccount && this.canSwitch(tab)) {
+    if (!ownFree && state.kind !== "overloaded" && prefs.switchAccount && this.canSwitch(tab)) {
       // Woken by another account's reset (every account was cooling down): move to it.
       const outcome = await this.failover(id, {
         commandId: limitCommandId("limit-switch", id, state.turnId ?? state.noticeId, String(due)),
@@ -556,7 +615,7 @@ export class ChatLimitRecovery {
         if (state.resetAt === null) {
           throw new UsageLimitError("The reset time is unknown, so the resume cannot be scheduled. Resume it yourself instead.", "COMMAND_REJECTED");
         }
-        const at = Math.max(Date.parse(state.resetAt) + USAGE_LIMIT_RESUME_MARGIN_MS, this.opts.clock.now().getTime());
+        const at = Math.max(Date.parse(resumeTime(state.resetAt, state.kind)), this.opts.clock.now().getTime());
         const next: ChatUsageLimitState = { ...state, autoResume: "armed", resumeAt: new Date(at).toISOString() };
         delete next.userCancelled;
         this.opts.chat.setUsageLimit(id, next);
@@ -634,7 +693,7 @@ export class ChatLimitRecovery {
           this.forget(tab.id);
           this.opts.chat.setUsageLimit(tab.id, { ...state, autoResume: "off", resumeAt: null });
         } else if (prefs.autoResume && state.autoResume === "off" && state.userCancelled !== true && state.resetAt !== null) {
-          const at = Date.parse(state.resetAt) + USAGE_LIMIT_RESUME_MARGIN_MS;
+          const at = Date.parse(resumeTime(state.resetAt, state.kind));
           if (!(at > now)) return;
           const next: ChatUsageLimitState = { ...state, autoResume: "armed", resumeAt: new Date(at).toISOString() };
           this.opts.chat.setUsageLimit(tab.id, next);
@@ -670,7 +729,16 @@ export class ChatLimitRecovery {
       action: { kind: "resume", commandId: input.commandId, startedAt: this.opts.clock.now().toISOString(), automatic: input.automatic }
     };
     this.opts.chat.setUsageLimit(id, state);
-    const outcome = await this.postContinue(api, id, state, input.commandId, USAGE_LIMIT_CONTINUE_MESSAGE);
+    const overloaded = before.kind === "overloaded";
+    const outcome = await this.postContinue(api, id, state, input.commandId, (head) =>
+      overloaded && head.goal?.status === "blocked" ? GOAL_RESUME_COMMAND : USAGE_LIMIT_CONTINUE_MESSAGE
+    );
+    if (overloaded && input.automatic && outcome.kind === "sent") {
+      const now = this.opts.clock.now().getTime();
+      const streak = this.overloadStreaks.get(id);
+      const count = streak && now - streak.sentAt <= OVERLOAD_STREAK_MS ? streak.count + 1 : 1;
+      this.overloadStreaks.set(id, { count, sentAt: now });
+    }
     this.settle(id, before, outcome, input.automatic ? "auto-resume" : "user");
   }
 
@@ -827,7 +895,7 @@ export class ChatLimitRecovery {
     id: string,
     state: ChatUsageLimitState,
     commandId: string,
-    input: string,
+    input: string | ((head: ThreadHeadResponse) => string),
     opts: { parkedHandled?: boolean } = {}
   ): Promise<PostOutcome> {
     if (!opts.parkedHandled && !(await this.stopParkedTurn(api, id, state, commandId))) return { kind: "busy" };
@@ -842,7 +910,7 @@ export class ChatLimitRecovery {
     if (!acceptsMessage(tab, head)) return { kind: "busy" };
     try {
       const res = await api.request("POST", agentChatCommandPath(id, "turn"), {
-        body: { commandId, input, interactionMode: head.interactionMode, ifIdle: true }
+        body: { commandId, input: typeof input === "string" ? input : input(head), interactionMode: head.interactionMode, ifIdle: true }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
@@ -868,9 +936,9 @@ function pastReset(stamp: string | undefined, now: Date): string | null {
   return Number.isFinite(t) && t <= now.getTime() ? new Date(t).toISOString() : null;
 }
 
-/** When the automatic resume goes out for a reset. */
-function resumeTime(resetAt: string): string {
-  return new Date(Date.parse(resetAt) + USAGE_LIMIT_RESUME_MARGIN_MS).toISOString();
+/** When the automatic resume goes out for a reset; an overload's `resetAt` is already the retry's time. */
+function resumeTime(resetAt: string, kind?: ChatUsageLimitState["kind"]): string {
+  return new Date(Date.parse(resetAt) + (kind === "overloaded" ? 0 : USAGE_LIMIT_RESUME_MARGIN_MS)).toISOString();
 }
 
 function validCommandId(value: unknown): string {

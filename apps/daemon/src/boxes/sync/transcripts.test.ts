@@ -66,6 +66,7 @@ const signal = (): AbortSignal => new AbortController().signal;
 const LINE = (n: number): string => `${JSON.stringify({ type: "user", n, text: "x".repeat(40) })}\n`;
 
 test("Claude: new transcripts and sidecars land at the identical host path, through the shared projects link", async (t) => {
+  assert.equal(claudeProjectDirName("/work/repo.name_1"), "-work-repo-name-1");
   const f = await fixture(t);
   const dir = join(f.home, "projects", claudeProjectDirName(f.cwd));
   await put(f.box.local(join(dir, "s1.jsonl")), LINE(1) + LINE(2));

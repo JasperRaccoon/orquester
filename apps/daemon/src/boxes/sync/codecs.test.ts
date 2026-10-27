@@ -70,6 +70,46 @@ test("mcp-toml blanks env and bearer tokens and restores them", () => {
   assert.equal(restored.model_providers.p.experimental_bearer_token, "abc");
 });
 
+test("codex-toml: the project trust Codex adds in a box stays there and never reaches the host", () => {
+  const codec = syncCodec("codex-toml");
+  const doc = (bytes: Buffer) => JSON.parse(JSON.stringify(parseToml(bytes.toString("utf8"))));
+  const host = buf('# mine\nmodel = "x"\n\n[mcp_servers.gh]\ncommand = "gh-mcp"\nenv = { GH_TOKEN = "ghp_secret" }\n\n[projects."/host/trusted"]\ntrust_level = "trusted"\n');
+  const trusted = buf('# mine\nmodel = "x"\n\n[mcp_servers.gh]\ncommand = "gh-mcp"\nenv = { GH_TOKEN = "" }\n\n[projects."/host/trusted"]\ntrust_level = "untrusted"\n\n[projects."/w/box-project"]\ntrust_level = "trusted"\n');
+
+  // A host push owns its trust entries while retaining the box's local entries.
+  const hostLater = buf(host.toString("utf8").replace('model = "x"', 'model = "y"'));
+  assert.deepEqual(doc(codec.toBox(hostLater, trusted, identity)!), {
+    model: "y",
+    mcp_servers: { gh: { command: "gh-mcp", env: { GH_TOKEN: "" } } },
+    projects: { "/host/trusted": { trust_level: "trusted" }, "/w/box-project": { trust_level: "trusted" } }
+  });
+  const hostUntrusts = buf(host.toString("utf8").replace('trust_level = "trusted"', 'trust_level = "untrusted"'));
+  assert.equal(doc(codec.toBox(hostUntrusts, trusted, identity)!).projects["/host/trusted"].trust_level, "untrusted");
+
+  const edited = buf(trusted.toString("utf8").replace('model = "x"', 'model = "z"'));
+  assert.deepEqual(doc(codec.boxView(edited, host, identity)), {
+    model: "z",
+    mcp_servers: { gh: { command: "gh-mcp", env: { GH_TOKEN: "" } } },
+    projects: { "/host/trusted": { trust_level: "trusted" } }
+  });
+  const approved = codec.toHost(edited, host, identity);
+  assert.deepEqual(doc(approved), {
+    model: "z",
+    mcp_servers: { gh: { command: "gh-mcp", env: { GH_TOKEN: "ghp_secret" } } },
+    projects: { "/host/trusted": { trust_level: "trusted" } }
+  });
+  const approvedText = approved.toString("utf8");
+  assert.ok(approvedText.includes("# mine"));
+
+  // With no host trust, only unrelated project settings survive the box edit.
+  const plain = buf('model = "x"\n');
+  const boxOnly = buf('model = "y"\n\n[projects."/w/p"]\ntrust_level = "trusted"\n');
+  assert.deepEqual(doc(codec.toHost(boxOnly, plain, identity)), { model: "y" });
+  const withOther = buf(`${boxOnly.toString("utf8")}other = 1\n`);
+  assert.deepEqual(doc(codec.boxView(withOther, plain, identity)), { model: "y", projects: { "/w/p": { other: 1 } } });
+  assert.deepEqual(doc(codec.toHost(withOther, plain, identity)), { model: "y", projects: { "/w/p": { other: 1 } } });
+});
+
 test("claude-json syncs only MCP servers and project trust, merging into the box CLI's own state", () => {
   const codec = syncCodec("claude-json");
   const host = buf(
@@ -97,7 +137,12 @@ test("claude-json syncs only MCP servers and project trust, merging into the box
   assert.equal(pushed.numStartups, 9);
   assert.equal(pushed.projects["/w/p"].lastCost, 1);
   const hostLater = buf(JSON.stringify({ ...JSON.parse(host.toString("utf8")), numStartups: 5 }));
-  assert.ok(codec.hostView(hostLater, identity)!.equals(codec.boxView(boxState, identity)));
+  const shareable = {
+    mcpServers: { gh: { command: "gh", env: { GH_TOKEN: "" } } },
+    projects: { "/w/p": { hasTrustDialogAccepted: true, mcpServers: {} } }
+  };
+  assert.deepEqual(JSON.parse(codec.hostView(hostLater, identity)!.toString("utf8")), shareable);
+  assert.deepEqual(JSON.parse(codec.boxView(boxState, hostLater, identity).toString("utf8")), shareable);
 
   // Approving a new server in the box: host keeps its own state and the blanked secret.
   const boxEdited = JSON.parse(boxState.toString("utf8"));
@@ -109,7 +154,7 @@ test("claude-json syncs only MCP servers and project trust, merging into the box
   assert.equal(approved.numStartups, 4);
   assert.equal(approved.projects["/w/p"].lastCost, 3);
   assert.equal(
-    codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), identity), executableConfigKeys("claude", ".claude.json")),
+    codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), host, identity), executableConfigKeys("claude", ".claude.json")),
     true
   );
 });
@@ -183,7 +228,7 @@ test("S4: a blanked secret is never restored next to a target the box changed", 
 test("S6: nested process-starting and credential-routing keys make a change executable", () => {
   const json = syncCodec("mcp-json");
   const changed = (codec: ReturnType<typeof syncCodec>, agent: Parameters<typeof executableConfigKeys>[0], rel: string, host: object, box: object): boolean =>
-    codec.executableKeysChanged(codec.hostView(buf(JSON.stringify(host)), identity), codec.boxView(buf(JSON.stringify(box)), identity), executableConfigKeys(agent, rel));
+    codec.executableKeysChanged(codec.hostView(buf(JSON.stringify(host)), identity), codec.boxView(buf(JSON.stringify(box)), null, identity), executableConfigKeys(agent, rel));
 
   const settings = { env: { MAX_THINKING_TOKENS: "1000" }, permissions: { defaultMode: "default", allow: [] }, theme: "dark" };
   assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, theme: "light" }), false);
@@ -200,7 +245,7 @@ test("S6: nested process-starting and credential-routing keys make a change exec
 
   const toml = syncCodec("mcp-toml");
   const tomlChanged = (rel: string, agent: "codex" | "grok", host: string, box: string): boolean =>
-    toml.executableKeysChanged(toml.hostView(buf(host), identity), toml.boxView(buf(box), identity), executableConfigKeys(agent, rel));
+    toml.executableKeysChanged(toml.hostView(buf(host), identity), toml.boxView(buf(box), null, identity), executableConfigKeys(agent, rel));
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "b"\n'), false);
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[model_providers.p]\nbase_url = "https://x"\n'), true);
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[shell_environment_policy]\ninherit = "all"\n'), true);

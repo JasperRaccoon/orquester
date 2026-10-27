@@ -680,7 +680,9 @@ export class TemporaryBoxTools {
       abortWith(options.signal, () => source.destroy(new Error("cancelled")));
       // Unpacked by the host's tar into a fresh, private directory (tar refuses members that climb
       // out with `..` or absolute names, and links cannot redirect writes into existing paths there).
-      const tar = spawn(this.deps.tar ?? "tar", ["-xf", "-", "-C", staging, "--no-same-owner"], { stdio: ["pipe", "ignore", "pipe"] });
+      // Read the whole stream, including zero padding: exiting at the archive's first EOF block
+      // races the stdin pipeline and can reject a complete download as a premature close.
+      const tar = spawn(this.deps.tar ?? "tar", ["-xf", "-", "-C", staging, "--no-same-owner", "--ignore-zeros"], { stdio: ["pipe", "ignore", "pipe"] });
       const exited = processExit(tar);
       try {
         await pipeline(source, counter.stream, tar.stdin);

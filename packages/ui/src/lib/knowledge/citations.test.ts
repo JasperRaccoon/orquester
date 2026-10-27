@@ -3,9 +3,14 @@ import { beforeEach, describe, it } from "node:test";
 
 import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL } from "@orquester/api";
 
-import { checkKnowledgeCitation, knowledgeCitationState, resetKnowledgeCitations, type KnowledgeCitationsApi } from "./citations.ts";
+import {
+  checkKnowledgeCitation,
+  knowledgeCitationAnswer,
+  knowledgeCitationPending,
+  type KnowledgeCitationsApi
+} from "./citations.ts";
 import { applyKnowledgeEvent, resetKnowledge } from "./store.ts";
-import { event, flush } from "./fixtures.test-helpers.ts";
+import { entry, event, flush } from "./fixtures.test-helpers.ts";
 
 const ID = "ke_aaaaaaaaaaaa";
 const notFound = Object.assign(new Error("No such entry."), { body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." } });
@@ -18,7 +23,7 @@ function fakeApi(id: string) {
     connection: { id },
     getKnowledgeItem: (entryId) => {
       reads.push(entryId);
-      return new Promise<unknown>((resolve, reject) => pending.push({ resolve: () => resolve({ kind: "entry" }), reject }));
+      return new Promise<unknown>((resolve, reject) => pending.push({ resolve: () => resolve({ kind: "entry", entry: { entry: entry(), concepts: [], related: [], citation: "" } }), reject }));
     }
   };
   return { api, reads, pending };
@@ -27,7 +32,6 @@ function fakeApi(id: string) {
 describe("knowledge citation answers", () => {
   beforeEach(() => {
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   it("are forgotten when the knowledge store resets, even before any entry changed", async () => {
@@ -35,11 +39,11 @@ describe("knowledge citation answers", () => {
     const asked = checkKnowledgeCitation(one.api, ID);
     one.pending.shift()!.resolve();
     await asked;
-    assert.equal(knowledgeCitationState(ID), "exists");
+    assert.equal(knowledgeCitationAnswer(ID)?.state, "exists");
 
     // A connection switch or the plugin turning off (the app store calls this).
     resetKnowledge();
-    assert.equal(knowledgeCitationState(ID), "unknown");
+    assert.equal(knowledgeCitationAnswer(ID)?.state, undefined);
   });
 
   it("never re-ask through the client of a connection that was reset", async () => {
@@ -60,7 +64,7 @@ describe("knowledge citation answers", () => {
     resetKnowledge();
     one.pending.shift()!.resolve();
     await asked;
-    assert.equal(knowledgeCitationState(ID), "unknown");
+    assert.equal(knowledgeCitationAnswer(ID)?.state, undefined);
   });
 
   it("ask again when the entry changes while its first read is in flight", async () => {
@@ -73,7 +77,7 @@ describe("knowledge citation answers", () => {
     one.pending.shift()!.reject(notFound);
     await asked;
     await flush();
-    assert.equal(knowledgeCitationState(ID), "deleted");
+    assert.equal(knowledgeCitationAnswer(ID)?.state, "deleted");
   });
 
   it("keep the newest answer when an older read settles last", async () => {
@@ -86,6 +90,95 @@ describe("knowledge citation answers", () => {
     stale.resolve();
     await asked;
     await flush();
-    assert.equal(knowledgeCitationState(ID), "deleted");
+    assert.equal(knowledgeCitationAnswer(ID)?.state, "deleted");
+  });
+});
+
+describe("knowledge citation summaries (the hover card)", () => {
+  beforeEach(() => {
+    resetKnowledge();
+  });
+
+  const detail = (body: string) => ({
+    kind: "entry",
+    entry: {
+      entry: { ...entry({ body }), collections: ["kc_seo", "kc_ads"] },
+      concepts: [],
+      related: [],
+      citation: ""
+    }
+  });
+
+  /** A fake answering every read with `answer` (or its error), counting the reads. */
+  function answering(answer: () => unknown) {
+    const reads: string[] = [];
+    const api: KnowledgeCitationsApi = {
+      connection: { id: "c1" },
+      getKnowledgeItem: async (entryId) => {
+        reads.push(entryId);
+        return answer();
+      }
+    };
+    return { api, reads };
+  }
+
+  it("are read only when asked, once for every chip of the entry, and keep no body", async () => {
+    const body = `## Title\n\n> quoted **bold**\n- item \`code\`\n1. step\n\`\`\`js\nfence();\n\`\`\`\n![alt](x.png) end\n${"More text. ".repeat(40)}END_FULL_BODY`;
+    const { api, reads } = answering(() => detail(body));
+    assert.equal(knowledgeCitationAnswer(ID), undefined);
+    assert.deepEqual(reads, [], "nothing is read before a chip asks");
+
+    const first = checkKnowledgeCitation(api, ID);
+    assert.equal(knowledgeCitationPending(ID), true);
+    const second = checkKnowledgeCitation(api, ID);
+    await Promise.all([first, second]);
+    await checkKnowledgeCitation(api, ID);
+    assert.deepEqual(reads, [ID], "one read, shared");
+    assert.equal(knowledgeCitationPending(ID), false);
+
+    const answer = knowledgeCitationAnswer(ID);
+    assert.equal(answer?.state, "exists");
+    assert.ok(answer?.state === "exists" && answer.summary);
+    const summary = answer.summary;
+    assert.equal(summary.title, "Alternatives pages");
+    assert.equal(summary.author, "Hridoy");
+    assert.equal(summary.handle, "hridoyreh");
+    assert.equal(summary.postedAt, "2026-10-11");
+    assert.deepEqual(summary.collections, ["kc_seo", "kc_ads"]);
+    assert.match(summary.snippet, /^Title quoted bold item code step fence\(\); alt end More text\./);
+    assert.ok(!summary.snippet.includes("END_FULL_BODY"), "a short excerpt does not retain the whole body");
+    assert.equal("body" in summary, false, "the whole body is not kept");
+    assert.equal(knowledgeCitationAnswer(ID), answer, "the same object until it changes");
+  });
+
+  it("leave an entry unknown after another failure, and ask again next time", async () => {
+    let fail = true;
+    const { api, reads } = answering(() => {
+      if (fail) throw new Error("offline");
+      return detail("Back");
+    });
+    await checkKnowledgeCitation(api, ID);
+    assert.equal(knowledgeCitationAnswer(ID), undefined);
+    fail = false;
+    await checkKnowledgeCitation(api, ID);
+    assert.deepEqual(reads, [ID, ID]);
+    const answer = knowledgeCitationAnswer(ID);
+    assert.equal(answer?.state === "exists" && answer.summary?.snippet, "Back");
+  });
+
+  it("are read again when the entry changes, with the new summary", async () => {
+    let title = "Before";
+    const { api, reads } = answering(() => {
+      const value = detail("Text");
+      value.entry.entry.title = title;
+      return value;
+    });
+    await checkKnowledgeCitation(api, ID);
+    title = "After";
+    applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: [ID] }));
+    await flush();
+    assert.deepEqual(reads, [ID, ID]);
+    const answer = knowledgeCitationAnswer(ID);
+    assert.equal(answer?.state === "exists" && answer.summary?.title, "After");
   });
 });

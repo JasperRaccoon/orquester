@@ -13,14 +13,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 
-import { knowledgePlugin } from "../../../../lib/knowledge/fixtures.test-helpers";
+import { collection, collections, entry, knowledgePlugin } from "../../../../lib/knowledge/fixtures.test-helpers";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let useAppStore: typeof import("../../../../store/app").useAppStore;
 let resetKnowledge: typeof import("../../../../lib/knowledge/store").resetKnowledge;
 let deleteKnowledgeEntry: typeof import("../../../../lib/knowledge/store").deleteKnowledgeEntry;
-let resetKnowledgeCitations: typeof import("../../../../lib/knowledge/citations").resetKnowledgeCitations;
+let knowledgeStore: typeof import("../../../../lib/knowledge/store").knowledgeStore;
 let markdown: typeof import("./ChatMarkdown");
 let ApiError: typeof import("../../../../lib/api-client").ApiError;
 
@@ -63,8 +63,7 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ useAppStore } = await import("../../../../store/app"));
-  ({ resetKnowledge, deleteKnowledgeEntry } = await import("../../../../lib/knowledge/store"));
-  ({ resetKnowledgeCitations } = await import("../../../../lib/knowledge/citations"));
+  ({ resetKnowledge, deleteKnowledgeEntry, knowledgeStore } = await import("../../../../lib/knowledge/store"));
   markdown = await import("./ChatMarkdown");
   ({ ApiError } = await import("../../../../lib/api-client"));
 });
@@ -143,6 +142,12 @@ describe("the chat's URL filter", () => {
     assert.doesNotMatch(html, /src="orquester-knowledge:/);
     assert.doesNotMatch(html, /href="orquester-knowledge:/);
   });
+
+  it("loads an ordinary remote image by default in chat", () => {
+    const html = renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text: "![chart](https://example.com/chart.png)" }));
+    const image = JSDOM.fragment(html).querySelector("img");
+    assert.equal(image?.getAttribute("src"), "https://example.com/chart.png");
+  });
 });
 
 describe("knowledge citations in a message", () => {
@@ -170,14 +175,12 @@ describe("knowledge citations in a message", () => {
     reads = [];
     api.getKnowledgeItem = readItem;
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   afterEach(() => {
     act(() => root.unmount());
     useAppStore.setState(initial, true);
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   const settle = async () => {
@@ -305,5 +308,147 @@ describe("knowledge citations in a message", () => {
     assert.match(doc().body.textContent!, /Use alternatives pages Alternatives pages · @hridoyreh\./);
     const span = doc().querySelector(`[data-knowledge-citation-text="${LIVE}"]`);
     assert.equal(span?.tagName, "SPAN");
+  });
+});
+
+describe("a knowledge citation's hover card", () => {
+  let root: Root;
+  let reads: string[];
+  let initial: ReturnType<typeof useAppStore.getState>;
+
+  const api = {
+    connection: { id: "c1" },
+    getKnowledgeItem: async (id: string) => {
+      reads.push(id);
+      if (id === GONE) throw new ApiError(404, "GET", `/api/knowledge/items/${id}`, {}, { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
+      return {
+        kind: "entry",
+        entry: {
+          entry: entry({ id, collections: ["kc_seo", "kc_ads"], body: "## Why\n\nMake a page for **every** competitor.\n\nSecond paragraph." }),
+          concepts: [],
+          related: [],
+          citation: ""
+        }
+      };
+    },
+    deleteKnowledgeEntry: async () => ({}),
+    listKnowledgeCollections: async () => collections()
+  };
+
+  beforeEach(() => {
+    initial = { ...useAppStore.getState() };
+    const mount = dom.window.document.createElement("div");
+    dom.window.document.body.replaceChildren(mount);
+    root = createRoot(mount);
+    reads = [];
+    resetKnowledge();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    useAppStore.setState(initial, true);
+    resetKnowledge();
+  });
+
+  const settle = async () => {
+    await act(async () => {
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    });
+  };
+
+  const show = async (on = true) => {
+    useAppStore.setState({ api: api as never, plugins: [knowledgePlugin(on)], currentProject: PROJECT as never });
+    knowledgeStore.setState({ collections: collections([collection(), collection({ id: "kc_ads", name: "Ads", color: "chart-2" })]) });
+    const text = `See [Alternatives pages · @hridoyreh](orquester-knowledge:entry/${LIVE}) and [Old note](orquester-knowledge:entry/${GONE}).`;
+    await act(async () => root.render(createElement(markdown.ChatMarkdown, { text })));
+    await settle();
+  };
+
+  const doc = () => dom.window.document;
+  const chip = (id: string) => doc().querySelector<HTMLButtonElement>(`button[data-knowledge-citation="${id}"]`)!;
+  const card = (id: string) => doc().querySelector<HTMLElement>(`[data-knowledge-citation-card="${id}"]`);
+  const focus = async (element: HTMLElement) => {
+    await act(async () => element.focus());
+    await settle();
+  };
+  const blur = async (element: HTMLElement) => {
+    await act(async () => element.blur());
+    await settle();
+  };
+  const key = async (name: string) => {
+    await act(async () => {
+      doc().activeElement!.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
+    });
+    await settle();
+  };
+
+  it("is not there, and reads nothing, until a chip is focused or hovered", async () => {
+    await show();
+    assert.equal(card(LIVE), null);
+    assert.equal(doc().querySelector('[role="tooltip"]'), null);
+    assert.deepEqual(reads, []);
+  });
+
+  it("shows on focus with the entry's title, byline, date, collections and opening lines; Escape hides it", async () => {
+    await show();
+    await focus(chip(LIVE));
+    const shown = card(LIVE);
+    assert.ok(shown, "focus shows the card");
+    assert.equal(shown.getAttribute("role"), "tooltip");
+    assert.equal(chip(LIVE).getAttribute("aria-describedby"), shown.id, "the chip is described by it");
+    assert.match(shown.textContent!, /Alternatives pages/);
+    assert.match(shown.textContent!, /Hridoy/);
+    assert.match(shown.textContent!, /@hridoyreh/);
+    assert.match(shown.textContent!, /Oct 11, 2026/);
+    assert.match(shown.textContent!, /SEO/);
+    assert.match(shown.textContent!, /Ads/);
+    assert.match(shown.textContent!, /Make a page for every competitor/);
+    assert.deepEqual(reads, [LIVE], "read once, on focus");
+
+    await key("Escape");
+    assert.equal(card(LIVE), null, "Escape hides it");
+    assert.equal(chip(LIVE).getAttribute("aria-describedby"), null);
+
+    await focus(chip(GONE));
+    assert.ok(card(GONE));
+    await blur(chip(GONE));
+    assert.equal(card(GONE), null, "leaving the chip hides it");
+  });
+
+  it("says a deleted entry is deleted", async () => {
+    await show();
+    await focus(chip(GONE));
+    const shown = card(GONE);
+    assert.ok(shown);
+    assert.match(shown.textContent!, /Old note\s*deleted/);
+    assert.doesNotMatch(shown.textContent!, /Make a page for every competitor/);
+  });
+
+  it("clears a dropped read from an open card and ignores its stale answer", async () => {
+    const normalRead = api.getKnowledgeItem;
+    try {
+      for (const reset of [
+        () => knowledgeStore.setState((state) => ({ entriesRevision: state.entriesRevision + 1, changedEntryIds: null })),
+        () => resetKnowledge()
+      ]) {
+        let answer!: (value: Awaited<ReturnType<typeof normalRead>>) => void;
+        const pending = new Promise<Awaited<ReturnType<typeof normalRead>>>((resolve) => { answer = resolve; });
+        api.getKnowledgeItem = async (id: string) => { reads.push(id); return pending; };
+        await show();
+        await focus(chip(LIVE));
+        assert.match(card(LIVE)!.querySelector('[role="status"]')?.textContent ?? "", /Loading/);
+        await act(async () => reset());
+        assert.equal(card(LIVE)!.querySelector('[role="status"]'), null, "no read remains in flight");
+        assert.match(card(LIVE)!.textContent!, /unavailable/i);
+        const stale = await normalRead(LIVE);
+        stale.entry.entry.title = "Stale pre-reset title";
+        await act(async () => answer(stale));
+        await settle();
+        assert.doesNotMatch(card(LIVE)!.textContent!, /Stale pre-reset title/);
+        await blur(chip(LIVE));
+      }
+    } finally {
+      api.getKnowledgeItem = normalRead;
+    }
   });
 });

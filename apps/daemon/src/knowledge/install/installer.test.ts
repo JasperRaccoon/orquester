@@ -10,8 +10,12 @@ import {
   KnowledgeInstallError,
   MYKG_CONFIG_CHECK,
   MYKG_LOCKS_DIR,
+  installKnowledgeModel,
   installKnowledgeRuntime,
   knowledgeHomeDir,
+  knowledgeModelReady,
+  knowledgeModelRepairable,
+  knowledgeMykgReady,
   knowledgePythonDir,
   knowledgeRuntimeOf,
   knowledgeRuntimeReady,
@@ -24,6 +28,7 @@ import {
 } from "./installer.ts";
 import { MYKG_PROMPTS_ROOT, overlayDigest, overlayFiles } from "./overlay.ts";
 import {
+  EMBEDDING_MODEL,
   MYKG_LOCKS,
   MYKG_PINNED_VERSION,
   MYKG_PINNED_WHEEL_SHA256,
@@ -428,6 +433,112 @@ test("readiness: the manifest, the entry points, every model file, and (when ask
   assert.equal(await ready(), true, "it still runs without one (tiktoken would fetch it)");
   await rm(join(runtime.embeddingModelDir, "Fixture", "mini-model", "config.json"));
   assert.equal(await ready(), false, "a model file is gone");
+});
+
+/** `h` with the pinned version installed holding `old` (an install from before the model changed). */
+async function installedWithOldModel(h: Harness): Promise<ReturnType<typeof makeModel>> {
+  const old = makeModel({ id: "Xenova/all-MiniLM-L6-v2", tag: "-minilm" });
+  for (const [path, bytes] of old.files) h.host.downloads.set(old.spec.fileUrl(path), bytes);
+  await installKnowledgeRuntime(h.runtimeDir, PINNED, h.host.deps, {
+    uv: h.uv.build,
+    env: DAEMON_ENV,
+    signal: new AbortController().signal,
+    model: old.spec,
+    encodings: h.host.encodings
+  });
+  return old;
+}
+
+test("readiness splits myKG from the model: another model's install runs but lacks this model", async (t) => {
+  const h = await harness(t);
+  await installedWithOldModel(h);
+  const overlayDigestNow = await overlayDigest("0.4");
+  assert.equal(await knowledgeMykgReady(h.runtimeDir, MYKG_PINNED_VERSION, { overlayDigestNow, encodings: h.host.encodings }), true);
+  assert.equal(await knowledgeModelReady(h.runtimeDir, MYKG_PINNED_VERSION, h.model.spec), false);
+  assert.equal(await knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION, { model: h.model.spec }), false);
+  // The pinned model: e5's prefixes, 512 tokens, thresholds ordered minimum < good < strong < duplicate.
+  assert.equal(EMBEDDING_MODEL.id, "Xenova/multilingual-e5-small");
+  assert.deepEqual([EMBEDDING_MODEL.queryPrefix, EMBEDDING_MODEL.passagePrefix, EMBEDDING_MODEL.maxTokens], ["query: ", "passage: ", 512]);
+  const { minimum, good, strong, duplicate } = EMBEDDING_MODEL.thresholds;
+  assert.ok(0 < minimum && minimum < good && good < strong && strong < duplicate && duplicate < 1);
+  assert.ok(EMBEDDING_MODEL.files.some((file) => file.path === "onnx/model_quantized.onnx"));
+  assert.equal(EMBEDDING_MODEL.fileUrl("config.json"), `https://huggingface.co/Xenova/multilingual-e5-small/resolve/${EMBEDDING_MODEL.revision}/config.json`);
+});
+
+test("an install with another model is repaired with the model alone, the rest of the version untouched", async (t) => {
+  const h = await harness(t);
+  await installedWithOldModel(h);
+  const versionDir = knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION);
+  // A field a newer Orquester may have written survives the rewrite.
+  const manifestPath = join(versionDir, "runtime.json");
+  const written = JSON.parse(await readFile(manifestPath, "utf8"));
+  await writeFile(manifestPath, JSON.stringify({ ...written, futureField: { kept: true } }));
+  const venvBefore = await stat(join(versionDir, "venv", "bin", "mykg"));
+  const overlayDigestNow = await overlayDigest("0.4");
+  const repairable = (release: MykgRelease = PINNED, encodings = h.host.encodings, digest = overlayDigestNow) =>
+    knowledgeModelRepairable(h.runtimeDir, release, { overlayDigestNow: digest, model: h.model.spec, encodings });
+  assert.equal(await repairable(), true);
+  assert.equal(await repairable({ version: MYKG_PINNED_VERSION, wheelSha256: NEWER_SHA }), false, "another wheel: a full install");
+  assert.equal(await repairable({ version: "0.4.11", wheelSha256: NEWER_SHA }), false, "not installed");
+  assert.equal(await repairable(PINNED, h.host.encodings, "f".repeat(64)), false, "another overlay: a full install");
+
+  const runs = h.host.calls.run.length;
+  const downloads = h.host.calls.downloads.length;
+  const installed = await installKnowledgeModel(h.runtimeDir, PINNED, h.host.deps, { signal: new AbortController().signal, model: h.model.spec });
+  assert.deepEqual(installed, { version: MYKG_PINNED_VERSION, integrity: `sha256:${MYKG_PINNED_WHEEL_SHA256}`, installedAt: "2026-10-23T12:00:00.000Z" });
+  // Only the model's files were fetched; no uv, no smoke test.
+  assert.equal(h.host.calls.run.length, runs);
+  assert.deepEqual(h.host.calls.downloads.slice(downloads), h.model.spec.files.map((file) => h.model.spec.fileUrl(file.path)));
+  assert.equal(await knowledgeRuntimeReady(h.runtimeDir, MYKG_PINNED_VERSION, { overlayDigestNow, model: h.model.spec, encodings: h.host.encodings }), true);
+  assert.equal(await repairable(), false, "nothing left to repair");
+  // The old model is gone, the new one sits where the embedder looks.
+  assert.deepEqual(await list(join(versionDir, "models")), ["Fixture"]);
+  for (const [path, bytes] of h.model.files) {
+    assert.deepEqual(await readFile(join(versionDir, "models", "Fixture", "mini-model", ...path.split("/"))), bytes);
+  }
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  assert.deepEqual(manifest.embeddingModel, {
+    id: h.model.spec.id,
+    revision: h.model.spec.revision,
+    dimensions: 384,
+    queryPrefix: "query: ",
+    passagePrefix: "passage: ",
+    maxTokens: 512
+  });
+  assert.deepEqual(manifest.futureField, { kept: true });
+  assert.equal(manifest.installedAt, written.installedAt, "myKG's install time stays");
+  assert.equal(manifest.overlay.digest, overlayDigestNow);
+  assert.equal((await stat(join(versionDir, "venv", "bin", "mykg"))).mtimeMs, venvBefore.mtimeMs);
+  assert.deepEqual(await list(knowledgeStagingDir(h.runtimeDir)), []);
+});
+
+test("a model download that does not match its hash is refused and leaves the version as it was", async (t) => {
+  const h = await harness(t);
+  const old = await installedWithOldModel(h);
+  const versionDir = knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION);
+  const before = await readFile(join(versionDir, "runtime.json"), "utf8");
+  const install = () => installKnowledgeModel(h.runtimeDir, PINNED, h.host.deps, { signal: new AbortController().signal, model: h.model.spec });
+
+  h.host.downloads.set(h.model.spec.fileUrl("onnx/model_quantized.onnx"), Buffer.from("tampered bytes"));
+  await failsAt(install(), "model", /Fixture\/mini-model\/onnx\/model_quantized\.onnx does not match its sha256/);
+  h.host.downloads.delete(h.model.spec.fileUrl("config.json"));
+  await failsAt(install(), "model", /HTTP 404/);
+  const abort = new AbortController();
+  abort.abort();
+  await failsAt(installKnowledgeModel(h.runtimeDir, PINNED, h.host.deps, { signal: abort.signal, model: h.model.spec }), "model", /cancelled/);
+
+  assert.equal(await readFile(join(versionDir, "runtime.json"), "utf8"), before);
+  for (const [path, bytes] of old.files) {
+    assert.deepEqual(await readFile(join(versionDir, "models", "Xenova", "all-MiniLM-L6-v2", ...path.split("/"))), bytes);
+  }
+  assert.equal(await knowledgeMykgReady(h.runtimeDir, MYKG_PINNED_VERSION), true);
+  assert.deepEqual(await list(knowledgeStagingDir(h.runtimeDir)), []);
+
+  // A version no longer installed from the same wheel is not touched.
+  await rm(versionDir, { recursive: true });
+  for (const [path, bytes] of h.model.files) h.host.downloads.set(h.model.spec.fileUrl(path), bytes);
+  await failsAt(install(), "install", /not installed from the same wheel/);
+  assert.deepEqual(await list(join(h.runtimeDir, "versions")), []);
 });
 
 test("prune keeps only the named versions", async (t) => {

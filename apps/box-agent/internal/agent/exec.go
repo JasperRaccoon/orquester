@@ -20,12 +20,8 @@ import (
 // inherited them): the pumps get this much reading time to drain them before
 // the channel ends. Time a pump spends waiting for the daemon's credit does
 // not count: output the process already wrote is never cut off because the
-// daemon reads slowly. A var so tests can shorten it.
-var outputDrainAfterExit = 2 * time.Second
-
-// drainPausedHook, when set (tests only), runs each time the drain deadline
-// passes while a pump is waiting for credit (and so does not end the drain).
-var drainPausedHook func()
+// daemon reads slowly.
+const outputDrainAfterExit = 2 * time.Second
 
 // hangupGrace: a non-detached process whose channel closed gets SIGHUP, then
 // SIGKILL after this long.
@@ -376,9 +372,6 @@ func (p *outputPumps) waitFor(budget time.Duration) bool {
 				continue
 			}
 			// The deadline passed while a pump waits for credit: not counted.
-			if hook := drainPausedHook; hook != nil {
-				hook()
-			}
 			select {
 			case <-p.done:
 				return true

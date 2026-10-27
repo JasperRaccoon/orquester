@@ -58,7 +58,9 @@ export interface PluginUpdater {
   /**
    * When set, a scheduled check does not retry a release whose install failed
    * last time (`lastError.version`) while a working version is installed; a
-   * manual check does. For a plugin whose install is a large download.
+   * manual check does. The same holds for the hourly check of a current version
+   * that runs (`hasInstalled`) but failed its repair (`hasFiles` false): start,
+   * turning on and a manual check retry it. For a plugin whose install is a large download.
    */
   readonly skipFailedOnSchedule?: boolean;
   /** Whether this host has a build at all (turning on and checks are refused when not). */

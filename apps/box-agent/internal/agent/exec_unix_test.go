@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,46 +55,52 @@ func (d *testDaemon) nextData(ch int) []byte {
 // A non-detached exec whose daemon withholds credit past the drain deadline
 // still delivers every byte before `exit`: waiting for credit is not idle.
 func TestExecOutputTailSurvivesADaemonSlowerThanTheDrainDeadline(t *testing.T) {
-	previous := outputDrainAfterExit
-	outputDrainAfterExit = 20 * time.Millisecond
-	paused := make(chan struct{}, 1)
-	drainPausedHook = func() {
-		select {
-		case paused <- struct{}{}:
-		default:
-		}
-	}
-	t.Cleanup(func() {
-		outputDrainAfterExit = previous
-		drainPausedHook = nil
-	})
-
-	// One window plus a tail that is still in the pipe when the process exits.
-	const size = wire.ChannelWindowBytes + 50*1024
+	const tailBytes = 4096
+	const size = wire.ChannelWindowBytes + 1 + tailBytes
 	d := newTestDaemon(t)
-	d.openExec(1, map[string]any{"command": "head", "args": []string{"-c", strconv.Itoa(size), "/dev/zero"}})
+	pid := d.openExec(1, shellSpec("head -c "+strconv.Itoa(wire.ChannelWindowBytes-1)+
+		" /dev/zero; read first; printf xy; read finish; head -c "+strconv.Itoa(tailBytes)+" /dev/zero", false))
 	received := 0
-	for received < wire.ChannelWindowBytes {
+	for received < wire.ChannelWindowBytes-1 {
 		received += len(d.nextData(1))
 	}
-	// No credit yet: the process exits, the drain deadline passes while the
-	// pump waits for credit, and the channel must stay open.
-	select {
-	case <-paused:
-	case msg := <-d.msgs:
-		t.Fatalf("the channel ended before its output was delivered: %v", msg)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the drain never waited for credit")
+	// The two-byte write consumes the last credit byte with x, leaving the
+	// pump blocked on y before the child is allowed to write its separate tail.
+	d.sendInput(1, "first\n")
+	if marker := d.nextData(1); string(marker) != "x" {
+		t.Fatalf("last credited byte = %q; want x", marker)
+	}
+	received++
+	d.sendInput(1, "finish\n")
+	assertGone(t, pid)
+
+	// Exercise the actual application timers: a daemon may withhold credit
+	// longer than both two-second read-drain budgets after the child exited.
+	hold := time.NewTimer(5 * time.Second)
+	defer hold.Stop()
+holding:
+	for {
+		select {
+		case msg, ok := <-d.msgs:
+			if !ok {
+				t.Fatal("link closed before its pending output was delivered")
+			}
+			if isMsg("eof", 1)(msg) || isMsg("exit", 1)(msg) || isMsg("close", 1)(msg) {
+				t.Fatalf("the channel ended before its output was delivered: %v", msg)
+			}
+		case <-hold.C:
+			break holding
+		}
 	}
 	d.send(map[string]any{"t": "credit", "ch": 1, "bytes": received})
-	credited := received
-	for received < size {
-		received += len(d.nextData(1))
-		if received-credited >= 64*1024 || received == size {
-			d.send(map[string]any{"t": "credit", "ch": 1, "bytes": received - credited})
-			credited = received
-		}
+	var tail []byte
+	for len(tail) < tailBytes+1 {
+		tail = append(tail, d.nextData(1)...)
 	}
+	if !bytes.Equal(tail, append([]byte{'y'}, make([]byte, tailBytes)...)) {
+		t.Fatalf("pending output was lost or changed: got %d bytes; want y and %d zero bytes", len(tail), tailBytes)
+	}
+	received += len(tail)
 	exit := d.expect("exit", isMsg("exit", 1))
 	if exit["code"] != float64(0) {
 		t.Fatalf("exit = %v", exit)

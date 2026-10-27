@@ -6,6 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import type { HostLibc } from "../../plugins/ts-rust/installer.ts";
+import type { KnowledgeSimilarityThresholds } from "../search/embedder.ts";
 
 // ---- uv (astral-sh/uv) -----------------------------------------------------------------------
 
@@ -117,34 +118,69 @@ export function tiktokenCacheKey(url: string): string {
 
 // ---- the embedding model ---------------------------------------------------------------------
 
-export const EMBEDDING_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
+/**
+ * multilingual-e5-small (retrieval spec P0.1): 384-d like the all-MiniLM-L6-v2 it replaces, but
+ * multilingual (the knowledge base mixes English and Spanish), asymmetric ("query: " / "passage: ")
+ * and trained on 512 tokens. Xenova's repo is intfloat/multilingual-e5-small exported to ONNX,
+ * with an XLM-R tokenizer (`<s>`, `</s>`, `<pad>`).
+ */
+export const EMBEDDING_MODEL_ID = "Xenova/multilingual-e5-small";
 /** The Hugging Face commit the files below were hashed at. */
-export const EMBEDDING_MODEL_REVISION = "751bff37182d3f1213fa05d7196b954e230abad9";
+export const EMBEDDING_MODEL_REVISION = "761b726dd34fb83930e26aab4e9ac3899aa1fa78";
 export const EMBEDDING_DIMENSIONS = 384;
+/** e5's input limit (`max_position_embeddings`), special tokens included. */
+export const EMBEDDING_MAX_TOKENS = 512;
 
 /**
- * The files a transformers.js `localModelPath` needs, laid out under
- * `<embeddingModelDir>/<EMBEDDING_MODEL_ID>/`, with their sha256.
+ * The files the embedder loads, laid out under `<embeddingModelDir>/<EMBEDDING_MODEL_ID>/`, with
+ * their sha256 (the quantized ONNX export is ~113 MiB: the 250k-token vocabulary is most of it).
  */
 export const EMBEDDING_MODEL_FILES: readonly { path: string; sha256: string; size: number }[] = [
-  { path: "config.json", sha256: "7135149f7cffa1a573466c6e4d8423ed73b62fd2332c575bf738a0d033f70df7", size: 650 },
-  { path: "tokenizer.json", sha256: "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0", size: 711_661 },
-  { path: "tokenizer_config.json", sha256: "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3", size: 366 },
-  { path: "special_tokens_map.json", sha256: "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3", size: 125 },
-  { path: "onnx/model_quantized.onnx", sha256: "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1", size: 22_972_370 }
+  { path: "config.json", sha256: "cb99455288675345e1a4f411438d5d0adbba5fbd3a67ea4fb03c015433b996c1", size: 658 },
+  { path: "tokenizer.json", sha256: "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39", size: 17_082_730 },
+  { path: "tokenizer_config.json", sha256: "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b", size: 443 },
+  { path: "special_tokens_map.json", sha256: "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7", size: 167 },
+  { path: "onnx/model_quantized.onnx", sha256: "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193", size: 118_308_185 }
 ];
+
+/**
+ * The model's cosine cut-offs, calibrated on the evaluation set (`../search/eval/`, 30 entries,
+ * 22 queries) with this pin, embedding as search does: queries as "query: " + text, passages as
+ * "passage: " + `embeddingPassage(embeddingHeader(meta), chunk)`. Measured 2026-10-27
+ * (`calibrationData`, printed by eval.test.ts with ORQUESTER_KG_MODEL_DIR set):
+ *
+ *   query → answer's best chunk      n=24   min 0.789  p10 0.822  p50 0.881  p90 0.913  max 0.916
+ *   query → non-answer's best chunk  n=636  min 0.731  p10 0.754  p50 0.785  p90 0.818  max 0.874
+ *   query → hardest non-answer       n=22   min 0.808  p10 0.814  p50 0.836  p90 0.848  max 0.874
+ *   entry ↔ entry, near-copies       n=2    min 0.987                                   max 0.993
+ *   entry ↔ entry, same topic        n=57   min 0.779  p10 0.789  p50 0.827  p90 0.862  max 0.885
+ *   entry ↔ entry, other topics      n=376  min 0.734  p10 0.767  p50 0.799  p90 0.833  max 0.883
+ *
+ * minimum 0.78: under every answer, over about half the non-answers. good 0.83: about 85% of
+ * answers, under 10% of non-answers. strong 0.87: about half the answers, only the hardest
+ * non-answer or two. duplicate 0.95: well above any two distinct entries (≤ 0.885), below every
+ * near-copy (≥ 0.987).
+ */
+export const EMBEDDING_MODEL_THRESHOLDS: KnowledgeSimilarityThresholds = { minimum: 0.78, good: 0.83, strong: 0.87, duplicate: 0.95 };
 
 export function embeddingModelFileUrl(path: string): string {
   return `https://huggingface.co/${EMBEDDING_MODEL_ID}/resolve/${EMBEDDING_MODEL_REVISION}/${path}`;
 }
 
-/** The model the installer fetches (the pinned one; tests pass a fixture). */
+/** The model the installer fetches and the embedder runs (the pinned one; tests pass a fixture). */
 export interface EmbeddingModelSpec {
   id: string;
   revision: string;
   dimensions: number;
   files: readonly { path: string; sha256: string; size: number }[];
   fileUrl(path: string): string;
+  /** Put before a search query when it is embedded ("" for a symmetric model). */
+  queryPrefix: string;
+  /** Put before every stored chunk when it is embedded. */
+  passagePrefix: string;
+  /** Tokens per input, special tokens included; a longer input is truncated (and counted). */
+  maxTokens: number;
+  thresholds: KnowledgeSimilarityThresholds;
 }
 
 export const EMBEDDING_MODEL: EmbeddingModelSpec = {
@@ -152,5 +188,9 @@ export const EMBEDDING_MODEL: EmbeddingModelSpec = {
   revision: EMBEDDING_MODEL_REVISION,
   dimensions: EMBEDDING_DIMENSIONS,
   files: EMBEDDING_MODEL_FILES,
-  fileUrl: embeddingModelFileUrl
+  fileUrl: embeddingModelFileUrl,
+  queryPrefix: "query: ",
+  passagePrefix: "passage: ",
+  maxTokens: EMBEDDING_MAX_TOKENS,
+  thresholds: EMBEDDING_MODEL_THRESHOLDS
 };

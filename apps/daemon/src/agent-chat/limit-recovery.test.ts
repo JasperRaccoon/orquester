@@ -70,6 +70,7 @@ class FakeApi implements DaemonApi {
   /** Commands the host already received, by id (its receipts). */
   receipts = new Map<string, number>();
   interactionMode = "default";
+  goal: unknown = null;
   onAccount?: (accountId: string) => void;
   onInterrupt?: () => void;
 
@@ -81,7 +82,7 @@ class FakeApi implements DaemonApi {
           head: { session: { status: "ready", activeTurnId: null }, modelSelection: { model: "claude-opus" } },
           seq: 1,
           pending: { approvals: [], userInputs: [] },
-          goal: null,
+          goal: this.goal,
           interactionMode: this.interactionMode,
           startedTurnCount: 1,
           recentTurns: [],
@@ -513,4 +514,71 @@ test("the summary's usageLimit is read tolerantly", () => {
     at: iso(T0),
     parked: false
   });
+  assert.equal(sanitizeUsageLimitNotice({ usageLimit: { activityId: "a", turnId: null, at: iso(T0), kind: "solar-flare" } }), null, "an unknown kind is not acted on");
+  assert.equal(sanitizeUsageLimitNotice({ usageLimit: { activityId: "a", turnId: null, at: iso(T0), kind: "overloaded" } })?.kind, "overloaded");
+});
+
+function overload(extra: Partial<ThreadUsageLimitNotice> = {}): ThreadUsageLimitNotice {
+  return { activityId: "o1", turnId: "turn-1", message: "Selected model is at capacity. Please try a different model.", at: iso(T0), parked: false, kind: "overloaded", ...extra };
+}
+
+test("an overload is retried shortly: no cooldown, no account switch, the continue message after the base wait", async () => {
+  const h = harness({ refId: "codex", prefs: { switchAccount: true } });
+  h.accounts.splice(0, h.accounts.length, account("acc1", "codex"), account("acc2", "codex"));
+  await report(h, overload());
+  const state = h.chat.get("s1")?.usageLimit;
+  assert.equal(state?.kind, "overloaded");
+  assert.equal(state?.autoResume, "armed");
+  assert.equal(state?.resetAt, iso(T0 + 30_000));
+  assert.equal(state?.resumeAt, iso(T0 + 30_000), "no reset margin");
+  assert.deepEqual(h.cooldowns.data, {}, "the account is not cooled down");
+  assert.equal(h.chat.records()[0]?.chat?.usageLimit?.kind, "overloaded", "persisted");
+  await advance(h, 28_500);
+  assert.equal(h.api.turns().length, 0);
+  await advance(h, 1_500);
+  assert.equal(h.api.posts.filter((post) => post.path.endsWith("/account")).length, 0, "never switches accounts");
+  const [turn] = h.api.turns();
+  assert.equal(turn?.body.input, "Continue where you left off.");
+  assert.equal(turn?.body.commandId, `limit-resume:s1:turn-1:${T0 + 30_000}`);
+});
+
+test("an overload met again after a retry waits twice as long, up to the cap; a quiet spell starts over", async () => {
+  const h = harness({ refId: "codex" });
+  const waits: number[] = [];
+  for (let n = 1; n <= 6; n += 1) {
+    await report(h, overload({ activityId: `o${n}`, turnId: `turn-${n}`, at: iso(h.clock.t) }));
+    const state = h.chat.get("s1")?.usageLimit;
+    waits.push(Date.parse(state!.resumeAt!) - h.clock.t);
+    await advance(h, waits.at(-1)!);
+    assert.equal(h.api.turns().length, n);
+    await report(h, null);
+  }
+  assert.deepEqual(waits, [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]);
+  await advance(h, HOUR);
+  await report(h, overload({ activityId: "o9", turnId: "turn-9", at: iso(h.clock.t) }));
+  assert.equal(Date.parse(h.chat.get("s1")!.usageLimit!.resumeAt!) - h.clock.t, 30_000);
+});
+
+test("an overload that blocked a Codex goal is retried with /goal resume", async () => {
+  const h = harness({ refId: "codex" });
+  h.api.goal = { objective: "ship it", status: "blocked", updatedAt: iso(T0) };
+  await report(h, overload());
+  await advance(h, 30_000);
+  assert.equal(h.api.turns()[0]?.body.input, "/goal resume");
+});
+
+test("an overload seen late (a daemon restart) is retried at once; with the setting off it is only recorded", async () => {
+  const late = harness({ refId: "codex" });
+  late.clock.advance(10 * 60_000);
+  await report(late, overload());
+  assert.equal(late.chat.get("s1")?.usageLimit?.resumeAt, iso(late.clock.t));
+  await advance(late, 0);
+  assert.equal(late.api.turns().length, 1);
+
+  const off = harness({ refId: "codex", prefs: { autoResume: false } });
+  await report(off, overload());
+  assert.equal(off.chat.get("s1")?.usageLimit?.autoResume, "off");
+  assert.equal(off.clock.pending(), 0);
+  await off.recovery.setAutoResume("s1", true);
+  assert.equal(off.chat.get("s1")?.usageLimit?.resumeAt, iso(T0 + 30_000), "re-armed with no reset margin");
 });

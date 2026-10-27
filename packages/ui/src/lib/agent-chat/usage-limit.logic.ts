@@ -71,6 +71,17 @@ function when(iso: string, now: number, opts: LimitClockOptions): string {
 
 /** The one line after the title: where the automatic resume stands. */
 export function usageLimitStatusText(state: ChatUsageLimitState, now: number, opts: LimitClockOptions = {}): string {
+  if (state.kind === "overloaded") {
+    // `resetAt` is the retry's own time, not an account reset.
+    switch (state.autoResume) {
+      case "resuming":
+        return "Retrying…";
+      case "armed":
+        return state.resumeAt ? `Retries automatically ${when(state.resumeAt, now, opts)}` : "Retries automatically";
+      default:
+        return "Not retrying automatically";
+    }
+  }
   switch (state.autoResume) {
     case "resuming":
       return "Resuming…";
@@ -88,14 +99,14 @@ export function usageLimitStatusText(state: ChatUsageLimitState, now: number, op
 }
 
 export interface UsageLimitBannerModel {
-  /** "Usage limit reached on <account>". */
+  /** "Usage limit reached on <account>", or "Model at capacity" (an overload). */
   title: string;
   /** "· Resumes automatically at 3:40 PM (in 1h 12m)", "· Resets at …", "· Reset time unknown". */
   detail: string;
   /** The provider's own message, for the banner's tooltip. */
   tooltip: string;
   /** The toggle: its label and the value it sends (`armed`); null when nothing can be toggled. */
-  toggle: { label: "Cancel auto-resume" | "Resume at reset"; armed: boolean } | null;
+  toggle: { label: "Cancel auto-resume" | "Resume at reset" | "Cancel auto-retry" | "Retry automatically"; armed: boolean } | null;
   /** A resume or switch is under way: every action waits. */
   busy: boolean;
   /** "Switch account & continue" is offered: another usable account of the chat's agent exists. */
@@ -112,20 +123,23 @@ export function usageLimitBannerModel(input: {
 }): UsageLimitBannerModel {
   const { state } = input;
   const busy = state.autoResume === "resuming";
+  const overloaded = state.kind === "overloaded";
   const toggle: UsageLimitBannerModel["toggle"] =
     state.autoResume === "armed"
-      ? { label: "Cancel auto-resume", armed: false }
+      ? { label: overloaded ? "Cancel auto-retry" : "Cancel auto-resume", armed: false }
       : state.autoResume === "off" && state.resetAt !== null
-        ? { label: "Resume at reset", armed: true }
+        ? { label: overloaded ? "Retry automatically" : "Resume at reset", armed: true }
         : null;
   const current = state.accountId || SYSTEM_ACCOUNT_ID;
+  // Another account does not help when the provider itself has no capacity.
   const canSwitch =
+    !overloaded &&
     chatAccountSwitchSupported({ refId: input.refId }) &&
     (input.accounts ?? []).some((account) => account.agent === input.refId && account.id !== current && !account.needsReauth);
   return {
-    title: `Usage limit reached on ${limitAccountLabel(state.accountId, input.accounts)}`,
+    title: overloaded ? "Model at capacity" : `Usage limit reached on ${limitAccountLabel(state.accountId, input.accounts)}`,
     detail: `· ${usageLimitStatusText(state, input.now, input.clock)}`,
-    tooltip: state.message ?? "The agent's account ran out of quota.",
+    tooltip: state.message ?? (overloaded ? "The provider had no capacity for the model." : "The agent's account ran out of quota."),
     toggle,
     busy,
     canSwitch
@@ -145,8 +159,9 @@ export function limitedMarker(
   session: Pick<SessionSummary, "usageLimit">,
   now: number,
   opts: LimitClockOptions = {}
-): { label: "Limited"; title: string } | null {
+): { label: "Limited" | "At capacity"; title: string } | null {
   const state = session.usageLimit;
   if (!state) return null;
+  if (state.kind === "overloaded") return { label: "At capacity", title: `Model at capacity · ${usageLimitStatusText(state, now, opts)}` };
   return { label: "Limited", title: `Usage limit reached · ${usageLimitStatusText(state, now, opts)}` };
 }

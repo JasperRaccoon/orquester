@@ -1,0 +1,249 @@
+// The entry panel's retrieval sections (retrieval spec, "Entry panel and citations (U2)"): the
+// body as Markdown or plain text, the possible-duplicates banner with its merge, and the similar
+// entries with their reasons. Logic in `panel.logic.ts`.
+
+import React, { useState, useSyncExternalStore } from "react";
+import { Copy, Loader2, Sparkles } from "lucide-react";
+import type { KnowledgeEntry, KnowledgeEntryDetail, KnowledgeSimilarEntry } from "@orquester/api";
+
+import { Button } from "../ui";
+// Directly, not through `../ui`: that index and confirm-dialog import each other, which a lazy chunk cannot split.
+import { ConfirmDialog } from "../ui/confirm-dialog";
+import { cn } from "../../lib/cn";
+import { ChatMarkdown } from "../agent-chat/timeline/markdown/ChatMarkdown";
+import { ErrorLine, SectionLabel } from "./parts";
+import { entryByline } from "./knowledge.logic";
+import {
+  duplicateText,
+  isPlainTextBody,
+  keepDuplicatePair,
+  knowledgeMergePlan,
+  markdownBodyPreview,
+  mergeConfirmMessage,
+  mergeErrorText,
+  panelSessionVersion,
+  reasonLabel,
+  reasonTitle,
+  setPlainTextBody,
+  similarSection,
+  subscribePanelSession,
+  visibleDuplicates,
+  type KnowledgeMergePlan
+} from "./panel.logic";
+
+function usePanelSession(): number {
+  return useSyncExternalStore(subscribePanelSession, panelSessionVersion, panelSessionVersion);
+}
+
+// ---------------------------------------------------------------------------
+// The body
+// ---------------------------------------------------------------------------
+
+const BODY_BOX = "rounded-md border border-neutral-800 bg-neutral-900/50 px-3 py-2.5";
+
+/**
+ * The entry's text through the chat's Markdown renderer (no raw HTML, filtered links), or as it
+ * was saved with "Plain text" (remembered for the session). A long body renders its first part as
+ * Markdown until "Show the rest".
+ */
+export const EntryBody: React.FC<{ body: string }> = ({ body }) => {
+  usePanelSession();
+  const plain = isPlainTextBody();
+  const [full, setFull] = useState(false);
+  const preview = full ? { text: body, rest: 0 } : markdownBodyPreview(body);
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-end">
+        <button
+          type="button"
+          aria-pressed={plain}
+          onClick={() => setPlainTextBody(!plain)}
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[11px]",
+            plain ? "bg-neutral-800 text-neutral-200" : "text-neutral-500 hover:text-neutral-300"
+          )}
+        >
+          Plain text
+        </button>
+      </div>
+      {plain ? (
+        <div
+          data-knowledge-body="plain"
+          className={cn(BODY_BOX, "whitespace-pre-wrap break-words text-[13px] leading-relaxed text-neutral-200")}
+        >
+          {body}
+        </div>
+      ) : (
+        <div data-knowledge-body="markdown" className={BODY_BOX}>
+          {/* Saved posts are third-party text: their remote images wait for a click (no tracking pixel fires on open). */}
+          <ChatMarkdown text={preview.text} remoteImages="click" className="text-[13px] text-neutral-200" />
+          {preview.rest > 0 && (
+            <button
+              type="button"
+              onClick={() => setFull(true)}
+              className="mt-2 text-xs text-info-300 hover:underline hover:decoration-dotted"
+            >
+              Show the rest ({preview.rest.toLocaleString("en-US")} more characters)
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Possible duplicates
+// ---------------------------------------------------------------------------
+
+/** "Looks like the same content as <Title> (95%)", with Open, Merge and Keep both. */
+export const DuplicatesBanner: React.FC<{
+  entry: KnowledgeEntry;
+  detail: Pick<KnowledgeEntryDetail, "entry" | "possibleDuplicates">;
+  canMerge: boolean;
+  onOpen: (id: string) => void;
+  /** Runs the merge (resolves once done, rejects with what failed). */
+  onMerge: (plan: KnowledgeMergePlan) => Promise<void>;
+}> = ({ entry, detail, canMerge, onOpen, onMerge }) => {
+  usePanelSession();
+  const [confirming, setConfirming] = useState<KnowledgeMergePlan | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const duplicates = visibleDuplicates(detail);
+  if (duplicates.length === 0) return null;
+
+  const merge = async (plan: KnowledgeMergePlan) => {
+    setConfirming(null);
+    setBusy(plan.keep.id === entry.id ? plan.remove.id : plan.keep.id);
+    setError(null);
+    try {
+      await onMerge(plan);
+    } catch (err) {
+      setError(mergeErrorText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section aria-label="Possible duplicates" className="space-y-2 rounded-md border border-warn/30 bg-warn/5 px-3 py-2.5">
+      {duplicates.map((item) => (
+        <DuplicateRow
+          key={item.entry.id}
+          item={item}
+          busy={busy !== null}
+          merging={busy === item.entry.id}
+          canMerge={canMerge}
+          onOpen={() => onOpen(item.entry.id)}
+          onMerge={() => setConfirming(knowledgeMergePlan(entry, item.entry))}
+          onKeepBoth={() => keepDuplicatePair(entry.id, item.entry.id)}
+        />
+      ))}
+      {error && <ErrorLine>{error}</ErrorLine>}
+      <ConfirmDialog
+        open={confirming !== null}
+        title="Merge these entries?"
+        message={confirming ? mergeConfirmMessage(confirming) : ""}
+        confirmLabel="Merge"
+        onConfirm={() => {
+          if (confirming) void merge(confirming);
+        }}
+        onCancel={() => setConfirming(null)}
+      />
+    </section>
+  );
+};
+
+const DuplicateRow: React.FC<{
+  item: KnowledgeSimilarEntry;
+  busy: boolean;
+  merging: boolean;
+  canMerge: boolean;
+  onOpen: () => void;
+  onMerge: () => void;
+  onKeepBoth: () => void;
+}> = ({ item, busy, merging, canMerge, onOpen, onMerge, onKeepBoth }) => {
+  const { title, percent } = duplicateText(item);
+  return (
+    <div className="space-y-1.5">
+      <p className="flex items-start gap-1.5 text-xs text-neutral-200">
+        <Copy size={13} aria-hidden className="mt-px shrink-0 text-warn" />
+        <span className="min-w-0">
+          Looks like the same content as <span className="font-medium text-neutral-100">{title}</span>
+          {percent !== null && <span className="text-neutral-400"> ({percent}%)</span>}
+        </span>
+      </p>
+      <div className="flex flex-wrap gap-1.5 pl-5">
+        <Button size="sm" variant="outline" onClick={onOpen} disabled={busy}>
+          Open
+        </Button>
+        <Button size="sm" variant="outline" onClick={onMerge} disabled={busy || !canMerge}>
+          {merging && <Loader2 size={12} className="motion-safe:animate-spin" />} Merge
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onKeepBoth} disabled={busy}>
+          Keep both
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Similar entries
+// ---------------------------------------------------------------------------
+
+/** Entries related by meaning, concepts or author, each with its reasons, and "More like this". */
+export const SimilarEntries: React.FC<{
+  detail: Pick<KnowledgeEntryDetail, "entry" | "related" | "similar">;
+  onOpen: (id: string) => void;
+  onFindSimilar?: ((entryId: string) => void) | undefined;
+}> = ({ detail, onOpen, onFindSimilar }) => {
+  const { items } = similarSection(detail);
+  if (items.length === 0 && !onFindSimilar) return null;
+  return (
+    <section aria-label="Similar entries">
+      <div className="mb-1.5 flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <SectionLabel>Similar</SectionLabel>
+        </div>
+        {onFindSimilar && (
+          <Button size="sm" variant="ghost" className="-mt-1.5 h-6 px-2" onClick={() => onFindSimilar(detail.entry.id)}>
+            <Sparkles size={12} /> More like this
+          </Button>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <p className="text-xs text-neutral-500">Nothing similar yet.</p>
+      ) : (
+        <ul className="space-y-1">
+          {items.map((item) => (
+            <li key={item.entry.id}>
+              <button
+                type="button"
+                data-knowledge-similar={item.entry.id}
+                onClick={() => onOpen(item.entry.id)}
+                className="w-full rounded-md px-2 py-1.5 text-left hover:bg-neutral-900"
+              >
+                <span className="block truncate text-xs text-neutral-200">{item.entry.title || "Untitled"}</span>
+                {entryByline(item.entry) && <span className="block truncate text-[11px] text-neutral-500">{entryByline(item.entry)}</span>}
+                {item.reasons.length > 0 && (
+                  <span className="mt-1 flex flex-wrap gap-1">
+                    {item.reasons.map((reason) => (
+                      <span
+                        key={reason.kind}
+                        title={reasonTitle(reason)}
+                        className="max-w-full truncate rounded-full border border-neutral-800 px-1.5 py-px text-[10.5px] text-neutral-400"
+                      >
+                        {reasonLabel(reason)}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+};

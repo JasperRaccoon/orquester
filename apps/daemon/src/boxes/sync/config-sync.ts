@@ -1102,7 +1102,17 @@ export class BoxConfigSyncService implements BoxConfigSync {
       else if (root.rule.codec(relOf(root.root, path)!) === "raw") toHash.push({ path, file });
       else {
         const bytes = await readBoxFile(connection, path, { signal });
-        boxHash.set(path, bytes === null ? null : sha256(syncCodec(root.rule.codec(relOf(root.root, path)!)).boxView(bytes, ctx)));
+        // The box view may depend on the host copy (Codex's project trust: `codecs.ts`).
+        const hostFile = host.get(path);
+        let hostBytes: Buffer | null = null;
+        if (hostFile && !isUnreadable(path)) {
+          try {
+            hostBytes = await readFile(hostFile.real);
+          } catch (error) {
+            if (!isAbsentError(error)) unreadable.push(path);
+          }
+        }
+        boxHash.set(path, bytes === null ? null : sha256(syncCodec(root.rule.codec(relOf(root.root, path)!)).boxView(bytes, hostBytes, ctx)));
       }
     }
     if (toHash.length > 0) {
@@ -1219,7 +1229,8 @@ export class BoxConfigSyncService implements BoxConfigSync {
       // Streamed; a host write racing it changes the host hash, so the next pass pushes again.
       data = createReadStream(hostFile.real);
     } else {
-      const current = codecId === "claude-json" ? await readBoxFile(connection, path) : null;
+      // The box CLI's own state in its copy is kept (`.claude.json`; Codex's project trust).
+      const current = codecId === "claude-json" || codecId === "codex-toml" ? await readBoxFile(connection, path) : null;
       data = syncCodec(codecId).toBox(await readFile(hostFile.real), current, ctx);
     }
     if (data === null) return;
@@ -1436,7 +1447,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     let bh: string | null = null;
     if (boxFile && !tooLarge) {
       boxBytes = await readBoxFile(connection, path);
-      bh = boxBytes === null ? null : sha256(codec.boxView(boxBytes, ctx));
+      bh = boxBytes === null ? null : sha256(codec.boxView(boxBytes, hostBytes, ctx));
     } else if (boxFile) {
       bh = (await this.hasher(connection, [{ path }]))[0] ?? null;
     }
@@ -1450,7 +1461,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
       boxSize: boxFile?.size ?? 0,
       boxMtimeMs: boxFile?.mtimeMs ?? 0,
       boxBytes,
-      boxView: boxBytes === null ? null : codec.boxView(boxBytes, ctx),
+      boxView: boxBytes === null ? null : codec.boxView(boxBytes, hostBytes, ctx),
       bh,
       tooLarge,
       unsyncable: hostBytes !== null && hostView === null

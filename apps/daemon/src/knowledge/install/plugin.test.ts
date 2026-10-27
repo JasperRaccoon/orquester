@@ -34,6 +34,7 @@ interface Harness {
   runtimeDir: string;
   file: string;
   host: FakeKnowledgeHost;
+  model: ReturnType<typeof makeModel>;
   service: PluginsService;
   tracker: KnowledgeRuntimeTracker;
   events: PluginsResponse[];
@@ -102,6 +103,7 @@ async function harness(t: TestContext, options: { platform?: string; seed?: unkn
     runtimeDir: knowledgeRuntimeDir(baseDir),
     file,
     host,
+    model,
     service,
     tracker,
     events,
@@ -185,6 +187,11 @@ test("turning it on installs the pinned runtime in its own lane; the runtime por
     embeddingModelDir: join(dir, "models"),
     embeddingModelId: "Fixture/mini-model",
     embeddingDimensions: 384,
+    embeddingModelReady: true,
+    embeddingQueryPrefix: "query: ",
+    embeddingPassagePrefix: "passage: ",
+    embeddingMaxTokens: 512,
+    embeddingThresholds: { minimum: 0.8, good: 0.84, strong: 0.88, duplicate: 0.95 },
     tiktokenCacheDir: join(dir, "tiktoken")
   });
   assert.deepEqual(h.runtimes, [runtime]);
@@ -326,6 +333,137 @@ test("an update over a current version with an older overlay keeps it as the rol
   const plugin = await info(h);
   assert.equal(plugin.current?.version, NEWER);
   assert.equal(plugin.previous?.version, MYKG_PINNED_VERSION);
+  assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION, NEWER]);
+});
+
+/**
+ * Make `version` look installed by an Orquester build that shipped all-MiniLM-L6-v2: its manifest
+ * names that model and only that model's files are in `models/`.
+ */
+async function oldModel(h: Harness, version: string): Promise<void> {
+  const dir = knowledgeVersionDir(h.runtimeDir, version);
+  const path = join(dir, "runtime.json");
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  manifest.embeddingModel = { id: "Xenova/all-MiniLM-L6-v2", revision: "751bff37182d3f1213fa05d7196b954e230abad9", dimensions: 384 };
+  await writeFile(path, JSON.stringify(manifest));
+  await rm(join(dir, "models"), { recursive: true });
+  await mkdir(join(dir, "models", "Xenova", "all-MiniLM-L6-v2", "onnx"), { recursive: true });
+  await writeFile(join(dir, "models", "Xenova", "all-MiniLM-L6-v2", "onnx", "model_quantized.onnx"), "old model");
+}
+
+const uvRuns = (h: Harness) => h.host.calls.run.filter((call) => call.command.endsWith("/uv")).length;
+const modelUrls = (h: Harness) => h.model.spec.files.map((file) => h.model.spec.fileUrl(file.path));
+
+test("an install from before the model change keeps linking; the hourly check brings the model alone", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  await oldModel(h, MYKG_PINNED_VERSION);
+  h.service.boxToolingChanged(); // any plugins.changed makes the port look again
+  await settle(h);
+  // myKG is intact: the runtime stays (linking runs); the model is not there (search on text).
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
+  assert.equal(h.tracker.current()?.embeddingModelReady, false);
+
+  const uv = uvRuns(h);
+  const downloads = h.host.calls.downloads.length;
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await settle(h);
+  const plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(plugin.previous, null, "a repair is no update");
+  assert.equal(plugin.lastError, null);
+  assert.equal(uvRuns(h), uv, "no venv rebuilt");
+  assert.deepEqual(h.host.calls.downloads.slice(downloads), modelUrls(h), "only the model was downloaded");
+  const runtime = h.tracker.current();
+  assert.equal(runtime?.embeddingModelReady, true);
+  assert.equal(runtime?.embeddingModelId, h.model.spec.id);
+  assert.equal(runtime?.embeddingQueryPrefix, "query: ");
+  assert.deepEqual(await readdir(join(knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION), "models")), ["Fixture"]);
+  assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION]);
+});
+
+test("a failed model repair is not retried every hour; turning on and a manual check retry it", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  await oldModel(h, MYKG_PINNED_VERSION);
+  h.service.boxToolingChanged();
+  await settle(h);
+  const modelUrl = h.model.spec.fileUrl("onnx/model_quantized.onnx");
+  const good = h.host.downloads.get(modelUrl)!;
+  h.host.downloads.set(modelUrl, Buffer.from("tampered"));
+  const before = h.host.calls.downloads.filter((url) => url === modelUrl).length;
+  const modelTries = () => h.host.calls.downloads.filter((url) => url === modelUrl).length - before;
+
+  // The first automatic attempt runs, and fails.
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await settle(h);
+  assert.equal(modelTries(), 1);
+  const failed = await info(h);
+  assert.equal(failed.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(failed.lastError?.step, "model");
+  assert.match(failed.lastError?.message ?? "", /does not match its sha256/);
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
+  assert.equal(h.tracker.current()?.embeddingModelReady, false);
+  const manifest = JSON.parse(await readFile(join(knowledgeVersionDir(h.runtimeDir, MYKG_PINNED_VERSION), "runtime.json"), "utf8"));
+  assert.equal(manifest.embeddingModel.id, "Xenova/all-MiniLM-L6-v2", "the version was left as it was");
+  assert.equal((await onDisk(h)).lastError.version, MYKG_PINNED_VERSION);
+
+  // The next hourly checks leave it (each try is a ~130 MB download); the error stays.
+  const json = h.host.calls.json.length;
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await settle(h);
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await settle(h);
+  assert.ok(h.host.calls.json.length > json, "the hourly checks ran");
+  assert.equal(modelTries(), 1, "no model download every hour");
+  assert.equal((await info(h)).lastError?.step, "model");
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION, "linking keeps running");
+
+  // Turning the plugin on again retries it (as a start does).
+  await h.service.update(ID, { enabled: false });
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  assert.equal(modelTries(), 2);
+
+  // A manual check retries it too; with a good download the model is in place.
+  h.host.downloads.set(modelUrl, good);
+  await h.service.checkNow(ID);
+  await settle(h);
+  assert.equal((await info(h)).lastError, null);
+  assert.equal(h.tracker.current()?.embeddingModelReady, true);
+});
+
+test("rollback to a version with the old model still works; the next check gives it the new model", async (t) => {
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  publishNewer(h);
+  await h.service.checkNow(ID);
+  await settle(h);
+  await oldModel(h, MYKG_PINNED_VERSION);
+
+  const rolled = await h.service.rollback(ID);
+  await settle(h);
+  assert.equal(rolled.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(rolled.previous?.version, NEWER);
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
+  assert.equal(h.tracker.current()?.embeddingModelReady, false);
+
+  const uv = uvRuns(h);
+  const downloads = h.host.calls.downloads.length;
+  await h.service.checkNow(ID);
+  await settle(h);
+  const plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION, "the version rolled back to, not the skipped one");
+  assert.equal(plugin.previous?.version, NEWER);
+  assert.equal(plugin.skippedVersion, NEWER);
+  assert.equal(uvRuns(h), uv);
+  assert.deepEqual(h.host.calls.downloads.slice(downloads), modelUrls(h));
+  assert.equal(h.tracker.current()?.embeddingModelReady, true);
   assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION, NEWER]);
 });
 

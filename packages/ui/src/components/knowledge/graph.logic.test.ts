@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { KnowledgeColor } from "@orquester/api";
+import type { KnowledgeColor, KnowledgeSimilarityGraphResponse, KnowledgeSimilarityNode } from "@orquester/api";
 
 import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
+  collectionLegend,
   focusFor,
   graphQueryOf,
   graphScopeKey,
+  isMissingRoute,
+  legendMemberIds,
   nodeColors,
   searchSummary,
+  similarityCanvasEdges,
+  similarityCanvasNodes,
+  similarityEmptyState,
+  similarityLegend,
+  similarityQueryOf,
   truncationNote
 } from "./graph.logic.ts";
 
@@ -77,5 +85,128 @@ describe("the search summary", () => {
     assert.equal(searchSummary([entryHit("ke_1"), entryHit("ke_2"), conceptHit("a")], new Set(["a"])), "Matches: 2 entries, 1 concept (marked).");
     assert.equal(searchSummary([conceptHit("a"), conceptHit("b")], new Set(["a"])), "Matches: 2 concepts (1 marked).");
     assert.equal(searchSummary([conceptHit("b")], new Set(["a"])), "Matches: 1 concept (not on the canvas).");
+  });
+});
+
+const simNode = (id: string, overrides: Partial<KnowledgeSimilarityNode> = {}): KnowledgeSimilarityNode => ({
+  id,
+  title: `Title ${id}`,
+  kind: "post",
+  author: null,
+  handle: null,
+  savedAt: "2026-10-20T10:00:00.000Z",
+  collections: ["kc_seo"],
+  cluster: 0,
+  degree: 1,
+  ...overrides
+});
+
+/** Clusters: 0 = {a, b, c} "Paywalls", 1 = {d, e} unlabelled, 2 = {f} singleton. */
+const SIM: KnowledgeSimilarityGraphResponse = {
+  nodes: [
+    simNode("a", { degree: 4 }),
+    simNode("b", { collections: ["kc_ads", "kc_seo"] }),
+    simNode("c", { title: "  " }),
+    simNode("d", { cluster: 1, collections: [] }),
+    simNode("e", { cluster: 1, collections: ["kc_gone"] }),
+    simNode("f", { cluster: 2, degree: 0 })
+  ],
+  edges: [
+    { from: "a", to: "b", similarity: 0.92, tree: true },
+    { from: "a", to: "c", similarity: 0.81, tree: false },
+    { from: "d", to: "e", similarity: 0.88, tree: true }
+  ],
+  clusters: [
+    { id: 0, size: 3, label: "Paywalls" },
+    { id: 1, size: 2, label: null },
+    { id: 2, size: 1, label: null }
+  ],
+  truncated: false,
+  totals: { entries: 6, embedded: 6 }
+};
+
+describe("the similarity layer", () => {
+  const collectionViews = [
+    { id: "kc_seo", name: "SEO", color: "chart-1" as const },
+    { id: "kc_ads", name: "Ads", color: "chart-2" as const }
+  ];
+
+  it("asks for the collections filtered to, sorted, or for everything", () => {
+    assert.deepEqual(similarityQueryOf([]), {});
+    assert.deepEqual(similarityQueryOf(["kc_b", "kc_a"]), { collections: "kc_a,kc_b" });
+  });
+
+  it("knows a daemon without the route from a refusal of its own", () => {
+    assert.equal(isMissingRoute({ status: 404, body: { message: "Route GET:/api/knowledge/similarity-graph not found", error: "Not Found", statusCode: 404 } }), true);
+    assert.equal(isMissingRoute({ status: 404 }), true);
+    assert.equal(isMissingRoute({ status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "x" } }), false);
+    assert.equal(isMissingRoute({ status: 404, body: { error: { code: "KNOWLEDGE_UNKNOWN_COLLECTION" } } }), false);
+    assert.equal(isMissingRoute({ status: 500, body: {} }), false);
+    assert.equal(isMissingRoute(new Error("offline")), false);
+    assert.equal(isMissingRoute(null), false);
+  });
+
+  it("projects entry identities, titles and cluster membership to the canvas", () => {
+    const nodes = similarityCanvasNodes(SIM, "cluster", colorOf, []);
+    assert.deepEqual(nodes.map((n) => n.id), ["a", "b", "c", "d", "e", "f"]);
+    assert.equal(nodes[0]!.label, "Title a");
+    assert.equal(nodes[2]!.label, "Untitled");
+    assert.ok(nodes[0]!.colors.length > 0);
+    assert.deepEqual(nodes[1]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[2]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[4]!.colors, nodes[3]!.colors);
+    assert.notDeepEqual(nodes[3]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[5]!.colors, []);
+  });
+
+  it("colours by collection like concepts, within the filter", () => {
+    const nodes = similarityCanvasNodes(SIM, "collection", colorOf, []);
+    assert.deepEqual(nodes.find((n) => n.id === "b")!.colors, ["chart-2", "chart-1"]);
+    assert.deepEqual(nodes.find((n) => n.id === "d")!.colors, [], "Unfiled: neutral");
+    assert.deepEqual(similarityCanvasNodes(SIM, "collection", colorOf, ["kc_ads"]).find((n) => n.id === "b")!.colors, ["chart-2"]);
+  });
+
+  it("preserves endpoints and distinguishes tree from nearest-neighbour edges", () => {
+    assert.deepEqual(similarityCanvasEdges(SIM).map(({ from, to, variant }) => [from, to, variant]), [
+      ["a", "b", "tree"], ["a", "c", "knn"], ["d", "e", "tree"]
+    ]);
+  });
+
+  it("lists cluster labels and member counts, including entries in no cluster", () => {
+    assert.deepEqual(similarityLegend(SIM).items.map(({ label, size, members }) => ({ label, size, members })), [
+      { label: "Paywalls", size: 3, members: { kind: "cluster", index: 0 } },
+      { label: "Untitled", size: 2, members: { kind: "cluster", index: 1 } },
+      { label: "In no cluster", size: 1, members: { kind: "singletons" } }
+    ]);
+  });
+
+  it("lists collections with their entry counts, within the filter, then Unfiled", () => {
+    assert.deepEqual(
+      collectionLegend(SIM, collectionViews, []).items.map((i) => [i.label, i.size]),
+      [
+        ["SEO", 4],
+        ["Ads", 1],
+        ["Unfiled", 2]
+      ]
+    );
+    assert.deepEqual(
+      collectionLegend(SIM, collectionViews, ["kc_ads"]).items.map((i) => i.label),
+      ["Ads", "Unfiled"]
+    );
+  });
+
+  it("marks the entries a legend line stands for", () => {
+    const known = new Set(["kc_seo", "kc_ads"]);
+    assert.deepEqual([...legendMemberIds(SIM, { kind: "cluster", index: 1 }, known)], ["d", "e"]);
+    assert.deepEqual([...legendMemberIds(SIM, { kind: "singletons" }, known)], ["f"]);
+    assert.deepEqual([...legendMemberIds(SIM, { kind: "collection", id: "kc_ads" }, known)], ["b"]);
+    assert.deepEqual([...legendMemberIds(SIM, { kind: "unfiled" }, known)], ["d", "e"]);
+  });
+
+  it("distinguishes an empty library and an older daemon with pending embeddings", () => {
+    const none = { nodes: [], totals: { entries: 0, embedded: 0 } };
+    assert.equal(similarityEmptyState(none, true), "no-entries");
+    assert.equal(similarityEmptyState(none, false), "no-entries");
+    assert.equal(similarityEmptyState({ nodes: [], totals: { entries: 4, embedded: 0 } }, undefined), "computing");
   });
 });

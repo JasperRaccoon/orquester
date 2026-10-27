@@ -1,0 +1,16 @@
+{
+  "baselineCommit": "923b3a51b594ef668483a5bd320af41187899e34",
+  "sourceDeclarations": 10832,
+  "audited": 10832,
+  "missing": 0,
+  "counts": {
+    "KEEP": 9840,
+    "CONSOLIDATE": 172,
+    "REWRITE": 436,
+    "DELETE": 121,
+    "OPTIMIZE": 263
+  },
+  "incomingChangedOrAdded": 275,
+  "incomingAffectedFiles": 47,
+  "counting": "Source declarations; parameterized families counted once. Consolidation includes donors and surviving owners. Subsequent actions for the same unchanged identity use DELETE > CONSOLIDATE > REWRITE > OPTIMIZE > KEEP; modified upstream bodies use their new audit. Reports preserve detailed evidence and all phases."
+}

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { KNOWLEDGE_ENTRY_MAX_BYTES, KNOWLEDGE_SAVE_MAX_ENTRIES } from "@orquester/api";
+import { KNOWLEDGE_ENTRY_MAX_BYTES, KNOWLEDGE_SAVE_MAX_ENTRIES, KNOWLEDGE_TITLE_MAX } from "@orquester/api";
 import { knowledgeCollectionsPath, knowledgeEntriesDir, knowledgeMykgInputDir } from "@orquester/config";
 import type { KnowledgeEntryChange } from "../ports.ts";
 import { parseEntryFile } from "./entry-file.ts";
@@ -460,4 +460,115 @@ test("savedFrom: unknown keys and an unknown `by` are read tolerantly and writte
   assert.deepEqual(await savedFromOf(extraKey), { by: "agent", sessionId: "sess-1", via: "mcp" });
   assert.deepEqual(await savedFromOf(newerBy), { by: "workflow", sessionId: "sess-1", runId: "run-7" });
   assert.deepEqual(await savedFromOf(newerByNoSession), { by: "schedule" });
+});
+
+// ---------------------------------------------------------------------------
+// Merging
+// ---------------------------------------------------------------------------
+
+/** Three entries saved one after the other (oldest first), in SEO, Ads and Growth+SEO. */
+async function threeToMerge(t: TestContext) {
+  const env = await setup(t);
+  const { store, changes } = await env.open();
+  const seo = await store.createCollection({ name: "SEO" });
+  const ads = await store.createCollection({ name: "Ads" });
+  const growth = await store.createCollection({ name: "Growth" });
+  const save = async (body: string, collections: string[]) => (await store.save({ entries: [{ body, title: body.slice(0, 20), collections }] })).results[0]!.entryId;
+  const oldest = await save("Alternatives pages convert well for every competitor.", ["SEO"]);
+  const middle = await save("Comparison tables beat feature lists on landing pages.", ["Ads"]);
+  const newest = await save("Programmatic SEO needs one honest page per competitor.", ["Growth", "SEO"]);
+  changes.length = 0;
+  return { ...env, store, changes, seo, ads, growth, oldest, middle, newest };
+}
+
+test("merge: keeps the oldest by default, unions collections (its own first, then the others' in order), deletes the rest", async (t) => {
+  const { appdir, store, changes, seo, ads, growth, oldest, middle, newest } = await threeToMerge(t);
+  const before = store.getMeta(oldest)!;
+  const outcome = await store.mergeEntries({ ids: [newest, middle, oldest] });
+  assert.equal(outcome.kept.id, oldest);
+  assert.deepEqual(outcome.kept.collections, [seo.id, growth.id, ads.id]);
+  assert.deepEqual(outcome.deleted, [newest, middle]);
+  assert.deepEqual(outcome.notDeleted, []);
+  assert.equal(outcome.keptChanged, true);
+  assert.equal(outcome.collectionsChanged, true);
+  // A collections-only change: relabelled, the text untouched.
+  assert.equal(outcome.kept.title, before.title);
+  assert.equal(outcome.kept.contentHash, before.contentHash);
+  assert.deepEqual(changes, [
+    { kind: "relabelled", entryIds: [oldest] },
+    { kind: "deleted", entryIds: [newest] },
+    { kind: "deleted", entryIds: [middle] }
+  ]);
+  assert.equal(store.getMeta(newest), null);
+  assert.equal(store.getMeta(middle), null);
+  assert.deepEqual(store.getMeta(oldest)!.collections, [seo.id, growth.id, ads.id]);
+  const files = await readdir(knowledgeEntriesDir(appdir));
+  assert.deepEqual(files.filter((name) => name.startsWith("ke_")), [`${oldest}.md`]);
+  assert.ok(!(await readdir(knowledgeMykgInputDir(appdir))).includes(`${newest}.md`));
+});
+
+test("merge: an explicit keep, a new title and a combined body are applied to the kept entry", async (t) => {
+  const { appdir, store, changes, seo, ads, oldest, middle } = await threeToMerge(t);
+  const outcome = await store.mergeEntries({ ids: [oldest, middle], keep: middle, title: "Comparison pages", body: "Both posts, combined." });
+  assert.equal(outcome.kept.id, middle);
+  assert.deepEqual(outcome.kept.collections, [ads.id, seo.id]);
+  assert.equal(outcome.kept.title, "Comparison pages");
+  assert.equal(outcome.kept.body, "Both posts, combined.");
+  assert.equal(outcome.kept.linkState, "pending");
+  assert.deepEqual(outcome.deleted, [oldest]);
+  assert.deepEqual(changes, [
+    { kind: "edited", entryIds: [middle] },
+    { kind: "deleted", entryIds: [oldest] }
+  ]);
+  assert.ok((await readFile(join(knowledgeMykgInputDir(appdir), `${middle}.md`), "utf8")).includes("Both posts, combined."));
+});
+
+test("merge: a kept entry that already has every collection and gets no new title or text is not rewritten", async (t) => {
+  const { appdir, store, changes, seo, growth, oldest, newest } = await threeToMerge(t);
+  await store.updateEntry(oldest, { collections: [seo.id, growth.id] });
+  changes.length = 0;
+  const path = join(knowledgeEntriesDir(appdir), `${oldest}.md`);
+  const fileBefore = await readFile(path, "utf8");
+  const metaBefore = store.getMeta(oldest)!;
+  const outcome = await store.mergeEntries({ ids: [oldest, newest], title: metaBefore.title });
+  assert.equal(outcome.keptChanged, false);
+  assert.equal(outcome.collectionsChanged, false);
+  assert.deepEqual(outcome.deleted, [newest]);
+  assert.deepEqual(changes, [{ kind: "deleted", entryIds: [newest] }]);
+  assert.equal(await readFile(path, "utf8"), fileBefore);
+  assert.equal(store.getMeta(oldest)!.updatedAt, metaBefore.updatedAt);
+});
+
+test("merge: entries saved at the same instant keep the smaller id", async (t) => {
+  const { open } = await setup(t);
+  const { store } = await open();
+  await store.createCollection({ name: "SEO" });
+  const { results } = await store.save({
+    entries: [
+      { body: "Alternatives pages convert well for every competitor.", collections: ["SEO"] },
+      { body: "Comparison tables beat feature lists on landing pages.", collections: ["SEO"] }
+    ]
+  });
+  const ids = results.map((r) => r.entryId).sort();
+  assert.equal(store.getMeta(ids[0]!)!.savedAt, store.getMeta(ids[1]!)!.savedAt);
+  const outcome = await store.mergeEntries({ ids: [...ids].reverse() });
+  assert.equal(outcome.kept.id, ids[0]);
+});
+
+test("merge: refusals are checked before anything changes", async (t) => {
+  const { appdir, store, changes, oldest, middle, newest } = await threeToMerge(t);
+  const filesBefore = await readdir(knowledgeEntriesDir(appdir));
+  const metasBefore = store.listMeta();
+  const eleven = [oldest, ...Array.from({ length: 10 }, (_, i) => `ke_${String(i).padStart(12, "0")}`)];
+  await rejects(store.mergeEntries({ ids: [oldest] }), "KNOWLEDGE_INVALID", /2 to 10/);
+  await rejects(store.mergeEntries({ ids: eleven }), "KNOWLEDGE_INVALID", /2 to 10/);
+  await rejects(store.mergeEntries({ ids: [oldest, middle, oldest] }), "KNOWLEDGE_INVALID", /named twice/);
+  await rejects(store.mergeEntries({ ids: [oldest, middle], keep: newest }), "KNOWLEDGE_INVALID", /keep must be one of/);
+  await rejects(store.mergeEntries({ ids: [oldest, "ke_zzzzzzzzzzzz"] }), "KNOWLEDGE_NOT_FOUND", /ke_zzzzzzzzzzzz/);
+  await rejects(store.mergeEntries({ ids: [oldest, middle], title: "x".repeat(KNOWLEDGE_TITLE_MAX + 1) }), "KNOWLEDGE_INVALID");
+  await rejects(store.mergeEntries({ ids: [oldest, middle], body: "   " }), "KNOWLEDGE_INVALID");
+  await rejects(store.mergeEntries({ ids: [oldest, middle], body: "x".repeat(KNOWLEDGE_ENTRY_MAX_BYTES + 1) }), "KNOWLEDGE_TOO_LARGE");
+  assert.deepEqual(changes, []);
+  assert.deepEqual(await readdir(knowledgeEntriesDir(appdir)), filesBefore);
+  assert.deepEqual(store.listMeta(), metasBefore);
 });

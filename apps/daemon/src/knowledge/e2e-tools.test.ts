@@ -24,6 +24,7 @@ import {
   AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE,
   knowledgeRoutes,
   type KnowledgeCollectionView,
+  type KnowledgeEntryDetail,
   type KnowledgeStatus,
   type KnowledgeWorkerNextResponse,
   type KnowledgeWorkerSubmitResponse,
@@ -486,4 +487,44 @@ test("knowledge_update and knowledge_delete end to end: edits by collection name
   for (const name of ["knowledge_update", "knowledge_delete"]) assert.ok(globalTools.includes(name), name);
   const plainTools = await h.toolsOf("plain-chat");
   assert.ok(plainTools.includes("knowledge_save") && !plainTools.includes("knowledge_update") && !plainTools.includes("knowledge_delete"));
+});
+
+test("knowledge_merge end to end: a hidden id refuses the whole merge; the kept entry gets every collection, the rest leave search; who is advertised it", async (t) => {
+  const h = await harness(t);
+  const make = async (name: string) => {
+    const res = await h.user("POST", knowledgeRoutes.collections, { name, description: `${name} notes.` });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    return res.body as KnowledgeCollectionView;
+  };
+  const seo = await make("SEO");
+  const ads = await make("Ads");
+  const adsOnly = await h.profiles.create({ name: "Ads only", settings: { knowledgeCollections: [ads.id] } });
+  const plain = await h.profiles.create({ name: "Plain" });
+  await h.knowledge.settled();
+  h.sessions.set("global", { profileId: null });
+  h.sessions.set("ads-chat", { profileId: adsOnly.id });
+  h.sessions.set("plain-chat", { profileId: plain.id });
+
+  const first = savedIds(await h.text("global", "knowledge_save", { entries: [{ body: "Cap the daily budget while a campaign learns.", title: "Learning phase", collections: ["Ads"] }] }))[0];
+  const second = savedIds(await h.text("global", "knowledge_save", { entries: [{ body: "Comparison pages win high-intent searches every time.", title: "Comparison pages", collections: ["SEO"] }] }))[0];
+  assert.ok(first && second);
+
+  // The Ads chat cannot see the SEO entry: the merge is refused and nothing changes.
+  assert.equal(await h.refusal("ads-chat", "knowledge_merge", { ids: [first, second] }), "KNOWLEDGE_NOT_FOUND");
+  assert.ok((await h.text("global", "knowledge_get", { id: second! })).endsWith("Comparison pages win high-intent searches every time."));
+  const unchanged = await h.user("GET", knowledgeRoutes.entry(first!));
+  assert.equal(unchanged.status, 200);
+  assert.deepEqual((unchanged.body as KnowledgeEntryDetail).entry.collections, [ads.id]);
+
+  // The whole-base chat merges: the kept entry gets both collections and the combined text.
+  await h.text("global", "knowledge_merge", { ids: [second, first], keep: first, body: "Cap the budget while learning; comparison pages win high-intent searches." });
+  const merged = await h.user("GET", knowledgeRoutes.entry(first!));
+  assert.equal(merged.status, 200);
+  assert.deepEqual((merged.body as KnowledgeEntryDetail).entry.collections, [ads.id, seo.id]);
+  assert.equal(await h.refusal("global", "knowledge_get", { id: second! }), "KNOWLEDGE_NOT_FOUND");
+  assert.ok(!(await h.text("global", "knowledge_search", { query: "comparison pages high-intent" })).includes(second!), "the deleted entry left search");
+  assert.ok((await h.text("ads-chat", "knowledge_get", { id: first! })).endsWith("comparison pages win high-intent searches."), "still visible where it was");
+
+  assert.ok((await h.toolsOf("global")).includes("knowledge_merge"));
+  assert.ok(!(await h.toolsOf("plain-chat")).includes("knowledge_merge"));
 });

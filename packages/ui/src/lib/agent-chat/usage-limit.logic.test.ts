@@ -118,3 +118,16 @@ test("account labels, the failover notice and the Limited marker", () => {
     title: "Usage limit reached · Resumes automatically at 3:40 PM (in 1h 12m)"
   });
 });
+
+test("an overload retries on its account instead of offering an account switch", () => {
+  const retryAt = iso(NOW + 30_000);
+  const overloaded = state({ kind: "overloaded", resetAt: retryAt, resumeAt: retryAt, message: "Selected model is at capacity." });
+  const armed = usageLimitBannerModel({ state: overloaded, refId: "claude", accounts: ACCOUNTS, now: NOW });
+  assert.equal(armed.canSwitch, false);
+  assert.ok(!armed.title.includes("work"), "provider capacity is not attributed to the account");
+  assert.equal(armed.toggle?.armed, false);
+  assert.equal(armed.tooltip, "Selected model is at capacity.");
+
+  const off = usageLimitBannerModel({ state: { ...overloaded, autoResume: "off", resumeAt: null }, refId: "claude", accounts: ACCOUNTS, now: NOW });
+  assert.equal(off.toggle?.armed, true);
+});

@@ -29,12 +29,18 @@ import {
   type KnowledgeEntry,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
+  type KnowledgeEntryMatch,
   type KnowledgeEntrySummary,
+  type KnowledgeFacetCount,
+  type KnowledgeFacets,
+  type KnowledgeFacetsResponse,
   type KnowledgeGraphNode,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
   type KnowledgeLinkState,
   type KnowledgeLinkingState,
+  type KnowledgeMatchBand,
+  type KnowledgeMatchSignal,
   type KnowledgePauseReason,
   type KnowledgeRebuildEstimate,
   type KnowledgeRunMode,
@@ -46,6 +52,8 @@ import {
   type KnowledgeWorkerView
 } from "@orquester/api";
 import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
+import type { KnowledgeRelatedReason, KnowledgeSimilarEntry } from "@orquester/api";
+import type { KnowledgeSimilarityCluster, KnowledgeSimilarityEdge, KnowledgeSimilarityGraphResponse, KnowledgeSimilarityNode } from "@orquester/api";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -252,6 +260,83 @@ export function parseKnowledgeGraphResponse(value: unknown): KnowledgeGraphRespo
   };
 }
 
+// ---------------------------------------------------------------------------
+// The similarity graph
+// ---------------------------------------------------------------------------
+
+function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarityNode | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  return {
+    id: value.id,
+    title: str(value.title),
+    kind: str(value.kind) || "note",
+    author: nullableStr(value.author),
+    handle: nullableStr(value.handle),
+    savedAt: str(value.savedAt),
+    collections: strings(value.collections),
+    // Unreadable: -1, an index no cluster has (drawn like a singleton, as one the answer lacks).
+    cluster: typeof value.cluster === "number" && Number.isInteger(value.cluster) && value.cluster >= 0 ? value.cluster : -1,
+    degree: count(value.degree)
+  };
+}
+
+function parseKnowledgeSimilarityEdge(value: unknown): KnowledgeSimilarityEdge | null {
+  if (!isRecord(value) || typeof value.from !== "string" || typeof value.to !== "string" || value.from === value.to) return null;
+  return { from: value.from, to: value.to, similarity: num(value.similarity), tree: bool(value.tree) };
+}
+
+/**
+ * Nodes deduplicated by id; an edge whose ends are not both in the answer is left out, and two
+ * edges between the same pair (either direction) are one, a tree edge when either was. Clusters
+ * keep their positions (nodes index into them): an unreadable one reads as an empty, unlabelled
+ * cluster, and an absent list as none. Null for a broken envelope (no node or edge list).
+ */
+export function parseKnowledgeSimilarityGraphResponse(value: unknown): KnowledgeSimilarityGraphResponse | null {
+  if (!isRecord(value)) return null;
+  const rawNodes = list(value.nodes, parseKnowledgeSimilarityNode);
+  const rawEdges = list(value.edges, parseKnowledgeSimilarityEdge);
+  if (!rawNodes || !rawEdges) return null;
+  const nodes: KnowledgeSimilarityNode[] = [];
+  const ids = new Set<string>();
+  for (const node of rawNodes) {
+    if (ids.has(node.id)) continue;
+    ids.add(node.id);
+    nodes.push(node);
+  }
+  const edges: KnowledgeSimilarityEdge[] = [];
+  const byPair = new Map<string, KnowledgeSimilarityEdge>();
+  for (const edge of rawEdges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to)) continue;
+    const pair = edge.from < edge.to ? `${edge.from}\u0000${edge.to}` : `${edge.to}\u0000${edge.from}`;
+    const seen = byPair.get(pair);
+    if (seen) {
+      if (edge.tree) seen.tree = true;
+      continue;
+    }
+    byPair.set(pair, edge);
+    edges.push(edge);
+  }
+  const clusters: KnowledgeSimilarityCluster[] = Array.isArray(value.clusters)
+    ? value.clusters.map((item: unknown, index: number) => {
+        if (!isRecord(item)) return { id: index, size: nodes.filter((n) => n.cluster === index).length, label: null };
+        return {
+          id: typeof item.id === "number" ? count(item.id) : index,
+          size: typeof item.size === "number" ? count(item.size) : nodes.filter((n) => n.cluster === index).length,
+          label: typeof item.label === "string" && item.label.trim() !== "" ? item.label : null
+        };
+      })
+    : [];
+  const totals = isRecord(value.totals) ? value.totals : {};
+  const embedded = typeof totals.embedded === "number" ? count(totals.embedded) : nodes.length;
+  return {
+    nodes,
+    edges,
+    clusters,
+    truncated: bool(value.truncated),
+    totals: { entries: Math.max(typeof totals.entries === "number" ? count(totals.entries) : embedded, embedded), embedded }
+  };
+}
+
 function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   if (!isRecord(value)) return null;
   const concept = parseKnowledgeConcept(value.concept);
@@ -271,16 +356,71 @@ function parseConceptDetail(value: unknown): KnowledgeConceptDetail | null {
   };
 }
 
+/**
+ * Why an entry is shown beside another; null for one this client cannot read (an unknown kind from
+ * a newer daemon, a meaning without a similarity, an author without a value).
+ */
+function parseKnowledgeRelatedReason(value: unknown): KnowledgeRelatedReason | null {
+  if (!isRecord(value)) return null;
+  switch (value.kind) {
+    case "meaning":
+      return typeof value.similarity === "number" && Number.isFinite(value.similarity)
+        ? { kind: "meaning", similarity: Math.min(1, Math.max(-1, value.similarity)) }
+        : null;
+    case "concepts": {
+      const concepts = list(value.concepts, parseKnowledgeConceptRef) ?? [];
+      return { kind: "concepts", concepts, shared: Math.max(count(value.shared), concepts.length) };
+    }
+    case "author":
+      return typeof value.value === "string" && value.value.trim() !== "" ? { kind: "author", value: value.value } : null;
+    default:
+      return null;
+  }
+}
+
+/** One similar entry: null without a readable entry; unreadable reasons are left out (a reason kind repeats once). */
+function parseKnowledgeSimilarEntry(value: unknown): KnowledgeSimilarEntry | null {
+  if (!isRecord(value)) return null;
+  const entry = parseKnowledgeEntrySummary(value.entry);
+  if (!entry) return null;
+  const similarity =
+    typeof value.similarity === "number" && Number.isFinite(value.similarity) ? Math.min(1, Math.max(-1, value.similarity)) : null;
+  const seen = new Set<string>();
+  const reasons = (list(value.reasons, parseKnowledgeRelatedReason) ?? []).filter((reason) => {
+    if (seen.has(reason.kind)) return false;
+    seen.add(reason.kind);
+    return true;
+  });
+  return { entry, similarity, reasons };
+}
+
+/** A similar-entries list: absent (an older daemon) when it is not an array; never the entry itself, each entry once. */
+function parseSimilarList(value: unknown, selfId: string): KnowledgeSimilarEntry[] | undefined {
+  const items = list(value, parseKnowledgeSimilarEntry);
+  if (!items) return undefined;
+  const ids = new Set<string>([selfId]);
+  return items.filter((item) => {
+    if (ids.has(item.entry.id)) return false;
+    ids.add(item.entry.id);
+    return true;
+  });
+}
+
 function parseEntryDetail(value: unknown): KnowledgeEntryDetail | null {
   if (!isRecord(value)) return null;
   const entry = parseKnowledgeEntry(value.entry);
   if (!entry) return null;
-  return {
+  const detail: KnowledgeEntryDetail = {
     entry,
     concepts: list(value.concepts, parseKnowledgeConceptRef) ?? [],
     related: (list(value.related, parseKnowledgeEntrySummary) ?? []).filter((r) => r.id !== entry.id),
     citation: typeof value.citation === "string" && value.citation ? value.citation : knowledgeCitation(entry)
   };
+  const similar = parseSimilarList(value.similar, entry.id);
+  if (similar) detail.similar = similar;
+  const possibleDuplicates = parseSimilarList(value.possibleDuplicates, entry.id);
+  if (possibleDuplicates) detail.possibleDuplicates = possibleDuplicates;
+  return detail;
 }
 
 export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemResponse | null {
@@ -300,27 +440,111 @@ export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemRespons
 // Search
 // ---------------------------------------------------------------------------
 
+const BANDS: ReadonlySet<string> = new Set<KnowledgeMatchBand>(["strong", "good", "weak"]);
+/** The contract's fixed order for `via`. */
+const SIGNAL_ORDER: readonly KnowledgeMatchSignal[] = ["keyword", "meaning", "similar", "concept"];
+
+const isIndex = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+function parseMatchPassage(value: unknown): KnowledgeEntryMatch["passage"] {
+  if (!isRecord(value)) return null;
+  const { start, end, chunk, chunks } = value;
+  if (!isIndex(start) || !isIndex(end) || !isIndex(chunk) || !isIndex(chunks)) return null;
+  if (end < start || chunks < 1 || chunk >= chunks) return null;
+  return { start, end, chunk, chunks };
+}
+
+/**
+ * Why a search found an entry. Null — the hit then carries no `match`, as from a daemon that
+ * predates it — when it is not an object, its band is not one this client knows, or it names no
+ * signal this client knows; a bad passage reads as none, and unreadable terms or concepts are left out.
+ */
+function parseKnowledgeEntryMatch(value: unknown): KnowledgeEntryMatch | null {
+  if (!isRecord(value) || typeof value.band !== "string" || !BANDS.has(value.band)) return null;
+  const named = new Set(strings(value.via));
+  const via = SIGNAL_ORDER.filter((signal) => named.has(signal));
+  if (via.length === 0) return null;
+  const terms = [...new Set(strings(value.terms).map((term) => term.trim()).filter((term) => term !== ""))];
+  return {
+    band: value.band as KnowledgeMatchBand,
+    via,
+    terms,
+    passage: parseMatchPassage(value.passage),
+    concepts: list(value.concepts, parseKnowledgeConceptRef) ?? []
+  };
+}
+
+function parseIdTitle(value: unknown): { id: string; title: string } | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  return { id: value.id, title: str(value.title) };
+}
+
 function parseSearchHit(value: unknown): KnowledgeSearchHit | null {
   if (!isRecord(value)) return null;
   const score = num(value.score);
   if (value.kind === "entry") {
     const entry = parseKnowledgeEntrySummary(value.entry);
-    return entry ? { kind: "entry", score, entry } : null;
+    if (!entry) return null;
+    const match = parseKnowledgeEntryMatch(value.match);
+    return match ? { kind: "entry", score, entry, match } : { kind: "entry", score, entry };
   }
   if (value.kind === "concept") {
     const ref = parseKnowledgeConceptRef(value.concept);
     if (!ref) return null;
     const description = isRecord(value.concept) ? nullableStr(value.concept.description) : null;
-    return { kind: "concept", score, concept: { ...ref, description }, entryIds: strings(value.entryIds) };
+    const hit: KnowledgeSearchHit = { kind: "concept", score, concept: { ...ref, description }, entryIds: strings(value.entryIds) };
+    const entries = list(value.entries, parseIdTitle);
+    if (entries) hit.entries = entries;
+    return hit;
   }
   return null;
 }
 
+function parseFacetCount(value: unknown): KnowledgeFacetCount | null {
+  if (!isRecord(value) || typeof value.value !== "string" || value.value === "") return null;
+  return { value: value.value, label: str(value.label) || value.value, count: count(value.count) };
+}
+
+/** Facet counts, each value once; a list that is missing or not an array reads as empty. Null when it is not an object. */
+function parseKnowledgeFacets(value: unknown): KnowledgeFacets | null {
+  if (!isRecord(value)) return null;
+  const facet = (field: unknown): KnowledgeFacetCount[] => {
+    const seen = new Set<string>();
+    const out: KnowledgeFacetCount[] = [];
+    for (const c of list(field, parseFacetCount) ?? []) {
+      if (seen.has(c.value)) continue;
+      seen.add(c.value);
+      out.push(c);
+    }
+    return out;
+  };
+  return { kinds: facet(value.kinds), authors: facet(value.authors), collections: facet(value.collections), years: facet(value.years) };
+}
+
+/** POST /facets' answer; null without readable `facets`. A missing total reads as the kinds' sum (every entry has one kind). */
+export function parseKnowledgeFacetsResponse(value: unknown): KnowledgeFacetsResponse | null {
+  if (!isRecord(value)) return null;
+  const facets = parseKnowledgeFacets(value.facets);
+  if (!facets) return null;
+  const total = typeof value.total === "number" && Number.isFinite(value.total) ? count(value.total) : facets.kinds.reduce((sum, c) => sum + c.count, 0);
+  return { facets, total };
+}
+
+/**
+ * A search answer. `total`, `nextCursor` and `facets` stay absent when the daemon sent none (one
+ * that predates paging): callers tell an older daemon by the missing `total`.
+ */
 export function parseKnowledgeSearchResponse(value: unknown): KnowledgeSearchResponse | null {
   if (!isRecord(value)) return null;
   const hits = list(value.hits, parseSearchHit);
   if (!hits) return null;
-  return { hits, searched: strings(value.searched) };
+  const answer: KnowledgeSearchResponse = { hits, searched: strings(value.searched) };
+  if (typeof value.total === "number" && Number.isFinite(value.total)) answer.total = count(value.total);
+  if (typeof value.nextCursor === "string" && value.nextCursor !== "") answer.nextCursor = value.nextCursor;
+  else if (value.nextCursor === null || value.nextCursor === "") answer.nextCursor = null;
+  const facets = value.facets === undefined ? null : parseKnowledgeFacets(value.facets);
+  if (facets) answer.facets = facets;
+  return answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +632,7 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
     isRecord(value.lastError) && typeof value.lastError.message === "string"
       ? { message: value.lastError.message, at: str(value.lastError.at) }
       : null;
-  return {
+  const status: KnowledgeStatus = {
     enabled: value.enabled,
     installed: value.installed,
     entries: count(value.entries),
@@ -423,6 +647,9 @@ export function parseKnowledgeStatus(value: unknown): KnowledgeStatus | null {
     tokens: { week: parseTokens(tokens.week), total: parseTokens(tokens.total) },
     lastError
   };
+  // Absent from a daemon that predates it (and anything not a boolean reads as absent).
+  if (typeof value.embeddingModelReady === "boolean") status.embeddingModelReady = value.embeddingModelReady;
+  return status;
 }
 
 /** `knowledge.changed`'s payload, or null when it is not an object. */

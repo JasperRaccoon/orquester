@@ -175,6 +175,15 @@ describe("knowledge wire validation", () => {
     assert.equal(parseKnowledgeStatus({ enabled: true, installed: true, failedEntries: 4 })?.failedEntries, 4);
   });
 
+  it("reads embeddingModelReady when it is a boolean, and leaves it out otherwise", () => {
+    assert.equal(parseKnowledgeStatus({ enabled: true, installed: true, embeddingModelReady: false })?.embeddingModelReady, false);
+    assert.equal(parseKnowledgeStatus({ enabled: true, installed: true, embeddingModelReady: true })?.embeddingModelReady, true);
+    const older = parseKnowledgeStatus({ enabled: true, installed: true });
+    assert.ok(older);
+    assert.equal("embeddingModelReady" in older, false, "absent from a daemon that predates it");
+    assert.equal("embeddingModelReady" in parseKnowledgeStatus({ enabled: true, installed: true, embeddingModelReady: "no" })!, false);
+  });
+
   it("reads an unknown linking state as idle and an unknown pause reason as an error", () => {
     assert.deepEqual(parseKnowledgeLinkingState({ state: "teleporting" }), { state: "idle" });
     assert.deepEqual(parseKnowledgeLinkingState({ state: "paused", reason: "solar-flare", message: "m", resumesAt: null, pendingEntries: 1 }), {
