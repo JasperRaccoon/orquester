@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +8,11 @@ import { after, describe, it } from "node:test";
 import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
+import { LOCAL_EXECUTOR } from "../../android/executor.ts";
 import { isProcessAlive, waitForExit } from "../../android/procs.ts";
 import { boxAgentDeviceConfigPath } from "./agent-device-config.ts";
 import { BoxAndroidHost, type BoxAndroidHostDeps } from "./android-host.ts";
+import { androidRentalSpec, boxAvdState, boxGolden } from "./android-remote.ts";
 import { createFakeLinuxBox, type FakeLinuxBox, type FakeLinuxBoxOptions } from "./android-testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -160,8 +162,8 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     );
     assert.notEqual(a!.deviceId, b!.deviceId);
     assert.deepEqual(a!.stream, { kind: "serve-emu", deviceParam: a!.deviceId });
-    // A cache AVD keeps its device's full resolution: 1080×2424 @420.
-    assert.deepEqual(a!.screen, { width: 411, height: 923, scale: 2.625 });
+    // The cache's AVD is tuned like one made here: Pixel 9 at 720×1616 @280.
+    assert.deepEqual(a!.screen, { width: 411, height: 923, scale: 1.75 });
     const args = await h.box.emulatorArgs();
     assert.equal(args.length, 2);
     for (const line of args) {
@@ -256,5 +258,56 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     const teardown = host.teardown();
     await assert.rejects(host.boot({ leaseId: "late", profile, fresh: true }, signal()), /being turned off/);
     await teardown;
+  });
+});
+
+describe("the device cache's AVDs in a box", { concurrency: false }, () => {
+  it("a restored AVD is the cache's: leases boot from its golden with the GPU mode the cache recorded", async () => {
+    const h = await harness({ cacheGpu: "swangle_indirect" });
+    const host = h.make();
+    await host.prepare(h.box.connection, signal());
+    assert.equal(host.cacheState(), "hit");
+    h.leases.push(lease("lease-a"));
+    await host.boot({ leaseId: "lease-a", profile, fresh: true }, signal());
+    const [line] = await h.box.emulatorArgs();
+    assert.match(line!, /-gpu swangle_indirect/);
+    assert.match(line!, /-snapshot orq-golden -no-snapshot-save$/);
+    await host.teardown();
+  });
+
+  it("an older cache's untuned AVD (no markers), another config or another emulator is not trusted", async () => {
+    const legacy = await createFakeLinuxBox({ cacheAvds: "legacy" });
+    const tuned = await createFakeLinuxBox();
+    cleanups.push(legacy.cleanup, tuned.cleanup);
+    const avdHome = (box: FakeLinuxBox) => join(box.root, "avd");
+    assert.equal(await boxAvdState(LOCAL_EXECUTOR, avdHome(legacy), profile), "outdated");
+    assert.equal(await boxGolden(LOCAL_EXECUTOR, avdHome(legacy), profile, "outdated", "37.2.12"), null);
+    assert.equal(await boxAvdState(LOCAL_EXECUTOR, avdHome(tuned), profile), "cache");
+    assert.deepEqual(await boxGolden(LOCAL_EXECUTOR, avdHome(tuned), profile, "cache", "37.2.12"), { snapshot: "orq-golden", gpu: "swiftshader_indirect", source: "cache" });
+    assert.equal(await boxGolden(LOCAL_EXECUTOR, avdHome(tuned), profile, "cache", "38.0.0"), null, "another emulator build");
+    const marker = join(avdHome(tuned), "orq-pixel-9.avd", "orq-avd.json");
+    await writeFile(marker, JSON.stringify({ ...JSON.parse(await readFile(marker, "utf8")), configHash: "0000000000000000" }));
+    assert.equal(await boxAvdState(LOCAL_EXECUTOR, avdHome(tuned), profile), "outdated");
+  });
+});
+
+describe("androidRentalSpec", () => {
+  it("takes the Linux hosts' own time limit (pool.androidLifetimeMinutes), not the Mac hosts'", () => {
+    const settings: DevicesSettings = structuredClone(DEFAULT_DEVICES_SETTINGS);
+    settings.ios.lifetimeMinutes = 600;
+    settings.pool.androidLifetimeMinutes = 90;
+    const spec = androidRentalSpec(settings);
+    assert.equal(spec.lifetimeMinutes, 90);
+    assert.equal(spec.size, "16vcpu");
+    settings.pool.provider = "hetzner";
+    settings.pool.androidSize = "ccx33";
+    assert.deepEqual(androidRentalSpec(settings, [{ id: "ccx33", label: "CCX33", vcpu: 8, ramGb: 32, diskGb: 240, gpu: null, hourlyUsd: 0.2, regions: [] }]), {
+      provider: "hetzner",
+      size: "ccx33",
+      sizeLabel: "CCX33",
+      image: null,
+      hourlyUsd: 0.2,
+      lifetimeMinutes: 90
+    });
   });
 });

@@ -1,14 +1,25 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { AVD_HARDWARE, avdHardware, cutoutSpecInDp, parseIni, patchAvdConfig } from "../../devices/android/avd-config.ts";
+import { emulatorArgs } from "../../devices/android/emulator.ts";
+import { LOCAL_EXECUTOR } from "../../devices/android/executor.ts";
+import { CLOSE_SYSTEM_DIALOGS_SCRIPT, GUEST_SETTINGS_SCRIPT } from "../../devices/android/golden.ts";
+import { BOX_GPU_MODES, boxAvdState, boxGolden } from "../../devices/hosts/box/android-remote.ts";
+import { CMDLINE_TOOLS, profileHash } from "../../devices/toolchain/android-sdk.ts";
 import {
-  ANDROID_AVDS,
+  ANDROID_AVD_STEP_SCRIPT,
   ANDROID_CACHE_HASH,
   ANDROID_CACHE_KEY,
   ANDROID_CACHE_PATHS,
+  ANDROID_CACHE_PROFILES,
+  ANDROID_GOLDEN_SNAPSHOT,
   ANDROID_SDK_PACKAGES,
+  ANDROID_SDK_STEP_SCRIPT,
   APPLE_RUNNER_CACHE_PATHS,
   APPLE_RUNNER_STEP_SCRIPT,
   appleRunnerCacheKey,
@@ -44,8 +55,9 @@ test("box paths live under /var/lib/orquester/devices, which the paths step hand
 });
 
 test("cache keys: one per content, valid for actions/cache, per OS where it matters", () => {
-  assert.match(ANDROID_CACHE_KEY, /^orq-devices-android-[0-9a-f]{16}-v1$/);
-  assert.equal(ANDROID_CACHE_KEY, `orq-devices-android-${ANDROID_CACHE_HASH}-v1`);
+  // v2: AVDs tuned like a box host's (v1 caches held untuned 1080p AVDs).
+  assert.match(ANDROID_CACHE_KEY, /^orq-devices-android-[0-9a-f]{16}-v2$/);
+  assert.equal(ANDROID_CACHE_KEY, `orq-devices-android-${ANDROID_CACHE_HASH}-v2`);
   assert.match(deviceToolsCacheKey("linux"), /^orq-devices-tools-linux-node22-[0-9a-f]{16}-v1$/);
   assert.notEqual(deviceToolsCacheKey("linux"), deviceToolsCacheKey("macos"));
   assert.equal(deviceToolsCacheKey("linux").replace("linux", "macos"), deviceToolsCacheKey("macos"), "the same tools hash on both");
@@ -56,14 +68,99 @@ test("cache keys: one per content, valid for actions/cache, per OS where it matt
   }
 });
 
-test("the Android cache holds the API 35 x86_64 image and the three Pixel AVDs", () => {
+test("the Android cache holds the API 35 x86_64 image and the default Pixel profiles, from the box host's pinned cmdline-tools", () => {
   assert.deepEqual(ANDROID_SDK_PACKAGES, ["platform-tools", "emulator", "system-images;android-35;google_apis;x86_64"]);
-  // Device ids from `avdmanager list device -c` (cmdline-tools 19).
-  assert.deepEqual(ANDROID_AVDS, [
-    { name: "orq-pixel-9", device: "pixel_9" },
-    { name: "orq-pixel-tablet", device: "pixel_tablet" },
-    { name: "orq-pixel-fold", device: "pixel_fold" }
-  ]);
+  assert.deepEqual(
+    ANDROID_CACHE_PROFILES.map((profile) => profile.id),
+    ["pixel-9", "pixel-tablet", "pixel-fold"]
+  );
+  assert.ok(ANDROID_SDK_STEP_SCRIPT.includes(`'${CMDLINE_TOOLS.url}'`) && ANDROID_SDK_STEP_SCRIPT.includes(`'${CMDLINE_TOOLS.sha256}'`));
+});
+
+// Snapshots of the generated scripts: `ORQ_UPDATE_SNAPSHOTS=1` rewrites them (review the diff).
+for (const [name, script] of [
+  ["android-sdk-step.sh", ANDROID_SDK_STEP_SCRIPT],
+  ["android-avd-step.sh", ANDROID_AVD_STEP_SCRIPT]
+] as const) {
+  test(`snapshot: ${name}`, () => {
+    const file = new URL(`./fixtures/${name}`, import.meta.url);
+    if (process.env.ORQ_UPDATE_SNAPSHOTS === "1") writeFileSync(file, script);
+    assert.equal(script, readFileSync(file, "utf8"), `the generated script changed: rerun with ORQ_UPDATE_SNAPSHOTS=1 and review fixtures/${name}`);
+  });
+}
+
+test("the AVD script is generated from the box host's own modules: hardware, config hash, flags, guest settings, GPU order", () => {
+  for (const profile of ANDROID_CACHE_PROFILES) {
+    const hardware = avdHardware(profile);
+    assert.ok(
+      ANDROID_AVD_STEP_SCRIPT.includes(
+        `make_profile 'orq-${profile.id}' '${profile.systemImage}' '${hardware.device}' '${hardware.width}' '${hardware.height}' '${hardware.density}' '${profile.id}' '${profileHash(profile)}'`
+      ),
+      profile.id
+    );
+  }
+  // Pixel 9 at its real aspect, ⅔ of the panel: 720×1616 @280 (not avdmanager's 1080×2424 @420).
+  assert.deepEqual(AVD_HARDWARE["pixel-9"], { device: "pixel_9", width: 720, height: 1616, density: 280 });
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(readFileSync(new URL("../../devices/android/avd-tuning.mjs", import.meta.url), "utf8").trimEnd()), "avd-tuning.mjs embedded verbatim");
+  const golden = emulatorArgs({ avd: "x", consolePort: 5554, grpcPort: 8554, golden: true, gpu: "g", snapshot: ANDROID_GOLDEN_SNAPSHOT });
+  assert.deepEqual(golden.slice(-2), ["-no-snapshot-load", "-no-snapshot-save"]);
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`setsid emulator '-avd' "$name" '-no-window'`));
+  for (const flag of golden.filter((arg) => arg.startsWith("-"))) assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(` '${flag}'`), flag);
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`sh_adb 60 '${GUEST_SETTINGS_SCRIPT}'`));
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`sh_adb 30 '${CLOSE_SYSTEM_DIALOGS_SCRIPT}'`));
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`for gpu in ${BOX_GPU_MODES.box.join(" ")}; do`));
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`adb -s "$SERIAL" emu avd snapshot save ${ANDROID_GOLDEN_SNAPSHOT}`));
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`ANDROID_AVD_HOME=${BOX_ANDROID_AVD_DIR}`));
+});
+
+/** The script's `cat > "$TUNE/<file>" << 'TAG'` heredocs, written into `dir`. */
+function extractTuning(dir: string): void {
+  for (const match of ANDROID_AVD_STEP_SCRIPT.matchAll(/cat > "\$TUNE\/([a-z-]+\.mjs)" << '([A-Z_]+)'\n([\s\S]*?)\n\2\n/g)) {
+    writeFileSync(join(dir, match[1]!), `${match[3]}\n`);
+  }
+}
+
+test("the script's tuning (run by node as the workflow runs it) writes what the box host makes and trusts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orq-avd-tune-"));
+  try {
+    extractTuning(dir);
+    const tune = (...args: string[]) => {
+      const result = spawnSync(process.execPath, [join(dir, "tune.mjs"), ...args], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    const avdHome = join(dir, "avd");
+    const sdk = join(dir, "sdk");
+    mkdirSync(join(sdk, "emulator"), { recursive: true });
+    writeFileSync(join(sdk, "emulator", "source.properties"), "Pkg.Desc = Android Emulator\nPkg.Revision=36.4.9\n");
+    for (const profile of ANDROID_CACHE_PROFILES) {
+      const hardware = avdHardware(profile);
+      const name = `orq-${profile.id}`;
+      const avd = join(avdHome, `${name}.avd`);
+      mkdirSync(join(avd, "snapshots", ANDROID_GOLDEN_SNAPSHOT), { recursive: true });
+      writeFileSync(join(avdHome, `${name}.ini`), `path=${avd}\n`);
+      writeFileSync(join(avd, "snapshots", ANDROID_GOLDEN_SNAPSHOT, "snapshot.pb"), "");
+      // What avdmanager 22 (cmdline-tools 15859902) writes for the device, unmodified.
+      const original = readFileSync(new URL(`./fixtures/avdmanager/${hardware.device}.ini`, import.meta.url), "utf8");
+      writeFileSync(join(avd, "config.ini"), original);
+      const deviceDensity = tune("patch", join(avd, "config.ini"), name, String(hardware.width), String(hardware.height), String(hardware.density), "swangle_indirect");
+      assert.equal(readFileSync(join(avd, "config.ini"), "utf8"), patchAvdConfig(original, { name, hardware }), `${profile.id}: the daemon's own patch`);
+      assert.equal(deviceDensity, parseIni(original).get("hw.lcd.density"));
+      const config = parseIni(readFileSync(join(avd, "config.ini"), "utf8"));
+      assert.deepEqual([config.get("hw.lcd.width"), config.get("hw.lcd.height"), config.get("hw.lcd.density")], [String(hardware.width), String(hardware.height), String(hardware.density)]);
+      tune("avd-marker", join(avd, "orq-avd.json"), profile.id, profileHash(profile), deviceDensity);
+      tune("golden-marker", join(avd, "orq-box-golden.json"), "swangle_indirect", profileHash(profile), sdk);
+      // The box host takes them as the cache's, with the GPU mode the cache recorded.
+      assert.equal(await boxAvdState(LOCAL_EXECUTOR, avdHome, profile), "cache");
+      assert.deepEqual(await boxGolden(LOCAL_EXECUTOR, avdHome, profile, "cache", "36.4.9"), { snapshot: ANDROID_GOLDEN_SNAPSHOT, gpu: "swangle_indirect", source: "cache" });
+      assert.equal(JSON.parse(readFileSync(join(avd, "orq-avd.json"), "utf8")).deviceDensity, Number(deviceDensity));
+    }
+    const spec = "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left";
+    assert.equal(tune("cutout", spec, "420"), cutoutSpecInDp(spec, 420));
+    assert.equal(tune("cutout", "", "420"), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the KVM step installs the udev rule that opens /dev/kvm to every user", () => {

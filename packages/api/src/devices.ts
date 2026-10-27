@@ -1099,6 +1099,7 @@ const SETTINGS_RULES: Readonly<Record<string, Readonly<Record<string, FieldRule>
     provider: { kind: "nullable-text" },
     androidSize: { kind: "nullable-text" },
     iosSize: { kind: "nullable-text" },
+    androidLifetimeMinutes: { kind: "int", ...L.lifetimeMinutes },
     maxHosts: { kind: "int", ...L.maxHosts },
     maxHourlyUsd: { kind: "number", ...L.maxHourlyUsd },
     idleTeardownMinutes: { kind: "int", ...L.idleTeardownMinutes },

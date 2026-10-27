@@ -8,15 +8,34 @@
  * workflow restored. Box runs only restore (a destroy cancels the run, so a post-job save would
  * never run); the separate cache-warming run builds and saves.
  *
- * A key changes whenever what it covers changes (packages, AVD definitions, tool versions, Node
- * major, the Xcode build), so a stale cache is never restored; bump {@link DEVICE_CACHE_VERSION}
+ * A key changes whenever what it covers changes (packages, tool versions, Node major, the Xcode
+ * build; the Android key hashes its generated AVD script, which the box host's own AVD modules
+ * write), so a stale cache is never restored; bump {@link DEVICE_CACHE_VERSION}
  * to drop every cache when the layout itself changes. Restore and save must use the same path
  * lists (`actions/cache` versions an entry by its paths): both come from the constants here.
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
+import { ANDROID_SYSTEM_IMAGE as API_ANDROID_SYSTEM_IMAGE, deviceProfile, type DeviceProfile } from "@orquester/api";
+import { DEFAULT_ANDROID_DEVICE_PROFILE_IDS } from "@orquester/config";
+
+import { avdHardware, avdName } from "../../devices/android/avd-config.ts";
+import { CONSOLE_PORT_MIN, EMULATOR_GPU_MODE, emulatorArgs, grpcPortFor } from "../../devices/android/emulator.ts";
+import { androidLayoutAt } from "../../devices/android/env.ts";
+import {
+  CLOSE_SYSTEM_DIALOGS_SCRIPT,
+  CUTOUT_OVERLAY,
+  fabricateCutoutCommand,
+  GOLDEN_BOOT_TIMEOUT_MS,
+  GUEST_SETTINGS_SCRIPT,
+  SETTLE_CPU_PERCENT,
+  SETTLE_MAX_MS,
+  SETTLE_WINDOW_MS
+} from "../../devices/android/golden.ts";
 import toolVersions from "../../devices/tool-versions.json" with { type: "json" };
+import { CMDLINE_TOOLS, profileHash, SDK_PACKAGES } from "../../devices/toolchain/android-sdk.ts";
 import { BOX_TOOLS_LOCK, NPM_CI_SCRIPT } from "../../devices/toolchain/npm-tools.ts";
 
 /** Which OS a Blacksmith box runs. */
@@ -58,47 +77,302 @@ export function boxDeviceToolBin(tool: keyof typeof DEVICE_TOOL_VERSIONS): strin
 // Android (Linux boxes)
 // ---------------------------------------------------------------------------
 
-/** Google's cmdline-tools archive (sdkmanager, avdmanager); needs Java 17+. */
-export const ANDROID_CMDLINE_TOOLS_URL = "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip";
-export const ANDROID_SYSTEM_IMAGE = "system-images;android-35;google_apis;x86_64";
-/** sdkmanager packages installed next to cmdline-tools. */
-export const ANDROID_SDK_PACKAGES: readonly string[] = ["platform-tools", "emulator", ANDROID_SYSTEM_IMAGE];
-/** The AVDs a device host offers: `name` → avdmanager device id (`avdmanager list device -c`). */
-export const ANDROID_AVDS: ReadonlyArray<{ name: string; device: string }> = [
-  { name: "orq-pixel-9", device: "pixel_9" },
-  { name: "orq-pixel-tablet", device: "pixel_tablet" },
-  { name: "orq-pixel-fold", device: "pixel_fold" }
-];
-/** The snapshot each AVD is cold-booted, settled (animations off) and saved as; leases boot from it read-only. */
+/** The system image every profile runs (the API's; the box host installs the same one). */
+export const ANDROID_SYSTEM_IMAGE = API_ANDROID_SYSTEM_IMAGE;
+/** sdkmanager packages installed next to cmdline-tools: the box host's list ({@link SDK_PACKAGES} and the image). */
+export const ANDROID_SDK_PACKAGES: readonly string[] = [...SDK_PACKAGES, ANDROID_SYSTEM_IMAGE];
+/**
+ * The profiles the cache holds an AVD and golden snapshot of: Settings' default Android profiles
+ * (a box host makes any other profile's AVD itself, on its first open).
+ */
+export const ANDROID_CACHE_PROFILES: readonly DeviceProfile[] = DEFAULT_ANDROID_DEVICE_PROFILE_IDS.map((id) => {
+  const profile = deviceProfile(id);
+  if (!profile || profile.platform !== "android") throw new Error(`unknown Android profile ${id}`);
+  return profile;
+});
+/** The snapshot each AVD's golden boot is saved as (`adb emu avd snapshot save`); leases boot from it read-only. */
 export const ANDROID_GOLDEN_SNAPSHOT = "orq-golden";
-/** A snapshot loads only with the GPU mode it was saved with: boot leases with this one. */
-export const ANDROID_EMULATOR_GPU = "swiftshader_indirect";
-/** config.ini lines set on every AVD before its golden snapshot (headless, no audio or cameras). */
-export const ANDROID_AVD_CONFIG: Readonly<Record<string, string>> = {
-  "hw.ramSize": "2048",
-  "hw.audioInput": "no",
-  "hw.audioOutput": "no",
-  "hw.camera.back": "none",
-  "hw.camera.front": "none",
-  "hw.keyboard": "yes",
-  showDeviceFrame: "no",
-  "fastboot.forceColdBoot": "no"
-};
+/**
+ * GPU modes a rented Linux host's golden snapshot is tried with, in order (the cache's script and a
+ * box host making its own alike); the one that worked is recorded in {@link BOX_GOLDEN_MARKER}
+ * (a snapshot loads only with the mode it was saved with).
+ */
+export const ANDROID_RENTED_GPU_MODES: readonly string[] = ["swiftshader_indirect", "swangle_indirect"];
+/** `<avd>/orq-<profile>.avd/orq-box-golden.json`: a box golden snapshot's GPU mode, config hash and emulator revision. */
+export const BOX_GOLDEN_MARKER = "orq-box-golden.json";
+/** The cache's AVDs and golden snapshots carry this as their markers' `source`. */
+export const ANDROID_CACHE_SOURCE = "cache";
+/** Bump to drop the Android cache alone (a change its script does not show); 2: AVDs tuned like a box host's. */
+export const ANDROID_CACHE_VERSION = "v2";
+
+/** The box layout the Android tools run with (`android-host.ts` uses the same for a rented host). */
+const BOX_ANDROID_LAYOUT = androidLayoutAt(BOX_DEVICES_DIR);
+
+// ---------------------------------------------------------------------------
+// Android step scripts (bash; constants only — no workflow input reaches them)
+// ---------------------------------------------------------------------------
+
+/** Single-quote a value for bash. */
+function sq(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Install cmdline-tools (the box host's pinned build, checksum verified) and {@link ANDROID_SDK_PACKAGES} into {@link BOX_ANDROID_SDK_DIR} (needs Java 17+). */
+export const ANDROID_SDK_STEP_SCRIPT = `set -eu
+SDK=${BOX_ANDROID_SDK_DIR}
+mkdir -p "$SDK/cmdline-tools" ${BOX_ANDROID_AVD_DIR}
+curl -fsSL --retry 3 -o "$RUNNER_TEMP/cmdline-tools.zip" ${sq(CMDLINE_TOOLS.url)}
+sum=$(sha256sum "$RUNNER_TEMP/cmdline-tools.zip" | awk '{ print $1 }')
+if [ "$sum" != ${sq(CMDLINE_TOOLS.sha256)} ]; then
+  echo "::error::cmdline-tools checksum mismatch ($sum)"
+  exit 1
+fi
+rm -rf "$SDK/cmdline-tools/latest" "$RUNNER_TEMP/cmdline-tools"
+unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP"
+mv "$RUNNER_TEMP/cmdline-tools" "$SDK/cmdline-tools/latest"
+rm -f "$RUNNER_TEMP/cmdline-tools.zip"
+SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+yes 2> /dev/null | "$SM" --sdk_root="$SDK" --licenses > /dev/null || true
+"$SM" --sdk_root="$SDK" --install ${ANDROID_SDK_PACKAGES.map(sq).join(" ")}
+"$SDK/emulator/emulator" -version | head -1
+`;
+
+/** The emulator flags of a golden boot (`emulator.ts` `emulatorArgs`) with the AVD, ports and GPU mode as shell variables. */
+function goldenBootArgs(): string {
+  const sentinels = new Map([
+    ["ORQ_AVD", '"$name"'],
+    ["ORQ_GPU", '"$gpu"'],
+    ["65531", '"$CONSOLE_PORT"'],
+    ["65533", '"$GRPC_PORT"']
+  ]);
+  return emulatorArgs({ avd: "ORQ_AVD", consolePort: 65531, grpcPort: 65533, golden: true, gpu: "ORQ_GPU", snapshot: ANDROID_GOLDEN_SNAPSHOT })
+    .map((arg) => sentinels.get(arg) ?? sq(arg))
+    .join(" ");
+}
+
+/** {@link fabricateCutoutCommand} as a bash word with the dp spec from `$dp` (checked to hold no `'`). */
+function fabricateInShell(): string {
+  const [before, after] = fabricateCutoutCommand("ORQ_DP").split("ORQ_DP") as [string, string];
+  return `${sq(before)}"$dp"${sq(after)}`;
+}
+
+/** `tune.mjs`: runs `avd-tuning.mjs` (the daemon's own config patch and dp cutout) in the workflow. */
+const AVD_TUNE_DRIVER = `import { readFileSync, writeFileSync } from "node:fs";
+import { cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-tuning.mjs";
+const [command, ...args] = process.argv.slice(2);
+if (command === "patch") {
+  const [file, name, width, height, density, gpuMode] = args;
+  const original = readFileSync(file, "utf8");
+  const patched = patchAvdConfig(original, { name, hardware: { width: Number(width), height: Number(height), density: Number(density) }, gpuMode });
+  if (hasAvdPlaceholders(patched)) {
+    console.error(name + "'s config.ini still has avdmanager placeholders");
+    process.exit(1);
+  }
+  writeFileSync(file, patched);
+  const deviceDensity = Number(parseIni(original).get("hw.lcd.density"));
+  console.log(Number.isInteger(deviceDensity) && deviceDensity > 0 ? String(deviceDensity) : "");
+} else if (command === "cutout") {
+  console.log(cutoutSpecInDp(args[0] ?? "", Number(args[1])) ?? "");
+} else if (command === "avd-marker") {
+  const [file, profile, configHash, deviceDensity] = args;
+  const marker = { profile, configHash, createdAt: new Date().toISOString(), ...(deviceDensity ? { deviceDensity: Number(deviceDensity) } : {}), source: ${JSON.stringify(ANDROID_CACHE_SOURCE)} };
+  writeFileSync(file, JSON.stringify(marker) + "\\n");
+} else if (command === "golden-marker") {
+  const [file, gpu, configHash, sdk] = args;
+  let emulatorRevision = null;
+  try {
+    emulatorRevision = /^Pkg\\.Revision=(.+)$/m.exec(readFileSync(sdk + "/emulator/source.properties", "utf8"))?.[1]?.trim() ?? null;
+  } catch {}
+  const marker = { snapshot: ${JSON.stringify(ANDROID_GOLDEN_SNAPSHOT)}, gpu, configHash, emulatorRevision, createdAt: new Date().toISOString(), source: ${JSON.stringify(ANDROID_CACHE_SOURCE)} };
+  writeFileSync(file, JSON.stringify(marker) + "\\n");
+} else {
+  process.exit(2);
+}
+`;
+
+/** The AVD tuning module's text (`devices/android/avd-tuning.mjs`), embedded verbatim. */
+const AVD_TUNING_SOURCE = readFileSync(new URL("../../devices/android/avd-tuning.mjs", import.meta.url), "utf8");
+
+/** One `make_profile` call: the profile's AVD as `avdmanager` and `createAvd` make it, and its config hash. */
+function makeProfileCall(profile: DeviceProfile): string {
+  const hardware = avdHardware(profile);
+  return `make_profile ${[avdName(profile.id), profile.systemImage ?? ANDROID_SYSTEM_IMAGE, hardware.device, String(hardware.width), String(hardware.height), String(hardware.density), profile.id, profileHash(profile)].map(sq).join(" ")}`;
+}
+
+/**
+ * Create {@link ANDROID_CACHE_PROFILES}' AVDs and golden snapshots exactly as a Linux box host
+ * makes its own (`hosts/box/android-host.ts` with `toolchain/android-sdk.ts` `createAvd` and
+ * `android/golden.ts` `createGoldenSnapshot`), so a host the cache restored runs the same tuned
+ * framebuffers: `avdmanager create avd` from the pinned cmdline-tools, the config patch of
+ * `avd-tuning.mjs` (embedded verbatim), the box layout's environment, the golden boot's flags
+ * (`emulatorArgs`), `sys.boot_completed`, the CPU settle, the guest settings, the dp display cutout
+ * (`adb root`, a fabricated overlay), agent-device's helper APKs, the system-dialog broadcast, a
+ * named save; GPU modes tried in {@link ANDROID_RENTED_GPU_MODES} order. Each AVD gets the box
+ * host's markers (`orq-avd.json`, {@link BOX_GOLDEN_MARKER} with the GPU mode that worked), with
+ * `source: "cache"`. Needs the device tools restored first (the helper APKs).
+ */
+export const ANDROID_AVD_STEP_SCRIPT = `set -eu
+SDK=${BOX_ANDROID_SDK_DIR}
+TOOLS=${BOX_DEVICE_TOOLS_DIR}
+export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_AVD_HOME=${BOX_ANDROID_LAYOUT.avd}
+export ANDROID_USER_HOME=${BOX_ANDROID_LAYOUT.androidUser} ANDROID_EMULATOR_HOME=${BOX_ANDROID_LAYOUT.androidUser}
+export HOME=${BOX_ANDROID_LAYOUT.home} TMPDIR=${BOX_ANDROID_LAYOUT.tmp} XDG_RUNTIME_DIR=${BOX_ANDROID_LAYOUT.runtime}
+export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
+mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME" "$HOME" "$TMPDIR" "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+TUNE="$RUNNER_TEMP/orq-avd-tune"
+LOGS="$RUNNER_TEMP/orq-avd-logs"
+mkdir -p "$TUNE" "$LOGS"
+cat > "$TUNE/avd-tuning.mjs" << 'ORQ_AVD_TUNING'
+${AVD_TUNING_SOURCE.trimEnd()}
+ORQ_AVD_TUNING
+cat > "$TUNE/tune.mjs" << 'ORQ_AVD_TUNE'
+${AVD_TUNE_DRIVER.trimEnd()}
+ORQ_AVD_TUNE
+CLK_TCK=$(getconf CLK_TCK)
+CONSOLE_PORT=${CONSOLE_PORT_MIN}
+GRPC_PORT=${grpcPortFor(CONSOLE_PORT_MIN)}
+SERIAL="emulator-$CONSOLE_PORT"
+QEMU=
+LAUNCHER=
+
+warn() { echo "::warning::$*"; }
+alive() { [ -n "$QEMU" ] && kill -0 "$QEMU" 2> /dev/null; }
+ticks() { awk '{ sub(/^.*\\) /, ""); print $12 + $13 }' "/proc/$1/stat" 2> /dev/null; }
+sh_adb() { timeout "$1" adb -s "$SERIAL" shell "$2"; }
+
+# adb emu kill, then SIGTERM, then SIGKILL (emulator.ts stopEmulator); the launcher's group last.
+stop_emulator() {
+  if alive; then
+    timeout 10 adb -s "$SERIAL" emu kill > /dev/null 2>&1 || true
+    end=$(($(date +%s) + $1))
+    while alive && [ "$(date +%s)" -lt "$end" ]; do sleep 0.2; done
+    if alive; then kill -TERM "$QEMU" 2> /dev/null || true; sleep 10; fi
+    if alive; then kill -KILL "$QEMU" 2> /dev/null || true; sleep 1; fi
+  fi
+  if [ -n "$LAUNCHER" ]; then kill -TERM -- "-$LAUNCHER" 2> /dev/null || true; fi
+  QEMU=
+  LAUNCHER=
+}
+
+# The dp display cutout (golden.ts fixDisplayCutout): best effort, as on a box host.
+fix_cutout() {
+  spec=$(sh_adb 30 'dumpsys display' | sed -n 's/.*cutoutSpec={\\([^}]*\\)}.*/\\1/p' | head -1)
+  dp=$(node "$TUNE/tune.mjs" cutout "$spec" "$1")
+  if [ -z "$dp" ]; then echo "display cutout kept"; return 0; fi
+  case "$dp" in *"'"*) warn "unexpected cutout spec"; return 1 ;; esac
+  emulation=$(sh_adb 30 'cmd overlay list' | sed -n 's/^[[:space:]]*\\[x\\][[:space:]]*\\(com\\.android\\.internal\\.emulation\\.[A-Za-z0-9_.]*\\).*/\\1/p')
+  root=$(timeout 30 adb -s "$SERIAL" root 2>&1) || { warn "adb root failed: $root"; return 1; }
+  case "$root" in *"cannot run as root"*) warn "adb root failed: $root"; return 1 ;; esac
+  sleep 1
+  timeout 60 adb -s "$SERIAL" wait-for-device
+  ok=1
+  made=$(sh_adb 30 ${fabricateInShell()} 2>&1) || ok=0
+  if printf '%s' "$made" | grep -qiE 'error|exception'; then ok=0; fi
+  if [ "$ok" = 1 ]; then
+    for overlay in $emulation; do sh_adb 30 "cmd overlay disable $overlay" > /dev/null 2>&1 || true; done
+    enabled=$(sh_adb 30 ${sq(`cmd overlay enable ${CUTOUT_OVERLAY}`)} 2>&1) || ok=0
+    if printf '%s' "$enabled" | grep -qi exception; then ok=0; fi
+  fi
+  timeout 30 adb -s "$SERIAL" unroot > /dev/null 2>&1 || true
+  sleep 1
+  timeout 60 adb -s "$SERIAL" wait-for-device || true
+  if [ "$ok" != 1 ]; then warn "the cutout overlay failed: $made $enabled"; return 1; fi
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if sh_adb 30 'dumpsys display' | grep -q 'cutoutSpec={[^}]*@dp'; then echo "display cutout fixed"; return 0; fi
+    sleep 0.5
+  done
+  warn "the display did not take the dp cutout"
+  return 1
+}
+
+# One golden boot of AVD $1 with GPU mode $2 (golden.ts createGoldenSnapshot with a named snapshot).
+golden() {
+  name=$1 gpu=$2 dir=$3 density=$4 device_density=$5
+  log="$LOGS/golden-$name-$gpu.log"
+  rm -rf "$dir/snapshots" "$dir/${BOX_GOLDEN_MARKER}"
+  timeout 30 adb start-server > /dev/null 2>&1 || true
+  setsid emulator ${goldenBootArgs()} > "$log" 2>&1 < /dev/null &
+  LAUNCHER=$!
+  for _ in $(seq 150); do
+    QEMU=$(pgrep -g "$LAUNCHER" '^qemu-system' | head -1 || true)
+    if [ -n "$QEMU" ] || ! kill -0 "$LAUNCHER" 2> /dev/null; then break; fi
+    sleep 0.2
+  done
+  if [ -z "$QEMU" ]; then warn "$name: the emulator did not start"; tail -40 "$log"; stop_emulator 5; return 1; fi
+  started=$(date +%s)
+  end=$((started + ${Math.round(GOLDEN_BOOT_TIMEOUT_MS / 1000)}))
+  until [ "$(timeout 5 adb -s "$SERIAL" shell getprop sys.boot_completed 2> /dev/null | tr -d '\\r')" = 1 ]; do
+    if ! alive; then warn "$name: exited during boot"; tail -40 "$log"; stop_emulator 5; return 1; fi
+    if [ "$(date +%s)" -ge "$end" ]; then warn "$name: did not finish booting"; tail -40 "$log"; stop_emulator 5; return 1; fi
+    sleep 1
+  done
+  echo "$name: booted in $(($(date +%s) - started)) s"
+  # Settle: emulator CPU under ${SETTLE_CPU_PERCENT} % of a core for two ${SETTLE_WINDOW_MS / 1000} s windows in a row (≤ ${SETTLE_MAX_MS / 60_000} min).
+  settle_end=$(($(date +%s) + ${SETTLE_MAX_MS / 1000}))
+  quiet=0
+  while [ "$(date +%s)" -lt "$settle_end" ]; do
+    before=$(ticks "$QEMU")
+    sleep ${SETTLE_WINDOW_MS / 1000}
+    after=$(ticks "$QEMU")
+    if [ -z "$before" ] || [ -z "$after" ]; then warn "$name: exited while settling"; stop_emulator 5; return 1; fi
+    percent=$(((after - before) * 100 / CLK_TCK / ${SETTLE_WINDOW_MS / 1000}))
+    echo "$name: settling (emulator CPU $percent %)"
+    if [ "$percent" -lt ${SETTLE_CPU_PERCENT} ]; then quiet=$((quiet + 1)); else quiet=0; fi
+    if [ "$quiet" -ge 2 ]; then break; fi
+  done
+  sh_adb 60 ${sq(GUEST_SETTINGS_SCRIPT)} || { warn "$name: applying guest settings failed"; stop_emulator 5; return 1; }
+  if [ -n "$device_density" ] && [ "$device_density" != "$density" ]; then fix_cutout "$device_density" || true; fi
+  for apk in "$TOOLS"/node_modules/agent-device/android/snapshot-helper/dist/*.apk "$TOOLS"/node_modules/agent-device/android/ime-helper/dist/*.apk; do
+    [ -f "$apk" ] || continue
+    timeout 120 adb -s "$SERIAL" install -r -g "$apk" > /dev/null || warn "$name: pre-installing $apk failed"
+  done
+  sleep 3
+  sh_adb 30 ${sq(CLOSE_SYSTEM_DIALOGS_SCRIPT)} > /dev/null || warn "$name: closing system dialogs failed"
+  sleep 1
+  saved=$(timeout 180 adb -s "$SERIAL" emu avd snapshot save ${ANDROID_GOLDEN_SNAPSHOT} 2>&1) || { warn "$name: saving the snapshot failed: $saved"; stop_emulator 5; return 1; }
+  case "$saved" in *KO*) warn "$name: saving the snapshot failed: $saved"; stop_emulator 5; return 1 ;; esac
+  stop_emulator 180
+  [ -f "$dir/snapshots/${ANDROID_GOLDEN_SNAPSHOT}/snapshot.pb" ] || { warn "$name: the snapshot was not saved"; tail -40 "$log"; return 1; }
+  echo "$name: saved after $(($(date +%s) - started)) s in total"
+}
+
+# An AVD made as createAvd makes it, then its golden snapshot (GPU modes in order) and both markers.
+make_profile() {
+  name=$1 image=$2 device=$3 width=$4 height=$5 density=$6 profile=$7 hash=$8
+  echo "::group::$name ($device, \${width}x\${height} @\${density})"
+  dir="$ANDROID_AVD_HOME/$name.avd"
+  rm -rf "$dir" "$ANDROID_AVD_HOME/$name.ini"
+  echo no | avdmanager create avd --force --name "$name" --package "$image" --device "$device" --path "$dir"
+  # Older avdmanagers write the .ini under ~/.android/avd whatever ANDROID_AVD_HOME says.
+  if [ ! -f "$ANDROID_AVD_HOME/$name.ini" ] && [ -f "$ANDROID_USER_HOME/avd/$name.ini" ]; then
+    mv "$ANDROID_USER_HOME/avd/$name.ini" "$ANDROID_AVD_HOME/$name.ini"
+  fi
+  device_density=$(node "$TUNE/tune.mjs" patch "$dir/config.ini" "$name" "$width" "$height" "$density" ${sq(EMULATOR_GPU_MODE)})
+  node "$TUNE/tune.mjs" avd-marker "$dir/orq-avd.json" "$profile" "$hash" "$device_density"
+  made=
+  for gpu in ${ANDROID_RENTED_GPU_MODES.join(" ")}; do
+    if golden "$name" "$gpu" "$dir" "$density" "$device_density"; then made=$gpu; break; fi
+    warn "$name: the golden snapshot with -gpu $gpu failed"
+  done
+  if [ -z "$made" ]; then echo "::error::$name: no GPU mode made a golden snapshot"; exit 1; fi
+  node "$TUNE/tune.mjs" golden-marker "$dir/${BOX_GOLDEN_MARKER}" "$made" "$hash" "$SDK"
+  du -sh "$dir"
+  echo "::endgroup::"
+}
+
+emulator -accel-check
+${ANDROID_CACHE_PROFILES.map(makeProfileCall).join("\n")}
+timeout 30 adb kill-server || true
+`;
 
 function shortHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
-/** Hash of everything the Android cache holds: a change to any of it is a new key. */
-export const ANDROID_CACHE_HASH = shortHash({
-  cmdlineTools: ANDROID_CMDLINE_TOOLS_URL,
-  packages: ANDROID_SDK_PACKAGES,
-  avds: ANDROID_AVDS,
-  config: ANDROID_AVD_CONFIG,
-  snapshot: ANDROID_GOLDEN_SNAPSHOT,
-  gpu: ANDROID_EMULATOR_GPU
-});
-export const ANDROID_CACHE_KEY = `orq-devices-android-${ANDROID_CACHE_HASH}-${DEVICE_CACHE_VERSION}`;
+/** Hash of everything the Android cache holds (the pinned cmdline-tools, the packages, the script that makes the AVDs): a change to any of it is a new key. */
+export const ANDROID_CACHE_HASH = shortHash({ cmdlineTools: CMDLINE_TOOLS.sha256, packages: ANDROID_SDK_PACKAGES, avds: ANDROID_AVD_STEP_SCRIPT });
+export const ANDROID_CACHE_KEY = `orq-devices-android-${ANDROID_CACHE_HASH}-${ANDROID_CACHE_VERSION}`;
 export const ANDROID_CACHE_PATHS: readonly string[] = [BOX_ANDROID_SDK_DIR, BOX_ANDROID_AVD_DIR];
 
 // ---------------------------------------------------------------------------
@@ -174,11 +448,6 @@ export const APPLE_RUNNER_CACHE_PATHS: readonly string[] = [BOX_APPLE_RUNNER_DIR
 // Step scripts (bash; constants only — no workflow input reaches them)
 // ---------------------------------------------------------------------------
 
-/** Single-quote a value for bash. */
-function sq(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 /** Make /dev/kvm usable by the runner user (Linux; Blacksmith x64 runners have nested virtualization). */
 export const KVM_STEP_SCRIPT = `set -eu
 echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-orq-kvm.rules > /dev/null
@@ -218,87 +487,6 @@ ${NPM_CI_SCRIPT}./node_modules/.bin/agent-device --version
 if [ "$(uname -s)" = Darwin ]; then
   TOOLS=${BOX_DEVICE_TOOLS_DIR} sh -c ${sq(SIMSLIM_INSTALL_SCRIPT)}
 fi
-`;
-
-/** Install cmdline-tools and {@link ANDROID_SDK_PACKAGES} into {@link BOX_ANDROID_SDK_DIR} (needs Java 17+). */
-export const ANDROID_SDK_STEP_SCRIPT = `set -eu
-SDK=${BOX_ANDROID_SDK_DIR}
-mkdir -p "$SDK/cmdline-tools" ${BOX_ANDROID_AVD_DIR}
-curl -fsSL --retry 3 -o "$RUNNER_TEMP/cmdline-tools.zip" ${sq(ANDROID_CMDLINE_TOOLS_URL)}
-rm -rf "$SDK/cmdline-tools/latest" "$RUNNER_TEMP/cmdline-tools"
-unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP"
-mv "$RUNNER_TEMP/cmdline-tools" "$SDK/cmdline-tools/latest"
-rm -f "$RUNNER_TEMP/cmdline-tools.zip"
-SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-yes 2> /dev/null | "$SM" --sdk_root="$SDK" --licenses > /dev/null || true
-"$SM" --sdk_root="$SDK" --install ${ANDROID_SDK_PACKAGES.map(sq).join(" ")}
-"$SDK/emulator/emulator" -version | head -1
-`;
-
-/**
- * Create {@link ANDROID_AVDS} and save each one's golden snapshot: cold boot headless, wait for
- * boot, turn animations off, `adb emu avd snapshot save`, stop the emulator.
- */
-export const ANDROID_AVD_STEP_SCRIPT = `set -eu
-SDK=${BOX_ANDROID_SDK_DIR}
-export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_AVD_HOME=${BOX_ANDROID_AVD_DIR}
-export PATH="$SDK/cmdline-tools/latest/bin:$SDK/platform-tools:$SDK/emulator:$PATH"
-mkdir -p "$ANDROID_AVD_HOME"
-# adb emu commands need an empty console auth token.
-: > "$HOME/.emulator_console_auth_token"
-adb start-server
-emulator -accel-check
-port=5554
-serial="emulator-$port"
-for spec in ${ANDROID_AVDS.map((avd) => `${avd.name}:${avd.device}`).join(" ")}; do
-  name=\${spec%%:*}
-  device=\${spec#*:}
-  echo "::group::$name ($device)"
-  rm -rf "$ANDROID_AVD_HOME/$name.avd" "$ANDROID_AVD_HOME/$name.ini"
-  echo no | avdmanager create avd -n "$name" -k ${sq(ANDROID_SYSTEM_IMAGE)} -d "$device" -p "$ANDROID_AVD_HOME/$name.avd" --force
-  # Older avdmanagers write the .ini under ~/.android/avd whatever ANDROID_AVD_HOME says.
-  if [ ! -f "$ANDROID_AVD_HOME/$name.ini" ] && [ -f "$HOME/.android/avd/$name.ini" ]; then
-    mv "$HOME/.android/avd/$name.ini" "$ANDROID_AVD_HOME/$name.ini"
-  fi
-  cfg="$ANDROID_AVD_HOME/$name.avd/config.ini"
-  sed -i -E '/^(${Object.keys(ANDROID_AVD_CONFIG)
-    .map((key) => key.replace(/\./g, "\\."))
-    .join("|")})=/d' "$cfg"
-  cat >> "$cfg" << 'CONFIG'
-${Object.entries(ANDROID_AVD_CONFIG)
-  .map(([key, value]) => `${key}=${value}`)
-  .join("\n")}
-CONFIG
-  log="$RUNNER_TEMP/emulator-$name.log"
-  emulator -avd "$name" -port "$port" -no-window -no-audio -no-boot-anim -accel on -gpu ${ANDROID_EMULATOR_GPU} \\
-    -no-snapshot-load -no-snapshot-save -camera-back none -camera-front none > "$log" 2>&1 < /dev/null &
-  pid=$!
-  end=$(($(date +%s) + 600))
-  until [ "$(adb -s "$serial" shell getprop sys.boot_completed 2> /dev/null | tr -d '\\r')" = 1 ] &&
-    [ "$(adb -s "$serial" shell getprop init.svc.bootanim 2> /dev/null | tr -d '\\r')" = stopped ]; do
-    if ! kill -0 "$pid" 2> /dev/null; then echo "::error::the $name emulator exited"; tail -40 "$log"; exit 1; fi
-    if [ "$(date +%s)" -ge "$end" ]; then echo "::error::$name did not boot within 10 min"; tail -40 "$log"; exit 1; fi
-    sleep 2
-  done
-  until adb -s "$serial" shell pm path android > /dev/null 2>&1; do
-    if [ "$(date +%s)" -ge "$end" ]; then echo "::error::$name's package manager did not start"; exit 1; fi
-    sleep 2
-  done
-  for scale in window_animation_scale transition_animation_scale animator_duration_scale; do
-    adb -s "$serial" shell settings put global "$scale" 0
-  done
-  adb -s "$serial" emu avd snapshot save ${ANDROID_GOLDEN_SNAPSHOT}
-  adb -s "$serial" emu kill || true
-  end=$(($(date +%s) + 120))
-  while kill -0 "$pid" 2> /dev/null; do
-    if [ "$(date +%s)" -ge "$end" ]; then kill -9 "$pid" || true; break; fi
-    sleep 1
-  done
-  [ -d "$ANDROID_AVD_HOME/$name.avd/snapshots/${ANDROID_GOLDEN_SNAPSHOT}" ] || { echo "::error::$name has no ${ANDROID_GOLDEN_SNAPSHOT} snapshot"; tail -40 "$log"; exit 1; }
-  du -sh "$ANDROID_AVD_HOME/$name.avd"
-  echo "::endgroup::"
-done
-adb kill-server || true
 `;
 
 /**

@@ -47,7 +47,7 @@ export interface DevicesIosSettings {
   provider: string;
   /** The provider size id. */
   size: string;
-  /** A Mac host's time limit. */
+  /** A rented Mac host's time limit (Linux/Android hosts: `pool.androidLifetimeMinutes`). */
   lifetimeMinutes: number;
   /**
    * Superseded by `pool.idleTeardownMinutes` (the pool tears down every idle rented host). Kept
@@ -84,6 +84,11 @@ export interface DevicePoolSettings {
   androidSize: string | null;
   /** macOS size for iOS pool hosts; null: `ios.size`. */
   iosSize: string | null;
+  /**
+   * A rented Linux (Android) device host's time limit; Mac hosts keep `ios.lifetimeMinutes`. A file
+   * written before this existed takes its `ios.lifetimeMinutes` (then every device host's one limit).
+   */
+  androidLifetimeMinutes: number;
   /** Hard cap on pool hosts at once. */
   maxHosts: number;
   /** Hard cap on the pool's summed $/h. */
@@ -200,6 +205,7 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     provider: null,
     androidSize: null,
     iosSize: null,
+    androidLifetimeMinutes: 240,
     maxHosts: 4,
     maxHourlyUsd: 20,
     minWarmHosts: { android: 0, ios: 0 },
@@ -282,6 +288,7 @@ const poolSchema = z
     provider: nullableText,
     androidSize: nullableText,
     iosSize: nullableText,
+    androidLifetimeMinutes: intIn(L.lifetimeMinutes, D.pool.androidLifetimeMinutes),
     maxHosts: intIn(L.maxHosts, D.pool.maxHosts),
     maxHourlyUsd: numberIn(L.maxHourlyUsd, D.pool.maxHourlyUsd),
     minWarmHosts: z
@@ -354,7 +361,9 @@ const isPlainRecord = (value: unknown): value is Record<string, unknown> => valu
 
 /**
  * A file written before `pool.rentWithoutAsking` / `pool.monthlyCapUsd` / `pool.idleTeardownMinutes`
- * existed: its Mac switch, cap and idle teardown become the pool's.
+ * existed: its Mac switch, cap and idle teardown become the pool's. One written before
+ * `pool.androidLifetimeMinutes`: its `ios.lifetimeMinutes` (then the limit of every device host)
+ * stays the Linux hosts' limit.
  */
 function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, unknown> {
   const ios = isPlainRecord(record.ios) ? record.ios : null;
@@ -371,6 +380,10 @@ function adoptLegacyRentSwitch(record: Record<string, unknown>): Record<string, 
   }
   if (typeof pool.idleTeardownMinutes !== "number" && typeof ios.idleTeardownMinutes === "number") {
     pool.idleTeardownMinutes = ios.idleTeardownMinutes;
+    changed = true;
+  }
+  if (typeof pool.androidLifetimeMinutes !== "number" && typeof ios.lifetimeMinutes === "number") {
+    pool.androidLifetimeMinutes = ios.lifetimeMinutes;
     changed = true;
   }
   return changed ? { ...record, pool } : record;

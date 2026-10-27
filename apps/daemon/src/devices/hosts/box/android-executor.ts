@@ -28,12 +28,22 @@ const PROC_READ_MS = 20_000;
 const HUB_PORT_MIN = 20_000;
 const HUB_PORT_SPAN = 10_000;
 
-/** Start `$@` in its own session with output appended to `$1` (0600); prints its pid. Constant text. */
+/**
+ * Start `$@` in its own session with output appended to `$1` (0600); prints its pid once the child
+ * leads its session (≤ 2 s): until `setsid` ran it is in this exec's process group, which orq-agent
+ * hangs up when the exec's channel closes or the link drops. Constant text.
+ */
 export const DETACH_SCRIPT = `log=$1; shift
 umask 077
 mkdir -p "$(dirname "$log")"
 setsid "$@" >> "$log" 2>&1 < /dev/null &
-echo $!
+pid=$!
+i=0
+while [ "$i" -lt 100 ] && kill -0 "$pid" 2> /dev/null && [ "$(awk '{ sub(/^.*\\) /, ""); print $4 }' "/proc/$pid/stat" 2> /dev/null)" != "$pid" ]; do
+  sleep 0.02
+  i=$((i + 1))
+done
+echo "$pid"
 `;
 
 /** `curl` a pinned file to `$2` unless it is already there with SHA-256 `$3`. Constant text. */
