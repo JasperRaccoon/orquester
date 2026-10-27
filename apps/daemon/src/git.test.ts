@@ -79,6 +79,73 @@ const deferred = (): Deferred => {
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("status reads a work tree in one git invocation and preserves porcelain paths", async () => {
+  const { git, calls } = fakeGit(() => nul(
+    "# branch.head main",
+    "# branch.upstream origin/main",
+    "# branch.ab +2 -1",
+    "1 .M N... 100644 100644 100644 abc def file with spaces.txt",
+    "2 R. N... 100644 100644 100644 abc def R100 renamed file.txt",
+    "original file.txt",
+    "? untracked.txt"
+  ));
+  assert.deepEqual(await git.status("/repo"), {
+    isRepo: true, branch: "main", detached: false, upstream: "origin/main",
+    ahead: 2, behind: 1, lastFetched: null,
+    files: [
+      { path: "file with spaces.txt", status: "modified", staged: false, unstaged: true },
+      { path: "renamed file.txt", oldPath: "original file.txt", status: "renamed", staged: true, unstaged: false },
+      { path: "untracked.txt", status: "untracked", staged: false, unstaged: true }
+    ]
+  });
+  assert.deepEqual(calls, [["status", "--porcelain=v2", "--branch", "-z"]]);
+});
+
+test("status retains its empty state for non-repositories and bare repositories", async (t) => {
+  const dir = await tempDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const expected = {
+    isRepo: false, branch: null, detached: false, upstream: null,
+    ahead: 0, behind: 0, lastFetched: null, files: []
+  };
+  const service = new GitService();
+  assert.deepEqual(await service.status(dir), expected);
+  await exec("git", ["init", "--bare", "-q", dir]);
+  assert.deepEqual(await service.status(dir), expected);
+});
+
+test("status preserves a work tree failure's original details", async () => {
+  const calls: string[][] = [];
+  const service = new GitService({ runner: async (_file, argv) => {
+    const args = withoutSafetyArgs(argv);
+    calls.push(args);
+    if (args[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
+    throw Object.assign(new Error("status failed"), { stderr: "fatal: unable to read index", code: 128 });
+  } });
+  await assert.rejects(service.status("/repo"), (error: unknown) => {
+    assert.ok(error instanceof GitError);
+    assert.equal(error.status, 500);
+    assert.equal(error.message, "fatal: unable to read index");
+    return true;
+  });
+  assert.deepEqual(calls, [["status", "--porcelain=v2", "--branch", "-z"], ["rev-parse", "--is-inside-work-tree"]]);
+});
+
+test("status propagates box routing errors without retrying", async () => {
+  let routes = 0;
+  const service = new GitService({ route: async () => {
+    routes += 1;
+    throw new GitError(409, "Box is not ready", "BOX_NOT_READY");
+  } });
+  await assert.rejects(service.status("/box/repo"), (error: unknown) => {
+    assert.ok(error instanceof GitError);
+    assert.equal(error.status, 409);
+    assert.equal(error.code, "BOX_NOT_READY");
+    return true;
+  });
+  assert.equal(routes, 1);
+});
+
 test("serializes concurrent git mutations in the same repository", async () => {
   const calls: string[] = [];
   const commands = [deferred(), deferred()];

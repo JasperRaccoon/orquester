@@ -82,6 +82,83 @@ const revertCounts = (rows: readonly AgentChatTimelineRow[]): Record<string, num
     )
   );
 
+describe("unchanged and streamed row projections", () => {
+  const context = messageStreamingContext({
+    head: { session: { status: "running", activeTurnId: "t1" } }, roster: []
+  });
+  const inputFor = (entries: readonly TimelineEntry[]): TimelineRowsInput => baseInput(entries, {
+    latestTurn: { turnId: "t1", state: "running", startedAt: stamp(0), completedAt: null },
+    runningTurnId: "t1", isWorking: true, activeTurnStartedAt: stamp(0), messageStreaming: context
+  });
+  const source = (): ThreadItem[] => [
+    message("user", "go", { id: "prompt", createdAt: stamp(0) }),
+    message("reasoning", "first thought", { id: "first", turnId: "t1", streaming: true, createdAt: stamp(1) }),
+    message("assistant", "Checking", { id: "commentary", turnId: "t1", messageKind: "commentary", createdAt: stamp(2) }),
+    message("reasoning", "second thought", { id: "second", turnId: "t1", streaming: true, createdAt: stamp(3) }),
+    message("assistant", "The answer", { id: "answer", turnId: "t1", streaming: true, createdAt: stamp(4) })
+  ];
+
+  it("reuses the projection when entries and every rendering input stayed the same", () => {
+    const input = inputFor(entriesFrom(source()));
+    const previous = deriveTimelineRowsWithState(input);
+    assert.equal(deriveTimelineRowsWithState({ ...input, latestTurn: { ...input.latestTurn! } }, previous), previous);
+  });
+
+  it("invalidates unchanged entries when any rendering context moves", () => {
+    const input = inputFor(entriesFrom(source()));
+    const previous = deriveTimelineRowsWithState(input);
+    const patches: Partial<TimelineRowsInput>[] = [
+      { latestTurn: { ...input.latestTurn!, state: "completed", completedAt: stamp(5) } },
+      { runningTurnId: null }, { isWorking: false }, { isCompacting: true },
+      { activeTurnStartedAt: stamp(1) }, { supportsConversationRollback: true },
+      { checkpoints: [] }, { turns: [turn("t1", "prompt")] },
+      { liveAgentTaskIds: new Set(["agent"]) }, { queuedMessages: [] },
+      { expandedTurnIds: new Set(["t1"]) }, { expandedWorkGroupIds: new Set(["work-group:first"]) },
+      { continuesBelow: true }, { activeTurnHeader: "above" }, { liveActivityAbove: true },
+      { agentRunStartIndex: 1 },
+      { messageStreaming: messageStreamingContext({ head: { session: { status: "stopped", activeTurnId: null } }, roster: [] }) }
+    ];
+    for (const patch of patches) {
+      const nextInput = { ...input, ...patch };
+      const next = deriveTimelineRowsWithState(nextInput, previous);
+      assert.notEqual(next, previous, `invalidate ${Object.keys(patch).join(",")}`);
+      assert.deepEqual(next.rows, deriveTimelineRowsWithState(nextInput).rows);
+    }
+  });
+
+  it("leaves every reasoning group untouched while the assistant streams", () => {
+    const items = source();
+    const timeline = deriveTimelineEntriesFromItems(items);
+    const input = inputFor(timeline.entries);
+    const previous = deriveTimelineRowsWithState(input);
+    const grown = items.map((item) => item.kind === "message" && item.id === "answer" ? { ...item, text: "The answer continued" } : item);
+    const nextInput = inputFor(deriveTimelineEntriesFromItems(grown, timeline).entries);
+    const next = deriveTimelineRowsWithState(nextInput, previous);
+    const groups = previous.rows.filter((row) => row.kind === "activity-group");
+    assert.equal(groups.length, 2);
+    for (const group of groups) assert.equal(next.rows.find((row) => row.id === group.id), group);
+    assert.deepEqual(next.rows, deriveTimelineRowsWithState(nextInput).rows);
+  });
+
+  it("updates multiple reasoning groups and the assistant together without mutating their previous rows", () => {
+    const items = source();
+    const timeline = deriveTimelineEntriesFromItems(items);
+    const previous = deriveTimelineRowsWithState(inputFor(timeline.entries));
+    const before = structuredClone(previous.rows);
+    const grown = items.map((item) => item.kind === "message" && item.streaming ? { ...item, text: `${item.text} continued` } : item);
+    const nextInput = inputFor(deriveTimelineEntriesFromItems(grown, timeline).entries);
+    const next = deriveTimelineRowsWithState(nextInput, previous);
+    assert.deepEqual(previous.rows, before);
+    assert.deepEqual(next.rows, deriveTimelineRowsWithState(nextInput).rows);
+    for (const group of previous.rows.filter((row) => row.kind === "activity-group")) {
+      const replacement = next.rows.find((row) => row.id === group.id);
+      assert.ok(replacement?.kind === "activity-group");
+      assert.notEqual(replacement.entries, group.entries);
+      assert.ok(replacement.entries[0]!.detail?.endsWith(" continued"));
+    }
+  });
+});
+
 describe("activity-group boundaries", () => {
 
   it("hoists an error out of the group rather than hiding it in a summary", () => {

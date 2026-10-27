@@ -140,6 +140,50 @@ test("the collections filter narrows within visibility; unknown or hidden names 
   assert.equal(limited.hits.length, 1);
 });
 
+test("semantic candidates are selected within the live collection scope, including multi-chunk entries", async (t) => {
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-search-scoped-"));
+  const store = new FakeStore();
+  store.collection(SEO, "SEO");
+  store.collection(SAAS, "SaaS");
+  // More than CANDIDATES hidden entries beat the visible entry by vector similarity. The
+  // visible match must still be returned, and its final chunk supplies the semantic snippet.
+  const hidden = Array.from({ length: 64 }, (_, i) => `ke_${i.toString(32).padStart(12, "0")}`);
+  for (const id of hidden) store.put(id, "ranking chatgpt", [SAAS], {}, true);
+  const visible = "ke_visibleentry";
+  // The final chunk starts at word 280 and contains only semantic matches; earlier chunks
+  // include filler. Keep enough words past 320 for the chunker to emit that final chunk.
+  const body = `${"filler ".repeat(280)}${"LLM visibility: answer engines surface sites with fresh FAQs. ".repeat(8)}`;
+  store.put(visible, body, [SEO], { title: "Fresh FAQs" }, true);
+  const search = new KnowledgeSearch({
+    store,
+    graph: new KnowledgeGraph({ entries: store, logger: silentLogger() }),
+    embedders: new FakeEmbedderSource(new FakeEmbedder()),
+    indexDir,
+    logger: silentLogger()
+  });
+  t.after(async () => {
+    await search.stop();
+    await rm(indexDir, { recursive: true, force: true });
+  });
+  await search.start();
+  await search.search({ query: "warm up" }, ALL);
+  await search.idle();
+  assert.ok(!entryIds((await search.search({ query: "ranking chatgpt", limit: 25 }, ALL)).hits).includes(visible));
+  const scoped = await search.search({ query: "ranking chatgpt" }, SEO_ONLY);
+  assert.deepEqual(entryIds(scoped.hits), [visible]);
+  const hit = scoped.hits[0]!;
+  assert.equal(hit.kind, "entry");
+  if (hit.kind === "entry") assert.match(hit.entry.snippet, /LLM visibility: answer engines/);
+  assert.deepEqual(await search.search({ query: "ranking chatgpt", collections: [SEO] }, ALL), scoped);
+  assert.deepEqual((await search.search({ query: "ranking chatgpt" }, { kind: "collections", ids: [] })).hits, []);
+
+  // Relabelling changes metadata without re-embedding: every query must read the current scope.
+  store.entries.get(visible)!.collections = [SAAS];
+  store.entries.get(hidden[0]!)!.collections = [SEO];
+  store.emit({ kind: "relabelled", entryIds: [visible, hidden[0]!] });
+  assert.deepEqual(entryIds((await search.search({ query: "ranking chatgpt" }, SEO_ONLY)).hits), [hidden[0]!]);
+});
+
 test("a new, unlinked entry is searchable by text and meaning as soon as it is indexed", async (t) => {
   const { store, search, embedder } = await setup(t);
   const id = "ke_newnewnewnew";

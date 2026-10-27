@@ -1913,16 +1913,15 @@ function replaceStreamingMessageRows(
     if (row.kind === "activity-group") {
       // A reasoning message inside a group is carried as a derived entry; the
       // cache is keyed on the message, so a replacement rebuilds only that one.
-      const replaced = row.entries.map((entry) => entry);
-      let changed = false;
+      let replaced: WorkLogEntry[] | null = null;
       for (const [previousMessage, nextMessage] of replacements) {
-        const at = replaced.findIndex((entry) => entry.id === previousMessage.id);
+        const at = row.entries.findIndex((entry) => entry.id === previousMessage.id);
         if (at >= 0) {
+          replaced ??= [...row.entries];
           replaced[at] = reasoningEntry(nextMessage);
-          changed = true;
         }
       }
-      return changed ? { ...row, entries: replaced } : row;
+      return replaced !== null ? { ...row, entries: replaced } : row;
     }
     if (row.kind !== "message" && row.kind !== "assistant-meta") {
       return row;
@@ -1937,6 +1936,16 @@ export function deriveTimelineRowsWithState(
   input: TimelineRowsInput,
   previous: TimelineRowsProjection | null = null
 ): TimelineRowsProjection {
+  // Draft and disclosure-independent store updates often leave every row
+  // input untouched. Compare the full context before scanning the entries:
+  // liveness, headers and fold clocks can change without a new entry array.
+  if (
+    previous !== null &&
+    input.timelineEntries === previous.input.timelineEntries &&
+    shallowEqualInput(previous.input, input)
+  ) {
+    return previous;
+  }
   const streamed = previous === null ? null : replaceStreamingMessageRows(input, previous);
   if (streamed !== null && previous !== null) {
     return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocksAt: previous.foldClocksAt };

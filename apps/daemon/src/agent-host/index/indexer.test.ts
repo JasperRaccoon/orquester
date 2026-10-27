@@ -139,6 +139,36 @@ describe("thread index: observe", () => {
     assert.deepEqual(index.cursor(log.threadId), { lastSeq: 16, lastByte: log.size });
   });
 
+  it("streamed rows follow the current open turn through adoption, revert and a new turn", async () => {
+    const log = new TestLog();
+    feed(index, log, log.append(created(), ...liveTurn({ n: 1, prompt: "first" })));
+    feed(index, log, log.append(delta("a1", " continued", "t1")));
+    await index.drain();
+    assert.equal(turn(index, log.threadId, 1).endByte, log.size);
+
+    feed(index, log, log.append(userMessage("u2", "second"), turnStart("u2")));
+    feed(index, log, log.append(session("running", "t2"), delta("a2", "second answer", "t2")));
+    await index.drain();
+    const first = turn(index, log.threadId, 1);
+    const second = turn(index, log.threadId, 2);
+    assert.equal(first.endByte, second.firstByte);
+    assert.equal(second.endByte, log.size);
+
+    feed(index, log, log.append(reverted(1), delta("late", "sealed", "t1")));
+    await index.drain();
+    assert.deepEqual(turn(index, log.threadId, 1), first, "a survivor stays sealed after its open turn is removed");
+
+    feed(index, log, log.append(userMessage("u3", "third"), turnStart("u3"), session("running", "t3")));
+    feed(index, log, log.append(delta("a3", "third", "t3")));
+    feed(index, log, log.append(delta("a3", " answer", "t3")));
+    await index.drain();
+    const third = turn(index, log.threadId, 2);
+    assert.equal(third.turnId, "t3");
+    assert.equal(third.lastSeq, log.lastSeq);
+    assert.equal(third.endByte, log.size);
+    assert.deepEqual(turn(index, log.threadId, 1), first);
+  });
+
   it("indexes finished messages and every activity write, with item positions and markers", async () => {
     const log = new TestLog();
     for (const batch of twoLiveTurns(log)) {

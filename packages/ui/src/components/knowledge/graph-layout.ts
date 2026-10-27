@@ -135,16 +135,36 @@ export function seedPositions(
     const angle = (hash(id) / 4294967296) * 2 * Math.PI;
     return { x: Math.cos(angle), y: Math.sin(angle) };
   };
-  let pending = nodes.filter((n) => !out[n.id]);
-  while (pending.length > 0) {
+  const pending = nodes.filter((n) => !out[n.id]);
+  // Discover the rounds once. Scanning every remaining node per round makes a
+  // long chain quadratic, and this also runs on the main thread before paint.
+  const unplaced = new Set(pending.map((n) => n.id));
+  const depth = new Map<string, number>();
+  // Use the same truthy lookup as `near` below. Concept ids are arbitrary
+  // strings, so a seed can also be inherited (notably `__proto__`).
+  const queue = [...neighbours.keys()].filter((id) => Boolean(out[id]));
+  for (let i = 0; i < queue.length; i += 1) {
+    const id = queue[i]!;
+    const nextDepth = (depth.get(id) ?? 0) + 1;
+    for (const next of neighbours.get(id) ?? []) {
+      if (!unplaced.has(next) || depth.has(next)) continue;
+      depth.set(next, nextDepth);
+      queue.push(next);
+    }
+  }
+  const rounds: typeof pending[] = [];
+  const unlinked: typeof pending = [];
+  // Keep the original node order within each round: both the returned property
+  // order and the later halo's floating-point sums depend on it.
+  for (const n of pending) {
+    const d = depth.get(n.id);
+    if (d === undefined) unlinked.push(n);
+    else (rounds[d - 1] ??= []).push(n);
+  }
+  for (const batch of rounds) {
     const round: [string, { x: number; y: number }][] = [];
-    const rest: typeof pending = [];
-    for (const n of pending) {
+    for (const n of batch) {
       const near = (neighbours.get(n.id) ?? []).flatMap((id) => (out[id] ? [out[id]] : []));
-      if (near.length === 0) {
-        rest.push(n);
-        continue;
-      }
       const away = direction(n.id);
       const reach = n.size / 2 + LINK_GAP;
       round.push([
@@ -155,15 +175,13 @@ export function seedPositions(
         }
       ]);
     }
-    if (round.length === 0) break;
     for (const [id, at] of round) out[id] = at;
-    pending = rest;
   }
   const points = Object.values(out);
   const cx = points.reduce((sum, p) => sum + p.x, 0) / Math.max(1, points.length);
   const cy = points.reduce((sum, p) => sum + p.y, 0) / Math.max(1, points.length);
   const radius = points.reduce((max, p) => Math.max(max, Math.hypot(p.x - cx, p.y - cy)), 0) + LINK_GAP;
-  for (const n of pending) {
+  for (const n of unlinked) {
     const away = direction(n.id);
     out[n.id] = { x: cx + away.x * radius, y: cy + away.y * radius };
   }

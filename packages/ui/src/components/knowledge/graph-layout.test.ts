@@ -119,6 +119,58 @@ describe("the warm start", () => {
     assert.ok(dist(seeds.next!, seeds["near-a"]!) < 40, "a chain of new concepts follows the placed part");
     assert.ok(dist(seeds.lone!, { x: 50, y: 0 }) > 50, "unlinked: outside the placed part");
   });
+
+  it("preserves the positions and node order across branching rounds, cycles and disconnected concepts", () => {
+    // Captured from the original round-by-round seeding. Nodes deliberately do
+    // not follow graph-distance order; edges within a round must not pull a
+    // concept towards another concept that has not been placed yet.
+    const nodes = ["g", "e", "a", "h", "c", "b", "f", "d", "i", "z", "lone"].map((id, i) => ({ id, size: 10 + i }));
+    const edges = [
+      ["b", "c"], ["a", "c"], ["c", "d"], ["c", "e"], ["d", "e"],
+      ["d", "f"], ["e", "f"], ["f", "g"], ["g", "h"], ["h", "g"],
+      ["i", "z"], ["a", "a"], ["ghost", "a"]
+    ].map(([source, target]) => ({ source: source!, target: target! }));
+    const positions = seedPositions(nodes, edges, {
+      a: { x: 0, y: 0 }, b: { x: 90, y: 30 }, ghost: { x: 50_000, y: 50_000 }
+    });
+    const expected = {
+      a: { x: 0, y: 0 },
+      b: { x: 90, y: 30 },
+      c: { x: 69.92096867578411, y: -3.437606142354479 },
+      e: { x: 90.80487576828448, y: -24.272970899224294 },
+      d: { x: 93.48507128465448, y: -25.82025719710286 },
+      f: { x: 116.399997028593, y: -45.919894454257744 },
+      g: { x: 137.91024835986832, y: -65.37006380224463 },
+      h: { x: 165.1696318408527, y: -79.05129226450764 },
+      i: { x: 204.12383446634425, y: -84.65187659796287 },
+      z: { x: 218.5618826316956, y: -29.610392543682348 },
+      lone: { x: 110.31029044215002, y: -148.96953679599469 }
+    };
+    assert.deepEqual(positions, expected);
+    assert.deepEqual(Object.keys(positions), Object.keys(expected), "halo sums retain the same node order");
+  });
+
+  it("keeps the existing lookup semantics for prototype-named seeds and neighbours", () => {
+    // Concept ids are unrestricted strings. In the original plain-object
+    // lookup, assigning __proto__ changes the output's prototype rather than
+    // adding an own key, but its coordinates still seed a neighbouring node.
+    for (const id of Object.getOwnPropertyNames(Object.prototype)) {
+      const edges = [{ source: id, target: "c" }];
+      const positions = seedPositions(
+        [{ id, size: 10 }, { id: "c", size: 14 }], edges,
+        { [id]: { x: 45, y: 15 } }
+      );
+      assert.deepEqual(positions[id], { x: 45, y: 15 }, id);
+      assert.deepEqual(positions.c, { x: 69.92096867578411, y: -3.437606142354479 }, id);
+      assert.deepEqual(Object.keys(positions), id === "__proto__" ? ["c"] : [id, "c"], id);
+
+      // An inherited name absent from the graph was also visible to the old
+      // truthy lookup. Its missing coordinates produce NaN, which is retained
+      // here rather than changing that behavior during the performance cut.
+      const inherited = seedPositions([{ id: "c", size: 14 }], edges, {});
+      assert.deepEqual(inherited.c, { x: NaN, y: NaN }, id);
+    }
+  });
 });
 
 /** A worker that answers only when told to. */

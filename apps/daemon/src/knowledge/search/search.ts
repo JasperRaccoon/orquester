@@ -227,7 +227,7 @@ export class KnowledgeSearch {
     const terms = tokenize(query);
 
     // 1. Meaning.
-    const vectorHits = await this.vectorSearch(query, visible);
+    const vectorHits = await this.vectorSearch(query, visible, scope.canSee !== null || scope.filter !== null);
     // 2. Words.
     const textHits = this.bm25.search(terms, visible, CANDIDATES).map((hit) => hit.key);
     const conceptHits = this.graph.searchConcepts(terms, scope, CANDIDATES).map((hit) => hit.id);
@@ -666,7 +666,7 @@ export class KnowledgeSearch {
     await this.cache.retain(new Set([...this.docs.values()].map((doc) => doc.hash))).catch(() => undefined);
   }
 
-  private async vectorSearch(query: string, visible: (id: string) => boolean): Promise<{ id: string; score: number; span: TextSpan }[]> {
+  private async vectorSearch(query: string, visible: (id: string) => boolean, filterBeforeScoring: boolean): Promise<{ id: string; score: number; span: TextSpan }[]> {
     const embedder = this.usableEmbedder();
     if (!embedder) return [];
     this.backfill(embedder);
@@ -684,6 +684,9 @@ export class KnowledgeSearch {
     for (const doc of this.docs.values()) {
       const rows = doc.vectors;
       if (!rows || doc.vectorModel !== embedder.modelId) continue;
+      // Profiles and collection filters can exclude most of the corpus. Check their live
+      // metadata before scoring every chunk of an entry the caller cannot see.
+      if (filterBeforeScoring && !visible(doc.id)) continue;
       let best = -1;
       let bestRow = 0;
       for (let row = 0; row * dims < rows.length; row += 1) {
@@ -695,7 +698,7 @@ export class KnowledgeSearch {
           bestRow = row;
         }
       }
-      if (best < this.minSimilarity || !visible(doc.id)) continue;
+      if (best < this.minSimilarity || (!filterBeforeScoring && !visible(doc.id))) continue;
       hits.push({ id: doc.id, score: best, span: doc.spans[bestRow] ?? { start: 0, end: doc.body.length } });
     }
     return hits.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1)).slice(0, CANDIDATES);
