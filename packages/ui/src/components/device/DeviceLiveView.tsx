@@ -41,6 +41,7 @@ import {
 } from "./device-panel.logic";
 import { DeviceToolbar, type ToolbarLayout } from "./DeviceToolbar";
 import { requestAndroidFold, type AndroidFoldState } from "./fold";
+import { screenshotTurn, uprightCanvas } from "./screenshot";
 import { useDeviceStream, type DeviceButton, type DeviceOrientation } from "./stream";
 import { androidFoldAngle } from "./three/DeviceAndroidFoldControls";
 import { DeviceViewport, type DeviceViewportHandle, type DeviceViewUnavailable } from "./three/DeviceViewport";
@@ -338,7 +339,9 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     if (!canvas || canvas.width === 0) return;
     setShooting(true);
     try {
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      // serve-sim's frames stay portrait while iOS is in landscape: turn the capture upright.
+      const frame = uprightCanvas(canvas, screenshotTurn(lease.platform, { width: canvas.width, height: canvas.height }, orientation));
+      const blob = await new Promise<Blob | null>((resolve) => frame.toBlob(resolve, "image/png"));
       if (!blob) throw new Error("The frame could not be captured.");
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const name = `${(props.name || "device").replace(/[^\w.-]+/g, "-")}-${stamp}.png`;
