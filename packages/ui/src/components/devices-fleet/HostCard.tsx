@@ -13,7 +13,7 @@ import { formatCountdown, formatHourlyRate, formatUsd } from "../../lib/boxes/fo
 import { cn } from "../../lib/cn";
 import { Button, ConfirmDialog } from "../ui";
 import { destroyHost, setHostDraining, warmHostCaches, type FleetApi } from "./actions";
-import { canDestroy, canDrain, canWarmCaches, formatUptime, hostCost, hostKindLabel, hostStatusView, meterFill, msSince } from "./fleet.logic";
+import { canDestroy, canDrain, canWarmCaches, formatUptime, hostCost, hostKindLabel, hostStatusView, meterFill, msSince, resumeBlockedReason } from "./fleet.logic";
 import { Meter, Stat, StatusPill, TONE_TEXT } from "./parts";
 
 type Busy = "drain" | "destroy" | "warm" | null;
@@ -38,6 +38,8 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
   const status = hostStatusView(host);
   const cost = hostCost(host, now);
   const draining = host.pool?.draining === true;
+  // Drained near its deadline: Resume shows, off, with the reason.
+  const resumeBlocked = draining ? resumeBlockedReason(host) : null;
   const uptime = host.box ? formatUptime(msSince(host.box.startedAt, now)) : null;
   const deadline = host.box ? formatCountdown(host.box.deadlineAt, now) : null;
   const fill = meterFill(host.capacity.used, host.capacity.total);
@@ -68,16 +70,20 @@ export const HostCard: React.FC<HostCardProps> = ({ host, leaseCount, now, api }
         {api && (canDrain(host) || canWarmCaches(host) || canDestroy(host)) ? (
           <div className="-ml-2 flex w-full shrink-0 flex-wrap items-center gap-1 sm:ml-0 sm:w-auto">
             {canDrain(host) ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busy !== null}
-                onClick={() => void run("drain", () => setHostDraining(api, host, !draining))}
-                title={draining ? "Take new devices on this host again" : "Stop placing new devices here; it is destroyed once empty"}
-              >
-                {busy === "drain" ? <Loader2 size={13} aria-hidden className="animate-spin" /> : draining ? <Play size={13} aria-hidden /> : <Ban size={13} aria-hidden />}
-                {draining ? "Resume" : "Drain"}
-              </Button>
+              // A disabled button shows no tooltip: its wrapper carries the reason.
+              <span className="inline-flex" title={resumeBlocked ?? undefined} data-resume-blocked={resumeBlocked !== null ? "" : undefined}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy !== null || resumeBlocked !== null}
+                  onClick={() => void run("drain", () => setHostDraining(api, host, !draining))}
+                  title={draining ? "Take new devices on this host again" : "Stop placing new devices here; it is destroyed once empty"}
+                  {...(resumeBlocked !== null ? { "aria-label": `Resume (${resumeBlocked})` } : {})}
+                >
+                  {busy === "drain" ? <Loader2 size={13} aria-hidden className="animate-spin" /> : draining ? <Play size={13} aria-hidden /> : <Ban size={13} aria-hidden />}
+                  {draining ? "Resume" : "Drain"}
+                </Button>
+              </span>
             ) : null}
             {canWarmCaches(host) ? (
               <Button

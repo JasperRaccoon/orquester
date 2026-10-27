@@ -241,6 +241,40 @@ test("drain: no new lease on the host, destroyed once its last lease ends; undra
   }
 });
 
+test("a host drained near its deadline reads `deadline`: Resume is refused with the reason; the pool destroys it once empty", async () => {
+  const box = boxFactory();
+  const host = box.makeBox("box:x");
+  let nearDeadline = false;
+  host.pool = () => (nearDeadline ? { draining: true, drainReason: "deadline", warm: false, idleSince: null } : null);
+  box.factory.hosts.push(host);
+  const { t } = await start({ local: null, box, pool: { placement: "pool-only", capacityWaitSeconds: 0 } });
+  try {
+    await t.service.toolOpen("t1", { platform: "android" }, signal());
+    t.service.setHostDraining("box:x", true);
+    assert.equal(t.service.hostSummaries()[0]?.pool?.drainReason, "owner");
+    t.service.setHostDraining("box:x", false);
+    assert.equal(t.service.hostSummaries()[0]?.pool?.drainReason, undefined);
+    nearDeadline = true;
+    const summary = t.service.hostSummaries()[0]!;
+    assert.equal(summary.pool?.draining, true);
+    assert.equal(summary.pool?.drainReason, "deadline");
+    // The owner's drain on top of it still reads as the deadline (no Resume undoes that).
+    t.service.setHostDraining("box:x", true);
+    assert.equal(t.service.hostSummaries()[0]?.pool?.drainReason, "deadline");
+    assert.throws(
+      () => t.service.setHostDraining("box:x", false),
+      (error: DeviceError) => error.code === "INVALID_ARGUMENT" && /ending soon/.test(error.message) && /cannot be resumed/.test(error.message)
+    );
+    assert.deepEqual(t.service.poolSummary().drainingHostIds, ["box:x"], "a refused Resume changes nothing");
+    await t.service.toolClose("t1", {});
+    t.service.pool.tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(box.destroyed, ["box:x"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("idle teardown after idleTeardownMinutes, sparing minWarmHosts", async () => {
   const clock = { now: T0 };
   const box = boxFactory();

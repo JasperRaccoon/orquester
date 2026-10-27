@@ -131,6 +131,9 @@ export function hostStatusView(host: Pick<DeviceHostSummary, "kind" | "status" |
   const detail = host.statusDetail;
   switch (host.status) {
     case "ready":
+      if (host.pool?.draining && host.pool.drainReason === "deadline") {
+        return { key: "draining", label: "Ending soon (deadline)", tone: "warn", detail: detail ?? DEADLINE_DRAIN_TEXT };
+      }
       return host.pool?.draining
         ? { key: "draining", label: "Draining", tone: "warn", detail: detail ?? "Takes no new devices; destroyed once empty." }
         : { key: "ready", label: "Ready", tone: "ok", detail };
@@ -151,6 +154,16 @@ export function hostStatusView(host: Pick<DeviceHostSummary, "kind" | "status" |
         ? { key: "offline", label: "Failed", tone: "danger", detail }
         : { key: "lost", label: "Lost", tone: "danger", detail: detail ?? "The host is gone; its devices ended." };
   }
+}
+
+const DEADLINE_DRAIN_TEXT = "Near its time limit: takes no new devices; destroyed once its devices end.";
+
+/**
+ * Why the card's Resume is off: a host drained near its time limit (the daemon refuses to resume
+ * it); null when Resume works (or the host is not draining).
+ */
+export function resumeBlockedReason(host: Pick<DeviceHostSummary, "pool">): string | null {
+  return host.pool?.draining && host.pool.drainReason === "deadline" ? `Can't resume: ${DEADLINE_DRAIN_TEXT.charAt(0).toLowerCase()}${DEADLINE_DRAIN_TEXT.slice(1)}` : null;
 }
 
 /** Whether the card offers Drain (or Resume): a rented or paired host that can take leases. */

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { deflateSync } from "node:zlib";
 
-import type { DeviceActionInput, DeviceHostKind, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
+import type { DeviceActionInput, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } from "./actions.ts";
@@ -43,6 +43,8 @@ export class FakeDeviceHost implements DeviceHost {
   };
   destroyed = false;
   destroy?: () => Promise<void>;
+  /** What the host reports of its pool place (a box host near its deadline drains). */
+  pool?: () => DeviceHostPoolInfo | null;
   agentDeviceCommand?: DeviceHost["agentDeviceCommand"];
   performAction?: DeviceHost["performAction"];
   installApp?: DeviceHost["installApp"];

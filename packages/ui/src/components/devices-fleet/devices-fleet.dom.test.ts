@@ -270,6 +270,22 @@ describe("the Devices fleet view", () => {
     assert.ok(api.calls.includes("destroy:box:bs-mac-1"));
   });
 
+  it("a host drained near its deadline reads Ending soon (deadline), with Resume off and the reason", async () => {
+    const fleet = fleetFixture(Date.now());
+    const hosts = fleet.hosts.map((host) => (host.id === "box:bs-linux-3" ? { ...host, pool: { draining: true, drainReason: "deadline" as const, warm: false, idleSince: null } } : host));
+    const api = await connect(stateOf(fleet, { hosts }));
+    await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
+    const card = document.querySelector('[data-host-id="box:bs-linux-3"]')!;
+    assert.match(card.textContent ?? "", /Ending soon \(deadline\)/);
+    const resume = [...card.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Resume")!;
+    assert.ok(resume, "Resume still shows");
+    assert.equal(resume.disabled, true);
+    assert.match(card.querySelector("[data-resume-blocked]")?.getAttribute("title") ?? "", /Can't resume: near its time limit/);
+    await click(resume);
+    await act(settle);
+    assert.ok(!api.calls.some((call) => call.startsWith("drain:")), "no request");
+  });
+
   it("explains how agents get devices when none is leased", async () => {
     const fleet = fleetFixture(Date.now());
     await connect(stateOf(fleet, { leases: [], hosts: [fleet.hosts[1]!] }));

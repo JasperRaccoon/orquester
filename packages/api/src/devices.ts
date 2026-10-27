@@ -195,10 +195,18 @@ export interface DeviceHostBoxInfo {
   deadlineAt: string | null;
 }
 
+export type DeviceHostDrainReason = "owner" | "deadline";
+
 /** Phase 2: a pool host's place in the fleet. */
 export interface DeviceHostPoolInfo {
   /** Being drained: no new leases, destroyed once empty. */
   draining: boolean;
+  /**
+   * Why it drains: the owner's Drain (Resume takes it back), or `deadline` — it is near its time
+   * limit (`box.deadlineAt`), which no Resume undoes. Absent when not draining (and from older
+   * daemons: read as the owner's).
+   */
+  drainReason?: DeviceHostDrainReason;
   /** Kept warm by `minWarmHosts`. */
   warm: boolean;
   /** Since when it has had no lease (idle teardown counts from here); null while in use. */

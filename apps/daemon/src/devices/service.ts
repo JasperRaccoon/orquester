@@ -345,9 +345,15 @@ export class DeviceService implements DeviceToolsPort {
     return this.hosts.list().map((host) => {
       const summary = deviceHostSummary(host);
       const leased = this.leases.filter((lease) => lease.hostId === host.id && isLiveLease(lease)).length;
-      // The pool's view (drained by the owner, kept warm, idle since) over what the host reports.
+      // The pool's view (drained by the owner, kept warm, idle since) over what the host reports
+      // (drained near its deadline: that reason wins, no Resume undoes it).
       const pool = this.pool.poolInfo(host);
-      const merged = pool || summary.pool ? { ...summary.pool, ...pool, draining: pool?.draining === true || summary.pool?.draining === true } : null;
+      const deadline = summary.pool?.draining === true && summary.pool.drainReason === "deadline";
+      const draining = pool?.draining === true || summary.pool?.draining === true;
+      const merged =
+        pool || summary.pool
+          ? { ...summary.pool, ...pool, draining, ...(draining ? { drainReason: deadline ? ("deadline" as const) : (pool?.drainReason ?? summary.pool?.drainReason ?? "owner") } : {}) }
+          : null;
       return { ...summary, capacity: { ...summary.capacity, used: Math.max(summary.capacity.used, leased) }, ...(merged ? { pool: merged as NonNullable<DeviceHostSummary["pool"]> } : {}) };
     });
   }
@@ -804,7 +810,12 @@ export class DeviceService implements DeviceToolsPort {
   /** The fleet view's Drain (`draining: true`) and Undrain: no new lease on the host; a rented one is destroyed once empty. */
   setHostDraining(hostId: string, draining: boolean): DeviceHostSummary {
     this.assertRunning();
-    if (!this.hosts.get(hostId)) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
+    const host = this.hosts.get(hostId);
+    if (!host) throw new DeviceError(DEVICE_ERROR_CODES.HOST_NOT_FOUND, `There is no device host ${hostId}.`);
+    const own = host.pool?.() ?? null;
+    if (!draining && own?.draining === true && own.drainReason === "deadline") {
+      throw new DeviceError("INVALID_ARGUMENT", `${host.label} is ending soon: it is near its time limit, so it takes no new devices and cannot be resumed. It is destroyed once its devices end.`);
+    }
     if (draining) this.pool.drain(hostId);
     else this.pool.undrain(hostId);
     this.publishHosts();

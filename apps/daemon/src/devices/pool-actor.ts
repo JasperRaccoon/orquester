@@ -332,6 +332,7 @@ export class DevicePool {
     const since = this.idleSince.get(host.id);
     return {
       draining,
+      ...(draining ? { drainReason: "owner" as const } : {}),
       warm: this.lastDecision?.warmHostIds.includes(host.id) ?? false,
       idleSince: since !== undefined && this.deps.leasesOn(host.id) === 0 ? new Date(since).toISOString() : null
     };
