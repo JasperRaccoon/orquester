@@ -64,21 +64,144 @@ export function embeddingPassage(header: string, chunk: string): string {
 }
 
 /** Bumped whenever {@link chunkBody} changes, so cached vectors are recomputed. */
-export const CHUNKER_VERSION = "words-180-40-v1";
-/** ~256 MiniLM tokens of English prose. */
+export const CHUNKER_VERSION = "words-180-40-cost410-v2";
+/** ~250 multilingual-e5-small tokens of English or Spanish prose. */
 const CHUNK_WORDS = 180;
 const CHUNK_OVERLAP = 40;
+/**
+ * The token budget of a chunk's text, by {@link estimateTokens}: e5's 512 less its two special
+ * tokens, the "passage: " prefix and the blank line (~6), and ~96 for the entry's
+ * {@link embeddingHeader} (a long title and byline), so header + prefix + chunk stays within 512.
+ */
+export const CHUNK_TOKEN_BUDGET = 410;
+/** The overlap's share of the budget (as 40 of 180 words). */
+const CHUNK_OVERLAP_BUDGET = Math.floor((CHUNK_TOKEN_BUDGET * CHUNK_OVERLAP) / CHUNK_WORDS);
+/** A "word" estimated past this (a CJK sentence, minified JSON, a data URL) is cut into pieces of at most this. */
+const PIECE_BUDGET = 48;
 
-/** Overlapping word windows over the body (one span for a short body). */
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const LATIN = /\p{Script=Latin}/u;
+/** Letters of scripts whose words XLM-R's vocabulary covers well (measured: ≤ 0.3 tokens a character in prose). */
+const WELL_COVERED = /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Devanagari}]/u;
+/** A plain word: optional opening punctuation, letters (with marks, inner hyphens or apostrophes), optional closing punctuation. */
+const PLAIN_WORD = /^([(["'«“¿¡]*)([\p{L}\p{M}][\p{L}\p{M}'’-]*)([.,;:!?)\]"'»”…]*)$/u;
+
+/**
+ * An upper estimate of how many multilingual-e5-small (XLM-R SentencePiece) tokens `word` takes,
+ * from its characters alone. Measured on the pinned tokenizer: English and Spanish prose ~0.25
+ * tokens a character, Cyrillic/Arabic/Devanagari ~0.3, code and URLs ~0.45, JSON ~0.55, base64
+ * and hex up to ~0.66, Chinese/Japanese/Korean ~0.55–0.75, mathematical symbols ~1. So: a plain
+ * word of a well-covered script costs half a token plus a quarter (Latin) or 0.4 a letter; any
+ * other word one token plus 0.7 a letter or digit and 1 for anything else (CJK, punctuation,
+ * symbols, emoji, rarer scripts). On the samples measured it never underestimates: prose by
+ * ~1.3–1.6×, dense text (hex, base64, emoji, symbols) by ~1.0–1.2×.
+ */
+export function estimateTokens(word: string): number {
+  const plain = PLAIN_WORD.exec(word);
+  if (plain && !/\p{Ll}\p{Lu}/u.test(plain[2]!) && !CJK.test(plain[2]!)) {
+    let cost = 0.5 + [...plain[1]!].length + [...plain[3]!].length;
+    let letters = 0;
+    let common = true;
+    for (const char of plain[2]!) {
+      letters += 1;
+      if (/[\p{M}'’-]/u.test(char) || LATIN.test(char)) cost += 0.25;
+      else if (WELL_COVERED.test(char)) cost += 0.4;
+      else {
+        cost += 1;
+        common = false;
+      }
+    }
+    // Long or rare-script words, and Latin "words" with too few vowels to be words (ids, hashes,
+    // keyboard mashing: XLM-R spells them out), fall through to the dense estimate.
+    if (letters <= 24 && common && !consonantRun(plain[2]!)) return cost;
+  }
+  let cost = 1;
+  for (const char of word) cost += denseCharCost(char);
+  return cost;
+}
+
+/** A Latin word of 4+ letters under 25% vowels ("xkcd", "tlrmnbvc"; few real words, "strengths"). */
+function consonantRun(letters: string): boolean {
+  const latin = letters.normalize("NFD").replace(/\p{M}+/gu, "").toLowerCase().replace(/[^a-z]/g, "");
+  if (latin.length < 4) return false;
+  return (latin.match(/[aeiouy]/g)?.length ?? 0) < latin.length * 0.25;
+}
+
+/** One character of a dense word (see {@link estimateTokens}). */
+function denseCharCost(char: string): number {
+  if (CJK.test(char)) return 1;
+  if (/\p{M}/u.test(char)) return 0.3;
+  if (/\p{N}/u.test(char) || (/\p{L}/u.test(char) && (LATIN.test(char) || WELL_COVERED.test(char)))) return 0.7;
+  return 1;
+}
+
+interface Unit {
+  start: number;
+  end: number;
+  cost: number;
+}
+
+/** The body's words with their estimated tokens; a word past {@link PIECE_BUDGET} cut into pieces that fit it. */
+function chunkUnits(body: string): Unit[] {
+  const units: Unit[] = [];
+  for (const match of body.matchAll(/\S+/g)) {
+    const word = match[0];
+    const start = match.index!;
+    const cost = estimateTokens(word);
+    if (cost <= PIECE_BUDGET) {
+      units.push({ start, end: start + word.length, cost });
+      continue;
+    }
+    // Cut at code point boundaries; each piece costs as a dense word of its own (never less than
+    // its own estimate).
+    let pieceStart = 0;
+    let pieceCost = 1;
+    let offset = 0;
+    for (const char of word) {
+      const charCost = denseCharCost(char);
+      if (offset > pieceStart && pieceCost + charCost > PIECE_BUDGET) {
+        units.push({ start: start + pieceStart, end: start + offset, cost: pieceCost });
+        pieceStart = offset;
+        pieceCost = 1;
+      }
+      pieceCost += charCost;
+      offset += char.length;
+    }
+    units.push({ start: start + pieceStart, end: start + word.length, cost: pieceCost });
+  }
+  return units;
+}
+
+/**
+ * Overlapping word windows over the body (one span for a short body): at most 180 words (40
+ * shared with the next window) and at most {@link CHUNK_TOKEN_BUDGET} estimated tokens, so
+ * token-dense text (code, JSON, URLs, non-Latin scripts) gets shorter windows instead of being
+ * truncated by the model; a run without spaces longer than a window is cut inside. The spans
+ * cover every non-space character of the body.
+ */
 export function chunkBody(body: string): TextSpan[] {
-  const words = [...body.matchAll(/\S+/g)];
-  if (words.length <= CHUNK_WORDS) return [{ start: 0, end: body.length }];
+  const units = chunkUnits(body);
+  const total = units.reduce((sum, unit) => sum + unit.cost, 0);
+  if (units.length <= CHUNK_WORDS && total <= CHUNK_TOKEN_BUDGET) return [{ start: 0, end: body.length }];
   const spans: TextSpan[] = [];
-  for (let first = 0; first < words.length; first += CHUNK_WORDS - CHUNK_OVERLAP) {
-    const last = Math.min(words.length, first + CHUNK_WORDS) - 1;
-    const end = words[last]!.index! + words[last]![0].length;
-    spans.push({ start: words[first]!.index!, end });
-    if (last === words.length - 1) break;
+  let first = 0;
+  for (;;) {
+    let last = first;
+    let cost = units[first]!.cost;
+    while (last + 1 < units.length && last + 1 - first < CHUNK_WORDS && cost + units[last + 1]!.cost <= CHUNK_TOKEN_BUDGET) {
+      last += 1;
+      cost += units[last]!.cost;
+    }
+    spans.push({ start: units[first]!.start, end: units[last]!.end });
+    if (last === units.length - 1) break;
+    // The next window starts up to 40 units (and the overlap's share of the budget) back.
+    let next = last + 1;
+    let overlap = 0;
+    while (next - 1 > first && last + 1 - (next - 1) <= CHUNK_OVERLAP && overlap + units[next - 1]!.cost <= CHUNK_OVERLAP_BUDGET) {
+      next -= 1;
+      overlap += units[next]!.cost;
+    }
+    first = next;
   }
   return spans;
 }

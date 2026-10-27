@@ -42,6 +42,19 @@ export interface KnowledgeRuntime {
   /** Embedding vector length. */
   embeddingDimensions: number;
   /**
+   * False while myKG runs but the model's files are not in place (a runtime installed with an
+   * older model, until the next update check fetches this one): no embeddings, search runs on
+   * text and the graph. Absent: ready.
+   */
+  embeddingModelReady?: boolean;
+  /** Put before a query / a stored chunk when embedded (e5: "query: " / "passage: "); absent: none. */
+  embeddingQueryPrefix?: string;
+  embeddingPassagePrefix?: string;
+  /** Tokens per input, special tokens included; absent: 256. */
+  embeddingMaxTokens?: number;
+  /** The model's cosine cut-offs; absent: all-MiniLM-L6-v2's. */
+  embeddingThresholds?: KnowledgeVectorThresholds;
+  /**
    * tiktoken's cache dir (`TIKTOKEN_CACHE_DIR` of every myKG child), filled with the
    * encodings myKG loads at install time, so a linking run never fetches one.
    */
