@@ -91,6 +91,16 @@
 - Keep credentials out of process arguments and generated shell commands.
 - Do not edit build outputs such as `dist`, `dist-electron`, or `release` as source.
 
+## Writing tests
+
+- Test behavior a user or caller would notice, through a stable seam; don't mirror the implementation or assert what types already guarantee.
+- Don't assert one case per constant, label, or `switch` branch, or UI copy, class names, or markup that no contract fixes.
+- Fix a logic, data, state, or protocol bug with the fewest tests that fail on `main` for that bug, then the fix; prove a purely visual fix with before/after screenshots instead of a test.
+- Wait on drains, receipts, events, or `mock.timers`; don't poll against a deadline, assert `Date.now()` deltas, or set a per-test timeout.
+- Make a negative test ("not called", "rejects") fail when the guard it covers is removed.
+- Test through a module's existing exports; don't add an export only for a test.
+- Keep audit notes and test inventories out of the repo.
+
 ## Verification commands
 
 - Run `pnpm install` when dependency changes require it; keep `pnpm-lock.yaml` in sync.
