@@ -104,6 +104,7 @@ import type {
   KnowledgeStorePort
 } from "../ports.ts";
 import { contextReady, EntryDocumentLocator, LINK_CONTEXT_VERSION, linkContextProvider, type KnowledgeLinkGraphView } from "./context.ts";
+import { linkGapConceptKey } from "../search/gaps.ts";
 import { clearUnansweredTasks, InboxBroker } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
 import {
@@ -1103,7 +1104,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const added = await queueLinkGaps(state.relink, {
       ids,
       index,
-      conceptsOf: (id) => view.conceptsOf(id).map((concept) => concept.id),
+      conceptsOf: (id) => view.conceptsOf(id).map(linkGapConceptKey),
       hashOf: (id) => store.getMeta(id)?.contentHash ?? null,
       minimum: thresholds.strong
     });
