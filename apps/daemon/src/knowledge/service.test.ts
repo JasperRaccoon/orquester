@@ -204,6 +204,32 @@ test("the first switch-on opens the knowledge base and builds and starts linking
   assert.equal(h.embedders.disposed, 1);
 });
 
+test("the status says whether the embedding model is installed and loadable", async (t) => {
+  const h = await harness(t, { enabled: true });
+  await h.knowledge.start();
+  await h.knowledge.settled();
+  assert.equal(h.knowledge.status().embeddingModelReady, true);
+  assert.equal(((await h.inject("GET", knowledgeRoutes.status)).body as unknown as KnowledgeStatus).embeddingModelReady, true);
+
+  // An install from before a model change: myKG links, the model still has to be fetched.
+  h.runtime.set({ ...FAKE_RUNTIME, embeddingModelReady: false });
+  await h.knowledge.settled();
+  assert.equal(h.knowledge.status().installed, true);
+  assert.equal(h.knowledge.status().embeddingModelReady, false);
+  assert.equal(h.statuses().at(-1)?.embeddingModelReady, false, "a runtime change publishes it");
+
+  h.runtime.set(null);
+  assert.equal(h.knowledge.status().embeddingModelReady, false);
+
+  // Installed, but the model fails to load: not ready.
+  h.runtime.set(FAKE_RUNTIME);
+  await h.knowledge.settled();
+  assert.equal(h.knowledge.status().embeddingModelReady, true);
+  h.embedders.made[0]!.failWith = new Error("the model file is corrupt");
+  assert.equal((await h.inject("POST", knowledgeRoutes.search, { query: "anything" })).status, 200);
+  assert.equal(h.knowledge.status().embeddingModelReady, false);
+});
+
 test("before start a request is told the plugin is starting; start opens it", async (t) => {
   const h = await harness(t, { enabled: true });
   const early = await h.inject("GET", knowledgeRoutes.collections);

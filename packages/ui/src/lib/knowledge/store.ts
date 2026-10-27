@@ -39,6 +39,7 @@ import {
   type CreateKnowledgeCollectionRequest,
   type EventMessage,
   type KnowledgeCollectionsResponse,
+  type KnowledgeMergeRequest,
   type KnowledgeStatus,
   type UpdateKnowledgeCollectionRequest,
   type UpdateKnowledgeEntryRequest
@@ -57,6 +58,7 @@ export interface KnowledgeApi {
   deleteKnowledgeCollection(id: string): Promise<unknown>;
   updateKnowledgeEntry(id: string, req: UpdateKnowledgeEntryRequest): Promise<unknown>;
   deleteKnowledgeEntry(id: string): Promise<unknown>;
+  mergeKnowledgeEntries(req: KnowledgeMergeRequest): Promise<unknown>;
 }
 
 export interface KnowledgeState {
@@ -292,6 +294,11 @@ export function updateKnowledgeEntry(api: KnowledgeApi, id: string, req: UpdateK
 
 export function deleteKnowledgeEntry(api: KnowledgeApi, id: string): Promise<void> {
   return mutate(api, () => api.deleteKnowledgeEntry(id), { entries: [id], graph: true });
+}
+
+/** The kept entry is relabelled (or edited) and the others deleted, so their panels, lists and the graph read again. */
+export function mergeKnowledgeEntries(api: KnowledgeApi, req: KnowledgeMergeRequest): Promise<void> {
+  return mutate(api, () => api.mergeKnowledgeEntries(req), { entries: req.ids, graph: true });
 }
 
 // ---------------------------------------------------------------------------

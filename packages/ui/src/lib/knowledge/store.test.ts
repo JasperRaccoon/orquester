@@ -10,6 +10,7 @@ import {
   loadKnowledge,
   loadKnowledgeCollections,
   loadKnowledgeStatus,
+  mergeKnowledgeEntries,
   resetKnowledge,
   updateKnowledgeCollection,
   updateKnowledgeEntry,
@@ -59,7 +60,8 @@ function fakeApi(id = "c1") {
     updateKnowledgeCollection: async (cid) => (calls.push(`update:${cid}`), {}),
     deleteKnowledgeCollection: async (cid) => (calls.push(`delete:${cid}`), {}),
     updateKnowledgeEntry: async (eid) => (calls.push(`patch:${eid}`), {}),
-    deleteKnowledgeEntry: async (eid) => (calls.push(`remove:${eid}`), {})
+    deleteKnowledgeEntry: async (eid) => (calls.push(`remove:${eid}`), {}),
+    mergeKnowledgeEntries: async (req) => (calls.push(`merge:${req.ids.join(",")}`), {})
   };
   return {
     api,
@@ -185,6 +187,11 @@ describe("the knowledge store", () => {
     await deleteKnowledgeCollection(fake.api, "kc_seo");
     assert.equal(state().changedEntryIds, null, "every entry may have lost the label");
     assert.equal(state().graphRevision, 2);
+
+    await mergeKnowledgeEntries(fake.api, { ids: ["ke_1", "ke_2"], keep: "ke_1" });
+    assert.equal(fake.calls.at(-2), "merge:ke_1,ke_2");
+    assert.deepEqual(state().changedEntryIds, ["ke_1", "ke_2"], "the kept entry and the deleted one");
+    assert.equal(state().graphRevision, 3, "a deleted entry's concepts go at once");
   });
 
   it("a refused mutation rejects and refetches nothing", async () => {

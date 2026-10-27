@@ -119,6 +119,8 @@ export interface PluginsServiceOptions {
 interface QueuedCheck {
   /** A manual check runs even while the plugin is off. */
   force: boolean;
+  /** Queued by the hourly timer only (not by start, turning on or a manual check). */
+  scheduled: boolean;
 }
 
 /** One downloaded plugin's job lane: its updater, job state and serialized job queue. */
@@ -440,13 +442,14 @@ export class PluginsService {
 
   // ---- update checks and installs ------------------------------------------------------------
 
-  private requestCheck(lane: Lane, force: boolean): void {
+  private requestCheck(lane: Lane, force: boolean, scheduled = false): void {
     if (this.stopped || !lane.updater.supported()) return;
     if (lane.queuedCheck) {
       lane.queuedCheck.force ||= force;
+      lane.queuedCheck.scheduled &&= scheduled;
       return;
     }
-    const queued: QueuedCheck = { force };
+    const queued: QueuedCheck = { force, scheduled };
     lane.queuedCheck = queued;
     void this.onJobQueue(lane, () => this.runCheck(lane, queued)).catch((error) =>
       this.logger.error(lane.updater.checkFailedMessage, error)
@@ -503,9 +506,12 @@ export class PluginsService {
         } else if (
           updater.skipFailedOnSchedule &&
           !queued.force &&
-          !currentMissing &&
           state.current !== undefined &&
-          state.lastError?.version === release.version
+          state.lastError?.version === release.version &&
+          // A current version that still runs but wants a repair (Knowledge Graph: installed with
+          // an older model) is no missing install: once its repair failed, the hourly check leaves
+          // it to the next start, turning on, or a manual check.
+          (!currentMissing || (queued.scheduled && (await installedFiles(target, state.current.version))))
         ) {
           // This release failed to install last time and a working version is in place:
           // only a manual check tries it again.
@@ -672,7 +678,7 @@ export class PluginsService {
         if (await this.refreshRuntime()) this.emitChanged();
         // Each tick retries a preload write that failed. A check repairs missing files
         // too, and runs only while its plugin is on.
-        for (const lane of this.lanes.values()) this.requestCheck(lane, false);
+        for (const lane of this.lanes.values()) this.requestCheck(lane, false, true);
       });
     }, PLUGIN_CHECK_INTERVAL_MS);
     this.timer.unref?.();

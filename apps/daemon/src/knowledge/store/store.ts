@@ -4,8 +4,10 @@ import { join } from "node:path";
 import {
   KNOWLEDGE_COLLECTIONS_MAX,
   KNOWLEDGE_COLORS,
+  KNOWLEDGE_MERGE_MAX_ENTRIES,
   KNOWLEDGE_SAVE_MAX_ENTRIES,
   knowledgeCitation,
+  knowledgeMergeKeep,
   type CreateKnowledgeCollectionRequest,
   type KnowledgeCollection,
   type KnowledgeColor,
@@ -13,6 +15,7 @@ import {
   type KnowledgeEntryMeta,
   type KnowledgeEntrySource,
   type KnowledgeLinkState,
+  type KnowledgeMergeRequest,
   type KnowledgeSaveRequest,
   type KnowledgeSaveResult,
   type UpdateKnowledgeCollectionRequest,
@@ -70,6 +73,17 @@ export interface KnowledgeSaveOutcome {
   createdCollections: KnowledgeCollection[];
   /** The changes emitted, in order (also delivered to `onChange` listeners). */
   changes: KnowledgeEntryChange[];
+}
+
+/** What one merge did (the route turns it into a `KnowledgeMergeResponse`). */
+export interface KnowledgeMergeOutcome {
+  kept: KnowledgeEntry;
+  /** The kept entry was rewritten (its title, text or collections changed). */
+  keptChanged: boolean;
+  collectionsChanged: boolean;
+  deleted: string[];
+  /** Entries still there after the edit landed (deleting them failed), with why. */
+  notDeleted: { id: string; message: string }[];
 }
 
 interface StoredEntry {
@@ -519,82 +533,145 @@ export class KnowledgeStore implements KnowledgeStorePort {
   // -------------------------------------------------------------------------
 
   async updateEntry(id: string, request: UpdateKnowledgeEntryRequest): Promise<KnowledgeEntry> {
-    return this.serialize(async () => {
-      const stored = this.entries.get(id);
-      if (!stored) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
-      const currentBody = await this.readBody(id);
-      if (currentBody === null) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
-      const where = "entry";
-      const body = request.body === undefined ? currentBody : checkBody(request.body, where);
-      const before = stored.meta;
-      let collections = before.collections;
-      if (request.collections !== undefined) {
-        collections = [];
-        for (const ref of request.collections) {
-          // By id (the Knowledge tab) or by name (an agent's knowledge_update), as saving resolves them.
-          const collection = this.resolveCollection(ref);
-          if (!collection) {
-            throw new KnowledgeError(
-              "KNOWLEDGE_UNKNOWN_COLLECTION",
-              `No collection "${ref.slice(0, 80)}". ${this.validNamesHint(this.collectionsFile.collections)}`
-            );
-          }
-          if (!collections.includes(collection.id)) collections.push(collection.id);
+    return this.serialize(() => this.applyUpdate(id, request));
+  }
+
+  /**
+   * One edit, already on the chain. Checks every field before writing; writes nothing when nothing
+   * changes. `collectionIds` (a merge's union) sets the collections as they are, where
+   * `request.collections` resolves names and ids.
+   */
+  private async applyUpdate(id: string, request: UpdateKnowledgeEntryRequest, collectionIds?: readonly string[]): Promise<KnowledgeEntry> {
+    const stored = this.entries.get(id);
+    if (!stored) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
+    const currentBody = await this.readBody(id);
+    if (currentBody === null) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
+    const where = "entry";
+    const body = request.body === undefined ? currentBody : checkBody(request.body, where);
+    const before = stored.meta;
+    let collections = collectionIds ? [...collectionIds] : before.collections;
+    if (request.collections !== undefined) {
+      collections = [];
+      for (const ref of request.collections) {
+        // By id (the Knowledge tab) or by name (an agent's knowledge_update), as saving resolves them.
+        const collection = this.resolveCollection(ref);
+        if (!collection) {
+          throw new KnowledgeError(
+            "KNOWLEDGE_UNKNOWN_COLLECTION",
+            `No collection "${ref.slice(0, 80)}". ${this.validNamesHint(this.collectionsFile.collections)}`
+          );
         }
+        if (!collections.includes(collection.id)) collections.push(collection.id);
       }
-      const contentHash = body === currentBody ? before.contentHash : knowledgeContentHash(body);
-      const next: KnowledgeEntryMeta = {
-        ...before,
-        title: request.title === undefined ? before.title : checkTitle(request.title, where),
-        kind: request.kind === undefined ? before.kind : checkKind(request.kind, where),
-        author: request.author === undefined ? before.author : checkAuthor(request.author, where),
-        handle: request.handle === undefined ? before.handle : checkHandle(request.handle, where),
-        url: request.url === undefined ? before.url : checkUrl(request.url, where),
-        postedAt: request.postedAt === undefined ? before.postedAt : checkPostedAt(request.postedAt, where),
-        collections,
-        contentHash
-      };
-      const edited =
-        body !== currentBody ||
-        next.title !== before.title ||
-        next.kind !== before.kind ||
-        next.author !== before.author ||
-        next.handle !== before.handle ||
-        next.postedAt !== before.postedAt;
-      const relabelled =
-        next.url !== before.url ||
-        next.collections.length !== before.collections.length ||
-        next.collections.some((c, i) => c !== before.collections[i]);
-      if (!edited && !relabelled) return { ...before, body: currentBody };
-      const meta = frozenMeta({
-        ...next,
-        updatedAt: this.now().toISOString(),
-        linkState: edited ? "pending" : before.linkState
-      });
-      await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
-      const shingles = body === currentBody ? null : knowledgeShingles(body);
-      const urlKey = meta.url ? normalizeKnowledgeUrl(meta.url) : null;
-      this.unindex(id, before.contentHash, stored.urlKey);
-      this.entries.set(id, { meta, extra: stored.extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
-      this.index(id, meta.contentHash, urlKey);
-      this.metaCache = null;
-      if (edited) await this.writeMirror(meta, body);
-      this.emit({ kind: edited ? "edited" : "relabelled", entryIds: [id] });
-      return { ...meta, body };
+    }
+    const contentHash = body === currentBody ? before.contentHash : knowledgeContentHash(body);
+    const next: KnowledgeEntryMeta = {
+      ...before,
+      title: request.title === undefined ? before.title : checkTitle(request.title, where),
+      kind: request.kind === undefined ? before.kind : checkKind(request.kind, where),
+      author: request.author === undefined ? before.author : checkAuthor(request.author, where),
+      handle: request.handle === undefined ? before.handle : checkHandle(request.handle, where),
+      url: request.url === undefined ? before.url : checkUrl(request.url, where),
+      postedAt: request.postedAt === undefined ? before.postedAt : checkPostedAt(request.postedAt, where),
+      collections,
+      contentHash
+    };
+    const edited =
+      body !== currentBody ||
+      next.title !== before.title ||
+      next.kind !== before.kind ||
+      next.author !== before.author ||
+      next.handle !== before.handle ||
+      next.postedAt !== before.postedAt;
+    const relabelled =
+      next.url !== before.url ||
+      next.collections.length !== before.collections.length ||
+      next.collections.some((c, i) => c !== before.collections[i]);
+    if (!edited && !relabelled) return { ...before, body: currentBody };
+    const meta = frozenMeta({
+      ...next,
+      updatedAt: this.now().toISOString(),
+      linkState: edited ? "pending" : before.linkState
     });
+    await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
+    const shingles = body === currentBody ? null : knowledgeShingles(body);
+    const urlKey = meta.url ? normalizeKnowledgeUrl(meta.url) : null;
+    this.unindex(id, before.contentHash, stored.urlKey);
+    this.entries.set(id, { meta, extra: stored.extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
+    this.index(id, meta.contentHash, urlKey);
+    this.metaCache = null;
+    if (edited) await this.writeMirror(meta, body);
+    this.emit({ kind: edited ? "edited" : "relabelled", entryIds: [id] });
+    return { ...meta, body };
   }
 
   async deleteEntry(id: string): Promise<void> {
-    await this.serialize(async () => {
-      const stored = this.entries.get(id);
-      if (!stored) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
-      await removeIfExists(this.entryPath(id));
-      await removeIfExists(this.mirrorPath(id));
-      this.mirrorDigest.delete(id);
-      this.unindex(id, stored.meta.contentHash, stored.urlKey);
-      this.entries.delete(id);
-      this.metaCache = null;
-      this.emit({ kind: "deleted", entryIds: [id] });
+    await this.serialize(() => this.removeEntry(id));
+  }
+
+  /** One delete, already on the chain. */
+  private async removeEntry(id: string): Promise<void> {
+    const stored = this.entries.get(id);
+    if (!stored) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
+    await removeIfExists(this.entryPath(id));
+    await removeIfExists(this.mirrorPath(id));
+    this.mirrorDigest.delete(id);
+    this.unindex(id, stored.meta.contentHash, stored.urlKey);
+    this.entries.delete(id);
+    this.metaCache = null;
+    this.emit({ kind: "deleted", entryIds: [id] });
+  }
+
+  /**
+   * Merge entries into one, on one turn of the chain (nothing else writes in between). Checks the
+   * ids, the kept one and the new title and text before writing anything; then edits the kept entry
+   * (the union of every merged entry's collections, its own first; not rewritten when nothing
+   * changes) and deletes the others. A delete that fails after the edit landed is reported in
+   * `notDeleted`, not thrown, so the caller can say exactly what happened.
+   */
+  async mergeEntries(request: Pick<KnowledgeMergeRequest, "ids" | "keep" | "title" | "body">): Promise<KnowledgeMergeOutcome> {
+    return this.serialize(async () => {
+      const ids = request.ids;
+      if (ids.length < 2 || ids.length > KNOWLEDGE_MERGE_MAX_ENTRIES) {
+        throw new KnowledgeError("KNOWLEDGE_INVALID", `A merge takes 2 to ${KNOWLEDGE_MERGE_MAX_ENTRIES} entry ids.`);
+      }
+      const repeated = ids.find((id, i) => ids.indexOf(id) !== i);
+      if (repeated !== undefined) throw new KnowledgeError("KNOWLEDGE_INVALID", `Entry ${repeated.slice(0, 80)} is named twice.`);
+      if (request.keep !== undefined && !ids.includes(request.keep)) throw new KnowledgeError("KNOWLEDGE_INVALID", "keep must be one of the ids merged.");
+      const metas = ids.map((id) => {
+        const meta = this.entries.get(id)?.meta;
+        if (!meta) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", `No such entry: ${id.slice(0, 80)}.`);
+        return meta;
+      });
+      const kept = request.keep !== undefined ? metas[ids.indexOf(request.keep)]! : knowledgeMergeKeep(metas)!;
+      const others = metas.filter((meta) => meta.id !== kept.id);
+      // Ids as they are (a label whose collection is gone stays, as on the entries merged).
+      const collections = [...new Set([...kept.collections, ...others.flatMap((meta) => meta.collections)])];
+      const edit: UpdateKnowledgeEntryRequest = {
+        ...(request.title !== undefined ? { title: request.title } : {}),
+        ...(request.body !== undefined ? { body: request.body } : {})
+      };
+      const entry = await this.applyUpdate(kept.id, edit, collections);
+      // A write replaces the stored meta; no change leaves it as it was.
+      const keptChanged = this.entries.get(kept.id)?.meta !== kept;
+      const deleted: string[] = [];
+      const notDeleted: { id: string; message: string }[] = [];
+      for (const other of others) {
+        try {
+          await this.removeEntry(other.id);
+          deleted.push(other.id);
+        } catch (error) {
+          this.logger.error(`knowledge: merging into ${kept.id}, ${other.id} could not be deleted (${(error as Error).message})`);
+          notDeleted.push({ id: other.id, message: error instanceof KnowledgeError ? error.message : "It could not be deleted." });
+        }
+      }
+      return {
+        kept: entry,
+        keptChanged,
+        collectionsChanged: entry.collections.join() !== kept.collections.join(),
+        deleted,
+        notDeleted
+      };
     });
   }
 

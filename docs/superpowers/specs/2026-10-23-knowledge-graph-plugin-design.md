@@ -280,6 +280,10 @@ calling session's visible collections on the server.
   tab's delete route, reporting each ID as deleted or not. Act tier, no card;
   the description limits it to what the user asked to remove or the agent's
   own mistaken saves. Update and delete are advertised with search and get.
+- `knowledge_merge(ids[], keep?, title?, body?)`: merges duplicates in one
+  step through the Knowledge tab's merge route: the kept entry (the oldest
+  unless `keep`) gets every merged entry's collections, and the others are
+  deleted. Act tier, no card; advertised with search and get.
 - `knowledge_collections()`: every collection's name, description and entry
   count, for choosing where to save. Read tier.
 

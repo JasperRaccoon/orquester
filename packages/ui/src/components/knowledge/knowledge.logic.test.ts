@@ -3,18 +3,44 @@ import { describe, it } from "node:test";
 
 import { KNOWLEDGE_COLORS } from "@orquester/api";
 
-import { entry } from "../../lib/knowledge/fixtures.test-helpers.ts";
+import { entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
+  appendPage,
+  cleanFilters,
+  clearFilterField,
   collectionFormError,
+  entriesQueryOf,
+  missingExamplesOf,
+  pruneSelectionHistory,
   entryFormOf,
   entryFormPatch,
   entryPostUrl,
+  facetsRequestOf,
+  filterChipLabel,
+  filterHas,
+  highlightParts,
   knowledgeErrorCode,
   knowledgeErrorText,
   linkingView,
   nextKnowledgeColor,
-  patchNeedsLinking
+  passageText,
+  patchNeedsLinking,
+  queryIsEmpty,
+  rediscoverEntries,
+  rediscoverRequestOf,
+  rediscoverSeeds,
+  resultsCountText,
+  searchHitKey,
+  searchKeyOf,
+  searchPageOf,
+  searchRequestOf,
+  shownSort,
+  sortOptionsFor,
+  toggleFilterValue,
+  viaBadges,
+  withoutExample
 } from "./knowledge.logic.ts";
+import { EMPTY_KNOWLEDGE_QUERY, findSimilarQuery, withUnlike, withoutExamples, type KnowledgeQuery } from "./query-state.ts";
 
 describe("knowledge colours", () => {
 
@@ -148,5 +174,225 @@ describe("the entry form", () => {
     assert.equal(patchNeedsLinking({ url: "https://x.com/a/status/1" }), false);
     assert.equal(patchNeedsLinking({ url: null, collections: [] }), false);
     assert.equal(patchNeedsLinking({ url: null, title: "New title" }), true);
+  });
+});
+
+const q = (overrides: Partial<KnowledgeQuery> = {}): KnowledgeQuery => ({ ...EMPTY_KNOWLEDGE_QUERY, ...overrides });
+
+describe("the List view's requests", () => {
+  it("map a query to a search: trimmed words, examples, narrowing, clean filters, sort and cursor", () => {
+    assert.deepEqual(searchRequestOf(q({ text: "  seo pages " }), "all"), { limit: 25, query: "seo pages", sort: "relevance" });
+    assert.deepEqual(
+      searchRequestOf(
+        q({
+          text: "",
+          similarTo: ["ke_a", "ke_a", "ke_b"],
+          unlike: ["ke_b", "ke_c"],
+          filters: { kinds: [" thread ", "Thread", ""], authors: [], savedBefore: " 2026-09-01 ", postedAfter: "" },
+          sort: "recent"
+        }),
+        "kc_seo",
+        { cursor: "next", limit: 10 }
+      ),
+      {
+        limit: 10,
+        similarTo: ["ke_a", "ke_b"],
+        unlike: ["ke_c"],
+        collections: ["kc_seo"],
+        filters: { kinds: ["thread"], savedBefore: "2026-09-01" },
+        sort: "recent",
+        cursor: "next"
+      }
+    );
+    // "Less like" alone means nothing: it is not sent.
+    assert.equal(searchRequestOf(q({ text: "x", unlike: ["ke_c"] }), "all").unlike, undefined);
+    assert.deepEqual(searchRequestOf(findSimilarQuery("ke_a"), "unfiled"), { limit: 25, similarTo: ["ke_a"], collections: ["unfiled"], sort: "relevance" });
+  });
+
+  it("key a search by everything but its page, so whitespace alone does not search again", () => {
+    assert.equal(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: " seo  " }), "all"));
+    assert.notEqual(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: "seo" }), "kc_seo"));
+    assert.notEqual(searchKeyOf(q({ text: "seo" }), "all"), searchKeyOf(q({ text: "seo", sort: "newest" }), "all"));
+  });
+
+  it("map filters to the entries list's query string", () => {
+    assert.deepEqual(entriesQueryOf("all", {}), { limit: 50 });
+    assert.deepEqual(entriesQueryOf("unfiled", { kinds: ["thread", "post"], authors: ["@om", "Om Patel"], years: ["2026"], postedAfter: "2026-01-01" }, { cursor: "c2" }), {
+      limit: 50,
+      collection: "unfiled",
+      cursor: "c2",
+      kinds: "thread,post",
+      authors: "@om,Om Patel",
+      years: "2026",
+      postedAfter: "2026-01-01"
+    });
+  });
+
+  it("send a filter list whose value holds a comma (or starts with '[') as a JSON array", () => {
+    const query = entriesQueryOf("all", { authors: ["Patel, Om", "@om"], kinds: ["[draft]"], years: ["2026"] });
+    assert.equal(query.authors, JSON.stringify(["Patel, Om", "@om"]));
+    assert.equal(query.kinds, JSON.stringify(["[draft]"]));
+    assert.equal(query.years, "2026");
+  });
+
+  it("scope a filter's counts to the collection and the other filters, never its own", () => {
+    const filters = { kinds: ["thread"], authors: ["om"], years: ["2026"] };
+    assert.deepEqual(facetsRequestOf("kc_seo", filters, "kinds"), { collections: ["kc_seo"], filters: { authors: ["om"], years: ["2026"] } });
+    assert.deepEqual(facetsRequestOf("all", { kinds: ["thread"] }, "kinds"), {});
+  });
+});
+
+describe("the List view's filters", () => {
+  it("toggle values as the daemon compares them, and cap a list", () => {
+    let query = toggleFilterValue(q(), "authors", "@Om_Patel5");
+    assert.deepEqual(query.filters, { authors: ["@Om_Patel5"] });
+    assert.ok(filterHas(query.filters, "authors", "om_patel5"));
+    query = toggleFilterValue(query, "authors", "om_patel5");
+    assert.deepEqual(query.filters, {}, "the same author, written differently, is let go of");
+    assert.equal(toggleFilterValue(query, "kinds", "  "), query);
+    const full = q({ filters: { kinds: Array.from({ length: 20 }, (_, i) => `k${i}`) } });
+    assert.equal(toggleFilterValue(full, "kinds", "another"), full);
+    assert.deepEqual(clearFilterField(q({ filters: { kinds: ["a"], years: ["2026"] } }), "kinds").filters, { years: ["2026"] });
+  });
+
+  it("label the chips, clean the filters, and know when there is nothing to clear", () => {
+    assert.equal(filterChipLabel("kinds", {}), "Kind");
+    assert.equal(filterChipLabel("kinds", { kinds: ["thread"] }), "Kind: thread");
+    assert.equal(filterChipLabel("years", { years: ["2025", "2026"] }), "Year: 2");
+    assert.equal(cleanFilters({ kinds: [" "], postedBefore: " " }), undefined);
+    assert.equal(queryIsEmpty(q({ filters: { kinds: [] } })), true);
+    assert.equal(queryIsEmpty(q({ sort: "newest" })), false);
+    assert.equal(queryIsEmpty(q({ text: "  " })), true);
+  });
+
+  it("offer every sort while searching, and only Newest otherwise", () => {
+    assert.deepEqual(sortOptionsFor(q()), ["newest"]);
+    assert.equal(shownSort(q({ sort: "recent" })), "newest");
+    assert.deepEqual(sortOptionsFor(q({ text: "seo" })), ["relevance", "recent", "newest"]);
+    assert.equal(shownSort(q({ text: "seo" })), "relevance");
+    assert.equal(shownSort(q({ similarTo: ["ke_a"], sort: "newest" })), "newest");
+  });
+
+  it("remove examples; the last \"like\" takes the \"not like\" ones with it", () => {
+    const query = withUnlike(q({ similarTo: ["ke_a", "ke_b"] }), "ke_c");
+    assert.deepEqual(withoutExample(query, "ke_c"), { ...query, unlike: [] });
+    assert.deepEqual(withoutExample(query, "ke_a"), { ...query, similarTo: ["ke_b"] });
+    assert.deepEqual(withoutExample(withoutExample(query, "ke_a"), "ke_b"), { ...query, similarTo: [], unlike: [] });
+    assert.equal(withoutExample(query, "ke_z"), query);
+  });
+});
+
+describe("the List view's results", () => {
+  it("split text around the matched terms, longest first, case-insensitively", () => {
+    assert.deepEqual(highlightParts("Competitor pages: one page per Competitor", ["page", "pages", "competitor"]), [
+      { text: "Competitor", match: true },
+      { text: " ", match: false },
+      { text: "pages", match: true },
+      { text: ": one ", match: false },
+      { text: "page", match: true },
+      { text: " per ", match: false },
+      { text: "Competitor", match: true }
+    ]);
+    assert.deepEqual(highlightParts("Precios (SaaS) — más", ["(saas)", "más"]), [
+      { text: "Precios ", match: false },
+      { text: "(SaaS)", match: true },
+      { text: " — ", match: false },
+      { text: "más", match: true }
+    ]);
+    assert.deepEqual(highlightParts("a b c", ["a", "b"]), [{ text: "a b c", match: false }], "single letters are not highlighted");
+    assert.deepEqual(highlightParts("seoseo", ["seo"]), [{ text: "seoseo", match: true }], "adjacent matches join");
+    assert.deepEqual(highlightParts("", ["seo"]), []);
+    assert.deepEqual(highlightParts("plain", []), [{ text: "plain", match: false }]);
+  });
+
+  it("name the signals, the passage and the count", () => {
+    assert.deepEqual(
+      viaBadges({ via: ["keyword", "meaning", "similar", "concept"], concepts: [{ id: "c1", name: "Pricing", type: "Topic" }] }).map((b) => b.label),
+      ["Keyword", "Meaning", "Similar", "Concept Pricing"]
+    );
+    assert.deepEqual(viaBadges({ via: ["concept"], concepts: [] }).map((b) => b.label), ["Concept"]);
+    assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 2, chunks: 12 } }), "passage 3 of 12");
+    assert.equal(passageText({ passage: { start: 0, end: 10, chunk: 0, chunks: 1 } }), null, "a short entry has one passage");
+    assert.equal(passageText({ passage: null }), null);
+    assert.equal(resultsCountText(31, 25), "31 results");
+    assert.equal(resultsCountText(1, 1), "1 result");
+    assert.equal(resultsCountText(200, 25), "Top 200 results");
+    assert.equal(resultsCountText(null, 8), "8 results", "an older daemon: the hits shown");
+  });
+
+  it("page: append without repeats; total and cursor from the newest page", () => {
+    const a = { kind: "entry" as const, score: 1, entry: summary({ id: "ke_a" }) };
+    const b = { kind: "entry" as const, score: 0.9, entry: summary({ id: "ke_b" }) };
+    const c = { kind: "concept" as const, score: 0.8, concept: { id: "ke_a", name: "A", type: "T", description: null }, entryIds: [] };
+    const first = appendPage(null, searchPageOf({ hits: [a, c], searched: [], total: 3, nextCursor: "p2" }), searchHitKey);
+    assert.deepEqual(first, { items: [a, c], total: 3, nextCursor: "p2" });
+    const second = appendPage(first, searchPageOf({ hits: [a, b], searched: [], total: 3, nextCursor: null }), searchHitKey);
+    assert.deepEqual(second.items.map(searchHitKey), ["entry:ke_a", "concept:ke_a", "entry:ke_b"]);
+    assert.equal(second.nextCursor, null);
+    // An older daemon: no total, no cursor — one page.
+    assert.deepEqual(appendPage(null, searchPageOf({ hits: [b], searched: [] }), searchHitKey), { items: [b], total: null, nextCursor: null });
+  });
+});
+
+describe("Rediscover", () => {
+  const now = Date.parse("2026-10-27T15:00:00Z");
+
+  it("seeds with up to five entries saved this week, most recent first", () => {
+    const entries = [
+      { id: "old", savedAt: "2026-10-01T10:00:00Z" },
+      ...Array.from({ length: 6 }, (_, i) => ({ id: `ke_${i}`, savedAt: `2026-10-2${i}T10:00:00Z` })),
+      { id: "bad", savedAt: "yesterday" }
+    ];
+    assert.deepEqual(rediscoverSeeds(entries, now), ["ke_5", "ke_4", "ke_3", "ke_2", "ke_1"]);
+    assert.deepEqual(rediscoverSeeds([{ id: "old", savedAt: "2026-10-01T10:00:00Z" }], now), []);
+  });
+
+  it("asks for entries like the seeds saved over 30 days ago, in the collection", () => {
+    assert.equal(rediscoverRequestOf([], "all", now), null);
+    assert.deepEqual(rediscoverRequestOf(["ke_5", "ke_4"], "kc_seo", now), {
+      similarTo: ["ke_5", "ke_4"],
+      filters: { savedBefore: "2026-09-26" },
+      sort: "relevance",
+      limit: 5,
+      collections: ["kc_seo"]
+    });
+  });
+
+  it("shows entry hits only, never a seed; hides when empty or from an older daemon", () => {
+    const hit = (id: string) => ({ kind: "entry" as const, score: 1, entry: summary({ id }) });
+    const concept = { kind: "concept" as const, score: 1, concept: { id: "c", name: "C", type: "T", description: null }, entryIds: [] };
+    assert.deepEqual(rediscoverEntries({ hits: [hit("ke_5"), concept, hit("ke_x")], searched: [], total: 2 }, ["ke_5"])?.map((e) => e.id), ["ke_x"]);
+    assert.equal(rediscoverEntries({ hits: [], searched: [], total: 0 }, ["ke_5"]), null);
+    assert.equal(rediscoverEntries({ hits: [hit("ke_x")], searched: [] }, ["ke_5"]), null, "no total: an older daemon");
+  });
+});
+
+describe("deleted example entries and history", () => {
+  const notFound = (message: string) => Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message } });
+  const examples = { ...EMPTY_KNOWLEDGE_QUERY, text: "", similarTo: ["ke_a", "ke_b"], unlike: ["ke_c"] };
+
+  it("let go of examples; with no \"more like\" left, \"less like\" goes too", () => {
+    assert.equal(withoutExamples(examples, ["ke_x"]), examples, "the same query when none is an example");
+    assert.deepEqual(withoutExamples(examples, ["ke_a"]), { ...examples, similarTo: ["ke_b"], unlike: ["ke_c"] });
+    assert.deepEqual(withoutExamples(examples, ["ke_c"]), { ...examples, unlike: [] });
+    const none = withoutExamples(examples, ["ke_a", "ke_b"]);
+    assert.deepEqual([none.similarTo, none.unlike], [[], []]);
+  });
+
+  it("read which examples a refused search names, else doubt them all", () => {
+    assert.deepEqual(missingExamplesOf(notFound('No visible entry "ke_b".'), examples), ["ke_b"]);
+    assert.deepEqual(missingExamplesOf(notFound("Gone."), examples), ["ke_a", "ke_b", "ke_c"]);
+    const long = "ke_" + "x".repeat(100);
+    assert.deepEqual(missingExamplesOf(notFound(`No visible entry "${long.slice(0, 80)}".`), { similarTo: [long], unlike: [] }), [long]);
+    assert.equal(missingExamplesOf(new Error("offline"), examples), null);
+    assert.equal(missingExamplesOf(notFound("Gone."), { similarTo: [], unlike: [] }), null);
+  });
+
+  it("prune deleted entries from Back history, never repeating a place or ending where you are", () => {
+    const e = (id: string) => ({ kind: "entry" as const, id });
+    const c = (id: string) => ({ kind: "concept" as const, id });
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("b"), e("a"), c("b")], new Set(["b"]), e("x")), [e("a"), c("b")]);
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("b")], new Set(["b"]), e("a")), [], "Back would go nowhere");
+    assert.deepEqual(pruneSelectionHistory([e("a"), e("k")], new Set(), e("k")), [e("a")]);
   });
 });

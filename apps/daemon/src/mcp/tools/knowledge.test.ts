@@ -2,7 +2,9 @@
  * The knowledge tools (Knowledge Graph plugin spec, "Agent tools", "Citations"), through the
  * executor: inputs mirror the contract's limits, every request names the calling session, results
  * are compact text with collections by name and each entry's citation, and the daemon's refusals
- * (plugin off, not a worker, an invalid worker answer) come back as clean tool errors.
+ * (plugin off, not a worker, an invalid worker answer) come back as clean tool errors. The retrieval
+ * spec's additions (filters, examples, paging, match explanations, body windows, similar entries and
+ * duplicates) render when the daemon sends them and are left out when an older one does not.
  */
 
 import assert from "node:assert/strict";
@@ -11,15 +13,20 @@ import { test } from "node:test";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   KNOWLEDGE_ENTRY_MAX_BYTES,
+  KNOWLEDGE_FILTER_MAX_VALUES,
   KNOWLEDGE_SAVE_MAX_ENTRIES,
   KNOWLEDGE_SEARCH_MAX_LIMIT,
+  KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
+  KNOWLEDGE_TITLE_MAX,
   knowledgeCitation,
   knowledgeRoutes,
   type KnowledgeCollectionsResponse,
   type KnowledgeEntryDetail,
   type KnowledgeEntrySummary,
+  type KnowledgeMergeResponse,
   type KnowledgeSaveResponse,
-  type KnowledgeSearchResponse
+  type KnowledgeSearchResponse,
+  type KnowledgeSimilarEntry
 } from "@orquester/api";
 
 import type { ThreadCaller } from "../catalog/contract.ts";
@@ -105,7 +112,7 @@ test("knowledge_search: nothing found says so; the limits are the contract's", a
   }
 });
 
-test("knowledge_get: the entry whole with its citation, concepts and related entries; the session in the query; a long body is cut", async () => {
+test("knowledge_get: the entry whole with its citation, concepts and related entries (an older daemon); the session in the query", async () => {
   const entry = meta({ url: "https://x.com/om_patel5/status/1", linkState: "pending" });
   const detail: KnowledgeEntryDetail = {
     entry: { ...entry, body: "Line one.\nLine two." },
@@ -122,16 +129,36 @@ test("knowledge_get: the entry whole with its citation, concepts and related ent
     assert.ok(out.includes(value), value);
   }
 
-  const long = { ...detail, entry: { ...detail.entry, body: "é".repeat(48_000) } };
-  api.on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: long } });
+  assert.ok(out.includes("Related:"), "an older daemon's related entries");
+  assert.doesNotMatch(out, /Similar:|Possible duplicates|\[chars /, "an older daemon sends no similar entries; a whole body has no footer");
+  assert.ok(out.endsWith(detail.entry.body));
+});
+
+test("knowledge_get: a long body is cut at 48 000 bytes on a character boundary, with the offset to read on from; from reads on", async () => {
+  const entry = meta();
+  const detail = (body: string): KnowledgeEntryDetail => ({ entry: { ...entry, body }, concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }], related: [], similar: [], possibleDuplicates: [], citation: entry.citation });
+  const api = withCollections(new FakeDaemonApi());
+  const serve = (body: string) => api.on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail(body) } });
+
+  // Two bytes a character: 24 000 characters fill the window.
+  serve("é".repeat(48_000));
   const cut = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
-  assert.ok(cut.includes("é".repeat(100)), "the body retains its source bytes");
-  const kept = cut.match(/é+/)?.[0] ?? "";
-  assert.ok(kept.length < long.entry.body.length, "the oversized body is cut");
-  assert.ok(cut.includes(String(Buffer.byteLength(long.entry.body) - Buffer.byteLength(kept))), "the omitted UTF8 byte count matches the missing body");
-  assert.ok(cut.includes("…"), "the cut is marked");
-  assert.doesNotMatch(cut, /\ufffd/, "the body is cut on a UTF8 boundary");
+  assert.ok(cut.includes(`---\n${"é".repeat(24_000)}\n[chars 0–24000 of 48000 — continue with from=24000]`), cut.slice(-200));
   assert.ok(Buffer.byteLength(cut, "utf8") < 60_000);
+  const rest = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa", from: 24_000 }));
+  assert.ok(rest.endsWith(`---\n${"é".repeat(24_000)}\n[chars 24000–48000 of 48000, the end]`), rest.slice(-120));
+  assert.ok(rest.startsWith(`cite: ${entry.citation}\nentry ke_aaaaaaaaaaaa`), "reading on keeps the head and citation");
+  assert.ok(!rest.includes("Concepts:"), "reading on shows the body, not the neighbours again");
+  assert.match(textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa", from: 100_000 })), /\[from=100000 is past the end: the body has 48000 chars\]$/);
+  assert.equal(api.calls.filter((call) => call.path === knowledgeRoutes.item("ke_aaaaaaaaaaaa")).length, 3);
+
+  // Four bytes and two UTF-16 units a character: a window never splits a surrogate pair, at either end.
+  serve("😀".repeat(20_000));
+  const emoji = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
+  assert.ok(emoji.endsWith(`${"😀".repeat(12_000)}\n[chars 0–24000 of 40000 — continue with from=24000]`), emoji.slice(-80));
+  const odd = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa", from: 24_001 }));
+  assert.ok(odd.endsWith(`---\n${"😀".repeat(8_000)}\n[chars 24000–40000 of 40000, the end]`), "a start inside a pair moves back to the pair");
+  for (const out of [emoji, odd]) assert.doesNotMatch(out, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no lone surrogate");
 });
 
 test("knowledge_get: a concept — description, entries, links; a hidden or unknown id is the daemon's refusal", async () => {
@@ -296,6 +323,51 @@ test("knowledge_delete: reads then deletes each id once, with the session; repor
   }
 });
 
+test("knowledge_merge: one POST with the session, ids once each; answers the kept entry, its citation and what was deleted; no card", async () => {
+  const entry = meta({ id: "ke_aaaaaaaaaaaa", title: "Alternatives pages", linkState: "pending" });
+  const merged: KnowledgeMergeResponse = {
+    kept: { entry: { ...entry, body: "Combined." }, concepts: [], related: [], citation: entry.citation },
+    deleted: ["ke_bbbbbbbbbbbb", "ke_cccccccccccc"]
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.entriesMerge, { status: 200, body: merged });
+  const r = await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb", "ke_aaaaaaaaaaaa", "ke_cccccccccccc"], keep: "ke_aaaaaaaaaaaa", title: " Alternatives pages ", body: "Combined." });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(r.structuredContent, undefined, "a text result: no card");
+  assert.equal(
+    textOf(r),
+    [
+      "Merged 3 entries into ke_aaaaaaaaaaaa; deleted ke_bbbbbbbbbbbb, ke_cccccccccccc. Their cite links no longer resolve: cite the kept one.",
+      "entry ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads · linking pending",
+      "Title: Alternatives pages",
+      `cite: ${entry.citation}`
+    ].join("\n")
+  );
+  const post = api.calls.find((call) => call.method === "POST")!;
+  assert.deepEqual(post.body, { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb", "ke_cccccccccccc"], sessionId: "chat-1", keep: "ke_aaaaaaaaaaaa", title: "Alternatives pages", body: "Combined." });
+  await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"] });
+  assert.deepEqual(api.calls.filter((call) => call.method === "POST").at(-1)!.body, { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], sessionId: "chat-1" }, "no keep: the daemon's rule");
+});
+
+test("knowledge_merge: 2..10 distinct entry ids, keep among them, the save limits; the daemon's refusals pass through", async () => {
+  const notFound = { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry: ke_hidden000000." } };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.entriesMerge, notFound);
+  for (const args of [
+    { ids: ["ke_aaaaaaaaaaaa"] },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_aaaaaaaaaaaa"] },
+    { ids: Array.from({ length: 11 }, (_, i) => `ke_${String(i).padStart(12, "0")}`) },
+    { ids: ["ke_aaaaaaaaaaaa", "nope"] },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], keep: "ke_cccccccccccc" },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], body: "   " },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], title: "t".repeat(KNOWLEDGE_TITLE_MAX + 1) },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], collections: ["SEO"] }
+  ]) {
+    assert.equal(errorOf(await run(api, "knowledge_merge", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 80));
+  }
+  assert.ok(!api.calls.some((call) => call.method === "POST"), "nothing invalid reaches the daemon");
+  const hidden = await run(api, "knowledge_merge", { ids: ["ke_aaaaaaaaaaaa", "ke_hidden000000"] });
+  assert.deepEqual(errorOf(hidden), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry: ke_hidden000000." });
+});
+
 test("knowledge_collections: every collection by name, count and description", async () => {
   const api = withCollections(new FakeDaemonApi());
   const out = textOf(await run(api, "knowledge_collections", {}));
@@ -399,4 +471,347 @@ test("knowledge_get: a concept's text fields are bounded — a text result is no
   assert.ok(out.includes("word word"));
   assert.ok(out.includes("alias 0"));
   assert.ok(out.includes("…"), "omitted text is marked");
+});
+
+// ---------------------------------------------------------------------------
+// Retrieval (spec 2026-10-27-knowledge-retrieval-phase0-1-design.md, "Agent tools (A1)")
+// ---------------------------------------------------------------------------
+
+const emptySearch: KnowledgeSearchResponse = { hits: [], searched: ["kc_seo0000000"], total: 0, nextCursor: null };
+const cursorAt = (offset: number): string => Buffer.from(JSON.stringify({ v: 1, o: offset, h: "f" })).toString("base64url");
+
+test("knowledge_search: typed filters, examples, sort and cursor map onto the request — lists once each, empty ones left out", async () => {
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: emptySearch });
+  const r = await run(api, "knowledge_search", {
+    query: " paywall tests ",
+    similarTo: ["ke_aaaaaaaaaaaa", "ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"],
+    unlike: ["ke_cccccccccccc"],
+    collections: ["SEO", "SEO"],
+    kinds: ["thread", "thread", "article"],
+    authors: ["@om_patel5", "Om Patel"],
+    years: ["2025", " 2026 "],
+    postedAfter: "2025-01-01",
+    postedBefore: "2026-10-27T12:00:00Z",
+    savedAfter: "2026-01-01",
+    savedBefore: "2026-10-27",
+    sort: "recent",
+    limit: 10,
+    cursor: cursorAt(10)
+  });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.deepEqual(api.calls.find((call) => call.path === knowledgeRoutes.search)!.body, {
+    query: "paywall tests",
+    sessionId: "chat-1",
+    collections: ["SEO"],
+    limit: 10,
+    filters: {
+      kinds: ["thread", "article"],
+      authors: ["@om_patel5", "Om Patel"],
+      years: ["2025", "2026"],
+      postedAfter: "2025-01-01",
+      postedBefore: "2026-10-27T12:00:00Z",
+      savedAfter: "2026-01-01",
+      savedBefore: "2026-10-27"
+    },
+    similarTo: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"],
+    unlike: ["ke_cccccccccccc"],
+    sort: "recent",
+    cursor: cursorAt(10)
+  });
+  assert.match(textOf(r), /^No knowledge found \(over SEO, with these filters\)/);
+
+  // Examples alone: no query; empty lists are not filters.
+  await run(api, "knowledge_search", { similarTo: ["ke_aaaaaaaaaaaa"], kinds: [], collections: [] });
+  assert.deepEqual(api.calls.filter((call) => call.path === knowledgeRoutes.search).at(-1)!.body, { sessionId: "chat-1", similarTo: ["ke_aaaaaaaaaaaa"] });
+  assert.match(textOf(await run(api, "knowledge_search", { query: "x", sort: "newest" })), /^No knowledge found \(over SEO\)\./, "no filters, no filter advice");
+});
+
+test("knowledge_search: refuses what the daemon would — no query and no examples, unlike alone, bad ids, years, dates, sort or cursor — before any request", async () => {
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: emptySearch });
+  const nothing = errorOf(await run(api, "knowledge_search", {}));
+  assert.equal(nothing.code, "INVALID_ARGUMENT");
+  assert.match(nothing.message, /query.*similarTo/, "the refusal says what to pass");
+  assert.equal(errorOf(await run(api, "knowledge_search", { similarTo: [], kinds: ["thread"] })).code, "INVALID_ARGUMENT", "filters alone are no search");
+  const unlikeAlone = errorOf(await run(api, "knowledge_search", { query: "x", unlike: ["ke_aaaaaaaaaaaa"] }));
+  assert.equal(unlikeAlone.code, "INVALID_ARGUMENT");
+  assert.match(unlikeAlone.message, /with similarTo/);
+  const ids = (n: number) => Array.from({ length: n }, (_, index) => `ke_${String(index).padStart(12, "0")}`);
+  for (const args of [
+    { similarTo: ["kc_seo0000000"] },
+    { similarTo: ["ke_AAAAAAAAAAAA"] },
+    { similarTo: ids(KNOWLEDGE_SIMILAR_MAX_EXAMPLES + 1) },
+    { similarTo: ["ke_aaaaaaaaaaaa"], unlike: ids(KNOWLEDGE_SIMILAR_MAX_EXAMPLES + 1) },
+    { query: "x", kinds: Array.from({ length: KNOWLEDGE_FILTER_MAX_VALUES + 1 }, (_, index) => `k${index}`) },
+    { query: "x", kinds: [" "] },
+    { query: "x", kinds: ["k".repeat(KNOWLEDGE_KIND_MAX + 1)] },
+    { query: "x", authors: ["a".repeat(KNOWLEDGE_AUTHOR_MAX + 1)] },
+    { query: "x", years: ["25"] },
+    { query: "x", years: ["2025-01"] },
+    { query: "x", postedAfter: "last week" },
+    { query: "x", postedBefore: "2026-13-45" },
+    { query: "x", savedAfter: "" },
+    { query: "x", savedBefore: "27/10/2026" },
+    { query: "x", sort: "oldest" },
+    { query: "x", cursor: "" },
+    { query: "x", cursor: "c".repeat(1_001) },
+    { query: "x", diverse: false },
+    { query: "x", filters: { kinds: ["thread"] } }
+  ]) {
+    assert.equal(errorOf(await run(api, "knowledge_search", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 80));
+  }
+  assert.ok(!api.calls.some((call) => call.path === knowledgeRoutes.search), "nothing invalid reaches the daemon");
+  // The limits themselves pass.
+  const full = await run(api, "knowledge_search", { similarTo: ids(KNOWLEDGE_SIMILAR_MAX_EXAMPLES), unlike: ["ke_aaaaaaaaaaaa"], years: ["2026"], postedAfter: "2026-10-27T08:30:00.000+01:00", kinds: ["k".repeat(KNOWLEDGE_KIND_MAX)] });
+  assert.equal(full.isError, undefined, textOf(full));
+});
+
+test("knowledge_search: each entry hit shows its band and signals, title, snippet, passage and citation (never the matched terms); concept hits name their entries; the footer pages", async () => {
+  const strong = meta();
+  const weak = meta({ id: "ke_wwwwwwwwwwww", title: "Paywall\n  pricing ", kind: "note", author: null, handle: null, postedAt: null, collections: [], linkState: "pending", snippet: "Weekly plans convert." });
+  const response: KnowledgeSearchResponse = {
+    hits: [
+      { kind: "entry", score: 1, entry: strong, match: { band: "strong", via: ["keyword", "meaning"], terms: ["alternatives", "competitor"], passage: { start: 120, end: 480, chunk: 1, chunks: 5 }, concepts: [] } },
+      { kind: "concept", score: 0.6, concept: { id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic", description: null }, entryIds: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], entries: [{ id: "ke_aaaaaaaaaaaa", title: "Alternatives pages" }, { id: "ke_bbbbbbbbbbbb", title: "Competitor\npages" }] },
+      { kind: "entry", score: 0.2, entry: weak, match: { band: "weak", via: ["concept"], terms: [], passage: null, concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }] } }
+    ],
+    searched: ["kc_seo0000000", "kc_ads0000000"],
+    total: 31,
+    nextCursor: cursorAt(2)
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: response });
+  const out = textOf(await run(api, "knowledge_search", { query: "alternatives competitor" }));
+  assert.deepEqual(out.split("\n"), [
+    "3 hits (over SEO, Ads). Read one whole with knowledge_get; cite each entry you use with its cite link, verbatim.",
+    "Weak hits may be unrelated: never cite one as evidence.",
+    "1. ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads · strong · via keyword+meaning",
+    '   "Alternatives pages"',
+    '   Build a page per competitor: "[competitor] vs [you]" ranks fast.',
+    "   passage: chars 120–480 (chunk 2/5)",
+    `   cite: ${strong.citation}`,
+    '2. concept tactic-alternatives "Alternatives pages" (Tactic) · entries ke_aaaaaaaaaaaa "Alternatives pages", ke_bbbbbbbbbbbb "Competitor pages"',
+    "3. ke_wwwwwwwwwwww · note · Unfiled · linking pending · weak · via concept",
+    '   "Paywall pricing"',
+    "   Weekly plans convert.",
+    `   cite: ${weak.citation}`,
+    "Showing 1–2 of 31.",
+    `Next page: cursor "${cursorAt(2)}".`,
+    "Too many to read? Narrow it: a more specific query, collections, kinds, authors, years or dates."
+  ]);
+
+  // A later page counts from the cursor's offset; the last one has no next cursor.
+  api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!], searched: ["kc_seo0000000"], total: 31, nextCursor: cursorAt(9) } });
+  assert.match(textOf(await run(api, "knowledge_search", { query: "x", cursor: cursorAt(8) })), /\nShowing 9–9 of 31\.\nNext page: cursor "[^"]+"\.\nToo many/);
+  api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!, response.hits[2]!], searched: ["kc_seo0000000"], total: 31, nextCursor: null } });
+  const last = textOf(await run(api, "knowledge_search", { query: "x", cursor: "not-a-cursor" }));
+  assert.match(last, /\nShowing 30–31 of 31\.\nToo many/, "the last page ends at the total even with an unreadable cursor");
+  assert.doesNotMatch(last, /Next page/);
+  api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!], searched: ["kc_seo0000000"], total: 31, nextCursor: "next" } });
+  assert.match(textOf(await run(api, "knowledge_search", { query: "x", cursor: "not-a-cursor" })), /\nShowing 1 of 31\.\nNext page: cursor "next"\./);
+  // Everything on one page: no hint, no cursor, no weak warning.
+  api.on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [response.hits[0]!], searched: ["kc_seo0000000"], total: 1, nextCursor: null } });
+  const one = textOf(await run(api, "knowledge_search", { query: "x" }));
+  assert.ok(one.endsWith("\nShowing 1–1 of 1."), one);
+  assert.doesNotMatch(one, /Weak hits|Next page|Too many/);
+});
+
+test("knowledge_search: an older daemon (no match, total, cursor or concept titles) renders without bands or a footer", async () => {
+  const entry = meta();
+  const response: KnowledgeSearchResponse = {
+    hits: [
+      { kind: "entry", score: 0.9, entry },
+      { kind: "concept", score: 0.5, concept: { id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic", description: "Comparison pages." }, entryIds: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"] }
+    ],
+    searched: ["kc_seo0000000"]
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: response });
+  const out = textOf(await run(api, "knowledge_search", { query: "x" }));
+  assert.ok(out.includes("\n1. ke_aaaaaaaaaaaa · thread · Om Patel (@om_patel5) · 2026-10-11 · in SEO, Ads\n"), out);
+  assert.ok(out.endsWith('2. concept tactic-alternatives "Alternatives pages" (Tactic): Comparison pages. · entries ke_aaaaaaaaaaaa, ke_bbbbbbbbbbbb'), out);
+  assert.doesNotMatch(out, /strong|good|weak|via |passage:|Showing|Next page/);
+});
+
+test("knowledge_get: similar entries with every reason, possible duplicates once, at most 8 similar; related only from an older daemon", async () => {
+  const entry = meta();
+  const other = (id: string, title: string) => meta({ id, title });
+  const duplicate: KnowledgeSimilarEntry = { entry: other("ke_dddddddddddd", "Same thread"), similarity: 0.973, reasons: [{ kind: "meaning", similarity: 0.973 }] };
+  const similar: KnowledgeSimilarEntry[] = [
+    {
+      entry: other("ke_bbbbbbbbbbbb", "Competitor pages"),
+      similarity: 0.912,
+      reasons: [
+        { kind: "meaning", similarity: 0.912 },
+        { kind: "concepts", concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }, { id: "channel-seo", name: "SEO", type: "Channel" }], shared: 2 },
+        { kind: "author", value: "om_patel5" }
+      ]
+    },
+    duplicate,
+    { entry: other("ke_cccccccccccc", "Pricing pages"), similarity: null, reasons: [{ kind: "concepts", concepts: [{ id: "a", name: "A", type: "T" }, { id: "b", name: "B", type: "T" }, { id: "c", name: "C", type: "T" }], shared: 5 }] },
+    { entry: other("ke_eeeeeeeeeeee", "Old notes"), similarity: null, reasons: [{ kind: "author", value: "om_patel5" }] },
+    ...Array.from({ length: 8 }, (_, index): KnowledgeSimilarEntry => ({ entry: other(`ke_x${String(index).padStart(11, "0")}`, `More ${index}`), similarity: 0.8, reasons: [{ kind: "meaning", similarity: 0.8 }] }))
+  ];
+  const detail: KnowledgeEntryDetail = {
+    entry: { ...entry, body: "Body." },
+    concepts: [],
+    related: [other("ke_rrrrrrrrrrrr", "Related only")],
+    similar,
+    possibleDuplicates: [duplicate],
+    citation: entry.citation
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
+  const lines = out.split("\n");
+  const from = lines.indexOf("Similar:");
+  assert.ok(from > 0, out);
+  assert.deepEqual(lines.slice(from + 1, from + 7), [
+    '- ke_bbbbbbbbbbbb "Competitor pages" · meaning 0.91 · shares concepts Alternatives pages, SEO · same author',
+    `  cite: ${similar[0]!.entry.citation}`,
+    '- ke_cccccccccccc "Pricing pages" · shares concepts A, B, C +2 more',
+    `  cite: ${similar[2]!.entry.citation}`,
+    '- ke_eeeeeeeeeeee "Old notes" · same author',
+    `  cite: ${similar[3]!.entry.citation}`
+  ]);
+  assert.equal(lines.filter((line) => line.startsWith("- ke_")).length, 8 + 1, "8 similar, then the duplicate");
+  const dup = lines.findIndex((line) => line.startsWith("Possible duplicates"));
+  assert.ok(dup > from, "duplicates after similar");
+  assert.equal(lines[dup], "Possible duplicates (if one is the same content, knowledge_merge them):");
+  assert.deepEqual(lines.slice(dup + 1, dup + 3), ['- ke_dddddddddddd "Same thread" (0.97)', `  cite: ${duplicate.entry.citation}`]);
+  assert.equal(out.split("ke_dddddddddddd").length - 1, 2, "a duplicate is listed once (its id, and its citation)");
+  assert.ok(!out.includes("Related") && !out.includes("ke_rrrrrrrrrrrr"), "similar replaces related");
+  assert.ok(out.endsWith("---\nBody."));
+
+  // A new daemon with nothing similar: no sections at all.
+  api.on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: { ...detail, related: [], similar: [], possibleDuplicates: [] } } });
+  assert.doesNotMatch(textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" })), /Similar|Related|Possible duplicates/);
+});
+
+test("knowledge_get: ids reads several at once — one request each, numbered, a refused one reported inline; all refused is the daemon's error", async () => {
+  const entryDetail = (id: string, body: string): KnowledgeEntryDetail => {
+    const entry = meta({ id, title: `Title ${id}` });
+    return { entry: { ...entry, body }, concepts: [], related: [], citation: entry.citation };
+  };
+  const notFound = { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." } };
+  const api = withCollections(new FakeDaemonApi())
+    .on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: entryDetail("ke_aaaaaaaaaaaa", "short body") } })
+    .on("GET", knowledgeRoutes.item("ke_bbbbbbbbbbbb"), { status: 200, body: { kind: "entry", entry: entryDetail("ke_bbbbbbbbbbbb", "b".repeat(100_000)) } })
+    .on("GET", knowledgeRoutes.item("ke_hidden000000"), notFound)
+    .on("GET", knowledgeRoutes.item("ke_gone00000000"), notFound)
+    .on("GET", knowledgeRoutes.item("tactic-x"), { status: 200, body: { kind: "concept", concept: { concept: { id: "tactic-x", name: "X", type: "Tactic", confidence: 0.5, description: null, aliases: [], attributes: {} }, collections: [], entries: [], neighbors: [] } } });
+  const r = await run(api, "knowledge_get", { ids: ["ke_aaaaaaaaaaaa", "ke_hidden000000", "ke_bbbbbbbbbbbb", "ke_aaaaaaaaaaaa", "tactic-x"] });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.deepEqual(
+    api.calls.filter((call) => call.path.startsWith("/api/knowledge/items/")).map((call) => [call.path, call.query]),
+    ["ke_aaaaaaaaaaaa", "ke_hidden000000", "ke_bbbbbbbbbbbb", "tactic-x"].map((id) => [knowledgeRoutes.item(id), { sessionId: "chat-1" }]),
+    "one request per distinct id, with the session"
+  );
+  const out = textOf(r);
+  const sections = out.split(/\n\n(?==== )/);
+  assert.equal(sections.length, 4, out.slice(0, 400));
+  assert.ok(sections[0]!.startsWith("=== 1/4 ke_aaaaaaaaaaaa ===\ncite: ") && sections[0]!.endsWith("---\nshort body"), sections[0]);
+  assert.equal(sections[1], "=== 2/4 ke_hidden000000 ===\nNot read: No such entry. (KNOWLEDGE_NOT_FOUND)");
+  // The short body is whole; the long one gets the rest of the 48 000 bytes.
+  assert.ok(sections[2]!.startsWith("=== 3/4 ke_bbbbbbbbbbbb ===") && sections[2]!.endsWith(`---\n${"b".repeat(47_990)}\n[chars 0–47990 of 100000 — continue with from=47990]`), sections[2]!.slice(-100));
+  assert.ok(sections[3]!.startsWith('=== 4/4 tactic-x ===\nconcept tactic-x "X" (Tactic)'));
+
+  const none = await run(api, "knowledge_get", { ids: ["ke_hidden000000", "ke_gone00000000"] });
+  assert.equal(none.isError, true);
+  assert.deepEqual(errorOf(none), { code: "KNOWLEDGE_NOT_FOUND", message: "No such entry." });
+  // One id in ids reads like id; from reads on in it.
+  const single = textOf(await run(api, "knowledge_get", { ids: ["ke_bbbbbbbbbbbb"], from: 99_990 }));
+  assert.ok(single.startsWith("cite: ") && single.endsWith(`---\n${"b".repeat(10)}\n[chars 99990–100000 of 100000, the end]`), single.slice(-80));
+});
+
+test("knowledge_get: exactly one of id and ids, at most 5 ids, from a whole offset and only for one entry", async () => {
+  const api = withCollections(new FakeDaemonApi());
+  for (const args of [
+    {},
+    { id: "ke_aaaaaaaaaaaa", ids: ["ke_bbbbbbbbbbbb"] },
+    { ids: [] },
+    { ids: Array.from({ length: 6 }, (_, index) => `ke_${String(index).padStart(12, "0")}`) },
+    { ids: [""] },
+    { id: "ke_aaaaaaaaaaaa", from: -1 },
+    { id: "ke_aaaaaaaaaaaa", from: 1.5 },
+    { id: "ke_aaaaaaaaaaaa", from: "10" },
+    { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], from: 10 }
+  ]) {
+    assert.equal(errorOf(await run(api, "knowledge_get", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 80));
+  }
+  assert.match(errorOf(await run(api, "knowledge_get", {})).message, /id, or ids/);
+  assert.match(errorOf(await run(api, "knowledge_get", { ids: ["ke_aaaaaaaaaaaa", "ke_bbbbbbbbbbbb"], from: 10 })).message, /with id/);
+  assert.equal(api.calls.filter((call) => call.path.startsWith("/api/knowledge/items/")).length, 0, "nothing invalid reaches the daemon");
+});
+
+test("knowledge_get: five full entries or five huge concepts stay under the result cap", async () => {
+  const api = withCollections(new FakeDaemonApi());
+  const ids = Array.from({ length: 5 }, (_, index) => `ke_${String(index).padStart(12, "0")}`);
+  for (const id of ids) {
+    const entry = meta({ id, title: "t".repeat(KNOWLEDGE_TITLE_MAX) });
+    const similar = Array.from({ length: 8 }, (_, index): KnowledgeSimilarEntry => ({ entry: meta({ id: `ke_s${String(index).padStart(11, "0")}`, title: "s".repeat(KNOWLEDGE_TITLE_MAX) }), similarity: 0.9, reasons: [{ kind: "meaning", similarity: 0.9 }, { kind: "concepts", concepts: [{ id: "c", name: "n".repeat(500), type: "T" }], shared: 9 }, { kind: "author", value: "a" }] }));
+    const detail: KnowledgeEntryDetail = {
+      entry: { ...entry, body: "€".repeat(60_000) },
+      concepts: Array.from({ length: 30 }, (_, index) => ({ id: `c-${index}`, name: "n".repeat(200), type: "T" })),
+      related: [],
+      similar,
+      possibleDuplicates: similar.slice(0, 3),
+      citation: entry.citation
+    };
+    api.on("GET", knowledgeRoutes.item(id), { status: 200, body: { kind: "entry", entry: detail } });
+  }
+  const entries = textOf(await run(api, "knowledge_get", { ids }));
+  assert.ok(Buffer.byteLength(entries, "utf8") < 60_000, `${Buffer.byteLength(entries, "utf8")} bytes`);
+  assert.equal(entries.match(/continue with from=\d+\]/g)?.length, 5, "every body is cut, with its footer");
+  assert.doesNotMatch(entries, /\ufffd/);
+  assert.ok(!entries.includes("read fewer ids"), "the windows shrink instead: nothing else is cut");
+
+  const huge = "word ".repeat(30_000);
+  const concepts = ids.map((_, index) => `tactic-${index}`);
+  for (const id of concepts) {
+    api.on("GET", knowledgeRoutes.item(id), {
+      status: 200,
+      body: {
+        kind: "concept",
+        concept: {
+          concept: { id, name: huge, type: huge, confidence: 1, description: "€".repeat(30_000), aliases: Array.from({ length: 50 }, () => "€".repeat(500)), attributes: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`k${index}`, { value: "€".repeat(500), confidence: 1 }])) },
+          collections: [],
+          entries: Array.from({ length: 30 }, () => meta({ snippet: "€".repeat(1_000) })),
+          neighbors: Array.from({ length: 100 }, (_, index) => ({ edge: { id: `e${index}`, type: huge, from: id, to: `t${index}`, confidence: 1 }, concept: { id: `t${index}`, name: huge, type: huge } }))
+        }
+      }
+    });
+  }
+  const many = textOf(await run(api, "knowledge_get", { ids: concepts }));
+  assert.ok(Buffer.byteLength(many, "utf8") < 60_000, `${Buffer.byteLength(many, "utf8")} bytes`);
+  assert.ok(many.includes("=== 1/5 tactic-0 ==="));
+  assert.ok(many.endsWith("\n[… the rest is cut at the result limit: read fewer ids at once]"), "the cut is said");
+});
+
+test("knowledge_save: a saved entry close in meaning to one already there gets a possible-duplicate line; an older daemon's answer has none", async () => {
+  const saved: KnowledgeSaveResponse = {
+    results: [
+      {
+        entryId: "ke_aaaaaaaaaaaa",
+        status: "saved",
+        title: "Alternatives pages",
+        collections: ["kc_seo0000000"],
+        citation: meta().citation,
+        similar: [
+          { entryId: "ke_cccccccccccc", title: "Alternatives\npages (copy)", similarity: 0.953, citation: "[c](orquester-knowledge:entry/ke_cccccccccccc)" },
+          { entryId: "ke_dddddddddddd", title: "Comparison pages", similarity: 0.9, citation: "[d](orquester-knowledge:entry/ke_dddddddddddd)" }
+        ]
+      },
+      { entryId: "ke_eeeeeeeeeeee", status: "saved", title: "New", collections: ["kc_seo0000000"], citation: "[New](orquester-knowledge:entry/ke_eeeeeeeeeeee)", similar: [] },
+      { entryId: "ke_ffffffffffff", status: "saved", title: "Older daemon", collections: ["kc_seo0000000"], citation: "[Older daemon](orquester-knowledge:entry/ke_ffffffffffff)" }
+    ],
+    createdCollections: [],
+    linking: "queued"
+  };
+  const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.save, { status: 200, body: saved });
+  const out = textOf(await run(api, "knowledge_save", { entries: [{ body: "text", collections: ["SEO"] }] }));
+  const lines = out.split("\n");
+  const at = lines.findIndex((line) => line.startsWith("- saved ke_aaaaaaaaaaaa"));
+  assert.deepEqual(lines.slice(at + 1, at + 4), [
+    '  possible duplicate of ke_cccccccccccc "Alternatives pages (copy)" (0.95) — if it is the same content, knowledge_merge the two',
+    '  possible duplicate of ke_dddddddddddd "Comparison pages" (0.90) — if it is the same content, knowledge_merge the two',
+    `- saved ke_eeeeeeeeeeee · in SEO · cite: ${saved.results[1]!.citation}`
+  ]);
+  assert.equal(out.match(/possible duplicate/g)?.length, 2, "only where the daemon named one");
 });
