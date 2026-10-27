@@ -6,9 +6,19 @@ import { after, describe, it } from "node:test";
 import type { KnowledgeConceptRef } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
-import { GMAIL_PASSAGE, LONG_GUIDE, LONG_GUIDE_CONCEPTS, SHORT_GUIDE, SHORT_GUIDE_CONCEPTS } from "./fixtures/tiktok-guides.ts";
+import {
+  GMAIL_PASSAGE,
+  LONG_GUIDE,
+  LONG_GUIDE_CONCEPTS,
+  NORDVPN_GUIDE,
+  NORDVPN_WARNING,
+  SHORT_GUIDE,
+  SHORT_GUIDE_CONCEPTS,
+  VPN_DETECTION
+} from "./fixtures/tiktok-guides.ts";
 import {
   negatedNames,
+  type PairCheckEntryInfo,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
@@ -307,6 +317,66 @@ describe("pair-check candidates", () => {
       ],
       "the concept and its negation; the two values"
     );
+  });
+
+  it("opposite advice in the text: saved posts by different authors that name one Tool, one against it and the other using it", async () => {
+    const posts = [NORDVPN_GUIDE, NORDVPN_WARNING, VPN_DETECTION];
+    // A research note that repeats the warning: it reports, it is not a saved post taking a side.
+    const research = { ...NORDVPN_WARNING, id: "ke_research", author: "Claude (research)" };
+    const index = new FakeVectorIndex(); // good = 0.5
+    [...posts, research].forEach((entry, i) => index.set(entry.id, around(16, 0, 1 + i, 0.9 - i * 0.01)));
+    const all = [...posts, research];
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: (id) => all.find((e) => e.id === id)?.concepts ?? [], contradicting: () => [] };
+    const options = {
+      ids: all.map((e) => e.id),
+      view,
+      hashOf: (id: string) => `h-${id}`,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id: string) => {
+        const entry = all.find((e) => e.id === id)!;
+        return { kind: entry === research ? "research note" : "post", title: entry.title, author: entry.author, handle: null };
+      },
+      bodyOf: async (id: string) => all.find((e) => e.id === id)?.body ?? null
+    };
+    const found = await pairCheckCandidates(options);
+    const opposed = found.filter((c) => c.reason === "opposed");
+    assert.deepEqual(
+      opposed.map((c) => [c.a, c.b]).sort(),
+      [
+        [NORDVPN_GUIDE.id, VPN_DETECTION.id], // "install a VPN" / "tiktok knows you're using a vpn"
+        [NORDVPN_GUIDE.id, NORDVPN_WARNING.id], // "I use NordVPN" / "do not use NordVPN"
+        [VPN_DETECTION.id, NORDVPN_WARNING.id] // "tiktok knows you're using a vpn" / "host your own VPN"
+      ].map((pair) => pair.sort()).sort()
+    );
+    assert.equal(found.indexOf(opposed[0]!), 0, "the opposed tier comes before alternatives and shared claims");
+    const nord = opposed.find((c) => [c.a, c.b].includes(NORDVPN_GUIDE.id) && [c.a, c.b].includes(NORDVPN_WARNING.id))!;
+    assert.deepEqual(nord.focus.map((c) => c.id), ["tool-nordvpn"], "the Tool both name: its passages are shown first");
+    assert.ok(found.every((c) => c.reason !== "opposed" || (c.a !== research.id && c.b !== research.id)), "a research note is no side of opposite advice");
+    // Without the bodies, nothing is found that way.
+    const { bodyOf: _bodyOf, ...withoutBodies } = options;
+    assert.ok((await pairCheckCandidates(withoutBodies)).every((c) => c.reason !== "opposed"));
+  });
+
+  it("within a tier: saved posts by different authors first, then a note on one side, one author's own entries last", async () => {
+    const index = new FakeVectorIndex(); // good = 0.5
+    index.set("ke_r1", around(16, 0, 1, 0.99));
+    index.set("ke_r2", around(16, 0, 2, 0.99)); // the closest pair: one research agent's two notes
+    index.set("ke_p1", around(16, 0, 3, 0.8));
+    index.set("ke_p2", around(16, 0, 4, 0.8)); // the furthest pair: two posts by different authors
+    const shared = [{ id: "t-warm", type: "Tactic", name: "Warm up the account" }];
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: () => shared, contradicting: () => [] };
+    const info: Record<string, PairCheckEntryInfo> = {
+      ke_r1: { kind: "research note", author: "Claude (research)", handle: null },
+      ke_r2: { kind: "research note", author: "Claude (research)", handle: null },
+      ke_p1: { kind: "post", author: "jason", handle: null },
+      ke_p2: { kind: "thread", author: "Alex Nguyen", handle: null }
+    };
+    const found = await pairCheckCandidates({ ids: Object.keys(info), view, hashOf: (id) => `h-${id}`, isChecked: () => false, limit: 30, entryOf: (id) => info[id] ?? null });
+    assert.ok(found.every((c) => c.reason === "shared"));
+    assert.deepEqual(found[0] && [found[0].a, found[0].b], ["ke_p1", "ke_p2"]);
+    assert.deepEqual(found.at(-1) && [found.at(-1)!.a, found.at(-1)!.b], ["ke_r1", "ke_r2"]);
+    assert.equal(found.length, 6);
   });
 });
 

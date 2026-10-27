@@ -2,13 +2,16 @@
  * Knowledge Graph linking — pair checks: contradictions an LLM confirms (phase 2 spec, "Pair
  * checks"). Implements `KnowledgePairChecksPort` (read by insights and similar entries, W3).
  *
- * Candidates ({@link pairCheckCandidates}), taken tier by tier ({@link PAIR_CHECK_REASONS}), closest
- * first within a tier, at most {@link PAIR_CHECK_MAX_PER_RUN} new ones per round, each pair checked
- * once per pair of content hashes:
+ * Candidates ({@link pairCheckCandidates}), taken tier by tier ({@link PAIR_CHECK_REASONS}); within a
+ * tier saved posts by different authors first, one author's own entries last, closest first; at
+ * most {@link PAIR_CHECK_MAX_PER_RUN} new ones per round, each pair checked once per pair of content
+ * hashes:
  * 1. joined by a `contradicts` edge between their concepts (any similarity): the check confirms the
  *    graph's guess (`checked`) or drops it (consistent/unrelated);
  * 2. opposite advice, at cosine ≥ the model's `good`: a concept and its negation ("One trial per IP"
- *    / "Never one-trial-per-IP"), or different values for the same decision — one is among the
+ *    / "Never one-trial-per-IP"); two saved posts by different authors that name the same Tool, one
+ *    in a negative sentence and the other not ("do not use NordVPN, you get shadow banned" / "install
+ *    a VPN (I use NordVPN…)"); or different values for the same decision — one is among the
  *    other's {@link PAIR_CHECK_ALTERNATIVE_NEIGHBOURS} nearest, by different authors, and a Tool or
  *    Tactic of each (not shared) names the same subject in {@link PAIR_CHECK_ALTERNATIVE_WORDS}+
  *    words ("Outlook/Proton email for TikTok account" / "Create TikTok accounts with a fresh Gmail");
@@ -386,14 +389,16 @@ function toCheck(record: KnowledgePairCheckRecord): KnowledgePairCheck {
 // ---------------------------------------------------------------------------
 
 /** Why a pair is worth checking, in priority order ({@link PAIR_CHECK_REASONS}). */
-export type PairCandidateReason = "contradicts" | "negation" | "alternatives" | "shared";
+export type PairCandidateReason = "contradicts" | "negation" | "opposed" | "alternatives" | "shared";
 /**
- * Candidates are taken tier by tier, closest first within a tier: the concept graph already says
- * they disagree (`contradicts` edge: a check confirms or drops it), then concept-level signs of
- * opposite advice (a concept and its negation; different values for the same decision), then the
- * close pairs sharing a claim.
+ * Candidates are taken tier by tier: the concept graph already says they disagree (`contradicts`
+ * edge: a check confirms or drops it), then signs of opposite advice (a concept and its negation;
+ * two saved posts that speak of the same tool with opposite polarity; different values for the same
+ * decision), then the close pairs sharing a claim. Within a tier, saved posts by different authors
+ * go first, then other pairs by different authors (a note or research note on one side), then one
+ * author's own entries ({@link pairCheckPriority}); closest first within those.
  */
-export const PAIR_CHECK_REASONS: readonly PairCandidateReason[] = ["contradicts", "negation", "alternatives", "shared"];
+export const PAIR_CHECK_REASONS: readonly PairCandidateReason[] = ["contradicts", "negation", "opposed", "alternatives", "shared"];
 
 export interface PairCandidate extends PairKey {
   /** Cosine of the two entry vectors; null when either has none (a `contradicts` edge alone). */
@@ -425,6 +430,11 @@ export interface PairCheckCandidatesOptions {
   limit: number;
   /** An entry's kind, title and author (survey entries and the same author are left out); absent: neither applies. */
   entryOf?(entryId: string): PairCheckEntryInfo | null;
+  /**
+   * An entry's body, read only for close saved posts by different authors (the `opposed` tier:
+   * {@link opposedSubject}); absent: no pair is found that way.
+   */
+  bodyOf?(entryId: string): Promise<string | null>;
 }
 
 /**
@@ -494,6 +504,98 @@ function negatedWords(x: NegationWords, y: NegationWords): boolean {
 }
 
 const authorKey = (value: string): string => normalizeAuthor(value);
+
+/** Kinds that are the user's or a research agent's own notes, not saved posts. */
+const NOTE_KIND = /^(research[ _-]?)?notes?$/i;
+
+/** Whether an entry is a saved post (a post, thread, article, video…), not a note, research note or synthesis. */
+function isSavedPost(info: PairCheckEntryInfo | null): boolean {
+  const kind = (info?.kind ?? "").trim();
+  return info !== null && !NOTE_KIND.test(kind) && kind.toLowerCase() !== "synthesis";
+}
+
+/**
+ * Concept types that name the platform, a company or a person an entry is about: their words are
+ * no subject of opposite advice (two TikTok guides both name TikTok).
+ */
+const ENTITY_TYPES: ReadonlySet<string> = new Set(["Channel", "App", "Platform", "Organization", "Company", "Person", "Brand"]);
+/** Words of Tool names that say what kind of thing it is, not which ("App-intelligence tool", "Free online address generators"). */
+const GENERIC_TOOL_WORDS: ReadonlySet<string> = new Set(["tool", "app", "free", "online", "paid", "service", "software", "platform", "website", "site", "account"]);
+/**
+ * Words that put a mention on the negative side when they stand within {@link STANCE_WINDOW} words
+ * of it: advice against it ("do not use", "avoid", "never", "stay away"), or that the platform sees
+ * it ("detects", "knows", "flagged", "banned"). Matched on {@link nameWords} (lower case, no
+ * apostrophes, plurals folded); `avoid…` and `detect…` by prefix.
+ */
+const NEGATIVE_WORDS: ReadonlySet<string> = new Set([
+  "not", "no", "never", "stop", "against", "without", "nor", "dont", "doesnt", "wont", "cant", "cannot", "isnt", "arent", "shouldnt", "didnt",
+  "wasnt", "away", "know", "flag", "flagged", "flagging", "ban", "banned", "shadowban", "shadowbanned", "blocked", "useless", "waste"
+]);
+/** Words that put a mention (with no negative word near) on the side of using it ("I use NordVPN", "buy an ISP proxy", "host your own VPN"). */
+const USE_WORDS: ReadonlySet<string> = new Set([
+  "use", "using", "install", "installed", "buy", "bought", "connect", "connected", "host", "hosted", "run", "running", "recommend", "recommended",
+  "work", "works", "worked", "pick", "choose", "get", "got", "need", "try", "set", "setup", "add", "download"
+]);
+/** How many words either side of a mention its stance is read from. */
+const STANCE_WINDOW = 4;
+const negativeWord = (word: string): boolean => NEGATIVE_WORDS.has(word) || word.startsWith("avoid") || word.startsWith("detect");
+
+/**
+ * An entry's stance per word, from each mention in its title and body: bit 1, a negative word
+ * stands near a mention ({@link NEGATIVE_WORDS}); bit 2, a use word does and no negative one
+ * ({@link USE_WORDS}). A mention with neither says nothing.
+ */
+function stances(title: string, body: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const sentence of `${title}\n${body}`.split(/(?<=[.!?])\s+|\n+/)) {
+    const words = nameWords(sentence);
+    for (let i = 0; i < words.length; i += 1) {
+      const near = words.slice(Math.max(0, i - STANCE_WINDOW), i + STANCE_WINDOW + 1);
+      const bit = near.some(negativeWord) ? 1 : near.some((w) => USE_WORDS.has(w)) ? 2 : 0;
+      if (bit !== 0) out.set(words[i]!, (out.get(words[i]!) ?? 0) | bit);
+    }
+  }
+  return out;
+}
+
+/**
+ * The word two entries give opposite advice about, or null: a content word of a Tool of either
+ * (not a word of their platforms, companies or people: {@link ENTITY_TYPES}) that both name, one
+ * negatively and the other as something to use ({@link stances}: "do not use NordVPN" / "I use
+ * NordVPN"; "TikTok knows you're using a VPN" / "host your own VPN"). The first such word of the Tools in
+ * order.
+ */
+function opposedSubject(
+  a: { concepts: readonly KnowledgeConceptRef[]; stances: ReadonlyMap<string, number> },
+  b: { concepts: readonly KnowledgeConceptRef[]; stances: ReadonlyMap<string, number> }
+): string | null {
+  const entity = new Set<string>();
+  for (const concept of [...a.concepts, ...b.concepts]) if (ENTITY_TYPES.has(concept.type)) for (const w of nameWords(concept.name)) entity.add(w);
+  const toolWords = (concepts: readonly KnowledgeConceptRef[]): Set<string> => {
+    const out = new Set<string>();
+    for (const concept of concepts) if (concept.type === "Tool") for (const w of contentWords(concept.name)) if (!entity.has(w) && !GENERIC_TOOL_WORDS.has(w)) out.add(w);
+    return out;
+  };
+  const other = toolWords(b.concepts);
+  for (const word of toolWords(a.concepts)) {
+    if (!other.has(word)) continue;
+    const x = a.stances.get(word) ?? 0;
+    const y = b.stances.get(word) ?? 0;
+    if ((x & 1 && y & 2) || (y & 1 && x & 2)) return word;
+  }
+  return null;
+}
+
+/**
+ * A candidate's rank within its tier: 0, saved posts by different authors; 1, different authors
+ * with a note or research note on one side; 2, one author's own entries (a research agent's notes
+ * among them). Without entry info every pair ranks 0.
+ */
+function pairCheckPriority(a: PairCheckEntryInfo | null, b: PairCheckEntryInfo | null, sameAuthor: boolean): number {
+  if (sameAuthor) return 2;
+  if (a === null || b === null) return 0;
+  return isSavedPost(a) && isSavedPost(b) ? 0 : 1;
+}
 
 /**
  * New candidate pairs (see the module header), tier by tier in {@link PAIR_CHECK_REASONS} order,
@@ -709,11 +811,49 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
       }
       if (alternative) consider(a, b, sim, "alternatives", alternative);
     }
+    // Opposite advice in the text: close saved posts by different authors that name one Tool, one
+    // in a negative sentence ("do not use NordVPN", "TikTok knows you're using a VPN") and the
+    // other not ("I use NordVPN"). Bodies are read for those entries only, once each.
+    const bodyOf = options.bodyOf;
+    if (bodyOf && options.entryOf) {
+      const stancesOf = new Map<string, Map<string, number> | null>();
+      const stanceOf = async (id: string): Promise<Map<string, number> | null> => {
+        if (stancesOf.has(id)) return stancesOf.get(id)!;
+        const body = await bodyOf(id).catch(() => null);
+        const found = body === null ? null : stances(options.entryOf?.(id)?.title ?? "", body);
+        stancesOf.set(id, found);
+        return found;
+      };
+      for (let p = 0; p < closeA.length; p += 1) {
+        if (due()) await breathe();
+        const a = rows[closeA[p]!]!;
+        const b = rows[closeB[p]!]!;
+        if (!isSavedPost(options.entryOf(a)) || !isSavedPost(options.entryOf(b)) || sameAuthor(a, b)) continue;
+        const [sa, sb] = [await stanceOf(a), await stanceOf(b)];
+        if (!sa || !sb) continue;
+        const ca = conceptsOf.get(a)!;
+        const cb = conceptsOf.get(b)!;
+        const subject = opposedSubject({ concepts: ca, stances: sa }, { concepts: cb, stances: sb });
+        if (subject === null) continue;
+        const focus = new Map<string, KnowledgeConceptRef>();
+        for (const concept of [...ca, ...cb]) if (concept.type === "Tool" && contentWords(concept.name).has(subject)) focus.set(concept.id, concept);
+        consider(a, b, closeSim[p]!, "opposed", [...focus.values()]);
+      }
+    }
   }
   const tier = (c: PairCandidate): number => PAIR_CHECK_REASONS.indexOf(c.reason);
-  return [...found.values()]
-    .sort((x, y) => tier(x) - tier(y) || (y.similarity ?? -2) - (x.similarity ?? -2) || (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : 1))
-    .slice(0, options.limit);
+  const priority = (c: PairCandidate): number => pairCheckPriority(options.entryOf?.(c.a) ?? null, options.entryOf?.(c.b) ?? null, sameAuthor(c.a, c.b));
+  const ranked = [...found.values()].map((candidate) => ({ candidate, tier: tier(candidate), priority: priority(candidate) }));
+  return ranked
+    .sort(
+      (x, y) =>
+        x.tier - y.tier ||
+        x.priority - y.priority ||
+        (y.candidate.similarity ?? -2) - (x.candidate.similarity ?? -2) ||
+        (x.candidate.a < y.candidate.a ? -1 : x.candidate.a > y.candidate.a ? 1 : x.candidate.b < y.candidate.b ? -1 : 1)
+    )
+    .slice(0, options.limit)
+    .map((x) => x.candidate);
 }
 
 // ---------------------------------------------------------------------------

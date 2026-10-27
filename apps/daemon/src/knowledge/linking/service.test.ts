@@ -26,7 +26,7 @@ import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } fr
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
 import { MAX_REFUSALS } from "./inbox.ts";
-import { PAIR_CHECK_BODY_CHARS, PAIR_CHECK_INPUT_VERSION } from "./pair-checks.ts";
+import { PAIR_CHECK_BODY_CHARS, PAIR_CHECK_INPUT_VERSION, PAIR_CHECK_MAX_PER_RUN } from "./pair-checks.ts";
 import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
 import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
 
@@ -1428,6 +1428,26 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     assert.equal(pairInputs().filter((i) => i.input.includes(`(${ID(1)})`) && i.input.includes(`(${ID(2)})`)).length, 1, "asked again once");
     await h.service.stop();
   });
+
+  it("more candidates than a round takes: rounds follow one another until every pair is checked, each once", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    // Nine close entries sharing a Tactic: 36 pairs, more than one round's 30.
+    const ids = Array.from({ length: 9 }, (_, i) => ID(i + 1));
+    graph.ready(ids);
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    assert.ok(36 > PAIR_CHECK_MAX_PER_RUN);
+    await h.until(() => h.service.pairChecks.all().length >= 36);
+    await h.service.pairChecksIdle();
+    const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check");
+    assert.equal(asked.length, 36, "each pair once");
+    const rounds = new Set((await readState(h)).workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
+    assert.equal(rounds.size, 2, "30, then the 6 left; then none");
+    await h.service.stop();
+  });
 });
 
 /** The attempt key of the round-test source's task for `item`: its task id (myKG's, of its prompt and label). */
@@ -1472,9 +1492,9 @@ function fakeRoundSource(items: string[]) {
 }
 
 describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 }, () => {
-  it("answers a source's capped tasks in the idle rounds only, counts their tokens, and asks each item once", async () => {
+  it("answers a source's capped tasks in the idle rounds only, round after round until none is left, counts their tokens, and asks each item once", async () => {
     const graph = fakeGraphView();
-    const round = fakeRoundSource(["x", "y", "z"]);
+    const round = fakeRoundSource(["v", "w", "x", "y", "z"]);
     const h = await harness({ extra: { graphView: graph.view, roundTasks: [round.source] } });
     round.watch(() => h.service.status().state);
     const ids = [ID(1), ID(2)];
@@ -1487,22 +1507,88 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     assert.equal(round.calls.length, 0, "no round while entries wait to be linked");
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 1));
-    await h.until(() => round.recorded.length >= 2);
+    // The source's own cap is 2 a round: a round that ran to its end with answers is followed by
+    // the next, until the source has nothing left (then no round starts).
+    await h.until(() => round.recorded.length >= 5);
     await h.service.pairChecksIdle();
-    assert.deepEqual(round.recorded.sort(), ["x", "y"], "the source's own cap: 2 a round");
+    assert.deepEqual([...round.recorded].sort(), ["v", "w", "x", "y", "z"]);
     assert.ok(round.calls.length > 0 && round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
+    const roundIds = new Set((await readState(h)).workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
+    assert.equal(roundIds.size, 3, "three rounds: 2 + 2 + 1");
     const state = await readState(h);
     const runTokens = state.recentRuns.reduce((sum, run) => sum + run.tokensIn, 0);
     assert.ok(state.tokens.total.in > runTokens, "the round's chats count");
-    // More work: the next round takes the rest; then nothing is asked again.
-    round.work();
-    await h.until(() => round.recorded.length >= 3);
-    await h.service.pairChecksIdle();
+    // More work: nothing is asked again.
     round.work();
     await flushAsync(20);
     await h.service.pairChecksIdle();
     const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").map((i) => i.input);
-    assert.equal(asked.length, 3, "each item once");
+    assert.equal(asked.length, 5, "each item once");
+    await h.service.stop();
+  });
+
+  it("a save during the rounds: linking goes first, and the rounds go on once it is idle again", async () => {
+    const graph = fakeGraphView();
+    const round = fakeRoundSource(["v", "w", "x", "y", "z"]);
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [round.source] } });
+    round.watch(() => h.service.status().state);
+    const ids = [ID(1), ID(2), ID(3)];
+    graph.ready(ids);
+    // An entry is saved while the first round runs (as its first answer is recorded).
+    const record = round.source.record.bind(round.source);
+    round.source.record = async (payload, answer) => {
+      await record(payload, answer);
+      if (round.recorded.length === 1) h.service.entriesChanged(await h.store.put(ID(3), `body of ${ID(3)}`));
+    };
+    await h.service.start();
+    for (const id of ids.slice(0, 2)) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await h.until(() => round.recorded.length >= 1);
+    await h.service.pairChecksIdle();
+    assert.deepEqual([...round.recorded].sort(), ["v", "w"], "the round in progress runs to its end; the next waits for linking");
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    await h.until(() => round.recorded.length >= 5);
+    await h.service.pairChecksIdle();
+    assert.ok(round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
+    assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").length, 5, "each item once");
+    await h.service.stop();
+  });
+
+  it("an answer that changes nothing (the source asks the same item again) is not asked again before the next graph load", async () => {
+    const graph = fakeGraphView();
+    const listeners = new Set<() => void>();
+    let calls = 0;
+    const source: KnowledgeRoundTaskSource = {
+      step: "round-test",
+      // A source whose answers are not kept (a read-only file): it offers the same item every time,
+      // for a few rounds at most here (without the rule, each would ask it again).
+      async tasks(options) {
+        calls += 1;
+        if (calls > 5) return [];
+        const task = { label: "round-test same", system: 'Answer {"ok": true}.', user: "Item same", payload: { item: "same" } };
+        return options?.skip?.(task) ? [] : [task];
+      },
+      validate: (value) => ((value as { ok?: unknown } | null)?.ok === true ? null : 'Answer {"ok": true}.'),
+      async record() {},
+      onWork(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    };
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [source] } });
+    graph.ready([ID(1), ID(2)]);
+    await h.service.start();
+    for (const id of [ID(1), ID(2)]) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await h.until(() => h.port.sessions.some((s) => s.inputs.some((i) => i.input === "Item same")));
+    await h.service.pairChecksIdle();
+    for (const listener of listeners) listener();
+    await flushAsync(20);
+    await h.service.pairChecksIdle();
+    assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.input === "Item same").length, 1);
     await h.service.stop();
   });
 
@@ -1540,15 +1626,16 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.until(() => recorded.includes("good"));
     await h.service.pairChecksIdle();
     const askedBad = () => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.input === "Item bad").length;
-    // Two chats gave up on it (each refused MAX_REFUSALS times), then it was out of the round: a third
-    // chat answered the rest instead of failing the round's pool (3 chats in a row giving up).
-    assert.equal(askedBad(), 2 * MAX_REFUSALS);
-    assert.ok(!h.service.pairChecks.gaveUp(roundTaskKey("bad")), "one failed round");
-    for (let round = 2; round <= 3; round += 1) {
-      work();
-      await h.until(() => h.service.pairChecks.givenUp().length > 0 || attemptsOf(h, "bad") >= round);
-      await h.service.pairChecksIdle();
-    }
+    // Each round, two chats gave up on it (each refused MAX_REFUSALS times), then it was out of the
+    // round: a third chat answered the rest instead of failing the round's pool (3 chats in a row
+    // giving up). The first round answered "good", so the next followed on its own and asked "bad"
+    // alone; it answered nothing, so no round followed it.
+    assert.equal(askedBad(), 2 * 2 * MAX_REFUSALS);
+    assert.equal(attemptsOf(h, "bad"), 2);
+    assert.ok(!h.service.pairChecks.gaveUp(roundTaskKey("bad")), "two failed rounds");
+    work();
+    await h.until(() => h.service.pairChecks.givenUp().length > 0);
+    await h.service.pairChecksIdle();
     assert.ok(h.service.pairChecks.gaveUp(roundTaskKey("bad")), "given up after three rounds");
     const asked = askedBad();
     work();
