@@ -11,7 +11,7 @@ import { Button, Dropdown } from "../ui";
 import { SegmentedControl } from "../settings/primitives";
 import { cn } from "../../lib/cn";
 import { useKnowledgeState } from "../../lib/knowledge/store";
-import { ErrorLine } from "./parts";
+import { ErrorLine, PHONE_CHIP_ROW, TOOLBAR_SEGMENTED } from "./parts";
 import {
   KNOWLEDGE_FACET_FIELDS,
   SORT_LABEL,
@@ -151,7 +151,7 @@ const FilterChip: React.FC<{
       trigger={
         <span
           className={cn(
-            "inline-flex max-w-[12rem] items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px]",
+            "inline-flex max-w-[12rem] items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px] max-md:min-h-8 max-md:px-3",
             active ? "border-neutral-500 bg-neutral-800 text-neutral-100" : "border-neutral-700 text-neutral-400 hover:border-neutral-600 hover:text-neutral-200"
           )}
         >
@@ -176,7 +176,7 @@ const ExampleChip: React.FC<{ label: string; title: string | null | undefined; o
         type="button"
         aria-label={`Remove “${label} ${name}”`}
         onClick={onRemove}
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100"
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100 max-md:h-7 max-md:w-7"
       >
         <X size={10} />
       </button>
@@ -305,31 +305,37 @@ export const KnowledgeQueryBar: React.FC<KnowledgeQueryBarProps> = ({ api, colle
             </button>
           )}
         </div>
-        <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-1.5">
-          {KNOWLEDGE_FACET_FIELDS.map((field) => (
-            <FilterChip key={field} api={api} collection={collection} query={query} field={field} onQueryChange={onQueryChange} />
-          ))}
+        {/* The filters, sort and Clear: on a wide bar they flow beside the search; on a phone they
+            are one line under it that scrolls sideways. */}
+        <div className={cn("flex min-w-0 basis-full items-center gap-2 md:contents", PHONE_CHIP_ROW)}>
+          <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-1.5 max-md:shrink-0 max-md:flex-nowrap">
+            {KNOWLEDGE_FACET_FIELDS.map((field) => (
+              <FilterChip key={field} api={api} collection={collection} query={query} field={field} onQueryChange={onQueryChange} />
+            ))}
+          </div>
+          <SegmentedControl<KnowledgeSearchSort>
+            value={shownSort(shown)}
+            options={sortOptions}
+            onChange={(sort) => onQueryChange({ ...queryRef.current, text: sent.current, sort })}
+            size="xs"
+            ariaLabel="Sort"
+            className={TOOLBAR_SEGMENTED}
+          />
+          {!queryIsEmpty(shown) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="shrink-0 max-md:min-h-8"
+              onClick={() => {
+                setText("");
+                sent.current = "";
+                onQueryChange(EMPTY_KNOWLEDGE_QUERY);
+              }}
+            >
+              Clear
+            </Button>
+          )}
         </div>
-        <SegmentedControl<KnowledgeSearchSort>
-          value={shownSort(shown)}
-          options={sortOptions}
-          onChange={(sort) => onQueryChange({ ...queryRef.current, text: sent.current, sort })}
-          size="xs"
-          ariaLabel="Sort"
-        />
-        {!queryIsEmpty(shown) && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setText("");
-              sent.current = "";
-              onQueryChange(EMPTY_KNOWLEDGE_QUERY);
-            }}
-          >
-            Clear
-          </Button>
-        )}
       </div>
       {examples && (
         <div role="group" aria-label="More like this" className="flex flex-wrap items-center gap-1.5">

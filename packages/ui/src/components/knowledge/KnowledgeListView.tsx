@@ -21,7 +21,7 @@ import type {
 import { Button, IconButton } from "../ui";
 import { cn } from "../../lib/cn";
 import { knowledgeStore } from "../../lib/knowledge/store";
-import { CollectionDot, ErrorLine } from "./parts";
+import { CollectionChip, CollectionDot, ErrorLine, PHONE_CHIP, PHONE_CHIP_ROW } from "./parts";
 import {
   appendPage,
   collectionProfilesText,
@@ -498,7 +498,8 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
 
   return (
     <div className="flex h-full min-h-0 w-full">
-      <nav aria-label="Collections" className="flex w-56 shrink-0 flex-col border-r border-neutral-800 max-sm:w-40">
+      {/* On a phone the sidebar gives way to a row of collection chips under the top bar. */}
+      <nav aria-label="Collections" className="flex w-56 shrink-0 flex-col border-r border-neutral-800 max-md:hidden">
         <div className="flex h-11 shrink-0 items-center px-3 text-[11px] font-medium uppercase tracking-wide text-neutral-500">Collections</div>
         <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-1.5 pb-2">
           <CollectionRow name="All" count={collections?.totalEntries ?? 0} active={collection === "all"} onClick={() => onCollection("all")} />
@@ -527,8 +528,28 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-neutral-800 px-4">
           <h2 className="min-w-0 truncate text-sm font-medium text-neutral-100">{heading}</h2>
           {current?.description && <span className="hidden min-w-0 truncate text-xs text-neutral-500 md:inline">{current.description}</span>}
+          {/* The sidebar's edit button, where the sidebar is hidden. */}
+          {current && (
+            <IconButton label={`Edit ${current.name}`} onClick={() => onEditCollection(current)} className="h-8 w-8 shrink-0 md:hidden">
+              <Pencil size={13} />
+            </IconButton>
+          )}
           <span className="flex-1" />
-          {toolbarEnd}
+          <div className="flex shrink-0 items-center">{toolbarEnd}</div>
+        </div>
+        <div role="group" aria-label="Choose a collection" className={cn("flex shrink-0 items-center gap-1 border-b border-neutral-800 px-4 py-2 md:hidden", PHONE_CHIP_ROW)}>
+          <CollectionChip name="All" color={null} dot={false} active={collection === "all"} onClick={() => onCollection("all")} className={PHONE_CHIP} />
+          {list.map((c) => (
+            <CollectionChip key={c.id} name={c.name} color={c.color} active={collection === c.id} onClick={() => onCollection(c.id)} className={PHONE_CHIP} />
+          ))}
+          <CollectionChip name="Unfiled" color={null} active={collection === "unfiled"} onClick={() => onCollection("unfiled")} className={PHONE_CHIP} />
+          <button
+            type="button"
+            onClick={onNewCollection}
+            className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-full border border-dashed border-neutral-700 px-3 text-[11px] text-neutral-400 hover:border-neutral-600 hover:text-neutral-200"
+          >
+            <Plus size={12} /> New collection
+          </button>
         </div>
         <KnowledgeQueryBar
           api={api}

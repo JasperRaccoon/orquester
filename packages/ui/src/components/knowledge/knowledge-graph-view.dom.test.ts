@@ -155,6 +155,7 @@ describe("the Graph view", () => {
       onQueryChange?: (query: KnowledgeQuery) => void;
       onOpenInList?: () => void;
       filter?: string[];
+      toolbarEnd?: ReturnType<typeof createElement>;
     } = {}
   ) => {
     const props = {
@@ -169,7 +170,7 @@ describe("the Graph view", () => {
       onShowList: () => undefined,
       active: true,
       Canvas: StubCanvas,
-      toolbarEnd: null,
+      toolbarEnd: opts.toolbarEnd ?? null,
       ...(opts.query ? { query: opts.query } : {}),
       ...(opts.onQueryChange ? { onQueryChange: opts.onQueryChange } : {}),
       ...(opts.onOpenInList ? { onOpenInList: opts.onOpenInList } : {})
@@ -207,6 +208,35 @@ describe("the Graph view", () => {
     await settle();
     return kept;
   };
+
+  it("lays the toolbar out for a phone: search, then the switches, then one sideways-scrolling row of chips", async () => {
+    await show({ toolbarEnd: createElement("div", { "data-testid": "view-toggle" }, "Graph | List") });
+    const classes = (element: Element | null) => new Set((element?.getAttribute("class") ?? "").split(/\s+/));
+    const chips = doc().querySelector('[role="group"][aria-label="Filter by collection"]')!;
+    const toolbar = chips.parentElement!;
+    const chipClasses = classes(chips);
+
+    // The chips never share a line squeezed narrower than a chip (they spilled under the toggle).
+    assert.ok(chipClasses.has("md:min-w-[12rem]"), "never narrower than its widest chip");
+    assert.ok(!chipClasses.has("flex-1") && !chipClasses.has("flex-wrap"), "grows and wraps only on a wide bar");
+    // On a phone: their own last line, one row that scrolls sideways.
+    for (const name of ["max-md:order-last", "max-md:basis-full", "max-md:flex-nowrap", "max-md:overflow-x-auto"]) assert.ok(chipClasses.has(name), name);
+    assert.ok([...chips.querySelectorAll("button")].every((chip) => classes(chip).has("shrink-0") && classes(chip).has("max-md:min-h-8")), "chips keep their width and a ~32 px touch height");
+
+    // The search takes the phone's whole first line.
+    assert.ok(classes(input().parentElement).has("max-md:w-full"));
+    // The layer switch never wraps its options.
+    const layer = doc().querySelector('[role="radiogroup"][aria-label="Layer"]');
+    assert.ok(classes(layer).has("flex-nowrap") && classes(layer).has("shrink-0"));
+
+    // The view toggle sits in the toolbar's own flow: not among the chips, nor in a positioned layer.
+    const toggle = doc().querySelector('[data-testid="view-toggle"]')!;
+    assert.ok(toolbar.contains(toggle) && !chips.contains(toggle));
+    for (let el = toggle.parentElement; el && el !== toolbar; el = el.parentElement) {
+      assert.ok(!["absolute", "fixed"].some((name) => classes(el).has(name)), "no positioned ancestor inside the toolbar");
+    }
+    assert.ok(![...classes(toolbar)].some((name) => name === "absolute" || name === "fixed"));
+  });
 
   it("does not offer the Similarity layer to a daemon without its route, or a client without it", async () => {
     await show({
