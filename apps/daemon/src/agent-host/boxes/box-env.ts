@@ -16,7 +16,10 @@
  *   adapter adds itself;
  * - the box's own login PATH, with the tooling plugins' `pathPrepend` first,
  *   their `env`, and their `nodeRequire` files as `NODE_OPTIONS` (§10), all in
- *   the box's path syntax.
+ *   the box's path syntax;
+ * - Claude Code's auto-updater off: its plugin updates would come back from
+ *   every box as changes to approve (config sync), and it has no plugin-only
+ *   switch, so the box's CLI keeps the version it was installed with.
  */
 
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
@@ -82,6 +85,8 @@ export function buildBoxProviderEnv(input: {
   for (const [key, value] of Object.entries(box.tooling.env)) {
     if (!stripped.has(key)) env[key] = value;
   }
+  // The host's Claude updates the shared plugins; config sync brings them to the box.
+  if (input.adapter === "claude") env.DISABLE_AUTOUPDATER = "1";
   const pathEntries = [...box.tooling.pathPrepend, ...input.boxPath.split(delimiter)].filter((entry) => entry.length > 0);
   const seen = new Set<string>();
   const path = pathEntries.filter((entry) => (seen.has(entry) ? false : (seen.add(entry), true))).join(delimiter);

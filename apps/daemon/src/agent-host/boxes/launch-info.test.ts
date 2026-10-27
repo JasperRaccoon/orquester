@@ -94,6 +94,7 @@ test("the box env drops the host's own variables and credentials and applies the
   assert.equal(env.ORQUESTER_AGENT_LAUNCH, "launch-1");
   assert.equal(env.CLAUDE_CODE_NO_FLICKER, "1");
   assert.equal(env.TSRS, "1");
+  assert.equal(env.DISABLE_AUTOUPDATER, "1", "plugins update on the host and sync down");
   // What the box's own agent environment may hold is removed too.
   assert.ok(unset.includes("ANTHROPIC_API_KEY"));
   assert.ok(unset.includes("CLAUDE_CODE_OAUTH_TOKEN"));
@@ -119,5 +120,6 @@ test("a Windows box gets its Path in its own syntax, its homes mapped, and no ho
   assert.equal(env.HOME, undefined);
   assert.equal(env.CODEX_HOME, "C:\\orq\\var\\lib\\orquester\\daemon\\agent-accounts\\codex\\a1\\home");
   assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.DISABLE_AUTOUPDATER, undefined, "Claude's own switch only");
   assert.ok(unset.includes("NODE_OPTIONS"));
 });
