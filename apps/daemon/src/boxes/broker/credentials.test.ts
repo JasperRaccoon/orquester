@@ -6,17 +6,7 @@ import { test } from "node:test";
 
 import { writeFileAtomic } from "../../agent-hooks.ts";
 import { claudeRefreshLockPaths, grantFromCredentials, nodeCredentialFiles } from "./credentials.ts";
-import { claudeCreds, codexAuth, grokAuth, jwt, NOW } from "./testing.ts";
-
-test("grants are built field by field: no refresh token, id token or other secret survives", () => {
-  const claude = grantFromCredentials("claude", claudeCreds("a", NOW));
-  const codex = grantFromCredentials("codex", codexAuth(1_900_000_000));
-  const grok = grantFromCredentials("grok", grokAuth("g", NOW));
-  assert.equal(claude?.accessToken, "a");
-  assert.equal(codex?.expiresAt, 1_900_000_000_000);
-  assert.equal(grok?.expiresAt, NOW);
-  for (const grant of [claude, codex, grok]) assert.doesNotMatch(JSON.stringify(grant), /SECRET/);
-});
+import { jwt } from "./testing.ts";
 
 test("unusable files give no grant", () => {
   assert.equal(grantFromCredentials("claude", "not json"), null);

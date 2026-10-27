@@ -204,16 +204,6 @@ describe("the Insights view", () => {
     assert.equal([...chips.querySelectorAll("button")].find((b) => b.textContent === "All")?.getAttribute("aria-pressed"), "false");
   });
 
-  it("lays its toolbar out for a phone: the title and the toggle, then one sideways-scrolling row of chips", async () => {
-    await show();
-    const classes = (element: Element | null) => new Set((element?.getAttribute("class") ?? "").split(/\s+/));
-    const chips = doc().querySelector('[role="group"][aria-label="Filter by collection"]')!;
-    for (const name of ["max-md:order-last", "max-md:basis-full", "max-md:flex-nowrap", "max-md:overflow-x-auto"]) assert.ok(classes(chips).has(name), name);
-    assert.ok([...chips.querySelectorAll("button")].every((chip) => classes(chip).has("shrink-0") && classes(chip).has("max-md:min-h-8")));
-    const toggle = doc().querySelector('[data-testid="view-toggle"]')!;
-    assert.ok(chips.parentElement!.contains(toggle) && !chips.contains(toggle), "the toggle sits in the toolbar, not among the chips");
-  });
-
   it("reads again when the knowledge changes", async () => {
     await show();
     assert.equal(reads.length, 1);

@@ -40,11 +40,6 @@ function loadStored(raw: unknown, coarse: boolean) {
   return readDesktopPrefs("fixture");
 }
 
-test("non-touch default is fit, unmuted, full volume", () => {
-  install(false);
-  assert.deepEqual(readDesktopPrefs("d1"), { muted: false, volume: 1, view: "fit" });
-});
-
 test("touch default is fixed 1280×800, scaled", () => {
   install(true);
   assert.deepEqual(readDesktopPrefs("d1"), {

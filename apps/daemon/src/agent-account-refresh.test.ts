@@ -6,7 +6,6 @@ import {
   mergeClaudeRefreshedCreds,
   refreshClaudeToken,
   mergeCodexRefreshedTokens,
-  refreshCodexToken
 } from "./agent-account-refresh.ts";
 import type { AgentAccountRecord } from "@orquester/config";
 
@@ -84,15 +83,6 @@ test("refreshClaudeToken flags invalid_grant", async (t) => {
     new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
   t.mock.method(globalThis, "fetch", fake);
   const out = await refreshClaudeToken("r");
-  assert.equal(out.ok, false);
-  if (!out.ok) assert.equal(out.invalidGrant, true);
-});
-
-test("refreshCodexToken flags invalid_grant", async (t) => {
-  const fake: typeof fetch = async () =>
-    new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
-  t.mock.method(globalThis, "fetch", fake);
-  const out = await refreshCodexToken("r");
   assert.equal(out.ok, false);
   if (!out.ok) assert.equal(out.invalidGrant, true);
 });

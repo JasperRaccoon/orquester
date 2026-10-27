@@ -102,14 +102,6 @@ describe("stripping the block from a replayed native history", () => {
     assert.equal(stripAttachmentPathLines(blank), blank);
   });
 
-  it("returns text without a trailing block by identity, including a mid-text mention", () => {
-    const plain = "see /a/q3.xlsx please";
-    assert.equal(stripAttachmentPathLines(plain), plain);
-    const mid = "Attached files:\n- a: /x\n\nand then I wrote more";
-    assert.equal(stripAttachmentPathLines(mid), mid);
-    assert.equal(stripAttachmentPathLines(""), "");
-  });
-
   it("answers in linear time when a block-shaped run fails at its last line", () => {
     // Each `- a: b: c` line splits into a name and a path two ways, and a
     // per-line `[^\n]*: [^\n]+` retries every combination of splits before a

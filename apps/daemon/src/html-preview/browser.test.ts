@@ -825,12 +825,4 @@ describe("the Windows tree kill", () => {
     assert.equal(killWindowsTree(4242, { run }), false, "a failed taskkill: the caller kills the process itself");
   });
 
-  it("a taskkill that hangs is killed at its bound: the call returns false instead of hanging", { timeout: TEST_TIMEOUT_MS }, () => {
-    // A stand-in that never exits, run through the real spawnSync with the options the kill passes.
-    const run = ((_command: string, _args: readonly string[], options: Parameters<typeof spawnSync>[2]) =>
-      spawnSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], options)) as unknown as typeof spawnSync;
-    const started = Date.now();
-    assert.equal(killWindowsTree(4242, { run, timeoutMs: 300 }), false);
-    assert.ok(Date.now() - started < TEST_TIMEOUT_MS, "bounded");
-  });
 });

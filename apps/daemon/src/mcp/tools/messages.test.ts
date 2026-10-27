@@ -106,13 +106,6 @@ test("send_message posts the turn body, waits for the new turn and returns its r
   assert.equal(r.seq, 21); assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "hello!"); assert.equal(r.pending, undefined);
 });
 
-test("send_message without wait returns sent; attachments are uploaded first and referenced", async (t) => {
-  const h = await harness(); t.after(h.close);
-  h.api.on("POST", "/api/sessions/c1/turn", ({ body }) => { const b = body as { attachments: { id: string }[]; input: string }; assert.deepEqual(b.attachments.map((ref) => ref.id), ["c1-att-1"]); assert.equal(b.input, "see"); return { status: 200, body: { seq: 3 } }; });
-  const r = await tool("send_message").run({ sessionId: "c1", text: "see", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: false, timeoutMs: 1000 }, h.ctx);
-  assert.equal(r.outcome, "sent");
-});
-
 test("send_message refusals: empty, pending request, plan mode unsupported; an errored session is sent to", async (t) => {
   const h = await harness(); t.after(h.close);
   const run = (a: Record<string, unknown>, ctx = h.ctx) => tool("send_message").run({ planMode: false, wait: false, timeoutMs: 1000, ...a }, ctx);

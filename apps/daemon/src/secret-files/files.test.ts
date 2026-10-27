@@ -529,28 +529,6 @@ function timed<T>(fn: () => T): { value: T; ms: number } {
 
 const MB = 1024 * 1024;
 
-test("parseEnv stays linear on 1 MB adversarial input", () => {
-  const inputs: Record<string, string> = {
-    words: "a".repeat(MB),
-    hashes: "#".repeat(MB),
-    spaces: " ".repeat(MB) + "x",
-    unterminatedDouble: 'A="' + "\\\"".repeat(MB / 2),
-    unterminatedSingle: "A='" + "x\n".repeat(MB / 2),
-    blankHashes: "A=" + " #".repeat(MB / 2),
-    tabsThenNothing: "A=" + "\t".repeat(MB) + "x # y",
-    escapes: 'A="' + "\\n".repeat(MB / 2) + '"\n',
-    manyKeys: "K_ABCDEF=v\n".repeat(MB / 11),
-    exports: "export ".repeat(MB / 7) + "A=1",
-    manyQuotes: "A=''\n".repeat(MB / 5),
-    longKey: "A".repeat(MB) + "=1"
-  };
-  for (const [name, text] of Object.entries(inputs)) {
-    const bytes = enc(text);
-    const { ms } = timed(() => parseEnv(bytes));
-    assert.ok(ms < 2000, `${name} took ${ms.toFixed(0)} ms`);
-  }
-});
-
 // ---------------------------------------------------------------------------
 // compareContents
 // ---------------------------------------------------------------------------

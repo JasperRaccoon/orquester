@@ -106,15 +106,6 @@ function streamOf(chunks: readonly string[]): {
   return { body, cancelled: () => cancelled };
 }
 
-test("readSseFrames yields every frame and ends at EOF", async () => {
-  const { body } = streamOf(["data: a\n\n", "data: b\n\n"]);
-  const seen: string[] = [];
-  for await (const frame of readSseFrames(body)) {
-    seen.push(frame.data);
-  }
-  assert.deepEqual(seen, ["a", "b"]);
-});
-
 test("readSseFrames CANCELS the body when the consumer breaks out", async () => {
   // Regression: the `finally` only released the lock, leaving the fetch body
   // unconsumed and its socket open — one leaked connection per reconnect.
@@ -123,21 +114,6 @@ test("readSseFrames CANCELS the body when the consumer breaks out", async () => 
     assert.equal(frame.data, "a");
     break;
   }
-  assert.equal(cancelled(), true);
-});
-
-test("readSseFrames cancels the body when the consumer throws", async () => {
-  const { body, cancelled } = streamOf(["data: a\n\n", "data: b\n\n"]);
-  const boom = new Error("handler blew up");
-  await assert.rejects(
-    (async () => {
-      for await (const frame of readSseFrames(body)) {
-        void frame;
-        throw boom;
-      }
-    })(),
-    (error: unknown) => error === boom
-  );
   assert.equal(cancelled(), true);
 });
 

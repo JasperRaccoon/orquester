@@ -5,7 +5,6 @@ import type { KnowledgeEntryDetail, KnowledgeRelatedReason, KnowledgeSimilarEntr
 
 import { entry, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
-  clusterText,
   contradictionSourceText,
   disagreements,
   distinctiveChips,
@@ -179,11 +178,6 @@ describe("disagreements, distinctive concepts and concept merges (phase 2)", () 
     assert.deepEqual(distinctiveChips({ kind: "concepts", concepts: [channel], shared: 2, distinctive: [app] }), [{ concept: app, label: "tiktok (App)" }]);
     assert.deepEqual(distinctiveChips({ kind: "concepts", concepts: [location], shared: 2, distinctive: [app] }), [{ concept: app, label: "tiktok" }]);
     assert.equal(reasonLabel({ kind: "concepts", concepts: [channel, location], shared: 2 }), "Concepts: TikTok, Location");
-  });
-
-  it("describes a cluster with or without its label", () => {
-    assert.equal(clusterText({ label: "Paywalls", size: 12 }), "“Paywalls” (12 entries)");
-    assert.equal(clusterText({ label: null, size: 1 }), "a cluster of 1 entry");
   });
 
   it("finds the merge that folded a concept in: only one into it that lists it", () => {

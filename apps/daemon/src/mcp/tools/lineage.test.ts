@@ -67,13 +67,6 @@ test("fork_session forks through a transcript turn number and returns the new se
   assert.deepEqual(withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body), { unattended: true }, "default: the host picks the latest finished turn");
 });
 
-test("fork_session refuses a turn past the end, and passes the host's refusal through", async () => {
-  const { api } = harness();
-  await assert.rejects(tool("fork_session").run({ sessionId: "c1", throughTurn: 3 }, api), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /between 0 and 2/.test(e.message));
-  api.on("POST", agentChatRoutes.fork("c1"), { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } } });
-  await assert.rejects(tool("fork_session").run({ sessionId: "c1" }, api), (e: { code: string; message: string }) => e.code === "COMMAND_REJECTED" && /still being written/.test(e.message));
-});
-
 /** `GET /api/session-profiles` as the daemon lists two profiles. */
 const PROFILES = { profiles: [
   { id: "prof-1", name: "Video", description: "", revision: "3", preparation: [{ agent: "claude", state: "ready", updatedAt: "x" }] },

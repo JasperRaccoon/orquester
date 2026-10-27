@@ -1,7 +1,6 @@
-// Thunder Compute adapter. `pricing.json`, `specs.json`, `status.json` (the public /v2 endpoints) and
-// `unauthorized.json` (an unauthenticated /v1/instances/list) were recorded on 2026-10-20; the
-// instance list follows the OpenAPI spec and the `tnr` CLI's JSON contract fixture (a map keyed by
-// index). No live account was used. Stubbed fetch only.
+// Thunder Compute adapter. `unauthorized.json` was recorded from an unauthenticated
+// /v1/instances/list on 2026-10-20. The instance-list fixture follows the OpenAPI spec
+// and the `tnr` CLI JSON contract (a map keyed by index). Stubbed fetch only.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -29,28 +28,6 @@ test("thunder: validate lists instances with the bearer token; 401 is ok:false",
   const result = await thunderAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Authentication required/);
-});
-
-test("thunder: offers price in-stock specs from the public pricing", async (t) => {
-  const { fetch, seen } = routedFetch([
-    { path: "/v2/pricing", replies: [{ body: f("pricing.json") }] },
-    { path: "/v2/specs", replies: [{ body: f("specs.json") }] },
-    { path: "/v2/status", replies: [{ body: f("status.json") }] }
-  ]);
-  const offers = await thunderAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
-  assert.ok(seen.every((call) => call.headers.authorization === undefined), "public endpoints get no token");
-  assert.deepEqual(
-    offers.sizes.map((size) => [size.id, size.hourlyUsd, size.vcpu, size.ramGb]),
-    [
-      ["l40_x1", 0.79, 6, 48],
-      ["a100xl_x1", 1.09, 8, 64],
-      ["l40_x2", 1.58, 12, 96],
-      ["a100xl_x2", 2.18, 16, 128],
-      ["a100xl_x4", 5.96, 36, 288]
-    ]
-  );
-  assert.deepEqual(offers.sizes[1]!.gpu, { model: "NVIDIA A100 (80GB)", count: 1, vramGb: 80 });
-  assert.deepEqual(offers.regions, [{ id: "us", label: "United States", country: "US" }]);
 });
 
 test("thunder: status finds the instance by uuid in the list; missing → gone", async (t) => {

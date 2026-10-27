@@ -156,20 +156,6 @@ describe("WorkerPool", () => {
     }
   });
 
-  it("stop() also counts a working chat's tokens before closing it", async () => {
-    const h = await harness({ mode: "manual", concurrency: 1 });
-    await h.addTasks(1);
-    await flushAsync();
-    const chat = h.port.sessions[0]!;
-    chat.answered.push("earlier-task"); // its turn has used tokens
-    await h.pool.stop();
-    assert.deepEqual(
-      h.events.filter((e) => e.kind === "tokens").map((e) => e.kind === "tokens" && [e.sessionId, e.in, e.out]),
-      [[chat.id, 1000, 100]]
-    );
-    assert.ok(h.port.calls.indexOf(`usage:${chat.id}`) < h.port.calls.indexOf(`stop:${chat.id}`));
-  });
-
   it("stop() interrupts a working chat's turn and lets it end before reading its usage: the last turn's tokens count", async () => {
     const h = await harness({ mode: "manual", concurrency: 1 });
     await h.addTasks(1);

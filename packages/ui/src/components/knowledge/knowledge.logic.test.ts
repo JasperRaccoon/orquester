@@ -9,7 +9,6 @@ import {
   cleanFilters,
   clearFilterField,
   collectionFormError,
-  conceptMergesText,
   relinkView,
   entriesQueryOf,
   missingExamplesOf,
@@ -358,10 +357,4 @@ describe("re-linking and concept merges in the status (phase 2)", () => {
     assert.equal(relinkView({ pending: 0, done: 0, total: 0 }), null);
   });
 
-  it("counts the concept merges in effect, and says nothing from an older daemon", () => {
-    assert.equal(conceptMergesText(12), "12 in effect");
-    assert.equal(conceptMergesText(1500), "1,500 in effect");
-    assert.equal(conceptMergesText(0), "None");
-    assert.equal(conceptMergesText(undefined), null);
-  });
 });

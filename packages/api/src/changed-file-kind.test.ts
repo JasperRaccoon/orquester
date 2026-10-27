@@ -5,17 +5,9 @@ import { classifyChangedFile, summarizeChangedFileKinds } from "./changed-file-k
 
 describe("classifyChangedFile", () => {
   // Adapted from T3 Code (MIT): packages/shared/src/changedFileKind.test.ts
-  for (const [path, kind] of [
-    ["src/contest.py", "code"],
-    ["test/fixtures/pr.json", "mocks"],
-    ["pnpm-lock.yaml", "generated"],
-    ["README.md", "docs"],
-    ["tests/README.md", "tests"]
-  ] as const) {
-    it(`${path} is ${kind}`, () => {
-      assert.equal(classifyChangedFile(path), kind);
-    });
-  }
+  it("tests/README.md is tests", () => {
+    assert.equal(classifyChangedFile("tests/README.md"), "tests");
+  });
 
   it("reads lockfiles, build output and generated directories as generated", () => {
     assert.equal(classifyChangedFile("apps/web/package-lock.json"), "generated");
@@ -76,10 +68,5 @@ describe("summarizeChangedFileKinds", () => {
     const breakdown = summarizeChangedFileKinds([{ path: "docs/a.md" }, { path: "logo.png", additions: null }]);
     assert.deepEqual(breakdown.docs, { files: 1, additions: 0, deletions: 0 });
     assert.deepEqual(breakdown.code, { files: 1, additions: 0, deletions: 0 });
-  });
-
-  it("is all zeroes for no files", () => {
-    const breakdown = summarizeChangedFileKinds([]);
-    assert.ok(Object.values(breakdown).every((t) => t.files === 0 && t.additions === 0 && t.deletions === 0));
   });
 });

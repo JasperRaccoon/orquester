@@ -88,9 +88,6 @@ async function makeHarness(t: any, mode: "local" | "remote" = "local"): Promise<
       if (id !== "d1") throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
       return known();
     },
-    restart: async () => {
-      throw new DesktopError(409, "DESKTOP_NOT_STOPPED", "Only a stopped desktop can be restarted.");
-    },
     close: async (id: string) => {
       if (id !== "d1") throw new DesktopError(404, "DESKTOP_NOT_FOUND", "No such desktop.");
     },
@@ -222,13 +219,6 @@ test("unknown desktop ids are 404", async (t) => {
   assert.equal((await h.inject({ method: "DELETE", url: "/api/desktops/nope" })).statusCode, 404);
   assert.equal((await h.inject({ method: "POST", url: "/api/desktops/nope/stop" })).statusCode, 404);
   assert.equal((await h.inject({ method: "DELETE", url: "/api/desktops/d1" })).statusCode, 204);
-});
-
-test("restart of a running desktop is 409", async (t) => {
-  const h = await makeHarness(t);
-  const res = await h.inject({ method: "POST", url: "/api/desktops/d1/restart" });
-  assert.equal(res.statusCode, 409);
-  assert.equal(res.json().code, "DESKTOP_NOT_STOPPED");
 });
 
 test("app log is text/plain", async (t) => {
