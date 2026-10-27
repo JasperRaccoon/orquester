@@ -565,14 +565,14 @@ export interface KnowledgeSimilarityCluster {
   id: number;
   /** Entries in it. */
   size: number;
-  /** The most common concept among its linked entries, else its most distinctive title words; null for singletons. */
+  /** Its most distinctive topic concept (never a person or organization), else its most distinctive title words; null for singletons. */
   label: string | null;
 }
 
 export interface KnowledgeSimilarityGraphResponse {
   nodes: KnowledgeSimilarityNode[];
   edges: KnowledgeSimilarityEdge[];
-  /** Largest first; a cluster = entries joined by edges at or above the model's `good` threshold. */
+  /** Largest first; a cluster = a community of closely similar entries (modularity over each entry's nearest neighbours). */
   clusters: KnowledgeSimilarityCluster[];
   /** True when more embedded entries were visible than `limit` (the most recent were kept). */
   truncated: boolean;

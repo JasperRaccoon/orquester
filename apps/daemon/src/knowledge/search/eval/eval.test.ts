@@ -125,3 +125,31 @@ test("the pinned model: recall@5 ≥ 0.8 on the evaluation set, and thresholds t
   assert.deepEqual(new Set(steered), new Set(like.filter((id) => id !== "ke_tiktok_hooks")), "unlike keeps what matches");
   assert.ok(steered.indexOf("ke_tiktok_hooks_repost") > like.indexOf("ke_tiktok_hooks_repost"), "the unlike entry's repost moves down");
 });
+
+test("the pinned model: the similarity graph over the evaluation set has several topic clusters, none holding half of it", { skip: SKIP_MODEL, timeout: 600_000 }, async (t) => {
+  const embedder = new OnnxSentenceEmbedder({
+    modelDir: MODEL_DIR!,
+    modelId: EMBEDDING_MODEL.id,
+    dimensions: EMBEDDING_MODEL.dimensions,
+    maxTokens: EMBEDDING_MODEL.maxTokens,
+    queryPrefix: EMBEDDING_MODEL.queryPrefix,
+    passagePrefix: EMBEDDING_MODEL.passagePrefix,
+    thresholds: EMBEDDING_MODEL.thresholds
+  });
+  t.after(() => embedder.dispose());
+  const evalSearch = await openEvalSearch(EVAL_ENTRIES, embedder);
+  t.after(() => evalSearch.close());
+  const graph = await evalSearch.similarityGraph();
+  const topic = new Map(EVAL_ENTRIES.map((entry) => [entry.id, `${entry.topic}/${entry.lang}`]));
+  for (const cluster of graph.clusters) {
+    const members = graph.nodes.filter((node) => node.cluster === cluster.id).map((node) => `${node.id} (${topic.get(node.id)})`);
+    t.diagnostic(`cluster ${cluster.id} "${cluster.label}" (${cluster.size}): ${members.join(", ")}`);
+  }
+  assert.equal(graph.nodes.length, EVAL_ENTRIES.length);
+  // Any two entries score 0.73–0.99 on this model: the old rule (components over edges ≥ good) drew one cluster.
+  assert.ok(graph.clusters.length >= 4, `${graph.clusters.length} clusters`);
+  assert.ok(graph.clusters[0]!.size <= EVAL_ENTRIES.length / 2, `largest cluster ${graph.clusters[0]!.size}`);
+  const labels = graph.clusters.filter((cluster) => cluster.size > 1).map((cluster) => cluster.label);
+  assert.ok(labels.every((label) => label !== null), "every cluster of two or more is named");
+  assert.equal(new Set(labels).size, labels.length, "no two clusters share a label");
+});

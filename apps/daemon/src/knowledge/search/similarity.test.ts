@@ -273,7 +273,7 @@ test("graph: an entry hidden from the caller is never a node or an edge end", as
   assert.deepEqual(narrowed.totals, { entries: 1, embedded: 1 });
 });
 
-test("graph: a cluster is named by its linked entries' most common concept", async () => {
+test("graph: a cluster is named by a concept two or more of its entries link to", async () => {
   const s = graphFixture();
   await loadGraph(s.graph, [
     node("topic-alternatives", "Alternatives pages", [`${ke("p1")}.md`, `${ke("p2")}.md`]),
@@ -311,7 +311,7 @@ test("graph: cached until the index generation, the graph revision or the drawn 
 
   // A graph load (revision) re-labels.
   let at = s.index.entryVectorCalls;
-  await loadGraph(s.graph, [node("topic-ads", "Ad budgets", [`${ke("q1")}.md`])]);
+  await loadGraph(s.graph, [node("topic-ads", "Ad budgets", [`${ke("q1")}.md`, `${ke("q2")}.md`])]);
   const relabelled = await s.similarity.graph({ k: 1 }, s.seoOnly);
   assert.ok(s.index.entryVectorCalls > at);
   assert.ok(relabelled.clusters.some((c) => c.label === "Ad budgets"));
@@ -340,4 +340,124 @@ test("graph: no index or no model answers the visible total and nothing drawn", 
   assert.deepEqual(await s.similarity.graph({}, s.seoOnly), { nodes: [], edges: [], clusters: [], truncated: false, totals: { entries: 7, embedded: 0 } });
   s.noIndex();
   assert.deepEqual((await s.similarity.graph({}, s.all)).totals, { entries: 8, embedded: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// Clusters in a narrow cone (multilingual-e5-small puts any two entries at 0.73–0.99)
+// ---------------------------------------------------------------------------
+
+/** The pinned e5 model's thresholds (install/pins.ts). */
+const CONE_THRESHOLDS = { minimum: 0.78, good: 0.83, strong: 0.87, duplicate: 0.95 };
+
+/**
+ * Topic groups in a narrow cone, saved group by group: two entries of one group are 0.93 apart,
+ * of two groups 0.84 — every pair above `good`. Entry ids are `<topic><i>`, titles "<Topic> note <i>".
+ */
+function cone(topics: Record<string, number>) {
+  const s = setup();
+  s.index.limits = CONE_THRESHOLDS;
+  const names = Object.keys(topics);
+  const total = Object.values(topics).reduce((sum, size) => sum + size, 0);
+  const dims = 1 + names.length + total + 1; // the last one free for an unrelated entry
+  let own = 1 + names.length;
+  const members: Record<string, string[]> = {};
+  names.forEach((topic, t) => {
+    members[topic] = [];
+    for (let i = 0; i < topics[topic]!; i += 1) {
+      const v = new Array<number>(dims).fill(0);
+      v[0] = Math.sqrt(0.84);
+      v[1 + t] = Math.sqrt(0.09);
+      v[own++] = Math.sqrt(0.07);
+      s.put(`${topic}${i}`, [], { title: `${topic[0]!.toUpperCase()}${topic.slice(1)} note ${i}` });
+      s.index.set(ke(`${topic}${i}`), v);
+      members[topic]!.push(ke(`${topic}${i}`));
+    }
+  });
+  return { ...s, members, dims };
+}
+
+/** Topic → its cluster's label, asserting every topic is exactly one cluster. */
+function labelsByTopic(g: Awaited<ReturnType<KnowledgeSimilarity["graph"]>>, members: Record<string, string[]>): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const [topic, list] of Object.entries(members)) {
+    const clusters = new Set(list.map((id) => g.nodes.find((n) => n.id === id)!.cluster));
+    assert.equal(clusters.size, 1, `${topic} is split`);
+    const cluster = g.clusters[[...clusters][0]!]!;
+    assert.equal(cluster.size, list.length, `${topic} shares its cluster`);
+    out[topic] = cluster.label;
+  }
+  return out;
+}
+
+const files = (list: readonly string[]) => list.map((id) => `${id}.md`);
+
+test("graph: topic groups inside a narrow cone, every pair above `good`, are separate clusters", async () => {
+  const s = cone({ pricing: 5, tiktok: 4, seo: 4, ads: 3 });
+  const g = await s.similarity.graph({ k: 8 }, s.all);
+  assert.ok(g.edges.every((e) => e.similarity >= CONE_THRESHOLDS.good), "one component over edges ≥ good");
+  assert.ok(g.edges.some((e) => e.similarity < 0.9), "edges across groups are drawn");
+  assert.deepEqual(g.clusters.map((c) => c.size), [5, 4, 4, 3]);
+  assert.deepEqual(labelsByTopic(g, s.members), { pricing: "pricing note", tiktok: "tiktok note", seo: "seo note", ads: "ads note" });
+});
+
+test("graph: the same entries always give the same clusters, whatever k is drawn", async () => {
+  const topics = { pricing: 5, tiktok: 4, seo: 4, ads: 3 };
+  const a = cone(topics);
+  const first = await a.similarity.graph({ k: 3 }, a.all);
+  const b = cone(topics);
+  assert.deepEqual(await b.similarity.graph({ k: 3 }, b.all), first);
+  const c = cone(topics);
+  const wider = await c.similarity.graph({ k: 8 }, c.all);
+  assert.deepEqual(wider.clusters, first.clusters);
+  assert.deepEqual(wider.nodes.map((n) => n.cluster), first.nodes.map((n) => n.cluster));
+});
+
+test("graph: an entry related to nothing is a singleton without a label; the groups are unchanged", async () => {
+  const s = cone({ pricing: 4, seo: 4 });
+  s.put("odd", [], { title: "Sourdough starter" });
+  s.index.set(ke("odd"), axis(s.dims, s.dims - 1)); // orthogonal to every other entry: no edge at all
+  const g = await s.similarity.graph({}, s.all);
+  assert.deepEqual(g.clusters, [
+    { id: 0, size: 4, label: "seo note" },
+    { id: 1, size: 4, label: "pricing note" },
+    { id: 2, size: 1, label: null }
+  ]);
+  assert.equal(g.nodes.find((n) => n.id === ke("odd"))!.cluster, 2);
+  assert.ok(!g.edges.some((e) => e.from === ke("odd") || e.to === ke("odd")));
+});
+
+test("graph: labels never name a person or organization, and prefer a concept distinctive of the cluster", async () => {
+  const s = cone({ pricing: 5, tiktok: 5, seo: 5 });
+  const all = Object.values(s.members).flat();
+  await loadGraph(s.graph, [
+    // On every entry: the author of research notes, and a channel everything mentions.
+    node("person-claude", "Claude (research)", files(all), { type: "Person" }),
+    node("channel-tiktok", "TikTok", files(all), { type: "Channel" }),
+    // On every pricing entry and nowhere else: as distinctive as it gets, but publishers.
+    node("organization-apple", "Apple", files(s.members.pricing!), { type: "Organization" }),
+    node("company-revenuecat", "RevenueCat Inc", files(s.members.pricing!), { type: "Company" }),
+    node("topic-paywalls", "Paywalls", files(s.members.pricing!.slice(0, 4)), { type: "Topic" }),
+    node("tactic-us", "US accounts", files(s.members.tiktok!.slice(0, 4)), { type: "Tactic" }),
+    node("tactic-alternatives", "Alternatives pages", files(s.members.seo!.slice(0, 3)), { type: "Tactic" }),
+    // One entry's concept does not name its group.
+    node("tool-ahrefs", "Ahrefs", files(s.members.seo!.slice(0, 1)), { type: "Tool" })
+  ]);
+  const g = await s.similarity.graph({}, s.all);
+  // "TikTok" is on every entry of each cluster, but only a third of its entries are in any one.
+  assert.deepEqual(labelsByTopic(g, s.members), { pricing: "Paywalls", tiktok: "US accounts", seo: "Alternatives pages" });
+});
+
+test("graph: two clusters never share a label when another one fits", async () => {
+  const s = cone({ pricing: 5, tiktok: 5, seo: 5 });
+  await loadGraph(s.graph, [
+    // Every cluster's best concept alike.
+    node("topic-growth", "Growth", files(Object.values(s.members).flat())),
+    node("topic-budgets", "Budgets", files(s.members.pricing!.slice(0, 3)))
+  ]);
+  const g = await s.similarity.graph({}, s.all);
+  // Pricing has a next-best concept; of the other two (tied, the newest cluster first) one gets
+  // "Growth" and the other its title words.
+  assert.deepEqual(labelsByTopic(g, s.members), { pricing: "Budgets", tiktok: "tiktok note", seo: "Growth" });
+  const labels = g.clusters.map((c) => c.label);
+  assert.equal(new Set(labels).size, labels.length);
 });
