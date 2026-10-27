@@ -195,6 +195,62 @@ describe("the List view", () => {
     await settle();
   };
 
+  it("gives a phone a row of collection chips for the sidebar, and its filters one sideways-scrolling line", async () => {
+    const chosen: string[] = [];
+    const edited: string[] = [];
+    let created = 0;
+    await act(async () =>
+      root.render(
+        createElement(KnowledgeListView, {
+          api: fakeApi() as never,
+          collections: collections(),
+          collection: "kc_seo",
+          onCollection: (c) => void chosen.push(c),
+          query: { ...EMPTY, text: "ads" },
+          onQueryChange: () => undefined,
+          selection: null,
+          onSelect: () => undefined,
+          onNewCollection: () => void (created += 1),
+          onEditCollection: (c) => void edited.push(c.id),
+          toolbarEnd: createElement("div", { "data-testid": "view-toggle" })
+        })
+      )
+    );
+    await settle();
+    const classes = (element: Element | null) => new Set((element?.getAttribute("class") ?? "").split(/\s+/));
+
+    // The sidebar steps aside on a phone; a chip row (hidden on a wide view) does its work.
+    assert.ok(classes(doc().querySelector('nav[aria-label="Collections"]')).has("max-md:hidden"));
+    const row = doc().querySelector('[role="group"][aria-label="Choose a collection"]')!;
+    const rowClasses = classes(row);
+    for (const name of ["md:hidden", "max-md:flex-nowrap", "max-md:overflow-x-auto"]) assert.ok(rowClasses.has(name), name);
+    const chips = [...row.querySelectorAll("button")];
+    assert.deepEqual(
+      chips.map((b) => b.textContent?.trim()),
+      ["All", "SEO", "Ads", "Unfiled", "New collection"]
+    );
+    assert.equal(chips.find((b) => b.textContent === "SEO")?.getAttribute("aria-pressed"), "true");
+    await click(chips.find((b) => b.textContent === "Ads")!);
+    await click(chips.find((b) => b.textContent?.trim() === "New collection")!);
+    assert.deepEqual(chosen, ["kc_ads"]);
+    assert.equal(created, 1);
+    // The sidebar's edit button, reachable without hover on a phone.
+    const edit = [...doc().querySelectorAll('button[aria-label="Edit SEO"]')].find((b) => classes(b).has("md:hidden"))!;
+    await click(edit);
+    assert.deepEqual(edited, ["kc_seo"]);
+
+    // The toggle stays in the top bar's flow, in a box that never shrinks it.
+    const toggle = doc().querySelector('[data-testid="view-toggle"]')!;
+    assert.ok(classes(toggle.parentElement).has("shrink-0"));
+
+    // Filters, sort and Clear: one line under the search on a phone (flowing beside it when wide).
+    const sort = doc().querySelector('[role="radiogroup"][aria-label="Sort"]')!;
+    assert.ok(classes(sort).has("flex-nowrap"));
+    const line = sort.parentElement!;
+    assert.ok(line.contains(doc().querySelector('[role="group"][aria-label="Filters"]')));
+    for (const name of ["md:contents", "basis-full", "max-md:flex-nowrap", "max-md:overflow-x-auto"]) assert.ok(classes(line).has(name), name);
+  });
+
   it("searches 250 ms after typing, explains each hit, and pages with the cursor", async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     try {

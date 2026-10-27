@@ -93,7 +93,7 @@ export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, st
   };
 
   return (
-    <div ref={rootRef} className="relative w-72 max-w-full">
+    <div ref={rootRef} className="relative w-72 max-w-full max-md:w-full">
       <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" />
       <input
         type="search"

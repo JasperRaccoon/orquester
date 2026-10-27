@@ -20,10 +20,11 @@ import type {
 } from "@orquester/api";
 
 import { Button } from "../ui";
+import { cn } from "../../lib/cn";
 import { SegmentedControl } from "../settings/primitives";
 import { knowledgeStore } from "../../lib/knowledge/store";
 import { useAppStore } from "../../store/app";
-import { CollectionChip, Centered, ErrorLine } from "./parts";
+import { CollectionChip, Centered, ErrorLine, PHONE_CHIP, PHONE_CHIP_ROW, TOOLBAR_SEGMENTED } from "./parts";
 import {
   canvasNodes,
   collectionLegend,
@@ -508,7 +509,7 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
           narrowed={searchIsNarrowed(query)}
         />
         {searchNote && (
-          <span role="status" className="inline-flex min-w-0 items-center gap-1.5 text-[11.5px] text-neutral-400">
+          <span role="status" className="inline-flex min-w-0 items-center gap-1.5 text-[11.5px] text-neutral-400 max-md:basis-full">
             <span className="truncate">{searchNote}</span>
             {hits && hits.length > 0 && (
               <button type="button" className="shrink-0 font-medium text-neutral-200 hover:underline" onClick={() => setResultsOpen(true)}>
@@ -517,14 +518,31 @@ export const KnowledgeGraphView: React.FC<KnowledgeGraphViewProps> = ({
             )}
           </span>
         )}
-        {showLayerSwitch && <SegmentedControl value={layer} options={LAYER_OPTIONS} onChange={chooseLayer} size="xs" ariaLabel="Layer" />}
-        <div role="group" aria-label="Filter by collection" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-          <CollectionChip name="All" color={null} active={filter.length === 0} onClick={() => onFilter([])} dot={false} />
+        {showLayerSwitch && (
+          <SegmentedControl value={layer} options={LAYER_OPTIONS} onChange={chooseLayer} size="xs" ariaLabel="Layer" className={TOOLBAR_SEGMENTED} />
+        )}
+        {/* Never narrower than its widest chip (a flex-1 group may otherwise share a line squeezed
+            to nothing, its chips spilling under the controls after it). On a phone: its own last
+            line, scrolling sideways. */}
+        <div
+          role="group"
+          aria-label="Filter by collection"
+          className={cn("flex min-w-0 items-center gap-1 md:min-w-[12rem] md:flex-1 md:flex-wrap max-md:order-last max-md:basis-full", PHONE_CHIP_ROW)}
+        >
+          <CollectionChip name="All" color={null} active={filter.length === 0} onClick={() => onFilter([])} dot={false} className={PHONE_CHIP} />
           {collections.map((c) => (
-            <CollectionChip key={c.id} name={c.name} color={c.color} active={filter.includes(c.id)} onClick={() => toggleFilter(c.id)} title={c.description || undefined} />
+            <CollectionChip
+              key={c.id}
+              name={c.name}
+              color={c.color}
+              active={filter.includes(c.id)}
+              onClick={() => toggleFilter(c.id)}
+              title={c.description || undefined}
+              className={PHONE_CHIP}
+            />
           ))}
         </div>
-        {toolbarEnd}
+        {toolbarEnd && <div className="ml-auto flex shrink-0 items-center">{toolbarEnd}</div>}
       </div>
 
       <div className="relative min-h-0 flex-1">

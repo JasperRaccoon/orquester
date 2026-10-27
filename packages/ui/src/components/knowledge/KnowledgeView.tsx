@@ -14,7 +14,7 @@ import { SegmentedControl } from "../settings/primitives";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
 import { knowledgeStore, loadKnowledge, useKnowledgeState } from "../../lib/knowledge/store";
 import { useAppStore, type KnowledgeFocus } from "../../store/app";
-import { Centered, ErrorLine } from "./parts";
+import { Centered, ErrorLine, TOOLBAR_SEGMENTED } from "./parts";
 import { knowledgeErrorCode, knowledgeErrorText, pruneSelectionHistory } from "./knowledge.logic";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
 import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
@@ -173,7 +173,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
     [panelItem, selection]
   );
 
-  const toggle = <SegmentedControl value={view} options={VIEW_OPTIONS} onChange={setView} size="xs" ariaLabel="View" />;
+  const toggle = <SegmentedControl value={view} options={VIEW_OPTIONS} onChange={setView} size="xs" ariaLabel="View" className={TOOLBAR_SEGMENTED} />;
   const openPlugins = () => openSettings("plugins");
 
   let body: React.ReactNode;

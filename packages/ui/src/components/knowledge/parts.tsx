@@ -49,6 +49,22 @@ export const CollectionChip: React.FC<{
   );
 };
 
+/**
+ * A toolbar's segmented control (layer, view, sort): one line that never wraps its options or
+ * shrinks below them, ~32 px tall on a phone.
+ */
+export const TOOLBAR_SEGMENTED = "shrink-0 flex-nowrap max-md:[&>button]:min-h-7";
+
+/**
+ * A row of chips that scrolls sideways on a phone instead of wrapping: no scrollbar, the right
+ * edge faded (the end padding lets the last chip clear the fade).
+ */
+export const PHONE_CHIP_ROW =
+  "max-md:flex-nowrap max-md:overflow-x-auto max-md:pr-6 max-md:[scrollbar-width:none] max-md:[mask-image:linear-gradient(to_right,black_calc(100%_-_1.5rem),transparent)]";
+
+/** A clickable chip in such a row: ~32 px tall on a phone. */
+export const PHONE_CHIP = "max-md:min-h-8 max-md:px-3";
+
 export const ErrorLine: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className }) => (
   <p role="alert" className={cn("flex items-start gap-1.5 text-xs text-danger", className)}>
     <AlertTriangle size={13} className="mt-px shrink-0" />
