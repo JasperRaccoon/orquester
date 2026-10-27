@@ -278,6 +278,31 @@ export function deviceStreamUrls(api: DeviceUrlApi, lease: Pick<DeviceLeaseSumma
   return null;
 }
 
+/**
+ * What the lease's host can stream, as `useDeviceStream`'s `hostCaps`: iOS H.264 only where the
+ * host's summary says serve-sim's encoder works (a physical Mac); an Apple VM (Blacksmith) or a host
+ * that says nothing streams MJPEG. The transport then picks the default view (H.264 → 3D).
+ */
+export function hostStreamCaps(hosts: readonly Pick<DeviceHostSummary, "id" | "stream">[], hostId: string): { h264: boolean } {
+  return { h264: hosts.find((host) => host.id === hostId)?.stream?.iosH264 === true };
+}
+
+/** The orientation a Rotate press asks for: landscape from portrait, portrait from anything else. */
+export function nextRotation(current: "portrait" | "portrait_upside_down" | "landscape_left" | "landscape_right"): "portrait" | "landscape" {
+  return current === "portrait" ? "landscape" : "portrait";
+}
+
+/**
+ * Whether the panel's Rotate works now, and why not: iOS turns the simulator through serve-sim's
+ * input socket (needs it admitted); Android asks the daemon (`deviceRoutes.userAction`: the
+ * emulator's accelerometer, so the video turns too), once its video is live.
+ */
+export function rotateControl(platform: DevicePlatform, now: { inputReady: boolean; live: boolean; pending: boolean }): { enabled: boolean; reason: string | null } {
+  if (now.pending) return { enabled: false, reason: "Rotating…" };
+  if (platform === "ios") return now.inputReady ? { enabled: true, reason: null } : { enabled: false, reason: "Waiting for the device's input to connect" };
+  return now.live ? { enabled: true, reason: null } : { enabled: false, reason: "Waiting for video" };
+}
+
 /** The Android fold route (`vendor/serve-emu/api/fold`), or null off HTTP. */
 export function deviceFoldUrl(api: DeviceUrlApi, lease: Pick<DeviceLeaseSummary, "hostId" | "stream">): string | null {
   if (lease.stream?.kind !== "serve-emu") return null;

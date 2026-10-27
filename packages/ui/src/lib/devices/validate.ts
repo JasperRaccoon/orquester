@@ -109,6 +109,8 @@ export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   if (isRecord(pool)) host.pool = { draining: pool.draining === true, warm: pool.warm === true, idleSince: strOrNull(pool.idleSince) };
   if (value.research === true) host.research = true;
   if (str(value.notice)) host.notice = value.notice;
+  const stream = value.stream;
+  if (isRecord(stream)) host.stream = { iosH264: stream.iosH264 === true };
   return host;
 }
 
@@ -271,6 +273,14 @@ export function sanitizeActionEvent(value: unknown): DeviceActionEventPayload | 
   if (!isRecord(value) || !str(value.leaseId) || !str(value.threadId)) return null;
   const entry = sanitizeActionEntry(value.entry);
   return entry && entry.leaseId === value.leaseId ? { leaseId: value.leaseId, threadId: value.threadId, entry } : null;
+}
+
+/** A user action's answer: the lease (released after a power off) and its log row. */
+export function sanitizeUserActionResponse(value: unknown): { lease: DeviceLeaseSummary; entry: DeviceActionEntry } | null {
+  if (!isRecord(value)) return null;
+  const lease = sanitizeDeviceLease(value.lease);
+  const entry = sanitizeActionEntry(value.entry);
+  return lease && entry && entry.leaseId === lease.id ? { lease, entry } : null;
 }
 
 export function sanitizeActionsResponse(value: unknown): { leaseId: string; actions: DeviceActionEntry[] } | null {

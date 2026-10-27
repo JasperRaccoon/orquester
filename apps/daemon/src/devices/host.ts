@@ -315,6 +315,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
   const box = host.box?.() ?? null;
   const pool = host.pool?.() ?? null;
   const research = host.research?.() ?? null;
+  const stream = host.streamCapabilities?.() ?? null;
   return {
     id: host.id,
     kind: host.kind,
@@ -326,6 +327,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
     capacity: host.capacity(),
     ...(box ? { box } : {}),
     ...(pool ? { pool } : {}),
-    ...(research ? { research: true, notice: research.notice } : {})
+    ...(research ? { research: true, notice: research.notice } : {}),
+    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {})
   };
 }

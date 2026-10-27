@@ -6,7 +6,7 @@
 
 import { DEVICE_ERROR_CODES, type DeviceErrorCode } from "@orquester/api";
 
-export type DeviceErrorCodeOrGeneric = DeviceErrorCode | "INVALID_ARGUMENT" | "UNAVAILABLE" | "CANCELLED" | "INTERNAL";
+export type DeviceErrorCodeOrGeneric = DeviceErrorCode | "INVALID_ARGUMENT" | "PERMISSION_DENIED" | "UNAVAILABLE" | "CANCELLED" | "INTERNAL";
 
 const STATUS: Readonly<Record<DeviceErrorCodeOrGeneric, number>> = {
   DEVICES_DISABLED: 409,
@@ -20,6 +20,7 @@ const STATUS: Readonly<Record<DeviceErrorCodeOrGeneric, number>> = {
   DEVICE_NOT_FOUND: 404,
   HOST_NOT_FOUND: 404,
   INVALID_ARGUMENT: 400,
+  PERMISSION_DENIED: 403,
   UNAVAILABLE: 503,
   CANCELLED: 499,
   INTERNAL: 500

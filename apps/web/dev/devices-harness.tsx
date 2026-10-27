@@ -291,6 +291,14 @@ const api = {
     lease: lease({ id: `lease-${Date.now()}`, platform: req.platform, profile: req.profile ?? "pixel-9", name: DEVICE_PROFILES.find((p) => p.id === req.profile)?.label ?? "", state: "starting", key: null, deviceId: null, stream: undefined, createdAt: new Date().toISOString(), progress: { step: req.platform === "ios" ? "rent-host" : "start-device", label: req.platform === "ios" ? "Renting Mac host" : "Starting device", startedAt: new Date().toISOString() } })
   }),
   releaseDeviceLease: async (leaseId: string) => ({ lease: { ...devicesStore.getState().leases!.find((entry) => entry.id === leaseId)!, state: "released" } }),
+  deviceUserAction: async (leaseId: string, req: { kind: string }) => {
+    const current = devicesStore.getState().leases!.find((entry) => entry.id === leaseId)!;
+    const summary = req.kind === "restart_app" ? "Restarted com.example.trips" : req.kind === "rotate" ? "Rotated" : req.kind;
+    return {
+      lease: { ...current, controller: "user", ...(req.kind === "power_off" ? { state: "released" } : {}) },
+      entry: { id: `u-${Date.now()}`, leaseId, at: new Date().toISOString(), actor: "user", kind: req.kind === "rotate" ? "rotate" : "open_app", summary, ok: true }
+    };
+  },
   updateDevicesSettings: async (patch: Partial<DevicesSettings>) => ({ settings: { ...settings, ...patch } }),
   startDeviceSetup: async () => ({ job: null }),
   uploadSessionFile: async (_id: string, meta: { name: string }) => ({ path: `/tmp/${meta.name}`, name: meta.name, size: 1 }),

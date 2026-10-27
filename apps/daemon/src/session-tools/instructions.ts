@@ -54,7 +54,7 @@ const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: change
 
 /** Devices spec §9: the one line the devices toolset adds (the rest travels in `open_device`'s quick start). */
 export const DEVICES_LINE =
-  "Mobile devices: call list_devices/open_device; prefer device_action snapshot refs over coordinates; the user watches the Device panel.";
+  "Mobile devices: list_devices, open_device; prefer device_action snapshot refs to coordinates; the user watches the Device panel and may take control.";
 
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";
 const KNOWLEDGE_LINE_SUFFIX = ". Search it (knowledge_search) before deciding on these topics.";

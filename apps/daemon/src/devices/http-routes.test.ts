@@ -3,8 +3,9 @@ import test from "node:test";
 
 import Fastify from "fastify";
 
-import { DEFAULT_DEVICES_SETTINGS, deviceRoutes, type DeviceLeaseResponse, type DevicesStateResponse } from "@orquester/api";
+import { DEFAULT_DEVICES_SETTINGS, deviceRoutes, type DeviceLeaseResponse, type DevicesStateResponse, type DeviceUserActionResponse } from "@orquester/api";
 
+import { DeviceError } from "./errors.ts";
 import { hubSearch, registerDeviceHttpRoutes } from "./http-routes.ts";
 import { createHubProxy } from "./hub-proxy.ts";
 import type { DeviceService } from "./service.ts";
@@ -12,8 +13,14 @@ import { FakeDeviceHost, FakeHostFactory, startTestDeviceService } from "./testi
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
-function appWith(service: DeviceService | null, mode: "local" | "remote" = "remote") {
+function appWith(service: DeviceService | null, mode: "local" | "remote" = "remote", principal?: { kind: string }) {
   const app = Fastify();
+  if (principal) {
+    app.decorateRequest("principal", null);
+    app.addHook("onRequest", async (request) => {
+      (request as unknown as { principal: unknown }).principal = principal;
+    });
+  }
   registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => createHubProxy({ leaseOnDevice: () => null, userInput: () => undefined, viewerActive: () => undefined, logger: quiet }), logger: quiet }, mode);
   return app;
 }
@@ -123,6 +130,65 @@ test("the hub proxy is remote-only, needs a known host with a lease, and strips 
   } finally {
     await remote.close();
     await local.close();
+    await t.cleanup();
+  }
+});
+
+test("user actions: the user takes control first (never refused for the agent's), each is logged as theirs, power off releases", async () => {
+  const host = new FakeDeviceHost();
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { android: { enabled: true } } });
+  const app = appWith(t.service);
+  const agentApp = appWith(t.service, "remote", { kind: "agent" });
+  try {
+    const signal = new AbortController().signal;
+    const { lease } = await t.service.toolOpen("t1", { platform: "android" }, signal);
+    assert.equal(lease.controller, "agent");
+    const post = (body: unknown, leaseId = lease.id, on = app) => on.inject({ method: "POST", url: deviceRoutes.userAction(leaseId), payload: body as Record<string, unknown> });
+
+    const rotated = await post({ kind: "rotate", orientation: "landscape" });
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const body = rotated.json() as DeviceUserActionResponse;
+    assert.equal(body.lease.controller, "user");
+    assert.deepEqual([body.entry.actor, body.entry.kind, body.entry.summary, body.entry.ok], ["user", "rotate", "did rotate", true]);
+    assert.deepEqual(t.actions.calls.at(-1)!.input, { action: "rotate", orientation: "landscape" });
+    // The agent now waits for the user.
+    await assert.rejects(t.service.toolAction("t1", undefined, { action: "tap", x: 1, y: 2 }, signal), (error: unknown) => (error as DeviceError).code === "DEVICE_CONTROLLED_BY_USER");
+
+    const restarted = (await post({ kind: "restart_app" })).json() as DeviceUserActionResponse;
+    assert.equal(restarted.entry.summary, "Restarted com.example.app");
+    assert.deepEqual(t.actions.restarts, [lease.id]);
+    const dark = (await post({ kind: "appearance", appearance: "dark" })).json() as DeviceUserActionResponse;
+    assert.equal(dark.entry.kind, "appearance");
+
+    // A refusal is logged as the user's failed row and answered with its code.
+    t.actions.restartImpl = async () => {
+      throw new DeviceError("INVALID_ARGUMENT", "No app is open: the home screen is in front.");
+    };
+    const refused = await post({ kind: "restart_app" });
+    assert.equal(refused.statusCode, 400);
+    assert.match(refused.json().message, /home screen/);
+    const log = t.service.actions(lease.id);
+    assert.deepEqual(log.map((entry) => [entry.actor, entry.ok]), [["user", true], ["user", true], ["user", true], ["user", false]]);
+    assert.equal(log.at(-1)!.summary, "Restart app failed");
+
+    assert.equal((await post({ kind: "rotate" })).statusCode, 400);
+    assert.equal((await post({ kind: "explode" })).statusCode, 400);
+    assert.equal((await post({ kind: "restart_app" }, "nope")).statusCode, 404);
+    // An agent's (or external client's) principal is refused: agents use device_action.
+    const byAgent = await post({ kind: "rotate", orientation: "portrait" }, lease.id, agentApp);
+    assert.equal(byAgent.statusCode, 403);
+    assert.equal(byAgent.json().code, "PERMISSION_DENIED");
+
+    const closed = t.nextEvent((type) => type === "devices.lease.closed");
+    const off = await post({ kind: "power_off" });
+    assert.equal(off.statusCode, 200);
+    assert.equal((off.json() as DeviceUserActionResponse).lease.state, "released");
+    assert.deepEqual(await closed, { leaseId: lease.id, threadId: "t1", reason: "user" });
+    assert.deepEqual(host.released.map((entry) => entry.shutdown), [true]);
+    assert.equal((await post({ kind: "power_off" })).statusCode, 404);
+  } finally {
+    await app.close();
+    await agentApp.close();
     await t.cleanup();
   }
 });

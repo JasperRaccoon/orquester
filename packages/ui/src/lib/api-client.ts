@@ -139,7 +139,9 @@ import type {
   DevicesSettingsResponse,
   DevicesStateResponse,
   DeviceSetupRequest,
-  DeviceSetupResponse
+  DeviceSetupResponse,
+  DeviceUserActionRequest,
+  DeviceUserActionResponse
 } from "@orquester/api";
 // The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
 import { knowledgeRoutes } from "@orquester/api";
@@ -988,6 +990,11 @@ export class ApiClient {
   /** Take over (`user`) or give back (`agent`). */
   setDeviceController(leaseId: string, controller: DeviceController): Promise<DeviceLeaseResponse> {
     return this.send("PUT", deviceRoutes.controller(leaseId), { body: { controller } });
+  }
+
+  /** The panel's buttons that are not hub input: rotate (Android), restart the app, appearance, power off. */
+  deviceUserAction(leaseId: string, req: DeviceUserActionRequest): Promise<DeviceUserActionResponse> {
+    return this.send("POST", deviceRoutes.userAction(leaseId), { body: req });
   }
 
   deviceLeaseActions(leaseId: string, signal?: AbortSignal): Promise<DeviceActionsResponse> {

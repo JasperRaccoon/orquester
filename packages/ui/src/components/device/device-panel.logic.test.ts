@@ -14,15 +14,20 @@ import {
   devicePanelView,
   deviceStreamUrls,
   formatElapsed,
+  hostStreamCaps,
   inputTakesOver,
   leaseName,
   leaseStateLabel,
   leaseSubtitle,
   NO_TRANSPORT_MESSAGE,
+  nextRotation,
   pickerGroups,
+  rotateControl,
   streamAvailability,
   takeOverToast
 } from "./device-panel.logic.ts";
+import { chooseTransport } from "./stream/capabilities.ts";
+import { effectiveDeviceViewMode } from "../../lib/devices/device-view-prefs.ts";
 
 function lease(overrides: Partial<DeviceLeaseSummary> = {}): DeviceLeaseSummary {
   return {
@@ -202,6 +207,41 @@ describe("stream URLs", () => {
     const off = { deviceSocketUrl: () => null, deviceMediaUrl: () => null };
     assert.equal(deviceStreamUrls(off, lease()), null);
     assert.equal(deviceStreamUrls(api, lease({ stream: undefined })), null);
+  });
+});
+
+describe("rotate", () => {
+  it("asks for landscape from portrait and portrait from anything else", () => {
+    assert.equal(nextRotation("portrait"), "landscape");
+    for (const current of ["landscape_left", "landscape_right", "portrait_upside_down"] as const) assert.equal(nextRotation(current), "portrait");
+  });
+  it("iOS needs the input socket; Android (the daemon's user action) the live video; never twice at once", () => {
+    assert.deepEqual(rotateControl("ios", { inputReady: true, live: false, pending: false }), { enabled: true, reason: null });
+    assert.equal(rotateControl("ios", { inputReady: false, live: true, pending: false }).enabled, false);
+    assert.deepEqual(rotateControl("android", { inputReady: false, live: true, pending: false }), { enabled: true, reason: null });
+    assert.deepEqual(rotateControl("android", { inputReady: true, live: false, pending: false }), { enabled: false, reason: "Waiting for video" });
+    assert.deepEqual(rotateControl("android", { inputReady: true, live: true, pending: true }), { enabled: false, reason: "Rotating…" });
+  });
+});
+
+describe("host stream capabilities", () => {
+  const full = { webCodecs: true, h264Baseline: true, h264High: true };
+  const hosts = [
+    { id: "box:mac", stream: { iosH264: true } },
+    { id: "box:vm", stream: { iosH264: false } },
+    { id: "box:old" }
+  ];
+  it("a physical Mac streams H.264 in 3D; an Apple VM or a host that says nothing streams MJPEG, flat", () => {
+    assert.deepEqual(hostStreamCaps(hosts, "box:mac"), { h264: true });
+    const mac = chooseTransport({ platform: "ios", hostCaps: hostStreamCaps(hosts, "box:mac"), browserCaps: full });
+    assert.equal(mac, "serve-sim-h264");
+    assert.equal(effectiveDeviceViewMode({ mode: null }, mac), "3d");
+    for (const hostId of ["box:vm", "box:old", "box:gone"]) {
+      assert.deepEqual(hostStreamCaps(hosts, hostId), { h264: false }, hostId);
+      const vm = chooseTransport({ platform: "ios", hostCaps: hostStreamCaps(hosts, hostId), browserCaps: full });
+      assert.equal(vm, "serve-sim-mjpeg", hostId);
+      assert.equal(effectiveDeviceViewMode({ mode: null }, vm), "flat", hostId);
+    }
   });
 });
 

@@ -6,14 +6,17 @@ iOS simulators and Android emulators beside agent chats: the "Device simulators"
 
 Contracts live outside this directory:
 
-- `packages/api/src/devices.ts` — profiles, host/lease/action/setup types, `deviceRoutes`,
-  `DEVICE_WS_PREFIXES`, `DEVICES_CHANNEL` events, error codes, request validators, `deviceRef`.
+- `packages/api/src/devices.ts` — profiles, host/lease/action/setup types (a host summary's
+  `stream.iosH264` picks the panel's iOS transport), `deviceRoutes` (`userAction` included),
+  `DEVICE_WS_PREFIXES`, `DEVICES_CHANNEL` events, error codes, request validators, `deviceRef`
+  (`{device, leaseId?, screenshotId?, name?, action?, summary?}`: the chat row's words after a reload).
 - `packages/config/src/devices.ts` — `devices.json` settings and `device-leases.json` schemas;
   path helpers (`devicesDir`, `devicesToolsDir`, `androidSdkDir`, `androidAvdDir`,
   `devicesRuntimeDir`, `devicesHubStatePath`, `deviceScreenshotsDir`, `devicesSettingsPath`,
   `deviceLeasesPath`) in `packages/config/src/index.ts`.
 - `apps/daemon/src/mcp/tools/devices.ts` — the five agent tools (`devices` toolset), through
-  `DaemonApi.devices*` (`mcp/daemon-api.ts`) → `DeviceToolsPort` (`tools-port.ts`).
+  `DaemonApi.devices*` (`mcp/daemon-api.ts`) → `DeviceToolsPort` (`tools-port.ts`); `open_device`'s
+  per-platform quick start; the instruction line is `DEVICES_LINE` (`session-tools/instructions.ts`).
 
 ## Files
 
@@ -21,7 +24,7 @@ Foundation (shared seams; change them only with the other work packages in mind)
 
 | File | What it is |
 |---|---|
-| `host.ts` | `DeviceHost` (one machine), `DeviceHostFactory` (makes/rents hosts), `DeviceHostRegistry`, `DeviceRentalQuote`. |
+| `host.ts` | `DeviceHost` (one machine), `DeviceHostFactory` (makes/rents hosts), `DeviceHostRegistry`, `DeviceRentalQuote`; `deviceHostSummary` (with `stream` from `streamCapabilities`). |
 | `errors.ts` | `DeviceError(code, message)` with its HTTP status. |
 | `store.ts` | Tolerant atomic stores: `DeviceSettingsStore` (`devices.json`), `DeviceLeaseStore` (`device-leases.json`). |
 | `leases.ts` | Pure lease and controller rules: acquire, boot, handoff, agent-action checks, handles, idle, host loss. |
@@ -30,14 +33,15 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `pool.ts` | `choosePlacement`: where a new lease goes (local first, best fit, wait, setup, provision, full). Phase 2 grows it into `decidePool`. |
 | `service.ts` | `DeviceService`: hosts, settings, leases, setup jobs, action log, the agent tools' operations. |
 | `tools-port.ts` | `DeviceToolsPort` and `runDeviceTool` (principal → thread, `DeviceError` → outcome). |
-| `http-routes.ts` | `deviceRoutes` on both transports; the hub proxy route on remote only (raw bodies, `?token=` accepted). |
+| `http-routes.ts` | `deviceRoutes` on both transports (`user-action` refuses agent and external principals); the hub proxy route on remote only (raw bodies, `?token=` accepted). |
+| `user-actions.ts` | The panel's buttons that are not hub input (`rotate`, `restart_app`, `appearance`, `power_off`): control goes to the user first, rows are logged as the user's (failures too). |
 | `ws-routes.ts` | `/ws-device/:hostId/*`: token, plugin, host and lease checks, then `HubProxy.handleWebSocket`. |
 | `wiring.ts` | `createDaemonDevices`: follows the plugin (service on/off), builds the factories and executor, routes. |
 | `testing.ts` | `FakeDeviceHost`, `FakeHostFactory`, `FakeActionExecutor`, `startTestDeviceService`. |
 | `hub-proxy.ts` | The hub proxy: path/method allowlists, leased-device check, header allowlists, the hub token as `Authorization: Bearer`, WS relay (8 MiB back-pressure), input → `userInput`, viewer counts → `DeviceHost.viewersChanged`. |
 | `mjpeg-still-frame.ts` | Re-sends the last MJPEG part once when the stream goes quiet (so `<img>` paints a still screen). |
 | `agent-device.ts` | The agent-device runner: pinned `--config`/`--session`/device flags before the command, no shell, scrubbed `AGENT_DEVICE_*`, caps; `--json` refusals → `DeviceError`. Fixtures: `fixtures/agent-device/`. |
-| `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs; `DeviceHost.performAction` / `installApp` answer first. |
+| `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs, `restartApp` (foreground app → `open <app> --relaunch`; the home screen is refused); `DeviceHost.performAction` / `installApp` answer first. |
 | `screenshot-image.ts` | PNG decode, downscale and baseline JPEG encode: screenshots fit `DEVICE_SCREENSHOT_MAX_BASE64_CHARS`. |
 | `hosts/vphone/` | Phase 3 research hosts (`vphone:<boxId>`, kind `byo`): `factory.ts` adopts BYO Macs with "Use for device simulators" and `settings.research.vphoneHosts[boxId].enabled`; `readiness.ts` (checks with fix commands; never changes SIP/AMFI), `cli.ts` (vphone-cli over `BoxConnection.exec`), `host.ts` (clone/launch/forward/stop/delete per lease, token in env and a 0600 record), `bridge.ts` (loopback serve-sim endpoints ↔ `/v1/host/screen`, `screen.screenshot`, `/v1/events`), `agent-actions.ts` + `snapshot.ts` (`performAction` → vphoned RPCs), `testing.ts` (fake vphoned, fake Mac link). |
 
@@ -95,3 +99,6 @@ cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/inte
   logs or process arguments. `DeviceError` messages are shown to the owner or the agent.
 - Agent tools act for the calling chat only: `runDeviceTool` takes the thread from the principal;
   a handle naming another chat's device reads `DEVICE_NOT_LEASED`.
+- Control: the panel's input frames, a fold POST through the proxy, and every user action switch
+  control to the user; the agent's input then answers `DEVICE_CONTROLLED_BY_USER` (reads still run).
+  Watching (streams, a fold GET) never changes control.

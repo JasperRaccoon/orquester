@@ -122,6 +122,8 @@ export const PRINCIPAL_ROUTES: readonly { method: "GET" | "POST" | "PUT" | "DELE
   { method: "PUT", path: "/api/sessions/:id/agent-tools", gate: "principal", reads: "agents refused (403)" },
   { method: "DELETE", path: "/api/agent-tools/grants", gate: "principal", reads: "agents refused (403)" },
   { method: "DELETE", path: "/api/agent-tools/grants/:id", gate: "principal", reads: "agents refused (403)" },
+  // devices: the Device panel's buttons that are not hub input (`deviceRoutes.userAction`).
+  { method: "POST", path: "/api/devices/leases/:leaseId/user-action", gate: "principal", reads: "agents and external clients refused (403)" },
   // boxes: temporary boxes (`box-tools.ts`): a chat reaches only the boxes it created.
   { method: "GET", path: "/api/boxes/temporary", gate: "principal", reads: "an agent lists only its chat's boxes; external refused (403)" },
   { method: "POST", path: "/api/boxes/temporary", gate: "principal", reads: "agents only (an approved create_box); the box belongs to the agent's chat" },

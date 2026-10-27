@@ -10,8 +10,9 @@
  *   `DEVICE_CONTROLLED_BY_USER`; read-only ones (snapshot, screenshot, logs, wait) still run.
  * - **Spend.** `open_device` raises a `devices` spend card only when it must rent a Mac host the
  *   owner did not pre-approve (its `scope` asks the daemon for the plan; the card pins what it rents).
- * - **Results** carry a `deviceRef` (`{device, leaseId?, screenshotId?}`) kept through slimming, so
- *   the chat row can show the device and a screenshot thumbnail without the image in the transcript.
+ * - **Results** carry a `deviceRef` (`{device, leaseId?, screenshotId?, name?, action?, summary?}`)
+ *   kept through slimming, so the chat row shows the device, its words ("Tapped “Search”") and a
+ *   screenshot thumbnail after a reload, without the image in the transcript.
  *
  * Everything goes through `DaemonApi` (D-1): this module imports types and pure contracts only.
  */
@@ -86,23 +87,53 @@ function leaseView(lease: DeviceLeaseSummary): Record<string, unknown> {
   };
 }
 
-function deviceRef(lease: DeviceLeaseSummary, screenshotId?: string): DeviceToolReference {
-  return { device: lease.key ?? lease.id, leaseId: lease.id, ...(screenshotId ? { screenshotId } : {}) };
+/** `readDeviceToolReference`'s caps on the row's words (longer ones would be dropped, not cut). */
+const REF_NAME_MAX = 120;
+const REF_SUMMARY_MAX = 200;
+
+/** One line of at most `max` characters: control characters and line breaks become spaces. */
+function refText(text: string, max: number): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const line = text.replace(/[\u0000-\u001f\u007f\u2028\u2029\s]+/g, " ").trim();
+  if (line === "") return undefined;
+  const chars = [...line];
+  return chars.length <= max ? line : `${chars.slice(0, max - 1).join("")}…`;
+}
+
+/**
+ * The result's `deviceRef` (kept through slimming): the device, its lease, a kept screenshot, and
+ * the words a reloaded chat row reads ("Opened Pixel 9", "Tapped “Search”") — the device's name,
+ * and for `device_action` the action and its action-log summary.
+ */
+export function deviceRef(lease: DeviceLeaseSummary, extra: { screenshotId?: string; action?: DeviceActionKind; summary?: string } = {}): DeviceToolReference {
+  const name = refText(lease.name, REF_NAME_MAX);
+  const summary = extra.summary !== undefined ? refText(extra.summary, REF_SUMMARY_MAX) : undefined;
+  return {
+    device: lease.key ?? lease.id,
+    leaseId: lease.id,
+    ...(extra.screenshotId ? { screenshotId: extra.screenshotId } : {}),
+    ...(name ? { name } : {}),
+    ...(extra.action ? { action: extra.action } : {}),
+    ...(summary ? { summary } : {})
+  };
 }
 
 /**
  * Sent back with every opened device (≤ 6 lines): the rest of the guidance the instruction line
- * leaves out, per platform.
+ * leaves out, per platform (devices spikes: iOS needs an app session before a snapshot, and its
+ * first call warms agent-device's runner; `open` re-issues refs).
  */
 export function deviceQuickStart(platform: "ios" | "android"): string {
   return [
-    'device_action {action:"snapshot"} first: the screen as an accessibility tree with @eN refs (again after open_app: refs expire).',
-    'Act by ref: {action:"tap",ref:"@e3"}, {action:"fill",ref:"@e5",text:"…"}; x/y in points only when no ref fits. Input returns the snapshot diff.',
-    '{action:"screenshot"} to see pixels; {action:"logs",seconds:10} for recent logs; {action:"wait",text:"…"} for slow screens.',
     platform === "ios"
-      ? 'device_install a simulator .app from this project, then {action:"open_app",app:"<bundle id>"}; press home for Springboard.'
-      : 'device_install an .apk from this project, then {action:"open_app",app:"<package>"}; press back/home to navigate.',
-    "The user watches the Device panel and may take control: input then fails until they give it back (reads still work).",
+      ? 'Open the app first ({action:"open_app",app:"<bundle id>"}; Settings is com.apple.Preferences), then {action:"snapshot"}: the screen as @eN refs. The first iOS call may take ~30 s.'
+      : '{action:"snapshot"} first: the screen as an accessibility tree with @eN refs.',
+    'Prefer refs to x/y points: {action:"tap",ref:"@e3"}, {action:"fill",ref:"@e5",text:"…"}. Input returns the diff with current refs; after open_app, open_url or rotate, snapshot again (refs expire).',
+    '{action:"screenshot"} returns an image; {action:"logs",seconds:10} recent logs; {action:"wait",text:"…"} for slow screens.',
+    platform === "ios"
+      ? "device_install {path} takes a simulator .app (or .ipa) in this project and answers its bundle id; press home for the home screen."
+      : "device_install {path} takes an .apk in this project and answers its package; press back/home to navigate.",
+    "The user watches the Device panel and may take control: input then fails DEVICE_CONTROLLED_BY_USER (reads still work); wait, or ask them to give it back.",
     "close_device when done."
   ].join("\n");
 }
@@ -336,7 +367,7 @@ const deviceAction = defineTool({
       ...(result.details ?? {}),
       ...(result.image ? { screenshot: { width: result.image.width, height: result.image.height, mime_type: result.image.mimeType } } : {}),
       ...(result.lease.controller === "user" ? { note: "The user has control now: input waits until they give it back." } : {}),
-      deviceRef: deviceRef(result.lease, result.screenshotId)
+      deviceRef: deviceRef(result.lease, { ...(result.screenshotId ? { screenshotId: result.screenshotId } : {}), action: args.action, summary: result.entry.summary })
     };
     if (!result.image) return value;
     const json = ok(value);

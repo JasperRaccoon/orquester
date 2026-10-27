@@ -205,6 +205,15 @@ export interface DeviceHostPoolInfo {
   idleSince: string | null;
 }
 
+/** What a host's hub can stream (`DeviceHost.streamCapabilities`), for the panel's transport choice. */
+export interface DeviceHostStreamInfo {
+  /**
+   * serve-sim's H.264 (`stream.avcc`) works: a physical Mac with a VideoToolbox encoder. False on
+   * Apple VMs (Blacksmith macOS runners have none: the panel streams MJPEG) and on Android hosts.
+   */
+  iosH264: boolean;
+}
+
 export interface DeviceHostSummary {
   id: string;
   kind: DeviceHostKind;
@@ -224,6 +233,8 @@ export interface DeviceHostSummary {
   research?: boolean;
   /** What the owner must know before using it ({@link VPHONE_RESEARCH_NOTICE} on a vphone host). */
   notice?: string;
+  /** Absent: the host did not say (the panel assumes no iOS H.264). */
+  stream?: DeviceHostStreamInfo;
 }
 
 /** The per-machine switch's label in Settings (phase 3 §2.3). */
@@ -627,6 +638,12 @@ export const deviceRoutes = {
   controller: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/controller`,
   /** GET → {@link DeviceActionsResponse}: the lease's action log, oldest first. */
   actions: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/actions`,
+  /**
+   * POST {@link DeviceUserActionRequest} → {@link DeviceUserActionResponse}: one of the panel's
+   * buttons that is not hub input (rotate an Android emulator, restart the foreground app, switch
+   * the appearance, power off). The user takes control first; the action log shows it as theirs.
+   */
+  userAction: (leaseId: string): string => `${LEASES}/${enc(leaseId)}/user-action`,
   /** GET → the image (`image/png` or `image/jpeg`) a `deviceRef` names. */
   screenshot: (leaseId: string, screenshotId: string): string => `${LEASES}/${enc(leaseId)}/screenshots/${enc(screenshotId)}`,
   /** GET / PUT ({@link DevicesSettingsPatch}) → {@link DevicesSettingsResponse}. */
@@ -665,6 +682,22 @@ export interface DeviceOpenRequest {
 export interface DeviceControllerRequest {
   controller: DeviceController;
 }
+
+/**
+ * POST {@link deviceRoutes.userAction}: what the panel's button asks for.
+ *
+ * - `rotate` — turn the device (Android emulators through the accelerometer, so the video turns too).
+ * - `restart_app` — stop the foreground app and launch it again (refused on the home screen).
+ * - `appearance` — light or dark.
+ * - `power_off` — turn the device off and release it.
+ */
+export type DeviceUserActionRequest =
+  | { kind: "rotate"; orientation: "portrait" | "landscape" }
+  | { kind: "restart_app" }
+  | { kind: "appearance"; appearance: "light" | "dark" }
+  | { kind: "power_off" };
+export type DeviceUserActionKind = DeviceUserActionRequest["kind"];
+export const DEVICE_USER_ACTION_KINDS: readonly DeviceUserActionKind[] = ["rotate", "restart_app", "appearance", "power_off"];
 
 /** POST {@link deviceRoutes.setup}: the fix actions to run; absent: every one the host's readiness names. */
 export interface DeviceSetupRequest {
@@ -724,6 +757,12 @@ export interface DeviceLeaseResponse {
 export interface DeviceActionsResponse {
   leaseId: string;
   actions: DeviceActionEntry[];
+}
+
+/** The lease after a user action (`released` after `power_off`), and its action-log row. */
+export interface DeviceUserActionResponse {
+  lease: DeviceLeaseSummary;
+  entry: DeviceActionEntry;
 }
 
 export interface DevicesSettingsResponse {
@@ -845,6 +884,26 @@ export function parseDeviceOpenRequest(value: unknown): DeviceParseResult<Device
 export function parseDeviceControllerRequest(value: unknown): DeviceParseResult<DeviceControllerRequest> {
   if (!isRecord(value) || !isDeviceController(value.controller)) return { ok: false, message: "`controller` must be agent or user." };
   return { ok: true, value: { controller: value.controller } };
+}
+
+/** The body of POST {@link deviceRoutes.userAction}. */
+export function parseDeviceUserActionRequest(value: unknown): DeviceParseResult<DeviceUserActionRequest> {
+  if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
+  switch (value.kind) {
+    case "rotate":
+      return value.orientation === "portrait" || value.orientation === "landscape"
+        ? { ok: true, value: { kind: "rotate", orientation: value.orientation } }
+        : { ok: false, message: "`orientation` must be portrait or landscape." };
+    case "appearance":
+      return value.appearance === "light" || value.appearance === "dark"
+        ? { ok: true, value: { kind: "appearance", appearance: value.appearance } }
+        : { ok: false, message: "`appearance` must be light or dark." };
+    case "restart_app":
+    case "power_off":
+      return { ok: true, value: { kind: value.kind } };
+    default:
+      return { ok: false, message: `\`kind\` must be one of ${DEVICE_USER_ACTION_KINDS.join(", ")}.` };
+  }
 }
 
 /** The body of POST {@link deviceRoutes.setup} (an empty body runs every fix). */

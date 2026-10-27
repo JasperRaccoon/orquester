@@ -18,6 +18,7 @@ import {
   deviceRoutes,
   deviceToolReferenceOfActivityData,
   parseDeviceControllerRequest,
+  parseDeviceUserActionRequest,
   parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
@@ -63,6 +64,19 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.hub("box:x1", "/vendor/serve-emu/ws"), "/api/devices/hosts/box%3Ax1/hub/vendor/serve-emu/ws");
   assert.equal(deviceRoutes.socket("local", "vendor/serve-sim/helper/ws"), "/ws-device/local/vendor/serve-sim/helper/ws");
   assert.equal(deviceRoutes.setup("android"), "/api/devices/setup/android");
+  assert.equal(deviceRoutes.userAction("l/1"), "/api/devices/leases/l%2F1/user-action");
+});
+
+test("user action requests: each kind with its own field, nothing else", () => {
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "rotate", orientation: "landscape" }), { ok: true, value: { kind: "rotate", orientation: "landscape" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "appearance", appearance: "dark", extra: 1 }), { ok: true, value: { kind: "appearance", appearance: "dark" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "restart_app" }), { ok: true, value: { kind: "restart_app" } });
+  assert.deepEqual(parseDeviceUserActionRequest({ kind: "power_off" }), { ok: true, value: { kind: "power_off" } });
+  assert.equal(parseDeviceUserActionRequest({ kind: "rotate" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "rotate", orientation: "sideways" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "appearance", appearance: "sepia" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest({ kind: "tap" }).ok, false);
+  assert.equal(parseDeviceUserActionRequest(null).ok, false);
 });
 
 test("open request: platform-matched profile, deviceId needs hostId, junk refused", () => {

@@ -2375,17 +2375,18 @@ agents use devices, and at least one platform is enabled. Design:
 | Tool | Tier | Input | Returns |
 |---|---|---|---|
 | `list_devices` | Read | — | `{platforms: [{platform, enabled, ready, detail?}], hosts: [{id, kind, label, platforms, status, capacity: "used/total", missing?}], profiles: [{id, platform, name, form, os}], my_devices: [Lease], busy: [{device, platform, name, chat?}]}` |
-| `open_device` | Act (a `devices` **spend** card when it must rent a host the owner did not pre-approve) | `platform` (`"ios"` \| `"android"`), `profile?`, `app?` (bundle id / package to launch), `fresh?` | `Lease` + `ready`, `quick_start` (6 lines); after 9 minutes still booting: `ready: false`, `progress`, a note to check `list_devices` |
-| `device_action` | Read for `snapshot`, `screenshot`, `logs`, `wait`; Act otherwise | `device?`, `action`, and the action's fields (below) | `{device, action, summary, result?, screenshot?: {width, height, mime_type}, note?}`; `screenshot` also returns an MCP image block |
-| `device_install` | Act | `device?`, `path` (a build inside the chat's project; relative = from the chat's cwd) | `{device, app, summary}` |
-| `close_device` | Act | `device?`, `shutdown?` | `{closed: true, device}` |
+| `open_device` | Act (a `devices` **spend** card when it must rent a host the owner did not pre-approve) | `platform` (`"ios"` \| `"android"`), `profile?`, `app?` (bundle id / package to launch), `fresh?` | `Lease` + `ready`, `quick_start` (≤ 6 lines, per platform), `deviceRef`; after 9 minutes still booting: `ready: false`, `progress`, a note to check `list_devices` |
+| `device_action` | Read for `snapshot`, `screenshot`, `logs`, `wait`; Act otherwise | `device?`, `action`, and the action's fields (below) | `{device, action, summary, result?, screenshot?: {width, height, mime_type}, note?, deviceRef}`; `screenshot` also returns an MCP image block (PNG, or a JPEG scaled to fit) |
+| `device_install` | Act | `device?`, `path` (a build inside the chat's project; relative = from the chat's cwd): an `.apk`, or a simulator `.app` (or `.ipa`) | `{device, app, summary, deviceRef}` — `app` is the bundle id / package to `open_app` |
+| `close_device` | Act | `device?`, `shutdown?` | `{closed: true, device, deviceRef}` |
 
 - **Lease** is `{device, lease_id, platform, name, os, state: "starting" | "ready" | "suspended" |
   "lost", controller: "agent" | "user", screen?: {width, height}, starting?, error?}`. `device` is
   the key `<hostId>/<deviceId>` (`local/emulator-5554`, `box:ab12cd/<UDID>`), or the lease id while
   it starts. Every tool's `device` takes either; omitted, it is the chat's only device.
-- **Profiles**: Android `pixel-9`, `pixel-tablet`, `pixel-fold` (Android 15); iOS
-  `iphone-17-pro`, `iphone-17-pro-max`, `ipad-pro-13`, `iphone-duo` (iOS 26).
+- **Profiles**: Android `pixel-9`, `pixel-tablet`, `pixel-fold`, `galaxy-s26`, `galaxy-s26-plus`,
+  `galaxy-s26-ultra`, `galaxy-z-fold8`, `galaxy-z-flip8` (Android 15); iOS `iphone-17-pro`,
+  `iphone-17-pro-max`, `ipad-pro-13`, `iphone-duo` (iOS 26). `list_devices` lists the enabled ones.
 - **Leases** are exclusive: a chat holds at most 3 devices (`DEVICE_LEASE_LIMIT`), another chat's
   device is never reachable (`DEVICE_NOT_LEASED`). A lease ends with `close_device`, the user's
   Release, the chat closing, or an hour with no agent or viewer activity.
@@ -2396,12 +2397,21 @@ agents use devices, and at least one platform is enabled. Design:
   `open_app` / `close_app` (`app`), `open_url` (`url`), `screenshot`, `logs` (`seconds` ≤ 60),
   `rotate` (`orientation`), `appearance` (`light` | `dark`), `location` (`lat`, `lon`),
   `permissions` (`app`, `permission`, `grant`: `grant` | `revoke`), `wait` (`text` or `ref`,
-  `timeout_ms` ≤ 60 000). Input actions return the new snapshot's diff.
-- **Control handoff**: when the user touches the device it switches to them; input actions then
-  fail `DEVICE_CONTROLLED_BY_USER` (wait, or ask them to give control back) while read-only ones
-  still run.
-- **`deviceRef`**: results carry `{device, leaseId?, screenshotId?}` so the chat row shows the
-  device and a screenshot thumbnail (the image itself is not kept in the transcript).
+  `timeout_ms` ≤ 60 000). Input actions return the new snapshot's diff with current refs; refs
+  expire after `open_app`, `open_url` and `rotate` (snapshot again). On iOS a snapshot needs an app
+  session: open the app under test first (the daemon otherwise opens the app in front, or the home
+  screen); the first iOS call may take ~30 s while agent-device warms its runner.
+- **Control handoff**: when the user touches the device, folds it, or uses one of the panel's own
+  buttons (rotate, restart app, appearance) it switches to them; input actions then fail
+  `DEVICE_CONTROLLED_BY_USER` (wait, or ask them to give control back) while read-only ones still
+  run. The user's actions show in the same action log, marked as theirs.
+- **`deviceRef`**: results carry `{device, leaseId?, screenshotId?, name?, action?, summary?}` —
+  the device's name and, for `device_action`, the action and its one-line log summary — kept
+  through slimming, so the chat row reads "Opened Pixel 9" / "Tapped “Search”" after a reload and
+  shows a screenshot thumbnail (the image itself is not kept in the transcript).
+- **Instructions**: while the tools are advertised the chat's Orquester block gains one line
+  (≤ 160 bytes): list/open devices, prefer snapshot refs, the user watches and may take control.
+  The rest travels in `open_device`'s `quick_start`.
 - **Errors**: `DEVICES_DISABLED`, `DEVICE_NOT_LEASED` (call `open_device`), `DEVICE_LOST` (its host
   or device is gone: call `open_device` again), `DEVICE_CONTROLLED_BY_USER`, `DEVICE_CAPACITY` (every
   host is full; names the leases), `DEVICE_LEASE_LIMIT`, `PLATFORM_NOT_READY` (off, or not set up —
