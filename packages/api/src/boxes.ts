@@ -94,7 +94,16 @@ export function isBoxProviderId(value: unknown): value is BoxProviderId {
   return typeof value === "string" && (BOX_PROVIDER_IDS as readonly string[]).includes(value);
 }
 
-export type BoxPurpose = "project" | "temporary";
+/**
+ * What a box is for: a project's machine, a chat's temporary box, or (devices) a device host the
+ * device service rents and owns (`threadId: null`; agents cannot `box_exec` it).
+ */
+export type BoxPurpose = "project" | "temporary" | "device-host";
+export const BOX_PURPOSES: readonly BoxPurpose[] = ["project", "temporary", "device-host"];
+
+export function isBoxPurpose(value: unknown): value is BoxPurpose {
+  return typeof value === "string" && (BOX_PURPOSES as readonly string[]).includes(value);
+}
 
 /**
  * - `provisioning` — being created and set up (see `setup`).
@@ -146,12 +155,14 @@ export function boxDestroyedOutsideOrquester(reason: BoxDestroyedReason | undefi
 
 /**
  * Setup steps, in order (spec §8.2). A temporary box runs only `create`,
- * `connect` and `ready`; a project box runs them all.
+ * `connect` and `ready`; a device host `create`, `connect`, `devices` (its device tools, hub and
+ * agent-device daemon; devices spec §6.3) and `ready`; a project box every other one.
  */
-export type BoxSetupStepId = "create" | "connect" | "paths" | "config" | "tooling" | "clone" | "toolchain" | "agents" | "ready";
+export type BoxSetupStepId = "create" | "connect" | "devices" | "paths" | "config" | "tooling" | "clone" | "toolchain" | "agents" | "ready";
 export const BOX_SETUP_STEP_IDS: readonly BoxSetupStepId[] = [
   "create",
   "connect",
+  "devices",
   "paths",
   "config",
   "tooling",
