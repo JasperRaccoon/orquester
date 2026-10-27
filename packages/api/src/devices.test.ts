@@ -22,6 +22,8 @@ import {
   parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
+  parseDeviceCacheWarmRequest,
+  parseDeviceHostDrainRequest,
   parseDevicesSettingsPatch,
   readDeviceToolReference,
   validateDeviceActionInput
@@ -64,7 +66,21 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.hub("box:x1", "/vendor/serve-emu/ws"), "/api/devices/hosts/box%3Ax1/hub/vendor/serve-emu/ws");
   assert.equal(deviceRoutes.socket("local", "vendor/serve-sim/helper/ws"), "/ws-device/local/vendor/serve-sim/helper/ws");
   assert.equal(deviceRoutes.setup("android"), "/api/devices/setup/android");
+  assert.equal(deviceRoutes.hostDrain("box:x1"), "/api/devices/hosts/box%3Ax1/drain");
+  assert.equal(deviceRoutes.pool, "/api/devices/pool");
+  assert.equal(deviceRoutes.cacheWarm, "/api/devices/pool/caches/warm");
   assert.equal(deviceRoutes.userAction("l/1"), "/api/devices/leases/l%2F1/user-action");
+  assert.equal(deviceRoutes.thumbnail("l/1"), "/api/devices/leases/l%2F1/thumbnail?w=320");
+  assert.equal(deviceRoutes.thumbnail("l1", 200.4), "/api/devices/leases/l1/thumbnail?w=200");
+});
+
+test("drain and cache-warm requests", () => {
+  assert.deepEqual(parseDeviceHostDrainRequest({ draining: true }), { ok: true, value: { draining: true } });
+  assert.equal(parseDeviceHostDrainRequest({ draining: "yes" }).ok, false);
+  assert.equal(parseDeviceHostDrainRequest(undefined).ok, false);
+  assert.deepEqual(parseDeviceCacheWarmRequest({ platform: "android" }), { ok: true, value: { platform: "android" } });
+  assert.equal(parseDeviceCacheWarmRequest({ platform: "windows" }).ok, false);
+  assert.equal(parseDeviceCacheWarmRequest({}).ok, false);
 });
 
 test("user action requests: each kind with its own field, nothing else", () => {
@@ -108,7 +124,7 @@ test("settings patch: each field checked against its range; unknown fields refus
   const good = parseDevicesSettingsPatch({
     android: { enabled: true, maxLocalDevices: 4, profiles: ["pixel-9", "pixel-9"] },
     ios: { rentWithoutAsking: true, monthlyCapUsd: 12.5 },
-    pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 } },
+    pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 }, monthlyCapUsd: 50 },
     leaseIdleMinutes: 30
   });
   assert.deepEqual(good, {
@@ -116,7 +132,7 @@ test("settings patch: each field checked against its range; unknown fields refus
     value: {
       android: { enabled: true, maxLocalDevices: 4, profiles: ["pixel-9"] },
       ios: { rentWithoutAsking: true, monthlyCapUsd: 12.5 },
-      pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 } },
+      pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 }, monthlyCapUsd: 50 },
       leaseIdleMinutes: 30
     }
   });
@@ -128,6 +144,7 @@ test("settings patch: each field checked against its range; unknown fields refus
     { ios: { size: "" } },
     { pool: { placement: "anywhere" } },
     { pool: { minWarmHosts: { windows: 1 } } },
+    { pool: { monthlyCapUsd: -1 } },
     { agents: { unknown: true } },
     { surprise: 1 },
     { maxLeasesPerChat: 99 },

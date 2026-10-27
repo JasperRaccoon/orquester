@@ -5,19 +5,23 @@ import {
   DEFAULT_DEVICES_SETTINGS,
   DEVICES_SETTINGS_LIMITS,
   createDefaultDeviceLeasesFile,
+  createDefaultDevicePoolStateFile,
   createDefaultDevicesSettingsFile,
   defaultDevicesSettings,
   mergeDevicesSettings,
   parseDeviceLeasesFile,
+  parseDevicePoolStateFile,
   parseDevicesSettingsFile,
   readDevicesSettings,
   serializeDeviceLeasesFile,
+  serializeDevicePoolStateFile,
   serializeDevicesSettingsFile
 } from "./devices.ts";
 import {
   androidAvdDir,
   androidSdkDir,
   deviceLeasesPath,
+  devicePoolPath,
   deviceScreenshotsDir,
   devicesDir,
   devicesHubStatePath,
@@ -36,6 +40,7 @@ test("device paths live under the daemon appdir", () => {
   assert.equal(deviceScreenshotsDir("/a"), "/a/daemon/devices/screenshots");
   assert.equal(devicesSettingsPath("/a/"), "/a/daemon/devices.json");
   assert.equal(deviceLeasesPath("/a"), "/a/daemon/device-leases.json");
+  assert.equal(devicePoolPath("/a"), "/a/daemon/device-pool.json");
 });
 
 test("settings: an empty or missing value reads as the defaults", () => {
@@ -180,4 +185,57 @@ test("leases: defaults fill optional fields; a broken outer shape throws", () =>
   assert.throws(() => parseDeviceLeasesFile({ leases: {} }));
   assert.throws(() => parseDeviceLeasesFile({ version: 2, leases: [] }));
   assert.throws(() => parseDeviceLeasesFile("nope"));
+});
+
+test("rent without asking: one pool switch; a legacy Mac switch is adopted on read and mirrored from patches", () => {
+  const legacy = readDevicesSettings({ ios: { rentWithoutAsking: true, monthlyCapUsd: 40 } });
+  assert.equal(legacy.pool.rentWithoutAsking, true);
+  assert.equal(legacy.pool.monthlyCapUsd, 40);
+  // A file that already has the pool's keeps them.
+  const both = readDevicesSettings({ ios: { rentWithoutAsking: true, monthlyCapUsd: 40 }, pool: { rentWithoutAsking: false, monthlyCapUsd: 70 } });
+  assert.equal(both.pool.rentWithoutAsking, false);
+  assert.equal(both.pool.monthlyCapUsd, 70);
+  const merged = mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true, monthlyCapUsd: 25 } });
+  assert.equal(merged.pool.rentWithoutAsking, true);
+  assert.equal(merged.pool.monthlyCapUsd, 25);
+  assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { rentWithoutAsking: true }, pool: { rentWithoutAsking: false } }).pool.rentWithoutAsking, false);
+});
+
+test("pool settings: the monthly cap defaults, clamps and falls back alone", () => {
+  assert.equal(readDevicesSettings({}).pool.monthlyCapUsd, 100);
+  assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: -5 } }).pool.monthlyCapUsd, 0);
+  assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: "x", maxHosts: 3 } }).pool.monthlyCapUsd, 100);
+  assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: "x", maxHosts: 3 } }).pool.maxHosts, 3);
+});
+
+test("device-pool.json: tolerant per section; rejected entries and unknown keys are written back", () => {
+  assert.deepEqual(parseDevicePoolStateFile({}).state, createDefaultDevicePoolStateFile().state);
+  const raw = {
+    version: 1,
+    future: { keep: true },
+    spend: { note: "an older build's key, kept" },
+    rentals: [
+      { hostId: "box:a", platform: "android", provider: "blacksmith", size: "16vcpu", hourlyUsd: 1.92, rentedAt: "2026-10-27T00:00:00.000Z", extra: 1 },
+      { hostId: 7 }
+    ],
+    learnedCapacity: [{ platform: "android", provider: "blacksmith", size: "16vcpu", capacity: 9, measuredAt: "2026-10-27T00:00:00.000Z" }, "junk"],
+    drainingHostIds: ["box:a", "box:a", 3],
+    cache: { linux: { lastWarmAt: "2026-10-20T00:00:00.000Z" }, macos: 5, other: { x: 1 } }
+  };
+  const file = parseDevicePoolStateFile(raw);
+  assert.equal(file.state.rentals.length, 1);
+  assert.equal(file.state.rentals[0]!.measured, false);
+  assert.equal(file.state.learnedCapacity[0]!.samples, 1);
+  assert.deepEqual(file.state.drainingHostIds, ["box:a"]);
+  assert.equal(file.state.cache.linux?.lastAutoWarmAt, null);
+  assert.equal(file.state.cache.macos, undefined);
+  const out = serializeDevicePoolStateFile(file);
+  assert.deepEqual(out.future, { keep: true });
+  assert.equal((out.rentals as unknown[]).length, 2);
+  assert.deepEqual((out.learnedCapacity as unknown[])[1], "junk");
+  assert.deepEqual(out.spend, { note: "an older build's key, kept" });
+  assert.deepEqual((out.cache as Record<string, unknown>).other, { x: 1 });
+  assert.equal((out.rentals as Record<string, unknown>[])[0]!.extra, 1);
+  assert.throws(() => parseDevicePoolStateFile({ version: 2 }));
+  assert.throws(() => parseDevicePoolStateFile([]));
 });

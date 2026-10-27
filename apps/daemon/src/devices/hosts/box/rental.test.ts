@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 
 import { DEFAULT_DEVICES_SETTINGS, type DevicesSettings } from "@orquester/api";
 
-import { iosRentalSpec, rentalNeedsApproval } from "./rental.ts";
+import type { StoredBox } from "@orquester/config";
+
+import { deviceHostSpend, iosRentalSpec, rentalNeedsApproval } from "./rental.ts";
 
 const settings = (ios: Partial<DevicesSettings["ios"]> = {}): DevicesSettings => ({ ...DEFAULT_DEVICES_SETTINGS, ios: { ...DEFAULT_DEVICES_SETTINGS.ios, ...ios } });
 
@@ -29,13 +31,39 @@ describe("Mac host rental", () => {
     assert.equal(iosRentalSpec(settings({ provider: "aws", size: "x" })).hourlyUsd, null);
   });
 
-  it("needs approval unless renting without asking stays within the monthly cap", () => {
+  it("needs approval unless the pool's one switch is on and the monthly cap holds (spent + committed + the new host)", () => {
     const spec = { hourlyUsd: 4.8, lifetimeMinutes: 240 };
+    const on = (cap = 100): DevicesSettings => ({ ...settings(), pool: { ...DEFAULT_DEVICES_SETTINGS.pool, rentWithoutAsking: true, monthlyCapUsd: cap } });
     assert.equal(rentalNeedsApproval(settings(), spec, 0), true);
-    assert.equal(rentalNeedsApproval(settings({ rentWithoutAsking: true }), spec, 0), false);
+    // The superseded Mac switch alone approves nothing.
+    assert.equal(rentalNeedsApproval(settings({ rentWithoutAsking: true }), spec, 0), true);
+    assert.equal(rentalNeedsApproval(on(), spec, 0), false);
     // 80.81 + 19.2 > 100.
-    assert.equal(rentalNeedsApproval(settings({ rentWithoutAsking: true }), spec, 80.81), true);
-    assert.equal(rentalNeedsApproval(settings({ rentWithoutAsking: true }), spec, 80.8), false);
-    assert.equal(rentalNeedsApproval(settings({ rentWithoutAsking: true }), { hourlyUsd: null, lifetimeMinutes: 240 }, 0), true);
+    assert.equal(rentalNeedsApproval(on(), spec, 80.81), true);
+    assert.equal(rentalNeedsApproval(on(), spec, 80.8), false);
+    // Committed cost of running hosts counts: 40 spent + 41 committed + 19.2 > 100.
+    assert.equal(rentalNeedsApproval(on(), spec, { monthUsd: 40, committedUsd: 41 }), true);
+    assert.equal(rentalNeedsApproval(on(), spec, { monthUsd: 40, committedUsd: 40 }), false);
+    assert.equal(rentalNeedsApproval(on(), { hourlyUsd: null, lifetimeMinutes: 240 }, 0), true);
+  });
+
+  it("spend: device-host boxes today, this month, and committed until their deadline", () => {
+    const now = Date.parse("2026-10-27T12:00:00.000Z");
+    const box = (over: Partial<StoredBox>): StoredBox => ({ id: "x", purpose: "device-host", state: "ready", hourlyUsd: 2, createdAt: "2026-10-27T10:00:00.000Z", ...over }) as StoredBox;
+    const spend = deviceHostSpend(
+      [
+        // Up 2 h today, 2 h left: $4 spent, $4 committed.
+        box({ deadlineAt: "2026-10-27T14:00:00.000Z" }),
+        // Ran yesterday 22:00 → today 01:00 (gone): $6 this month, $2 today, nothing committed.
+        box({ id: "y", state: "destroyed", providerRef: { runId: 1 }, createdAt: "2026-10-26T22:00:00.000Z", destroyedAt: "2026-10-27T01:00:00.000Z", deadlineAt: "2026-10-27T20:00:00.000Z" }),
+        // Not a device host.
+        box({ id: "z", purpose: "chat", deadlineAt: "2026-10-27T20:00:00.000Z" })
+      ],
+      now
+    );
+    assert.deepEqual(
+      [spend.todayUsd, spend.monthUsd, spend.committedUsd].map((usd) => Math.round(usd * 100) / 100),
+      [6, 10, 4]
+    );
   });
 });

@@ -148,6 +148,11 @@ export interface DeviceHost {
   box?(): DeviceHostBoxInfo | null;
   /** Phase 2: its pool role. */
   pool?(): DeviceHostPoolInfo | null;
+  /**
+   * Phase 2: whether the host's device caches were restored when it started (`miss`: it built them
+   * from scratch, slowly). The pool dispatches a cache warm on a miss, at most once a day.
+   */
+  cacheState?(): "hit" | "miss" | "unknown";
 
   /**
    * Install or repair what readiness names, then start the hub (and agent-device daemon). `actions`
@@ -218,6 +223,11 @@ export interface DeviceHostFactoryContext {
   addHost(host: DeviceHost): void;
   removeHost(hostId: string): void;
   logger: Pick<Console, "info" | "warn" | "error">;
+  /**
+   * Phase 2: the pool keeps this idle host for `pool.minWarmHosts`, or is draining it itself: a
+   * factory's own idle teardown leaves it alone (absent: none kept).
+   */
+  keepWarm?(hostId: string): boolean;
 }
 
 /** What renting one more host would cost, for the spend card and Settings. */
@@ -235,6 +245,21 @@ export interface DeviceRentalQuote {
   lifetimeMinutes: number;
   /** No standing approval covers it ("Rent … without asking" off, or over its cap): a `spend` card is needed. */
   needsApproval: boolean;
+  /** Phase 2: the pool's caps and spend when quoted (the device service fills it; the spend card shows it). */
+  caps?: DeviceRentalCaps;
+}
+
+/** The pool's hard caps and this month's spend, next to a rental quote. */
+export interface DeviceRentalCaps {
+  /** Rented pool hosts now, and `pool.maxHosts`. */
+  hosts: number;
+  maxHosts: number;
+  /** The pool's summed $/h now, and `pool.maxHourlyUsd`. */
+  hourlyUsd: number;
+  maxHourlyUsd: number;
+  /** Spend on device hosts this month (UTC) plus what running ones are committed to until their deadline, and `pool.monthlyCapUsd`. */
+  monthSpentUsd: number;
+  monthlyCapUsd: number;
 }
 
 /** A request to rent (or prepare) one more host for a platform. */

@@ -399,7 +399,7 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
         badge = "Host starting";
       } else {
         note = `No Mac host — opening an iPhone rents one${hourly(input.macHourlyUsd)}`;
-        badge = input.settings?.ios.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
+        badge = input.settings?.pool.rentWithoutAsking ? "Rents a Mac" : "Asks to rent";
       }
     }
     if (!reason && full) reason = fullReason;

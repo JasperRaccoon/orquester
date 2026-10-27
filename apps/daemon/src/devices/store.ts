@@ -11,18 +11,24 @@
  *
  * {@link DeviceSettingsStore}: `devices.json`. {@link DeviceLeaseStore}: `device-leases.json`, the
  * durable record of every live lease (the service rebuilds its view from it after a restart).
+ * {@link DevicePoolStore}: `device-pool.json`, the pool's spend, rentals, learned capacity, drains
+ * and cache warms.
  */
 
 import { readFile, rename } from "node:fs/promises";
 
 import {
   createDefaultDeviceLeasesFile,
+  createDefaultDevicePoolStateFile,
   createDefaultDevicesSettingsFile,
   mergeDevicesSettings,
   parseDeviceLeasesFile,
+  parseDevicePoolStateFile,
   parseDevicesSettingsFile,
   serializeDeviceLeasesFile,
+  serializeDevicePoolStateFile,
   serializeDevicesSettingsFile,
+  type DevicePoolState,
   type DevicesSettings,
   type DevicesSettingsPatch,
   type StoredDeviceLease
@@ -209,5 +215,47 @@ export class DeviceLeaseStore extends TolerantJsonStore {
     const snapshot = this.snapshot;
     if (!snapshot) return this.flush();
     return this.queueWrite(() => serializeDeviceLeasesFile({ version: 1, leases: [...snapshot()], rejected: this.rejected, extra: this.extra }));
+  }
+}
+
+/**
+ * `device-pool.json`: the pool's own record (spend, rentals, learned capacity, drains, cache warms).
+ * `file: null` keeps it in memory only (a service built without one).
+ */
+export class DevicePoolStore extends TolerantJsonStore {
+  private file_ = createDefaultDevicePoolStateFile();
+  private readonly memoryOnly: boolean;
+
+  constructor(options: { file: string | null; logger?: Logger }) {
+    super(options.file ?? "device-pool.json", options.logger ?? console, "device pool records");
+    this.memoryOnly = options.file === null;
+  }
+
+  /** Read the file; never throws. The state is empty when it is missing or unusable. */
+  async load(): Promise<DevicePoolState> {
+    if (this.memoryOnly) {
+      this.loaded = true;
+      return this.state();
+    }
+    await this.read(
+      (value) => {
+        this.file_ = parseDevicePoolStateFile(value);
+      },
+      () => {
+        this.file_ = createDefaultDevicePoolStateFile();
+      }
+    );
+    return this.state();
+  }
+
+  /** The live state: change it in place, then {@link persist}. */
+  state(): DevicePoolState {
+    return this.file_.state;
+  }
+
+  /** Queue a write of the current state. Never rejects. */
+  persist(): Promise<void> {
+    if (this.memoryOnly) return this.flush();
+    return this.queueWrite(() => serializeDevicePoolStateFile(this.file_));
   }
 }

@@ -1032,6 +1032,11 @@ export class ApiClient {
    * loads (`deviceRoutes.hub(...)` MJPEG, `deviceRoutes.screenshot(...)`), or null off HTTP. The
    * daemon accepts `?token=` on exactly those routes and never forwards it.
    */
+  /** A lease's downscaled JPEG thumbnail (`deviceRoutes.thumbnail`; GET, `no-store`) as an authenticated media URL, or null off HTTP. */
+  deviceThumbnailUrl(leaseId: string, width?: number): string | null {
+    return this.deviceMediaUrl(deviceRoutes.thumbnail(leaseId, width));
+  }
+
   deviceMediaUrl(path: string): string | null {
     if (this.transportKind !== "http") {
       return null;
