@@ -302,7 +302,8 @@ const deviceHandle = z
   .max(300)
   .optional()
   .describe("A device from open_device or list_devices; default: this chat's only device.");
-const point = z.object({ x: z.number().min(0).max(10_000), y: z.number().min(0).max(10_000) }).strict();
+/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). */
+const point = () => z.object({ x: z.number().min(0).max(10_000), y: z.number().min(0).max(10_000) }).strict();
 
 const deviceActionInput = {
   device: deviceHandle,
@@ -313,8 +314,8 @@ const deviceActionInput = {
   text: z.string().max(DEVICE_TEXT_MAX_CHARS).optional(),
   key: z.enum(DEVICE_PRESS_KEYS).optional(),
   direction: z.enum(DEVICE_DIRECTIONS as unknown as ["up", "down", "left", "right"]).optional(),
-  from: point.optional(),
-  to: point.optional(),
+  from: point().optional(),
+  to: point().optional(),
   app: APP_ID.optional().describe("Bundle id or package."),
   url: z.string().trim().min(1).max(2_000).optional(),
   seconds: z.number().int().min(1).max(DEVICE_LOGS_MAX_SECONDS).optional(),

@@ -1,5 +1,5 @@
 {
-  "sourceReference": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+  "sourceReference": "e866b62bd0d197200683dcdd61e38d1302235b4e",
   "gates": [
     {
       "command": "pnpm check",
@@ -88,5 +88,53 @@
     "runningOriginalSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
     "byteEqualToOriginalProcess": true,
     "syntheticTokenExists": false
-  }
+  },
+  "postSchemaGates": [
+    {
+      "command": "pnpm check:changed --no-cache --base 9b6308a7",
+      "result": "PASS",
+      "scope": "Five MCP test files and affected dependent typechecks; previous cleanup already passed broader changed gate"
+    },
+    {
+      "command": "pnpm check",
+      "result": "PASS",
+      "scope": "All eight workspace packages and Go vet"
+    },
+    {
+      "command": "focused MCP controls and two restored mutation controls",
+      "result": "PASS",
+      "details": "incoming-schema-refs.json"
+    },
+    {
+      "command": "pnpm build",
+      "result": "PASS",
+      "scope": "All package builds, web/desktop and Linux x64 AppImage; native modules restored for Node before final full suite",
+      "artifact": {
+        "path": "apps/desktop/release/Orquester-0.0.0.AppImage",
+        "bytes": 572223712,
+        "sha256": "5dcb1a38a521517f9a6ae93079d0892431466bfed3979763deb696d623c8ba35"
+      }
+    },
+    {
+      "command": "node scripts/ensure-node-native.mjs",
+      "result": "PASS",
+      "scope": "Explicit verification after final production build"
+    },
+    {
+      "command": "pnpm test",
+      "result": "PASS",
+      "wallSeconds": 518.8344938910013,
+      "nodeTotals": {
+        "tests": 11442,
+        "failed": 0,
+        "passed": 11410,
+        "cancelled": 0,
+        "skipped": 32,
+        "todo": 0
+      },
+      "sourceHashesUnchanged": true,
+      "headAtMeasurement": "4c10170dcf661c6458176e8772ea528e6d8cf274",
+      "pendingMerge": "e866b62bd0d197200683dcdd61e38d1302235b4e"
+    }
+  ]
 }

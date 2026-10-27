@@ -1,16 +1,18 @@
 {
-  "baselineCommit": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
-  "sourceDeclarations": 11540,
-  "audited": 11540,
+  "baselineCommit": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+  "sourceDeclarations": 11542,
+  "audited": 11542,
   "missing": 0,
   "counts": {
     "KEEP": 9816,
-    "CONSOLIDATE": 254,
+    "CONSOLIDATE": 257,
     "DELETE": 188,
-    "REWRITE": 1004,
+    "REWRITE": 1003,
     "OPTIMIZE": 278
   },
-  "incomingChangedOrAdded": 28,
-  "incomingAffectedFiles": 11,
-  "counting": "Source declarations; parameterized families counted once. A family with retained and deleted vectors is REWRITE; expanded-case outcomes remain in the ledgers. Consolidation includes donors and surviving owners. Subsequent actions for the same unchanged identity use DELETE > CONSOLIDATE > REWRITE > OPTIMIZE > KEEP; modified upstream bodies use their new audit. Detailed evidence and earlier phases remain in referenced area ledgers."
+  "incomingChangedOrAdded": 2,
+  "incomingAffectedFiles": 1,
+  "counting": "Source declarations; parameterized families counted once. A family with retained and deleted vectors is REWRITE; expanded-case outcomes remain in the ledgers. Consolidation includes donors and surviving owners. Subsequent actions for the same unchanged identity use DELETE > CONSOLIDATE > REWRITE > OPTIMIZE > KEEP; modified upstream bodies use their new audit. Detailed evidence and earlier phases remain in referenced area ledgers. Latest schema integration adds two donor declarations and changes one existing owner from REWRITE to CONSOLIDATE; it does not add the owner again.",
+  "incomingExistingOwnerOverrides": 1,
+  "previousReference": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f"
 }

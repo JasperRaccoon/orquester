@@ -151,7 +151,8 @@ function pickWords(report: WorkReport): Record<string, unknown> {
   return { ...(lastTurn ? { lastTurn } : {}), ...(reply !== undefined ? { reply } : {}), ...(replyTruncated ? { replyTruncated } : {}), ...(emptyReply ? { emptyReply, hint } : {}), ...(error !== undefined ? { error } : {}) };
 }
 
-const sessionIdField = z.string().min(1);
+/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). */
+const sessionIdField = () => z.string().min(1);
 
 export const waitForSessionTool = defineTool({
   name: "wait_for_session",
@@ -160,8 +161,8 @@ export const waitForSessionTool = defineTool({
     "Block until a session (sessionId, any of sessionIds, a project's, or any) needs attention (question, approval, plan, finished turn, error) after `after` (default now); pass the result's `cursor` back as `after`. Never poll. A one-session result adds its `state` and latest `reply`.",
   chatNote: "Without `after`, sessionId(s) return once one is not working (at once if one already is), with its final reply. Default: this chat's project.",
   input: {
-    sessionId: sessionIdField.optional(),
-    sessionIds: z.array(sessionIdField).min(1).max(MAX_WAIT_SESSIONS).optional(),
+    sessionId: sessionIdField().optional(),
+    sessionIds: z.array(sessionIdField()).min(1).max(MAX_WAIT_SESSIONS).optional(),
     project: z.string().optional().describe("Path or \"workspace/project\"."),
     after: z.string().optional().describe("ISO time: the last result's cursor."),
     timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(120)

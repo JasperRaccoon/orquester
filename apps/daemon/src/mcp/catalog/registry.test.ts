@@ -40,6 +40,15 @@ function descriptions(value: unknown): string[] {
   ];
 }
 
+/** Supported clients need self-contained schemas, including nested object and array fields. */
+function schemaRefs(value: unknown, path = ""): string[] {
+  if (Array.isArray(value)) return value.flatMap((item, index) => schemaRefs(item, `${path}[${index}]`));
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) =>
+    key === "$ref" ? [`${path || "(root)"} → ${String(child)}`] : schemaRefs(child, `${path}.${key}`)
+  );
+}
+
 async function externalCatalog(): Promise<{ tools: Tool[]; instructions: string; version: string }> {
   const app = Fastify();
   registerMcp(app, { createApi: () => new FakeDaemonApi() });
@@ -97,6 +106,7 @@ test("tools/list and instructions preserve audience names, MCP annotations and c
   for (const [audience, rows] of [["external", external.tools], ["chat", chat]] as const) {
     const allowed = new Set(rows.map((tool) => tool.name));
     for (const row of rows) {
+      assert.deepEqual(schemaRefs(row.inputSchema), [], `${audience} ${row.name}: unsupported schema references`);
       const bytes = Buffer.byteLength(JSON.stringify(row), "utf8");
       assert.ok(bytes <= (TOOL_TARGETS[row.name] ?? 3_000), `${audience} ${row.name}: ${bytes} bytes`);
       assert.ok(Buffer.byteLength(row.description ?? "", "utf8") <= (["html_render", "html_preview"].includes(row.name) ? 2_000 : 1_000), `${audience} ${row.name}: description`);

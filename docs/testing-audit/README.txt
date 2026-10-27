@@ -3,26 +3,27 @@ TEST SUITE CLEANUP — FINAL INTEGRATION REPORT
 The repository-wide cleanup is implemented. The integrated source passes the
 full measured suite, typechecks, the changed-files gate and the web/desktop
 production build. A second official pnpm test confirmation also passes; performance-results.json
-records the measurements and delivery.json records Git integration. Earlier
+records the measurements and delivery.json records Git integration.
+The final post-e866 integration also passes the complete suite and build. Earlier
 area reports are phase records: their pending-validation notes are superseded by
 validation-results.json and this final report, not claims of additional runs.
 
 SCOPE AND COUNTING
 
 All initial tests and incoming tests were read with their production owners.
-Remote knowledge-retrieval, Devices and performance changes were merged and
+Remote knowledge-retrieval, Devices, performance and MCP schema changes were merged and
 re-audited rather than overwriting either feature work or the cleanup.
 
-Latest upstream comparison: ee5c32495c88e39ff8cfef73dce8d43e59f4483f.
+Latest upstream comparison: e866b62bd0d197200683dcdd61e38d1302235b4e.
                     Upstream       Final        Change
-Test/check/Go files     1,090       1,080           -10
-Test source LOC       297,171     291,730        -5,441
-Source declarations    11,540      11,175          -365
+Test/check/Go files     1,091       1,080           -11
+Test source LOC       297,223     291,740        -5,483
+Source declarations    11,542      11,175          -367
 
-Effective outcomes across all 11,540 upstream declarations/families:
-KEEP 9,816; DELETE 188; REWRITE 1,004; OPTIMIZE 278; CONSOLIDATE 254.
+Effective outcomes across all 11,542 upstream declarations/families:
+KEEP 9,816; DELETE 188; REWRITE 1,003; OPTIMIZE 278; CONSOLIDATE 257.
 A parameterized family counts once; mixed deleted/retained vectors are REWRITE.
-CONSOLIDATE counts donors and surviving owners, not 254 deleted tests. Runtime
+CONSOLIDATE counts donors and surviving owners, not 257 deleted tests. Runtime
 Node counts differ because nested/parameterized cases expand and root-sensitive
 fixtures execute selected child processes. Do not add overlapping phase totals.
 
@@ -51,7 +52,9 @@ TEST-BY-TEST EVIDENCE
 - initial-* and devices-* summaries describe earlier source revisions only.
   incoming-* covers retrieval integration; devices-* covers Devices integration;
   dead-seams-* and final-aliases-* cover final seam/caller reviews; perf-* covers
-  the final ee5c3249 changes. final-review.md records independent integration
+  the ee5c3249 changes. incoming-schema-refs.* records final e866b62b consolidation.
+  schema-effective-summary.json preserves the previous counts and exact delta.
+  final-review.md records independent integration
   review and the TMPDIR portability correction.
 
 The indexes are plain gzip-compressed JSON Lines; for example:
@@ -66,10 +69,11 @@ real process ownership and critical UI behavior remain with their lowest stable
 owner. No required gate was removed or important failure hidden with a skip or
 retry. Default four-worker isolation and ten-minute test timeout are unchanged.
 
-Removed ten test files, including private formatter/geometry probes, secret-text
+Removed eleven test files, including private formatter/geometry probes, secret-text
 unit duplicates and a newly incoming test-only fake-box seam. Surviving public
 owners are linked in their ledgers. Deleted five orphan Android/AVD fixtures
-(817 LOC). No snapshot or test configuration needed removal. Dead fetch/clock/
+(817 LOC). No snapshot or test configuration needed removal. No existing dependency became
+unused; the independent decoder described below is the one added development dependency. Dead fetch/clock/
 timing/cache/backend/root/stream options, helper exports and wrappers were removed
 after checking production callers. Actual native ports, GitRunner, credential
 watch/read, the OIDC domain clock, documented preparers and live UI adapters stay.
@@ -94,12 +98,20 @@ Legitimate defects exposed during the audit were fixed at their owners:
   finite own-key results without changing ordinary layout output.
 Upstream's fuller tar input-drain/producer-EOF correction is preserved; an earlier
 local --ignore-zeros workaround and redundant padding case were superseded.
+The final incoming MCP fix constructs equivalent fresh schemas so supported clients
+receive inline array/object shapes. Its two new tests were consolidated into the
+existing actual chat/external tools-list owner; both schema-reference mutants
+failed at the intended public wire assertion and both restored controls passed.
 No product behavior was changed merely to preserve an invalid test.
 
 MEASURED PERFORMANCE
 
-Matching latest upstream: 528.815 s (8m48.8s), four fixture failures, 40 skips.
-Final matched full suite: 524.133 s (8m44.1s), zero failures, 32 skips.
+Final post-e866 full pnpm test: 518.834 s; 11,410 Node pass, zero failures,
+32 existing skips, plus successful Go and standalone checks. There is no separate
+e866 full-suite baseline: the matching comparison below is explicitly pre-schema.
+
+Matching pre-schema reference ee5c3249: 528.815 s (8m48.8s), four fixture failures, 40 skips.
+Pre-schema final matched full suite: 524.133 s (8m44.1s), zero failures, 32 skips.
 Observed difference: 4.682 s / 0.885%. This is within ordinary variance and does
 not establish a reliable overall or hosted-CI speedup. No CI job was measured.
 
@@ -127,7 +139,7 @@ noise; no speedup is claimed. V8 compile-cache and six-worker experiments were
 rejected: no material benefit, additional cache work or CPU cost. No runner
 complexity was added to report a misleading improvement.
 
-Slowest latest-reference file harnesses: HTML browser 28.116 s; device cache
+Slowest measured-reference file harnesses: HTML browser 28.116 s; device cache
 20.125 s; Grok replay 18.293 s; Grok lifecycle 14.124 s; sandbox 12.211 s.
 Slowest final harnesses: HTML browser 32.269 s; Grok lifecycle 14.704 s; knowledge
 search performance 8.729 s; Android box host 8.681 s; UI history 8.019 s.
@@ -157,13 +169,15 @@ verified for Node after Electron packaging. Bundler/platform metadata warnings
 were nonfatal and unrelated. Emitted artifacts remain ignored, not committed.
 PASS: completed full matching suite, all Go/standalone/package/root scripts.
 PASS: focused controls, mutation experiments and static/caller/diff reviews.
-The second official pnpm test passed in 522.517 s with the same 11,410 pass /
+The pre-schema second official pnpm test passed in 522.517 s with the same 11,410 pass /
 32 skip / zero failure Node totals; source hashes remained unchanged. Its 1.616 s
 spread from the first final run reinforces the limits on the global speed claim.
+The final post-schema changed gate, full pnpm check, production build and full
+pnpm test also passed. Native modules and source hashes were verified unchanged.
 Exact command/results and artifact hashes are in validation-results.json; exact
 focused command lists and mutant failure witnesses are in subsystem ledgers.
 
-The latest reference's four failing contracts were retained: three checkpoint
+The measured reference's four failing contracts were retained: three checkpoint
 capture/prune/privacy cases and one whole-profile rollback case used filesystem modes
 that uid 0 bypasses. Checkpoint failures now use real rejecting Git hooks/ref locks instead of mode
 bits; profile rollback executes the same native write failure as an unprivileged
@@ -210,4 +224,5 @@ merge is 9b6308a714c77d89baf534e7476d1db912acb186. Report/confirmation and push
 status are recorded in delivery.json and the final chat reply. Fetch and
 integration use ordinary merges; no history rewrite, force push or protection
 bypass is authorized. The final chat reply records the actual push result and
-remote-HEAD verification. No deployment is part of this task.
+remote-HEAD verification. The additional e866b62b merge preserves the schema fix
+and consolidates its two duplicate catalog setups. No deployment is part of this task.
