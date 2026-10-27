@@ -145,6 +145,23 @@ test("merges survive a reload of myKG's graph; a merge whose concepts are gone i
   assert.equal(graph.counts().nodes, 4);
 });
 
+test("the content revision moves when the files loaded or the merges in effect change, not on a reload of the same files", async () => {
+  const { graph } = await fixture();
+  const first = graph.contentRevision();
+  const loads = graph.loadRevision();
+  await loadGraph(graph, NODES, EDGES);
+  assert.equal(graph.loadRevision(), loads + 1);
+  assert.equal(graph.contentRevision(), first, "the same files");
+  await loadGraph(graph, [...NODES, node("tool-extra", "Extra", [`${eA}.md`])], EDGES);
+  assert.equal(graph.contentRevision(), first + 1);
+  graph.setConceptMerges([MERGE]);
+  assert.equal(graph.contentRevision(), first + 2, "a merge took effect");
+  graph.setConceptMerges([MERGE]);
+  assert.equal(graph.contentRevision(), first + 2, "the same merges");
+  graph.setConceptMerges([{ ...MERGE, into: "tactic-nowhere" }]);
+  assert.equal(graph.contentRevision(), first + 3, "none in effect any more");
+});
+
 test("merges apply in order: a concept claimed by an earlier merge stays there; types never mix", async () => {
   const { graph } = await fixture();
   graph.setConceptMerges([

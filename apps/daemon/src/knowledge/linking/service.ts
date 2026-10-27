@@ -259,6 +259,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private orphansClosing: Promise<void> = Promise.resolve();
   /** A graph load since the last pair-check round. */
   private pairRoundDue = false;
+  /** What the last link-gap scan read (the vectors' generation and model, the graph's content): an unchanged one is not scanned again. */
+  private lastGapScan: string | null = null;
 
   constructor(options: KnowledgeLinkingOptions) {
     this.opts = options;
@@ -1091,6 +1093,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const index = view.vectors();
     const thresholds = index.thresholds();
     if (!thresholds) return;
+    // Nothing the scan reads moved since the last one (the vectors and the graph's content): it
+    // would find the same pairs, all recorded already. A new scan runs after either moves.
+    const graphRevision = view.graphRevision?.() ?? null;
+    const key = graphRevision === null ? null : JSON.stringify([index.modelId(), index.generation(), thresholds.strong, graphRevision]);
+    if (key !== null && key === this.lastGapScan) return;
     const store = this.opts.store;
     const ids = store.listMeta().filter((meta) => meta.linkState === "linked").map((meta) => meta.id);
     const added = await queueLinkGaps(state.relink, {
@@ -1101,6 +1108,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       minimum: thresholds.strong
     });
     if (added.length > 0) this.opts.logger?.info?.("knowledge linking: link gaps queued for re-linking", { entries: added.length });
+    this.lastGapScan = key;
     this.persist();
   }
 

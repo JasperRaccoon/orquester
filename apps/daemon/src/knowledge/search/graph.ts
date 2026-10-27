@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
@@ -212,8 +213,9 @@ function parseEdge(raw: unknown): GraphEdge | null {
   return parsed;
 }
 
-async function readJsonl(path: string, logger: KnowledgeLogger, what: string): Promise<unknown[]> {
+async function readJsonl(path: string, logger: KnowledgeLogger, what: string, digest?: ReturnType<typeof createHash>): Promise<unknown[]> {
   const text = await readFile(path, "utf8");
+  digest?.update(`${text.length}\u0000`).update(text);
   const out: unknown[] = [];
   let bad = 0;
   for (const line of text.split("\n")) {
@@ -653,6 +655,9 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private appliedLoad = 0;
   /** Moves with every snapshot swapped in (a load, or the overlay re-applied). */
   private applied = 0;
+  /** What myKG's files held at the last load applied (a digest), and a revision that moves only when they, or the merges in effect, change. */
+  private baseDigest: string | null = null;
+  private content = 0;
   private readonly getMeta: (id: string) => KnowledgeEntryMeta | null;
   private readonly logger: KnowledgeLogger;
 
@@ -667,8 +672,11 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     const dir = (await exists(join(outputDir, "nodes.jsonl"))) ? outputDir : join(outputDir, "output");
     const nodesPath = join(dir, "nodes.jsonl");
     const edgesPath = join(dir, "edges.jsonl");
-    const nodes = await readJsonl(nodesPath, this.logger, "nodes.jsonl");
-    const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl") : [];
+    const digest = createHash("sha256");
+    const nodes = await readJsonl(nodesPath, this.logger, "nodes.jsonl", digest);
+    digest.update("\u0001");
+    const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl", digest) : [];
+    const contentDigest = digest.digest("hex");
     const { base, skipped } = parseGraph(nodes, edges);
     if (skipped > 0) this.logger.warn(`knowledge: skipped ${skipped} graph record(s) (unreadable, repeated, or an edge to an unknown concept)`);
     if (seq < this.appliedLoad) {
@@ -677,6 +685,10 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     }
     this.base = base;
     this.appliedLoad = seq;
+    if (contentDigest !== this.baseDigest) {
+      this.baseDigest = contentDigest;
+      this.content += 1;
+    }
     this.swap(buildGraphSnapshot(base, this.merges));
     for (const listener of this.loadListeners) {
       try {
@@ -699,7 +711,9 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
    */
   setConceptMerges(merges: readonly ConceptMergeOverlay[]): void {
     this.merges = [...merges];
+    const before = JSON.stringify(this.snapshot.merges);
     this.swap(buildGraphSnapshot(this.base, this.merges));
+    if (JSON.stringify(this.snapshot.merges) !== before) this.content += 1;
   }
 
   /** The merges in effect on the current graph. */
@@ -715,6 +729,14 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   /** Moves with every load swapped in (not with the overlay). */
   loadRevision(): number {
     return this.appliedLoad;
+  }
+
+  /**
+   * Moves only when what the graph says may have changed: a load of files that differ from the
+   * last ones loaded, or a change of the merges in effect (a reload of the same files does not).
+   */
+  contentRevision(): number {
+    return this.content;
   }
 
   /** Called after every load swapped in a graph. */

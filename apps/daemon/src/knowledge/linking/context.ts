@@ -62,6 +62,11 @@ export interface KnowledgeLinkGraphView {
   conceptsOf(entryId: string): readonly KnowledgeConceptRef[];
   /** Concept ids joined to this one by a `contradicts` edge, either direction. */
   contradicting(conceptId: string): readonly string[];
+  /**
+   * Moves whenever an entry's concepts may have changed (`KnowledgeGraph.contentRevision`); absent:
+   * unknown (every link-gap scan runs).
+   */
+  graphRevision?(): number;
 }
 
 /** Whether neighbour context can be built: an embedder is loaded. */

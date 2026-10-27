@@ -156,6 +156,7 @@ export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, gr
   const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
   return {
     vectors: () => search.vectorIndex(),
+    graphRevision: () => graph.contentRevision(),
     conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
     // The graph's adjacency, not a concept detail (which also ranks similar concepts): read per concept of every linked entry.
     contradicting: (conceptId) => {

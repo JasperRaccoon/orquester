@@ -1246,6 +1246,38 @@ async function tempAppdir(): Promise<string> {
   return appdir;
 }
 
+describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_000 }, () => {
+  it("a graph load that changed nothing the scan reads (the vectors, the graph's content) is not scanned again", async () => {
+    const graph = fakeGraphView();
+    let revision = 1;
+    const view: KnowledgeLinkGraphView = { ...graph.view, graphRevision: () => revision };
+    const h = await harness({ extra: { graphView: view } });
+    const ids = [ID(1), ID(2), ID(3)];
+    graph.ready(ids);
+    graph.concepts.set(ID(3), [{ id: "tool-x", type: "Tool", name: "X" }]);
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    const pairs = async () => Object.keys((await readState(h)).relink.gapPairs).sort();
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`]);
+    // What a scan would read now differs, but neither the vectors nor the graph's revision moved
+    // (so the scan is known to find what it found): the gap run's load scans nothing.
+    graph.concepts.set(ID(1), [{ id: "tool-y", type: "Tool", name: "Y" }]);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.entries, 3, "the gap run");
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`], "not scanned again");
+    // The graph's content moves: the next load scans.
+    revision += 1;
+    h.service.entriesChanged(await h.store.put(ID(4), "body of 4"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    assert.deepEqual(await pairs(), [`${ID(1)} ${ID(2)}`, `${ID(1)} ${ID(3)}`, `${ID(2)} ${ID(3)}`]);
+    await h.service.stop();
+  });
+});
+
 describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { timeout: 120_000 }, () => {
   it("after a graph load, link gaps are queued once; a pair-check round answers close pairs and counts its tokens", async () => {
     const graph = fakeGraphView();
