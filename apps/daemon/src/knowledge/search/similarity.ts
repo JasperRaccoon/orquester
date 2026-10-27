@@ -191,6 +191,16 @@ interface GraphStructure {
   degree: Int32Array;
   edges: KnowledgeSimilarityEdge[];
   clusters: KnowledgeSimilarityCluster[];
+  /**
+   * Per cluster: the entries an LLM label was named from (`clusters[i].label` is that label), or
+   * null for a concept label. Checked again whenever the graph is served: a label never outlives
+   * its visibility ({@link KnowledgeSimilarity.clusterLabel}).
+   */
+  labelSources: (readonly string[] | null)[];
+  /** Per cluster: the concept label, shown instead of an LLM label one of whose sources is hidden. */
+  conceptLabels: (string | null)[];
+  /** Clusters drawn without an LLM label (member ids, most central first): asked for by the default unscoped draw. */
+  unnamed: string[][];
 }
 
 export function dot(a: Float32Array, b: Float32Array): number {
@@ -216,6 +226,9 @@ export function scopeKey(scope: KnowledgeScope): string {
   const sorted = (set: ReadonlySet<string> | null) => (set ? [...set].sort() : null);
   return JSON.stringify([sorted(scope.canSee), sorted(scope.filter), scope.unfiled, [...scope.known].sort()]);
 }
+
+/** Whether a scope lets every entry through: `all` visibility, no narrowing. */
+const unscoped = (scope: KnowledgeScope): boolean => scope.canSee === null && scope.filter === null && scope.unfiled;
 
 class UnionFind {
   private readonly parent: Int32Array;
@@ -297,9 +310,15 @@ export class KnowledgeSimilarity {
     this.now = options.now ?? Date.now;
   }
 
+  /** Moves whenever an LLM cluster name is added (part of every cache over the graph's labels); null when none are connected. */
+  clusterLabelsRevision(): number | null {
+    return this.clusterNames?.revision() ?? null;
+  }
+
   /**
-   * Clusters of 3+ entries take the LLM's topic name from `port` when it has one (else their concept
-   * label, as without it), and ask it for the ones it lacks (`cluster-labels.ts`). Null disconnects.
+   * Clusters of 3+ entries take the LLM's topic name from `port` when it has one and the caller sees
+   * every entry it was named from (else their concept label, as without it); the unscoped default
+   * draw asks it for the ones it lacks (`cluster-labels.ts`). Null disconnects.
    */
   connectClusterLabels(port: KnowledgeClusterLabelsPort | null): void {
     this.clusterNames = port;
@@ -541,7 +560,7 @@ export class KnowledgeSimilarity {
       .map(({ concept }) => ({ ...concept }));
     const structure = this.latestStructure(scope, vectors.index);
     if (!structure) this.drawInBackground(scope, vectors.index);
-    return { newConcepts, cluster: structure ? clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()) : null };
+    return { newConcepts, cluster: structure ? this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()), scope) : null };
   }
 
   /**
@@ -562,7 +581,7 @@ export class KnowledgeSimilarity {
     const exclude = new Set(entryIds);
     for (const id of entryIds) {
       const own = vectors.index.entryVector(id);
-      if (own) out.set(id, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, exclude));
+      if (own) out.set(id, this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, exclude), scope));
     }
     return out;
   }
@@ -727,6 +746,12 @@ export class KnowledgeSimilarity {
     }
     const built = await cached.structure;
     this.remember(scope, vectors.index, cached.seq, built);
+    // Names are asked for from the unscoped default draw only (the one linking's rounds refresh):
+    // a scoped draw, or another `k` or `limit`, cuts the clusters differently.
+    const names = this.clusterNames;
+    if (names && built.unnamed.length > 0 && unscoped(scope) && k === KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_K && limit === KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_NODES) {
+      names.request(built.unnamed);
+    }
 
     // An entry deleted or moved out of view while the graph was computed is left out, with its edges.
     const nodes = built.ids.flatMap((id, i) => {
@@ -750,7 +775,10 @@ export class KnowledgeSimilarity {
     return {
       nodes,
       edges: built.edges.filter((edge) => !drawn || (drawn.has(edge.from) && drawn.has(edge.to))).map((edge) => ({ ...edge })),
-      clusters: built.clusters.map((cluster) => (cluster.concepts ? { ...cluster, concepts: cluster.concepts.map((c) => ({ ...c })) } : { ...cluster })),
+      clusters: built.clusters.map((cluster, i) => {
+        const label = this.clusterLabel(built, i, scope);
+        return cluster.concepts ? { ...cluster, label, concepts: cluster.concepts.map((c) => ({ ...c })) } : { ...cluster, label };
+      }),
       truncated: embedded.length > limit,
       totals: { entries: visible.length, embedded: embedded.length }
     };
@@ -900,7 +928,8 @@ export class KnowledgeSimilarity {
     });
     await pause();
     const named = clusterLabels(groups, drawn, concepts);
-    // LLM topic names where there are some (`connectClusterLabels`); the rest are asked for.
+    // LLM topic names where there are some (`connectClusterLabels`), with the entries they were named
+    // from; the rest are asked for by `graph` (the unscoped default draw only).
     const names = this.clusterNames;
     const membersOf = (group: readonly number[]): string[] => [...group].sort((x, y) => degree[y]! - degree[x]! || x - y).map((i) => drawn[i]!.id);
     const hidden = (entryId: string): boolean => {
@@ -908,18 +937,20 @@ export class KnowledgeSimilarity {
       return meta !== null && meta !== undefined && !entryInScope(meta, scope);
     };
     const unnamed: string[][] = [];
+    const labelSources: (readonly string[] | null)[] = groups.map(() => null);
     const clusters: KnowledgeSimilarityCluster[] = groups.map((group, id) => {
       const { concepts: top } = named[id]!;
       let label = named[id]!.label;
       if (names) {
         const members = membersOf(group);
         const topic = names.labelFor(members, hidden);
-        if (topic !== null) label = topic;
-        else unnamed.push(members);
+        if (topic !== null) {
+          label = topic.label;
+          labelSources[id] = topic.sources;
+        } else unnamed.push(members);
       }
       return top.length > 0 ? { id, size: group.length, label, concepts: top } : { id, size: group.length, label };
     });
-    if (names && unnamed.length > 0) names.request(unnamed);
 
     return {
       ids: drawn.map((meta) => meta.id),
@@ -939,8 +970,33 @@ export class KnowledgeSimilarity {
             ...(edge.contradicts ? { contradicts: true } : {})
           };
         }),
-      clusters
+      clusters,
+      labelSources,
+      conceptLabels: named.map((item) => item.label),
+      unnamed
     };
+  }
+
+  /**
+   * A drawn cluster's label as `scope` may see it: an LLM label only while every entry it was named
+   * from is still visible (an entry may have moved out of view since the graph was drawn), else the
+   * concept label.
+   */
+  private clusterLabel(structure: GraphStructure, cluster: number, scope: KnowledgeScope): string | null {
+    const label = structure.clusters[cluster]!.label;
+    const sources = structure.labelSources[cluster];
+    if (!sources) return label;
+    for (const id of sources) {
+      const meta = this.store.getMeta(id);
+      if (meta && !entryInScope(meta, scope)) return structure.conceptLabels[cluster] ?? null;
+    }
+    return label;
+  }
+
+  /** A cluster as entries name it ({@link clusterOf}'s), labelled as `scope` may see it; null for a singleton or none. */
+  private clusterRef(structure: GraphStructure, cluster: number, scope: KnowledgeScope): KnowledgeClusterRef | null {
+    const found = cluster >= 0 ? structure.clusters[cluster] : undefined;
+    return found && found.size >= 2 ? { label: this.clusterLabel(structure, cluster, scope), size: found.size } : null;
   }
 
 }
@@ -1047,9 +1103,9 @@ function clusterLabels(
 }
 
 /**
- * The entry's cluster in `structure`: its own when drawn, else the one most of its nearest drawn
- * neighbours (cosine ≥ `minimum`, up to {@link CLUSTER_NEIGHBOURS}, `exclude` aside) are in, the
- * nearest's on a tie. Null for a singleton or no neighbour.
+ * The entry's cluster in `structure` (its index; -1 for none): its own when drawn, else the one
+ * most of its nearest drawn neighbours (cosine ≥ `minimum`, up to {@link CLUSTER_NEIGHBOURS},
+ * `exclude` aside) are in, the nearest's on a tie.
  */
 function clusterOf(
   structure: GraphStructure,
@@ -1058,7 +1114,7 @@ function clusterOf(
   index: KnowledgeVectorIndex,
   minimum: number,
   exclude: ReadonlySet<string>
-): KnowledgeClusterRef | null {
+): number {
   let cluster = structure.position.get(id) ?? -1;
   if (cluster >= 0) cluster = structure.cluster[cluster]!;
   else {
@@ -1081,8 +1137,7 @@ function clusterOf(
       }
     }
   }
-  const found = cluster >= 0 ? structure.clusters[cluster] : undefined;
-  return found && found.size >= 2 ? { label: found.label, size: found.size } : null;
+  return cluster;
 }
 
 /**

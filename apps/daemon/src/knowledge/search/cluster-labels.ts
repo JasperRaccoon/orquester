@@ -10,8 +10,10 @@
  *
  * - The port similarity reads ({@link KnowledgeClusterLabelsPort}): `labelFor(members)` answers the
  *   label of a named cluster whose members are at least {@link CLUSTER_LABEL_REUSE} the same (both
- *   ways), so a label stays as entries are added; `request(clusters)` queues the clusters it drew
- *   without one. A label is never shown to a caller who cannot see every entry it was named from.
+ *   ways), so a label stays as entries are added, with the entries it was named from;
+ *   `request(clusters)` queues the clusters the unscoped default draw has without one (new work
+ *   only for a cluster never queued before). A label is never shown to a caller who cannot see
+ *   every entry it was named from (similarity checks again whenever it serves a drawn graph).
  * - Answers: exactly `{label}`, ≤ {@link CLUSTER_LABEL_MAX_CHARS} characters, 2–5 words, no quotes,
  *   not an author's name or handle, nor a product, tool or other brand name alone (the cluster's
  *   entity concepts; {@link validateClusterLabelAnswer}).
@@ -42,6 +44,8 @@ export const CLUSTER_LABEL_REUSE = 0.8;
 export const CLUSTER_LABEL_MAX_CHARS = 40;
 /** Clusters waiting for a name at most (the oldest go first). */
 const PENDING_MAX = 64;
+/** Cluster keys ever queued, remembered (the least recent go first) so one evicted and drawn again is no new work. */
+const QUEUED_KEYS_MAX = 1_024;
 const TITLES_MAX = 12;
 const CONCEPTS_MAX = 12;
 
@@ -49,10 +53,10 @@ const CONCEPTS_MAX = 12;
 export interface KnowledgeClusterLabelsPort {
   /**
    * The LLM label of the cluster with these members (or one at least {@link CLUSTER_LABEL_REUSE}
-   * the same), or null. `hidden(id)`: the entry exists but the caller cannot see it — a label named
-   * from such an entry is not shown.
+   * the same) and the entries it was named from, or null. `hidden(id)`: the entry exists but the
+   * caller cannot see it — a label named from such an entry is not shown.
    */
-  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): string | null;
+  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): { label: string; sources: readonly string[] } | null;
   /** Clusters drawn (member ids, most central first) that may need a name: queued when they have none. */
   request(clusters: readonly (readonly string[])[]): void;
   /** Moves whenever a label is added (part of the similarity graph's cache key). */
@@ -184,6 +188,8 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
   private records: { record: KnowledgeClusterLabelRecord; members: Set<string> }[] = [];
   /** Clusters waiting for a name, by key, oldest first. */
   private readonly pending = new Map<string, { members: string[]; set: Set<string> }>();
+  /** Keys of every cluster queued lately (pending or not): a cluster seen again is not new work. */
+  private readonly queued = new Set<string>();
   private readonly workListeners = new Set<() => void>();
   private readonly changeListeners = new Set<() => void>();
   private rev = 0;
@@ -232,14 +238,19 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
     return () => this.workListeners.delete(listener);
   }
 
-  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): string | null {
+  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): { label: string; sources: readonly string[] } | null {
     if (memberIds.length < CLUSTER_LABEL_MIN_SIZE) return null;
     const found = this.find(new Set(memberIds));
     if (!found) return null;
     for (const id of found.record.members) if (hidden(id)) return null;
-    return found.record.label;
+    return { label: found.record.label, sources: found.record.members };
   }
 
+  /**
+   * Queues the clusters without a name; new work ({@link onWork}) only when one was never queued
+   * before: a changed cluster replacing its queued version, or one evicted (more than 64 waiting)
+   * and drawn again, is not.
+   */
   request(clusters: readonly (readonly string[])[]): void {
     let added = false;
     for (const members of clusters) {
@@ -248,11 +259,19 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
       const key = clusterKey(members);
       if (this.pending.has(key) || this.find(set)) continue;
       // A queued cluster that is mostly the same is replaced by the newer member set.
-      for (const [other, item] of this.pending) if (similarMembers(item.set, set)) this.pending.delete(other);
+      let replaced = false;
+      for (const [other, item] of this.pending) {
+        if (!similarMembers(item.set, set)) continue;
+        this.pending.delete(other);
+        replaced = true;
+      }
       this.pending.set(key, { members: [...members], set });
-      added = true;
+      if (!replaced && !this.queued.has(key)) added = true;
+      this.queued.delete(key);
+      this.queued.add(key);
     }
     while (this.pending.size > PENDING_MAX) this.pending.delete(this.pending.keys().next().value!);
+    while (this.queued.size > QUEUED_KEYS_MAX) this.queued.delete(this.queued.keys().next().value!);
     if (added) for (const listener of [...this.workListeners]) listener();
   }
 

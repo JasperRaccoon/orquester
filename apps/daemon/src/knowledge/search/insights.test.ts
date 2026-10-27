@@ -162,6 +162,23 @@ test("bridges: an entry whose distinctive topic concepts reach two other cluster
   assert.ok(!JSON.stringify(seo).includes(ke("h")) && !JSON.stringify(seo).includes("Hidden note"));
 });
 
+test("an LLM cluster name added after insights were computed shows in them: the labels' revision is part of the cache key", async () => {
+  const s = await setup();
+  let label: string | null = null;
+  let revision = 0;
+  s.similarity.connectClusterLabels({
+    labelFor: (members) => (label !== null && members.includes(ke("p1")) ? { label, sources: members } : null),
+    request: () => undefined,
+    revision: () => revision
+  });
+  const before = await s.insights.list({}, s.seoOnly);
+  const p1 = (response: typeof before) => response.singleSource.find((item) => item.entry.id === ke("p1"))!.cluster;
+  assert.notEqual(p1(before)?.label, "Pricing pages");
+  label = "Pricing pages";
+  revision += 1;
+  assert.equal(p1(await s.insights.list({}, s.seoOnly))?.label, "Pricing pages");
+});
+
 test("single-source: claims on exactly one visible entry in a cluster of 3 or more whose topic its peers discuss, most discussed first", async () => {
   const s = await setup();
   const seo = await s.insights.list({}, s.seoOnly);
