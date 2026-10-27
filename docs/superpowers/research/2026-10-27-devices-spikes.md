@@ -42,3 +42,16 @@ Measured while other workloads ran (load 3–17): timings are ranges.
 - **agent-device:** state confined by `AGENT_DEVICE_STATE_DIR`/`AGENT_DEVICE_HOME`/`AGENT_DEVICE_CLAIMS_DIR`; daemon auto-starts on a random loopback port, writes `daemon.json` (0600, token), exits after 5 idle min (`AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS=0` disables). `devices --json` 3.3 s; `snapshot -i` 6.1 s first (installs snapshot helper) then 0.45 s; `open` 1.8 s (refs expire); `click --settle` 1.8 s; `fill --settle` ~1.5 s (installs/switches an IME helper; `close` restores); `screenshot` 0.54 s.
 - **Density:** per instance ≈3.0–3.2 GB RAM, ~5 % CPU idle; one actively streamed+driven device costs 6–10 threads. Formulas: `maxBooted = floor((MemAvailable − 8 GB) / 3.2 GB)`, `maxActive = floor(threads / 8)` → this host: 8 booted, 2 heavily active.
 - **Emulator flags:** `-read-only -no-window -no-audio -no-boot-anim -no-metrics -accel on -gpu swangle_indirect -no-snapshot-save -port <even 5554–5682> -grpc <port> -grpc-use-token -camera-back none -camera-front none`; stop with `adb emu kill` → SIGTERM → SIGKILL.
+
+## 3. Android emulators on Blacksmith x64 Linux runners
+
+Workflow `orquester-spike-android.yml`, runs 40441392093, 40444613315, 40445394929, 40447268028 (80 billed minutes ≈ $3.84). Queue latency 9–10 s.
+
+- **Labels/prices:** `blacksmith-{2,4,8,16,32}vcpu-ubuntu-2404` (8–128 GB), $0.004/min per 2 vCPU (16 vCPU $1.92/h, 32 vCPU $3.84/h). Nested virtualization on x64 only.
+- **KVM:** AMD EPYC KVM guest with `kvm_amd nested=1`; `/dev/kvm` needs the udev rule (`99-kvm4all.rules`, mode 0666), then `emulator -accel-check` is happy. `-gpu swiftshader_indirect` works.
+- **Image:** has an Android SDK at `/usr/local/lib/android/sdk` but no emulator/system images. Fresh: emulator 335 MB in ~5 s, API 35 image 1.67 GB in 14.7 s, ffmpeg via apt 15–18 s. `actions/cache` restores: system image 1.57 GB in 7–11 s, AVD+snapshot 2.05 GB in 6.5–9 s.
+- **Boot:** cold 21–24 s; snapshot 4–5 s (also `-read-only`); a snapshot made on one runner and restored from cache loads on other runners of both sizes; 8 concurrent read-only boots 9–10 s (16 vCPU), 16 in 17–19 s (32 vCPU).
+- **Density:** ~3.5–3.6 GB host RAM per emulator (2 GB raised to 2.5 GB, no sharing); idle 0.2–0.4 cores; worst-case continuous swiping ~1.8 cores each. **Hard cap 16 emulators per host**: the 17th aborts right after snapshot load and may take running ones down; adb discovers only 16 unless `ADB_LOCAL_TRANSPORT_MAX_PORT` is raised. Root cause unknown (suspect per-user `netsimd`). Applies to every host: never exceed 16 per host (per adb/user namespace).
+- **Streaming via expo-device-hub:** per stream one host-side ffmpeg libx264 at 60 fps; swiping 55 fps 7.6 Mbit/s, still 5.5 fps 0.3 Mbit/s; ≈1.75–1.9 cores per stream (≈1.45 each with 4 streams). Pool hosts should cap hub fps/bitrate (`--video-fps 30`, `--video-bitrate`) for viewers.
+
+**Decisions:** device-pool boxes default to `blacksmith-16vcpu-ubuntu-2404` with 8 emulators (12 when mostly idle; never > 16); a scheduled cache-warm job bakes system image + AVD snapshot + ffmpeg keyed on emulator version, image revision and AVD config hash (refresh at least weekly — unused entries are evicted after 7 days); fall back to a cold boot when a snapshot fails to load. Expect ~30–40 s from job start to 8 ready devices.
