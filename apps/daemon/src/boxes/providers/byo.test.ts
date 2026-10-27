@@ -41,7 +41,7 @@ test("byo: free Linux and macOS machines, no credentials, no lifetime cap, never
   assert.deepEqual((await byoAdapter.offers({}, "linux", options)).regions, [BYO_REGION]);
 });
 
-test("byo offers: one free size per idle, connected machine of the kind; device hosts last", () => {
+test("byo offers: one free size per idle, connected machine of the kind; never a device host", () => {
   const records = [
     machine("a", { deviceHost: true }),
     machine("bb"),
@@ -53,14 +53,12 @@ test("byo offers: one free size per idle, connected machine of the kind; device 
   ];
   const connected = (id: string) => id !== "bb-offline";
   const linux = byoOffers(records, "linux", connected);
-  assert.deepEqual(linux.sizes.map((size) => [size.id, size.hourlyUsd]), [
-    ["bb", 0],
-    ["a", 0]
-  ]);
+  assert.deepEqual(linux.sizes.map((size) => [size.id, size.hourlyUsd]), [["bb", 0]]);
   assert.deepEqual(linux.regions, [BYO_REGION]);
   assert.deepEqual(byoOffers(records, "macos", connected).sizes.map((size) => size.label), ["Machine eeeee (macOS, arm64)"]);
   assert.deepEqual(byoOffers(records, "linux", () => false).sizes, [], "only connected machines");
   assert.equal(byoMachineIdle(machine("x"), true), true);
   assert.equal(byoMachineIdle(machine("x"), false), false);
+  assert.equal(byoMachineIdle(machine("x", { deviceHost: true }), true), false, "a device host is the device service's");
   assert.equal(byoMachineLabel(machine("x")), "Machine x");
 });

@@ -177,6 +177,19 @@ test("a chat borrows an idle machine (provider byo) and destroying it gives it b
   assert.equal(service.registry.get(id)?.destroyedAt ?? null, null);
 });
 
+test("a machine used for device simulators is never lent to a chat or a project", async (t) => {
+  const { service, hub } = await setup(t);
+  const pairing = await service.byo.add({ kind: "linux", name: "Box" });
+  const id = pairing.box.id;
+  hub.connect(id, localBoxConnection({ boxId: id }));
+  await until(service, id, () => service.registry.get(id)?.state === "ready");
+  await service.byo.update(id, { deviceHost: true });
+  await assert.rejects(service.createTemporaryBox({ threadId: "chat-1", kind: "linux", provider: "byo", lifetimeMinutes: 10, purposeNote: "x" }));
+  await assert.rejects(service.byo.leaseProject(id, { workspace: "w", name: "p" } as never), (error: BoxError) => error.code === "BOX_IN_USE");
+  await assert.rejects(service.byo.leaseTemporary(id, { threadId: "chat-1", purposeNote: "x", lifetimeMinutes: 10 }), (error: BoxError) => error.code === "BOX_IN_USE");
+  assert.equal(service.registry.get(id)?.purpose, "machine");
+});
+
 test("a chat's lease past its time limit is released by the reconciler", async (t) => {
   const { service, hub, advance } = await setup(t);
   const pairing = await service.byo.add({ kind: "linux", name: "Box" });

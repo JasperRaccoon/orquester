@@ -38,9 +38,13 @@ export const byoAdapter: BoxProviderAdapter = {
   listManaged: async () => []
 };
 
-/** A paired machine nobody uses that is connected now: a project or a chat may take it. */
+/**
+ * A paired machine nobody uses that is connected now: a project or a chat may take it. A machine
+ * marked "Use for device simulators" never is — the device service owns it (its hub, simulators
+ * and the owner's account), so a chat or project must not run commands there.
+ */
 export function byoMachineIdle(record: StoredBox, connected: boolean): boolean {
-  return record.provider === "byo" && record.purpose === "machine" && record.state === "ready" && connected;
+  return record.provider === "byo" && record.purpose === "machine" && record.deviceHost !== true && record.state === "ready" && connected;
 }
 
 /** "Mac mini (macOS, arm64)". */
@@ -52,13 +56,13 @@ export function byoMachineLabel(record: StoredBox): string {
 
 /**
  * The machines a project or a chat may use for `kind`, as offers: one size per idle, connected
- * machine (price 0), in the one {@link BYO_REGION}. Machines marked as device hosts come last, so a
- * chat's default pick leaves them to the device service.
+ * machine (price 0), in the one {@link BYO_REGION}. Machines marked as device hosts are never
+ * offered ({@link byoMachineIdle}).
  */
 export function byoOffers(records: readonly StoredBox[], kind: BoxKind, connected: (boxId: string) => boolean): ProviderOffers {
   const sizes: BoxSizeOffer[] = records
     .filter((record) => record.kind === kind && byoMachineIdle(record, connected(record.id)))
-    .sort((a, b) => Number(a.deviceHost === true) - Number(b.deviceHost === true) || a.createdAt.localeCompare(b.createdAt))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map((record) => ({
       id: record.id,
       label: byoMachineLabel(record),

@@ -332,6 +332,9 @@ export class ByoMachines {
   private assertFree(record: StoredBox): void {
     if (record.provider !== "byo") throw new BoxError(400, "BOX_INVALID_REQUEST", "That is not one of your machines.");
     if (record.purpose !== "machine") throw new BoxError(409, "BOX_IN_USE", `${record.machineName ?? "This machine"} is used by ${inUseBy(record)}.`);
+    if (record.deviceHost === true) {
+      throw new BoxError(409, "BOX_IN_USE", `${record.machineName ?? "This machine"} is used for device simulators; turn that off in its settings to lend it to a chat or project.`);
+    }
     if (!byoMachineIdle(record, this.deps.hub.get(record.id)?.connected === true)) {
       throw new BoxError(409, "BOX_NOT_READY", `${record.machineName ?? "This machine"} is not connected right now.`);
     }
