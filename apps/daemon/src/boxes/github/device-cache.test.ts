@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { AVD_HARDWARE, avdHardware, cutoutSpecInDp, parseIni, patchAvdConfig } from "../../devices/android/avd-config.ts";
 import { emulatorArgs } from "../../devices/android/emulator.ts";
 import { LOCAL_EXECUTOR } from "../../devices/android/executor.ts";
-import { CLOSE_SYSTEM_DIALOGS_SCRIPT, GUEST_SETTINGS_SCRIPT } from "../../devices/android/golden.ts";
+import { CLOSE_SYSTEM_DIALOGS_SCRIPT, fixDisplayCutout, GUEST_SETTINGS_SCRIPT } from "../../devices/android/golden.ts";
 import { BOX_GPU_MODES, boxAvdState, boxGolden } from "../../devices/hosts/box/android-remote.ts";
 import { CMDLINE_TOOLS, profileHash } from "../../devices/toolchain/android-sdk.ts";
 import {
@@ -111,6 +112,8 @@ test("the AVD script is generated from the box host's own modules: hardware, con
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`for gpu in ${BOX_GPU_MODES.box.join(" ")}; do`));
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`adb -s "$SERIAL" emu avd snapshot save ${ANDROID_GOLDEN_SNAPSHOT}`));
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`ANDROID_AVD_HOME=${BOX_ANDROID_AVD_DIR}`));
+  // The emulator's overlays and crashpad database in the box layout, as a box host's env has them (not /tmp/android-$USER).
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(` TMPDIR=${BOX_DEVICES_DIR}/tmp ANDROID_TMP=${BOX_DEVICES_DIR}/tmp `));
 });
 
 /** The script's `cat > "$TUNE/<file>" << 'TAG'` heredocs, written into `dir`. */
@@ -158,6 +161,90 @@ test("the script's tuning (run by node as the workflow runs it) writes what the 
     const spec = "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left";
     assert.equal(tune("cutout", spec, "420"), cutoutSpecInDp(spec, 420));
     assert.equal(tune("cutout", "", "420"), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A fake device for the cutout fix, answering the daemon's `exec` and the script's `adb` alike
+ * (state in a JSON file): Pixel 9's emulation overlay, a SystemUI that restarts when killed, the dp
+ * cutout taken once `OrqCutout` is enabled.
+ */
+const FAKE_DEVICE = `import { readFileSync, writeFileSync } from "node:fs";
+export function answer(stateFile, command) {
+  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+  let out = { exitCode: 0, stdout: "" };
+  if (command === "shell dumpsys display") out.stdout = "mCutout cutoutSpec={" + state.spec + "} x\\n";
+  else if (command === "shell cmd overlay list") out.stdout = "android\\n[x] com.android.internal.emulation.pixel_9\\n[ ] com.android.internal.emulation.pixel_8\\n";
+  else if (command === "shell cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation") out.stdout = state.rect;
+  else if (command === "shell cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout") out.stdout = state.fill;
+  else if (command === "shell pidof com.android.systemui") out.stdout = state.systemUiPid + "\\n";
+  else if (command === "shell kill " + state.systemUiPid) state.systemUiPid += 208;
+  else if (state.fail && command.startsWith("shell cmd overlay fabricate --target android --name " + state.fail + " ")) out = { exitCode: 1, stdout: "Error: no such resource\\n" };
+  else if (command === "shell cmd overlay enable com.android.shell:OrqCutout") state.spec = "m 221 33 @left @dp";
+  writeFileSync(stateFile, JSON.stringify(state));
+  return out;
+}
+`;
+
+test("the script's cutout fix runs what golden.ts runs: rect and fill overlays, enable/disable, SystemUI restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orq-avd-cutout-"));
+  try {
+    extractTuning(dir);
+    writeFileSync(join(dir, "fake-device.mjs"), FAKE_DEVICE);
+    writeFileSync(
+      join(dir, "fake-adb.mjs"),
+      `import { appendFileSync } from "node:fs";\nimport { answer } from "./fake-device.mjs";\nconst command = process.argv.slice(4).join(" ");\nappendFileSync(process.env.ORQ_FAKE_LOG, command + "\\n");\nconst out = answer(process.env.ORQ_FAKE_STATE, command);\nprocess.stdout.write(out.stdout);\nprocess.exit(out.exitCode);\n`
+    );
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "adb"), `#!/bin/sh\nexec '${process.execPath}' '${join(dir, "fake-adb.mjs")}' "$@"\n`);
+    chmodSync(join(bin, "adb"), 0o755);
+    const { answer } = (await import(pathToFileURL(join(dir, "fake-device.mjs")).href)) as { answer: (stateFile: string, command: string) => { exitCode: number; stdout: string } };
+    // The script's own helpers and fix_cutout, with sleeps skipped.
+    const fns = ["warn", "sh_adb"].map((name) => new RegExp(`^${name}\\(\\) \\{.*\\}$`, "m").exec(ANDROID_AVD_STEP_SCRIPT)?.[0]);
+    const fixCutout = /^fix_cutout\(\) \{\n[\s\S]*?\n\}$/m.exec(ANDROID_AVD_STEP_SCRIPT)?.[0];
+    assert.ok(fns.every(Boolean) && fixCutout);
+    const scenarios = [
+      { name: "fixed", state: { rect: "@android:string/config_mainBuiltInDisplayCutoutRectApproximation -> m 484.5,0 h 110 v 141.5 h -110 z @left\n", fill: "true\n" }, golden: "fixed" },
+      { name: "no rect, not filled", state: { rect: "\n", fill: "false\n" }, golden: "fixed" },
+      { name: "the rect overlay fails", state: { rect: "m 484.5,0 h 110 v 141.5 h -110 z @left\n", fill: "true\n", fail: "OrqCutoutRect" }, golden: /fabricating the cutout overlay failed/ },
+      { name: "already in dp", state: { spec: "m 1 2 @left @dp", rect: "", fill: "" }, golden: "kept" }
+    ] as const;
+    for (const scenario of scenarios) {
+      const initial = JSON.stringify({ spec: "m 581.5,86.5 a 42,42 0 0 0 -84,0 42,42 0 0 0 84,0 z @left", systemUiPid: 996, ...scenario.state });
+      const stateFile = join(dir, "state.json");
+      // golden.ts, as a host runs it.
+      writeFileSync(stateFile, initial);
+      const daemon: string[] = [];
+      const how = fixDisplayCutout({
+        exec: async (_adb, args) => {
+          const command = args.slice(2).join(" ");
+          daemon.push(command);
+          return { ...answer(stateFile, command), stderr: "" };
+        },
+        adb: "adb",
+        env: {},
+        serial: "emulator-5554",
+        cutoutDensity: 420,
+        signal: new AbortController().signal
+      });
+      if (typeof scenario.golden === "string") assert.equal(await how, scenario.golden, scenario.name);
+      else await assert.rejects(how, scenario.golden, scenario.name);
+      const daemonState = readFileSync(stateFile, "utf8");
+      // The script, as the cache workflow runs it.
+      writeFileSync(stateFile, initial);
+      const log = join(dir, "adb.log");
+      writeFileSync(log, "");
+      const result: SpawnSyncReturns<string> = spawnSync("bash", ["-c", `set -u\nsleep() { :; }\n${fns.join("\n")}\n${fixCutout}\nfix_cutout 420`], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TUNE: dir, SERIAL: "emulator-5554", ORQ_FAKE_LOG: log, ORQ_FAKE_STATE: stateFile }
+      });
+      assert.equal(result.status, scenario.golden === "fixed" || scenario.golden === "kept" ? 0 : 1, `${scenario.name}: ${result.stdout}${result.stderr}`);
+      assert.deepEqual(readFileSync(log, "utf8").split("\n").filter(Boolean), daemon, scenario.name);
+      assert.equal(readFileSync(stateFile, "utf8"), daemonState, scenario.name);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

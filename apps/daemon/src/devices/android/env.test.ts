@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ADB_PORT_BASE, ADB_PORT_SPAN, adbServerPort, androidLayout, appdirMarker, buildAndroidEnv } from "./env.ts";
+import { ADB_PORT_BASE, ADB_PORT_SPAN, adbServerPort, androidLayout, androidLayoutAt, appdirMarker, buildAndroidEnv } from "./env.ts";
 
 test("env: every tool home is inside the appdir; the adb port is private; daemon secrets are not passed", () => {
   const layout = androidLayout("/srv/app");
@@ -17,6 +17,8 @@ test("env: every tool home is inside the appdir; the adb port is private; daemon
     ANDROID_EMULATOR_HOME: layout.androidUser,
     XDG_RUNTIME_DIR: layout.runtime,
     TMPDIR: layout.tmp,
+    // The emulator's overlays and crashpad database: without it, /tmp/android-$USER.
+    ANDROID_TMP: layout.tmp,
     HOME: layout.home,
     USER: "orq",
     ANDROID_ADB_SERVER_PORT: "16123",
@@ -41,4 +43,11 @@ test("adb port: stable per appdir, different between appdirs, never the default 
     const port = adbServerPort(dir);
     assert.ok(port >= ADB_PORT_BASE && port < ADB_PORT_BASE + ADB_PORT_SPAN && port !== 5037);
   }
+});
+
+test("env: a box host's emulator keeps its overlays and crashpad database in the box layout's temp dir, not /tmp", () => {
+  const layout = androidLayoutAt("/var/lib/orquester/devices");
+  const env = buildAndroidEnv(layout, { PATH: "/usr/bin:/bin", TMPDIR: "/tmp", ANDROID_TMP: "/tmp/android-runner" }, { user: "runner", nodePath: "/usr/bin/node", adbPort: 16001 });
+  assert.equal(env.ANDROID_TMP, "/var/lib/orquester/devices/tmp");
+  assert.equal(env.TMPDIR, "/var/lib/orquester/devices/tmp");
 });

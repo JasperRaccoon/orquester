@@ -13,6 +13,7 @@ import {
   deviceKeyOf,
   devicePanelView,
   deviceStreamUrls,
+  deviceToolbarLayout,
   formatElapsed,
   hostStreamCaps,
   inputTakesOver,
@@ -23,6 +24,7 @@ import {
   NO_TRANSPORT_MESSAGE,
   nextRotation,
   pickerGroups,
+  railToolbarHeight,
   rotateControl,
   streamAvailability,
   takeOverToast
@@ -253,6 +255,27 @@ describe("host stream capabilities", () => {
   });
 });
 
+describe("the toolbar's place", () => {
+  it("the rail's height follows DeviceToolbar's buttons: 7 on iOS, 8 on Android, Fold/Unfold beside on foldables", () => {
+    assert.equal(railToolbarHeight({ platform: "ios", foldable: false, foldError: false }), 16 + 10 + 7 * 34 + 5);
+    assert.equal(railToolbarHeight({ platform: "android", foldable: false, foldError: false }), 303);
+    // As measured in the harness: a Pixel Fold's rail is 371 px tall, plus the rail's 16 px padding.
+    assert.equal(railToolbarHeight({ platform: "android", foldable: true, foldError: false }), 387);
+    assert.ok(railToolbarHeight({ platform: "android", foldable: true, foldError: true }) > 387);
+  });
+  it("a rail taller than the room beside the device becomes the bar below it (never over the activity drawer)", () => {
+    const fold = railToolbarHeight({ platform: "android", foldable: true, foldError: false });
+    // A narrow rail at 577 px tall leaves 362 px beside the device: the bar.
+    assert.equal(deviceToolbarLayout("rail", 362, fold), "bar");
+    assert.equal(deviceToolbarLayout("rail", 362, railToolbarHeight({ platform: "android", foldable: false, foldError: false })), "rail");
+    assert.equal(deviceToolbarLayout("rail", fold, fold), "rail");
+    // Unmeasured (no layout yet, or a DOM without one): the panel's choice; a phone keeps its bar.
+    assert.equal(deviceToolbarLayout("rail", null, fold), "rail");
+    assert.equal(deviceToolbarLayout("rail", 0, fold), "rail");
+    assert.equal(deviceToolbarLayout("bar", 2000, fold), "bar");
+  });
+});
+
 describe("picker", () => {
   const profiles = DEVICE_PROFILES;
   it("offers ready Android profiles and iPhones that rent a Mac with the quote", () => {
@@ -263,7 +286,7 @@ describe("picker", () => {
     assert.equal(groups[1]!.note, "No Mac host — opening an iPhone rents one (~$4.80/h)");
     assert.ok(groups[1]!.rows.every((row) => row.enabled && row.badge === "Asks to rent"));
   });
-  it("explains disabled rows: platform off, host needs setup, full host, chat limit", () => {
+  it("explains disabled rows: platform off, host needs setup, a host the pool can never use, chat limit", () => {
     const off = pickerGroups({ profiles, hosts: [host()], settings: settings((s) => (s.android.enabled = false)), chatLeases: 0, macHourlyUsd: null });
     assert.match(off[0]!.rows[0]!.reason!, /Android is off/);
     const setup = pickerGroups({
@@ -275,10 +298,31 @@ describe("picker", () => {
     });
     assert.match(setup[0]!.rows[0]!.reason!, /needs setup: KVM/);
     assert.equal(setup[0]!.rows[0]!.badge, "Needs setup");
-    const full = pickerGroups({ profiles, hosts: [host({ capacity: { used: 4, total: 4 } })], settings: settings(), chatLeases: 0, macHourlyUsd: null });
-    assert.match(full[0]!.rows[0]!.reason!, /full/);
+    // Kept on this host, which has no room at all: the pool can never place it.
+    const never = pickerGroups({ profiles, hosts: [host({ capacity: { used: 0, total: 0 } })], settings: settings((s) => (s.pool.placement = "local-only")), chatLeases: 0, macHourlyUsd: null });
+    assert.ok(never[0]!.rows.every((row) => !row.enabled && row.badge === "No room" && row.action === "open"));
+    assert.match(never[0]!.rows[0]!.reason!, /no room/);
     const limit = pickerGroups({ profiles, hosts: [host()], settings: settings(), chatLeases: 3, macHourlyUsd: null });
     assert.ok(limit.every((g) => g.rows.every((row) => !row.enabled && row.badge === "Limit reached")));
+  });
+  it("a full host queues: Open answers at once with a stand-in the pool places when a slot frees up (or on a rented host)", () => {
+    const full = pickerGroups({ profiles, hosts: [host({ capacity: { used: 4, total: 4 } })], settings: settings(), chatLeases: 0, macHourlyUsd: null });
+    const android = full[0]!;
+    assert.ok(android.rows.every((row) => row.enabled && row.reason === null && row.badge === "Full" && row.action === "queue"));
+    assert.equal(android.rows[0]!.hint, "All 4 slots are in use — it opens when one frees up, or on a rented host if the fleet allows.");
+    assert.equal(android.note, "Runs on this host · 4 of 4 in use — a new device waits for a slot");
+    // Kept on this host: only a freed slot opens it.
+    const local = pickerGroups({ profiles, hosts: [host({ capacity: { used: 1, total: 1 } })], settings: settings((s) => (s.pool.placement = "local-only")), chatLeases: 0, macHourlyUsd: null });
+    assert.equal(local[0]!.rows[0]!.hint, "All 1 slot is in use — it opens when one frees up.");
+    // A host with no room that may rent: it waits for a rented host.
+    const none = pickerGroups({ profiles, hosts: [host({ capacity: { used: 0, total: 0 } })], settings: settings(), chatLeases: 0, macHourlyUsd: null });
+    assert.ok(none[0]!.rows.every((row) => row.enabled && row.action === "queue"));
+    assert.match(none[0]!.rows[0]!.hint!, /rented host/);
+    // A ready host with room opens at once, no tooltip; the chat's limit still wins over queueing.
+    const ready = pickerGroups({ profiles, hosts: [host()], settings: settings(), chatLeases: 0, macHourlyUsd: null });
+    assert.ok(ready[0]!.rows.every((row) => row.action === "open" && row.hint === null));
+    const limit = pickerGroups({ profiles, hosts: [host({ capacity: { used: 4, total: 4 } })], settings: settings(), chatLeases: 3, macHourlyUsd: null });
+    assert.ok(limit[0]!.rows.every((row) => !row.enabled && row.badge === "Limit reached" && row.action === "open" && row.hint === null));
   });
   it("lists only the profiles Settings offers, and a running Mac host opens in seconds", () => {
     const mac = host({ id: "box:b1", kind: "box", platforms: ["ios"], capacity: { used: 1, total: 3 } });

@@ -153,6 +153,19 @@ describe("DevicePanel", () => {
     assert.ok(calls.includes("open android pixel-9"));
   });
 
+  it("a full host's profile reads Queue with what that means, and opens (the pool queues it)", async () => {
+    await render([], [{ ...localHost, capacity: { used: 4, total: 4 } }]);
+    const row = host.querySelector('[data-profile="pixel-9"]')!;
+    assert.equal(row.getAttribute("aria-disabled"), null);
+    const queue = button("Queue Pixel 9")!;
+    assert.equal(queue.textContent?.trim(), "Queue");
+    assert.equal(queue.disabled, false);
+    assert.equal(queue.title, "All 4 slots are in use — it opens when one frees up, or on a rented host if the fleet allows.");
+    assert.equal(button("Open Pixel 9"), undefined);
+    await act(async () => queue.click());
+    assert.ok(calls.includes("open android pixel-9"));
+  });
+
   it("a booting device lists its steps; Cancel releases it", async () => {
     await render([lease({ state: "starting", stream: undefined, progress: { step: "start-device", label: "Starting device", startedAt: new Date().toISOString() } })]);
     const steps = [...host.querySelectorAll("[data-step]")].map((li) => `${li.getAttribute("data-step")}:${li.getAttribute("data-state")}`);

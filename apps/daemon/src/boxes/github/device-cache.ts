@@ -21,18 +21,19 @@ import { readFileSync } from "node:fs";
 import { ANDROID_SYSTEM_IMAGE as API_ANDROID_SYSTEM_IMAGE, deviceProfile, type DeviceProfile } from "@orquester/api";
 import { DEFAULT_ANDROID_DEVICE_PROFILE_IDS } from "@orquester/config";
 
-import { avdHardware, avdName } from "../../devices/android/avd-config.ts";
+import { avdHardware, avdName, CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP } from "../../devices/android/avd-config.ts";
 import { CONSOLE_PORT_MIN, EMULATOR_GPU_MODE, emulatorArgs, grpcPortFor } from "../../devices/android/emulator.ts";
 import { androidLayoutAt } from "../../devices/android/env.ts";
 import {
   CLOSE_SYSTEM_DIALOGS_SCRIPT,
-  CUTOUT_OVERLAY,
-  fabricateCutoutCommand,
   GOLDEN_BOOT_TIMEOUT_MS,
   GUEST_SETTINGS_SCRIPT,
   SETTLE_CPU_PERCENT,
   SETTLE_MAX_MS,
-  SETTLE_WINDOW_MS
+  SETTLE_WINDOW_MS,
+  SYSTEM_UI_PIDOF,
+  SYSTEM_UI_POLL,
+  SYSTEM_UI_SETTLE_MS
 } from "../../devices/android/golden.ts";
 import toolVersions from "../../devices/tool-versions.json" with { type: "json" };
 import { CMDLINE_TOOLS, profileHash, SDK_PACKAGES } from "../../devices/toolchain/android-sdk.ts";
@@ -150,15 +151,9 @@ function goldenBootArgs(): string {
     .join(" ");
 }
 
-/** {@link fabricateCutoutCommand} as a bash word with the dp spec from `$dp` (checked to hold no `'`). */
-function fabricateInShell(): string {
-  const [before, after] = fabricateCutoutCommand("ORQ_DP").split("ORQ_DP") as [string, string];
-  return `${sq(before)}"$dp"${sq(after)}`;
-}
-
-/** `tune.mjs`: runs `avd-tuning.mjs` (the daemon's own config patch and dp cutout) in the workflow. */
+/** `tune.mjs`: runs `avd-tuning.mjs` (the daemon's own config patch, dp cutout and its overlays) in the workflow. */
 const AVD_TUNE_DRIVER = `import { readFileSync, writeFileSync } from "node:fs";
-import { cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-tuning.mjs";
+import { cutoutOverlayPlan, cutoutSpecInDp, hasAvdPlaceholders, parseIni, patchAvdConfig } from "./avd-tuning.mjs";
 const [command, ...args] = process.argv.slice(2);
 if (command === "patch") {
   const [file, name, width, height, density, gpuMode] = args;
@@ -173,6 +168,11 @@ if (command === "patch") {
   console.log(Number.isInteger(deviceDensity) && deviceDensity > 0 ? String(deviceDensity) : "");
 } else if (command === "cutout") {
   console.log(cutoutSpecInDp(args[0] ?? "", Number(args[1])) ?? "");
+} else if (command === "cutout-plan") {
+  const [part, dp, rect, fill, density, overlayList] = args;
+  const commands = cutoutOverlayPlan({ dp, rect, fill, density: Number(density), overlayList })[part];
+  if (!commands) process.exit(2);
+  if (commands.length > 0) console.log(commands.join("\\n"));
 } else if (command === "avd-marker") {
   const [file, profile, configHash, deviceDensity] = args;
   const marker = { profile, configHash, createdAt: new Date().toISOString(), ...(deviceDensity ? { deviceDensity: Number(deviceDensity) } : {}), source: ${JSON.stringify(ANDROID_CACHE_SOURCE)} };
@@ -206,8 +206,8 @@ function makeProfileCall(profile: DeviceProfile): string {
  * framebuffers: `avdmanager create avd` from the pinned cmdline-tools, the config patch of
  * `avd-tuning.mjs` (embedded verbatim), the box layout's environment, the golden boot's flags
  * (`emulatorArgs`), `sys.boot_completed`, the CPU settle, the guest settings, the dp display cutout
- * (`adb root`, a fabricated overlay), agent-device's helper APKs, the system-dialog broadcast, a
- * named save; GPU modes tried in {@link ANDROID_RENTED_GPU_MODES} order. Each AVD gets the box
+ * (`adb root`, the overlays of `avd-tuning.mjs` `cutoutOverlayPlan`, a SystemUI restart),
+ * agent-device's helper APKs, the system-dialog broadcast, a named save; GPU modes tried in {@link ANDROID_RENTED_GPU_MODES} order. Each AVD gets the box
  * host's markers (`orq-avd.json`, {@link BOX_GOLDEN_MARKER} with the GPU mode that worked), with
  * `source: "cache"`. Needs the device tools restored first (the helper APKs).
  */
@@ -216,7 +216,7 @@ SDK=${BOX_ANDROID_SDK_DIR}
 TOOLS=${BOX_DEVICE_TOOLS_DIR}
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_AVD_HOME=${BOX_ANDROID_LAYOUT.avd}
 export ANDROID_USER_HOME=${BOX_ANDROID_LAYOUT.androidUser} ANDROID_EMULATOR_HOME=${BOX_ANDROID_LAYOUT.androidUser}
-export HOME=${BOX_ANDROID_LAYOUT.home} TMPDIR=${BOX_ANDROID_LAYOUT.tmp} XDG_RUNTIME_DIR=${BOX_ANDROID_LAYOUT.runtime}
+export HOME=${BOX_ANDROID_LAYOUT.home} TMPDIR=${BOX_ANDROID_LAYOUT.tmp} ANDROID_TMP=${BOX_ANDROID_LAYOUT.tmp} XDG_RUNTIME_DIR=${BOX_ANDROID_LAYOUT.runtime}
 export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
 mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME" "$HOME" "$TMPDIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -255,29 +255,59 @@ stop_emulator() {
   LAUNCHER=
 }
 
-# The dp display cutout (golden.ts fixDisplayCutout): best effort, as on a box host.
+# The dp display cutout (golden.ts fixDisplayCutout, the overlays from avd-tuning.mjs cutoutOverlayPlan): best effort, as on a box host.
 fix_cutout() {
   spec=$(sh_adb 30 'dumpsys display' | sed -n 's/.*cutoutSpec={\\([^}]*\\)}.*/\\1/p' | head -1)
   dp=$(node "$TUNE/tune.mjs" cutout "$spec" "$1")
   if [ -z "$dp" ]; then echo "display cutout kept"; return 0; fi
   case "$dp" in *"'"*) warn "unexpected cutout spec"; return 1 ;; esac
-  emulation=$(sh_adb 30 'cmd overlay list' | sed -n 's/^[[:space:]]*\\[x\\][[:space:]]*\\(com\\.android\\.internal\\.emulation\\.[A-Za-z0-9_.]*\\).*/\\1/p')
+  list=$(sh_adb 30 'cmd overlay list') || true
   root=$(timeout 30 adb -s "$SERIAL" root 2>&1) || { warn "adb root failed: $root"; return 1; }
   case "$root" in *"cannot run as root"*) warn "adb root failed: $root"; return 1 ;; esac
   sleep 1
   timeout 60 adb -s "$SERIAL" wait-for-device
-  ok=1
-  made=$(sh_adb 30 ${fabricateInShell()} 2>&1) || ok=0
-  if printf '%s' "$made" | grep -qiE 'error|exception'; then ok=0; fi
-  if [ "$ok" = 1 ]; then
-    for overlay in $emulation; do sh_adb 30 "cmd overlay disable $overlay" > /dev/null 2>&1 || true; done
-    enabled=$(sh_adb 30 ${sq(`cmd overlay enable ${CUTOUT_OVERLAY}`)} 2>&1) || ok=0
-    if printf '%s' "$enabled" | grep -qi exception; then ok=0; fi
+  # What the emulation overlay also sets for the hole, read before it goes: its rect and its fill.
+  rect=$(sh_adb 30 ${sq(CUTOUT_RECT_LOOKUP)}) || true
+  fill=$(sh_adb 30 ${sq(CUTOUT_FILL_LOOKUP)}) || true
+  failed=
+  fabricate=$(node "$TUNE/tune.mjs" cutout-plan fabricate "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  disable=$(node "$TUNE/tune.mjs" cutout-plan disable "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  enable=$(node "$TUNE/tune.mjs" cutout-plan enable "$dp" "$rect" "$fill" "$1" "$list") || failed="unexpected cutout spec"
+  if [ -z "$failed" ]; then
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      out=$(sh_adb 30 "$command" 2>&1 < /dev/null) || failed=1
+      if [ -n "$failed" ] || printf '%s' "$out" | grep -qiE 'error|exception'; then failed="fabricating the cutout overlay failed: $out"; break; fi
+    done <<< "$fabricate"
+  fi
+  if [ -z "$failed" ]; then
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      sh_adb 30 "$command" > /dev/null 2>&1 < /dev/null || true
+    done <<< "$disable"
+    while IFS= read -r command; do
+      [ -n "$command" ] || continue
+      out=$(sh_adb 30 "$command" 2>&1 < /dev/null) || failed=1
+      if [ -n "$failed" ] || printf '%s' "$out" | grep -qi exception; then failed="enabling the cutout overlay failed: $out"; break; fi
+    done <<< "$enable"
+  fi
+  if [ -z "$failed" ]; then
+    # SystemUI keeps drawing the hole it drew at boot (the pixel one) until it starts again.
+    before=$(sh_adb 30 ${sq(SYSTEM_UI_PIDOF)} | tr -d '\\r')
+    if [ -n "$before" ]; then
+      sh_adb 30 "kill \${before%% *}" > /dev/null 2>&1 || true
+      for _ in $(seq ${SYSTEM_UI_POLL.tries}); do
+        sleep ${SYSTEM_UI_POLL.intervalMs / 1000}
+        now=$(sh_adb 30 ${sq(SYSTEM_UI_PIDOF)} | tr -d '\\r')
+        if [ -n "$now" ] && [ "$now" != "$before" ]; then break; fi
+      done
+      sleep ${SYSTEM_UI_SETTLE_MS / 1000}
+    fi
   fi
   timeout 30 adb -s "$SERIAL" unroot > /dev/null 2>&1 || true
   sleep 1
   timeout 60 adb -s "$SERIAL" wait-for-device || true
-  if [ "$ok" != 1 ]; then warn "the cutout overlay failed: $made $enabled"; return 1; fi
+  if [ -n "$failed" ]; then warn "$failed"; return 1; fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if sh_adb 30 'dumpsys display' | grep -q 'cutoutSpec={[^}]*@dp'; then echo "display cutout fixed"; return 0; fi
     sleep 0.5

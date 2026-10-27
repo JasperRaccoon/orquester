@@ -15,7 +15,7 @@ import type { DeviceProfile, DeviceScreen } from "@orquester/api";
 import * as tuning from "./avd-tuning.mjs";
 import { EMULATOR_GPU_MODE } from "./emulator.ts";
 
-export { cutoutSpecInDp, hasAvdPlaceholders, parseIni } from "./avd-tuning.mjs";
+export { CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP, cutoutOverlayPlan, cutoutSpecInDp, hasAvdPlaceholders, parseIni } from "./avd-tuning.mjs";
 
 /**
  * Bump when the patch (`avd-tuning.mjs`) or the hardware table below changes: AVDs and golden

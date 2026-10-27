@@ -323,6 +323,34 @@ export function deviceFoldRequest(api: DeviceUrlApi, lease: Pick<DeviceLeaseSumm
 }
 
 // ---------------------------------------------------------------------------
+// The toolbar's place
+// ---------------------------------------------------------------------------
+
+/** The device toolbar's sizes as `DeviceToolbar` draws them (px): `h-8` buttons, `gap-0.5`, a divider with its margins, `p-1` and a border per group, `gap-2` between groups; the rail's `py-2`; a fold error's two lines. */
+const TOOLBAR_PX = { button: 32, gap: 2, divider: 5, groupChrome: 10, groupGap: 8, railPadding: 16, foldError: 32 } as const;
+
+/** How tall the vertical rail is for a device: Home, (Back,) Recents, Rotate | Screenshot, Keyboard, 3D, More, then Fold/Unfold for foldables. */
+export function railToolbarHeight(device: { platform: DevicePlatform; foldable: boolean; foldError: boolean }): number {
+  const px = TOOLBAR_PX;
+  const buttons = device.platform === "android" ? 8 : 7;
+  let height = px.railPadding + px.groupChrome + buttons * px.button + buttons * px.gap + px.divider;
+  if (device.foldable) height += px.groupGap + px.groupChrome + 2 * px.button + px.gap;
+  if (device.foldable && device.foldError) height += px.groupGap + px.foldError;
+  return height;
+}
+
+/**
+ * Where the toolbar goes: the panel's choice, except that a rail taller than the room beside the
+ * device (`areaHeight`: the stage and the toolbar's row together, above the activity drawer) becomes
+ * the bar below the device, so it never spills over the controller pill or the activity drawer.
+ * Unmeasured (`null` or 0): the panel's choice.
+ */
+export function deviceToolbarLayout(preferred: "rail" | "bar", areaHeight: number | null, railHeight: number): "rail" | "bar" {
+  if (preferred === "bar" || !areaHeight) return preferred;
+  return areaHeight >= railHeight ? "rail" : "bar";
+}
+
+// ---------------------------------------------------------------------------
 // The picker
 // ---------------------------------------------------------------------------
 
@@ -332,8 +360,12 @@ export interface PickerRow {
   enabled: boolean;
   /** Why not, in one line (links to Settings → Devices). */
   reason: string | null;
-  /** A short state chip: "Ready", "Needs setup", "Rents a Mac", "Installing…". */
+  /** A short state chip: "Ready", "Needs setup", "Rents a Mac", "Installing…", "Full". */
   badge: string;
+  /** What Open does: opens now, or queues in the pool (the host is full; it answers with a stand-in at once). */
+  action: "open" | "queue";
+  /** A tooltip for an enabled row (what queueing means). */
+  hint: string | null;
 }
 
 export interface PickerGroup {
@@ -373,6 +405,7 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
     let note: string | null = null;
     let reason: string | null = null;
     let badge = "Ready";
+    let queueHint: string | null = null;
     if (!enabledInSettings) {
       reason = `${DEVICE_PLATFORM_LABELS[platform]} is off. Turn it on in Settings → Devices.`;
       badge = "Off";
@@ -388,8 +421,19 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
       } else if (local.status === "disabled") {
         reason = "Android on this host is off. Turn it on in Settings → Devices.";
         badge = "Off";
-      } else if (local.capacity.total > 0 && local.capacity.used >= local.capacity.total) {
-        reason = `This host is full (${local.capacity.used} of ${local.capacity.total} devices running).`;
+      } else if (local.capacity.total === 0 && input.settings?.pool.placement === "local-only") {
+        // Kept on this host, which runs none: the pool can never place it.
+        reason = "This host has no room for an Android device (too little free memory, or Settings allow none here), and Settings keep devices on this host.";
+        badge = "No room";
+      } else if (local.capacity.used >= local.capacity.total) {
+        // Open queues it in the pool (a stand-in answers at once): it opens when a slot frees up, or on a rented host.
+        const { used, total } = local.capacity;
+        const rents = input.settings?.pool.placement !== "local-only";
+        note = total > 0 ? `Runs on this host · ${used} of ${total} in use — a new device waits for a slot` : "This host runs no devices — a new device waits for a rented host";
+        queueHint =
+          total > 0
+            ? `All ${total} slot${total === 1 ? " is" : "s are"} in use — it opens when one frees up${rents ? ", or on a rented host if the fleet allows" : ""}.`
+            : "This host runs no devices — it opens on a rented host if the fleet allows.";
         badge = "Full";
       } else {
         note = local.capacity.total > 0 ? `Runs on this host · ${local.capacity.used} of ${local.capacity.total} in use` : "Runs on this host";
@@ -412,7 +456,14 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
       platform,
       title: platform === "android" ? "Android" : DEVICE_PLATFORM_LABELS.ios,
       note,
-      rows: profiles.map((profile) => ({ profile, enabled: reason === null, reason, badge: reason === fullReason ? "Limit reached" : badge }))
+      rows: profiles.map((profile) => ({
+        profile,
+        enabled: reason === null,
+        reason,
+        badge: reason === fullReason ? "Limit reached" : badge,
+        action: reason === null && queueHint ? "queue" : "open",
+        hint: reason === null ? queueHint : null
+      }))
     });
   }
   return groups;

@@ -120,6 +120,36 @@ export function cutoutSpecInDp(spec, density) {
   return `${out.join(" ")} ${markers ? `${markers} ` : ""}@dp`;
 }
 
+/** The guest command that prints the cutout rect SystemUI sizes the hole's window by (in pixels, like the cutout). */
+export const CUTOUT_RECT_LOOKUP = "cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation";
+/** The guest command that prints whether the cutout is drawn filled (`true`: without it no hole is drawn). */
+export const CUTOUT_FILL_LOOKUP = "cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout";
+
+/**
+ * The guest commands (as root, run in order: fabricate all, disable, enable all) that carry a
+ * display cutout in dp: `OrqCutout` with `dp` ({@link cutoutSpecInDp}'s, no `'`), `OrqCutoutRect`
+ * with the rect approximation re-expressed in dp, `OrqCutoutFill` when the image fills the hole;
+ * the device emulation overlays enabled in `overlayList` (`cmd overlay list`) are disabled.
+ * `rect` and `fill` are what {@link CUTOUT_RECT_LOOKUP} and {@link CUTOUT_FILL_LOOKUP} printed.
+ */
+export function cutoutOverlayPlan(input) {
+  if (input.dp.includes("'")) throw new Error("unexpected cutout spec");
+  const looked = (text) => text.trim().replace(/^@\S+ -> /, "");
+  const rect = cutoutSpecInDp(looked(input.rect), input.density);
+  const overlays = [["OrqCutout", "string/config_mainBuiltInDisplayCutout", `0x03 '${input.dp}'`]];
+  if (rect && !rect.includes("'")) overlays.push(["OrqCutoutRect", "string/config_mainBuiltInDisplayCutoutRectApproximation", `0x03 '${rect}'`]);
+  if (looked(input.fill) === "true") overlays.push(["OrqCutoutFill", "bool/config_fillMainBuiltInDisplayCutout", "0x12 0xffffffff"]);
+  const emulation = input.overlayList
+    .split("\n")
+    .map((line) => /^\s*\[x\]\s+(com\.android\.internal\.emulation\.[A-Za-z0-9_.]+)/.exec(line)?.[1])
+    .filter((name) => name !== undefined);
+  return {
+    fabricate: overlays.map(([name, resource, value]) => `cmd overlay fabricate --target android --name ${name} android:${resource} ${value}`),
+    disable: emulation.map((name) => `cmd overlay disable ${name}`),
+    enable: overlays.map(([name]) => `cmd overlay enable com.android.shell:${name}`)
+  };
+}
+
 /** Placeholders avdmanager 22 leaves behind; none may survive the patch. */
 export function hasAvdPlaceholders(text) {
   return /=<(build|temp)>/.test(text);

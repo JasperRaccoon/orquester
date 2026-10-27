@@ -7,3 +7,8 @@ export function patchAvdConfig(text: string, options: { name: string; hardware: 
 export function cutoutSpecInDp(spec: string, density: number): string | null;
 
 export function hasAvdPlaceholders(text: string): boolean;
+
+export const CUTOUT_RECT_LOOKUP: string;
+export const CUTOUT_FILL_LOOKUP: string;
+
+export function cutoutOverlayPlan(input: { dp: string; rect: string; fill: string; density: number; overlayList: string }): { fabricate: string[]; disable: string[]; enable: string[] };

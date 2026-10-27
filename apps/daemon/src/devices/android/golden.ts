@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { DeviceProfile } from "@orquester/api";
 
 import type { DeviceHostProgress } from "../host.ts";
-import { avdName, cutoutSpecInDp } from "./avd-config.ts";
+import { avdName, CUTOUT_FILL_LOOKUP, CUTOUT_RECT_LOOKUP, cutoutOverlayPlan, cutoutSpecInDp } from "./avd-config.ts";
 import { type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
 import { type ExecFn, lastLine } from "./exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
@@ -89,14 +89,13 @@ export interface GoldenDeps {
 
 /** How long a restarted SystemUI gets to draw its status bar and cutout before going on. */
 export const SYSTEM_UI_SETTLE_MS = 5_000;
+/** The guest command that prints SystemUI's pid (its restart is a new pid). */
+export const SYSTEM_UI_PIDOF = "pidof com.android.systemui";
+/** How often, and how many times, a killed SystemUI is looked for again. */
+export const SYSTEM_UI_POLL = Object.freeze({ tries: 60, intervalMs: 500 });
 
-/** The fabricated overlay that carries a snapshot's display cutout in dp. */
+/** The fabricated overlay that carries a snapshot's display cutout in dp (`OrqCutoutRect` and `OrqCutoutFill` beside it). */
 export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
-
-/** The guest command (as root) that fabricates {@link CUTOUT_OVERLAY} with the dp cutout `dp` (no `'` in it). */
-export function fabricateCutoutCommand(dp: string): string {
-  return `cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 '${dp}'`;
-}
 
 /**
  * Re-express the running device's display cutout in dp: the system image's device emulation
@@ -115,10 +114,7 @@ export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: 
   const dp = cutoutSpecInDp(spec, input.cutoutDensity);
   if (!dp) return "kept";
   if (/'/.test(dp)) throw new Error("unexpected cutout spec");
-  const emulation = (await shell("cmd overlay list")).stdout
-    .split("\n")
-    .map((line) => /^\s*\[x\]\s+(com\.android\.internal\.emulation\.[A-Za-z0-9_.]+)/.exec(line)?.[1])
-    .filter((name): name is string => name !== undefined);
+  const overlayList = (await shell("cmd overlay list")).stdout;
   const root = await adbRun(["root"]);
   if (root.exitCode !== 0 || /cannot run as root/i.test(root.stdout + root.stderr)) throw new Error(`adb root failed: ${lastLine(root)}`);
   await delay(1_000, signal);
@@ -126,29 +122,26 @@ export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: 
   try {
     // What the emulation overlay also sets for the hole, read before it goes: the rect SystemUI
     // sizes its cutout window by (left out, the hole is drawn cut in half) and the fill (left out,
-    // no hole is drawn at all).
-    const lookup = async (resource: string) => (await shell(`cmd overlay lookup android android:${resource}`)).stdout.trim().replace(/^@\S+ -> /, "");
-    const rect = cutoutSpecInDp(await lookup("string/config_mainBuiltInDisplayCutoutRectApproximation"), input.cutoutDensity);
-    const fill = (await lookup("bool/config_fillMainBuiltInDisplayCutout")) === "true";
-    const overlays: [name: string, resource: string, value: string][] = [["OrqCutout", "string/config_mainBuiltInDisplayCutout", `0x03 '${dp}'`]];
-    if (rect && !/'/.test(rect)) overlays.push(["OrqCutoutRect", "string/config_mainBuiltInDisplayCutoutRectApproximation", `0x03 '${rect}'`]);
-    if (fill) overlays.push(["OrqCutoutFill", "bool/config_fillMainBuiltInDisplayCutout", "0x12 0xffffffff"]);
-    for (const [name, resource, value] of overlays) {
-      const made = await shell(`cmd overlay fabricate --target android --name ${name} android:${resource} ${value}`);
+    // no hole is drawn at all). The device-cache workflow runs the same plan (`avd-tuning.mjs`).
+    const rect = (await shell(CUTOUT_RECT_LOOKUP)).stdout;
+    const fill = (await shell(CUTOUT_FILL_LOOKUP)).stdout;
+    const plan = cutoutOverlayPlan({ dp, rect, fill, density: input.cutoutDensity, overlayList });
+    for (const command of plan.fabricate) {
+      const made = await shell(command);
       if (made.exitCode !== 0 || /error|exception/i.test(made.stdout + made.stderr)) throw new Error(`fabricating the cutout overlay failed: ${lastLine(made)}`);
     }
-    for (const overlay of emulation) await shell(`cmd overlay disable ${overlay}`);
-    for (const [name] of overlays) {
-      const enabled = await shell(`cmd overlay enable com.android.shell:${name}`);
+    for (const command of plan.disable) await shell(command);
+    for (const command of plan.enable) {
+      const enabled = await shell(command);
       if (enabled.exitCode !== 0 || /exception/i.test(enabled.stdout + enabled.stderr)) throw new Error(`enabling the cutout overlay failed: ${lastLine(enabled)}`);
     }
     // SystemUI keeps drawing the hole it drew at boot (the pixel one) until it starts again.
-    const systemUi = async () => (await shell("pidof com.android.systemui")).stdout.trim();
+    const systemUi = async () => (await shell(SYSTEM_UI_PIDOF)).stdout.trim();
     const before = await systemUi();
     if (before) {
       await shell(`kill ${before.split(/\s+/)[0]}`);
-      for (let tries = 0; tries < 60; tries++) {
-        await delay(500, signal);
+      for (let tries = 0; tries < SYSTEM_UI_POLL.tries; tries++) {
+        await delay(SYSTEM_UI_POLL.intervalMs, signal);
         const now = await systemUi();
         if (now && now !== before) break;
       }
