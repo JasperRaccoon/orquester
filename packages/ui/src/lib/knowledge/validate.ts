@@ -46,6 +46,7 @@ import {
   type KnowledgeWorkerView
 } from "@orquester/api";
 import { readAccountPolicy, type AccountPolicy } from "@orquester/config";
+import type { KnowledgeSimilarityCluster, KnowledgeSimilarityEdge, KnowledgeSimilarityGraphResponse, KnowledgeSimilarityNode } from "@orquester/api";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -249,6 +250,83 @@ export function parseKnowledgeGraphResponse(value: unknown): KnowledgeGraphRespo
       nodes: typeof totals.nodes === "number" ? count(totals.nodes) : nodes.length,
       edges: typeof totals.edges === "number" ? count(totals.edges) : edges.length
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The similarity graph
+// ---------------------------------------------------------------------------
+
+export function parseKnowledgeSimilarityNode(value: unknown): KnowledgeSimilarityNode | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  return {
+    id: value.id,
+    title: str(value.title),
+    kind: str(value.kind) || "note",
+    author: nullableStr(value.author),
+    handle: nullableStr(value.handle),
+    savedAt: str(value.savedAt),
+    collections: strings(value.collections),
+    // Unreadable: -1, an index no cluster has (drawn like a singleton, as one the answer lacks).
+    cluster: typeof value.cluster === "number" && Number.isInteger(value.cluster) && value.cluster >= 0 ? value.cluster : -1,
+    degree: count(value.degree)
+  };
+}
+
+export function parseKnowledgeSimilarityEdge(value: unknown): KnowledgeSimilarityEdge | null {
+  if (!isRecord(value) || typeof value.from !== "string" || typeof value.to !== "string" || value.from === value.to) return null;
+  return { from: value.from, to: value.to, similarity: num(value.similarity), tree: bool(value.tree) };
+}
+
+/**
+ * Nodes deduplicated by id; an edge whose ends are not both in the answer is left out, and two
+ * edges between the same pair (either direction) are one, a tree edge when either was. Clusters
+ * keep their positions (nodes index into them): an unreadable one reads as an empty, unlabelled
+ * cluster, and an absent list as none. Null for a broken envelope (no node or edge list).
+ */
+export function parseKnowledgeSimilarityGraphResponse(value: unknown): KnowledgeSimilarityGraphResponse | null {
+  if (!isRecord(value)) return null;
+  const rawNodes = list(value.nodes, parseKnowledgeSimilarityNode);
+  const rawEdges = list(value.edges, parseKnowledgeSimilarityEdge);
+  if (!rawNodes || !rawEdges) return null;
+  const nodes: KnowledgeSimilarityNode[] = [];
+  const ids = new Set<string>();
+  for (const node of rawNodes) {
+    if (ids.has(node.id)) continue;
+    ids.add(node.id);
+    nodes.push(node);
+  }
+  const edges: KnowledgeSimilarityEdge[] = [];
+  const byPair = new Map<string, KnowledgeSimilarityEdge>();
+  for (const edge of rawEdges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to)) continue;
+    const pair = edge.from < edge.to ? `${edge.from}\u0000${edge.to}` : `${edge.to}\u0000${edge.from}`;
+    const seen = byPair.get(pair);
+    if (seen) {
+      if (edge.tree) seen.tree = true;
+      continue;
+    }
+    byPair.set(pair, edge);
+    edges.push(edge);
+  }
+  const clusters: KnowledgeSimilarityCluster[] = Array.isArray(value.clusters)
+    ? value.clusters.map((item: unknown, index: number) => {
+        if (!isRecord(item)) return { id: index, size: nodes.filter((n) => n.cluster === index).length, label: null };
+        return {
+          id: typeof item.id === "number" ? count(item.id) : index,
+          size: typeof item.size === "number" ? count(item.size) : nodes.filter((n) => n.cluster === index).length,
+          label: typeof item.label === "string" && item.label.trim() !== "" ? item.label : null
+        };
+      })
+    : [];
+  const totals = isRecord(value.totals) ? value.totals : {};
+  const embedded = typeof totals.embedded === "number" ? count(totals.embedded) : nodes.length;
+  return {
+    nodes,
+    edges,
+    clusters,
+    truncated: bool(value.truncated),
+    totals: { entries: Math.max(typeof totals.entries === "number" ? count(totals.entries) : embedded, embedded), embedded }
   };
 }
 
