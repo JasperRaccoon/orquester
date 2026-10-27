@@ -1446,7 +1446,7 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     await h.service.pairChecksIdle();
     const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check");
     assert.equal(asked.length, 36, "each pair once");
-    const rounds = new Set((await readState(h)).workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
+    const rounds = new Set(h.service.snapshot().workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
     assert.equal(rounds.size, 2, "30, then the 6 left; then none");
     await h.service.stop();
   });
@@ -1515,7 +1515,7 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     assert.deepEqual([...round.recorded].sort(), ["v", "w", "x", "y", "z"]);
     assert.ok(round.calls.length > 0 && round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
-    const roundIds = new Set((await readState(h)).workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
+    const roundIds = new Set(h.service.snapshot().workers.filter((w) => w.runId.startsWith("kp_")).map((w) => w.runId));
     assert.equal(roundIds.size, 3, "three rounds: 2 + 2 + 1");
     const state = await readState(h);
     const runTokens = state.recentRuns.reduce((sum, run) => sum + run.tokensIn, 0);
