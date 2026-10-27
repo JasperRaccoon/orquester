@@ -33,6 +33,7 @@ export function DeviceFlatViewport(props: {
   const mediaRef = useRef<HTMLDivElement | null>(null);
   const active = useRef<{ id: number; x: number; y: number } | null>(null);
   const [host, setHost] = useState<Size>({ width: 0, height: 0 });
+  const sized = host.width > 0 && host.height > 0;
 
   useEffect(() => {
     const node = hostRef.current;
@@ -60,7 +61,8 @@ export function DeviceFlatViewport(props: {
       if (source.parentElement === node) source.remove();
       source.style.cssText = previousStyle;
     };
-  }, [source]);
+    // The media box exists only once the host has a size: attach then too.
+  }, [source, sized]);
 
   const aspect = deviceScreenAspect(platform, frame, orientation);
   const geometry = useMemo(

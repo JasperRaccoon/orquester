@@ -6,6 +6,7 @@ import { useAppStore, useCurrentContext, type TabContext } from "../../store/app
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
 import { useDevicesEnabled } from "../../lib/devices/hooks";
+import { useFollowAgentDevices } from "../../lib/devices/use-follow-agent";
 import { MobileSectionOverlay } from "./MobileSections";
 import { RIGHT_RAIL_PANEL_ORDER, visibleRailPanels } from "./panels";
 import { rightRailWidthOf, toggleRightRailPanel, useRightRailState } from "./right-rail-state";
@@ -112,6 +113,8 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
   const devicesOn = useDevicesEnabled();
   const panels = React.useMemo(() => visibleRailPanels(RIGHT_RAIL_PANEL_ORDER, { devices: devicesOn }), [devicesOn]);
   const open = railState.open !== null && panels.includes(railState.open) ? railState.open : null;
+  // Devices §10.2: the rail opens on a device an agent opened for the visible chat (desktop only).
+  useFollowAgentDevices(devicesOn && isDesktop && projectPath !== null);
   return (
     <RightRailRow
       projectPath={isDesktop ? projectPath : null}

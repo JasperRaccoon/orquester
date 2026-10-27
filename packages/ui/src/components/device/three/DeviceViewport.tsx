@@ -168,12 +168,16 @@ export const DeviceViewport = forwardRef<DeviceViewportHandle, DeviceViewportPro
           const root = rootRef.current;
           if (!root) return null;
           const box = root.getBoundingClientRect();
+          // Client rects are scaled by CSS zoom and transforms; the overlay is laid out in CSS px.
+          const sx = box.width > 0 ? root.offsetWidth / box.width : 1;
+          const sy = box.height > 0 ? root.offsetHeight / box.height : 1;
           if (show3dRef.current) {
             const seen = project.current?.(x, y);
-            return seen ? { x: seen.x * box.width, y: seen.y * box.height } : null;
+            return seen ? { x: seen.x * root.offsetWidth, y: seen.y * root.offsetHeight } : null;
           }
           const screen = root.querySelector<HTMLElement>("[data-device-flat-screen]");
-          return screen ? flatViewPoint(screen.getBoundingClientRect(), box, x, y) : null;
+          const seen = screen ? flatViewPoint(screen.getBoundingClientRect(), box, x, y) : null;
+          return seen ? { x: seen.x * sx, y: seen.y * sy } : null;
         },
       }),
       [],
