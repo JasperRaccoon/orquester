@@ -470,6 +470,33 @@ test("graph: topic groups inside a narrow cone, every pair above `good`, are sep
   assert.deepEqual(labelsByTopic(g, s.members), { pricing: "pricing note", tiktok: "tiktok note", seo: "seo note", ads: "ads note" });
 });
 
+test("graph: a survey close to two topics joins one of them; it never glues them into one cluster", async () => {
+  const s = setup();
+  // Two loose topics (each entry 0.36 from its own topic's others) and two surveys of both (0.42 from each entry).
+  for (const [topic, base, sides] of [["x", 0, [3, 4, 5]], ["y", 1, [6, 7, 8]]] as const) {
+    sides.forEach((side, i) => {
+      s.put(`${topic}${i + 1}`, ["kc_seo"], { title: `${topic} ${i + 1}` });
+      s.index.set(ke(`${topic}${i + 1}`), around(DIMS, base, side, 0.6));
+    });
+  }
+  for (const [name, noise] of [["map", 12], ["audit", 13]] as const) {
+    s.put(name, ["kc_seo"], { kind: "synthesis", title: `${name} of x and y` });
+    const vector = new Array<number>(DIMS).fill(0);
+    vector[0] = 1;
+    vector[1] = 1;
+    vector[noise] = 0.1;
+    s.index.set(ke(name), vector);
+  }
+  const g = await s.similarity.graph({}, s.all);
+  const clusterOf = (name: string) => g.nodes.find((node) => node.id === ke(name))!.cluster;
+  assert.deepEqual(
+    ["x2", "x3", "y1", "y2", "y3"].map(clusterOf),
+    [clusterOf("x1"), clusterOf("x1"), clusterOf("y1"), clusterOf("y1"), clusterOf("y1")]
+  );
+  assert.notEqual(clusterOf("x1"), clusterOf("y1"), "the surveys do not glue the two topics");
+  for (const survey of ["map", "audit"]) assert.ok([clusterOf("x1"), clusterOf("y1")].includes(clusterOf(survey)), `${survey} joins a topic`);
+});
+
 test("graph: the same entries always give the same clusters, whatever k is drawn", async () => {
   const topics = { pricing: 5, tiktok: 4, seo: 4, ads: 3 };
   const a = cone(topics);
