@@ -32,7 +32,8 @@ import {
   type KnowledgeSearchResponse,
   type KnowledgeSearchSort,
   type KnowledgeStatus,
-  type UpdateKnowledgeEntryRequest
+  type UpdateKnowledgeEntryRequest,
+  encodeKnowledgeFilterList
 } from "@orquester/api";
 
 import { effectiveSort, isSearching, type KnowledgeQuery } from "./query-state";
@@ -458,7 +459,7 @@ export function searchKeyOf(query: KnowledgeQuery, collection: string): string {
   return JSON.stringify(searchRequestOf(query, collection));
 }
 
-/** The plain list's query string: the collection and the filters (comma-separated lists, ISO bounds). */
+/** The plain list's query string: the collection and the filters (lists as `encodeKnowledgeFilterList` writes them, ISO bounds). */
 export function entriesQueryOf(
   collection: string,
   filters: KnowledgeSearchFilters,
@@ -469,8 +470,8 @@ export function entriesQueryOf(
   if (page.cursor) query.cursor = page.cursor;
   const clean = cleanFilters(filters) ?? {};
   for (const field of KNOWLEDGE_FACET_FIELDS) {
-    const values = clean[field];
-    if (values) query[field] = values.join(",");
+    const encoded = encodeKnowledgeFilterList(clean[field]);
+    if (encoded) query[field] = encoded;
   }
   for (const bound of BOUNDS) {
     const value = clean[bound];

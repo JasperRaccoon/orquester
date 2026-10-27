@@ -226,6 +226,13 @@ describe("the List view's requests", () => {
     });
   });
 
+  it("send a filter list whose value holds a comma (or starts with '[') as a JSON array", () => {
+    const query = entriesQueryOf("all", { authors: ["Patel, Om", "@om"], kinds: ["[draft]"], years: ["2026"] });
+    assert.equal(query.authors, JSON.stringify(["Patel, Om", "@om"]));
+    assert.equal(query.kinds, JSON.stringify(["[draft]"]));
+    assert.equal(query.years, "2026");
+  });
+
   it("scope a filter's counts to the collection and the other filters, never its own", () => {
     const filters = { kinds: ["thread"], authors: ["om"], years: ["2026"] };
     assert.deepEqual(facetsRequestOf("kc_seo", filters, "kinds"), { collections: ["kc_seo"], filters: { authors: ["om"], years: ["2026"] } });
