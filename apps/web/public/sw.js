@@ -219,13 +219,6 @@ function networkFirstWithTimeout(event, cacheKey) {
   });
 }
 
-// Navigations refresh the cached shell on each successful load so it stays
-// current across deploys, keyed under "/index.html" (not the request URL, which
-// is "/") to match the fallback's lookup.
-function networkFirstNavigation(event) {
-  return networkFirstWithTimeout(event, "/index.html");
-}
-
 function cacheFirstAsset(event) {
   return caches.open(ASSET_CACHE).then(function (cache) {
     return cache.match(event.request).then(function (cached) {
@@ -239,10 +232,6 @@ function cacheFirstAsset(event) {
       });
     });
   });
-}
-
-function networkFirstStatic(event) {
-  return networkFirstWithTimeout(event, event.request);
 }
 
 self.addEventListener("fetch", function (event) {
@@ -265,7 +254,8 @@ self.addEventListener("fetch", function (event) {
   if (isBypassed(url)) return;
 
   if (request.mode === "navigate") {
-    event.respondWith(networkFirstNavigation(event));
+    // Cache every successful navigation under the offline shell's lookup key.
+    event.respondWith(networkFirstWithTimeout(event, "/index.html"));
     return;
   }
 
@@ -275,7 +265,7 @@ self.addEventListener("fetch", function (event) {
   }
 
   // Root static files (icons, manifest, favicons): network-first, cache on ok.
-  event.respondWith(networkFirstStatic(event));
+  event.respondWith(networkFirstWithTimeout(event, request));
 });
 
 // --- Web Push -------------------------------------------------------------

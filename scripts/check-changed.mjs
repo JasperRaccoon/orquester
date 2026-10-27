@@ -29,7 +29,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A test or check file, by name. */
-export const TEST_FILE = /\.(test|check)\.[cm]?[jt]sx?$/;
+const TEST_FILE = /\.(test|check)\.[cm]?[jt]sx?$/;
 const CHECK_FILE = /\.check\.[cm]?[jt]sx?$/;
 const TYPESCRIPT = /\.[cm]?tsx?$/;
 /** Root files every package's typecheck reads. */

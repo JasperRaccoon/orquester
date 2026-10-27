@@ -11,9 +11,9 @@ import {
   DESKTOP_TOOLS,
   evaluateDesktopHost,
   parseFfmpegOpusEncoder,
-  parseFfmpegPulseInput,
-  tmuxVersionOutputOk
+  parseFfmpegPulseInput
 } from "../../../desktops/host-status.ts";
+import { tmuxVersionOutputOk } from "../../../tmux.ts";
 
 /** Package managers the installer can drive, by the command the probe found. */
 export type BoxPackageManager = "apt" | "dnf" | "yum";

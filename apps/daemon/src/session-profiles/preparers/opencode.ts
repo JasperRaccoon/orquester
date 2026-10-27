@@ -64,7 +64,7 @@
 import { createHash } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { OPENCODE_SESSION_TOOLS_SERVER_PATTERN, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 import { OPENCODE_STATUS_PLUGIN_FILE, openCodeStatusPluginSource } from "../../agent-hooks.ts";
 import { opencodeRuntimeConfig } from "../../agent-isolation/runtime-settings.ts";
@@ -94,20 +94,20 @@ import type { ResolvedMcpServer } from "../resolve.ts";
 const OPENCODE_PREPARER_VERSION = `3.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
 
 /** OpenCode's one built-in skill (1.18.34); denied when the profile hides built-ins. */
-export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
+const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
 
 /** The repo's own skill folders, brought back by `skills.paths` (relative to the session's directory). */
-export const OPENCODE_PROJECT_SKILL_PATHS = [".claude/skills", ".agents/skills"] as const;
+const OPENCODE_PROJECT_SKILL_PATHS = [".claude/skills", ".agents/skills"] as const;
 
 /**
  * The variables a profile server starts with (besides the dirs): the user's `~/.claude/skills` and
  * `~/.agents/skills` off. Not `OPENCODE_DISABLE_CLAUDE_CODE`: it also drops a repo's own
  * `CLAUDE.md`; the `~/.claude/CLAUDE.md` fallback is stopped by the always-present `AGENTS.md`.
  */
-export const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1" } as const;
+const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1" } as const;
 
 /** Removed from a profile server's env: an extra config FILE the launcher env may name (user items). */
-export const OPENCODE_PROFILE_UNSET = ["OPENCODE_CONFIG"] as const;
+const OPENCODE_PROFILE_UNSET = ["OPENCODE_CONFIG"] as const;
 
 const CONFIG_DIR = "opencode";
 const XDG_DIR = "xdg";
@@ -160,7 +160,7 @@ export function withSkillsDenied(permission: unknown, hidden: readonly string[])
 }
 
 /** A profile MCP server as OpenCode's `mcp.<name>` entry (known keys only; refused shapes throw). */
-export function opencodeMcpEntry(server: ResolvedMcpServer): JsonObject {
+function opencodeMcpEntry(server: ResolvedMcpServer): JsonObject {
   const timeout = server.advanced.timeout;
   const portable: PortableMcpServer = {
     name: server.name,

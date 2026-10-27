@@ -160,11 +160,6 @@ export class MykgRun {
     return this.child.pid ?? null;
   }
 
-  /** The session the run extracts into, once known. */
-  get sessionName(): string | null {
-    return this.session;
-  }
-
   /** Called once, when a new session's name is printed (a run with a known session never calls it). */
   onSession(listener: (session: string) => void): () => void {
     this.sessionListeners.add(listener);
@@ -220,10 +215,6 @@ function describeFailure(head: string, failed: { step: string; error: string }[]
 /** The error's LAST characters (a traceback ends with the exception). */
 function clip(text: string): string {
   return text.length <= ERROR_MAX_CHARS ? text : `…${text.slice(-(ERROR_MAX_CHARS - 1))}`;
-}
-
-export function startMykgRun(spec: MykgRunSpec, deps: MykgRunDeps): MykgRun {
-  return new MykgRun(spec, deps);
 }
 
 /** What a stale-child check reads of a pid and how it signals it (Linux `/proc`; tests stub it). */

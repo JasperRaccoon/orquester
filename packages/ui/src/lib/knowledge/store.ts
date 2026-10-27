@@ -23,11 +23,6 @@
  * Per connection: `resetKnowledge()` runs on a connection switch and when the
  * plugin turns off (the app store), and a call through a client of another
  * connection resets first.
- *
- * Exported API for other UI modules: the vanilla `knowledgeStore`, the hooks
- * `useKnowledgeState(select)`, `useKnowledgeStatus()`,
- * `useKnowledgeCollections()`, `useKnowledgeRevisions()`, and the functions
- * below (each takes the `KnowledgeApi`, which `ApiClient` satisfies).
  */
 
 import { useSyncExternalStore } from "react";
@@ -306,17 +301,6 @@ export function useKnowledgeState<T>(select: (state: KnowledgeState) => T): T {
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
-export function useKnowledgeStatus(): KnowledgeStatus | null {
-  return useKnowledgeState((state) => state.status);
-}
-
 export function useKnowledgeCollections(): KnowledgeCollectionsResponse | null {
   return useKnowledgeState((state) => state.collections);
-}
-
-/** The two revision counters (a fresh object each render: depend on its fields, not on it). */
-export function useKnowledgeRevisions(): { entries: number; graph: number } {
-  const entries = useKnowledgeState((state) => state.entriesRevision);
-  const graph = useKnowledgeState((state) => state.graphRevision);
-  return { entries, graph };
 }

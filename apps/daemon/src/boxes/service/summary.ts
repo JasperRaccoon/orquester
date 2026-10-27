@@ -54,13 +54,8 @@ export function setupStepIds(purpose: BoxPurpose): BoxSetupStepId[] {
   return purpose === "temporary" ? ["create", "connect", "ready"] : [...BOX_SETUP_STEP_IDS];
 }
 
-export function initialSetup(purpose: BoxPurpose): BoxSetupStep[] {
-  return setupStepIds(purpose).map((id) => ({ id, label: SETUP_STEP_LABELS[id], state: "pending", startedAt: null, finishedAt: null, message: null }));
-}
-
-/** {@link initialSetup} in the stored record's shape. */
 export function initialStoredSetup(purpose: BoxPurpose): NonNullable<StoredBox["setup"]> {
-  return initialSetup(purpose).map((step) => ({ ...step }));
+  return setupStepIds(purpose).map((id) => ({ id, label: SETUP_STEP_LABELS[id], state: "pending", startedAt: null, finishedAt: null, message: null }));
 }
 
 export function isBoxState(value: unknown): value is BoxState {

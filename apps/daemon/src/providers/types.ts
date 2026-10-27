@@ -1,4 +1,4 @@
-import type { GitProviderId, OwnerSummary, RepoSummary } from "@orquester/api";
+import type { OwnerSummary, RepoSummary } from "@orquester/api";
 
 import { AccountError } from "../account-error";
 
@@ -117,7 +117,7 @@ export interface PullRequestInfo {
   updatedAt: string;
 }
 
-/** A GitHub release (Bitbucket has none — see `GitProvider.supportsReleases`). */
+/** A GitHub release (Bitbucket listings answer `unsupported`). */
 export interface ReleaseInfo {
   id: string;
   /** The release title; the tag name when the release has none. */
@@ -209,10 +209,6 @@ export function retryAfterMs(value: string | null, now = Date.now()): number | u
 
 /** One git-hosting provider. All methods are pure or REST-only (no fs/git). */
 export interface GitProvider {
-  readonly id: GitProviderId;
-  /** Human-readable token scopes/permissions, surfaced in error hints + UI. */
-  readonly scopesHint: string;
-
   getIdentity(creds: ProviderCreds): Promise<ProviderIdentity>;
   uploadSshKey(
     creds: ProviderCreds,
@@ -239,8 +235,6 @@ export interface GitProvider {
   sshProbe(ctx: UrlContext & { login: string }): SshProbe | null;
   credentialSpec(ctx: UrlContext & { login: string; email?: string }): CredentialSpec;
 
-  /** False when the forge has no releases (Bitbucket): `listReleases` then answers `unsupported`. */
-  readonly supportsReleases: boolean;
   /**
    * One page (≤ `POLL_PAGE_SIZE`) of the repo's pull requests in every state,
    * most recently updated first. `creds: null` reads anonymously (public repos

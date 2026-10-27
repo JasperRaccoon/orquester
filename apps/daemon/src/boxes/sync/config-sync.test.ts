@@ -13,7 +13,7 @@ import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
 import { BoxConfigSyncService, BoxSyncError, type BoxConfigSyncOptions } from "./config-sync.ts";
 import { BoxConfigWatches } from "./watches.ts";
-import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
+import { fakeBoxHub, mappedBoxConnection } from "./testing.ts";
 
 const SECRETS = ["ghp_mcpsecret", "ghp_settingssecret", "CREDENTIALS-CONTENT", "PRIVATE-KEY-CONTENT"];
 

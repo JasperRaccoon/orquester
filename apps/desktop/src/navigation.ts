@@ -13,7 +13,7 @@
 // and, for a daemon served under a sub-path (`https://host/orq`), that path —
 // the layout of `packages/ui/src/lib/agent-chat/visual-frame.ts`.
 export const VISUAL_SCHEME = "orq-visual";
-export const VISUAL_ROUTE_PREFIX = "/api/agent-visuals/";
+const VISUAL_ROUTE_PREFIX = "/api/agent-visuals/";
 
 /** The daemon route a remote's file and folder downloads come from. */
 const DOWNLOAD_ROUTE = "/api/fs/download";
@@ -41,7 +41,7 @@ export function remoteBaseOf(url: string): string | null {
 }
 
 /** Where a page URL points: a daemon path over the socket, or a remote URL. Null for anything else. */
-export type VisualTarget = { kind: "local"; path: string } | { kind: "remote"; url: string };
+type VisualTarget = { kind: "local"; path: string } | { kind: "remote"; url: string };
 
 /**
  * A remote endpoint decoded from a page URL — only when it is exactly the base
@@ -81,7 +81,7 @@ export function visualTarget(raw: string, remoteBases: ReadonlySet<string>): Vis
 }
 
 /** A link this app hands to the system browser: http(s) and mail only. */
-export function isExternalUrl(url: string): boolean {
+function isExternalUrl(url: string): boolean {
   try {
     const { protocol: scheme } = new URL(url);
     return scheme === "https:" || scheme === "http:" || scheme === "mailto:";
@@ -164,7 +164,7 @@ export function carriesCredential(url: string): boolean {
 }
 
 /** A file or folder download from a remote daemon this process talks to (at its configured base). */
-export function isRemoteDownload(url: string, remoteBases: ReadonlySet<string>): boolean {
+function isRemoteDownload(url: string, remoteBases: ReadonlySet<string>): boolean {
   const base = remoteBaseOf(url);
   if (base === null || !remoteBases.has(base)) return false;
   try {

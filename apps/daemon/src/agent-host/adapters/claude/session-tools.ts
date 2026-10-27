@@ -45,23 +45,13 @@ import { buildSessionToolsMcpServer, type SessionToolsMcpServer } from "../../se
  * 2.1.285 re-lists within ~70 ms). Past it the apply answers truthfully that only a restart is
  * certain (`next-idle`), and the host restarts the session at its next idle point.
  */
-export const CLAUDE_RELIST_TIMEOUT_MS = 5_000;
+const CLAUDE_RELIST_TIMEOUT_MS = 5_000;
 
 const TOOL_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`;
-
-/** A session tool as Claude names it: `mcp__orquester__<tool>`. */
-export function claudeSessionToolName(name: string): string {
-  return `${TOOL_PREFIX}${name}`;
-}
 
 /** True for one of `names` (bare) as Claude names it. */
 export function isClaudeSessionTool(toolName: string, names: ReadonlySet<string>): boolean {
   return toolName.startsWith(TOOL_PREFIX) && names.has(toolName.slice(TOOL_PREFIX.length));
-}
-
-/** Claude's spelling of a server inside tool names (`mcp__<server>__<tool>`): unsafe characters as `_`. */
-export function claudeServerRuleName(server: string): string {
-  return server.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
 /** What `buildClaudeQueryOptions` attaches. */
@@ -81,7 +71,7 @@ export interface ClaudeSessionToolsLaunch {
 
 /** `disallowedTools` for a launch's denials: the server-level rule of each denied server but ours. */
 export function claudeDisallowedTools(deny: readonly string[]): string[] {
-  return [...new Set(deny.filter((name) => name !== SESSION_TOOLS_SERVER_NAME).map((name) => `mcp__${claudeServerRuleName(name)}`))];
+  return [...new Set(deny.filter((name) => name !== SESSION_TOOLS_SERVER_NAME).map((name) => `mcp__${name.replace(/[^a-zA-Z0-9_-]/g, "_")}`))];
 }
 
 /** The flag settings' `deniedMcpServers`: every denied server, and always a user server named `orquester`. */
@@ -147,7 +137,7 @@ export async function createClaudeSessionToolsLaunch(input: {
   return {
     server: { type: "sdk", name: SESSION_TOOLS_SERVER_NAME, instance },
     instructions: prepared.instructions,
-    allowedTools: prepared.tools.map((tool) => claudeSessionToolName(tool.name)),
+    allowedTools: prepared.tools.map((tool) => `${TOOL_PREFIX}${tool.name}`),
     deny: prepared.deny,
     names: () => names,
     release

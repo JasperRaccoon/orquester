@@ -17,7 +17,6 @@ import {
   knowledgeRuntimeReady,
   knowledgeStagingDir,
   knowledgeVersionDir,
-  parseLockVersions,
   pruneKnowledgeVersions,
   readKnowledgeManifest,
   resolveMykgRelease
@@ -89,6 +88,17 @@ async function failsAt(promise: Promise<unknown>, step: string, pattern?: RegExp
     if (pattern) assert.match(error.message, pattern);
     return true;
   });
+}
+
+/** `name==version[ ; marker]` of every requirement in a hashed lock (hashes and comments dropped). */
+function parseLockVersions(lock: string): string[] {
+  const out: string[] = [];
+  for (const raw of lock.split(/\r?\n/)) {
+    if (raw.startsWith(" ") || raw.startsWith("\t") || raw.startsWith("#")) continue;
+    const line = raw.replace(/\\\s*$/, "").trim();
+    if (/^[A-Za-z0-9._-]+==[^\s;]+/.test(line)) out.push(line);
+  }
+  return out;
 }
 
 async function list(dir: string): Promise<string[]> {
@@ -493,5 +503,4 @@ test("the shipped lock pins the pinned myKG by its wheel hash and every dependen
   assert.ok(versions.length > 40);
   assert.ok(versions.every((line) => /^[A-Za-z0-9._-]+==\S+/.test(line)));
   assert.ok(versions.some((line) => line.startsWith("pywin32==312 ;")), "markers are kept");
-  assert.deepEqual(parseLockVersions("# c\nfoo==1.0 \\\n    --hash=sha256:ab\nbar==2 ; x \\\n"), ["foo==1.0", "bar==2 ; x"]);
 });

@@ -128,7 +128,6 @@ export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
   accountNote:
     "macOS boxes run as GitHub Actions jobs on Blacksmith in a private repo of your GitHub org. Set it up in the macOS section with a connected Git hosting account; Blacksmith bills the org.",
   maxLifetimeMinutes: BLACKSMITH_MAX_LIFETIME_MINUTES,
-  needsWindowsImage: false,
 
   async validate(credentials, options) {
     let call: GithubCallOptions & BlacksmithAccess;

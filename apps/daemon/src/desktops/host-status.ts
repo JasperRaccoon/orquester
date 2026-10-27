@@ -29,7 +29,7 @@ export const DESKTOP_TOOLS: readonly DesktopToolSpec[] = [
 ];
 
 /** Ubuntu package of Mesa's software OpenGL driver (recommended, not required). */
-export const MESA_DRI_PACKAGE = "libgl1-mesa-dri";
+const MESA_DRI_PACKAGE = "libgl1-mesa-dri";
 
 /** Package order in the hint (the spec's list). */
 const PACKAGE_ORDER = [
@@ -81,18 +81,6 @@ export function parseFfmpegPulseInput(devicesOutput: string): boolean {
 /** Whether `ffmpeg -hide_banner -encoders` lists `libopus` (rows: ` A....D libopus  …`). */
 export function parseFfmpegOpusEncoder(encodersOutput: string): boolean {
   return encodersOutput.split("\n").some((line) => /^ [A-Z.]{6} libopus(\s|$)/.test(line));
-}
-
-/**
- * Whether `tmux -V` output ("tmux 3.4", "tmux 3.2a", "tmux next-3.4") is 3.2 or newer: the rule of
- * `tmuxVersionOk` in tmux.ts, for output read somewhere else (a box).
- */
-export function tmuxVersionOutputOk(output: string): boolean {
-  const match = /(\d+)\.(\d+)/.exec(output);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  return major > 3 || (major === 3 && minor >= 2);
 }
 
 /** The apt command for the missing packages in the spec's order, or null when nothing is missing. */

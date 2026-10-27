@@ -22,7 +22,7 @@ import { knowledgeContentHash } from "../store/normalize.ts";
 import { Bm25Index } from "./bm25.ts";
 import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
 import type { KnowledgeGraph } from "./graph.ts";
-import { CHUNKER_VERSION, type TextSpan, bestSnippet, chunkBody, leadSnippet, tokenize } from "./text.ts";
+import { CHUNKER_VERSION, type TextSpan, bestSnippet, chunkBody, tokenize } from "./text.ts";
 import { VectorCache } from "./vector-cache.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
 
@@ -309,7 +309,7 @@ export class KnowledgeSearch {
       ...meta,
       savedFrom: { ...meta.savedFrom },
       collections: visibleCollections(meta, scope),
-      snippet: snippet ?? (doc ? leadSnippet(doc.body) : ""),
+      snippet: snippet ?? (doc ? bestSnippet(doc.body, []) : ""),
       linkCount: this.graph.linkCount(meta.id),
       citation: knowledgeCitation(meta)
     };

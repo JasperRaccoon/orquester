@@ -14,24 +14,17 @@
  *   an in-chat tool call); a body `sessionId` is never trusted. It must be a session whose `owner`
  *   is `{kind: "knowledge-indexer"}` for the run in flight, else 403 `KNOWLEDGE_NOT_A_WORKER`. `workerNext` long-polls (see `linking/inbox.ts`);
  *   a client that goes away ends the wait.
- *
- * `publishKnowledgeStatus` puts `KNOWLEDGE_STATUS_EVENT` (payload `KnowledgeStatus`) on the
- * `KNOWLEDGE_CHANNEL` whenever the linking state, its runs, workers or tokens move.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  KNOWLEDGE_CHANNEL,
-  KNOWLEDGE_STATUS_EVENT,
   knowledgeRoutes,
-  type KnowledgeErrorCode,
   type KnowledgeRebuildEstimate,
   type KnowledgeStatus,
   type KnowledgeWorkerNextResponse,
   type KnowledgeWorkerSubmitResponse,
   type SessionOwner
 } from "@orquester/api";
-import type { Broadcaster } from "../broadcaster.ts";
 import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
 import { KnowledgeError } from "./store/errors.ts";
 
@@ -83,18 +76,8 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
   };
 }
 
-class RouteError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: KnowledgeErrorCode,
-    message: string
-  ) {
-    super(message);
-  }
-}
-
-const NOT_A_WORKER = (): RouteError =>
-  new RouteError(403, "KNOWLEDGE_NOT_A_WORKER", "Only the Knowledge Graph indexer's worker chats of the run in flight may call this.");
+const NOT_A_WORKER = (): KnowledgeError =>
+  new KnowledgeError("KNOWLEDGE_NOT_A_WORKER", "Only the Knowledge Graph indexer's worker chats of the run in flight may call this.");
 
 /** The calling chat: the agent principal's thread (server-stamped), never a body field. */
 function callerSession(request: FastifyRequest): string {
@@ -120,7 +103,7 @@ function clientGone(reply: FastifyReply): AbortSignal {
 export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: KnowledgeLinkingRoutesDeps): void {
   const { linking } = deps;
   const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
-    if (error instanceof RouteError || error instanceof KnowledgeError) return reply.code(error.status).send({ code: error.code, message: error.message });
+    if (error instanceof KnowledgeError) return reply.code(error.status).send({ code: error.code, message: error.message });
     deps.logger?.error(`knowledge: a linking request failed (${error instanceof Error ? error.name : typeof error})`);
     return reply.code(500).send({ code: "KNOWLEDGE_ERROR", message: "The request failed." });
   };
@@ -140,8 +123,8 @@ export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: Knowl
   app.post(knowledgeRoutes.rebuild, async (_request, reply): Promise<KnowledgeStatus | void> => {
     try {
       const counts = deps.counts();
-      if (!counts.enabled) throw new RouteError(409, "KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off.");
-      if (!counts.installed) throw new RouteError(409, "KNOWLEDGE_NOT_INSTALLED", "myKG is not installed yet.");
+      if (!counts.enabled) throw new KnowledgeError("KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off.");
+      if (!counts.installed) throw new KnowledgeError("KNOWLEDGE_NOT_INSTALLED", "myKG is not installed yet.");
       await linking.rebuild();
       return status();
     } catch (error) {
@@ -176,30 +159,13 @@ export function registerKnowledgeLinkingRoutes(app: FastifyInstance, deps: Knowl
       requireWorker(sessionId);
       const { taskId, answer } = body;
       if (typeof taskId !== "string" || taskId.trim() === "" || taskId.length > 200) {
-        throw new RouteError(400, "KNOWLEDGE_INVALID", "taskId must be the id of the task you answer.");
+        throw new KnowledgeError("KNOWLEDGE_INVALID", "taskId must be the id of the task you answer.");
       }
-      if (typeof answer !== "string") throw new RouteError(400, "KNOWLEDGE_INVALID", "answer must be the JSON text the task asks for.");
-      if (answer.length > KNOWLEDGE_WORKER_ANSWER_MAX) throw new RouteError(413, "KNOWLEDGE_TOO_LARGE", "The answer is too large.");
+      if (typeof answer !== "string") throw new KnowledgeError("KNOWLEDGE_INVALID", "answer must be the JSON text the task asks for.");
+      if (answer.length > KNOWLEDGE_WORKER_ANSWER_MAX) throw new KnowledgeError("KNOWLEDGE_TOO_LARGE", "The answer is too large.");
       return await linking.workerSubmit(sessionId, taskId, answer, clientGone(reply));
     } catch (error) {
       return fail(reply, error);
     }
   });
-}
-
-/** Publishes `KNOWLEDGE_STATUS_EVENT` on every linking change. Answers the unsubscribe. */
-export function publishKnowledgeStatus(
-  linking: Pick<KnowledgeLinkingService, "events" | "snapshot">,
-  broadcaster: Pick<Broadcaster, "publish">,
-  counts: () => KnowledgeStatusCounts
-): () => void {
-  const onStatus = (): void => {
-    try {
-      broadcaster.publish(KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, buildKnowledgeStatus(linking.snapshot(), counts()));
-    } catch {
-      // A status that cannot be built now is published with the next change.
-    }
-  };
-  linking.events.on("status", onStatus);
-  return () => linking.events.off("status", onStatus);
 }

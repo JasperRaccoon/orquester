@@ -48,7 +48,7 @@ import {
   type SessionProfileSettingsDraft,
   type UpdateSessionProfileRequest
 } from "@orquester/api";
-import { AgentProfileError, profileErrors } from "../agent-profile/errors.ts";
+import { AgentProfileError } from "../agent-profile/errors.ts";
 import {
   acceptRawBody,
   declaredLengthExceedsCap,

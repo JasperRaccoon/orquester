@@ -642,17 +642,6 @@ function lockWithout(lock: string, name: string): string {
   return `${out.join("\n")}\n`;
 }
 
-/** `name==version[ ; marker]` of every requirement in a hashed lock (hashes and comments dropped). */
-export function parseLockVersions(lock: string): string[] {
-  const out: string[] = [];
-  for (const raw of lock.split(/\r?\n/)) {
-    if (raw.startsWith(" ") || raw.startsWith("\t") || raw.startsWith("#")) continue;
-    const line = raw.replace(/\\\s*$/, "").trim();
-    if (/^[A-Za-z0-9._-]+==[^\s;]+/.test(line)) out.push(line);
-  }
-  return out;
-}
-
 /** `<venv>/lib/python3.X/site-packages/mykg/prompts`. */
 async function installedPromptsDir(venv: string): Promise<string> {
   const lib = join(venv, "lib");

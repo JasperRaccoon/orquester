@@ -324,9 +324,6 @@ function userRef(identity: ProviderIdentity): string {
 }
 
 export const bitbucketCloudProvider: GitProvider = {
-  id: "bitbucket-cloud",
-  scopesHint: SCOPES,
-
   async getIdentity(creds): Promise<ProviderIdentity> {
     if (!creds.email) {
       throw new AccountError(400, "The Atlassian account email is required.");
@@ -460,8 +457,6 @@ export const bitbucketCloudProvider: GitProvider = {
   credentialSpec(_ctx): CredentialSpec {
     return { host: "bitbucket.org", username: CLOUD_GIT_USERNAME };
   },
-
-  supportsReleases: false,
 
   /**
    * `GET /repositories/:ws/:slug/pullrequests` in every live state, most

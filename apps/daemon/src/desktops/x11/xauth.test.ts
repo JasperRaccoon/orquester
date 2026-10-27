@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encodeXauthEntry, findMitCookie, MIT_MAGIC_COOKIE, parseXauthority, readXauthCookie, writeXauthority } from "./xauth.ts";
+import { encodeXauthEntry, findMitCookie, MIT_MAGIC_COOKIE, newXauthority, parseXauthority, readXauthCookie } from "./xauth.ts";
 
 const hex = (text: string): Buffer => Buffer.from(text.replace(/\s+/g, ""), "hex");
 const cookie = hex("00112233445566778899aabbccddeeff");
@@ -39,20 +39,17 @@ test("rejects a truncated file and accepts an empty one", () => {
   assert.throws(() => parseXauthority(hex("ff")), /truncated/);
 });
 
-test("replaces the authority file with a private wildcard cookie readable on any display", async () => {
+test("creates a fresh wildcard cookie readable on any display", async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-xauth-"));
   try {
     const path = join(dir, "Xauthority");
-    await writeFile(path, "old authority file", { mode: 0o644 });
-    await writeXauthority(path);
-    const bytes = await readFile(path);
+    const bytes = newXauthority();
     const header = hex("ffff 0000 0000 0012 4d49542d4d414749432d434f4f4b49452d31 0010");
     assert.deepEqual(bytes.subarray(0, header.length), header);
     assert.equal(bytes.length, header.length + 16);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    await writeFile(path, bytes);
     assert.deepEqual(await readXauthCookie(path, 12), { name: MIT_MAGIC_COOKIE, data: bytes.subarray(header.length) });
-    await writeXauthority(path);
-    assert.notDeepEqual(await readFile(path), bytes, "each host start gets a new cookie");
+    assert.notDeepEqual(newXauthority(), bytes, "each host start gets a new cookie");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

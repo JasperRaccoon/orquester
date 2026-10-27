@@ -46,7 +46,7 @@ import {
   windowFrameOptions,
   type WindowState
 } from "./window-state";
-import { canDeliverToRenderer, planShowWindow, RendererOutbox, replacementShows } from "./window-lifecycle";
+import { RendererOutbox } from "./window-lifecycle";
 
 /**
  * A bridged request body: JSON as a string, or an upload's raw bytes as the
@@ -742,7 +742,7 @@ function sendToRenderer(channel: string, payload: unknown): void {
 function flushRendererOutbox(): void {
   const contents = mainWindow?.webContents;
   const mainLoaded = contents !== undefined && !contents.isDestroyed() && !contents.isLoading();
-  if (!contents || !canDeliverToRenderer({ mainLoaded, rebuilding: replacementWindow !== undefined })) return;
+  if (!contents || !mainLoaded || replacementWindow !== undefined) return;
   for (const message of rendererOutbox.drain()) contents.send(message.channel, message.payload);
 }
 
@@ -856,12 +856,11 @@ function registerIpc(): void {
 }
 
 function showWindow(): void {
-  const plan = planShowWindow({ hasMain: mainWindow !== undefined, rebuilding: replacementWindow !== undefined });
-  if (plan === "show-main" && mainWindow) {
+  if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-  } else if (plan === "create") {
+  } else if (!replacementWindow) {
     createWindow();
   }
 }
@@ -1013,10 +1012,7 @@ function createWindow(replacing?: BrowserWindow): void {
       return;
     }
     // Hidden to the tray (run in background) stays hidden.
-    const show = replacementShows({
-      destroyed: replacing.isDestroyed(),
-      visible: !replacing.isDestroyed() && replacing.isVisible()
-    });
+    const show = !replacing.isDestroyed() && replacing.isVisible();
     replacementWindow = undefined;
     mainWindow = win;
     mainWindowFrame = frameKey(frame);

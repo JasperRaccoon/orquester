@@ -1,6 +1,6 @@
 /**
  * The plugin's settings (spec §6, §11.2, §11.3): provider credentials and their offers, the
- * "Runs on" kinds, Windows prepared images, the connection route boxes dial, and the Blacksmith
+ * "Runs on" kinds, the connection route boxes dial, and the Blacksmith
  * macOS setup. Secret values go into box-secrets.json and never come back out: responses carry a
  * `keyHint` (last four characters) at most.
  */
@@ -22,15 +22,13 @@ import {
   type BoxProviderId,
   type BoxProviderInfo,
   type BoxProvidersResponse,
-  type BoxWindowsImageState,
   type SetBlacksmithSetupRequest,
   type SetBoxConnectionRequest,
   type SetBoxProviderCredentialsRequest
 } from "@orquester/api";
 
-import type { BoxProviderAdapter, BoxProviderRegistry, BuildBootstrap, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import type { BoxProviderAdapter, BoxProviderRegistry, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
-import type { BoxSetupLog } from "./box-exec.ts";
 import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import type { BoxClock, BoxConnectivity, ConnectRoute } from "./lifecycle.ts";
@@ -107,7 +105,6 @@ const WORKLOAD_VALUE = /^[A-Za-z0-9._:/-]{1,200}$/;
 export interface BoxSettingsDeps {
   store: BoxStore;
   providers: BoxProviderRegistry;
-  buildBootstrap: BuildBootstrap;
   tailscale: (credentials: TailscaleCredentials) => TailscaleKeys;
   accounts: BoxHostingAccounts;
   blacksmith?: BlacksmithSetupDriver;
@@ -117,11 +114,10 @@ export interface BoxSettingsDeps {
   localTailscale?: LocalTailscale;
   /** Where the daemon's HTTP transport listens (the Check's reverse proxy hint names its port). */
   daemonHttp?: () => DaemonHttpAddress;
-  setupLog: BoxSetupLog;
   clock: BoxClock;
   fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error">;
-  /** Provider settings changed (credentials, Windows image, Blacksmith steps). */
+  /** Provider settings changed (credentials, Blacksmith steps). */
   providersChanged(): void;
 }
 
@@ -195,7 +191,6 @@ export function tailscalePolicySnippet(daemonUrl: string | null, local?: Pick<Bo
 export class BoxSettings implements BoxConnectivity {
   private readonly offersCache = new Map<string, { at: number; value: Promise<BoxOffersResponse> }>();
   private readonly checking = new Set<string>();
-  private readonly windowsImageRuns = new Map<string, Promise<void>>();
   private serving: Promise<BoxConnectionSettings> | null = null;
   /** Blacksmith checks run one at a time; a re-run queues behind the current one. */
   private blacksmithRuns: Promise<void> = Promise.resolve();
@@ -235,7 +230,7 @@ export class BoxSettings implements BoxConnectivity {
       const secret = adapter.credentialFields.find((field) => field.secret) ?? adapter.credentialFields[0];
       hint = secret ? keyHint(credentials[secret.id]) : null;
     }
-    const info: BoxProviderInfo = {
+    return {
       id: adapter.id,
       label: adapter.label,
       kinds: [...adapter.kinds],
@@ -248,12 +243,6 @@ export class BoxSettings implements BoxConnectivity {
       accountNote: adapter.accountNote,
       maxLifetimeMinutes: adapter.maxLifetimeMinutes
     };
-    if (adapter.needsWindowsImage) {
-      const image = settings.windowsImage;
-      const state: BoxWindowsImageState = image && ["none", "preparing", "ready", "failed"].includes(image.state) ? (image.state as BoxWindowsImageState) : "none";
-      info.windowsImage = { state, message: image?.message ?? null, updatedAt: image?.updatedAt ?? null };
-    }
-    return info;
   }
 
   /** Validate with a cheap read, then save. Bad credentials are refused (400) and nothing is saved. */
@@ -423,15 +412,6 @@ export class BoxSettings implements BoxConnectivity {
     }
   }
 
-  /** A provider that rents `kind` but cannot right now (its Windows image is not prepared), or null. */
-  kindBlocker(adapter: BoxProviderAdapter, kind: BoxKind): string | null {
-    if ((kind === "windows" || kind === "windows-gpu") && adapter.needsWindowsImage) {
-      const image = this.deps.store.providerSettings(adapter.id).windowsImage;
-      if (image?.state !== "ready" || !image.imageId) return `Prepare ${adapter.label}'s Windows image first.`;
-    }
-    return null;
-  }
-
   /** The cheapest priced size of a provider's offers for a kind (null when none has a price or the fetch failed). */
   async cheapest(adapter: BoxProviderAdapter, kind: BoxKind): Promise<number | null> {
     try {
@@ -447,18 +427,15 @@ export class BoxSettings implements BoxConnectivity {
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
         const renting = [...this.deps.providers.values()].filter((adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id));
-        const blocked = renting.map((adapter) => this.kindBlocker(adapter, kind));
-        const usable = renting.filter((_adapter, index) => blocked[index] === null);
-        const priced = await Promise.all(usable.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
+        const priced = await Promise.all(renting.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
         priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
-        const lifetimes = usable.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
+        const lifetimes = renting.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
         // macOS runners route differently: a kind is blocked only when none of its providers has a route.
-        const routeProblems = usable.map((adapter) => this.routeProblem(adapter.id));
+        const routeProblems = renting.map((adapter) => this.routeProblem(adapter.id));
         const routeProblem = routeProblems.every((problem) => problem !== null) ? (routeProblems[0] ?? null) : null;
         let unavailableReason: string | null = null;
         if (renting.length === 0) unavailableReason = `No connected provider rents ${BOX_KIND_LABELS[kind]} boxes.`;
-        else if (usable.length === 0) unavailableReason = blocked.find((reason) => reason !== null) ?? null;
         else if (routeProblem) unavailableReason = routeProblem;
         return {
           kind,
@@ -471,72 +448,10 @@ export class BoxSettings implements BoxConnectivity {
     );
   }
 
-  // ---- Windows prepared images -------------------------------------------------------------------
-
-  /** Start building the provider's prepared Windows image in the background (202). */
+  /** Keep the existing endpoint's refusal: every provider bootstraps Windows boxes directly. */
   async prepareWindowsImage(id: string): Promise<void> {
     const adapter = this.adapter(id);
-    if (!adapter.needsWindowsImage || !adapter.prepareWindowsImage) {
-      throw new BoxError(409, "BOX_UNSUPPORTED", `${adapter.label} needs no prepared Windows image.`);
-    }
-    if (this.windowsImageRuns.has(adapter.id)) throw new BoxError(409, "BOX_INVALID_REQUEST", "The Windows image is already being prepared.");
-    const credentials = await this.credentials(adapter.id);
-    if (!credentials) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", `${adapter.label} is not connected.`);
-    const route = this.route();
-    const windowsKind: BoxKind = adapter.kinds.includes("windows") ? "windows" : "windows-gpu";
-    const offers = await this.offers(adapter.id, windowsKind);
-    const region = offers.regions[0]?.id;
-    if (!region) throw new BoxError(502, "BOX_PROVIDER_ERROR", `${adapter.label} lists no region for Windows.`);
-    await this.setWindowsImage(adapter.id, { state: "preparing", message: `Preparing in ${offers.regions[0]!.label}…`, region });
-    const logId = `windows-image-${adapter.id}`;
-    // The image installs orq-agent as a service but carries no token: each box created from it
-    // gets its own bootstrap token through its startup script.
-    const bootstrap = this.deps.buildBootstrap({ boxId: logId, daemonUrl: route.daemonUrl, bootstrapToken: "", tailscaleAuthKey: null, container: false });
-    const run = (async () => {
-      try {
-        const { imageId } = await adapter.prepareWindowsImage!(
-          credentials,
-          { region, bootstrap, log: (line) => void this.deps.setupLog.append(logId, line) },
-          { signal: AbortSignal.timeout(2 * 60 * 60_000), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
-        );
-        await this.setWindowsImage(adapter.id, { state: "ready", message: null, imageId, region });
-      } catch (error) {
-        this.deps.logger.error(`Preparing the ${adapter.label} Windows image failed`, errorLine(error));
-        await this.setWindowsImage(adapter.id, { state: "failed", message: errorLine(error), region }).catch(() => undefined);
-      } finally {
-        this.windowsImageRuns.delete(adapter.id);
-      }
-    })();
-    this.windowsImageRuns.set(adapter.id, run);
-  }
-
-  /** The prepared image to create a Windows box from, when the provider needs one. */
-  windowsImageId(adapter: BoxProviderAdapter, kind: BoxKind): string | null {
-    if (!adapter.needsWindowsImage || (kind !== "windows" && kind !== "windows-gpu")) return null;
-    const image = this.deps.store.providerSettings(adapter.id).windowsImage;
-    return image?.state === "ready" && image.imageId ? image.imageId : null;
-  }
-
-  private async setWindowsImage(
-    providerId: string,
-    image: { state: BoxWindowsImageState; message: string | null; imageId?: string; region?: string }
-  ): Promise<void> {
-    const at = new Date(this.deps.clock.now()).toISOString();
-    await this.deps.store.updateProviderSettings(providerId, (settings) => {
-      settings.windowsImage = {
-        ...(settings.windowsImage ?? {}),
-        state: image.state,
-        message: image.message,
-        updatedAt: at,
-        ...(image.region ? { region: image.region } : {}),
-        ...(image.imageId ? { imageId: image.imageId } : {})
-      };
-    });
-    this.deps.providersChanged();
-  }
-
-  async windowsImagesSettled(): Promise<void> {
-    await Promise.all([...this.windowsImageRuns.values()]);
+    throw new BoxError(409, "BOX_UNSUPPORTED", `${adapter.label} needs no prepared Windows image.`);
   }
 
   // ---- connection --------------------------------------------------------------------------------

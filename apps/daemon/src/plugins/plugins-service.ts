@@ -57,7 +57,6 @@ import {
   type PluginJobState,
   type PluginsResponse,
   type SetPluginEnabledRequest,
-  type TsCheckerEngine,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
   TS_CHECKER_ENGINES,

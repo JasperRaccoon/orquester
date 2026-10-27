@@ -325,7 +325,7 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";

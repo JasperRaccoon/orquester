@@ -584,11 +584,6 @@ export function parseBoxPanelHeight(raw: string | null): number | null {
 // Box → host config changes (§8.3)
 // ---------------------------------------------------------------------------
 
-/** The pending change sets a chat's turn made. */
-export function chatPendingConfigChanges(changes: readonly BoxConfigChangeSet[], threadId: string): BoxConfigChangeSet[] {
-  return changes.filter((change) => change.state === "pending" && change.threadId === threadId);
-}
-
 /** The pending change sets of a project's box that no chat turn made (shown on the project row). */
 export function projectPendingConfigChanges(
   changes: readonly BoxConfigChangeSet[],

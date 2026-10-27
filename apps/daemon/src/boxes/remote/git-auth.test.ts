@@ -107,9 +107,15 @@ async function policySocket(dir: string, policy: SshAgentPolicy | null): Promise
   const path = join(dir, `agent-${randomBytes(4).toString("hex")}.sock`);
   const seen: number[] = [];
   const server = createServer((socket: Socket) => {
+    let pending = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
-      // Single-frame requests in these tests: the type byte follows the length.
-      if (chunk.length > 4) seen.push(chunk[4]!);
+      pending = Buffer.concat([pending, chunk]);
+      while (pending.length >= 4) {
+        const length = pending.readUInt32BE(0);
+        if (pending.length < 4 + length) break;
+        if (length > 0) seen.push(pending[4]!);
+        pending = pending.subarray(4 + length);
+      }
     });
     serveSshAgent(socket, async () => policy);
   });

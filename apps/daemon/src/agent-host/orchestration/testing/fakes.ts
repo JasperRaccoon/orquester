@@ -51,22 +51,14 @@ import type { LaunchConfigStore, ThreadLaunchConfig } from "../launch-config.ts"
 // ---------------------------------------------------------------------------
 
 export interface FakeThreadStore extends ThreadStore {
-  /**
-   * Every `pruneAttachments` call, in order. An entry that is `undefined` is
-   * the argument-less host-wide sweep — the only form that reaches the
-   * cross-thread raw-log ceiling (S1 #5).
-   */
-  readonly pruneCalls: Array<{ threadId?: string; now?: Date } | undefined>;
   /** Every event ever appended, per thread. */
   readonly logs: Map<string, DomainEvent[]>;
   readonly heads: Map<string, ThreadHead>;
   /** `binding.json`, per thread (§3.3). Survives a `createTestHost` restart. */
   readonly bindings: Map<string, ProviderSessionBinding>;
   readonly receipts: Map<string, CommandReceipt>;
-  readonly rawFrames: Array<{ threadId: string; frame: unknown }>;
   /** Cut the log at `index`, as a malformed line would (§5.1). */
   truncateAt(threadId: string, index: number): void;
-  headSaves: number;
   /**
    * `state.json` per thread, as `saveFoldSnapshot` wrote it (A2). Plant a
    * stale or broken snapshot here to drive the fallback: `loadFoldSnapshot`
@@ -105,18 +97,13 @@ export function createFakeThreadStore(): FakeThreadStore {
   const bindings = new Map<string, ProviderSessionBinding>();
   const receipts = new Map<string, CommandReceipt>();
   const attachments = new Map<string, string>();
-  const rawFrames: Array<{ threadId: string; frame: unknown }> = [];
-  const pruneCalls: Array<{ threadId?: string; now?: Date } | undefined> = [];
   const truncated = new Map<string, number>();
   const store = {
     logs,
     heads,
     bindings,
     receipts,
-    rawFrames,
-    pruneCalls,
     snapshots,
-    headSaves: 0,
 
     truncateAt(threadId: string, index: number): void {
       truncated.set(threadId, index);
@@ -310,7 +297,6 @@ export function createFakeThreadStore(): FakeThreadStore {
     },
 
     async saveHead(head: ThreadHead): Promise<void> {
-      store.headSaves += 1;
       heads.set(head.id, { ...head });
     },
 
@@ -380,13 +366,9 @@ export function createFakeThreadStore(): FakeThreadStore {
       return path;
     },
 
-    async pruneAttachments(input?: { threadId?: string; now?: Date }): Promise<void> {
-      pruneCalls.push(input);
-    },
+    async pruneAttachments(): Promise<void> {},
 
-    logRawFrame(threadId: string, frame: unknown): void {
-      rawFrames.push({ threadId, frame });
-    },
+    logRawFrame(): void {},
 
     async drain(): Promise<void> {}
   } satisfies FakeThreadStore;
@@ -399,8 +381,6 @@ export function createFakeThreadStore(): FakeThreadStore {
 
 export interface FakeIngestion extends Ingestion {
   readonly ingested: RuntimeEvent[];
-  readonly flushedTurns: Array<{ threadId: string; turnId: string | undefined }>;
-  readonly flushedThreads: string[];
   /** What to append for a given runtime event, if anything. */
   translate?: (event: RuntimeEvent) => AppendableDomainEvent[];
 }
@@ -409,12 +389,8 @@ export function createFakeIngestion(input: {
   sink?: (threadId: string, events: AppendableDomainEvent[]) => Promise<void>;
 }): FakeIngestion {
   const ingested: RuntimeEvent[] = [];
-  const flushedTurns: Array<{ threadId: string; turnId: string | undefined }> = [];
-  const flushedThreads: string[] = [];
   const fake: FakeIngestion = {
     ingested,
-    flushedTurns,
-    flushedThreads,
     async ingest(event: RuntimeEvent): Promise<void> {
       ingested.push(event);
       const events = fake.translate?.(event) ?? [];
@@ -422,13 +398,9 @@ export function createFakeIngestion(input: {
         await input.sink(event.threadId, events);
       }
     },
-    async flushTurn(threadId: string, turnId: string | undefined): Promise<void> {
-      flushedTurns.push({ threadId, turnId });
-    },
+    async flushTurn(): Promise<void> {},
     async finalizeReasoning(): Promise<void> {},
-    async flushThread(threadId: string): Promise<void> {
-      flushedThreads.push(threadId);
-    },
+    async flushThread(): Promise<void> {},
     async forget(): Promise<void> {},
     async drain(): Promise<void> {}
   };
@@ -446,18 +418,6 @@ export interface FakeCheckpointService extends CheckpointService {
     targetTurnCount: number;
     droppedTurnCounts: number[];
   }>;
-  readonly deleted: string[];
-  /** Thread ids a baseline was requested for, in order. */
-  readonly baselines: string[];
-  /**
-   * Every `captureBaseline` request as the host made it, in order — the turn it
-   * precedes and the count it named (§5.5: checkpoints count turns by order).
-   */
-  readonly baselineRequests: Array<{
-    threadId: string;
-    turnId?: string | null;
-    turnCount?: number;
-  }>;
   /** Every `captureTurnEnd` request, in order, with the ordinal the host named. */
   readonly turnEndRequests: Array<{
     threadId: string;
@@ -471,10 +431,6 @@ export interface FakeCheckpointService extends CheckpointService {
     toTurnCount: number;
     ignoreWhitespace?: boolean;
   }>;
-  /** Set to model a project that is not a git repo (§5.4 skips silently). */
-  nonGit: boolean;
-  /** Adapters whose rollback is refused (§5.5 step 2). Grok by default. */
-  rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
   /**
    * The derived counter: what a capture falls back to when the host names no
@@ -482,55 +438,29 @@ export interface FakeCheckpointService extends CheckpointService {
    * way the real service's "highest existing + 1" would.
    */
   turnCount: number;
-  /** Override what `captureBaseline` answers; `null` models a non-git project. */
-  baseline?: CaptureResult | null;
 }
 
 export function createFakeCheckpointService(): FakeCheckpointService {
   const pruned: FakeCheckpointService["pruned"] = [];
-  const deleted: string[] = [];
-  const baselines: string[] = [];
-  const baselineRequests: FakeCheckpointService["baselineRequests"] = [];
   const turnEndRequests: FakeCheckpointService["turnEndRequests"] = [];
   const diffRequests: FakeCheckpointService["diffRequests"] = [];
   const fake: FakeCheckpointService = {
     pruned,
-    deleted,
-    baselines,
-    baselineRequests,
     turnEndRequests,
     diffRequests,
-    nonGit: false,
-    rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
     turnCount: 0,
-    /**
-     * A git-backed project by default. `null` is reserved for "this project
-     * has no checkpoints at all"; an already-published baseline answers
-     * `ready`, which is what the real service does from a thread's second turn
-     * onwards. Set `fake.baseline = null` to model a non-git project.
-     */
     async captureBaseline(input: {
       threadId: string;
       turnId?: string | null;
       turnCount?: number;
     }): Promise<CaptureResult | null> {
-      // Recorded so a test can assert WHEN the baseline was taken, not just
-      // what it answered — the §5.4 ordering is the thing under test.
-      baselines.push(input.threadId);
-      baselineRequests.push({
-        threadId: input.threadId,
-        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
-        ...(input.turnCount !== undefined ? { turnCount: input.turnCount } : {})
-      });
       const turnCount = input.turnCount ?? fake.turnCount;
-      return fake.baseline === undefined
-        ? {
-            turnCount,
-            ref: `refs/orquester/checkpoints/${input.threadId}/turn/${turnCount}`,
-            status: "ready"
-          }
-        : fake.baseline;
+      return {
+        turnCount,
+        ref: `refs/orquester/checkpoints/${input.threadId}/turn/${turnCount}`,
+        status: "ready"
+      };
     },
     async captureTurnEnd(input: {
       threadId: string;
@@ -575,11 +505,9 @@ export function createFakeCheckpointService(): FakeCheckpointService {
         droppedTurnCounts: [...(input.droppedTurnCounts ?? [])]
       });
     },
-    async deleteThreadRefs(input): Promise<void> {
-      deleted.push(input.threadId);
-    },
+    async deleteThreadRefs(): Promise<void> {},
     assertRollbackSupported(adapter: AgentAdapterId): void {
-      if (fake.rollbackUnsupported.has(adapter)) {
+      if (adapter === "grok") {
         throw new Error(`${adapter} cannot rewind a conversation.`);
       }
     }

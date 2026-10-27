@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { PRINCIPAL_TOKEN_HEADER, PRINCIPAL_TOKEN_INVALID, type CallerPrincipal } from "@orquester/api/agent-chat";
 

@@ -104,7 +104,6 @@ export const thunderAdapter: BoxProviderAdapter = {
   credentialFields: [{ id: "apiKey", label: "API token", secret: true, help: "Console → Settings → Tokens." }],
   accountNote: `Not available for boxes yet: ${THUNDER_UNSUPPORTED}. Single-GPU instances also use a virtualized GPU without CUDA managed memory (UVM), MPS, GPU profilers or FFmpeg GPU acceleration.`,
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () => listInstances(credentials, options));

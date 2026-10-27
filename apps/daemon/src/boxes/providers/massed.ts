@@ -143,7 +143,6 @@ export const massedAdapter: BoxProviderAdapter = {
   ],
   accountNote: "Launching needs a billing method with auto-recharge set up in the Massed Compute dashboard; the recharge amount also caps how many instances can run.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () =>

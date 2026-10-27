@@ -190,7 +190,6 @@ export const vastaiAdapter: BoxProviderAdapter = {
   ],
   accountNote: "GPU boxes are Docker containers on third-party hosts (verified hosts with ≥ 98 % reliability only): no systemd and no Docker inside the box.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () =>

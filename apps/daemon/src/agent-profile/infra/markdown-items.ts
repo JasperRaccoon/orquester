@@ -65,7 +65,7 @@ async function entries(dir: string): Promise<Dirent[]> {
   try {
     return (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
   } catch (error) {
-    if (isMissing(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+    if (isMissing(error)) {
       return [];
     }
     throw error;

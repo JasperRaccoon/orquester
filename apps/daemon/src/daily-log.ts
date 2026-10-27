@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { DAILY_LOG_RETENTION_DAYS, dailyLogFile, localDateStamp, parseDailyLogFileName } from "@orquester/config";
 
 /** A day's file is cut at this size and continued in `<day>.<n>.log`. */
-export const DAILY_LOG_MAX_BYTES = 64 * 1024 * 1024;
+const DAILY_LOG_MAX_BYTES = 64 * 1024 * 1024;
 
 export interface DailyLogClock {
   now(): number;

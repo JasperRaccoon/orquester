@@ -48,13 +48,7 @@ function bannerPriority(entry: BannerStackEntry): number {
 
 /** Stable sort: equal priorities keep the caller's order. */
 export function sortBannerStack<T extends BannerStackEntry>(entries: readonly T[]): T[] {
-  return [...entries]
-    .map((entry, index) => ({ entry, index }))
-    .sort(
-      (left, right) =>
-        bannerPriority(left.entry) - bannerPriority(right.entry) || left.index - right.index
-    )
-    .map(({ entry }) => entry);
+  return [...entries].sort((left, right) => bannerPriority(left) - bannerPriority(right));
 }
 
 // ---------------------------------------------------------------------------
@@ -466,20 +460,4 @@ export function toolApprovalAnswerFailure(status: number | null): { text: string
   if (status === 404) return { text: "This approval has already ended.", closed: true };
   if (status === 400) return { text: "The answer was refused: check the card and try again.", closed: false };
   return { text: "Could not send the answer. Try again.", closed: false };
-}
-
-/**
- * A card is ready to approve: not expired, nothing in flight, every asked secret typed, the whole
- * preview loaded when the summary was cut (`previewComplete`) — and of a kind this client knows: a
- * newer daemon's card can only be denied here (fail closed; its caution says to use an updated
- * client). Grant rows follow the same rule.
- */
-export function toolApprovalCanApprove(input: {
-  card: Pick<ParsedToolApprovalSummary, "secretFields" | "kind" | "family">;
-  secrets: Readonly<Record<string, string>>;
-  submitting: boolean;
-  expired: boolean;
-  previewComplete: boolean;
-}): boolean {
-  return toolApprovalApproveBlockedReason(input) === null;
 }

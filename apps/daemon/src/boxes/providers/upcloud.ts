@@ -292,7 +292,6 @@ export const upcloudAdapter: BoxProviderAdapter = {
   ],
   accountNote: "UpCloud API tokens expire (365 days at most); save a new token here when the old one runs out.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => upRequest(credentials, { url: `${API}/account` }, options));

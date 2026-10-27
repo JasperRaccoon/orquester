@@ -44,7 +44,7 @@ import {
 } from "@orquester/api";
 
 import { canonicalProject, projectNamesFor } from "../addressing.ts";
-import type { ScopeClaim, ThreadCaller, ToolCaller } from "../catalog/contract.ts";
+import type { ScopeClaim, ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText } from "../result.ts";

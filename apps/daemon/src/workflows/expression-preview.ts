@@ -83,7 +83,7 @@ interface BlockState {
 function jsonType(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
-  return typeof value === "object" ? "object" : typeof value;
+  return typeof value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

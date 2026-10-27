@@ -23,14 +23,6 @@ export class Bm25Index {
   private readonly terms = new Map<string, string[]>();
   private totalLength = 0;
 
-  get size(): number {
-    return this.lengths.size;
-  }
-
-  has(key: string): boolean {
-    return this.lengths.has(key);
-  }
-
   add(key: string, fields: readonly Bm25Field[]): void {
     if (this.lengths.has(key)) this.remove(key);
     const tf = new Map<string, number>();

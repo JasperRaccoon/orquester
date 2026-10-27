@@ -30,7 +30,7 @@ function codexSessionRef(cursor: unknown): string | null {
 }
 
 /** `codex --version` (`codex-cli 0.159.0`) → `0.159.0`; null when it does not read. */
-export function parseCodexVersion(output: string): string | null {
+function parseCodexVersion(output: string): string | null {
   return /(\d+\.\d+\.\d+[^\s]*)/.exec(output)?.[1] ?? null;
 }
 

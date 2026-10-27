@@ -200,11 +200,6 @@ export class LineageService {
     if (this.api) listener.attachApi(this.api);
   }
 
-  /** The reply router wired to this queue, for the routes that reach it. */
-  deliveryListener(): DeliveryListener | null {
-    return this.listener;
-  }
-
   /**
    * Read the outbox. Missing → empty. Unreadable (permissions, I/O) → empty and READ-ONLY for this
    * run: the file may hold queued merges, so it is never written over and nothing new is queued

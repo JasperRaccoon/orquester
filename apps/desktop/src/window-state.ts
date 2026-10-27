@@ -10,9 +10,9 @@ import type { BrowserWindowConstructorOptions, Rectangle } from "electron";
 // defaults instead of opening the window off-screen.
 
 export const MIN_WINDOW_SIZE = { width: 1040, height: 680 } as const;
-export const DEFAULT_WINDOW_SIZE = { width: 1320, height: 860 } as const;
+const DEFAULT_WINDOW_SIZE = { width: 1320, height: 860 } as const;
 
-export interface WindowBounds {
+interface WindowBounds {
   x: number;
   y: number;
   width: number;
@@ -102,7 +102,7 @@ export function sameWindowState(a: WindowState, b: WindowState): boolean {
   );
 }
 
-export type WindowFrameOptions = Pick<BrowserWindowConstructorOptions, "frame" | "titleBarStyle" | "trafficLightPosition">;
+type WindowFrameOptions = Pick<BrowserWindowConstructorOptions, "frame" | "titleBarStyle" | "trafficLightPosition">;
 
 /**
  * The window's native frame for the "Custom titlebar" setting. macOS always

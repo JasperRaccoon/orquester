@@ -113,12 +113,10 @@ export interface RemoteChromeLauncher {
 /** The launcher of a project whose Chromium does not run on the host; null = host. */
 export type RemoteChromeResolver = (projectPath: string) => RemoteChromeLauncher | null;
 
-type Chrome = BrowserChrome;
-
 export class BrowserManager {
   readonly lifecycle = new EventEmitter();
   private readonly tabs = new Map<string, Tab>();
-  private readonly chromes = new Map<string, Promise<Chrome>>();
+  private readonly chromes = new Map<string, Promise<BrowserChrome>>();
   /** In-flight per-project Chromium teardowns; launch() waits on these so a
    *  relaunch can't race the dying process for the profile dir. */
   private readonly closingChromes = new Map<string, Promise<void>>();
@@ -467,7 +465,7 @@ export class BrowserManager {
     this.lifecycle.emit("updated", this.summary(tab));
   }
 
-  private chromeFor(projectPath: string): Promise<Chrome> {
+  private chromeFor(projectPath: string): Promise<BrowserChrome> {
     let pending = this.chromes.get(projectPath);
     if (!pending) {
       const abort = new AbortController();
@@ -485,7 +483,7 @@ export class BrowserManager {
       });
       // Evict a browser that dies at runtime (renderer OOM taking Chromium down,
       // host kill, etc.) so the next subscribe/navigate relaunches instead of
-      // reusing a dead Promise<Chrome> forever. Capture `launched` so a newer
+      // reusing a dead Promise<BrowserChrome> forever. Capture `launched` so a newer
       // entry (from a relaunch) isn't clobbered by a stale disconnect.
       launched.then((chrome) => {
         chrome.browser.once("disconnected", () => {
@@ -502,7 +500,7 @@ export class BrowserManager {
    * so the next subscribe or Relaunch makes one in a fresh Chromium. A crash
    * reads "crashed"; a lost VM link says so.
    */
-  private dropPages(projectPath: string, chrome: Chrome): void {
+  private dropPages(projectPath: string, chrome: BrowserChrome): void {
     const lost = chrome.lostReason?.() ?? null;
     for (const tab of this.tabs.values()) {
       if (tab.record.projectPath !== projectPath || !tab.page || tab.page.browser() !== chrome.browser) continue;
@@ -526,7 +524,7 @@ export class BrowserManager {
     this.pushState(tab);
   }
 
-  private async launch(projectPath: string, signal: AbortSignal): Promise<Chrome> {
+  private async launch(projectPath: string, signal: AbortSignal): Promise<BrowserChrome> {
     await this.closingChromes.get(projectPath);
     const remote = this.remoteChrome?.(projectPath);
     if (remote) {
@@ -576,7 +574,7 @@ export class BrowserManager {
     }
   }
 
-  private async launchWith(options: Parameters<typeof puppeteer.launch>[0], sandboxed: boolean): Promise<Chrome> {
+  private async launchWith(options: Parameters<typeof puppeteer.launch>[0], sandboxed: boolean): Promise<BrowserChrome> {
     const browser = await this.tryLaunch(options);
     const debugPort = parseDebugPort(browser.wsEndpoint());
     if (debugPort === null) {

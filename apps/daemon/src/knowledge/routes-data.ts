@@ -12,7 +12,6 @@ import {
   type KnowledgeCollectionsResponse,
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
-  type KnowledgeErrorCode,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
   type KnowledgeSaveResponse,
@@ -54,8 +53,6 @@ export interface KnowledgeDataRoutesDeps {
 /** A save can carry KNOWLEDGE_SAVE_MAX_ENTRIES bodies of KNOWLEDGE_ENTRY_MAX_BYTES, JSON-escaped. */
 const SAVE_BODY_LIMIT = 32 * 1024 * 1024;
 const ENTRY_BODY_LIMIT = 2 * 1024 * 1024;
-
-type Code = KnowledgeErrorCode | "KNOWLEDGE_ERROR";
 
 // ---------------------------------------------------------------------------
 // Request shapes (the store and search check limits and meaning)
@@ -179,8 +176,7 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
   const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
     if (error instanceof KnowledgeError) return reply.code(error.status).send({ code: error.code, message: error.message });
     logger.error(`knowledge: a request failed (${error instanceof Error ? error.message : String(error)})`);
-    const code: Code = "KNOWLEDGE_ERROR";
-    return reply.code(500).send({ code, message: "The knowledge request failed." });
+    return reply.code(500).send({ code: "KNOWLEDGE_ERROR", message: "The knowledge request failed." });
   };
 
   app.setErrorHandler((error, _request, reply) => fail(reply, knowledgeFrameworkError(error) ?? error));

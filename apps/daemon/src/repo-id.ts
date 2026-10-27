@@ -4,7 +4,7 @@ import { repoDisplayName, repoKeyOf, stripUrlCredentials } from "./workflows/git
 
 /** What one read of a checkout's `.git`/config yields: its `repoId` and the raw `origin` URL. */
 export interface RepoInfo {
-  /** The value behind `ProjectSummary.repoId` (see `detectRepoId`). */
+  /** The value behind `ProjectSummary.repoId` (see `detectRepoInfo`). */
   repoId: string;
   /**
    * The `url` of `[remote "origin"]` exactly as configured. It MAY carry credentials, so it
@@ -32,14 +32,6 @@ export interface RepoInfo {
  *
  * Reads `.git`/`config` directly instead of spawning `git` — this runs for
  * every project on every workspace listing.
- */
-export async function detectRepoId(projectDir: string): Promise<string | null> {
-  return (await detectRepoInfo(projectDir))?.repoId ?? null;
-}
-
-/**
- * `detectRepoId` plus the raw `origin` URL it was derived from, off the same single config
- * read, so a listing fills `repoKey`/`repoName`/`cloneUrl` without spawning git.
  */
 export async function detectRepoInfo(projectDir: string): Promise<RepoInfo | null> {
   const layout = await resolveGitLayout(projectDir);

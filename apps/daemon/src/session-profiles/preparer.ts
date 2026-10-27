@@ -129,7 +129,7 @@ export interface SessionProfilePreparer<A extends SessionProfileAgentId = Sessio
   unusableReason?(preparedDir: string): Promise<string | null>;
 }
 
-/** Every agent's preparer; `null` until that agent's task implements it (`preparers/<agent>.ts`). */
+/** Every agent's preparer; `null` marks an unsupported agent. */
 export type SessionProfilePreparers = { [A in SessionProfileAgentId]: SessionProfilePreparer<A> | null };
 
 export const sessionProfilePreparers: SessionProfilePreparers = {
@@ -138,15 +138,3 @@ export const sessionProfilePreparers: SessionProfilePreparers = {
   grok: grokPreparer,
   opencode: opencodePreparer
 };
-
-/**
- * The agent's preparer, or `null` when it has none yet: the lifecycle reports the agent as
- * `not-prepared` with a "not supported yet" reason and `ensureReady` throws
- * `PROFILE_UNSUPPORTED_AGENT`.
- */
-export function preparerFor<A extends SessionProfileAgentId>(
-  agent: A,
-  preparers: SessionProfilePreparers = sessionProfilePreparers
-): SessionProfilePreparer<A> | null {
-  return preparers[agent] as SessionProfilePreparer<A> | null;
-}

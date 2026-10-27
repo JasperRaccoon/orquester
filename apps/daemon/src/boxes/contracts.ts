@@ -280,8 +280,6 @@ export interface BoxProviderAdapter {
   readonly credentialFields: readonly BoxProviderCredentialField[];
   readonly accountNote: string | null;
   readonly maxLifetimeMinutes: number | null;
-  /** Whether Windows boxes need a prepared image first (spec §11.1). */
-  readonly needsWindowsImage: boolean;
 
   /** A cheap authenticated read. Never throws for bad credentials: returns `{ ok: false }`. */
   validate(credentials: ProviderCredentials, options: ProviderCallOptions): Promise<{ ok: true } | { ok: false; message: string }>;
@@ -296,12 +294,6 @@ export interface BoxProviderAdapter {
   destroy(credentials: ProviderCredentials, ref: ProviderInstanceRef, options: ProviderCallOptions): Promise<void>;
   /** Every instance carrying Orquester's marker (tag or `orq-` name prefix). */
   listManaged(credentials: ProviderCredentials, options: ProviderCallOptions): Promise<ProviderManagedInstance[]>;
-  /** Providers with `needsWindowsImage`: build and snapshot the prepared Windows image; returns its id. */
-  prepareWindowsImage?(
-    credentials: ProviderCredentials,
-    request: { region: string; bootstrap: BoxBootstrap; log: (line: string) => void },
-    options: ProviderCallOptions
-  ): Promise<{ imageId: string }>;
 }
 
 /** All adapters by id (boxes/providers/index.ts). */

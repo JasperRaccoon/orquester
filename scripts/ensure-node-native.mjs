@@ -34,7 +34,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const daemonDir = join(repoRoot, "apps", "daemon");
 
 /** Native modules the daemon loads under Node, each with a minimal exercise. */
-export const NATIVE_MODULES = [
+const NATIVE_MODULES = [
   // better-sqlite3's JS loads without its binding; the first open loads it.
   { name: "better-sqlite3", probe: "new (require('better-sqlite3'))(':memory:').close();" },
   // node-pty loads its binding when the module is required.
@@ -42,7 +42,7 @@ export const NATIVE_MODULES = [
 ];
 
 /** The installed package directory the daemon resolves for `name`. */
-export function packageDir(name) {
+function packageDir(name) {
   return dirname(createRequire(join(daemonDir, "package.json")).resolve(`${name}/package.json`));
 }
 
@@ -91,7 +91,7 @@ export function probeInChild(mod) {
 }
 
 /** `pnpm rebuild` the named packages for the running Node. Returns true on success. */
-export function pnpmRebuild(names) {
+function pnpmRebuild(names) {
   // -r: the packages are dependencies of workspace projects, not of the root.
   // This node's directory goes first on PATH so pnpm and node-gyp build for the
   // Node that was probed, not another one found on PATH.

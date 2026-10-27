@@ -120,8 +120,6 @@ export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly
  */
 export type ChatAutoResumeStatus = "armed" | "resuming" | "off" | "unscheduled";
 
-export const CHAT_AUTO_RESUME_STATUSES = ["armed", "resuming", "off", "unscheduled"] as const satisfies readonly ChatAutoResumeStatus[];
-
 /** The resume or account switch the daemon is carrying out, persisted before its side effects. */
 export interface ChatUsageLimitAction {
   kind: "resume" | "switch";

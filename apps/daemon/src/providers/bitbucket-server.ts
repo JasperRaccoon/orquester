@@ -481,9 +481,6 @@ function resolveDcLogin(headerValue: string | null | undefined, typedUsername: s
 }
 
 export const bitbucketServerProvider: GitProvider = {
-  id: "bitbucket-server",
-  scopesHint: SCOPES,
-
   /**
    * The identity comes from the *instance*, not from what the user typed: DC
    * echoes the authenticated user in `X-AUSERNAME` on every REST response, and
@@ -604,9 +601,7 @@ export const bitbucketServerProvider: GitProvider = {
     return summary;
   },
 
-  parseRepoUrl(input: string, ctx: UrlContext): ParsedRepo | null {
-    return parseServerRepoUrl(input, ctx);
-  },
+  parseRepoUrl: parseServerRepoUrl,
 
   async cloneUrls(creds, ref): Promise<CloneUrls> {
     const repo = await dc(
@@ -640,8 +635,6 @@ export const bitbucketServerProvider: GitProvider = {
     // is irrelevant to git's credential lookup.
     return { host: new URL(base(ctx)).host, username: ctx.login };
   },
-
-  supportsReleases: false,
 
   /**
    * DC can only order a listing by CREATION (`order=NEWEST`), so one `state=ALL` page dropped every

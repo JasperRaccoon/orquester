@@ -1,4 +1,3 @@
-import React from "react";
 import { AlertTriangle } from "lucide-react";
 import { loginExpiryWarning, type LoginStatus } from "../../lib/login-expiry";
 import { cn } from "../../lib/cn";

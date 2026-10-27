@@ -29,13 +29,6 @@
  *
  * Per connection: `resetBoxes()` runs on a connection switch (the app store),
  * and a call through a client of another connection resets first.
- *
- * Exported API for other UI modules: the vanilla `boxesStore`,
- * `setBoxesPluginOn(on)`, `hasActiveBoxes(boxes)`, the hooks `useBoxes()`,
- * `useActiveBoxes()`, `useBoxesTotals()`, `useBox(id)`, `useProjectBox(path)`,
- * `useBoxProviders()`, `useBoxKinds()`, `useBoxConfigChanges()`,
- * `useBoxConnection()`, `useBlacksmithSetup()`, and the load / mutation
- * functions below (each takes the `ApiClient`).
  */
 
 import { useMemo, useSyncExternalStore } from "react";
@@ -86,7 +79,6 @@ export interface BoxesApi {
   /** The connection the client talks to; a different id resets the store. */
   readonly connection?: { readonly id: string };
   listBoxes(signal?: AbortSignal): Promise<BoxesResponse>;
-  getBox(id: string, signal?: AbortSignal): Promise<BoxResponse>;
   destroyBox(id: string): Promise<BoxResponse | undefined>;
   listBoxKinds(signal?: AbortSignal): Promise<BoxKindsResponse>;
   listBoxProviders(signal?: AbortSignal): Promise<BoxProvidersResponse>;
@@ -510,15 +502,6 @@ export async function destroyBox(api: BoxesApi, id: string): Promise<void> {
   else reloadQuietly(() => loadBoxesList(api));
 }
 
-/** One box from the daemon, applied — unless an event or mutation wrote the list meanwhile (that is newer). */
-export async function fetchBox(api: BoxesApi, id: string, signal?: AbortSignal): Promise<BoxSummary | null> {
-  const { answer, current } = await mutate(api, "boxes", () => api.getBox(id, signal));
-  const box = sanitizeBoxResponse(answer);
-  if (!box || box.id !== id) throw new Error("The daemon answered the box in an unexpected shape.");
-  if (current) upsertBox(box);
-  return box;
-}
-
 function applyConnectionAnswer(
   api: BoxesApi,
   { answer, reset, current }: { answer: unknown; reset: boolean; current: boolean }
@@ -636,15 +619,6 @@ export function useBoxesLoaded(): boolean {
 
 export function useBoxesTotals(): BoxesTotals | null {
   return useBoxesState((state) => state.totals);
-}
-
-export function useBox(id: string | null | undefined): BoxSummary | undefined {
-  return useBoxesState((state) => (id ? state.boxes?.find((box) => box.id === id) : undefined));
-}
-
-/** The box a project runs in (see {@link projectBoxIn}); undefined for a host project. */
-export function useProjectBox(projectPath: string | null | undefined): BoxSummary | undefined {
-  return useBoxesState((state) => projectBoxIn(state.boxes, projectPath));
 }
 
 /** The providers; null until loaded. */

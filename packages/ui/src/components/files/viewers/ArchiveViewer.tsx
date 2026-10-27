@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { File as FileIcon, Folder } from "lucide-react";
 import type { FsArchiveResponse } from "@orquester/api";
 import { useApi } from "../../../context/orquester-context";
+import { DOWNLOAD_MAX_BYTES } from "../../../lib/file-kind";
 import { BinaryCard } from "./BinaryCard";
 
 export const ArchiveViewer: React.FC<{
@@ -37,14 +38,14 @@ export const ArchiveViewer: React.FC<{
 
   if (!previewable) {
     return (
-      <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= 50 * 1024 * 1024} title="Archive (no 7z or bsdtar in this VM)" fetchBytes={fetchBytes} />
+      <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= DOWNLOAD_MAX_BYTES} title="Archive (no 7z or bsdtar in this VM)" fetchBytes={fetchBytes} />
     );
   }
   if (state.loading) return <p className="p-3 text-xs text-neutral-600">Reading archive…</p>;
   if (state.error || !state.data) return <p className="p-3 text-xs text-danger">Could not read archive.</p>;
   if (!state.data.supported) {
     return (
-      <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= 50 * 1024 * 1024} title="Archive (no preview tool)" fetchBytes={fetchBytes} />
+      <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= DOWNLOAD_MAX_BYTES} title="Archive (no preview tool)" fetchBytes={fetchBytes} />
     );
   }
 

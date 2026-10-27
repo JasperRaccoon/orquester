@@ -170,12 +170,6 @@ export const boxesStoreSchema = z
   })
   .passthrough();
 
-export type BoxesStore = z.infer<typeof boxesStoreSchema>;
-
-export function emptyBoxesStore(): BoxesStore {
-  return { version: BOXES_STORE_VERSION, boxes: {} };
-}
-
 export const boxSecretsSchema = z
   .object({
     version: z.number().int().optional(),
@@ -193,12 +187,6 @@ export const boxSecretsSchema = z
     windowsPasswords: z.record(z.string()).optional()
   })
   .passthrough();
-
-export type BoxSecrets = z.infer<typeof boxSecretsSchema>;
-
-export function emptyBoxSecrets(): BoxSecrets {
-  return { version: BOX_SECRETS_VERSION, providers: {} };
-}
 
 // ---------------------------------------------------------------------------
 // boxes (sync): box → host config changes waiting for approval (spec §8.3), and the per-box

@@ -123,7 +123,7 @@ export interface BoxService {
   destroyBox(boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary>;
   startBlacksmithTest(): Promise<void>;
   reconcileNow(): Promise<void>;
-  /** Every background setup, destroy and image build has finished (tests). */
+  /** Every background setup and destroy has finished (tests). */
   settled(): Promise<void>;
 }
 
@@ -160,14 +160,12 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
   const settings = new BoxSettings({
     store,
     providers: deps.providers,
-    buildBootstrap: deps.buildBootstrap,
     tailscale: deps.tailscale,
     accounts: deps.accounts,
     ...(deps.blacksmith ? { blacksmith: deps.blacksmith } : {}),
     publicOrigin: deps.publicOrigin,
     ...(deps.localTailscale ? { localTailscale: deps.localTailscale } : {}),
     ...(deps.daemonHttp ? { daemonHttp: deps.daemonHttp } : {}),
-    setupLog,
     clock,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
@@ -374,7 +372,6 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
         await Promise.allSettled([...background]);
         await lifecycle.settled();
         await reconciler.settled();
-        await settings.windowsImagesSettled();
         await settings.blacksmithChecksSettled();
         await store.flush();
         await setupLog.flush();

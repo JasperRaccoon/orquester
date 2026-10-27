@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DesktopHostStatus, DesktopSummary } from "@orquester/api";
@@ -72,6 +72,7 @@ test("an app's exit is never seen as exited without its code: every summary samp
 
   const desktop = await manager.create({ projectPath: appdir, projectRealPath: appdir });
   assert.equal(desktop.status, "running");
+  assert.equal((await stat(join(desktopRuntimeDir(appdir, desktop.id), "Xauthority"))).mode & 0o777, 0o600);
   const app = await manager.launchApp(desktop.id, { command: "true", cwd: appdir, env: {} });
   const appOf = (summary: DesktopSummary | undefined) => summary?.apps.find((candidate) => candidate.id === app.id);
   // Running first: the `.pgid` the window wrote has been taken in.

@@ -29,7 +29,6 @@ import type { ApprovalFamily, ToolApprovalGrantScope } from "./agent-chat/tool-a
  * runs code outside the agent's sandbox, and always raises a card.
  */
 export type ToolTier = "read" | "act" | "admin";
-export const TOOL_TIERS: readonly ToolTier[] = ["read", "act", "admin"];
 
 /** The groups chat tools are filed under (a label and the `orquester/toolset` tag; never a switch). */
 export const TOOLSET_IDS = [

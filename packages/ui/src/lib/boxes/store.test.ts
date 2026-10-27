@@ -56,7 +56,6 @@ function fakeApi(overrides: Partial<Record<keyof BoxesApi, unknown>> = {}, conne
   const api: Record<string, unknown> = {
     connection: { id: connection },
     listBoxes: async () => (calls.push("listBoxes"), listOf(box())),
-    getBox: async (id: string) => (calls.push(`getBox:${id}`), { box: box({ id }) }),
     destroyBox: async (id: string) => (calls.push(`destroyBox:${id}`), { box: box({ id, state: "destroying" }) }),
     listBoxKinds: async () => (calls.push("listBoxKinds"), { kinds: [kind()] }),
     listBoxProviders: async () => (calls.push("listBoxProviders"), { providers: [provider()] }),

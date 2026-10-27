@@ -89,7 +89,6 @@ import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import { PREPARED_MANIFEST_FILE, parsePreparedManifest, writePreparedManifest, type PreparedManifest } from "./manifest.ts";
 import {
-  preparerFor,
   sessionProfilePreparers,
   type SessionProfilePrepareContext,
   type SessionProfilePrepareInputsContext,
@@ -789,7 +788,7 @@ export class SessionProfileLifecycle {
   // -------------------------------------------------------------------------
 
   private preparerOf(agent: SessionProfileAgentId): SessionProfilePreparer | null {
-    return preparerFor(agent, this.preparers) as SessionProfilePreparer | null;
+    return this.preparers[agent] as SessionProfilePreparer | null;
   }
 
   /** The key's state, created on first use. Throws `PROFILE_NOT_FOUND`/`INVALID_REQUEST` for ids that cannot be path segments. */

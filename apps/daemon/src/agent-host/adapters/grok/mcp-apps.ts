@@ -66,7 +66,7 @@ function unwrap(response: unknown): Record<string, unknown> {
 }
 
 /** The completed MCP call a `session/update` reports whose tool names a `ui://` resource. */
-export interface GrokMcpAppCall {
+interface GrokMcpAppCall {
   toolCallId: string;
   server: string;
   tool: string;

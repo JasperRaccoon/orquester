@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { HttpOrquesterApiClient } from "./index.ts";
-import { sessionProfileRoutes, sessionProfileScopeIncludes, sessionProfileScopeProblem } from "./session-profiles.ts";
+import { sessionProfileRoutes, sessionProfileScopeProblem } from "./session-profiles.ts";
 
 interface Seen {
   method: string;
@@ -43,8 +43,6 @@ describe("Agent Profiles routes", () => {
     assert.match(sessionProfileScopeProblem("hook", ["claude", "codex"])!, /exactly one agent/);
     assert.equal(sessionProfileScopeProblem("plugin", ["opencode"]), null);
     assert.match(sessionProfileScopeProblem("hook", ["opencode"])!, /no hooks/);
-    assert.equal(sessionProfileScopeIncludes("all", "grok"), true);
-    assert.equal(sessionProfileScopeIncludes(["claude"], "grok"), false);
   });
 });
 

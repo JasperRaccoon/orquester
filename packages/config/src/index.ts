@@ -214,7 +214,7 @@ export function knowledgeMykgHomeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
 }
 
-// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
+// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target path helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
 export function boxesStorePath(baseDir: string): string {

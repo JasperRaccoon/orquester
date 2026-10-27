@@ -109,7 +109,6 @@ import { contextTokensOf, isReplayFrame } from "./xai-meta.ts";
 export {
   ACP_RAW_SOURCE,
   XAI_RAW_SOURCE,
-  type GrokEventStamp,
   type GrokNormalizerDeps
 } from "./normalizer-state.ts";
 

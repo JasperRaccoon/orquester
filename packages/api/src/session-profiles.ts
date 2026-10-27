@@ -68,11 +68,6 @@ export const SESSION_PROFILE_HOOK_AGENTS: readonly SessionProfileAgentId[] = ["c
  */
 export type SessionProfileAgentScope = "all" | SessionProfileAgentId[];
 
-/** Whether `scope` includes `agent`. */
-export function sessionProfileScopeIncludes(scope: SessionProfileAgentScope, agent: SessionProfileAgentId): boolean {
-  return scope === "all" || scope.includes(agent);
-}
-
 /**
  * Why a scope is not valid for `kind`, or `null` when it is: a list must be non-empty, name only
  * known agents, no agent twice; a plugin or hook names exactly one agent (a hook one of
