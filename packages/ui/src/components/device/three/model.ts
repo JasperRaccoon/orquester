@@ -33,11 +33,17 @@ const MODEL_NAMES: ReadonlyArray<readonly [RegExp, DeviceModelId]> = [
   [/^iPhone Duo$/i, "iphone-duo"],
   [/^iPhone 18 Pro Max$/i, "iphone-18-pro-max"],
   [/^iPhone 18 Pro$/i, "iphone-18-pro"],
+  // The 17 Pro generation shares the 18 Pro's industrial design and dimensions.
+  [/^iPhone 17 Pro Max$/i, "iphone-18-pro-max"],
+  [/^iPhone 17 Pro$/i, "iphone-18-pro"],
   [/^iPhone 17$/i, "iphone-17"],
   [/^iPhone Air$/i, "iphone-air"],
   [/^iPhone 17e$/i, "iphone-17e"],
   [/^iPad Pro 13-inch \(M5\)$/i, "ipad-pro-13-m5"],
-  [/^iPad Air (11|13)-inch \((M3|M4)\)$/i, "ipad-air"],
+  [/^iPad Air 13-inch \((M3|M4)\)$/i, "ipad-air"],
+  // Apple publishes only the 13-inch Air; the iPad (A16) has the 11-inch Air's 2360x1640 screen
+  // and the same flat-edged body, so the framebuffer is not stretched.
+  [/^iPad Air 11-inch \((M3|M4)\)$/i, "ipad-a16"],
   [/^iPad \(A16\)$/i, "ipad-a16"],
 ];
 
