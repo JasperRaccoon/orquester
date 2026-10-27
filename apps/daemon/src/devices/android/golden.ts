@@ -31,6 +31,16 @@ export const GUEST_SETTINGS_SCRIPT = [
 
 export const ANIMATIONS_OFF_SCRIPT = GUEST_SETTINGS_SCRIPT.split("; ").slice(0, 3).join("; ");
 
+/**
+ * Dismiss what a loaded first boot leaves on screen: `hide_error_dialogs` only stops NEW error
+ * dialogs, and a "System UI isn't responding" dialog raised while the boot was still settling would
+ * otherwise be saved into the snapshot and greet every lease (error dialogs close on this broadcast).
+ */
+export const CLOSE_SYSTEM_DIALOGS_SCRIPT = "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS";
+
+/** Run after each lease boot: the animations off again, and any dialog an older snapshot kept closed. */
+export const LEASE_BOOT_SCRIPT = `${ANIMATIONS_OFF_SCRIPT}; ${CLOSE_SYSTEM_DIALOGS_SCRIPT}`;
+
 /** Settle: CPU of the emulator (in % of one core) under this for two windows in a row. */
 export const SETTLE_CPU_PERCENT = 60;
 export const SETTLE_WINDOW_MS = 10_000;
@@ -155,6 +165,9 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
       if (installed.exitCode !== 0) deps.logger.warn(`[devices] golden ${profile.id}: pre-installing ${apk} failed: ${lastLine(installed)}`);
     }
     await delay(3_000, signal);
+    const closed = await deps.exec(adb, ["-s", serial, "shell", CLOSE_SYSTEM_DIALOGS_SCRIPT], { env: deps.env, signal, timeoutMs: 30_000 });
+    if (closed.exitCode !== 0) deps.logger.warn(`[devices] golden ${profile.id}: closing system dialogs failed: ${lastLine(closed)}`);
+    await delay(1_000, signal);
     report("Saving the snapshot", 90);
     if (deps.snapshotName) {
       const save = await deps.exec(adb, ["-s", serial, "emu", "avd", "snapshot", "save", deps.snapshotName], { env: deps.env, signal, timeoutMs: 180_000 });

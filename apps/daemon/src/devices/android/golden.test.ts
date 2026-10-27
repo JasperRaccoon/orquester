@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ANIMATIONS_OFF_SCRIPT, GUEST_SETTINGS_SCRIPT, waitForSettle } from "./golden.ts";
+import { ANIMATIONS_OFF_SCRIPT, CLOSE_SYSTEM_DIALOGS_SCRIPT, GUEST_SETTINGS_SCRIPT, LEASE_BOOT_SCRIPT, waitForSettle } from "./golden.ts";
 
 function clock() {
   let t = 0;
@@ -34,4 +34,10 @@ test("guest settings: animations off, screen never off, error dialogs hidden, st
     assert.ok(GUEST_SETTINGS_SCRIPT.includes(part), part);
   }
   assert.ok(ANIMATIONS_OFF_SCRIPT.includes("animator_duration_scale 0") && !ANIMATIONS_OFF_SCRIPT.includes("stayon"));
+});
+
+test("dialogs a loaded first boot raised are closed: before the snapshot is saved, and after every lease boot", () => {
+  assert.equal(CLOSE_SYSTEM_DIALOGS_SCRIPT, "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
+  // An older snapshot may still hold a "System UI isn't responding" dialog: each lease boot closes it too.
+  assert.ok(LEASE_BOOT_SCRIPT.startsWith(ANIMATIONS_OFF_SCRIPT) && LEASE_BOOT_SCRIPT.endsWith(`; ${CLOSE_SYSTEM_DIALOGS_SCRIPT}`));
 });
