@@ -1,0 +1,16 @@
+{
+ "success": true,
+ "data": {
+  "setting": "permission",
+  "state": "deny",
+  "permission": "camera",
+  "permissions": [
+   "android.permission.CAMERA"
+  ],
+  "priorGrantState": "granted",
+  "warnings": [
+   "android.permission.CAMERA was granted before this revoke, and Android kills an app when a granted permission is revoked: if com.android.camera2 was running it is no longer. Relaunch it with open com.android.camera2 --relaunch before the next interaction."
+  ],
+  "message": "Updated setting: permission"
+ }
+}

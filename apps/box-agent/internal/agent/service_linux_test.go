@@ -56,3 +56,44 @@ func TestOOMPolicyDropInIsWrittenOnce(t *testing.T) {
 		t.Fatalf("second write: changed=%v err=%v", changed, err)
 	}
 }
+
+func TestServiceDryRunsWriteNothing(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "data dir")
+	t.Setenv("HOME", home)
+	// Unset: a dry run on a dev host shows a placeholder instead of failing.
+	t.Setenv("ORQ_DAEMON_URL", "")
+	t.Setenv("ORQ_BOX_ID", "")
+	t.Setenv("ORQ_BOOTSTRAP_TOKEN", "")
+	t.Setenv("ORQ_BOOTSTRAP_TOKEN_FILE", "")
+
+	var out strings.Builder
+	if err := InstallServiceCommand("test", ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"nothing is written or run",
+		"ORQ_DAEMON_URL is not set",
+		"write '" + filepath.Join(dataDir, "agent.env") + "' (mode 0600):",
+		"ORQ_DAEMON_URL=<ORQ_DAEMON_URL>\n",
+		"# service kind: ",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("install dry run lacks %q:\n%s", want, got)
+		}
+	}
+	out.Reset()
+	if err := UninstallServiceCommand(ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "nothing is removed or run") {
+		t.Errorf("uninstall dry run:\n%s", out.String())
+	}
+	if pathExists(dataDir) {
+		t.Error("a dry run created the data dir")
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Errorf("a dry run wrote into HOME: %v", entries)
+	}
+}

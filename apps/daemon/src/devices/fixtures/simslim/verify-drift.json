@@ -1,0 +1,11 @@
+{
+  "udid": "6F1C2E9A-3B7D-4E21-9C55-0A8B1D2E3F40",
+  "ok": false,
+  "missing": [
+    "com.apple.Spotlight",
+    "com.apple.photoanalysisd"
+  ],
+  "extra": [
+    "com.apple.apsd"
+  ]
+}

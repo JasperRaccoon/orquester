@@ -10,6 +10,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import {
+  type AddByoMachineRequest,
   type BlacksmithSetupResponse,
   type BoxConnectionSettings,
   type BoxesResponse,
@@ -18,9 +19,12 @@ import {
   type BoxProviderInfo,
   type BoxProvidersResponse,
   type BoxResponse,
+  type ByoPairingResponse,
+  type RemoveByoMachineResponse,
   type SetBlacksmithSetupRequest,
   type SetBoxConnectionRequest,
   type SetBoxProviderCredentialsRequest,
+  type UpdateByoMachineRequest,
   boxRoutes
 } from "@orquester/api";
 
@@ -92,6 +96,20 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
   );
   app.post(boxRoutes.blacksmithTest, accepted(() => service.startBlacksmithTest()));
 
+  // Bring-your-own machines (service/byo.ts). Removing one stays possible while the plugin is off.
+  app.post<{ Body: AddByoMachineRequest }>(boxRoutes.byoMachines, (request, reply) =>
+    guarded((): Promise<ByoPairingResponse> => service.byo.add(request.body))(request, reply)
+  );
+  app.patch<{ Params: { id: string }; Body: UpdateByoMachineRequest }>("/api/boxes/byo/:id", (request, reply) =>
+    guarded(async (): Promise<BoxResponse> => ({ box: await service.byo.update(request.params.id, request.body) }))(request, reply)
+  );
+  app.delete<{ Params: { id: string } }>("/api/boxes/byo/:id", (request, reply) =>
+    read((): Promise<RemoveByoMachineResponse> => service.byo.remove(request.params.id))(request, reply)
+  );
+  app.post<{ Params: { id: string } }>("/api/boxes/byo/:id/pairing", (request, reply) =>
+    guarded((): Promise<ByoPairingResponse> => service.byo.newPairing(request.params.id))(request, reply)
+  );
+
   app.get<{ Params: { id: string } }>("/api/boxes/:id", (request, reply) =>
     read((): BoxResponse => ({ box: box(request.params.id) }))(request, reply)
   );
@@ -111,6 +129,7 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
       if (summary.purpose === "project") {
         throw new BoxError(409, "BOX_IS_PROJECT", "This box belongs to a project: delete the project to destroy it.");
       }
+      // One of the owner's machines lent to a chat is released (given back), not destroyed.
       return { box: await service.destroyBox(summary.id, "deleted") };
     })(request, reply)
   );

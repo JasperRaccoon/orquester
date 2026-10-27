@@ -17,7 +17,7 @@ import { mkdir, readdir, rmdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { projectBoxInfo, type BoxLocationRequest, type CreateProjectRequest, type ProjectSummary } from "@orquester/api";
-import { isValidName } from "@orquester/config";
+import { isValidName, type StoredBox } from "@orquester/config";
 
 import { normalizeGitUrl, remoteRepoFields } from "../../repo-id.ts";
 import { cloneRefProblem, stripUrlCredentials } from "../../workflows/git-remote/index.ts";
@@ -47,6 +47,8 @@ export interface BoxProjectsDeps {
   accounts: BoxHostingAccounts;
   enabled(): boolean;
   now(): number;
+  /** Place the project on one of the owner's own machines (`provider: "byo"`, the size is the machine's id). */
+  leaseMachine?(boxId: string, project: StoredBoxProject): Promise<StoredBox>;
 }
 
 function invalid(message: string, status: 400 | 409 = 400): BoxError {
@@ -155,21 +157,26 @@ export class BoxProjects {
     await mkdir(path, { recursive: true });
     let record;
     try {
-      record = await this.deps.lifecycle.create({
-        purpose: "project",
-        kind: placement.kind,
-        provider: placement.adapter.id,
-        size: placement.size.id,
-        sizeLabel: placement.size.label,
-        region: placement.region.id,
-        regionLabel: placement.region.label,
-        image: placement.image,
-        hourlyUsd: placement.size.hourlyUsd,
-        lifetimeMinutes: placement.lifetimeMinutes,
-        project,
-        threadId: null,
-        purposeNote: null
-      });
+      if (placement.adapter.id === "byo") {
+        if (!this.deps.leaseMachine) throw new BoxError(409, "BOX_UNSUPPORTED", "Projects cannot use your own machines in this build.");
+        record = await this.deps.leaseMachine(placement.size.id, project);
+      } else {
+        record = await this.deps.lifecycle.create({
+          purpose: "project",
+          kind: placement.kind,
+          provider: placement.adapter.id,
+          size: placement.size.id,
+          sizeLabel: placement.size.label,
+          region: placement.region.id,
+          regionLabel: placement.region.label,
+          image: placement.image,
+          hourlyUsd: placement.size.hourlyUsd,
+          lifetimeMinutes: placement.lifetimeMinutes,
+          project,
+          threadId: null,
+          purposeNote: null
+        });
+      }
     } catch (error) {
       if (createdStub) await rmdir(path).catch(() => undefined);
       throw error;

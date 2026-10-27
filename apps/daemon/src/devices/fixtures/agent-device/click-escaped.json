@@ -1,0 +1,22 @@
+{
+ "success": false,
+ "error": {
+  "code": "COMMAND_FAILED",
+  "message": "press coordinate tap left com.android.settings and foregrounded com.google.android.apps.nexuslauncher. The tap likely escaped the app.",
+  "hint": "Use screenshot as visual truth, then take a fresh snapshot -i before retrying.",
+  "diagnosticId": "mvq8p41h-469c60d4",
+  "logPath": "/tmp/orq-smoke/ad-state/remote-diagnostics/orq-fixture/requests/2dd87f7be96f5164.ndjson",
+  "diagnosticsRecord": {
+   "session": "orq-fixture",
+   "requestId": "2dd87f7be96f5164"
+  },
+  "details": {
+   "expectedPackage": "com.android.settings",
+   "foregroundPackage": "com.google.android.apps.nexuslauncher",
+   "activity": "com.google.android.apps.nexuslauncher.NexusLauncherActivity",
+   "dispatchedSteps": 1,
+   "dispatched": "unknown",
+   "requestId": "2dd87f7be96f5164"
+  }
+ }
+}

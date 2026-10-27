@@ -1,0 +1,215 @@
+{
+  "author": "Apple Inc.",
+  "assetLicense": "No open-source or redistribution license has been established.",
+  "conversion": {
+    "blender": "4.5.9",
+    "gltfTransform": "4.2.1",
+    "changes": [
+      "Extracted device bodies and a separate Magic Keyboard accessory; excluded unrelated parts and presentation duplicates. Samsung's glTF sources (Draco decoded by Blender's glTF importer) hold one device each and keep every mesh.",
+      "Normalized conventional device portrait axes, centered their screen and uniformly scaled its height to 2.2 scene units. The Duo retains its upstream centimeter hinge rig.",
+      "Replaced the baked marketing screen with a named placeholder for the live framebuffer.",
+      "Split the Galaxy Z Fold8 (vertical hinge) and Z Flip8 (horizontal hinge) at the hinge into two halves pivoting on the hinge axis just in front of the inner display; the inner display, its bezel and the hinge links that stand proud of the frame are cut with their halves, the spine (Hinge, SAMSUNG_LOGO) becomes a separate hinge group, and the displays become cover-display and inner-display-<side> placeholders.",
+      "Resized textures to at most 1024 pixels and encoded them as WebP; retained body geometry.",
+      "Re-encoded the geometry of every model except the iPhone Duo with EXT_meshopt_compression (gltf-transform meshopt --level medium: 14-bit positions, 10-bit normals); the Duo keeps float geometry because its hinge rig and display UVs depend on per-mesh local coordinates. The Samsung fold rigs are re-encoded too: their viewer reads display frames through node transforms."
+    ]
+  },
+  "models": [
+    {
+      "id": "iphone-18-pro",
+      "file": "iphone-18-pro.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone-18-pro/2026/591df885-5ee2-4173-86e6-401021249f7c/ar/iphone-18-pro-e-sim.usdz",
+      "sourceSha256": "0f2dac354fbc6505e7917983de460f2cc68e253f96aabf52e9f0468a4803f317",
+      "bodyNode": "UBGArkKGrAMRRnj",
+      "screenNode": "EHjrGDHNHzgNjtE.001",
+      "meshopt": true
+    },
+    {
+      "id": "iphone-18-pro-max",
+      "file": "iphone-18-pro-max.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone-18-pro/2026/591df885-5ee2-4173-86e6-401021249f7c/ar/iphone-18-pro-e-sim.usdz",
+      "sourceSha256": "0f2dac354fbc6505e7917983de460f2cc68e253f96aabf52e9f0468a4803f317",
+      "bodyNode": "wUOhcMgiBmCgGaw",
+      "screenNode": "EHjrGDHNHzgNjtE",
+      "meshopt": true
+    },
+    {
+      "id": "ipad-pro-13-m5",
+      "file": "ipad-pro-13-m5.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/ipad-pro/2025/adee90db-c01e-430d-b726-fe64c0063f08/ar/ipad-pro-space-black.usdz",
+      "sourceSha256": "48098daf7c49117c81a4e4e1808899b93fad081faeba6c8b65124946b83b5ac6",
+      "bodyNode": "zRrSLDpdYmKeRJQ",
+      "screenNode": "lsDiIbtoSGSmWWZ",
+      "meshopt": true
+    },
+    {
+      "id": "ipad-pro-13-m5-magic-keyboard",
+      "file": "ipad-pro-13-m5-magic-keyboard.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/ipad-pro/2025/adee90db-c01e-430d-b726-fe64c0063f08/ar/ipad-pro-space-black.usdz",
+      "sourceSha256": "48098daf7c49117c81a4e4e1808899b93fad081faeba6c8b65124946b83b5ac6",
+      "bodyNode": "zRrSLDpdYmKeRJQ",
+      "screenNode": "lsDiIbtoSGSmWWZ",
+      "accessoryNode": "PoBqSMmyhhcJsBX",
+      "meshopt": true
+    },
+    {
+      "id": "iphone-duo",
+      "file": "iphone-duo.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone-duo/2026/9305e4b9-72d9-4c05-9381-b572adadd5e5/ar/iPhone_Duo_e-sim_Star-White_Variant.usdz",
+      "sourceSha256": "5cab2ea636da0bc0b06c8abf4809843498f7c1d680042b4f95e383b5c6a718b2",
+      "upstreamConversionCommit": "bb265b11c13b395e5302d121458e2d42224a2e9f",
+      "conversion": "Preserved the centimeter split hinge rig and three display meshes from serve-sim; resized textures to 1024 pixels and encoded them as WebP without simplifying or flattening the rig."
+    },
+    {
+      "id": "iphone-17",
+      "file": "iphone-17.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone-17/2025/b2c72de3-1cbc-4e24-b4d3-23c7abcec4ec/ar/iphone-17-e-sim.usdz",
+      "sourceSha256": "2eb04d020c595e12884e95e13b197dab706c13797450b45ca2fa8eefbfa9404b",
+      "bodyNode": "nVMdepcBMBmnVhZ",
+      "screenNode": "eXcdWRctfHqyWLU",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "iphone-air",
+      "file": "iphone-air.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone-air/2025/731189b1-a606-493f-afa4-7c766a8fd08d/ar/iphone-air-e-sim.usdz",
+      "sourceSha256": "9b7587b91e945c5699a8fbb1c79a3cd07d4d9553d11f2e0b794fddc0fe32d5b6",
+      "bodyNode": "sePZlgtqCVXFQPm",
+      "screenNode": "tppzCQmnlKcHIpP",
+      "recessNodes": {
+        "IJtRUXYEEXnnqxn": 0.002,
+        "OJRMWDmWznngIRa": 0.001
+      },
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "iphone-17e",
+      "file": "iphone-17e.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/iphone/shared/ar/2026/44fa1631-e6c3-4596-b59b-0d58f7e8735c/iphone-17e/iphone-17e-e-sim-soft-pink.usdz",
+      "sourceSha256": "e4efca18f6fb2b3c1547d75afec4ab4170838bfe7ccc616c4cd6cdc69a48dc01",
+      "bodyNode": "TGDVcCHLdxlIePk",
+      "screenNode": "saxrJLGXKkVuvan",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "ipad-air",
+      "file": "ipad-air.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/ipad-air/2025/e184d49a-4015-42ae-8a8b-db06bfeabd75/ar/ipad-air-space-gray-with-accessories.usdz",
+      "sourceSha256": "a99471a53acd892d4765feb382dd019d398d1cad809f1c9df476d19f1bde281d",
+      "bodyNode": "UafKVrFFrXNvORp",
+      "screenNode": "PlmwhBklHctYyNL",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "ipad-a16",
+      "file": "ipad-a16.glb",
+      "sourceUrl": "https://www.apple.com/105/media/us/ipad-11/2025/21af9618-666d-4368-9fb9-38822c35dc35/ar/ipad-11-silver.usdz",
+      "sourceSha256": "9d8acc70de2374a5820e37f9b2467230fd95173d7daabd706004563064a69875",
+      "bodyNode": "PjHOxQYsCxJEdDJ",
+      "screenNode": "xlzlkvUdaKfEmbz",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "galaxy-s26",
+      "file": "galaxy-s26.glb",
+      "author": "Samsung Electronics Co., Ltd.",
+      "sourceUrl": "https://images.samsung.com/common/smartphones/compare/galaxy-s26/viewer/models/galaxy-s26/galaxy-s26-cobalt-violet.glb",
+      "sourceSha256": "bf0abe2500f68e2e2c6086bc137a12602fbd8a3ef365f10893340ec022cd76b6",
+      "screenNode": "M1_Display_Activearea",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "galaxy-s26-plus",
+      "file": "galaxy-s26-plus.glb",
+      "author": "Samsung Electronics Co., Ltd.",
+      "sourceUrl": "https://images.samsung.com/common/smartphones/compare/galaxy-s26/viewer/models/galaxy-s26-plus/galaxy-s26-plus-cobalt-violet.glb",
+      "sourceSha256": "efc1f836b5a407220fda9b41dace43986488ce571004e8cc3c8f174a6bb687ab",
+      "screenNode": "M2_Display_Activearea",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "galaxy-s26-ultra",
+      "file": "galaxy-s26-ultra.glb",
+      "author": "Samsung Electronics Co., Ltd.",
+      "sourceUrl": "https://images.samsung.com/common/smartphones/compare/galaxy-s26/viewer/models/galaxy-s26-ultra/galaxy-s26-ultra-cobalt-violet.glb",
+      "sourceSha256": "46746fd419ed76e480d86ae5b901d0d9ab6a42c9c4998e19f8b23e38ab9fe5b0",
+      "screenNode": "M3_Display_Activearea",
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true
+    },
+    {
+      "id": "galaxy-z-fold8",
+      "file": "galaxy-z-fold8.glb",
+      "author": "Samsung Electronics Co., Ltd.",
+      "sourceUrl": "https://images.samsung.com/common/smartphones/compare/galaxy-z-fold8-flip8/viewer/models/galaxy-z-fold8/galaxy-z-fold8-jasmine.glb",
+      "sourceSha256": "e9099de8d08e9141f415e1f72c21b847e90d1927489402f211704b5b3451a1b7",
+      "fold": {
+        "hinge": "vertical",
+        "innerNode": "Main_Display",
+        "coverNode": "Sub_Display",
+        "spineNodes": [
+          "Hinge",
+          "SAMSUNG_LOGO"
+        ]
+      },
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true,
+      "conversion": "Hinge rig: the half carrying cover-display folds about its origin; the hinge group turns by half and slides in to meet the fold edge when closed (foldModelScene.ts)."
+    },
+    {
+      "id": "galaxy-z-flip8",
+      "file": "galaxy-z-flip8.glb",
+      "author": "Samsung Electronics Co., Ltd.",
+      "sourceUrl": "https://images.samsung.com/common/smartphones/compare/galaxy-z-fold8-flip8/viewer/models/galaxy-z-flip8/galaxy-z-flip8-pink.glb",
+      "sourceSha256": "5d5a725017cc7256944ef7f4277a18884c88d4b3ccfa53f832d8e27dd153615f",
+      "fold": {
+        "hinge": "horizontal",
+        "innerNode": "Main_Display",
+        "coverNode": "Sub_Display",
+        "spineNodes": [
+          "Hinge",
+          "SAMSUNG_LOGO"
+        ]
+      },
+      "tools": {
+        "blender": "4.5.9",
+        "gltfTransform": "4.2.1"
+      },
+      "meshopt": true,
+      "conversion": "Hinge rig: the half carrying cover-display folds about its origin; the hinge group turns by half and slides in to meet the fold edge when closed (foldModelScene.ts)."
+    }
+  ]
+}

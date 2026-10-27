@@ -4,13 +4,14 @@
  * per-agent global config editor that held the id before is Settings → Agent
  * config, so a stale stored "profile" now opens the library.
  */
-export type RightRailPanelId = "prompts" | "history" | "workflows" | "profile";
+export type RightRailPanelId = "prompts" | "history" | "workflows" | "profile" | "device";
 
 /**
  * The panels the desktop dock hosts: the ones about the visible chat. Workflows
- * live in the left sidebar on desktop (`sidebar/ActivityBar.tsx`).
+ * live in the left sidebar on desktop (`sidebar/ActivityBar.tsx`). "device" is
+ * the visible chat's devices (Device simulators plugin; shown only while it is on).
  */
-export type DockPanelId = "prompts" | "history";
+export type DockPanelId = "prompts" | "history" | "device";
 
 /** What every panel receives from the rail — docked on desktop, inside the sheet on mobile. */
 export interface RightRailPanelProps {

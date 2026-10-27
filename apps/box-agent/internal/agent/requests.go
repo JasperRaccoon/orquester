@@ -214,5 +214,5 @@ func handleAgentShutdown(_ context.Context, a *Agent, _ *Link, raw json.RawMessa
 	if err != nil {
 		return nil, err
 	}
-	return thenRun{nil, func() { a.shutdown("daemon request: " + p.Reason) }}, nil
+	return thenRun{nil, func() { a.shutdown("daemon request: "+p.Reason, p.Uninstall) }}, nil
 }

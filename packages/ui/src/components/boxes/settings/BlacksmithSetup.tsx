@@ -88,7 +88,7 @@ function useFollowRunningSetup(setup: BlacksmithSetupResponse | null): void {
   }, [busy, api]);
 }
 
-/** The Blacksmith (macOS) row: its status and, expanded, the five-step checklist. */
+/** The Blacksmith (macOS and Linux) row: its status and, expanded, the five-step checklist. */
 export const BlacksmithRow: React.FC<{ provider: BoxProviderInfo }> = ({ provider }) => {
   const setup = useBlacksmithSetup();
   const [open, setOpen] = useState(false);
@@ -108,9 +108,9 @@ export const BlacksmithRow: React.FC<{ provider: BoxProviderInfo }> = ({ provide
         >
           <ProviderTile provider={provider} />
           <span className="min-w-0 flex-1">
-            <span className="block text-sm font-medium text-neutral-100">{provider.label} (macOS)</span>
+            <span className="block text-sm font-medium text-neutral-100">{provider.label} (macOS and Linux)</span>
             <span className="block truncate text-xs text-neutral-500">
-              {subline || "macOS boxes as GitHub Actions jobs in your org"}
+              {subline || "macOS and Linux boxes as GitHub Actions jobs in your org"}
             </span>
           </span>
         </button>

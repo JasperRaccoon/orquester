@@ -129,6 +129,22 @@ export function releaseActiveChatTab(sessionId: string): void {
 }
 
 /**
+ * The shell's publish (`MainView`): `sessionId` is the visible chat tab until the returned stop
+ * runs. A chat view that unmounts while it is still the visible tab — React StrictMode's simulated
+ * unmount of a freshly mounted view in development, or a remount under a new parent — releases its
+ * claim ({@link releaseActiveChatTab}) though nothing changed on screen; the hold takes it back,
+ * where the shell's effect would not run again and the keyboard and the right rail's chat target
+ * (the Device panel, saved prompts) would stay unowned.
+ */
+export function holdActiveChatTab(sessionId: string | null): () => void {
+  setActiveChatTab(sessionId);
+  if (sessionId === null) return () => undefined;
+  return subscribeActiveChatTab((next) => {
+    if (next === null) setActiveChatTab(sessionId);
+  });
+}
+
+/**
  * A tab, as much of one as this decision needs: the arms that carry no
  * `sessionId` (files, git, todo, browser, the overview) satisfy it by omission.
  */

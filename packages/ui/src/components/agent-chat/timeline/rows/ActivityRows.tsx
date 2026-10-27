@@ -53,6 +53,7 @@ import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
 import { ChatIconButton } from "../../primitives/ChatIconButton";
+import { DeviceScreenshotThumb, DeviceShowButton, useDeviceLinkName } from "./DeviceRowLink";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
@@ -476,6 +477,9 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const expanded = ctx.isExpanded(entry.id);
+  // Devices §10.3: a device tool's row names its device as the store knows it.
+  const deviceLink = entry.sessionTool !== undefined ? entry.deviceLink : undefined;
+  const storeDeviceName = useDeviceLinkName(deviceLink);
 
   const warning = workEntryIsWarning(entry);
   const failed = workEntryDisplayIndicatesToolFailure(entry);
@@ -493,7 +497,10 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   if (workEntryIsContinuation(entry)) return <ContinuationNoticeRow entry={entry} />;
 
   const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
-  const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);
+  const label =
+    deviceLink !== undefined
+      ? workEntryDisplayLabel(entry, ctx.workspaceRoot, () => storeDeviceName)
+      : (displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot));
   const detail = entry.detail?.trim() ?? "";
   const command = entry.command?.trim() ?? "";
   const changedFiles = entry.changedFiles ?? [];
@@ -574,6 +581,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
             </span>
           </p>
           {entry.threadLink ? <ThreadLinkButton link={entry.threadLink} /> : null}
+          {deviceLink ? <DeviceShowButton link={deviceLink} sessionId={ctx.sessionId} /> : null}
           {failed && !destructive ? (
             <X size={12} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500/40" />
           ) : null}
@@ -584,6 +592,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
           </span>
         </div>
       </div>
+      {deviceLink?.screenshotId ? <DeviceScreenshotThumb link={deviceLink} name={deviceLink.name ?? storeDeviceName} /> : null}
       {expanded && entry.questionAnswer ? <QuestionAnswerHistory answer={entry.questionAnswer} /> : null}
       {expanded && canExpand && entry.questionAnswer === undefined ? (
         <div

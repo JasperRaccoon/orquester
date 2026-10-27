@@ -105,7 +105,8 @@ const BOX_ERROR_STATUS: Readonly<Record<BoxErrorCode, number>> = {
   BOX_TAILSCALE_NEEDS_PERMISSION: 409,
   BOX_CONFIG_CHANGE_NOT_FOUND: 404,
   BOX_CONFIG_CHANGE_DECIDED: 409,
-  BOX_DESTROYED: 410
+  BOX_DESTROYED: 410,
+  BOX_IN_USE: 409
 };
 
 const DISABLED = refuse(503, "BOXES_DISABLED", "Temporary boxes are not available: the Ephemeral AI VMs plugin is off or still starting.");
@@ -1073,7 +1074,8 @@ export class TemporaryBoxTools {
 
   private boxChanged(boxId: string): void {
     const box = this.connection?.boxes.get(boxId);
-    if (!box || box.state === "destroying" || box.state === "destroyed") void this.boxGone(boxId);
+    // A machine of the owner's lent to a chat and given back is no longer the chat's either.
+    if (!box || box.state === "destroying" || box.state === "destroyed" || box.purpose !== "temporary") void this.boxGone(boxId);
   }
 
   /** A box went: its forwards close and its jobs are forgotten. Concurrent calls share one cleanup. */

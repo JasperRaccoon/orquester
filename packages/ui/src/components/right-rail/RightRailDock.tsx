@@ -36,11 +36,11 @@ import { useActiveChatTarget } from "./chat-target";
 import { dockKeyAction, useDockKeyboardLayer, useFocusInside } from "./dock-keyboard";
 import { RIGHT_RAIL_DOCK_ID, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
 import {
-  RIGHT_RAIL_CSS_MAX_WIDTH,
-  RIGHT_RAIL_CSS_MIN_WIDTH,
   clampRightRailWidth,
   resetRightRailWidth,
+  rightRailCssBounds,
   rightRailState,
+  rightRailWidthOf,
   setRightRailWidth
 } from "./right-rail-state";
 import type { DockPanelId, RightRailPanelProps } from "./types";
@@ -138,7 +138,9 @@ export const RightRailDock: React.FC<RightRailDockProps> = ({
   const dragRowWidth = React.useRef<number | null>(null);
   // The width as drawn: on a narrowed window the CSS bounds below hold it
   // under the stored one, and a drag must start from what the user sees.
-  const drawnWidth = (): number => node?.getBoundingClientRect().width || rightRailState().width;
+  const drawnWidth = (): number => node?.getBoundingClientRect().width || rightRailWidthOf(rightRailState(), panel);
+  // Each panel's own range (the Device panel's is wider).
+  const bounds = rightRailCssBounds(panel);
   const startDrag = (): number => {
     dragRowWidth.current = rowRef?.current?.getBoundingClientRect().width ?? null;
     return -drawnWidth();
@@ -166,8 +168,8 @@ export const RightRailDock: React.FC<RightRailDockProps> = ({
         // row: a window narrowed after the drag still leaves the tab
         // content its floor, which wins over the dock's minimum — the dock
         // gives way (down to nothing) and the rail stays whole.
-        minWidth: RIGHT_RAIL_CSS_MIN_WIDTH,
-        maxWidth: RIGHT_RAIL_CSS_MAX_WIDTH
+        minWidth: bounds.minWidth,
+        maxWidth: bounds.maxWidth
       }}
     >
       {/* The handle grows its value to the RIGHT (`base + (x − start)`); the
@@ -185,10 +187,10 @@ export const RightRailDock: React.FC<RightRailDockProps> = ({
         aria-label="Resize side panel"
         className="absolute inset-y-0 left-0 [&>[role=separator]]:left-0 [&>[role=separator]]:translate-x-0"
         getCurrent={startDrag}
-        clamp={(next) => -clampRightRailWidth(-next, dragRowWidth.current)}
-        onResize={(next) => setRightRailWidth(-next, { persist: false, rowWidth: dragRowWidth.current })}
-        onCommit={(next) => setRightRailWidth(-next, { persist: true, rowWidth: dragRowWidth.current })}
-        onReset={resetRightRailWidth}
+        clamp={(next) => -clampRightRailWidth(-next, dragRowWidth.current, panel)}
+        onResize={(next) => setRightRailWidth(-next, { persist: false, rowWidth: dragRowWidth.current, panel })}
+        onCommit={(next) => setRightRailWidth(-next, { persist: true, rowWidth: dragRowWidth.current, panel })}
+        onReset={() => resetRightRailWidth(panel)}
       />
       <header className="flex h-12 shrink-0 items-center gap-2 px-3">
         <Icon size={16} aria-hidden className="shrink-0 text-neutral-300" />

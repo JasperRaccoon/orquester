@@ -1,0 +1,53 @@
+{
+    "sims": [
+        {
+            "udid": "80A2A57A-21F5-4AE8-A7AF-B20B90D268CF",
+            "name": "orq-it-L3",
+            "state": "Booted",
+            "platform": "iOS",
+            "osVersion": "27.0",
+            "set": "default",
+            "managedDisabled": 165,
+            "managedTotal": 168,
+            "memory": {
+                "processes": 90,
+                "bytes": 734356480,
+                "cpu": 17.6
+            },
+            "diskBytes": 383655936
+        },
+        {
+            "udid": "A28234C0-0343-4BD2-8FFE-79D0A7E78979",
+            "name": "orq-it-L1",
+            "state": "Booted",
+            "platform": "iOS",
+            "osVersion": "27.0",
+            "set": "default",
+            "managedDisabled": 165,
+            "managedTotal": 168,
+            "memory": {
+                "processes": 81,
+                "bytes": 632107008,
+                "cpu": 18.200000000000003
+            },
+            "diskBytes": 284573696
+        },
+        {
+            "udid": "B6E87C89-51B1-44C3-A33D-18D3D1383FB9",
+            "name": "orq-it-L2",
+            "state": "Booted",
+            "platform": "iOS",
+            "osVersion": "27.0",
+            "set": "default",
+            "managedDisabled": 165,
+            "managedTotal": 168,
+            "memory": {
+                "processes": 80,
+                "bytes": 630602752,
+                "cpu": 18.800000000000004
+            },
+            "diskBytes": 314208256
+        }
+    ],
+    "totalBytes": 1997066240
+}
