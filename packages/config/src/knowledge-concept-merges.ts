@@ -2,7 +2,9 @@
 // docs/superpowers/specs/2026-10-27-knowledge-phase2-cross-graph-design.md, "Concept merges"):
 // a daemon-side overlay re-applied over myKG's graph at every load, since myKG rewrites its own
 // output on every run. `merges` are the merges made (in effect while their concepts exist);
-// `rejected` are merges a user undid, so the same concepts are never merged again.
+// `rejected` are merges a user undid, so the same concepts are never merged again; `checks` are
+// the LLM's answers on pairs the name guards refused (a merge with `source: "checked"` when they
+// are the same, remembered either way so the same names are never asked again).
 //
 // This module imports only zod: the path helper (`knowledgeConceptMergesPath`) lives in index.ts,
 // which re-exports this file.
@@ -31,7 +33,12 @@ export const knowledgeConceptMergeRecordSchema = z
     merged: z.array(z.string().min(1)).min(1),
     /** Lowest similarity among the concept pairs that justified it. */
     similarity: z.number().catch(0),
-    createdAt: z.string().catch("")
+    createdAt: z.string().catch(""),
+    /**
+     * Why it was made: absent = the automatic rule; "checked" = an LLM check confirmed a pair the
+     * name guards refused. Any other text (a newer build's) reads as it is.
+     */
+    source: z.string().optional().catch(undefined)
   })
   .passthrough();
 export type KnowledgeConceptMergeRecord = z.infer<typeof knowledgeConceptMergeRecordSchema>;
@@ -49,18 +56,40 @@ export const knowledgeConceptMergeRejectionSchema = z
   .passthrough();
 export type KnowledgeConceptMergeRejection = z.infer<typeof knowledgeConceptMergeRejectionSchema>;
 
+/**
+ * An LLM check of two same-type concepts the name guards kept apart: asked once per pair of names
+ * (`nameA`, `nameB` as asked; a renamed concept is asked again). `a` < `b`.
+ */
+export const knowledgeConceptMergeCheckSchema = z
+  .object({
+    a: z.string().min(1),
+    b: z.string().min(1),
+    type: z.string().min(1),
+    nameA: z.string(),
+    nameB: z.string(),
+    same: z.boolean(),
+    /** The concept the checker would keep (`a` or `b`'s id), when `same`. */
+    keep: z.string().nullable().catch(null),
+    reason: z.string().catch(""),
+    similarity: z.number().catch(0),
+    checkedAt: z.string().catch("")
+  })
+  .passthrough();
+export type KnowledgeConceptMergeCheck = z.infer<typeof knowledgeConceptMergeCheckSchema>;
+
 export interface KnowledgeConceptMergesFile {
   version: 1;
   merges: KnowledgeConceptMergeRecord[];
   rejected: KnowledgeConceptMergeRejection[];
-  /** `merges` / `rejected` list items this build could not read, exactly as found, in file order. */
-  unreadable: { merges: unknown[]; rejected: unknown[] };
-  /** Every top-level key but `version`, `merges` and `rejected`, exactly as found. */
+  checks: KnowledgeConceptMergeCheck[];
+  /** `merges` / `rejected` / `checks` list items this build could not read, exactly as found, in file order. */
+  unreadable: { merges: unknown[]; rejected: unknown[]; checks: unknown[] };
+  /** Every top-level key but `version`, `merges`, `rejected` and `checks`, exactly as found. */
   extra: Record<string, unknown>;
 }
 
 export function emptyKnowledgeConceptMergesFile(): KnowledgeConceptMergesFile {
-  return { version: 1, merges: [], rejected: [], unreadable: { merges: [], rejected: [] }, extra: {} };
+  return { version: 1, merges: [], rejected: [], checks: [], unreadable: { merges: [], rejected: [], checks: [] }, extra: {} };
 }
 
 /** Record-wise tolerant; the outer shape (a `version` other than 1 included) throws. */
@@ -69,7 +98,9 @@ export function parseKnowledgeConceptMergesFile(raw: unknown): KnowledgeConceptM
     .object({
       version: z.literal(KNOWLEDGE_CONCEPT_MERGES_VERSION),
       merges: z.array(z.unknown()).default([]),
-      rejected: z.array(z.unknown()).default([])
+      rejected: z.array(z.unknown()).default([]),
+      // An older build of this version kept `checks` among its unknown keys: anything but a list reads as none.
+      checks: z.array(z.unknown()).catch([]).default([])
     })
     .safeParse(raw);
   if (!outer.success || raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -93,8 +124,17 @@ export function parseKnowledgeConceptMergesFile(raw: unknown): KnowledgeConceptM
     if (parsed.success) file.rejected.push(parsed.data);
     else file.unreadable.rejected.push(item);
   }
-  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
-  file.extra = Object.fromEntries(Object.entries(raw).filter(([key]) => key !== "version" && key !== "merges" && key !== "rejected"));
+  for (const item of outer.data.checks) {
+    const parsed = knowledgeConceptMergeCheckSchema.safeParse(item);
+    if (parsed.success) file.checks.push(parsed.data);
+    else file.unreadable.checks.push(item);
+  }
+  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key. A `checks` that is
+  // not a list is kept as it was (an unknown key's value).
+  const checksIsList = Array.isArray((raw as Record<string, unknown>).checks);
+  file.extra = Object.fromEntries(
+    Object.entries(raw).filter(([key]) => key !== "version" && key !== "merges" && key !== "rejected" && !(key === "checks" && checksIsList))
+  );
   return file;
 }
 
@@ -104,7 +144,9 @@ export function serializeKnowledgeConceptMergesFile(file: KnowledgeConceptMerges
     version: KNOWLEDGE_CONCEPT_MERGES_VERSION,
     merges: [...file.merges, ...file.unreadable.merges],
     rejected: [...file.rejected, ...file.unreadable.rejected],
-    ...file.extra
+    ...file.extra,
+    // Written only once there are some (a file without checks reads exactly as before).
+    ...(file.checks.length + file.unreadable.checks.length > 0 ? { checks: [...file.checks, ...file.unreadable.checks] } : {})
   };
   return `${JSON.stringify(value, null, 2)}\n`;
 }

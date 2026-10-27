@@ -7,6 +7,7 @@ import type { KnowledgeConceptRef } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import {
+  negatedNames,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
@@ -15,7 +16,8 @@ import {
   pairCheckInput,
   parsePairCheckAnswer,
   validatePairCheckAnswer,
-  writePairCheckTask
+  writePairCheckTask,
+  writeRoundTask
 } from "./pair-checks.ts";
 
 const roots: string[] = [];
@@ -144,21 +146,101 @@ describe("pair-check candidates", () => {
     return { view, hashOf: (id: string) => `h-${id}` };
   }
 
-  it("close pairs sharing a claim-like concept, and pairs joined by `contradicts`, closest first; checked pairs and the limit are honoured", async () => {
+  it("pairs joined by `contradicts` first (whatever their similarity), then close pairs sharing a claim-like concept, closest first; checked pairs and the limit are honoured", async () => {
     const { view, hashOf } = setup();
     const ids = ["ke_a", "ke_b", "ke_c", "ke_d", "ke_e"];
     const all = await pairCheckCandidates({ ids, view, hashOf, isChecked: () => false, limit: 30 });
     assert.deepEqual(
-      all.map((c) => [c.a, c.b]),
+      all.map((c) => [c.a, c.b, c.reason]),
       [
-        ["ke_a", "ke_b"],
-        ["ke_a", "ke_e"],
-        ["ke_a", "ke_d"]
+        ["ke_a", "ke_d", "contradicts"],
+        ["ke_a", "ke_b", "shared"],
+        ["ke_a", "ke_e", "shared"]
       ]
     );
-    assert.deepEqual({ hashA: all[0]!.hashA, hashB: all[0]!.hashB }, { hashA: "h-ke_a", hashB: "h-ke_b" });
-    const unchecked = await pairCheckCandidates({ ids, view, hashOf, isChecked: (p) => p.b === "ke_b", limit: 1 });
+    assert.deepEqual({ hashA: all[1]!.hashA, hashB: all[1]!.hashB }, { hashA: "h-ke_a", hashB: "h-ke_b" });
+    const unchecked = await pairCheckCandidates({ ids, view, hashOf, isChecked: (p) => p.b !== "ke_e", limit: 1 });
     assert.deepEqual(unchecked.map((c) => [c.a, c.b]), [["ke_a", "ke_e"]]);
+    const capped = await pairCheckCandidates({ ids, view, hashOf, isChecked: () => false, limit: 2 });
+    assert.deepEqual(capped.map((c) => c.reason), ["contradicts", "shared"], "the cap keeps the first tiers");
+  });
+
+  it("meta entries: a synthesis is never checked; an entry linked to both sides of a `contradicts` edge is not paired through it", async () => {
+    const { view, hashOf } = setup();
+    const quoting: KnowledgeConceptRef[] = [ref("Tactic", "t-48h"), ref("Tactic", "t-72h"), ref("Tactic", "t1")];
+    const index = view.vectors() as FakeVectorIndex;
+    index.set("ke_q", around(8, 0, 4, 0.95));
+    index.set("ke_s", around(8, 0, 5, 0.95));
+    const meta: KnowledgeLinkGraphView = {
+      ...view,
+      conceptsOf: (id) => (id === "ke_q" ? quoting : id === "ke_s" ? [ref("Tactic", "t1"), ref("Tactic", "t-72h")] : view.conceptsOf(id))
+    };
+    const kinds: Record<string, string> = { ke_s: "synthesis" };
+    const all = await pairCheckCandidates({
+      ids: ["ke_a", "ke_b", "ke_d", "ke_q", "ke_s"],
+      view: meta,
+      hashOf,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id) => ({ kind: kinds[id] ?? "note", author: null, handle: null })
+    });
+    assert.ok(all.every((c) => c.a !== "ke_s" && c.b !== "ke_s"), JSON.stringify(all));
+    assert.deepEqual(
+      all.map((c) => [c.a, c.b, c.reason]),
+      [
+        ["ke_a", "ke_d", "contradicts"],
+        ["ke_a", "ke_q", "shared"],
+        ["ke_a", "ke_b", "shared"],
+        ["ke_b", "ke_q", "shared"]
+      ],
+      "ke_q quotes both sides: never paired through that edge, still through a shared claim"
+    );
+  });
+
+  it("a negated name: one negates, the rest overlaps; parentheses are clarifications", () => {
+    assert.equal(negatedNames("One trial per IP", "Use IP reputation as an input, never one-trial-per-IP"), true, "a live pair");
+    assert.equal(negatedNames("Post daily", "Never post at night on weekends"), false, "too little in common");
+    assert.equal(negatedNames("One trial per IP", "Never one trial per IP"), true);
+    assert.equal(negatedNames("Offer a free trial", "Do not offer a free trial"), true);
+    assert.equal(negatedNames("Allow OAI-SearchBot", "Allow OAI-SearchBot (and don't block it at the CDN)"), false);
+    assert.equal(negatedNames("Avoid free VPNs", "Never use free VPNs"), false, "both negate");
+  });
+
+  it("opposite advice: a concept and its negation; different values for the same decision between near neighbours by different authors", async () => {
+    const index = new FakeVectorIndex(); // good = 0.5
+    index.set("ke_trial", axis(16, 0));
+    index.set("ke_never", around(16, 0, 1, 0.7)); // "never one trial per IP"
+    index.set("ke_outlook", axis(16, 4));
+    index.set("ke_gmail", around(16, 4, 5, 0.9)); // nearest of ke_outlook, another author
+    index.set("ke_gmail2", around(16, 4, 6, 0.85)); // also near, but the same author as ke_outlook
+    index.set("ke_far", around(16, 4, 7, 0.55)); // close enough, but neither is among the other's nearest
+    for (let i = 0; i < 6; i += 1) index.set(`ke_fill${i}`, around(16, 7, 8 + i, 0.95 - i * 0.01)); // ke_far's nearest
+    for (let i = 0; i < 6; i += 1) index.set(`ke_near${i}`, around(16, 4, 14, 0.8)); // ke_outlook's nearest after its two
+    const concepts: Record<string, KnowledgeConceptRef[]> = {
+      ke_trial: [{ id: "t-one", type: "Tactic", name: "One trial per IP" }],
+      ke_never: [{ id: "t-never", type: "Tactic", name: "Never one-trial-per-IP" }],
+      ke_outlook: [{ id: "t-outlook", type: "Tactic", name: "Outlook/Proton email for TikTok account" }],
+      ke_gmail: [{ id: "t-gmail", type: "Tactic", name: "Create TikTok accounts with a fresh Gmail" }],
+      ke_gmail2: [{ id: "t-gmail2", type: "Tactic", name: "Create a TikTok account with Gmail" }],
+      ke_far: [{ id: "t-far", type: "Tactic", name: "TikTok account email choice" }]
+    };
+    const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: (id) => concepts[id] ?? [], contradicting: () => [] };
+    const authors: Record<string, [string, string | null]> = { ke_outlook: ["jason", null], ke_gmail: ["Alex", null], ke_gmail2: ["Alex", "@Jason "] };
+    const all = await pairCheckCandidates({
+      ids: [...index.embeddedIds()],
+      view,
+      hashOf: (id) => `h-${id}`,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id) => ({ kind: "post", author: authors[id]?.[0] ?? id, handle: authors[id]?.[1] ?? null })
+    });
+    assert.deepEqual(
+      all.map((c) => [c.a, c.b, c.reason]),
+      [
+        ["ke_never", "ke_trial", "negation"],
+        ["ke_gmail", "ke_outlook", "alternatives"]
+      ]
+    );
   });
 });
 
@@ -186,5 +268,28 @@ describe("the pair checks' inbox", () => {
     assert.deepEqual(await readdir(join(root, "agent_inbox")), [], `the open task (${open.slice(0, 8)}) goes too: written again while still worth checking`);
     assert.deepEqual(await readdir(join(root, "agent_outbox")), []);
     assert.equal(await harvestPairCheckInbox(join(root, "missing"), { record: async () => undefined }), 0);
+  });
+
+  it("a round task source's task carries its payload; an answer left before a restart goes to its source only if it validates", async () => {
+    const root = await dir();
+    const good = await writeRoundTask(root, "cluster-name", { label: "cluster-name k1", system: "S", user: "U1", payload: { key: "k1" } }, NOW);
+    const bad = await writeRoundTask(root, "cluster-name", { label: "cluster-name k2", system: "S", user: "U2", payload: { key: "k2" } }, NOW);
+    const orphan = await writeRoundTask(root, "unknown-step", { label: "x", system: "S", user: "U3", payload: 1 }, NOW);
+    const task = JSON.parse(await readFile(join(root, "agent_inbox", `${good}.task.json`), "utf8")) as Record<string, unknown>;
+    assert.equal(task.step, "cluster-name");
+    assert.deepEqual(task.payload, { key: "k1" });
+    for (const [id, answer] of [[good, '{"label":"App Store review"}'], [bad, '{"label":""}'], [orphan, "{}"]] as const) {
+      await writeFile(join(root, "agent_outbox", `${id}.answer.json`), JSON.stringify({ task_id: id, answer }));
+      await writeFile(join(root, "agent_outbox", `${id}.done`), "");
+    }
+    const recorded: unknown[] = [];
+    const source = {
+      validate: (value: unknown) => ((value as { label?: unknown }).label ? null : "a label"),
+      record: async (payload: unknown, answer: string) => void recorded.push([payload, answer])
+    };
+    const count = await harvestPairCheckInbox(root, { record: async () => undefined }, new Map([["cluster-name", source]]));
+    assert.equal(count, 1);
+    assert.deepEqual(recorded, [[{ key: "k1" }, '{"label":"App Store review"}']]);
+    assert.deepEqual(await readdir(join(root, "agent_inbox")), []);
   });
 });

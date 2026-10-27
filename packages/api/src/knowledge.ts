@@ -380,6 +380,8 @@ export interface KnowledgeConceptMerge {
   /** Lowest pairwise similarity of the names that justified it. */
   similarity: number;
   createdAt: string;
+  /** "checked": an LLM check confirmed a pair the name guards refused; absent: the automatic rule (or an older daemon). */
+  source?: "checked";
 }
 
 export interface KnowledgeConceptMergesResponse {

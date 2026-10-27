@@ -1,28 +1,30 @@
 /**
  * `KnowledgeService` wiring of concept merges (phase 2 spec, "Concept merges"): the overlay file is
  * applied before linking loads the graph, the status counts the merges in effect, and undoing one
- * through the routes announces the graph change once.
+ * through the routes announces the graph change once. Linking gets the LLM quality sources.
  */
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import Fastify from "fastify";
 import { KNOWLEDGE_CHANGED_EVENT, KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, knowledgeRoutes, type KnowledgeConceptMergesResponse, type KnowledgeStatus } from "@orquester/api";
-import { knowledgeConceptMergesPath, knowledgeGraphPluginDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeGraphPluginDir } from "@orquester/config";
 
 import { FAKE_RUNTIME } from "./linking/testing.ts";
 import { loadGraph, node, silentLogger } from "./search/test-fakes.ts";
+import type { KnowledgeRoundTaskSource } from "./ports.ts";
 import { KnowledgeService, type KnowledgeLinking, type KnowledgeLinkingFactory } from "./service.ts";
 import { FakeKnowledgePlugins, FakeRuntime, fakeEmbedders } from "./test-fakes.ts";
 
 /** Linking whose start saves two entries and loads a graph over them, as a run's graph load would. */
-function graphLinking(built?: (linking: KnowledgeLinking) => void): KnowledgeLinkingFactory {
-  return ({ store, graph }) => {
+function graphLinking(built?: (linking: KnowledgeLinking) => void, sources?: (roundTasks: readonly KnowledgeRoundTaskSource[]) => void): KnowledgeLinkingFactory {
+  return ({ store, graph, roundTasks }) => {
+    sources?.(roundTasks);
     const linking: KnowledgeLinking = {
       events: new EventEmitter<{ status: [] }>(),
       start: async () => {
@@ -53,7 +55,7 @@ function graphLinking(built?: (linking: KnowledgeLinking) => void): KnowledgeLin
   };
 }
 
-async function harness(t: TestContext, built?: (linking: KnowledgeLinking) => void) {
+async function harness(t: TestContext, built?: (linking: KnowledgeLinking) => void, sources?: (roundTasks: readonly KnowledgeRoundTaskSource[]) => void) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-service-concepts-"));
   await mkdir(knowledgeGraphPluginDir(appdir), { recursive: true });
   await writeFile(
@@ -76,7 +78,7 @@ async function harness(t: TestContext, built?: (linking: KnowledgeLinking) => vo
     publisher: { publish: (channel: string, type: string, payload: unknown) => void events.push({ channel, type, payload }) },
     runtime,
     embedders: fakeEmbedders().factory,
-    linking: graphLinking(built),
+    linking: graphLinking(built, sources),
     logger: silentLogger()
   });
   const app = Fastify();
@@ -88,7 +90,7 @@ async function harness(t: TestContext, built?: (linking: KnowledgeLinking) => vo
   });
   await knowledge.start();
   await knowledge.settled();
-  return { knowledge, app, events };
+  return { knowledge, app, events, appdir };
 }
 
 const graphChanges = (events: { channel: string; type: string; payload: unknown }[]) =>
@@ -136,4 +138,19 @@ test("an undo publishes the status (the merges count) and exactly one graph chan
   linking.events.emit("status");
   await h.knowledge.settled();
   assert.equal(graphChanges(h.events) - before, 1);
+});
+
+test("linking is handed the LLM quality sources; a cluster name recorded through one is persisted and redraws the graph", async (t) => {
+  let sources: readonly KnowledgeRoundTaskSource[] = [];
+  const h = await harness(t, undefined, (given) => (sources = given));
+  assert.deepEqual(
+    sources.map((source) => source.step),
+    ["concept-check", "cluster-name"]
+  );
+  const names = sources.find((source) => source.step === "cluster-name")!;
+  const before = graphChanges(h.events);
+  await names.record({ key: "k", members: ["ke_a", "ke_b", "ke_c"], forbidden: [] }, JSON.stringify({ label: "Account warm-up" }));
+  assert.equal(graphChanges(h.events) - before, 1);
+  const file = JSON.parse(await readFile(knowledgeClusterLabelsPath(h.appdir), "utf8")) as { labels: { label: string }[] };
+  assert.deepEqual(file.labels.map((l) => l.label), ["Account warm-up"]);
 });
