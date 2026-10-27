@@ -196,7 +196,7 @@ test("load reads myKG's jsonl from a session output dir, tolerating bad lines an
   assert.equal(acme.concept.description, "Makes anvils");
   assert.deepEqual(acme.concept.attributes, { founding_year: { value: "2015", confidence: 1 } });
   assert.deepEqual(acme.entryIds, [eA]);
-  assert.equal(graph.conceptRef("person-alice")!.name, "person-alice", "no name attribute: the id is the name");
+  assert.equal(graph.conceptRef("person-alice", knowledgeScope({ kind: "all" }, [A]))!.name, "person-alice", "no name attribute: the id is the name");
   await assert.rejects(graph.load(join(dir, "missing")));
   assert.deepEqual(graph.counts(), { nodes: 2, edges: 1 }, "a failed load keeps the old graph");
 });

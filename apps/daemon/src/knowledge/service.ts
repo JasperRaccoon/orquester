@@ -153,11 +153,12 @@ const NO_PAIR_CHECKS: KnowledgePairChecksPort = {
  * linking sees every entry).
  */
 export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, graph: KnowledgeGraph, search: Pick<KnowledgeSearch, "vectorIndex">): KnowledgeLinkGraphView {
+  const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
   return {
     vectors: () => search.vectorIndex(),
-    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId),
+    conceptsOf: (entryId) => graph.conceptsOfEntry(entryId, everything()),
     contradicting: (conceptId) => {
-      const scope = knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
+      const scope = everything();
       const view = graph.concept(conceptId, scope);
       return view ? view.neighbors.filter((neighbor) => neighbor.edge.type === "contradicts").map((neighbor) => neighbor.concept.id) : [];
     }

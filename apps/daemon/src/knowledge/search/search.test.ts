@@ -405,6 +405,41 @@ test("hidden entries never leak through examples, expansion, concept hits or fac
   }
 });
 
+test("a concept merged into a hidden one is shown as itself: search, entry and concept details and the graph never name the hidden one", async (t) => {
+  const { search, graph } = await setup(t);
+  await loadGraph(graph, [
+    node("tool-stripe", "Stripe", [`${BILLING}.md`], { aliases: ["stripe.com"], attributes: { description: { value: "Payments for SaaS billing", confidence: 1 } } }),
+    node("tool-tables", "Comparison tables tool", [`${ALT}.md`])
+  ]);
+  graph.setConceptMerges([{ id: "cm_tools", type: "tool", into: "tool-stripe", merged: ["tool-tables"], similarity: 0.93, createdAt: "2026-10-27T10:00:00.000Z" }]);
+  await search.idle();
+  const leaks = /stripe|payments/i;
+  const shown = { id: "tool-tables", name: "Comparison tables tool", type: "tool" };
+  const found = await search.search({ query: "comparison tables tool" }, SEO_ONLY);
+  assert.deepEqual(
+    found.hits.filter((hit) => hit.kind === "concept").map((hit) => hit.kind === "concept" && hit.concept),
+    [{ ...shown, description: null }]
+  );
+  assert.doesNotMatch(JSON.stringify(found), leaks);
+  for (const query of ["stripe", "payments"]) {
+    assert.deepEqual(
+      (await search.search({ query }, SEO_ONLY)).hits.filter((hit) => hit.kind === "concept"),
+      [],
+      query
+    );
+  }
+  const entry = await search.entryDetail(ALT, SEO_ONLY);
+  assert.deepEqual(entry?.concepts, [shown]);
+  assert.doesNotMatch(JSON.stringify(entry), leaks);
+  const concept = await search.conceptDetail("tool-tables", SEO_ONLY);
+  assert.equal(concept?.concept.id, "tool-tables");
+  assert.doesNotMatch(JSON.stringify(concept), leaks);
+  assert.equal(await search.conceptDetail("tool-stripe", SEO_ONLY), null);
+  assert.doesNotMatch(JSON.stringify(search.graphView({}, SEO_ONLY)), leaks);
+  // The user sees the merge as it is.
+  assert.equal((await search.conceptDetail("tool-tables", ALL))?.concept.id, "tool-stripe");
+});
+
 test("query by example ranks toward positive and away from negative examples, excluding both", async (t) => {
   const like = "ke_likeseedaaaa";
   const unlike = "ke_zunlikeseed1";

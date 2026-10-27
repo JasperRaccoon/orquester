@@ -10,7 +10,7 @@ import { parseKnowledgeFilters, entryMatchesFilter } from "./filters.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
 import { FakeEmbedderSource, FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
-import { entryInScope } from "./visibility.ts";
+import { entryInScope, type KnowledgeScope } from "./visibility.ts";
 
 // Retrieval spec "Performance budgets": entry detail (similar + duplicates) and facets p95 under
 // 100 ms at 5,000 entries; the similarity graph within 2 s cold at 1,000 entries. Vectors come from
@@ -148,12 +148,12 @@ test("similarity graph over 1,000 entries: within 2 s cold and yielding to the e
  * This machine's time, right now, for one pass insights cannot avoid: every visible entry's
  * concepts read from the graph and its metadata hashed (median of 5).
  */
-function insightsFloor(graph: KnowledgeGraph, ids: readonly string[]): number {
+function insightsFloor(graph: KnowledgeGraph, ids: readonly string[], scope: KnowledgeScope): number {
   const runs: number[] = [];
   for (let run = 0; run < 5; run += 1) {
     const started = performance.now();
     let sink = 0;
-    for (const id of ids) sink += graph.conceptsOfEntry(id).length + id.length;
+    for (const id of ids) sink += graph.conceptsOfEntry(id, scope).length + id.length;
     assert.ok(sink > 0);
     runs.push(performance.now() - started);
   }
@@ -188,7 +188,7 @@ test("insights over 2,000 entries: p95 under 300 ms cached-cold (link gaps aside
   const cold = performance.now() - started;
   assert.ok(turns > 1, "the event loop ran while the graph and gaps were computed");
 
-  const floor = insightsFloor(graph, entryIds);
+  const floor = insightsFloor(graph, entryIds, scope);
   const timings: number[] = [];
   for (let limit = 1; limit <= 50; limit += 1) {
     if (limit === 20) continue;

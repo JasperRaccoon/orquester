@@ -94,7 +94,7 @@ test("a merge folds concepts: edges re-pointed, self-loops and repeated edges dr
     graph.conceptMerges().map((m) => [m.id, m.into.id, m.merged.map((c) => c.id)]),
     [["cm_warmup", "tactic-warm-up", ["tactic-warm-up-the", "tactic-warm-up-proper"]]]
   );
-  assert.deepEqual(graph.conceptsOfEntry(eB).map((c) => c.id).sort(), ["tactic-warm-up", "tool-tiktok"]);
+  assert.deepEqual(graph.conceptsOfEntry(eB, all).map((c) => c.id).sort(), ["tactic-warm-up", "tool-tiktok"]);
 });
 
 test("a repeated edge keeps the union of its sources, so it shows wherever either did", async () => {
@@ -190,4 +190,109 @@ test("similar concepts come from the provider, visible and in the current graph 
   assert.equal(graph.concept("tactic-warm-up", profile)!.similarConcepts.length, 1);
   graph.setSimilarConcepts(null);
   assert.deepEqual(graph.concept("tactic-warm-up", all)!.similarConcepts, []);
+});
+
+// A merge must never show a scope what only hidden entries say (the review's reproduction): the
+// kept concept `tactic-secret` comes from eB and eD (collection B, hidden from the profile), with a
+// description, an attribute and a `contradicts` edge whose context only eB backs; `tactic-public`
+// (eA, collection A) is folded into it.
+const eD = "ke_dddddddddddd";
+
+async function secretFixture() {
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.collection(B, "B");
+  store.put(eA, "a", [A], {}, true);
+  store.put(eB, "b", [B], {}, true);
+  store.put(eC, "c", [A], {}, true);
+  store.put(eD, "d", [B], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  await loadGraph(
+    graph,
+    [
+      node("tactic-secret", "Secret launch plan", [`${eB}.md`, `${eD}.md`], {
+        aliases: ["codename falcon"],
+        attributes: { description: { value: "The confidential roadmap", confidence: 1 }, budget: { value: "two million", confidence: 0.9 } }
+      }),
+      node("tactic-public", "Public launch plan", [`${eA}.md`], { aliases: ["launch plan"] }),
+      node("rule-x", "Launch only on Tuesdays", [`${eC}.md`])
+    ],
+    [
+      { ...edge("c1", "rule-x", "tactic-secret", [`${eB}.md`], "contradicts"), confidence: 0.99, attributes: { context: { value: "the secret note", confidence: 1 } } },
+      { ...edge("c2", "rule-x", "tactic-public", [`${eC}.md`], "contradicts"), confidence: 0.5 }
+    ]
+  );
+  graph.setConceptMerges([{ id: "cm_secret", type: "tactic", into: "tactic-secret", merged: ["tactic-public"], similarity: 0.93, createdAt: "2026-10-27T10:00:00.000Z" }]);
+  return {
+    graph,
+    all: knowledgeScope({ kind: "all" }, [A, B]),
+    profile: knowledgeScope({ kind: "collections", ids: [A] }, [A, B])
+  };
+}
+
+const LEAKS = /secret|falcon|confidential|two million/i;
+
+test("a merge into a hidden concept: the scope sees the visible folded concept, under its own id and name, and nothing hidden", async () => {
+  const { graph, profile, all } = await secretFixture();
+  const view = graph.concept("tactic-public", profile)!;
+  assert.deepEqual(view.concept, { id: "tactic-public", name: "Public launch plan", type: "tactic", confidence: 0.9, description: null, aliases: ["launch plan"], attributes: {} });
+  assert.deepEqual(view.mergedFrom, []);
+  assert.deepEqual(view.entryIds, [eA]);
+  assert.deepEqual(
+    view.neighbors.map((n) => [n.edge.id, n.edge.from, n.edge.to, n.edge.confidence, n.concept.id]),
+    [["c2", "rule-x", "tactic-public", 0.5, "rule-x"]],
+    "the folded edge shows as its visible source"
+  );
+  assert.doesNotMatch(JSON.stringify(view), LEAKS);
+  assert.equal(graph.concept("tactic-secret", profile), null, "a hidden source's id names nothing");
+  assert.deepEqual(graph.visibleConceptMerges(profile), [], "one visible concept is no merge");
+  assert.deepEqual(graph.conceptsOfEntry(eA, profile), [{ id: "tactic-public", name: "Public launch plan", type: "tactic" }]);
+  assert.deepEqual(graph.conceptRef("tactic-secret", profile), { id: "tactic-public", name: "Public launch plan", type: "tactic", description: null });
+  assert.deepEqual(graph.searchConcepts(["secret"], profile, 10), []);
+  assert.deepEqual(graph.searchConcepts(["falcon"], profile, 10), []);
+  assert.deepEqual(graph.searchConcepts(["confidential"], profile, 10), []);
+  assert.deepEqual(
+    graph.searchConcepts(["public"], profile, 10).map((hit) => hit.id),
+    ["tactic-secret"],
+    "the visible source matches (the graph's own id; callers present it)"
+  );
+  const drawn = graph.graph(profile)!;
+  assert.doesNotMatch(JSON.stringify(drawn), LEAKS);
+  assert.deepEqual(drawn.nodes.map((n) => n.id).sort(), ["rule-x", "tactic-public"]);
+  assert.equal(graph.graph(profile, { focus: "tactic-secret" }), null);
+  assert.deepEqual(graph.graph(profile, { focus: "tactic-public" })!.nodes.map((n) => n.id).sort(), ["rule-x", "tactic-public"]);
+  assert.deepEqual(
+    graph.visibleEdgesOfType("contradicts", profile).map((e) => [e.id, e.context, e.confidence]),
+    [["c2", undefined, 0.5]],
+    "a context only a hidden source backs is not shown"
+  );
+
+  // Everything visible: the kept concept as before, with what every source says.
+  const whole = graph.concept("tactic-public", all)!;
+  assert.equal(whole.concept.id, "tactic-secret");
+  assert.equal(whole.concept.description, "The confidential roadmap");
+  assert.deepEqual(
+    whole.mergedFrom.map((c) => c.id),
+    ["tactic-public"]
+  );
+  assert.equal(graph.visibleEdgesOfType("contradicts", all)[0]!.context, "the secret note");
+  assert.deepEqual(
+    graph.visibleConceptMerges(all).map((m) => [m.into.id, m.merged.map((c) => c.id)]),
+    [["tactic-secret", ["tactic-public"]]]
+  );
+});
+
+test("a merge into a visible concept: a hidden folded concept's names, attributes and description never show", async () => {
+  const { graph, profile } = await secretFixture();
+  // The other way round: the public concept is kept, the secret one folded into it.
+  graph.setConceptMerges([{ id: "cm_public", type: "tactic", into: "tactic-public", merged: ["tactic-secret"], similarity: 0.93, createdAt: "2026-10-27T10:00:00.000Z" }]);
+  const view = graph.concept("tactic-public", profile)!;
+  assert.equal(view.concept.description, null);
+  assert.deepEqual(view.concept.attributes, {});
+  assert.deepEqual(view.concept.aliases, ["launch plan"]);
+  assert.equal(view.concept.confidence, 0.9);
+  assert.doesNotMatch(JSON.stringify(view), LEAKS);
+  assert.deepEqual(graph.searchConcepts(["secret"], profile, 10), []);
+  assert.deepEqual(graph.searchConcepts(["budget", "two", "million"], profile, 10), []);
+  assert.equal(graph.concept("tactic-secret", profile), null);
 });

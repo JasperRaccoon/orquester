@@ -496,8 +496,8 @@ export class KnowledgeConceptMerges {
     const thresholds = set ? this.thresholdsOf(set.modelId) : null;
     const vector = set?.vectors.get(conceptId);
     if (!set || !thresholds || !vector) return [];
-    const type = this.graph.conceptRef(conceptId)?.type;
-    if (type === undefined) return [];
+    const type = this.graph.conceptType(conceptId);
+    if (type === null) return [];
     const best = new Map<string, number>();
     for (const other of this.idsOfType(type)) {
       const otherVector = set.vectors.get(other);

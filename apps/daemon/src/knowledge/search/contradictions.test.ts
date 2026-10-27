@@ -22,10 +22,10 @@ function graphOf(concepts: Record<string, string[]>, edges: (Partial<GraphEdge> 
     },
     visibleEntriesOf: (conceptId) => [...(concepts[conceptId] ?? [])],
     conceptRef: (id) => (concepts[id] ? { id, name: id.toUpperCase(), type: "Tactic", description: null } : null),
-    conceptsOfEntry: (entryId) =>
+    conceptIdsOfEntry: (entryId) =>
       Object.entries(concepts)
         .filter(([, entries]) => entries.includes(entryId))
-        .map(([id]) => ({ id, name: id.toUpperCase(), type: "Tactic" }))
+        .map(([id]) => id)
   };
 }
 
