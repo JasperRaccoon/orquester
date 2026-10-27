@@ -116,13 +116,29 @@ test("open → act → screenshot → install → close, acting for the calling 
     const quickStart = String(opened.value.quick_start);
     assert.ok(quickStart.split("\n").length <= 6);
     for (const needle of [/snapshot/, /@eN refs/, /\.apk/, /Device panel/]) assert.match(quickStart, needle);
-    assert.deepEqual(readDeviceToolReference(opened.value[DEVICE_TOOL_REFERENCE_KEY]), { device: "local/dev-1", leaseId: opened.value.lease_id });
+    // The reference names the device, so a reloaded (slimmed) row still reads "Opened Pixel 9".
+    assert.deepEqual(readDeviceToolReference(opened.value[DEVICE_TOOL_REFERENCE_KEY]), { device: "local/dev-1", leaseId: opened.value.lease_id, name: "Pixel 9" });
     assert.ok(principals.every((who) => who === "me"));
 
     const tapped = await call(api, "device_action", { action: "tap", ref: "e3" });
     assert.ok(tapped.ok);
     assert.equal(t.actions.calls.at(-1)!.input.ref, "@e3");
     assert.equal(tapped.value.summary, "did tap");
+    assert.deepEqual(readDeviceToolReference(tapped.value[DEVICE_TOOL_REFERENCE_KEY]), {
+      device: "local/dev-1",
+      leaseId: opened.value.lease_id,
+      name: "Pixel 9",
+      action: "tap",
+      summary: "did tap"
+    });
+    // A summary that would not survive the reader (a line break, too long) is made one line and clipped.
+    t.actions.result = () => ({ log: { summary: `Tapped @e3 “${"x".repeat(300)}”\nsecond line` } });
+    const long = await call(api, "device_action", { action: "tap", ref: "e3" });
+    assert.ok(long.ok);
+    const longRef = readDeviceToolReference(long.value[DEVICE_TOOL_REFERENCE_KEY]);
+    assert.equal(longRef?.action, "tap");
+    assert.equal([...(longRef?.summary ?? "")].length, 200);
+    assert.ok(longRef?.summary?.endsWith("…"));
 
     t.actions.result = () => ({ log: { summary: "Took a screenshot" }, image: { mimeType: "image/png", data: Buffer.from("png"), width: 2, height: 4 } });
     const shot = await call(api, "device_action", { device: "local/dev-1", action: "screenshot" });
@@ -130,11 +146,14 @@ test("open → act → screenshot → install → close, acting for the calling 
     assert.equal(shot.result.content[0]!.type, "image");
     const ref = readDeviceToolReference(shot.value[DEVICE_TOOL_REFERENCE_KEY]);
     assert.ok(ref?.screenshotId);
+    assert.equal(ref?.action, "screenshot");
+    assert.equal(ref?.name, "Pixel 9");
 
     const installed = await call(api, "device_install", { path: "build/app.apk" });
     assert.ok(installed.ok, JSON.stringify(installed));
     assert.equal(installed.value.app, "com.example.app");
     assert.deepEqual(t.actions.installs, [join(PROJECT, "build", "app.apk")]);
+    assert.equal(readDeviceToolReference(installed.value[DEVICE_TOOL_REFERENCE_KEY])?.name, "Pixel 9");
 
     // Another chat cannot touch it.
     const stranger = await call(api, "device_action", { device: "local/dev-1", action: "snapshot" }, { caller: chat({ threadId: "other" }) });
@@ -153,6 +172,7 @@ test("open → act → screenshot → install → close, acting for the calling 
     const closed = await call(api, "close_device", { shutdown: true });
     assert.ok(closed.ok);
     assert.equal(closed.value.closed, true);
+    assert.equal(readDeviceToolReference(closed.value[DEVICE_TOOL_REFERENCE_KEY])?.name, "Pixel 9");
     const listed = await call(api, "list_devices", {});
     assert.ok(listed.ok);
     assert.deepEqual(listed.value.my_devices, []);
@@ -211,11 +231,22 @@ test("open_device while planning: no spend card can be raised", async () => {
   }
 });
 
-test("the quick start is per platform and at most six lines", () => {
+test("the quick start is per platform, at most six lines and 1 KiB, and says what the spikes found", () => {
+  for (const platform of ["ios", "android"] as const) {
+    const text = deviceQuickStart(platform);
+    assert.ok(text.split("\n").length <= 6, platform);
+    assert.ok(Buffer.byteLength(text) <= 1024, `${platform}: ${Buffer.byteLength(text)} bytes`);
+    // Refs first, they expire after open, screenshots are images, the build path, and the handoff.
+    for (const needle of [/@eN refs/, /Prefer refs/, /refs expire/, /open_app, open_url or rotate/, /returns an image/, /device_install \{path\}/, /in this project/, /Device panel/, /DEVICE_CONTROLLED_BY_USER/, /wait, or ask/]) {
+      assert.match(text, needle, `${platform}: ${needle}`);
+    }
+  }
   const ios = deviceQuickStart("ios");
-  assert.ok(ios.split("\n").length <= 6);
+  // iOS: an app session before the first snapshot.
+  assert.ok(ios.indexOf("open_app") < ios.indexOf("snapshot"));
   assert.match(ios, /simulator \.app/);
   assert.match(ios, /bundle id/);
   assert.doesNotMatch(ios, /\.apk/);
+  assert.match(deviceQuickStart("android"), /\.apk/);
   assert.match(deviceQuickStart("android"), /package/);
 });

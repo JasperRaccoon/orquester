@@ -209,7 +209,7 @@ test("devices: the device tools and their instruction line only while devices ar
     assert.ok(owned.tools.includes(name), `${name}: none is Admin, so a workflow-owned chat keeps it`);
   }
   assert.doesNotMatch(off.instructions, /list_devices/);
-  assert.match(on.instructions, /Mobile devices: call list_devices\/open_device/);
+  assert.match(on.instructions, /Mobile devices: list_devices, open_device;/);
   // Gated independently of the box tools.
   assert.ok(!on.tools.includes("create_box"));
 });
