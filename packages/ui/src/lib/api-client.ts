@@ -182,6 +182,8 @@ import type {
 } from "@orquester/api";
 // boxes: Global MCP servers' "Run in box" switch.
 import type { BoxMcpRunInBoxResponse, SetBoxMcpRunInBoxRequest } from "@orquester/api";
+// boxes: bring-your-own machines.
+import type { AddByoMachineRequest, ByoPairingResponse, RemoveByoMachineResponse, UpdateByoMachineRequest } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -934,6 +936,26 @@ export class ApiClient {
   /** Destroy a temporary box (a project box answers 409 `BOX_IS_PROJECT`: delete its project instead). */
   destroyBox(id: string): Promise<BoxResponse | undefined> {
     return this.send("DELETE", boxRoutes.box(id));
+  }
+
+  /** "Add your machine": its `pairing` record and one-time command. */
+  addByoMachine(req: AddByoMachineRequest): Promise<ByoPairingResponse> {
+    return this.send("POST", boxRoutes.byoMachines, { body: req });
+  }
+
+  /** Rename one of your machines, or switch "Use for device simulators". */
+  updateByoMachine(id: string, req: UpdateByoMachineRequest): Promise<BoxResponse> {
+    return this.send("PATCH", boxRoutes.byoMachine(id), { body: req });
+  }
+
+  /** Remove one of your machines (cancels a pairing; a connected machine uninstalls its service). */
+  removeByoMachine(id: string): Promise<RemoveByoMachineResponse> {
+    return this.send("DELETE", boxRoutes.byoMachine(id));
+  }
+
+  /** A new pairing command for a machine still pairing (the previous one stops working). */
+  newByoPairing(id: string): Promise<ByoPairingResponse> {
+    return this.send("POST", boxRoutes.byoPairing(id));
   }
 
   /** A box's setup log. The daemon serves text/plain, so this reads bytes rather than JSON. */
