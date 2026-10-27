@@ -53,6 +53,18 @@ also adapts [micromark-extension-llm-math](https://github.com/ofk/micromark-exte
 3.1.0 as patched by T3 Code. Like the `micromark-extension-math` it forks
 (© Titus Wormer), it is MIT licensed under the same terms reproduced below.
 
+The 3D device frame viewer (`packages/ui/src/components/device/three/**`) ports
+T3 Code's device viewer from `packages/client-runtime/src/device/` (phone, Duo and
+Android-fold scenes, GLB model loading, motion, framing, snapping, interaction,
+render scheduling and their tests) and `apps/web/src/components/device/` (the
+viewport components, viewer mounting, trackpad gestures, Duo and fold controls),
+together with `scripts/convert-device-model.py`. Each ported file carries an
+`// Adapted from T3 Code (MIT, Copyright 2026 T3 Tools Inc.): <path>` header.
+The device models under `packages/ui/src/components/device/models/` are
+conversions of Apple Inc.'s published AR assets; they are not covered by this
+licence, and `sources.json` beside them records each source URL, checksum and
+conversion.
+
 T3 Code is distributed under the MIT licence, reproduced in full below.
 
 ```
