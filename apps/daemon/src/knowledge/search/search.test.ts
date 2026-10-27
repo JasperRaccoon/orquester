@@ -136,6 +136,11 @@ test("the collections filter narrows within visibility; unknown or hidden names 
     return true;
   });
   await assert.rejects(search.search({ query: "  " }, ALL), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID");
+  // The Unfiled pseudo-collection, as in the entries and graph routes: only for callers who see everything.
+  const unfiled = await search.search({ query: "tables", collections: ["unfiled"], limit: 25 }, ALL);
+  assert.deepEqual(entryIds(unfiled.hits), [UNFILED]);
+  assert.deepEqual(entryIds((await search.search({ query: "tables", collections: ["Unfiled", "SEO"], limit: 25 }, ALL)).hits).sort(), [ALT, CLOUDFLARE, UNFILED].sort());
+  await assert.rejects(search.search({ query: "tables", collections: ["unfiled"] }, SEO_ONLY), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
   const limited = await search.search({ query: "tables", limit: 1 }, ALL);
   assert.equal(limited.hits.length, 1);
 });

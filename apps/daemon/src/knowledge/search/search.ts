@@ -222,7 +222,8 @@ export class KnowledgeSearch {
     const diverse = request.diverse !== false;
     const limit = clampLimit(request.limit, KNOWLEDGE_SEARCH_DEFAULT_LIMIT, KNOWLEDGE_SEARCH_MAX_LIMIT);
     const cursor = request.cursor !== undefined && request.cursor !== null ? decodeSearchCursor(request.cursor) : null;
-    const narrow = request.collections && request.collections.length > 0 ? this.resolveVisible(request.collections, visibility, false) : null;
+    // "unfiled" narrows to entries with no collection, for callers who see everything (as in the entries and graph routes).
+    const narrow = request.collections && request.collections.length > 0 ? this.resolveVisible(request.collections, visibility, true) : null;
     await this.whenReady();
     const collections = this.store.listCollections();
     const known = collections.map((c) => c.id);
