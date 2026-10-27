@@ -159,6 +159,7 @@ test("asset + ws routes are absent on the local (unix) transport", async (t) => 
 test("ws route rejects a missing/invalid token with 1008 on the remote transport", async (t) => {
   const h = await makeHarness("remote");
   t.after(() => h.close());
+  h.upstream.on("connection", (socket) => socket.close(1000));
 
   const port = await h.listen();
   const result = await probeWs(`ws://127.0.0.1:${port}/ws-devtools/${BROWSER_ID}`);

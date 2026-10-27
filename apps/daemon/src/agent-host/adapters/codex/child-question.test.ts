@@ -17,17 +17,16 @@
  */
 
 import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { activitiesOf, orchestratedCodex } from "./seam-testing.ts";
-import { waitUntil } from "./testing.ts";
 
 const cleanups: (() => void | Promise<void>)[] = [];
-after(async () => {
-  for (const cleanup of cleanups) {
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) {
     await cleanup();
   }
 });
@@ -60,10 +59,7 @@ describe("a collab child's question at the orchestrator seam (Task 3, fix round 
     // The child asks, then the parent's turn ends with the card still open.
     // Wait until the host has HANDLED that end — the stranded-question sweep
     // included — which it does after the question, in the order they came.
-    await waitUntil(
-      () => host.handled.some((event) => event.type === "turn.completed"),
-      "the host handled the parent's turn end"
-    );
+    await host.waitForHandled((event) => event.type === "turn.completed");
     await orchestrator.drain();
 
     const asked = activitiesOf(host.log()).find((row) => row.activityKind === "user-input.requested");
@@ -80,21 +76,15 @@ describe("a collab child's question at the orchestrator seam (Task 3, fix round 
       requestId: question.requestId,
       answers: { branch: "main" }
     });
-    await waitUntil(
-      () => host.received().some((frame) => (frame.result as { answers?: unknown } | undefined)?.answers !== undefined),
-      "the child got its answer"
-    );
+    await host.providerBarrier();
     const reply = host
       .received()
       .find((frame) => (frame.result as { answers?: unknown } | undefined)?.answers !== undefined);
     assert.deepEqual((reply?.result as { answers: unknown }).answers, { branch: { answers: ["main"] } });
-    await waitUntil(
-      () => orchestrator.summary("thread-1")?.hasPendingUserInput === false,
-      "the card closed with the answer"
-    );
+    await host.waitForHandled((event) => event.type === "user-input.resolved");
+    assert.equal(orchestrator.summary("thread-1")?.hasPendingUserInput, false, "the card closed with the answer");
     const artifact = join(mkdtempSync(join(tmpdir(), "codex-child-question-")), "answered-question.json");
     writeFileSync(artifact, JSON.stringify({ events: host.log(), wire: host.received() }, null, 2));
     t.diagnostic(`Question workflow evidence: ${artifact}`);
-    await host.stop();
   });
 });

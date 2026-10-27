@@ -96,8 +96,8 @@ test("secret stripping removes `secrets` keys by shape and masks known values ev
 test("labels are one line without bidi, control or zero-width characters", () => {
   assert.equal(sanitizeApprovalLabel("Add‮skill⁦ `x`\n\tnow​\u0007"), "Addskill `x` now");
   assert.equal(sanitizeApprovalLabel("a b"), "a b");
-  const long = sanitizeApprovalLabel("😀".repeat(400), 11);
-  assert.ok(long.length <= 11 && long.endsWith("…"));
+  const long = sanitizeApprovalLabel("😀".repeat(400), 10);
+  assert.ok(long.length <= 10 && long.endsWith("…"));
   assert.doesNotMatch(long.slice(0, -1), /[\ud800-\udbff]$/, "never a lone high surrogate");
 });
 

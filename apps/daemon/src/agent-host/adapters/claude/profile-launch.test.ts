@@ -181,7 +181,8 @@ describe("loadClaudeProfileLaunch", () => {
   });
 
   it("refuses a section path that leaves the prepared dir", async () => {
-    const { preparedDir, cwd, where, profile } = await setup();
+    const { root, preparedDir, cwd, where, profile } = await setup();
+    await writeFile(join(root, "escape.md"), "outside instructions");
     const manifest = JSON.parse(await readFile(join(preparedDir, "manifest.json"), "utf8"));
     manifest.agentSection.instructionsFile = "../../escape.md";
     await writeFile(join(preparedDir, "manifest.json"), JSON.stringify(manifest));

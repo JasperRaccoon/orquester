@@ -151,8 +151,11 @@ test("broker over the real service: concurrent requests and the usage path share
   const now = Date.parse("2026-10-20T00:00:00Z");
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
+  let started!: () => void;
+  const refreshStarted = new Promise<void>((resolve) => (started = resolve));
   const newExp = Math.floor(now / 1000) + 864_000;
   const { svc, accountsDir, calls } = await service(t, now, async () => {
+    started();
     await gate;
     return new Response(JSON.stringify({ access_token: jwt({ exp: newExp }), refresh_token: "codex-refresh-NEW-SECRET", id_token: jwt({ email: "id-SECRET" }) }), {
       status: 200
@@ -170,7 +173,7 @@ test("broker over the real service: concurrent requests and the usage path share
   ];
   const usage = svc.ensureFreshForUsage("codex", acct.id, sessions.hostLocalAccountIds());
   // Every caller is now parked on the one in-flight refresh.
-  while (calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  await refreshStarted;
   release();
   const grants = await Promise.all(requests);
   await usage;

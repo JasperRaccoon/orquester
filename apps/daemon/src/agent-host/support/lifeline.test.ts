@@ -1,21 +1,21 @@
 /**
  * The host-death lifeline (`lifeline.ts`), live: a stand-in host (`lifeline.fixture.ts`) starts
  * a dummy CLI through it and is then SIGKILLed; the dummy's whole process group must be gone
- * within the grace window. Every wait is on an event: the dummies hold a FIFO open for writing,
+ * after the graceful and forced-stop steps. Every wait is on an event: the dummies hold a FIFO open for writing,
  * so its reader sees EOF exactly when the last of them died.
  */
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { createReadStream, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { after, describe, it } from "node:test";
 
 import { AGENT_LAUNCH_ENV_VAR, recordHelperProcesses } from "./leftover-processes.ts";
-import { isLifelineWatcher, LIFELINE_KILL_GRACE_S, LIFELINE_SUPPORTED } from "./lifeline.ts";
+import { isLifelineWatcher, LIFELINE_SUPPORTED } from "./lifeline.ts";
 import { spawnProviderChild } from "./spawn.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "orq-lifeline-"));
@@ -35,8 +35,8 @@ after(() => {
 const FIXTURE = join(import.meta.dirname, "lifeline.fixture.ts");
 
 /** The dummy: it and a background child both hold the FIFO ($0) open, then sleep. */
-const DUMMY = 'exec 9>"$0"; sleep 1000 & exec sleep 1000';
-const DUMMY_IGNORING_TERM = `trap '' TERM; ${DUMMY}`;
+const DUMMY = 'trap \'printf \"term\\n\" >&9; exit 0\' TERM; exec 9>"$0"; /bin/sleep 1000 & wait';
+const DUMMY_IGNORING_TERM = 'trap \'\' TERM; exec 9>"$0"; /bin/sleep 1000 & exec /bin/sleep 1000';
 
 let fifos = 0;
 function fifo(): string {
@@ -53,7 +53,7 @@ function groupMembers(pgid: number): number[] {
     try {
       const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
       const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (Number(fields[2]) === pgid) pids.push(Number(entry));
+      if (Number(fields[2]) === pgid && fields[0] !== "Z") pids.push(Number(entry));
     } catch {
       // Gone meanwhile.
     }
@@ -62,14 +62,15 @@ function groupMembers(pgid: number): number[] {
 }
 
 /** Starts the stand-in host; resolves with it, the dummy's pid, and the FIFO's reader once open. */
-async function startHost(mode: string, script: string) {
+async function startHost(mode: string, script: string, pathEnv = process.env.PATH) {
   const path = fifo();
   const reader = createReadStream(path);
-  reader.on("data", () => {});
+  let output = "";
+  reader.on("data", (chunk: Buffer | string) => { output += chunk.toString(); });
   const opened = once(reader, "open");
-  const closed = once(reader, "close");
+  const closed = once(reader, "close").then(() => output);
   const host = spawn(process.execPath, ["--import", "tsx", FIXTURE, mode, script, path], {
-    env: { ...process.env, TSX_DISABLE_CACHE: "1" },
+    env: { ...process.env, PATH: pathEnv, TSX_DISABLE_CACHE: "1" },
     stdio: ["ignore", "pipe", "inherit"]
   });
   // Buffered: a line that arrives before the test awaits it is not lost.
@@ -84,35 +85,42 @@ async function startHost(mode: string, script: string) {
 
 describe("the host-death lifeline", { skip: !LIFELINE_SUPPORTED || process.platform !== "linux" }, () => {
   for (const mode of ["provider", "claude"]) {
-    it(`${mode}: the CLI's whole group is stopped when the host is SIGKILLed`, { timeout: 30_000 }, async () => {
+    it(`${mode}: the CLI's whole group is stopped when the host is SIGKILLed`, async () => {
       const { host, pid, closed } = await startHost(mode, DUMMY);
       assert.ok(groupMembers(pid).length >= 2, "the dummy runs in a group of its own");
-      const started = Date.now();
       host.kill("SIGKILL");
-      await closed;
-      assert.ok(Date.now() - started < LIFELINE_KILL_GRACE_S * 1000, "SIGTERM stops it at once");
+      assert.equal(await closed, "term\n", "the CLI received SIGTERM before its group ended");
     });
   }
 
-  it("a group that ignores SIGTERM is SIGKILLed after the grace", { timeout: 30_000 }, async () => {
-    const { host, closed } = await startHost("provider", DUMMY_IGNORING_TERM);
-    const started = Date.now();
+  it("a group that ignores SIGTERM is SIGKILLed after the grace", async () => {
+    // The shell's sleep is a barrier: reaching it proves TERM was sent; releasing it permits KILL.
+    const graceStarted = fifo();
+    const graceRelease = fifo();
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "sleep"), `#!/bin/sh\nprintf '%s\\n' \"$1\" > '${graceStarted}'\nread -r _ < '${graceRelease}'\n`, { mode: 0o700 });
+    const entered = createReadStream(graceStarted);
+    let requestedGrace = "";
+    entered.on("data", (chunk: Buffer | string) => { requestedGrace += chunk.toString(); });
+    const graceEntered = once(entered, "end");
+    const { host, closed } = await startHost("provider", DUMMY_IGNORING_TERM, `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`);
+    let ended = false;
+    void closed.then(() => { ended = true; });
     host.kill("SIGKILL");
+    await graceEntered;
+    assert.equal(requestedGrace, "5\n", "the watcher requests its five-second grace before KILL");
+    assert.equal(ended, false, "the group remains alive inside its grace period");
+    const release = createWriteStream(graceRelease);
+    release.end("\n");
     await closed;
-    const elapsed = Date.now() - started;
-    assert.ok(elapsed >= LIFELINE_KILL_GRACE_S * 1000 - 500, `waited the grace (${elapsed} ms)`);
-    assert.ok(elapsed < (LIFELINE_KILL_GRACE_S + 5) * 1000, `then killed (${elapsed} ms)`);
   });
 
-  it("a CLI that ends while the host lives releases its watcher: nothing is signalled", { timeout: 30_000 }, async () => {
+  it("a CLI that ends while the host lives releases its watcher: nothing is signalled", async () => {
     // The dummy exits at once, leaving its background child in the group.
-    const { host, pid, lines } = await startHost("graceful", 'exec 9>"$0"; sleep 1000 </dev/null >/dev/null 2>&1 & exit 0');
-    assert.equal((await lines.next()).value, "exited");
-    // The watcher goes on its own; only the background child is left.
-    const deadline = Date.now() + 10_000;
-    while (groupMembers(pid).length !== 1 && Date.now() < deadline) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    const { host, pid, lines } = await startHost("graceful", 'exec 4>&-; exec 9>"$0"; sleep 1000 </dev/null >/dev/null 2>&1 & exit 0');
+    // The fixture's extra inherited pipe closes when the watcher has exited.
+    assert.equal((await lines.next()).value, "released");
     const [survivor] = groupMembers(pid);
     assert.equal(groupMembers(pid).length, 1, "only the background child remains");
     host.kill("SIGKILL");
@@ -128,7 +136,7 @@ function starttime(pid: number): number {
 }
 
 describe("the lifeline and the leftover sweep (real /proc)", { skip: process.platform !== "linux" }, () => {
-  it("the watcher, a marked child of the CLI, is never recorded as one of its helpers", { timeout: 30_000 }, async () => {
+  it("the watcher, a marked child of the CLI, is never recorded as one of its helpers", async () => {
     const child = spawnProviderChild({
       command: "/bin/sh",
       args: ["-c", "sleep 1000 & echo ready; wait"],

@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { createCodexAdapter } from "./index.ts";
@@ -26,8 +26,8 @@ import {
 import { createFakeContext, EventCollector, writeMockCodexServer } from "./testing.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
-after(async () => {
-  for (const cleanup of cleanups) await cleanup();
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 describe("codex session tools — the builders", () => {
@@ -43,7 +43,7 @@ describe("codex session tools — the builders", () => {
     assert.equal(config["mcp_servers.my remote.enabled"], false);
     // `orquester` is ours: the thread entry already replaces a user's same-named one.
     assert.equal(config["mcp_servers.orquester.enabled"], undefined);
-    assert.ok(config["mcp_servers.orquester"]);
+    assert.ok(config["mcp_servers.orquester"] && (config["mcp_servers.orquester"] as { enabled?: boolean }).enabled !== false, "the host server stays enabled");
   });
 
   it("a denied name with a `.` is never dropped: the whole override becomes ONE mcp_servers table", () => {
@@ -184,7 +184,6 @@ describe("codex session tools — a launch", () => {
     });
     const start = server.received().find((frame) => frame.method === "thread/start");
     assert.equal((start?.params as { config?: unknown }).config, undefined);
-    await adapter.stopAll();
   });
 });
 
@@ -275,7 +274,6 @@ describe("codex session tools — a fork (thread lineage, spec 2026-10-14 §6)",
     await adapter.stopSession("child");
     assert.equal(childGrant.revoked, true);
     assert.equal(parentGrant.revoked, false, "ending the child never ends the parent's");
-    await adapter.stopAll();
   });
 });
 

@@ -27,16 +27,24 @@ describe("applyFrame — snapshots", () => {
     const resolved = activity("approval.resolved", { requestId: "r1" }, { createdAt: stamp(3) });
     let state = applyFrame(createReducerState("s1"), {
       kind: "snapshot",
-      thread: snapshot({ items: [resolved], seq: 3 })
+      // Lose the closing row through ordinary retention before the replay. Otherwise the
+      // fold can reconstruct the tombstone from that row and mask a missing snapshot seed.
+      thread: snapshot({ items: [resolved, ...Array.from({ length: 550 }, (_, index) =>
+        activity("tool.output", { toolUseId: "noise", delta: "." }, { id: `noise-${index}`, createdAt: stamp(4) })
+      )], seq: 3 })
     });
+    state = applyFrame(state, eventFrame(ev("thread.activity-appended", {
+      activity: activity("tool.output", { toolUseId: "noise", delta: "." }, { id: "noise-last", createdAt: stamp(4) })
+    }, { seq: 4 })));
+    assert.equal(state.slice.entries.some((item) => item.id === resolved.id), false);
     const request = (createdAt: string, seq: number) => eventFrame(ev("thread.activity-appended", {
       activity: activity("approval.requested", {
         requestId: "r1", requestType: "command_execution_approval"
       }, { createdAt })
     }, { seq }));
-    state = applyFrame(state, request(stamp(2), 4));
+    state = applyFrame(state, request(stamp(2), 5));
     assert.deepEqual(state.slice.pending.approvals, [], "an older request stays resolved after reload");
-    state = applyFrame(state, request(stamp(5), 5));
+    state = applyFrame(state, request(stamp(5), 6));
     assert.deepEqual(state.slice.pending.approvals.map((request) => request.requestId), ["r1"],
       "a new request recycling the id must still be answerable");
   });

@@ -6,13 +6,19 @@ import { after, describe, it } from "node:test";
 import type { KnowledgeConceptRef } from "@orquester/api";
 import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
+import { GMAIL_PASSAGE, LONG_GUIDE, LONG_GUIDE_CONCEPTS, SHORT_GUIDE, SHORT_GUIDE_CONCEPTS } from "./fixtures/tiktok-guides.ts";
 import {
   negatedNames,
   harvestPairCheckInbox,
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
+  PAIR_CHECK_INPUT_VERSION,
+  PAIR_CHECK_MAX_PER_RUN,
   PAIR_CHECK_STEP,
+  PAIR_CHECK_SYSTEM,
+  PAIR_CHECK_V1_BODY_CHARS,
   pairCheckItemKey,
+  pairCheckNeedsRecheck,
   ROUND_TASK_MAX_ATTEMPTS,
   pairCheckCandidates,
   pairCheckInput,
@@ -146,11 +152,10 @@ describe("round task attempts", () => {
     await reread.load();
     assert.equal(reread.gaveUp(item.key), true);
     assert.equal(reread.gaveUp("other"), false);
-    assert.deepEqual(reread.givenUp().map((r) => [r.key, r.failures, r.gaveUpAt]), [[item.key, 3, "2026-10-27T12:00:00.000Z"]]);
     await reread.answered("other");
     await reread.flush();
-    const written = JSON.parse(await readFile(path, "utf8")) as { attempts: { key: string }[] };
-    assert.deepEqual(written.attempts.map((r) => r.key), [item.key]);
+    const written = JSON.parse(await readFile(path, "utf8")) as { attempts: { key: string; failures: number; gaveUpAt: string | null }[] };
+    assert.deepEqual(written.attempts.map((r) => [r.key, r.failures, r.gaveUpAt]), [[item.key, 3, "2026-10-27T12:00:00.000Z"]]);
   });
 });
 
@@ -191,6 +196,8 @@ describe("pair-check candidates", () => {
       ]
     );
     assert.deepEqual({ hashA: all[1]!.hashA, hashB: all[1]!.hashB }, { hashA: "h-ke_a", hashB: "h-ke_b" });
+    assert.deepEqual(all[0]!.focus.map((c) => c.id), ["t-48h", "t-72h"], "the ends of the edge, the passages shown first");
+    assert.deepEqual(all[1]!.focus, [], "a shared claim has no focus");
     const unchecked = await pairCheckCandidates({ ids, view, hashOf, isChecked: (p) => p.b !== "ke_e", limit: 1 });
     assert.deepEqual(unchecked.map((c) => [c.a, c.b]), [["ke_a", "ke_e"]]);
     const capped = await pairCheckCandidates({ ids, view, hashOf, isChecked: () => false, limit: 2 });
@@ -291,6 +298,128 @@ describe("pair-check candidates", () => {
         ["ke_gmail", "ke_outlook", "alternatives"]
       ]
     );
+    assert.deepEqual(
+      all.map((c) => c.focus.map((concept) => concept.id).sort()),
+      [
+        ["t-never", "t-one"],
+        ["t-gmail", "t-outlook"]
+      ],
+      "the concept and its negation; the two values"
+    );
+  });
+});
+
+describe("the task's input: excerpts chosen for relevance", () => {
+  const short = { ...SHORT_GUIDE, concepts: SHORT_GUIDE_CONCEPTS };
+  const long = { ...LONG_GUIDE, concepts: LONG_GUIDE_CONCEPTS };
+
+  it("a long body deep inside which the disagreement sits: the passage is in the prompt, said to be excerpts; a short body is whole", () => {
+    assert.ok(LONG_GUIDE.body.length > PAIR_CHECK_BODY_CHARS && SHORT_GUIDE.body.length <= PAIR_CHECK_BODY_CHARS);
+    assert.ok(LONG_GUIDE.body.indexOf(GMAIL_PASSAGE) > PAIR_CHECK_BODY_CHARS, "past what any opening-only cut would show");
+    const input = pairCheckInput(short, long);
+    assert.ok(input.includes(SHORT_GUIDE.body), "the short guide whole");
+    assert.ok(input.includes("11) make an outlook/proton email"));
+    assert.ok(input.includes(GMAIL_PASSAGE), "the Gmail passage of the long guide");
+    assert.match(input, /ENTRY B \(ke_mq74jvvzggnn\)\n=+\nTitle: Step-by-step iPhone setup[^\n]*\n\(Excerpts chosen for relevance to the other entry[^\n]*\)\n\nStep-by-step phone setup/);
+    assert.ok(!/ENTRY A[^]*\(Excerpts chosen[^]*ENTRY B/.test(input), "a whole body is not called excerpts");
+    assert.match(input, /A disagreement in any excerpt counts\./);
+    assert.match(PAIR_CHECK_SYSTEM, /passages chosen for their relevance to the other entry/);
+    assert.match(PAIR_CHECK_SYSTEM, /A disagreement in any excerpt counts/);
+    // The same either way round, and the same every time.
+    assert.ok(pairCheckInput(long, short).includes(GMAIL_PASSAGE));
+    assert.equal(pairCheckInput(short, long), input);
+  });
+
+  it("the focus concepts' passages come first", () => {
+    // Lines sharing many words with the short guide fill the budget; one line shares none of its
+    // words but names the concept the pair was found through.
+    const lines = Array.from({ length: 40 }, (_, i) => `Proxy note ${i}: buy an isp proxy at iproyal, set socks5 in shadowrocket, check ipqualityscore and scamalytics, warm up 48 hours.`);
+    lines.splice(25, 0, "Static note: a paid dedicated static VPN gets configured once.");
+    const other = { id: "ke_other", title: "Proxy notes", body: lines.join("\n"), concepts: [] };
+    const focus = [{ id: "t-static", type: "Tactic", name: "Paid dedicated static VPN" }];
+    assert.ok(!pairCheckInput(short, other).includes("Static note"));
+    assert.ok(pairCheckInput(short, other, focus).includes("Static note: a paid dedicated static VPN gets configured once."));
+  });
+});
+
+describe("re-asking checks judged on cut text", () => {
+  const long = (id: string) => id === "ke_long" || id === "ke_long2";
+  it("a consistent or unrelated verdict on input version 1 with a body past the old cut is asked again; contradicts, short bodies and version 2 stand", () => {
+    const base = { a: "ke_long", b: "ke_short" };
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent" }, long), true);
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "unrelated", inputVersion: 1 }, long), true);
+    assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_long", verdict: "unrelated" }, long), true, "either side");
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "contradicts" }, long), false, "contradicts stands");
+    assert.equal(pairCheckNeedsRecheck({ a: "ke_short", b: "ke_short2", verdict: "consistent" }, long), false, "both whole: nothing was cut");
+    assert.equal(pairCheckNeedsRecheck({ ...base, verdict: "consistent", inputVersion: PAIR_CHECK_INPUT_VERSION }, long), false);
+  });
+
+  it("the pair is a candidate again once: its new check is recorded on the current version; bounded by the round's limit, tiers first", async () => {
+    const root = await dir();
+    const path = join(root, "pair-checks.json");
+    const hashOf = (id: string) => `h-${id}`;
+    const v1 = (a: string, b: string, verdict: string) => ({ a, b, hashA: hashOf(a), hashB: hashOf(b), verdict, note: "n", checkedAt: "t" });
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        checks: [v1("ke_long", "ke_short", "consistent"), v1("ke_long2", "ke_short", "contradicts"), v1("ke_short", "ke_short2", "unrelated"), { ...v1("ke_long", "ke_long2", "consistent"), inputVersion: 2 }]
+      })
+    );
+    const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
+    await checks.load();
+    assert.deepEqual(checks.recheckEntryIds(), ["ke_long", "ke_short", "ke_short2"], "the entries of version-1 consistent/unrelated checks");
+    const pair = { a: "ke_long", b: "ke_short", hashA: hashOf("ke_long"), hashB: hashOf("ke_short") };
+    assert.equal(checks.isChecked(pair), true, "without body lengths: checked, as before");
+    assert.equal(checks.isChecked(pair, long), false, "asked again");
+    assert.equal(checks.isChecked({ ...pair, b: "ke_long2", hashB: hashOf("ke_long2") }, long), true, "version 2");
+    assert.equal(checks.isChecked({ a: "ke_long2", b: "ke_short", hashA: hashOf("ke_long2"), hashB: hashOf("ke_short") }, long), true, "contradicts kept");
+    assert.equal(checks.isChecked({ a: "ke_short", b: "ke_short2", hashA: hashOf("ke_short"), hashB: hashOf("ke_short2") }, long), true, "nothing was cut");
+    assert.equal(checks.get("ke_long", "ke_short")?.verdict, "consistent", "the old verdict shows until it is replaced");
+
+    await checks.record(pair, "contradicts", "Gmail vs Outlook/Proton.");
+    assert.equal(checks.isChecked(pair, long), true, "asked once");
+    await checks.flush();
+    const written = JSON.parse(await readFile(path, "utf8")) as { checks: Record<string, unknown>[] };
+    assert.equal(written.checks.find((c) => c.a === "ke_long" && c.b === "ke_short")!.inputVersion, PAIR_CHECK_INPUT_VERSION);
+    const reread = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
+    await reread.load();
+    assert.equal(reread.isChecked(pair, long), true, "and after a restart");
+    assert.ok(PAIR_CHECK_V1_BODY_CHARS < PAIR_CHECK_BODY_CHARS);
+  });
+
+  it("re-asks go through the candidates like new pairs: their tier order and the round's limit", async () => {
+    const index = new FakeVectorIndex(); // good = 0.5
+    const concepts: Record<string, KnowledgeConceptRef[]> = {};
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const id = `ke_${String(i).padStart(2, "0")}`;
+      ids.push(id);
+      index.set(id, around(16, 0, 1 + i, 0.9));
+      concepts[id] = [{ id: "t-shared", type: "Tactic", name: "Shared tactic" }, ...(i === 11 ? [{ id: "t-48h", type: "Tactic", name: "48h" }] : i === 10 ? [{ id: "t-72h", type: "Tactic", name: "72h" }] : [])];
+    }
+    const view: KnowledgeLinkGraphView = {
+      vectors: () => index,
+      conceptsOf: (id) => concepts[id] ?? [],
+      contradicting: (id) => (id === "t-48h" ? ["t-72h"] : id === "t-72h" ? ["t-48h"] : [])
+    };
+    const hashOf = (id: string) => `h-${id}`;
+    const root = await dir();
+    const path = join(root, "pair-checks.json");
+    // Every pair was checked on version 1 and found consistent; every body is long.
+    const records = [];
+    for (let i = 0; i < ids.length; i += 1) for (let j = i + 1; j < ids.length; j += 1) records.push({ a: ids[i], b: ids[j], hashA: hashOf(ids[i]!), hashB: hashOf(ids[j]!), verdict: "consistent", note: "n", checkedAt: "t" });
+    await writeFile(path, JSON.stringify({ version: 1, checks: records }));
+    const checks = new KnowledgePairChecks({ path, hashOf, now: () => NOW });
+    await checks.load();
+    const round = await pairCheckCandidates({ ids, view, hashOf, isChecked: (p) => checks.isChecked(p, () => true), limit: PAIR_CHECK_MAX_PER_RUN });
+    assert.equal(round.length, PAIR_CHECK_MAX_PER_RUN, `${records.length} re-asks, ${PAIR_CHECK_MAX_PER_RUN} a round`);
+    assert.deepEqual([round[0]!.a, round[0]!.b, round[0]!.reason], ["ke_10", "ke_11", "contradicts"], "the contradicts tier first");
+    assert.equal(
+      (await pairCheckCandidates({ ids, view, hashOf, isChecked: (p) => checks.isChecked(p), limit: PAIR_CHECK_MAX_PER_RUN })).length,
+      0,
+      "without the rule: nothing to ask"
+    );
   });
 });
 
@@ -308,13 +437,28 @@ describe("the pair checks' inbox", () => {
     const task = JSON.parse(await readFile(join(root, "agent_inbox", `${answered}.task.json`), "utf8")) as Record<string, unknown>;
     assert.equal(task.step, PAIR_CHECK_STEP);
     assert.deepEqual(task.pair, pair);
+    assert.equal(task.inputVersion, PAIR_CHECK_INPUT_VERSION);
     await writeFile(join(root, "agent_outbox", `${answered}.answer.json`), JSON.stringify({ task_id: answered, answer: '{"verdict":"contradicts","note":"48h vs 72h"}' }));
     await writeFile(join(root, "agent_outbox", `${answered}.done`), "");
+    // A task an older build wrote (no input version) and answered before the restart: version 1.
+    const legacy = { a: "ke_a", b: "ke_d", hashA: "ha", hashB: "hd" };
+    await writeFile(
+      join(root, "agent_inbox", "legacy.task.json"),
+      JSON.stringify({ task_id: "legacy", step: PAIR_CHECK_STEP, context_label: "pair-check ke_a ke_d", system: "S", user: "U", max_tokens: 1024, timeout_seconds: 0, created_at: NOW.toISOString(), pair: legacy })
+    );
+    await writeFile(join(root, "agent_outbox", "legacy.answer.json"), JSON.stringify({ task_id: "legacy", answer: '{"verdict":"consistent","note":"Same."}' }));
+    await writeFile(join(root, "agent_outbox", "legacy.done"), "");
 
     const recorded: unknown[] = [];
     const count = await harvestPairCheckInbox(root, { record: async (...args) => void recorded.push(args) });
-    assert.equal(count, 1);
-    assert.deepEqual(recorded, [[pair, "contradicts", "48h vs 72h"]]);
+    assert.equal(count, 2);
+    assert.deepEqual(
+      recorded.sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))),
+      [
+        [pair, "contradicts", "48h vs 72h", PAIR_CHECK_INPUT_VERSION],
+        [legacy, "consistent", "Same.", 1]
+      ]
+    );
     assert.deepEqual(await readdir(join(root, "agent_inbox")), [], `the open task (${open.slice(0, 8)}) goes too: written again while still worth checking`);
     assert.deepEqual(await readdir(join(root, "agent_outbox")), []);
     assert.equal(await harvestPairCheckInbox(join(root, "missing"), { record: async () => undefined }), 0);

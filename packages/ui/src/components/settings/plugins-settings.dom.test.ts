@@ -145,7 +145,7 @@ describe("PluginsSettings toggles", () => {
   it("turning tsc-rs off goes ahead without asking", async () => {
     show([plugin({ enabled: true })]);
     await click(switchFor("Better TS Typecheck"));
-    assert.equal(button("Confirm"), undefined);
+    assert.equal((button("Confirm")) === undefined, true);
     assert.deepEqual(calls, [["ts-rust", false]]);
   });
 
@@ -165,7 +165,7 @@ describe("PluginsSettings toggles", () => {
     await click(radio("tsrs"));
     assert.deepEqual(calls, []);
     await click(radio("tsc-rs"));
-    assert.equal(button("Confirm"), undefined, "no confirmation for an engine switch");
+    assert.equal((button("Confirm")) === undefined, true, "no confirmation for an engine switch");
     assert.deepEqual(calls, [["ts-rust", "tsc-rs"]]);
     assert.equal(useAppStore.getState().plugins?.[0]?.engine, "tsc-rs");
     assert.equal(radio("tsc-rs").getAttribute("aria-checked"), "true");

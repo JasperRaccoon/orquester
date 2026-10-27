@@ -537,8 +537,9 @@ test("an invalid_grant for a refresh token a host CLI already rotated is that CL
   });
   const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
   home = svc.homePath("codex", acct.id);
-  assert.equal(await svc.refreshNow("codex", acct.id), "refreshed");
+  const outcome = await svc.refreshNow("codex", acct.id);
   assert.equal(svc.getRecord(acct.id)?.needsReauth, false);
+  assert.equal(outcome, "refreshed");
   // The file still holding what was posted: a real invalid_grant.
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
   assert.equal(await svc.refreshNow("codex", acct.id), "invalid-grant");
@@ -779,7 +780,7 @@ test("Claude: an account copy never replaces a dangling shared CLAUDE.md link", 
   await symlink(join(f.base, "not-yet.md"), join(f.system, "CLAUDE.md"));
   await writeFile(join(f.home, "CLAUDE.md"), "account");
   await f.launch();
-  assert.equal(await readlink(join(f.system, "CLAUDE.md")), join(f.base, "not-yet.md"), "the owner's link is kept");
+  assert.equal(await readlink(join(f.system, "CLAUDE.md")).catch(() => null), join(f.base, "not-yet.md"), "the owner's link is kept");
   assert.equal(await readFile(join(f.home, "CLAUDE.md"), "utf8"), "account", "the account's copy is left in place");
 });
 

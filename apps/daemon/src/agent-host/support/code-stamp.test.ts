@@ -117,11 +117,13 @@ describe("computeCodeStamp", () => {
     });
   });
 
-  it("moves when a new import pulls in another file", async () => {
+  it("follows a new import after its graph was cached", async () => {
     await withCheckout(async (root) => {
-      const before = stampOf(root);
+      stampOf(root);
       await rewrite(root, "apps/daemon/src/agent-host/support/helper.ts", 'import "../side-effect.ts";\nimport "@orquester/api";\nexport const helper = 1;\n');
-      assert.notEqual(stampOf(root), before);
+      const imported = stampOf(root);
+      await rewrite(root, "packages/api/src/index.ts", "export const unrelated = 2;\n");
+      assert.notEqual(stampOf(root), imported);
     });
   });
 

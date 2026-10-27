@@ -240,14 +240,14 @@ describe("the secret-files project bar", () => {
   it("stays hidden while the plugin is off or the project is in sync", async () => {
     applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "synced" }]));
     await render();
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
 
     await act(async () => applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified" }])));
     await flush();
     assert.ok(bar());
 
     await act(async () => useAppStore.setState({ plugins: [plugin(false)] }));
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
   });
 
   it("says how the one modified file differs, and Push asks first naming the clones it overwrites", async () => {
@@ -270,19 +270,19 @@ describe("the secret-files project bar", () => {
     await click(confirm);
     assert.deepEqual(pushes, [{ workspace: "ws", repoKey: KEY, projectPath: MINE, files: ["MatsSmileBack/.env"] }]);
     // The answered vault has this clone in sync: the bar goes.
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
   });
 
   it("stays dismissed until a flagged file's state or vault version changes", async () => {
     applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified" }]));
     await render();
     await click(document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]'));
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
 
     // Same states and versions: still dismissed.
     await act(async () => applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified" }])));
     await flush();
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
 
     // Another clone pushed: the vault version moved, so it shows again.
     await act(async () => applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified" }], "v3")));
@@ -302,7 +302,7 @@ describe("the secret-files project bar", () => {
     assert.equal(compares.length, 2);
 
     await click(document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]'));
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
     await act(async () => applySecretVault("ws", KEY, edited("t3")));
     await flush();
     assert.ok(bar(), "the dismissed bar is back");
@@ -317,12 +317,12 @@ describe("the secret-files project bar", () => {
     applySecretVault("ws", KEY, at("t1", "b1", 1));
     await render();
     await click(document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]'));
-    assert.equal(bar(), null);
+    assert.equal((bar()) === null, true);
 
     // The daemon restarted: the same copy has another token under the new boot.
     await act(async () => applySecretVault("ws", KEY, at("r1", "b2", 1)));
     await flush();
-    assert.equal(bar(), null, "still dismissed");
+    assert.equal((bar()) === null, true, "still dismissed");
 
     // Edited after the restart: back.
     await act(async () => applySecretVault("ws", KEY, at("r2", "b2", 2)));
@@ -403,7 +403,7 @@ describe("the secret-files project bar", () => {
     await render();
     assert.deepEqual(compares, []);
     assert.match(bar()?.textContent ?? "", /2 secret files differ from the vault/);
-    assert.equal(button("Push to vault"), undefined);
+    assert.equal((button("Push to vault")) === undefined, true);
     assert.ok(button("Reset to vault"));
   });
 
@@ -412,8 +412,8 @@ describe("the secret-files project bar", () => {
     await render();
     assert.match(bar()?.textContent ?? "", /MatsSmileBack\/\.env can't be copied here: its folder doesn't exist/);
     assert.ok(button("Open secret files…"));
-    assert.equal(button("Push to vault"), undefined);
-    assert.equal(button("Reset to vault"), undefined);
+    assert.equal((button("Push to vault")) === undefined, true);
+    assert.equal((button("Reset to vault")) === undefined, true);
   });
 
   it("Compare lists variable names with their change, never values", async () => {

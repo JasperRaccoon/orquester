@@ -139,11 +139,18 @@ test("scanIconLinks scans a hostile 1 MB page in linear time", () => {
     `<link ${'a="'.repeat(Math.floor(MB / 3))}>`,
     `<link rel=icon href='${"&#x1".repeat(MB / 4)}'>`
   ];
+  // A same-size page of ordinary links is the parser's CPU baseline; other
+  // workers and scheduler pauses cannot consume this process's CPU budget.
+  const ordinary = '<link rel=stylesheet href="/site.css">';
+  const baselinePage = ordinary.repeat(Math.ceil(MB / ordinary.length));
+  const baselineStarted = process.cpuUsage();
+  assert.equal(scanIconLinks(baselinePage, page).length, 0);
+  const baseline = process.cpuUsage(baselineStarted);
   for (const html of pages) {
-    const started = performance.now();
+    const started = process.cpuUsage();
     scanIconLinks(html, page);
-    const ms = performance.now() - started;
-    assert.ok(ms < 500, `${html.slice(0, 16)}... took ${ms.toFixed(1)} ms`);
+    const used = process.cpuUsage(started);
+    assert.ok(used.user + used.system < 16 * (baseline.user + baseline.system), `${html.slice(0, 16)}... exceeds the same-size parser CPU baseline`);
   }
 });
 
@@ -355,6 +362,7 @@ test("fetchFavicon skips an oversized icon for the next candidate", async () => 
     "/ok.png": bytes(PNG)
   };
   const icon = await fetchFavicon("site.test", options());
+  assert.equal(icon.bytes.length, PNG.length, "the accepted icon stays within the expected byte length");
   assert.deepEqual(icon.bytes, PNG);
   assert.deepEqual(requests, ["site.test/", "site.test/huge.svg", "site.test/declared.png", "site.test/ok.png"]);
 });

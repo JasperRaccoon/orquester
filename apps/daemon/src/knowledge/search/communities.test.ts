@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 
 import { type WeightedEdge, communities } from "./communities.ts";
 
@@ -77,9 +78,18 @@ test("deterministic: the same graph, its edges in any order, gives the same comm
 });
 
 test("awaits the pause between passes", async () => {
-  let pauses = 0;
-  await communities(8, [...clique([0, 1, 2, 3], 1), ...clique([4, 5, 6, 7], 1), { a: 3, b: 4, weight: 0.1 }], async () => {
-    pauses += 1;
-  });
-  assert.ok(pauses > 0);
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  let release!: () => void;
+  const paused = new Promise<void>((resolve) => { release = resolve; });
+  let finished = false;
+  const result = communities(8, [...clique([0, 1, 2, 3], 1), ...clique([4, 5, 6, 7], 1), { a: 3, b: 4, weight: 0.1 }], async () => {
+    enter();
+    await paused;
+  }).then((labels) => { finished = true; return labels; });
+  await entered;
+  await setImmediate();
+  assert.equal(finished, false, "clustering waits for the caller's pause");
+  release();
+  assert.deepEqual([...(await result)], [0, 0, 0, 0, 1, 1, 1, 1]);
 });

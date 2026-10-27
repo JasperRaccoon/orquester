@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { setImmediate as drain } from "node:timers/promises";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -647,7 +651,41 @@ test("overlapping mutations are all on disk, in their final state", async (t) =>
     Array.from({ length: 25 }, (_, i) => service.create({ title: `P${i}`, body: "B", projectPath: null }))
   );
   await Promise.all(created.slice(0, 10).map((p) => service.markUsed(p.id)));
-  await Promise.all(created.slice(20).map((p) => service.delete(p.id)));
+  // Keep the first deletion's atomic rename pending while later deletions queue.
+  // Synchronous OS calls below let a single event-loop drain finish all work
+  // that is not blocked on the library's write chain.
+  for (const method of ["realpath", "stat", "mkdir", "writeFile", "chmod"] as const) {
+    const original = fsPromises[method];
+    t.mock.method(fsPromises, method, async (...args: unknown[]) => {
+      const path = args[0];
+      if (path === s.file || path === dirname(s.file) || (typeof path === "string" && path.startsWith(`${s.file}.`))) {
+        return Reflect.apply(fs[`${method}Sync`], fs, args);
+      }
+      return Reflect.apply(original, fsPromises, args);
+    });
+  }
+  let entered!: () => void;
+  let release!: () => void;
+  const pendingRename = new Promise<void>((resolve) => { entered = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  const originalRename = fsPromises.rename;
+  t.mock.method(fsPromises, "rename", async (from: fs.PathLike, to: fs.PathLike) => {
+    if (to !== s.file) return originalRename(from, to);
+    if (!held) {
+      held = true;
+      entered();
+      await released;
+    }
+    fs.renameSync(from, to);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const deleted = Promise.all(created.slice(20).map((p) => service.delete(p.id)));
+  await pendingRename;
+  await drain();
+  release();
+  await deleted;
 
   const reloaded = s.service();
   await reloaded.load();

@@ -96,7 +96,7 @@ test("a lineage keeps the inherited workflowOwned marker only as `true`", () => 
 });
 
 test("the provenance header never outgrows its budget, whatever the title — quotes and backslashes included (T6-M1)", () => {
-  for (const title of ['"'.repeat(300), "\\".repeat(300), `${"x".repeat(199)}"tail`, "😀".repeat(150), "a\\\"b".repeat(80)]) {
+  for (const title of ['"'.repeat(3000), "\\".repeat(3000), `${"x".repeat(199)}"tail`, "😀".repeat(150), "a\\\"b".repeat(80)]) {
     for (const origin of ["sent", "opened", "delegated"] as const) {
       const message = buildThreadMessage({ origin, fromTitle: title, text: "body" });
       assert.ok(message.length - "body".length <= THREAD_MESSAGE_OVERHEAD_CHARS, `${origin}: ${message.length}`);
@@ -177,7 +177,7 @@ test("header fields an agent controls cannot break the header: ids keep id chara
   assert.equal(parsed?.fromProject, "ws/pq r");
   assert.equal(parsed?.body, "body");
   // An id with nothing left falls back to v1 rather than a header nobody reads.
-  assert.equal(parseThreadMessage(buildThreadMessage({ origin: "sent", fromTitle: "x", fromSessionId: "  ", text: "b" }))?.fromSessionId, undefined);
+  assert.deepEqual(parseThreadMessage(buildThreadMessage({ origin: "sent", fromTitle: "x", fromSessionId: "  ", text: "b" })), { origin: "sent", fromTitle: "x", body: "b" });
 });
 
 test("the v2 overhead stays within THREAD_MESSAGE_OVERHEAD_CHARS at every field's longest", () => {

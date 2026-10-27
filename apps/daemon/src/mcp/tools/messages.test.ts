@@ -106,6 +106,13 @@ test("send_message posts the turn body, waits for the new turn and returns its r
   assert.equal(r.seq, 21); assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "hello!"); assert.equal(r.pending, undefined);
 });
 
+test("send_message without wait returns sent; attachments are uploaded first and referenced", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/turn", ({ body }) => { const b = body as { attachments: { id: string }[]; input: string }; assert.deepEqual(b.attachments.map((ref) => ref.id), ["c1-att-1"]); assert.equal(b.input, "see"); return { status: 200, body: { seq: 3 } }; });
+  const r = await tool("send_message").run({ sessionId: "c1", text: "see", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: false, timeoutMs: 1000 }, h.ctx);
+  assert.equal(r.outcome, "sent");
+});
+
 test("send_message refusals: empty, pending request, plan mode unsupported; an errored session is sent to", async (t) => {
   const h = await harness(); t.after(h.close);
   const run = (a: Record<string, unknown>, ctx = h.ctx) => tool("send_message").run({ planMode: false, wait: false, timeoutMs: 1000, ...a }, ctx);
@@ -125,7 +132,11 @@ test("send_message refusals: empty, pending request, plan mode unsupported; an e
 test("send_message reports needs-input with the pending requests, and timeout", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 4 } });
-  const asked = snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } });
+  const asked = snapshot({
+    turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })],
+    items: [message("assistant", "The child still needs approval.", { turnId: "t2" })],
+    pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] }
+  });
   let posted = false;
   h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 4 } }; });
   h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(posted ? asked : snapshot()), head: { ...snapshot().head, projectPath: h.projectPath, cwd: h.projectPath } } } }));
@@ -736,7 +747,7 @@ test("goals §5.1: a /goal whose route cannot be told — the capabilities unrea
   // Sent as a prompt, the host might run it as a command while the call waited on a turn that never starts.
   const blind = await goalHarness(snapshot(), () => snapshot()); t.after(blind.close);
   blind.api.on("GET", "/api/agent/providers", { status: 503, body: { code: "HOST_UNAVAILABLE", message: "down" } });
-  await assert.rejects(goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, blind.ctx),
+  await assert.rejects(goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: false, timeoutMs: 120_000 }, blind.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT");
   assert.equal(blind.bodies.length, 0, "nothing was sent");
   // Any other text is unaffected: it needs no route.

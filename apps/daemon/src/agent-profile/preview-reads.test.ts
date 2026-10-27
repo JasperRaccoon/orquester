@@ -18,7 +18,7 @@ import { codexMarketplaceRoot, codexPluginLocation } from "./adapters/codex/inde
 import { ProfileImportStore } from "./import.ts";
 import { AgentProfileService } from "./service.ts";
 import { FakeProfileAdapter, fakeItem } from "./testing.ts";
-import { pluginProvidesOf, readGitCommit, readInstalledPlugin, readPreviewTree, treeDigest } from "./preview-reads.ts";
+import { pluginProvidesOf, readGitCommit, readInstalledPlugin, readPreviewTree } from "./preview-reads.ts";
 import { registerAgentProfileRoutes, type AgentProfileRouteDeps } from "./routes.ts";
 
 async function write(path: string, text: string | Buffer): Promise<void> {
@@ -48,6 +48,7 @@ test("readPreviewTree: text in full, executables and binaries flagged with hashe
   await symlink(join(root, "outside.txt"), join(skill, "link"));
   await write(join(skill, ".git", "HEAD"), "ref: refs/heads/main\n");
   const tree = await readPreviewTree(skill);
+  assert.ok(!JSON.stringify(tree).includes("secret elsewhere"), "a symlink is never followed");
   assert.equal(tree.complete, true);
   assert.deepEqual(tree.files.map((file) => [file.path, file.flag ?? "", file.text ?? null]), [
     ["bin/tool", "executable", null],
@@ -59,13 +60,9 @@ test("readPreviewTree: text in full, executables and binaries flagged with hashe
   ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
   assert.equal(tree.files.find((file) => file.path === "bin/tool")!.sha256, sha(elf));
   assert.equal(tree.files.find((file) => file.path === "link")!.target, join(root, "outside.txt"));
-  assert.ok(!JSON.stringify(tree).includes("secret elsewhere"), "a symlink is never followed");
-  // One file (a command) reads as itself; a digest moves when any byte does.
+  // One file (a command) reads as itself.
   const command = await readPreviewTree(join(skill, "SKILL.md"));
   assert.deepEqual(command.files.map((file) => file.path), ["SKILL.md"]);
-  const before = treeDigest(tree);
-  await write(join(skill, "scripts", "plain.txt"), "plain!");
-  assert.notEqual(treeDigest(await readPreviewTree(skill)), before);
 });
 
 test("readPreviewTree: past the byte cap the tree is incomplete, never cut silently", async (t) => {

@@ -330,7 +330,7 @@ test("a sandbox-looking failure is retried only once the first Chromium is known
   assert.ok(execs[1]!.args!.includes("--no-sandbox"));
 });
 
-test("a link that drops mid-start is not retried, and the detached process is stopped by id once the link is back", { timeout: 5_000 }, async (t) => {
+test("a link that drops mid-start is not retried, and the detached process is stopped by id once the link is back", async (t) => {
   // A long exit deadline: a detached process must not be waited on at all.
   const r = await rig(t, {
     exitDeadlineMs: 60_000,

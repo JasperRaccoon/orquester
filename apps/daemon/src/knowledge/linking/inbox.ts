@@ -327,11 +327,6 @@ export class InboxBroker {
     return this.tasks.get(taskId)?.giveUps?.size ?? 0;
   }
 
-  /** Whether too many chats gave up on this task and it is handed out no more. */
-  isAbandoned(taskId: string): boolean {
-    return this.tasks.get(taskId)?.abandoned === true;
-  }
-
   /** The chat ended, or was retired, holding a task it never answered (the pool counts it as a failure). */
   gaveUp(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.gaveUp === true;

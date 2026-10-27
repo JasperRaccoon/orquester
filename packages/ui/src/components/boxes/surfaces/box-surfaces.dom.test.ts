@@ -191,7 +191,7 @@ describe("box surfaces", () => {
 
   it("lists the chat's temporary box with Watch and Destroy, and its pending config change", async () => {
     await render(createElement(BoxChatPanel, { sessionId: "thread-1", view: null }));
-    assert.equal(document.querySelector("[data-box-chat-panel]"), null, "nothing to show yet");
+    assert.equal(document.querySelector("[data-box-chat-panel]") === null, true, "nothing to show yet");
 
     await act(async () => {
       store.applyBoxesEvent(boxesEvent(BOXES_CHANGED_EVENT, { boxes: [temporary] }));
@@ -225,6 +225,6 @@ describe("box surfaces", () => {
     assert.match(document.querySelector('[data-box-config-change="cc-1"]')?.textContent ?? "", /Approved/);
     await act(async () => button("Dismiss")?.click());
     await flush();
-    assert.equal(document.querySelector('[data-box-config-change="cc-1"]'), null);
+    assert.equal(document.querySelector('[data-box-config-change="cc-1"]') === null, true);
   });
 });

@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -186,7 +186,15 @@ test("/ws accepts a session token, refuses the legacy credential, and closes whe
 
 test("revoking a session ends its open event stream", async (t) => {
   const h = await harness();
-  t.after(h.close);
+  const responses: ServerResponse[] = [];
+  h.remote.addHook("onRequest", (request, reply, done) => {
+    if (request.url === "/events") responses.push(reply.raw);
+    done();
+  });
+  t.after(async () => {
+    for (const response of responses) response.destroy();
+    await h.close();
+  });
   const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
@@ -194,6 +202,7 @@ test("revoking a session ends its open event stream", async (t) => {
   const stream = openStream(port, "/events", token);
   await h.sinkAdded;
   await h.store.revoke(session.id);
+  assert.ok(responses.some((response) => response.writableEnded || response.destroyed || response.socket?.destroyed), "revocation ended the streaming response before returning");
   await stream.terminated;
   await h.sinkRemoved;
 });

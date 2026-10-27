@@ -2,7 +2,6 @@ package agent
 
 import (
 	"testing"
-	"time"
 
 	"orquester/box-agent/internal/wire"
 )
@@ -34,7 +33,7 @@ func TestRingKeepsNewestBytesAndReportsStart(t *testing.T) {
 	r.finish()
 	select {
 	case <-wait:
-	case <-time.After(time.Second):
+	default:
 		t.Fatal("finish did not wake the reader")
 	}
 	if _, _, _, finished, _, _ := r.read(11, 100); !finished {

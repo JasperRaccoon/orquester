@@ -521,14 +521,6 @@ test("parseEnv returns null for text that isn't KEY=VALUE", () => {
   assert.equal(parseEnv(new Uint8Array([0x41, 0x3d, 0xff, 0xfe, 0x0a])), null, "invalid UTF-8");
 });
 
-function timed<T>(fn: () => T): { value: T; ms: number } {
-  const start = performance.now();
-  const value = fn();
-  return { value, ms: performance.now() - start };
-}
-
-const MB = 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // compareContents
 // ---------------------------------------------------------------------------
@@ -576,29 +568,14 @@ test("compareContents counts lines when either side isn't env", () => {
   });
 });
 
-test("compareContents stays fast on 1 MB adversarial input", () => {
-  const cases: Array<[string, string, string]> = [
-    ["distinct lines", "a\n".repeat(MB / 2), "b\n".repeat(MB / 2)],
-    ["one long line each", "x".repeat(MB), "y".repeat(MB)],
-    ["middle change", "line\n".repeat(MB / 10) + "mid\n" + "line\n".repeat(MB / 10), "line\n".repeat(MB / 10) + "MID\n" + "line\n".repeat(MB / 10)],
-    [
-      "max distance under the line cap",
-      Array.from({ length: 5000 }, (_, i) => `left-${i}`).join("\n"),
-      Array.from({ length: 5000 }, (_, i) => `right-${i}`).join("\n")
-    ],
-    ["interleaved", "a\nb\n".repeat(MB / 8), "b\na\n".repeat(MB / 8)],
-    [
-      "env keys",
-      Array.from({ length: 80000 }, (_, i) => `KEY_${i}=left`).join("\n"),
-      Array.from({ length: 80000 }, (_, i) => `KEY_${79999 - i}=right`).join("\n")
-    ]
-  ];
-  for (const [name, left, right] of cases) {
-    const l = enc(left);
-    const r = enc(right);
-    const { ms } = timed(() => compareContents(l, r));
-    assert.ok(ms < 2000, `${name} took ${ms.toFixed(0)} ms`);
-  }
+test("compareContents uses order-blind counts past the line or work budget", () => {
+  const lines = Array.from({ length: 5001 }, (_, i) => `line-${i}`);
+  const approximate = { format: "lines", linesAdded: 0, linesRemoved: 0 };
+  // One moved line is cheap for an exact diff, but exceeds the line-count limit.
+  assert.deepEqual(compareContents(enc(lines.join("\n")), enc([...lines.slice(1), lines[0]!].join("\n"))), approximate);
+  // Under the line limit, reversing distinct lines exhausts the work budget.
+  const reversed = lines.slice(0, 4000);
+  assert.deepEqual(compareContents(enc(reversed.join("\n")), enc([...reversed].reverse().join("\n"))), approximate);
 });
 
 // ---------------------------------------------------------------------------

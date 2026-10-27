@@ -6,11 +6,11 @@ import { ToolError } from "./errors.ts";
 import { ok,toSafeToolError } from "./result.ts";
 
 test("oversized MCP results remain byte-bounded, flagged and valid UTF-8", () => {
-  for (const text of ["x".repeat(60_100), "é".repeat(60_000)]) {
+  for (const text of ["x".repeat(60_100), "😀".repeat(40_000)]) {
     const r = ok({ text });
+    assert.ok(!r.content[0].text.includes("�"));
     assert.ok(Buffer.byteLength(r.content[0].text, "utf8") <= 60_000);
     assert.equal(r.structuredContent.truncated, true);
-    assert.ok(!r.content[0].text.includes("�"));
     assert.ok(r.content[0].text.startsWith('{"text":"' + text.slice(0, 20)));
   }
 });

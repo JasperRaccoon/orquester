@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { writeFileAtomic } from "../../agent-hooks.ts";
 import { claudeRefreshLockPaths, grantFromCredentials, nodeCredentialFiles } from "./credentials.ts";
-import { jwt } from "./testing.ts";
+import { claudeCreds, codexAuth, grokAuth, jwt, NOW } from "./testing.ts";
+
+test("grants are built field by field: no refresh token, id token or other secret survives", () => {
+  const claude = grantFromCredentials("claude", claudeCreds("a", NOW));
+  const codex = grantFromCredentials("codex", codexAuth(1_900_000_000));
+  const grok = grantFromCredentials("grok", grokAuth("g", NOW));
+  assert.equal(claude?.accessToken, "a");
+  assert.equal(codex?.expiresAt, 1_900_000_000_000);
+  assert.equal(grok?.expiresAt, NOW);
+  for (const grant of [claude, codex, grok]) assert.doesNotMatch(JSON.stringify(grant), /SECRET/);
+});
 
 test("unusable files give no grant", () => {
   assert.equal(grantFromCredentials("claude", "not json"), null);
@@ -35,9 +45,12 @@ test("nodeCredentialFiles: missing files read as null, lock ages, and the watch 
   const path = join(home, "auth.json");
   assert.equal(await files.read(path), null);
   assert.equal(await files.ageOfNewest(claudeRefreshLockPaths(home)), null);
-  await mkdir(join(home, ".oauth_refresh.lock"));
-  const age = await files.ageOfNewest(claudeRefreshLockPaths(home));
-  assert.ok(age !== null && age < 60_000);
+  const lock = join(home, ".oauth_refresh.lock");
+  await mkdir(lock);
+  const modified = new Date("2026-10-20T00:00:00Z");
+  await utimes(lock, modified, modified);
+  t.mock.timers.enable({ apis: ["Date"], now: modified.getTime() + 1_000 });
+  assert.equal(await files.ageOfNewest(claudeRefreshLockPaths(home)), 1_000);
 
   await writeFile(path, "one");
   const changed = new Promise<void>((resolve) => {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SECRET_BLOBS_DIR_NAME, SECRET_VAULT_INDEX_FILE } from "./secret-files.ts";
+import { SECRET_BLOBS_DIR_NAME } from "./secret-files.ts";
 import { readAccountPolicy, type AccountPolicy } from "./workflows.ts";
 
 export const ORQUESTER_DIR_NAME = ".orquester";
@@ -413,11 +413,6 @@ export function workflowSecretsPath(baseDir: string): string {
 /** The Secret files vaults (spec 2026-10-19 §3): the index and the content blobs; mode 0700. */
 export function secretFilesDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "secret-files");
-}
-
-/** The vault index; 0600. */
-export function secretVaultIndexPath(baseDir: string): string {
-  return joinPath(secretFilesDir(baseDir), SECRET_VAULT_INDEX_FILE);
 }
 
 /** Secret file contents, each named by its sha256; files 0600. */
@@ -2729,12 +2724,6 @@ export const savedPromptCreatedBySchema = z
     title: z.string().optional()
   })
   .passthrough();
-export type SavedPromptCreatedByRecord = z.infer<typeof savedPromptCreatedBySchema>;
-
-/** Whether a stored `createdBy` marks an agent-created prompt (anything else — absent, another kind — is the user's). */
-export function isAgentCreatedPrompt(createdBy: SavedPromptCreatedByRecord | undefined): boolean {
-  return createdBy?.kind === "agent";
-}
 
 /**
  * One stored prompt. Deliberately checks SHAPE, never the editor's limits

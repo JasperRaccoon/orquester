@@ -41,7 +41,7 @@ test("a new whiteboard is an empty Excalidraw scene", () => {
 
 test("only an Excalidraw scene opens as one", () => {
   assert.equal(isWhiteboardScene('{"type":"excalidraw","elements":[{"id":"a"}]}'), true);
-  assert.equal(isWhiteboardScene('{"type":"excalidrawlib","libraryItems":[]}'), false);
+  assert.equal(isWhiteboardScene('{"type":"excalidrawlib","elements":[],"libraryItems":[]}'), false);
   assert.equal(isWhiteboardScene('{"type":"excalidraw"}'), false);
   assert.equal(isWhiteboardScene("[]"), false);
   assert.equal(isWhiteboardScene("null"), false);

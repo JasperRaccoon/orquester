@@ -162,7 +162,7 @@ test("the cap counts UTF-8 bytes, not UTF-16 code units", () => {
   // R5 #16: `value.length` let a CJK string reach ~3x the stated cap, and an
   // emoji string ~2x (a surrogate pair is 2 units but 4 bytes).
   for (const unit of ["世", "🙂"]) {
-    const huge = unit.repeat(16_384);
+    const huge = `a${unit.repeat(16_384)}`; // shift the byte boundary into an emoji pair
     const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
     const detail = slim.detail as string;
     assert.ok(

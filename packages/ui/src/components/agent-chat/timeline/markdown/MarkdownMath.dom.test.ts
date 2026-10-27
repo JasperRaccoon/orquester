@@ -115,7 +115,7 @@ describe("lazy KaTeX", () => {
     setMathEngineLoader(loader.load);
     await show("Plain (parens), [brackets], `$code$` and a price of $5.");
     assert.equal(loader.calls, 0);
-    assert.equal(container.querySelector("[data-markdown-math]"), null);
+    assert.ok(container.querySelector("[data-markdown-math]") === null, "the element is absent");
   });
 
   it("is loaded once the first formula mounts, which shows its source meanwhile", async () => {
@@ -123,7 +123,7 @@ describe("lazy KaTeX", () => {
     setMathEngineLoader(loader.load);
     await show("Energy \\(E=mc^2\\) and $x$.");
     assert.equal(loader.calls, 1, "one load for every formula");
-    assert.equal(container.querySelector(".katex"), null);
+    assert.ok(container.querySelector(".katex") === null, "the element is absent");
     assert.ok(container.textContent?.includes("\\(E=mc^2\\)"), container.textContent ?? "");
     await loader.finish(katex);
     assert.equal(container.querySelectorAll(".katex").length, 2, container.innerHTML);
@@ -137,7 +137,7 @@ describe("lazy KaTeX", () => {
     setMathEngineLoader(loader.load);
     await show("$x$");
     await loader.fail();
-    assert.equal(container.querySelector(".katex"), null);
+    assert.ok(container.querySelector(".katex") === null, "the element is absent");
     assert.ok(container.textContent?.includes("\\(x\\)"));
     await act(async () => root.unmount());
     root = createRoot(container);

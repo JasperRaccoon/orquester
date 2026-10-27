@@ -100,14 +100,6 @@ export async function readPreviewTree(root: string): Promise<ProfilePreviewTree>
   return { files, complete: true };
 }
 
-/** A stable digest of a tree (paths, hashes, flags): what a pin compares. */
-export function treeDigest(tree: ProfilePreviewTree): string {
-  const hash = createHash("sha256");
-  for (const file of tree.files) hash.update(`${file.path}\0${file.sha256}\0${file.flag ?? ""}\n`);
-  hash.update(tree.complete ? "complete" : "partial");
-  return hash.digest("hex");
-}
-
 /**
  * The commit a git checkout is at, read from `.git` without running git (a worktree's `.git`
  * file, a symbolic `HEAD`, loose and packed refs); null when `dir` is not a checkout.

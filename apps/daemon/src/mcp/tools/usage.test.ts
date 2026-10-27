@@ -42,6 +42,8 @@ test("get_usage cost windows the rows to the last N UTC days and totals them", a
     { agent: "claude", model: "opus", day: "2026-09-21", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.5, costSource: "api_equivalent" },
     { agent: "codex", model: "gpt", day: "2026-09-01", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 9, costSource: "api_equivalent" }
   ] } });
+  api.on("GET", "/api/usage", { status: 200, body: { agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [] } });
   const r = (await run(api, { include: ["cost"], days: 7 })).cost;
   assert.equal(r.days, 7); assert.equal(r.bucket, "day"); assert.equal(r.totalUsd, 2); assert.deepEqual(r.byDay, [{ day: "2026-09-21", usd: 0.5 }, { day: "2026-09-22", usd: 1.5 }]);
   assert.equal((r.rows as unknown[]).length, 2); assert.equal(r.asOf, "2026-09-22T11:00:00.000Z");
@@ -155,7 +157,7 @@ test("get_usage cost counts Grok from Orquester's own chats (its reported cost),
   assert.equal(weekly.orquesterChatsOnly[0].agent, "grok");
   assert.match(weekly.orquesterChatsOnly[0].note, /Orquester chats only.*outside Orquester .*not counted/);
   // The source unreadable (an older daemon): Grok is not counted, and the result says so.
-  api.on("GET", "/api/usage/chat-threads", { status: 404, body: { code: "NOT_FOUND", message: "x" } });
+  api.on("GET", "/api/usage/chat-threads", { status: 404, body: { code: "NOT_FOUND", message: "x", agent: "grok", scope: "orquester-chats", rows: [grokRow("2026-10-14", 0.25)] } });
   const without = await cost({ include: ["cost"], bucket: "week", days: 14 });
   assert.ok(!without.rows.some((row: { agent: string }) => row.agent === "grok"));
   assert.equal(without.orquesterChatsOnly[0].unavailable, true);
@@ -181,6 +183,8 @@ test("get_usage session: sums the snapshot's turn tokens and prices Codex turns 
     turn({ turnId: "t2", tokenUsage: usage(0, 0) }),
     turn({ turnId: "t3", state: "running", completedAt: null })
   ]);
+  api.on("GET", "/api/usage", { status: 200, body: { agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [] } });
   const r = (await run(api, { sessionId: "s1" })).session;
   assert.deepEqual(r, {
     sessionId: "s1", agent: "codex", model: "gpt-5.6-sol", turnsCounted: 3, partial: false,

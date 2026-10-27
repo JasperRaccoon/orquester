@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import fs, { appendFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { get as httpGet } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -361,7 +362,7 @@ test("log windows are redacted and report their position", async () => {
   assert.equal((await h.app.inject({ url: workflowRoutes.nodeLog("nope", "c") })).statusCode, 404);
 });
 
-test("log follow streams as the file grows and redacts a secret split across writes", async () => {
+test("log follow streams as the file grows and redacts a secret split across writes", async (t) => {
   let h!: Harness;
   const engine = fakeEngine(() => h);
   h = await harness({ engine });
@@ -374,6 +375,27 @@ test("log follow streams as the file grows and redacts a secret split across wri
   await writeFile(logPath, "first line\n");
   engine.logPath = logPath;
   engine.live = true;
+  let partialRead!: () => void;
+  const readPartial = new Promise<void>((resolve) => { partialRead = resolve; });
+  const open = fs.open;
+  const observed = t.mock.method(fs, "open", async (...args: Parameters<typeof open>) => {
+    const handle = await open(...args);
+    if (args[0] !== logPath) return handle;
+    return new Proxy(handle, {
+      get(target, key) {
+        if (key === "read") return async (buffer: Buffer, offset: number, length: number, position: number) => {
+          const result = await target.read(buffer, offset, length, position);
+          const text = buffer.toString("utf8", offset, offset + result.bytesRead);
+          if (text.includes("token=hun") && !text.includes("token=hunter22")) partialRead();
+          return result;
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+  });
+  syncBuiltinESMExports();
+  t.after(() => { observed.mock.restore(); syncBuiltinESMExports(); });
 
   await h.app.listen({ host: "127.0.0.1", port: 0 });
   const { port } = h.app.server.address() as AddressInfo;
@@ -393,6 +415,7 @@ test("log follow streams as the file grows and redacts a secret split across wri
           // The writer continues while the client follows, splitting the secret across two writes.
           void (async () => {
             await appendFile(logPath, "token=hun");
+            await readPartial;
             await appendFile(logPath, "ter22 end\n");
             engine.live = false;
           })().catch(reject);
@@ -456,7 +479,8 @@ test("account-preview refuses a chain entry it cannot read (400, never 500)", as
   assert.equal(res.json().error.code, "INVALID_REQUEST");
 });
 
-test("the delete cascade keeps a run record whose temp project it could not delete; deletes it directly when it can", async () => {
+test("the delete cascade keeps a run record whose temp project it could not delete; deletes it directly when it can", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-28T12:00:00.000Z") });
   for (const withProjects of [false, true]) {
     const deleted: string[] = [];
     const h = await harness(withProjects ? { projects: { deleteProject: async (path) => void deleted.push(path) } } : {});
@@ -473,7 +497,7 @@ test("the delete cascade keeps a run record whose temp project it could not dele
       const kept = await h.runStore.load("kept");
       assert.ok(kept, "the only record naming the directory stays");
       assert.equal(kept.tempProject?.deleted, false);
-      assert.ok(Date.parse(kept.tempProject!.deleteAfter!) <= Date.now(), "due for the sweeper now");
+      assert.equal(kept.tempProject!.deleteAfter, "2026-09-28T12:00:00.000Z", "due for the sweeper now");
       assert.ok(h.runStore.workflowIds().includes(workflow.id), "the sweeper still finds it");
     }
   }

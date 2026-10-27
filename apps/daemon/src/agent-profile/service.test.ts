@@ -159,12 +159,22 @@ test("reads do not queue behind a held mutation", async () => {
   const h = harness();
   const gate = h.adapters.claude.hold("create");
   const pending = h.service.create("claude", mcpDraft("one"));
-  const snapshot = await h.service.snapshot("claude");
-  assert.deepEqual(snapshot.items, []);
-  const instructions = await h.service.readInstructions("claude");
-  assert.equal(instructions.text, "");
-  gate.resolve();
-  await pending;
+  let settled = false;
+  const reading = h.service.snapshot("claude").then((snapshot) => {
+    settled = true;
+    return snapshot;
+  });
+  try {
+    await drain();
+    assert.equal(settled, true, "the read settles while the mutation is still held");
+    const snapshot = await reading;
+    assert.deepEqual(snapshot.items, []);
+    const instructions = await h.service.readInstructions("claude");
+    assert.equal(instructions.text, "");
+  } finally {
+    gate.resolve();
+    await pending;
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -600,6 +610,7 @@ test("watching: a watch that throws while arming leaves the agent unarmed (retri
   assert.deepEqual(live(fake.watches), []);
   await h.service.snapshot("claude");
   await drain();
+  assert.deepEqual(live(fake.watches), ["/real/fake/claude/config"], "a read retries the failed arm");
   h.adapters.claude.items = [fakeItem("mcp", "recovered")];
   const read = h.adapters.claude.nextSnapshot();
   fake.watches.find((entry) => !entry.closed)!.change();

@@ -155,6 +155,28 @@ test("pair-checks.json: unreadable records and unknown keys are kept for the rew
   assert.equal(newer.checks.length, 1);
 });
 
+test("pair-checks.json: a check's input version reads when valid, an older record has none, a bad one costs only the field", () => {
+  const base = { a: "ke_a", b: "ke_b", hashA: "h1", hashB: "h2", verdict: "consistent", note: "n", checkedAt: "t" };
+  const file = readKnowledgePairChecksFile({
+    version: 1,
+    checks: [base, { ...base, b: "ke_c", inputVersion: 2, future: true }, { ...base, b: "ke_d", inputVersion: "two" }, { ...base, b: "ke_e", inputVersion: 0 }]
+  });
+  assert.equal(file.rejected.length, 0, "every record stays readable");
+  assert.deepEqual(
+    file.checks.map((c) => [c.b, c.inputVersion]),
+    [
+      ["ke_b", undefined],
+      ["ke_c", 2],
+      ["ke_d", undefined],
+      ["ke_e", undefined]
+    ]
+  );
+  assert.equal("inputVersion" in file.checks[0]!, false, "an older record is not given one");
+  const written = JSON.parse(serializeKnowledgePairChecksFile(file)) as { checks: Record<string, unknown>[] };
+  assert.deepEqual(written.checks[0], base, "an older record is written as it was");
+  assert.deepEqual(written.checks[1], { ...base, b: "ke_c", inputVersion: 2, future: true }, "unknown fields kept");
+});
+
 test("pair-checks.json: round task attempts read tolerantly, unknown fields and unreadable records kept for the rewrite", () => {
   const attempt = { key: "pair ke_a ke_b h1 h2", step: "pair-check", label: "pair-check ke_a ke_b", failures: 2, lastAt: "t", gaveUpAt: null, model: "x" };
   const given = { key: "abc", step: "cluster-name", failures: 3, lastAt: "t", gaveUpAt: "t2" };

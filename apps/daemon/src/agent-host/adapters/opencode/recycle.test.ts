@@ -474,13 +474,13 @@ test("a recycle never stops the server under a history read; it goes once the re
     await h.waitFor("session.state.changed");
     const gate = deferred<void>();
     h.fake.messagesGate = gate.promise;
-    const reading = h.adapter.readThread(HOST_THREAD_ID);
+    const reading = Promise.allSettled([h.adapter.readThread(HOST_THREAD_ID)]);
     await h.fake.messagesRequested.promise;
 
     assert.deepEqual(await h.recycleIdleServers(), { recycled: 0, deferred: 1 });
     assert.equal(gone(h.servers[0]!), false, "the read's server stays up");
     gate.resolve();
-    await reading;
+    assert.equal((await reading)[0]!.status, "fulfilled");
     await h.waitForExit(h.servers[0]!);
     assert.equal(gone(h.servers[0]!), true, "recycled once the read ended");
     assert.equal(h.events.some((event) => event.type === "session.exited"), false);

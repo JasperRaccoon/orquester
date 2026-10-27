@@ -197,13 +197,15 @@ describe("on-demand agent rows — the store", () => {
     const host = fakeHost();
     const { store, state } = open(host);
     await settle();
+    host.open();
+    host.drop();
     const releaseA1 = state().actions.wantAgentRows!("a1");
     const releaseA3 = state().actions.wantAgentRows!("a3");
     await settle();
     assert.deepEqual(host.posts, [], "nothing before the stream is live");
     host.open();
     await settle();
-    assert.deepEqual(host.posts, [{ streamId: "stream-1", agentIds: ["a1", "a3"] }], "one request for both");
+    assert.deepEqual(host.posts, [{ streamId: "stream-2", agentIds: ["a1", "a3"] }], "one request for both");
     assert.deepEqual(state().slice.omittedAgentIds, ["a2", "a4", "a6", "n1"]);
     const own = (agentId: string) => state().slice.entries.filter((item) => item.agentId === agentId);
     assert.deepEqual(own("a1"), host.fold.items.filter((item) => item.agentId === "a1"));

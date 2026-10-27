@@ -745,7 +745,7 @@ test("processes() lists the whole host, marks our tree managed and tags the daem
     assert.ok(self?.state && self.state !== "zombie");
     assert.ok((self?.threads ?? 0) >= 1);
     assert.ok(self?.user && self.user.length > 0);
-    assert.ok(self?.startedAt && Math.abs(self.startedAt - (Date.now() - process.uptime() * 1000)) < 5_000, "startedAt is when this process began");
+    assert.ok(self?.startedAt && Math.abs(self.startedAt - performance.timeOrigin) < 5_000, "startedAt is when this process began");
 
     assert.equal(self?.stoppable, false, "the daemon is never a target");
     const parent = processes.find((row) => row.pid === process.ppid);
@@ -778,7 +778,7 @@ test("processDetails() resolves our own exe and cwd, refuses a bad pid and repor
   assert.equal(self?.exe, process.execPath);
   assert.equal(self?.cwd, process.cwd());
   assert.ok((self?.openFiles ?? 0) >= 3, "stdin, stdout and stderr at least");
-  assert.ok(self?.startedAt && Math.abs(self.startedAt - (Date.now() - process.uptime() * 1000)) < 5_000);
+  assert.ok(self?.startedAt && Math.abs(self.startedAt - performance.timeOrigin) < 5_000);
 
   assert.equal(await status.processDetails(0), null);
   assert.equal(await status.processDetails(Number.NaN), null);

@@ -35,4 +35,11 @@ test("rejects a symlinked home that escapes the accounts dir", async () => {
   await mkdir(join(root, "claude", "id4"), { recursive: true });
   await symlink(outside, link);
   await assert.rejects(() => assertOwnedAccountHome(root, "claude", "id4", link), AgentAccountError);
+  // Realpath containment alone cannot refuse an alias of the valid owned home.
+  await rm(link);
+  await mkdir(link);
+  await writeFile(join(link, ACCOUNT_MARKER), "id4");
+  const alias = join(outside, "owned-home");
+  await symlink(link, alias);
+  await assert.rejects(() => assertOwnedAccountHome(root, "claude", "id4", alias), AgentAccountError);
 });

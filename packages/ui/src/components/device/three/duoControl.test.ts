@@ -28,6 +28,7 @@ it("pinches only a hit device, accumulates independently of native readback, cla
   pinch.move(-3);
   assert.deepEqual(lastArgs(change), [0]);
   pinch.move(NaN);
+  assert.ok(change.mock.calls.every(({ arguments: [angle] }) => angle === null || Number.isFinite(angle)), "non-finite pinch input must not reach native angle control");
   pinch.end();
   assert.deepEqual(lastArgs(change), [null]);
   const count = change.mock.callCount();

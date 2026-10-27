@@ -10,6 +10,7 @@
  */
 
 import { rmSync } from "node:fs";
+import { EventEmitter, on } from "node:events";
 
 import type {
   AgentAdapterId,
@@ -59,28 +60,38 @@ function noSnapshots(): ProviderSnapshotRegistry {
  * before it pulls again, so a test waits on what the host has DONE, not on a
  * sleep.
  */
-function trackHandled(adapter: AgentAdapter): { adapter: AgentAdapter; handled: RuntimeEvent[] } {
+function trackHandled(adapter: AgentAdapter) {
   const handled: RuntimeEvent[] = [];
+  const receipts = new EventEmitter();
   const source = adapter.events;
   const events: AsyncIterable<RuntimeEvent> = {
     async *[Symbol.asyncIterator]() {
       for await (const event of source) {
         yield event;
         handled.push(event);
+        receipts.emit("handled", event);
       }
     }
   };
-  return { adapter: { ...adapter, events }, handled };
+  return {
+    adapter: { ...adapter, events },
+    waitForHandled: async (match: (event: RuntimeEvent) => boolean): Promise<void> => {
+      if (handled.some(match)) return;
+      for await (const [event] of on(receipts, "handled")) {
+        if (match(event as RuntimeEvent)) return;
+      }
+    }
+  };
 }
 
 interface OrchestratedCodex {
   orchestrator: Orchestrator;
   /** The one thread's log, as the store holds it. */
   log: () => DomainEvent[];
-  /** Every runtime event the host has finished handling, in order. */
-  handled: RuntimeEvent[];
   /** Every frame the mock peer received, in the order it read them. */
   received: () => MockReceived[];
+  waitForHandled(match: (event: RuntimeEvent) => boolean): Promise<void>;
+  providerBarrier(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -146,8 +157,9 @@ export async function orchestratedCodex(
   return {
     orchestrator: running,
     log: () => store.logs.get("thread-1") ?? [],
-    handled: tracked.handled,
     received: () => server.received(),
+    waitForHandled: tracked.waitForHandled,
+    providerBarrier: async () => { await tracked.adapter.readThread("thread-1"); },
     stop
   };
 }

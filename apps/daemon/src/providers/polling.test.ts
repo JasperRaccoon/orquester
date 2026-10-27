@@ -141,7 +141,8 @@ test("github: releases map drafts, prereleases and a nameless release", async ()
   ]);
 });
 
-test("github: a spent rate limit is a 429 rate_limited error with the reset", async () => {
+test("github: a spent rate limit is a 429 rate_limited error with the reset", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-28T10:00:00Z") });
   const reset = Math.floor(Date.now() / 1000) + 120;
   stubFetch(() =>
     json('{"message":"API rate limit exceeded"}', 403, {
@@ -156,7 +157,7 @@ test("github: a spent rate limit is a 429 rate_limited error with the reset", as
       assert.equal(error.kind, "rate_limited");
       assert.equal(error.status, 429);
       assert.equal(error.httpStatus, 403);
-      assert.ok(error.retryAfterMs !== undefined && error.retryAfterMs > 100_000);
+      assert.equal(error.retryAfterMs, 120_000);
       return true;
     }
   );
@@ -363,7 +364,8 @@ test("bitbucket server: needs an account; personal projects keep the ~; a 403 is
 
 const BB = { token: "t", email: "e@example.invalid" };
 
-test("bitbucket cloud: a 429 is not retried; it pauses the account, and later requests fail fast", async () => {
+test("bitbucket cloud: a 429 is not retried; it pauses the account, and later requests fail fast", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-28T10:00:00Z") });
   const seen = stubFetch(() => json('{"type":"error"}', 429, { "retry-after": "30" }));
   await assert.rejects(bitbucketCloudProvider.listPullRequests(BB, { owner: "a", repo: "b" }), (error: unknown) => {
     assert.ok(error instanceof GitRemoteError);
@@ -376,7 +378,7 @@ test("bitbucket cloud: a 429 is not retried; it pauses the account, and later re
   // Another repo's poll on the same account: refused at once, with what is left of the pause.
   await assert.rejects(bitbucketCloudProvider.listPullRequests(BB, { owner: "a", repo: "c" }), (error: unknown) => {
     assert.ok(error instanceof GitRemoteError && error.kind === "rate_limited");
-    assert.ok(error.retryAfterMs !== undefined && error.retryAfterMs > 25_000 && error.retryAfterMs <= 30_000);
+    assert.equal(error.retryAfterMs, 30_000);
     return true;
   });
   // A user's request on the same account says how long to wait instead of adding a request.
@@ -417,7 +419,8 @@ test("bitbucket server: a 429 reads Retry-After and stops the rest of the poll's
   assert.equal(seen.length, 1, "the instance is paused for this account");
 });
 
-test("github: a spent quota pauses the account until its reset; other answers start no pause", async () => {
+test("github: a spent quota pauses the account until its reset; other answers start no pause", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-28T10:00:00Z") });
   const reset = Math.floor(Date.now() / 1000) + 120;
   const seen = stubFetch(() =>
     json('{"message":"API rate limit exceeded"}', 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) })
@@ -425,7 +428,7 @@ test("github: a spent quota pauses the account until its reset; other answers st
   await assert.rejects(githubProvider.listReleases({ token: "ghp_a" }, { owner: "o", repo: "r" }));
   await assert.rejects(
     githubProvider.listPullRequests({ token: "ghp_a" }, { owner: "o", repo: "other" }),
-    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited" && (error.retryAfterMs ?? 0) > 100_000
+    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited" && error.retryAfterMs === 120_000
   );
   assert.equal(seen.length, 1);
 

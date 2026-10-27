@@ -109,13 +109,13 @@ describe("file-tree refreshes", () => {
   it("opens the selected file, returns with Back and honors refreshed download size", async () => {
     entries = [{ ...file("first.pdf"), size: 30 * 1024 * 1024 }];
     await refresh();
-    assert.equal(back(), null);
+    assert.ok(back() === null, "the element is absent");
     await openPreview();
     assert.ok(back());
     await act(async () => button("Download")!.click());
     assert.deepEqual(readPaths, [`${ROOT}/first.pdf`]);
     await act(async () => back()!.click());
-    assert.equal(back(), null);
+    assert.ok(back() === null, "the element is absent");
     await openPreview();
     assert.ok(back(), "the same file can be opened again after Back");
     await act(async () => back()!.click());
@@ -125,7 +125,7 @@ describe("file-tree refreshes", () => {
     await refresh();
     await openPreview();
     assert.ok(back());
-    assert.equal(button("Download"), undefined, "an oversized file cannot use the buffered download");
+    assert.ok(button("Download") === undefined, "an oversized file cannot use the buffered download");
   });
 
   it("refreshes a file replaced by a directory and opens its listing", async () => {

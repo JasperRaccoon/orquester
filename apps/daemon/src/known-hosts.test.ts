@@ -38,8 +38,8 @@ test("parseKnownHostsDocument keeps only well-formed bitbucket lines, normalized
     "# Bitbucket host keys",
     `bitbucket.org ssh-ed25519 ${key}`,
     `ssh.bitbucket.org ssh-ed25519 ${key}`, // same key, other host → one entry
-    `evil.example.com ssh-ed25519 ${key}`, // foreign host → dropped
-    "bitbucket.org totally-not-a-key-type AAAAB3Nza",
+    `evil.example.com ssh-ed25519 ${key.slice(0, -1)}A`, // foreign host → dropped
+    `bitbucket.org totally-not-a-key-type ${key}`,
     "bitbucket.org ssh-rsa short",
     "<html>garbage</html>",
     ""

@@ -290,7 +290,7 @@ const keys = (value: unknown): string[] => (value !== null && typeof value === "
 const pluginFiles = (config: Record<string, unknown>): string[] =>
   (Array.isArray(config.plugin) ? config.plugin : []).map((spec) => String(Array.isArray(spec) ? spec[0] : spec));
 
-describe("OpenCode profile isolation (real CLI)", { skip, timeout: 4 * CLI_TIMEOUT_MS }, () => {
+describe("OpenCode profile isolation (real CLI)", { skip }, () => {
   it("a profile server loads only the profile's items and the repo's own; Global loads the user's", async () => {
     const root = await mkdtemp(join(TMP, "orq-opencode-live-"));
     roots.push(root);

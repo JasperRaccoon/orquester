@@ -143,7 +143,7 @@ describe("the new-project modal with a clone preset", () => {
   it("fixes the repo: titled after it, no mode tabs, URL or picker, the name empty and focused", async () => {
     await open(true, PRESET);
     assert.ok(document.body.textContent?.includes("New clone of JasperRaccoon/JasperEngine"));
-    assert.equal(buttonNamed("Empty"), undefined);
+    assert.equal((buttonNamed("Empty")) === undefined, true);
     assert.equal(document.querySelectorAll("input").length, 1);
     assert.equal(nameInput()?.value, "");
     assert.equal(document.activeElement, nameInput());
@@ -191,7 +191,7 @@ describe("the new-project modal with a clone preset", () => {
     assert.match(text(), /Repository not found/);
     await act(async () => buttonNamed("Clone in a terminal instead")!.click());
     assert.ok(text().includes(`git clone '${URL_}' .`), "straight to the typed clone's review");
-    assert.equal(buttonNamed("Clone in a terminal instead"), undefined);
+    assert.equal((buttonNamed("Clone in a terminal instead")) === undefined, true);
     await act(async () => mock.timers.tick(400));
     await act(async () => buttonNamed("Create & run")!.click());
     assert.deepEqual(typed, [
@@ -206,7 +206,7 @@ describe("the new-project modal with a clone preset", () => {
     await typeName("Multiplayer");
     await act(async () => buttonNamed("Clone")!.click());
     assert.match(text(), /Folder exists/);
-    assert.equal(buttonNamed("Clone in a terminal instead"), undefined);
+    assert.equal((buttonNamed("Clone in a terminal instead")) === undefined, true);
   });
 
   it("types any daemon-supplied URL form, the scp form without a user included", async () => {
@@ -230,7 +230,7 @@ describe("the new-project modal with a clone preset", () => {
       await typeName("Multiplayer");
       await act(async () => buttonNamed("Review")!.click());
       assert.match(text(), /cannot be typed into a terminal safely/);
-      assert.equal(buttonNamed("Create & run"), undefined, "no review");
+      assert.equal((buttonNamed("Create & run")) === undefined, true, "no review");
       assert.deepEqual(typed, []);
     });
   }
@@ -239,6 +239,6 @@ describe("the new-project modal with a clone preset", () => {
     await open(true, null);
     assert.ok(document.body.textContent?.includes("New project"));
     assert.equal(buttonNamed("Empty")?.getAttribute("aria-pressed"), "true");
-    assert.equal(nameInput(), null);
+    assert.equal((nameInput()) === null, true);
   });
 });

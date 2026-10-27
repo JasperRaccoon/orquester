@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,24 +73,28 @@ async function setup(options: FakeMacOptions = {}, settings: Partial<DevicesVpho
   return { host, mac, logs, dir };
 }
 
-async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error("timed out waiting");
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+function until(host: VphoneDeviceHost, check: () => boolean | Promise<boolean>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const inspect = () => {
+      void Promise.resolve().then(check).then((ready) => {
+        if (ready) { off(); resolve(); }
+      }, (error: unknown) => { off(); reject(error); });
+    };
+    const off = host.onChange(inspect);
+    inspect();
+  });
 }
 
 const cliCalls = (mac: FakeMacLink, from = 0) => mac.execs.slice(from).filter((exec) => exec.command === VPHONE_CLI_PATH).map((exec) => exec.args.join(" "));
 
 test("a ready research Mac retries guest health and boots an isolated lease VM", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let healthRefusals = 0;
+  const healthFailures = new EventEmitter();
   const health = VphoneGuestClient.prototype.health;
   // Observe actual HTTP failures; the real client and server still decide their results.
   t.mock.method(VphoneGuestClient.prototype, "health", async function (this: VphoneGuestClient, ...args: Parameters<VphoneGuestClient["health"]>) {
     try { return await health.apply(this, args); }
-    catch (error) { healthRefusals += 1; throw error; }
+    catch (error) { healthFailures.emit("refused"); throw error; }
   });
   const { host, mac, logs } = await setup({ vphoned: { unhealthyFirst: 2 } });
   assert.equal(host.state().status, "ready");
@@ -104,8 +109,11 @@ test("a ready research Mac retries guest health and boots an isolated lease VM",
   const progress: DeviceHostProgress[] = [];
   let bootedEarly = false;
   const pending = host.boot({ leaseId: "lease1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal, (step) => progress.push(step)).then((result) => { bootedEarly = true; return result; });
-  for (let refused = 1; refused <= 2; refused += 1) {
-    await until(() => healthRefusals >= refused);
+  let refused = once(healthFailures, "refused");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await Promise.race([refused, pending.then(() => assert.fail("a guest became ready before its health probe succeeded"))]);
+    await new Promise((resolve) => setImmediate(resolve)); // drain the failure into the retry timer
+    refused = once(healthFailures, "refused");
     assert.equal(bootedEarly, false, "an unhealthy guest is not a ready lease");
     t.mock.timers.tick(2_000);
   }
@@ -222,16 +230,17 @@ test("released while the Mac is offline, or a delete that failed: a tombstone (n
   assert.equal((await stat(record)).mode & 0o777, 0o600);
 
   // Back online: the next check tries; the delete fails while the machine is still there, so the tombstone stays.
+  const remembered = until(host, async () => logs.some((line) => line.includes("machine is busy")) && JSON.parse(await readFile(record, "utf8")).released === true);
   mac.setConnected(true);
   await host.refreshReadiness();
-  await until(() => logs.some((line) => line.includes("machine is busy")));
-  await until(async () => JSON.parse(await readFile(record, "utf8")).released === true);
+  await remembered;
   assert.deepEqual(JSON.parse(await readFile(record, "utf8")), { name: "orq-lease8", procId: "vphone-orq-lease8", released: true });
 
   // The next check deletes it, and the tombstone goes.
+  const deleted = until(host, async () => !(await stat(record).then(() => true, () => false)));
   deleteWorks = true;
   await host.refreshReadiness();
-  await until(async () => !(await stat(record).then(() => true, () => false)));
+  await deleted;
 });
 
 test("a failed clone is deleted and reports the CLI reason", async () => {

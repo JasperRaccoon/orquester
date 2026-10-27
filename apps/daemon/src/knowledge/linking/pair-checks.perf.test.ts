@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { KnowledgeConceptRef } from "@orquester/api";
+import { cpu, cpuFloor, workClock } from "../search/test-fakes.ts";
 import { FakeVectorIndex } from "../search/fake-vector-index.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import { pairCheckCandidates } from "./pair-checks.ts";
 
 // Pair-check candidates over ~3,000 linked entries at the real model's 384 dimensions: every pair
 // is compared once, but what is kept stays bounded (each entry's nearest few, the close pairs), and
-// the event loop keeps turning (no slice of work much longer than the 40 ms yield).
+// the event loop keeps turning when a deterministic clock says a work slice is due.
 
 const ENTRIES = 3_000;
 const DIMS = 384;
@@ -22,7 +23,7 @@ function prng(seed: number): () => number {
   };
 }
 
-test("pair-check candidates at 3,000 entries: bounded memory, and the event loop keeps turning", async () => {
+test("pair-check candidates at 3,000 entries: bounded memory, and the event loop keeps turning", async (t) => {
   const random = prng(11);
   const index = new FakeVectorIndex(); // good = 0.5
   const concepts = new Map<string, KnowledgeConceptRef[]>();
@@ -45,16 +46,21 @@ test("pair-check candidates at 3,000 entries: bounded memory, and the event loop
   }
   const view: KnowledgeLinkGraphView = { vectors: () => index, conceptsOf: (id) => concepts.get(id) ?? [], contradicting: () => [] };
   // Entry vectors are computed once by the index, before the measurement.
-  for (const id of ids) index.entryVector(id);
-
+  const rows = ids.map((id) => index.entryVector(id)!);
+  const sliceBudget = cpuFloor(() => {
+    let sum = 0;
+    for (const row of rows) for (let d = 0; d < DIMS; d += 1) sum += rows[0]![d]! * row[d]!;
+    return sum;
+  }) * 20;
   const baseline = process.memoryUsage().heapUsed;
   let peak = baseline;
+  workClock(t, 1_024);
   let maxGap = 0;
   let turns = 0;
-  let last = performance.now();
+  let last = cpu();
   let running = true;
   const tick = (): void => {
-    const now = performance.now();
+    const now = cpu();
     maxGap = Math.max(maxGap, now - last);
     last = now;
     turns += 1;
@@ -69,7 +75,7 @@ test("pair-check candidates at 3,000 entries: bounded memory, and the event loop
   assert.equal(candidates.length, 30);
   assert.ok(candidates.every((c) => c.reason === "negation"), "close pairs whose claims turn each other around come first");
   assert.ok(turns > 20, `the event loop turned ${turns} times`);
-  assert.ok(maxGap < 250, `the longest slice without a turn of the event loop was ${maxGap.toFixed(0)} ms`);
+  assert.ok(maxGap < sliceBudget, `longest slice ${maxGap.toFixed(1)} CPU ms exceeds ${sliceBudget.toFixed(1)} CPU ms (20 vector scans)`);
   // Every pair both ways (the old neighbour lists) would be 9 million objects, several hundred MB.
   const grown = (peak - baseline) / 2 ** 20;
   assert.ok(grown < 150, `the heap grew by ${grown.toFixed(0)} MB`);

@@ -96,12 +96,24 @@ const command = process.argv[2];
 if (command === "__serve") {
   const token = randomBytes(16).toString("hex");
   const server = createServer((req, res) => res.end(req.url === "/health" ? "ok" : "{}"));
-  server.listen(0, "127.0.0.1", () => writeFileSync(file, JSON.stringify({ pid: process.pid, httpPort: server.address().port, token }), { mode: 0o600 }));
+  server.listen(0, "127.0.0.1", () => {
+    writeFileSync(file, JSON.stringify({ pid: process.pid, httpPort: server.address().port, token }), { mode: 0o600 });
+    process.send("ready", () => process.disconnect());
+  });
 } else if (command === "devices") {
   if (!existsSync(file)) {
-    spawn(process.execPath, [fileURLToPath(import.meta.url), "__serve"], { detached: true, stdio: "ignore", env: process.env }).unref();
-    const end = Date.now() + 10000;
-    while (!existsSync(file) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve, reject) => {
+      const daemon = spawn(process.execPath, [fileURLToPath(import.meta.url), "__serve"], { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], env: process.env });
+      const exited = (code, signal) => reject(new Error("fake agent-device exited before readiness: " + (signal ?? code)));
+      daemon.once("error", reject);
+      daemon.once("exit", exited);
+      daemon.once("message", () => {
+        daemon.off("error", reject);
+        daemon.off("exit", exited);
+        resolve();
+      });
+      daemon.unref();
+    });
   }
   console.log("[]");
 } else if (command === "daemon" && process.argv[3] === "stop") {

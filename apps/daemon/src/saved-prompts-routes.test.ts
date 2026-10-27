@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 import type { SavedPrompt } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import type { InjectOptions } from "fastify";
-import { GitService } from "./git.ts";
 import { createServer } from "./index.js";
 import { SavedPromptsService } from "./saved-prompts.ts";
 import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
@@ -23,7 +20,6 @@ import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal } from "@orquester/api/age
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const quiet = { warn: () => {}, error: () => {} };
-const exec = promisify(execFile);
 
 async function harness(options: { unreadableLibrary?: boolean; workflows?: unknown[] } = {}): Promise<{
   root: string;
@@ -31,6 +27,7 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
   /** The live paths the routes AND the service read — reassign them as a config change does. */
   resolved: { workspacesDir: string; fsRoot: string };
   savedPrompts: SavedPromptsService;
+  origins: Map<string, string>;
   /** Every to-do cascade the delete routes ran, as `<method> <path>`. */
   todoCascades: string[];
   inject: ReturnType<typeof createServer>["inject"];
@@ -55,12 +52,19 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
     workspacesMetaFile: join(daemonDir, "workspaces.json"),
     fsRoot: workspacesDir
   };
+  const origins = new Map<string, string>();
+  const git = {
+    topLevel: async (path: string) => origins.has(path) ? path : null,
+    remoteUrl: async (path: string) => origins.get(path) ?? null,
+    workingDiff: async () => ({ isRepo: false, diff: "", untracked: [], truncated: false })
+  };
   // Wired as startDaemon wires it: the service reads the live paths at every use.
   const savedPrompts = new SavedPromptsService({
     file,
     workspacesDir: () => resolved.workspacesDir,
     fsRoot: () => resolved.fsRoot,
-    logger: quiet
+    logger: quiet,
+    git
   });
   await savedPrompts.load();
   const todoCascades: string[] = [];
@@ -68,7 +72,7 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
   // The delete routes' other cascades are stubbed: only the saved-prompt one is under test.
   const services = {
     savedPrompts,
-    git: new GitService(),
+    git,
     sessions: { closeByProjectPrefix: () => {} },
     browsers: { closeForProject: async () => {} },
     desktops: { closeForProject: async () => {} },
@@ -101,6 +105,7 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
     workspacesDir,
     resolved,
     savedPrompts,
+    origins,
     todoCascades,
     inject: app.inject.bind(app),
     close: async () => {
@@ -217,8 +222,7 @@ test("repository prompts list and stay editable from another checkout after dele
     [clone, "https://github.com/acme/site.git"]
   ]) {
     await mkdir(path, { recursive: true });
-    await exec("git", ["init", "-q", path]);
-    await exec("git", ["-C", path, "remote", "add", "origin", remote]);
+    h.origins.set(path, remote);
   }
   const created = await h.inject({
     method: "POST", url: "/api/saved-prompts", payload: { title: "Shared", body: "B", projectPath: site }
@@ -422,8 +426,7 @@ test("GET /api/saved-prompts/:id answers one prompt whatever its scope (a reposi
   t.after(() => h.close());
   const site = join(h.workspacesDir, "acme", "site");
   await mkdir(site, { recursive: true });
-  await exec("git", ["init", "-q", site]);
-  await exec("git", ["-C", site, "remote", "add", "origin", "git@github.com:acme/site.git"]);
+  h.origins.set(site, "git@github.com:acme/site.git");
   const created = await h.inject({ method: "POST", url: "/api/saved-prompts", payload: { title: "Shared", body: "B", projectPath: site } });
   assert.equal(created.statusCode, 201, created.body);
   const prompt = created.json() as SavedPrompt;

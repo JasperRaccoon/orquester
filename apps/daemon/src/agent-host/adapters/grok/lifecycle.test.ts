@@ -11,7 +11,7 @@
  * Nothing here sleeps: every wait is on an emitted event.
  */
 
-import test, { after } from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -70,8 +70,8 @@ interface Rig {
 
 /** Always dispose rigs, including when a behavioral assertion fails. */
 const openRigs: Rig[] = [];
-after(async () => {
-  for (const entry of openRigs) {
+afterEach(async () => {
+  for (const entry of openRigs.splice(0).reverse()) {
     if (!entry.disposed) await entry.dispose();
   }
 });
@@ -261,16 +261,14 @@ const MOCK_SESSION_CURSOR = { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a
 test("a missing binary is refused with a message, not a hang", async () => {
   const r = await rig({ bin: null });
   await assert.rejects(async () => await start(r), /not installed or not on PATH/);
-  await r.dispose();
 });
 
 test("a binary that cannot be spawned settles rather than hanging", async () => {
   const r = await rig({ bin: join(dirname(MOCK), "definitely-not-here") });
   await assert.rejects(async () => await start(r), /ENOENT/);
-  await r.dispose();
 });
 
-test("a handshake that never answers times out and kills the child", { timeout: 30_000 }, async (t) => {
+test("a handshake that never answers times out and kills the child", async (t) => {
   let initializeSent!: () => void;
   const sent = new Promise<void>((resolve) => { initializeSent = resolve; });
   const rawFrames: unknown[] = [];
@@ -422,7 +420,6 @@ test("the happy path: session, turn, usage, and a settled turn", async () => {
     .join("");
   assert.equal(text, "echo:hello");
 
-  await r.dispose();
 });
 
 test("the session's own catalog: its live commands and the skills `grok inspect` lists under its env (Agent Profiles composer)", async () => {
@@ -497,7 +494,6 @@ test("an approval opens a request, and the decision reaches the agent", async ()
   assert.deepEqual(resolutionsOf(r.events, opened.requestId).map((event) => event.payload), [
     { requestType: "file_change_approval", decision: "accept" }
   ]);
-  await r.dispose();
 });
 
 test("a declined tool settles as cancelled, not as an interrupt", async () => {
@@ -515,7 +511,6 @@ test("a declined tool settles as cancelled, not as an interrupt", async () => {
   // `cancellationCategory` is what distinguishes a decline from a Stop.
   assert.equal(completed.payload.stopReason, "cancelled");
   assert.equal(completed.payload.state, "cancelled");
-  await r.dispose();
 });
 
 test("a redirecting decline is Grok's own reject_once: the card resolves declined, the steer carries the message", async () => {
@@ -536,34 +531,31 @@ test("a redirecting decline is Grok's own reject_once: the card resolves decline
   assert.deepEqual(resolutionsOf(r.events, opened.requestId).map((event) => event.payload), [
     { requestType: "file_change_approval", decision: "decline" }
   ]);
-  await r.dispose();
 });
 
 test("full-access answers the approval itself with no card at all", async () => {
   const r = await rig({ scenario: "permission" });
   await start(r, { runtimeMode: "full-access" });
   void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  const completed = await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = await r.waitFor((event) => event.type === "turn.completed" || event.type === "request.opened", "turn end or unexpected approval");
   assert.equal((completed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
   assert.equal(
     r.events.some((event) => event.type === "request.opened"),
     false
   );
-  await r.dispose();
 });
 
 test("auto-accept-edits answers an edit itself, because the CLI flag is a no-op", async () => {
   const r = await rig({ scenario: "permission" });
   await start(r, { runtimeMode: "auto-accept-edits" });
   void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  const completed = await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = await r.waitFor((event) => event.type === "turn.completed" || event.type === "request.opened", "turn end or unexpected approval");
   assert.equal((completed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
   assert.equal(
     r.events.some((event) => event.type === "request.opened"),
     false,
     "`--permission-mode acceptEdits` still asks; the adapter is what honours the mode"
   );
-  await r.dispose();
 });
 
 test("interrupt settles the pending approval BEFORE the cancel, then settles the turn", async () => {
@@ -586,7 +578,6 @@ test("interrupt settles the pending approval BEFORE the cancel, then settles the
 
   const completed = r.events[completedAt] as Extract<RuntimeEvent, { type: "turn.completed" }>;
   assert.equal(completed.payload.state, "interrupted");
-  await r.dispose();
 });
 
 test("interrupt is turn-scoped: a Stop naming another turn is a no-op", async () => {
@@ -596,6 +587,7 @@ test("interrupt is turn-scoped: a Stop naming another turn is a no-op", async ()
   await r.waitFor((event) => event.type === "request.opened", "request.opened");
 
   await r.adapter.interruptTurn("t1", "some-other-turn");
+  await r.drain();
   assert.equal(
     r.events.some((event) => event.type === "turn.completed"),
     false,
@@ -603,7 +595,6 @@ test("interrupt is turn-scoped: a Stop naming another turn is a no-op", async ()
   );
   await r.adapter.interruptTurn("t1");
   await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
-  await r.dispose();
 });
 
 test("a child that exits mid-turn settles the turn, closes items and then exits", async () => {
@@ -631,7 +622,6 @@ test("a child that exits mid-turn settles the turn, closes items and then exits"
   await r.drain();
   assert.equal(r.adapter.hasSession("t1"), false);
   assert.deepEqual(r.adapter.listSessions(), []);
-  await r.dispose();
 });
 
 test("a cursor with the wrong shape means 'no resume', never an error", async () => {
@@ -642,7 +632,6 @@ test("a cursor with the wrong shape means 'no resume', never an error", async ()
     "session.started"
   )) as Extract<RuntimeEvent, { type: "session.started" }>;
   assert.equal(started.payload.resume, undefined);
-  await r.dispose();
 });
 
 test("compaction is a /compact turn, and is refused while a turn runs", async () => {
@@ -651,7 +640,6 @@ test("compaction is a /compact turn, and is refused while a turn runs", async ()
   void r.adapter.sendTurn({ threadId: "t1", input: "long", attachments: [], interactionMode: "default" });
   await r.waitFor((event) => event.type === "turn.started", "turn.started");
   await assert.rejects(async () => await r.adapter.compact("t1"), /cannot compact while a turn is running/);
-  await r.dispose();
 });
 
 test("rollback validates first and then always refuses", async () => {
@@ -662,7 +650,6 @@ test("rollback validates first and then always refuses", async () => {
     async () => await r.adapter.rollbackThread("t1", 2),
     /do not support provider-side conversation rollback/
   );
-  await r.dispose();
 });
 
 test("stopSession settles everything and emits a graceful exit", async () => {
@@ -684,7 +671,6 @@ test("stopSession settles everything and emits a graceful exit", async () => {
   assert.equal(r.adapter.hasSession("t1"), false);
   await r.drain();
   assert.equal(r.events.slice(r.events.indexOf(exited)).some((event) => event.type === "runtime.error"), false);
-  await r.dispose();
 });
 
 test("attachments reach the agent as PATHS, because promptCapabilities.image is false", async () => {
@@ -709,7 +695,6 @@ test("attachments reach the agent as PATHS, because promptCapabilities.image is 
     .join("");
   assert.ok(echoed.includes(r.cwd), "the resolved attachment path reaches the provider");
   assert.match(echoed, /shot\.png/);
-  await r.dispose();
 });
 
 test("the input guard bounds the typed text, never the Attached files block after it", async () => {
@@ -737,7 +722,6 @@ test("the input guard bounds the typed text, never the Attached files block afte
     "turn.completed"
   )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
   assert.equal(completed.payload.state, "completed");
-  await r.dispose();
 });
 
 test("readThread returns the turns the adapter actually observed", async () => {
@@ -759,7 +743,6 @@ test("readThread returns the turns the adapter actually observed", async () => {
   assert.equal(item["stopReason"], "end_turn");
   // The provider's OWN prompt id, resolved from `_x.ai/queue/changed`.
   assert.equal(item["providerPromptId"], "prompt-1");
-  await r.dispose();
 });
 
 test("stopAll stops sessions without ending the event stream", async () => {
@@ -775,7 +758,6 @@ test("stopAll stops sessions without ending the event stream", async () => {
     "thread.started for t2"
   );
   assert.equal(started.threadId, "t2");
-  await r.dispose();
 });
 
 test("a session starts from the host's minimal cursor, not just our own", async () => {
@@ -797,7 +779,6 @@ test("a session starts from the host's minimal cursor, not just our own", async 
     r.events.some((event) => event.type === "content.delta" && event.payload.delta === "earlier"),
     false
   );
-  await r.dispose();
 });
 
 test("a steer closes the call its cancel cut, on the turn it steers — the CLI never answers it", async () => {
@@ -898,7 +879,6 @@ test("a steer closes the cancelled prompt's bubble: the steered reply is a new a
     ["one", "DONE"],
     "the steered reply is its own message, after the cancelled prompt's"
   );
-  await r.dispose();
 });
 
 test("a chunk the cancelled prompt sends after the steer stays in ITS bubble, never the steered reply's", async () => {
@@ -940,7 +920,6 @@ test("a chunk the cancelled prompt sends after the steer stays in ITS bubble, ne
     ["one two", "DONE"],
     "the tail joins the cancelled prompt's bubble; the steered reply is its own"
   );
-  await r.dispose();
 });
 
 test("Stop with NO active turn is session-scoped: live background work is closed", async () => {
@@ -966,15 +945,15 @@ test("Stop with NO active turn is session-scoped: live background work is closed
 
   await r.adapter.interruptTurn("t1");
 
-  const stopped = (await r.waitFor(
-    (event) => event.type === "task.completed",
-    "task.completed"
-  )) as Extract<RuntimeEvent, { type: "task.completed" }>;
+  await r.drain();
+  const stopped = r.events.find((event) => event.type === "task.completed") as
+    | Extract<RuntimeEvent, { type: "task.completed" }>
+    | undefined;
+  assert.ok(stopped, "Stop closes the session's background work");
   assert.equal(stopped.payload.status, "stopped");
   assert.equal(stopped.payload.taskId, "task-bg-1");
   // The session itself stays up: the user pressed Stop, not Close.
   assert.equal(r.adapter.hasSession("t1"), true);
-  await r.dispose();
 });
 
 /** `[type, id]` of the item and task ends, in emission order. */
@@ -1002,7 +981,6 @@ test("Stop with no turn closes the open call BEFORE the background task", async 
   await r.waitFor((event) => event.type === "task.completed", "task.completed");
   await r.drain();
   assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
-  await r.dispose();
 });
 
 test("stopSession closes the open call BEFORE the background task", async () => {
@@ -1015,7 +993,6 @@ test("stopSession closes the open call BEFORE the background task", async () => 
   await r.waitFor((event) => event.type === "session.exited", "session.exited");
   await r.drain();
   assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
-  await r.dispose();
 });
 
 test("an exit closes the open call BEFORE the background task, both before session.exited", async () => {
@@ -1029,7 +1006,6 @@ test("an exit closes the open call BEFORE the background task, both before sessi
   const after = r.events.slice(before);
   assert.deepEqual(ends(after), OPEN_WORK_ENDS);
   assert.equal(after.at(-1)?.type, "session.exited");
-  await r.dispose();
 });
 
 test("the CLI's own prompt after a turn is a turn of its own; a message during it steers it", async () => {
@@ -1061,7 +1037,6 @@ test("the CLI's own prompt after a turn is a turn of its own; a message during i
     .join("");
   assert.equal(text, "The subagent finishedsteered");
   assert.equal(r.events.filter((event) => event.type === "turn.completed").length, 2, "one end per turn");
-  await r.dispose();
 });
 
 test("a Stop while the CLI's own prompt waits for its turn opens no turn for it — what it streamed joins ours", async () => {
@@ -1080,7 +1055,6 @@ test("a Stop while the CLI's own prompt waits for its turn opens no turn for it 
   const hooks = r.events.filter((event) => event.type === "hook.started");
   assert.equal(hooks.length, 1, "what that prompt streamed before the cancel is kept");
   assert.equal(hooks[0]!.turnId, turnId, "on the turn the Stop settled");
-  await r.dispose();
 });
 
 /** `turn.started` / `turn.completed` in order, each marked ours or another turn's. */
@@ -1137,7 +1111,6 @@ test("a waiting wake that outgrows the hold loses nothing: all 300 chunks join t
     "a bubble per prompt: the wake's chunks name its prompt, so the first closes ours and opens its own"
   );
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"], "no turn for a wake that ended merged");
-  await r.dispose();
 });
 
 test("a waiting wake within the hold gets its own turn with every chunk", async () => {
@@ -1157,7 +1130,6 @@ test("a waiting wake within the hold gets its own turn with every chunk", async 
     "turn.started:other",
     "turn.completed:other"
   ]);
-  await r.dispose();
 });
 
 test("a Stop after the waiting wake finished keeps its reply, on a turn of its own", async () => {
@@ -1174,7 +1146,6 @@ test("a Stop after the waiting wake finished keeps its reply, on a turn of its o
   assert.equal(turnText(r.events, turnId), "ours;");
   assert.equal(turnText(r.events, woken.turnId), wakeChunks(50), "the cancel ended nothing: the wake had finished");
   assert.equal(woken.payload.state, "completed");
-  await r.dispose();
 });
 
 test("a steer after the waiting wake finished keeps its reply: it joins the turn the steer continues, before ours", async () => {
@@ -1193,7 +1164,6 @@ test("a steer after the waiting wake finished keeps its reply: it joins the turn
     "a bubble per prompt: ours, the wake's that joined the turn, the steered prompt's"
   );
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
-  await r.dispose();
 });
 
 test("a steer while the CLI has its own prompt queued keeps that prompt's reply, in the order the CLI ran it", async () => {
@@ -1211,7 +1181,6 @@ test("a steer while the CLI has its own prompt queued keeps that prompt's reply,
     "the wake ran between the cancelled prompt and ours, so its reply sits between them, in the turn ours continues"
   );
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
-  await r.dispose();
 });
 
 test("stopSession with frames waiting for a wake's turn keeps them: they join the open turn", async () => {
@@ -1224,7 +1193,6 @@ test("stopSession with frames waiting for a wake's turn keeps them: they join th
   await r.drain();
   assert.equal(turnText(r.events, turnId), "ours;w1;w2;");
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
-  await r.dispose();
 });
 
 test("an exit with frames waiting for a wake's turn keeps them: they join the open turn", async () => {
@@ -1235,7 +1203,6 @@ test("an exit with frames waiting for a wake's turn keeps them: they join the op
   await r.drain();
   assert.equal(turnText(r.events, turnId), "ours;w1;w2;");
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
-  await r.dispose();
 });
 
 test("a question the CLI's own prompt asks while our turn settles rides no turn — our turn's end cannot sweep it", async () => {
@@ -1258,7 +1225,6 @@ test("a question the CLI's own prompt asks while our turn settles rides no turn 
     'answered:{"alpha or beta?":["alpha"]};',
     "the answer reached the CLI, and the wake went on in its own turn"
   );
-  await r.dispose();
 });
 
 test("a subagent's child session's question rides no turn, as Codex's does", async () => {
@@ -1272,7 +1238,6 @@ test("a subagent's child session's question rides no turn, as Codex's does", asy
   await r.drain();
   assert.equal(turnText(r.events, turnId), "one;two;");
   assert.equal(r.events.find((event) => event.type === "user-input.resolved")?.turnId, undefined);
-  await r.dispose();
 });
 
 test("the host's cancel of a question reaches the CLI as `cancelled`, never as an empty answer", async () => {
@@ -1295,7 +1260,6 @@ test("the host's cancel of a question reaches the CLI as `cancelled`, never as a
     true,
     "nobody answered: the host's own cancelled row, which repeats the Stop's"
   );
-  await r.dispose();
 });
 
 test("a user's empty answer to a question stays an answer", async () => {
@@ -1312,7 +1276,6 @@ test("a user's empty answer to a question stays an answer", async () => {
   const resolved = r.events.filter((event) => event.type === "user-input.resolved");
   assert.equal(resolved.length, 1);
   assert.equal((resolved[0].payload as { withdrawn?: boolean }).withdrawn, undefined);
-  await r.dispose();
 });
 
 test("a request answered without a card leaves a waiting wake's frames waiting for its own turn", async () => {
@@ -1320,14 +1283,13 @@ test("a request answered without a card leaves a waiting wake's frames waiting f
   await start(r, { runtimeMode: "full-access" });
   const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
   const woken = await r.waitFor(
-    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    (event) => (event.type === "turn.completed" && event.turnId !== turnId) || event.type === "request.opened",
     "the wake's own turn's end"
   );
   await r.drain();
   assert.equal(turnText(r.events, turnId), "ours;");
   assert.equal(turnText(r.events, woken.turnId), "w1;w2;", "no card, so nothing to put the wake's frames in order before");
   assert.equal(r.events.some((event) => event.type === "request.opened"), false);
-  await r.dispose();
 });
 
 test("a woken parent's spawn is one agent, launched by its call: its subagent_spawned waits behind it", async () => {
@@ -1348,7 +1310,6 @@ test("a woken parent's spawn is one agent, launched by its call: its subagent_sp
     [["call-a00d2553-adc5-48f4-9181-4a66616fc94f-0", woken.turnId]],
     "one agent, under its launching call, on the wake's turn — no phantom under the subagent's id"
   );
-  await r.dispose();
 });
 
 test("a model the CLI refuses warns once per session, not at every turn", async () => {
@@ -1382,7 +1343,6 @@ test("a model the CLI refuses warns once per session, not at every turn", async 
       (event.payload as { message?: string }).message === "grok: could not switch model to nope"
   );
   assert.equal(refusals.length, 1, "the CLI's refusal is remembered for the session");
-  await r.dispose();
 });
 
 function advisories(events: readonly RuntimeEvent[]): number {
@@ -1400,7 +1360,6 @@ test("full-access: a CLI resolving its own interactions is what was asked for �
   await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
   await r.drain();
   assert.equal(advisories(r.events), 0);
-  await r.dispose();
 });
 
 test("supervised: a CLI resolving its own interactions is told ONCE, not at every turn end", async () => {
@@ -1412,7 +1371,6 @@ test("supervised: a CLI resolving its own interactions is told ONCE, not at ever
   await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
   await r.drain();
   assert.equal(advisories(r.events), 1);
-  await r.dispose();
 });
 
 // A-I1: a request answered without a card is still the CLI asking; the
@@ -1427,11 +1385,10 @@ for (const [scenario, runtimeMode] of [
     const r = await rig({ scenario, sessionTools: recordingSessionTools() });
     await start(r, { runtimeMode });
     await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
-    await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+    await r.waitFor((event) => event.type === "turn.completed" || event.type === "request.opened", "turn end or unexpected approval");
     await r.drain();
     assert.equal(r.events.some((event) => event.type === "request.opened"), false, "answered without a card");
     assert.equal(advisories(r.events), 0);
-    await r.dispose();
   });
 }
 
@@ -1453,7 +1410,6 @@ test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => 
     attachments: [],
     interactionMode: "default"
   });
-  await r.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -1637,7 +1593,7 @@ test("the host's teardown resolves only once every session's stop is done: the s
   }
 });
 
-test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s", { skip: process.platform !== "linux", timeout: 30_000 }, async (t) => {
+test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s", { skip: process.platform !== "linux" }, async (t) => {
   const r = await rig({ scenario: "leftover", env: { GROK_MOCK_HELPER_IGNORES_TERM: "1" } });
   try {
     await start(r);
@@ -1916,7 +1872,7 @@ test("a host teardown while the session opens sweeps the CLI's helpers — never
   }
 });
 
-test("a CLI that dies while its session opens takes the helpers it booted with it", { skip: process.platform !== "linux", timeout: 30_000 }, async () => {
+test("a CLI that dies while its session opens takes the helpers it booted with it", { skip: process.platform !== "linux" }, async () => {
   // The CLI reports its MCP servers booting before `session/new` answers
   // (fixture 31), and dies before it answers: only a recording made off that
   // report, while it lived, ties the helper to it.
@@ -1941,10 +1897,7 @@ test("a CLI that dies while its session opens takes the helpers it booted with i
     await assert.rejects(opening);
     assert.deepEqual(leftovers(r).helper, [], "its exit swept the helper it booted");
     // The host lives: the CLI's exit released the watcher, which goes by itself.
-    const deadline = Date.now() + 10_000;
-    while (isRunning(watchers[0]!) && Date.now() < deadline) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    await gone(watchers[0]!);
     assert.equal(isRunning(watchers[0]!), false, "its lifeline watcher went with it");
     assert.deepEqual(lifecycleRows(r.events), [], "the open's rejection is its whole report");
   } finally {
@@ -2009,7 +1962,6 @@ test("goals: live goal frames on every private-channel spelling become goal rows
     ).length,
     1
   );
-  await r.dispose();
 });
 
 test("goals: a load replays the goal silently, then restores it once, after the session is up", async () => {
@@ -2035,7 +1987,6 @@ test("goals: a load replays the goal silently, then restores it once, after the 
     r.events.some((event) => JSON.stringify(event).includes("A goal has been set")),
     false
   );
-  await r.dispose();
 });
 
 test("goals: a fresh session (session/new) clears the unfinished goal the thread still shows", async () => {
@@ -2048,7 +1999,6 @@ test("goals: a fresh session (session/new) clears the unfinished goal the thread
   assert.deepEqual(goalUpdates(r), [{ goal: null, change: "cleared", previous: MOCK_REPLAYED_GOAL }]);
   const order = r.events.map((event) => event.type);
   assert.ok(order.indexOf("thread.goal.updated") > order.indexOf("thread.started"));
-  await r.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -2086,7 +2036,6 @@ test("stopSession with a parked approval settles it once, as nobody's answer", a
     decision: "cancel",
     withdrawn: true
   });
-  await r.dispose();
 });
 
 test("stopSession with a parked question settles it once, as nobody's answer, on the stamp it was asked with", async () => {
@@ -2101,7 +2050,6 @@ test("stopSession with a parked question settles it once, as nobody's answer, on
   assert.equal(resolutions.length, 1, "one closing row");
   assert.deepEqual(resolutions[0]!.payload, { answers: {}, withdrawn: true });
   assert.equal(resolutions[0]!.turnId, undefined, "turnless, as the child's question was asked");
-  await r.dispose();
 });
 
 test("an exit with a parked approval settles it once, before session.exited", async () => {
@@ -2115,7 +2063,6 @@ test("an exit with a parked approval settles it once, before session.exited", as
   assert.equal(resolutions.length, 1, "one closing row, none after the exit");
   assert.equal((resolutions[0]!.payload as { withdrawn?: boolean }).withdrawn, true);
   assert.ok(r.events.indexOf(resolutions[0]!) < r.events.indexOf(exited), "a running state never outlives its process");
-  await r.dispose();
 });
 
 test("an exit with a parked question settles it once, before session.exited", async () => {
@@ -2129,7 +2076,6 @@ test("an exit with a parked question settles it once, before session.exited", as
   assert.equal(resolutions.length, 1, "one closing row, none after the exit");
   assert.deepEqual(resolutions[0]!.payload, { answers: {}, withdrawn: true });
   assert.ok(r.events.indexOf(resolutions[0]!) < r.events.indexOf(exited));
-  await r.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -2152,7 +2098,6 @@ test("a rate_limit stop is a usage limit, named by its reason — with no reset 
   assert.equal(errors.length, 1);
   assert.equal(errors[0]!.payload.reason, "usage_limit");
   assert.equal(errors[0]!.payload.resetsAt, undefined, "the frame names no reset");
-  await r.dispose();
 });
 
 for (const noPromptComplete of [false, true]) {
@@ -2165,7 +2110,6 @@ for (const noPromptComplete of [false, true]) {
     const errors = runtimeErrors(r.events);
     assert.equal(errors.length, 1, "reported once");
     assert.equal(errors[0]!.payload.reason, "auth");
-    await r.dispose();
   });
 }
 
@@ -2183,7 +2127,6 @@ for (const [message, reason] of [
     const errors = runtimeErrors(r.events);
     assert.equal(errors.length, 1);
     assert.equal(errors[0]!.payload.reason, reason);
-    await r.dispose();
   });
 }
 
@@ -2216,7 +2159,10 @@ test("session tools: the server rides session/new with its credential redacted f
   assert.ok(!JSON.stringify(rawFrames).includes(grant.token), "the raw log never holds the credential");
 
   await r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
-  const completed = (await r.waitFor((event) => event.type === "turn.completed", "turn.completed")) as Extract<
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed" || event.type === "request.opened",
+    "turn outcome or approval card"
+  )) as Extract<
     RuntimeEvent,
     { type: "turn.completed" }
   >;
@@ -2235,7 +2181,6 @@ test("session tools: the server rides session/new with its credential redacted f
 
   await r.adapter.stopSession("t1");
   assert.equal(grant.revoked, true, "the credential dies with its session");
-  await r.dispose();
 });
 
 test("session tools × fork: a transcript fork's child opens with its OWN grant; the handoff rides its prompt, the rules only _meta", async () => {
@@ -2276,7 +2221,6 @@ test("session tools × fork: a transcript fork's child opens with its OWN grant;
   await r.adapter.stopSession("child");
   assert.equal(childGrant!.revoked, true);
   assert.equal(parentGrant!.revoked, false, "ending the child never ends the parent's");
-  await r.dispose();
 });
 
 test("session tools: a use_tool permission request titled use_tool still needs no card, by its tool_name", async () => {
@@ -2288,14 +2232,16 @@ test("session tools: a use_tool permission request titled use_tool still needs n
   });
   await start(r);
   await r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
-  const completed = (await r.waitFor((event) => event.type === "turn.completed", "turn.completed")) as Extract<
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed" || event.type === "request.opened",
+    "turn outcome or approval card"
+  )) as Extract<
     RuntimeEvent,
     { type: "turn.completed" }
   >;
   assert.equal(completed.payload.state, "completed");
   await r.drain();
   assert.equal(r.events.some((event) => event.type === "request.opened"), false, "no approval card");
-  await r.dispose();
 });
 
 test("session tools: without a registered toolkit, session/new carries no server and an orquester-named call still asks", async () => {
@@ -2308,13 +2254,16 @@ test("session tools: without a registered toolkit, session/new carries no server
   assert.deepEqual(sent?.frame.params?.mcpServers, []);
   assert.equal(sent?.frame.params?._meta, undefined);
   void r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
-  const opened = (await r.waitFor((event) => event.type === "request.opened", "request.opened")) as Extract<
+  const opened = (await r.waitFor(
+    (event) => event.type === "request.opened" || event.type === "turn.completed",
+    "approval card or turn outcome"
+  )) as Extract<
     RuntimeEvent,
     { type: "request.opened" }
   >;
+  assert.equal(opened.type, "request.opened", "an unregistered tool requires approval");
   await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
   await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
-  await r.dispose();
 });
 
 // Unified MCP §12.1: the thread's denials reach session/new — as same-named inert entries — with
@@ -2335,6 +2284,5 @@ for (const failGrant of [false, true]) {
     const own = servers.find((server) => server.name === "orquester");
     if (failGrant) assert.equal(own?.url, "http://127.0.0.1:65000/mcp/denied", "no grant: a user's `orquester` is shadowed");
     else assert.equal(own?.url, "http://127.0.0.1:65000/mcp", "our own server");
-    await r.dispose();
   });
 }

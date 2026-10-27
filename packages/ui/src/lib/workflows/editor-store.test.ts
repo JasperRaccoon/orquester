@@ -234,6 +234,8 @@ describe("editor-store: conflicts", () => {
     assert.equal(editor.state.revision, 2);
     assert.equal(editor.state.dirty, false);
     assert.equal(editor.state.canUndo, false);
+    editor.undo();
+    assert.equal(editor.state.draft?.name, "Theirs", "undo cannot bring back the discarded draft");
   });
 
   it("Keep mine overwrites theirs with the draft", async () => {

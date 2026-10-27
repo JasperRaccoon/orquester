@@ -33,7 +33,7 @@ function closeOf(client: WebSocket): Promise<{ code: number; reason: string }> {
   return new Promise((resolve) => client.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
 }
 
-test("the device relay checks the token, the plugin, the host and its lease before handing over", { timeout: 15_000 }, async (t) => {
+test("the device relay checks the token, the plugin, the host and its lease before handing over", async (t) => {
   const host = new FakeDeviceHost();
   const svc = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { android: { enabled: true } } });
   t.after(() => svc.cleanup());

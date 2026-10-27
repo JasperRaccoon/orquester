@@ -251,13 +251,13 @@ describe("the Graph view", () => {
       }
     });
     assert.deepEqual(similarityReads, [{ limit: 1, k: 1 }], "a one-entry read asks");
-    assert.equal(layerRadio("Similarity"), null);
+    assert.equal((layerRadio("Similarity")) === null, true);
     assert.equal(lastCanvas().layer, "concepts");
 
     act(() => root.unmount());
     root = createRoot(doc().body.appendChild(doc().createElement("div")));
     await show({ api: { getKnowledgeSimilarityGraph: undefined } });
-    assert.equal(layerRadio("Similarity"), null);
+    assert.equal((layerRadio("Similarity")) === null, true);
   });
 
   it("shows entries by similarity: cluster colours, legend, tree and k-NN edges; a node opens its entry", async () => {
@@ -352,7 +352,7 @@ describe("the Graph view", () => {
         }
       }
     });
-    assert.equal(layerRadio("Similarity"), null);
+    assert.equal((layerRadio("Similarity")) === null, true);
     assert.equal(lastCanvas().layer, "concepts");
     assert.doesNotMatch(text(), /not found/);
   });
@@ -401,7 +401,7 @@ describe("the Graph view", () => {
       assert.equal(options()[1]!.getAttribute("aria-selected"), "true", "the pointer hands selection to another row");
       await key("Enter");
       assert.deepEqual(selections.at(-1), { kind: "entry", id: "ke_2" });
-      assert.equal(doc().querySelector('[role="listbox"]'), null, "the results closed");
+      assert.equal((doc().querySelector('[role="listbox"]')) === null, true, "the results closed");
     });
 
     it("shows the band, how each hit was found and the terms highlighted, as text", async () => {
@@ -419,7 +419,7 @@ describe("the Graph view", () => {
       assert.equal(third!.querySelectorAll("mark").length, 0, "no match from an older daemon: no badges");
       assert.doesNotMatch(third!.textContent!, /Strong|Good|Weak/);
       assert.ok(third!.textContent!.includes("<img src=x onerror=alert(1)>"));
-      assert.equal(third!.querySelector("img"), null, "saved text cannot inject HTML");
+      assert.equal((third!.querySelector("img")) === null, true, "saved text cannot inject HTML");
     });
 
     it("Show all N results opens the List view, and is not offered without it", async () => {
@@ -433,7 +433,7 @@ describe("the Graph view", () => {
       act(() => root.unmount());
       root = createRoot(doc().body.appendChild(doc().createElement("div")));
       await searchWith();
-      assert.equal([...doc().querySelectorAll("button")].find((b) => b.textContent?.startsWith("Show all")), undefined);
+      assert.equal(([...doc().querySelectorAll("button")].find((b) => b.textContent?.startsWith("Show all"))) === undefined, true);
     });
 
     it("promises no count when two or more collection chips are on", async () => {
@@ -453,7 +453,7 @@ describe("the Graph view", () => {
       await key("ArrowDown");
       assert.ok(doc().querySelector('[role="listbox"]'), "the list is open");
       assert.equal(await key("Escape"), false, "the browser does not clear the search field");
-      assert.equal(doc().querySelector('[role="listbox"]'), null, "the list closed");
+      assert.equal((doc().querySelector('[role="listbox"]')) === null, true, "the list closed");
       assert.equal(changes.length, 0, "the words stay");
       await key("Escape");
       assert.equal(changes.at(-1)?.text, "");
@@ -609,7 +609,7 @@ describe("the Graph view", () => {
     it("an older daemon's clusters offer no concepts", async () => {
       await showHeld({ api: { getKnowledgeSimilarityGraph: async () => SIMILARITY } });
       await click(layerRadio("Similarity")!);
-      assert.equal(doc().querySelector('[role="group"][aria-label^="Top concepts of"]'), null);
+      assert.equal((doc().querySelector('[role="group"][aria-label^="Top concepts of"]')) === null, true);
     });
 
     it("marks a concept's entries in Similarity when the panel asks: those drawn, until cleared, once per request", async () => {

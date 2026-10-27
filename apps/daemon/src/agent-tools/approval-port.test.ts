@@ -222,17 +222,19 @@ test("a caller that left full-access while the card was open cannot attach a gra
 
 test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, boundary → PERMISSION_DENIED", async (t) => {
   const h = await harness(t);
+  const opened = h.opened().then(() => assert.fail("A forbidden call opened an approval card."));
+  const request = (input: ApprovalRequest) => Promise.race([h.port.request(input, new AbortController().signal), opened]);
   h.owned.add("t1");
-  await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
+  await assert.rejects(request(card()), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
   await assert.rejects(
-    h.port.request(card({ kind: "boundary", family: "cross-project", grantOptions: [] }), new AbortController().signal),
+    request(card({ kind: "boundary", family: "cross-project", grantOptions: [] })),
     (e: Error & { code?: string }) => e.code === "PERMISSION_DENIED"
   );
   h.owned.delete("t1");
   h.traits.set("t1", { runtimeMode: "full-access", workflowOwned: true });
-  await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
+  await assert.rejects(request(card()), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
   assert.equal(h.events.length, 0, "no card was ever shown");
-  await assert.rejects(h.port.request(card({ threadId: "gone" }), new AbortController().signal), (e: Error & { code?: string }) => e.code === "THREAD_NOT_FOUND");
+  await assert.rejects(request(card({ threadId: "gone" })), (e: Error & { code?: string }) => e.code === "THREAD_NOT_FOUND");
 });
 
 // boxes: renting a box spends money — its card opens for a workflow-owned chat too, never with a grant.
@@ -254,7 +256,8 @@ test("a spend card (create_box) opens for a workflow-owned chat, offers no grant
 test("an older build's toolset card is never opened: every tool is on already", async (t) => {
   const h = await harness(t);
   const legacy = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Desktops for this chat" });
-  await assert.rejects(h.port.request(legacy, new AbortController().signal), (e: Error & { code?: string }) => e.code === "INVALID_ARGUMENT");
+  const opened = h.opened().then(() => assert.fail("A legacy toolset call opened an approval card."));
+  await assert.rejects(Promise.race([h.port.request(legacy, new AbortController().signal), opened]), (e: Error & { code?: string }) => e.code === "INVALID_ARGUMENT");
   assert.equal(h.events.length, 0, "no card was shown");
 });
 

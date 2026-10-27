@@ -120,7 +120,7 @@ async function killGroup(child: ChildProcess | undefined, signal: NodeJS.Signals
   clearTimeout(timer);
 }
 
-describe("DesktopWindowTracker against Xvnc + Openbox", { skip: missing.length > 0 ? `missing ${missing.join(", ")}` : false, timeout: 120_000 }, () => {
+describe("DesktopWindowTracker against Xvnc + Openbox", { skip: missing.length > 0 ? `missing ${missing.join(", ")}` : false }, () => {
   let dir: string;
   let xauthorityPath: string;
   let cookie: Buffer;

@@ -56,9 +56,10 @@ function harness(options: { size?: number; targets?: string[]; fail?: (profile: 
   const pool = new SimPool(deps);
   /** Let the next `make` finish, then let the loop run on. */
   const finishNext = async () => {
-    for (let i = 0; i < 20 && pending.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-    pending.shift()!.resolve();
-    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    const work = pending.shift();
+    assert.ok(work, "the pool requested the next simulator");
+    work.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
   };
   return {
     pool,
@@ -70,17 +71,10 @@ function harness(options: { size?: number; targets?: string[]; fail?: (profile: 
   };
 }
 
-async function until(check: () => boolean, what: string): Promise<void> {
-  for (let tries = 0; tries < 500; tries += 1) {
-    if (check()) return;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-
 async function settled(pool: SimPool): Promise<void> {
+  // The harness's work completes from explicit receipts; drain their microtasks.
   await new Promise((resolve) => setImmediate(resolve));
-  await until(() => !pool.busy, "the simulator work to finish");
+  assert.equal(pool.busy, false, "the simulator work finished");
 }
 
 describe("SimPool", () => {

@@ -219,11 +219,6 @@ export class DesktopAudioHub {
     for (const encoder of [...this.encoders.values()]) this.dispose(encoder);
   }
 
-  /** The running encoder's pid, for diagnostics and tests. */
-  encoderPid(desktopId: string): number | null {
-    return this.encoders.get(desktopId)?.child?.pid ?? null;
-  }
-
   private unsubscribe(encoder: DesktopEncoder, sink: DesktopAudioSink): void {
     encoder.sinks.delete(sink);
     if (encoder.sinks.size > 0 || this.encoders.get(encoder.desktopId) !== encoder) return;

@@ -39,7 +39,7 @@ const DIFFERENT: [type: string, a: string, b: string, why: string][] = [
 
 const dot = (a: Float32Array, b: Float32Array) => a.reduce((sum, x, i) => sum + x * b[i]!, 0);
 
-test("concept merge calibration on the pinned model: duplicates merge, look-alikes do not", { skip: SKIP, timeout: 120_000 }, async () => {
+test("concept merge calibration on the pinned model: duplicates merge, look-alikes do not", { skip: SKIP }, async () => {
   assert.deepEqual(conceptThresholdsFor(EMBEDDING_MODEL.id), E5_SMALL_CONCEPT_THRESHOLDS);
   const embedder = new OnnxSentenceEmbedder({
     modelDir: MODEL_DIR!,

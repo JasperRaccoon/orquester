@@ -555,18 +555,21 @@ describe("rewindTo", () => {
   it("rejects a message it cannot find — or one that is not the user's — without posting", async () => {
     const { api, fake, state } = await rewindable();
     await assert.rejects(api.getState().actions.rewindTo({ messageId: "nope", targetTurnCount: 0 }));
-    await assert.rejects(api.getState().actions.rewindTo({ messageId: "a1", targetTurnCount: 0 }));
+    const rejected = assert.rejects(api.getState().actions.rewindTo({ messageId: "a1", targetTurnCount: 0 }));
+    await settle();
     assert.equal(fake.posted.length, 0);
+    await rejected;
     assert.equal(state().reverting, false);
   });
 
   it("refuses a second rewind while one is in flight — one `/revert`, one message back", async () => {
     const { api, fake, state, truncated } = await rewindable();
     const first = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
-    await assert.rejects(api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 }));
+    const rejected = assert.rejects(api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 }));
     await settle();
     fake.push(truncated);
     await first;
+    await rejected;
     assert.equal(fake.posted.length, 1);
     assert.equal(state().draft.text, REWOUND_TEXT, "handed back once, not twice");
   });

@@ -263,7 +263,7 @@ describe("the entry panel", () => {
     assert.equal(link?.getAttribute("target"), "_blank");
     assert.match(link?.getAttribute("rel") ?? "", /noopener/);
     assert.ok(![...body.querySelectorAll("a")].some((a) => /javascript:/i.test(a.getAttribute("href") ?? "")), "no script link");
-    assert.equal(body.querySelector("img"), null, "raw HTML is not rendered");
+    assert.equal((body.querySelector("img")) === null, true, "raw HTML is not rendered");
 
     const toggle = buttonNamed("Plain text");
     assert.equal(toggle.getAttribute("aria-pressed"), "false");
@@ -283,7 +283,7 @@ describe("the entry panel", () => {
   it("loads a remote image in the body only when clicked (no tracking pixel on open)", async () => {
     await show(openDetail({ entry: entry({ id: OPEN, body: "Saved post.\n\n![pixel](https://tracker.example/p.gif)" }) }));
     const body = doc().querySelector('[data-knowledge-body="markdown"]')!;
-    assert.equal(body.querySelector("img"), null, "nothing is requested on open");
+    assert.equal((body.querySelector("img")) === null, true, "nothing is requested on open");
     const load = [...body.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Load image"));
     assert.ok(load, "a click-to-load button stands in");
     assert.equal(load.textContent, "Load image: pixel (tracker.example)");
@@ -328,7 +328,7 @@ describe("the entry panel", () => {
     const section = doc().querySelector('section[aria-label="Similar entries"]');
     assert.match(section?.textContent ?? "", /Related one/);
     assert.match(section?.textContent ?? "", /Shared concepts/);
-    assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null);
+    assert.equal((doc().querySelector('section[aria-label="Possible duplicates"]')) === null, true);
   });
 
   it("offers a possible duplicate: Open goes there, Keep both hides it for the session", async () => {
@@ -341,14 +341,14 @@ describe("the entry panel", () => {
 
     await show(openDetail());
     await click(buttonNamed("Keep both", doc().querySelector('section[aria-label="Possible duplicates"]')!));
-    assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null);
+    assert.equal((doc().querySelector('section[aria-label="Possible duplicates"]')) === null, true);
     await show(openDetail());
-    assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null, "still hidden");
+    assert.equal((doc().querySelector('section[aria-label="Possible duplicates"]')) === null, true, "still hidden");
     await show(openDetail({
       entry: entry({ id: OLDER, title: "Original" }),
       possibleDuplicates: [{ entry: summary({ id: OPEN, title: "Copy" }), similarity: 0.97, reasons: [] }]
     }));
-    assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null, "the same pair stays hidden from the other entry");
+    assert.equal((doc().querySelector('section[aria-label="Possible duplicates"]')) === null, true, "the same pair stays hidden from the other entry");
   });
 
   it("merges into the older entry: confirm, one merge call keeping it, then open the kept one", async () => {
@@ -418,7 +418,7 @@ describe("the entry panel", () => {
       const row = section.querySelector(`[data-knowledge-disagrees="${DISAGREES}"]`)!;
       assert.match(row.textContent!, /Long trials win/);
       assert.match(row.textContent!, /<i>Seven days<\/i> against thirty\./, "the note, as text");
-      assert.equal(row.querySelector("i"), null);
+      assert.equal((row.querySelector("i")) === null, true);
       assert.match(row.textContent!, /Short trial≠Long trial/);
       assert.match(row.textContent!, /Checked by an agent/);
       await click(buttonNamed("Long trial", row));
@@ -453,8 +453,8 @@ describe("the entry panel", () => {
 
       const { novelty: _novelty, ...older } = phase2({ similar: [] });
       await show(older);
-      assert.equal(doc().querySelector("[data-knowledge-novelty]"), null);
-      assert.equal(doc().querySelector('section[aria-label="Disagrees with"]'), null);
+      assert.equal((doc().querySelector("[data-knowledge-novelty]")) === null, true);
+      assert.equal((doc().querySelector('section[aria-label="Disagrees with"]')) === null, true);
     });
   });
 
@@ -509,9 +509,9 @@ describe("the entry panel", () => {
       await act(async () => applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { graph: true })));
       await settle();
       assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2, "read again after the daemon's graph event");
-      assert.equal(mergedRow("tactic-prices"), null, "no longer merged");
+      assert.equal((mergedRow("tactic-prices")) === null, true, "no longer merged");
       assert.ok(mergedRow("tactic-plans"));
-      assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]'), null);
+      assert.equal((doc().querySelector('section[aria-label="Merged from"] [role="alert"]')) === null, true);
     });
 
     it("cancelling the confirmation changes nothing", async () => {
@@ -519,7 +519,7 @@ describe("the entry panel", () => {
       await show(concept());
       await click(buttonNamed("Undo", mergedRow("tactic-prices")!));
       await click(buttonNamed("Cancel", doc().querySelector('[role="dialog"]')!));
-      assert.equal(doc().querySelector('[role="dialog"]'), null);
+      assert.equal((doc().querySelector('[role="dialog"]')) === null, true);
       assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), []);
     });
 
@@ -567,8 +567,8 @@ describe("the entry panel", () => {
 
       const { mergedFrom: _merged, similarConcepts: _similar, ...olderDaemon } = concept();
       await show(olderDaemon);
-      assert.equal(doc().querySelector('section[aria-label="Merged from"]'), null);
-      assert.equal(doc().querySelector('section[aria-label="Similar concepts"]'), null);
+      assert.equal((doc().querySelector('section[aria-label="Merged from"]')) === null, true);
+      assert.equal((doc().querySelector('section[aria-label="Similar concepts"]')) === null, true);
     });
   });
 });

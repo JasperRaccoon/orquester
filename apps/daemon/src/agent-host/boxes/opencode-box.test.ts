@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { localBoxConnection } from "../../boxes/testing.ts";
-import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
+import { createFakeContext } from "../adapters/codex/testing.ts";
 import { prepareOpenCodeBoxServer } from "../adapters/opencode/box-launch.ts";
 import { OpenCodeServerPool } from "../adapters/opencode/server.ts";
 import { makePeer } from "../adapters/opencode/testing/peer.ts";
@@ -98,6 +98,13 @@ test("opencode serve runs in the box, reached through a forwarded port; API keys
       start: { threadId: "t1", home: { kind: "system", path: hostEnv.HOME }, cwd: project, box },
       hostEnv
     });
+    let released!: () => void;
+    const registrationsReleased = new Promise<void>((resolve) => { released = resolve; });
+    const configContent = server.configContent;
+    server.configContent = async () => {
+      const config = await configContent();
+      return { ...config, release: async () => { await config.release(); released(); } };
+    };
     const handle = await pool.acquire(project, undefined, server);
     assert.equal(handle.pid, undefined);
     assert.match(handle.url, /^http:\/\/127\.0\.0\.1:\d+$/);
@@ -118,13 +125,8 @@ test("opencode serve runs in the box, reached through a forwarded port; API keys
     await pool.stopAll();
     // The server's bridge registrations went with it.
     const serverId = github!.command[2]!;
-    let gone = false;
-    await waitUntil(() => {
-      void readMcpBridgeEntry(appdir, connection.boxId, serverId).then((value) => {
-        gone = value === null;
-      });
-      return gone;
-    }, "the server's bridge entries removed");
+    await registrationsReleased;
+    assert.equal(await readMcpBridgeEntry(appdir, connection.boxId, serverId), null);
   } finally {
     abort.abort();
     await pool.stopAll();

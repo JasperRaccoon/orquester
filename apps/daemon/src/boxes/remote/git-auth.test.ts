@@ -234,7 +234,8 @@ test("a temporary box gets no identity, and a sign request is refused", async ()
   try {
     const key = await keypair(dir, "acme", "ed25519");
     const hub = register({ acme: account("acc-1", key) });
-    const { path, server } = await agentSocket(dir, hub, { boxId: "box-2", record: temporaryRecord() });
+    // A stale project field must never let a temporary box borrow a workspace identity.
+    const { path, server } = await agentSocket(dir, hub, { boxId: "box-2", record: { ...temporaryRecord(), project: projectRecord("acme").project } });
     try {
       await assert.rejects(exec("ssh-add", ["-L"], { env: { ...process.env, SSH_AUTH_SOCK: path } }), (error: { stdout?: string; code?: number }) => {
         assert.equal(error.code, 1);

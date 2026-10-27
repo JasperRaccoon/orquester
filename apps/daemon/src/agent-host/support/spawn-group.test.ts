@@ -11,25 +11,6 @@ import { describe, it } from "node:test";
 
 import { spawnProviderChild } from "./spawn.ts";
 
-/** Alive per `kill(pid, 0)` — ESRCH means gone. */
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  assert.fail(label);
-}
-
 const node = process.execPath;
 
 /**
@@ -38,10 +19,15 @@ const node = process.execPath;
  */
 const PARENT_SCRIPT = `
 const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-  stdio: "ignore"
+const child = spawn(process.execPath, ["-e", \`
+  process.stdout.write("ready");
+  setInterval(() => {}, 1000);
+\`], { stdio: ["ignore", "pipe", "ignore"] });
+child.stdout.once("data", () => process.stdout.write(String(child.pid) + "\\n"));
+process.on("SIGTERM", () => {
+  if (child.exitCode !== null || child.signalCode !== null) process.exit(0);
+  child.once("exit", () => process.exit(0));
 });
-process.stdout.write(String(child.pid) + "\\n");
 setInterval(() => {}, 1000);
 `;
 
@@ -63,12 +49,13 @@ describe("spawnProviderChild kills the whole process group (E20)", () => {
     lines.close();
     const grandchild = Number.parseInt(String(announcedPid), 10);
     assert.ok(Number.isFinite(grandchild) && grandchild > 0);
-    assert.equal(isAlive(grandchild), true, "the grandchild is up before the kill");
+    t.after(() => {
+      try { process.kill(grandchild, "SIGKILL"); } catch { /* Already gone. */ }
+    });
+    assert.doesNotThrow(() => process.kill(grandchild, 0), "the grandchild is up before the kill");
 
-    await child.kill();
-    // The signal went to the group, so the grandchild goes too rather than
-    // reparenting to init.
-    await waitFor(() => !isAlive(grandchild), "the grandchild outlived the provider child");
+    // The parent exits only after its child has exited; parent-only signals reach escalation.
+    assert.deepEqual(await child.kill(), { kind: "exit", code: 0, signal: null });
   });
 
 });

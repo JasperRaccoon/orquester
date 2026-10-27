@@ -95,11 +95,12 @@ describe("the editor's save", () => {
     const saver = createSavedPromptSaver(deps);
     const first = saver.save(CREATE, draftOf(CREATE));
     assert.equal(saver.saving, true);
-    assert.deepEqual(await saver.save(CREATE, draftOf(CREATE)), { status: "busy" });
+    const second = saver.save(CREATE, draftOf(CREATE));
+    assert.equal(calls.created.length, 1);
+    assert.deepEqual(await second, { status: "busy" });
     answer.resolve({ ok: true, prompt: null });
     assert.equal((await first).status, "saved");
     assert.equal(saver.saving, false);
-    assert.equal(calls.created.length, 1);
   });
 
   it("closed while saving: a success still lands and is revealed", async () => {

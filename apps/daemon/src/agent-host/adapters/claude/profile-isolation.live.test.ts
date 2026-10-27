@@ -266,7 +266,7 @@ async function profileOptions(
   return { options: built.options, tools };
 }
 
-describe("Claude profile isolation against the real CLI (no model call)", { skip, timeout: 240_000 }, () => {
+describe("Claude profile isolation against the real CLI (no model call)", { skip }, () => {
   it("a Global launch of the fixture sees the user's items (baseline)", async () => {
     const root = await mkdtemp(join(TMP, "orq-claude-live-"));
     roots.push(root);

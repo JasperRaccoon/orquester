@@ -14,7 +14,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test, { after, describe } from "node:test";
+import test, { afterEach, describe } from "node:test";
 
 import { mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
@@ -109,8 +109,8 @@ describe("grok MCP Apps — readers", () => {
 // ---------------------------------------------------------------------------
 
 const rigs: Array<() => Promise<void>> = [];
-after(async () => {
-  for (const dispose of rigs) await dispose();
+afterEach(async () => {
+  for (const dispose of rigs.splice(0).reverse()) await dispose();
 });
 
 async function rig(scenario: string, env: Record<string, string> = {}) {
@@ -118,7 +118,7 @@ async function rig(scenario: string, env: Record<string, string> = {}) {
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
   const sent: Array<{ method?: string; params?: unknown }> = [];
-  const sentWaiters: Array<{ method: string; resolve: () => void }> = [];
+  const sentWaiters: Array<{ method: string; after: number; resolve: () => void }> = [];
   const stored: Array<{ name: string; bytes: string }> = [];
   const controller = new AbortController();
   let ids = 0;
@@ -138,7 +138,7 @@ async function rig(scenario: string, env: Record<string, string> = {}) {
       if (direction !== "send") return;
       sent.push(frame);
       for (let index = sentWaiters.length - 1; index >= 0; index -= 1) {
-        if (sentWaiters[index]!.method === frame.method) sentWaiters.splice(index, 1)[0]!.resolve();
+        if (sentWaiters[index]!.method === frame.method && sent.length > sentWaiters[index]!.after) sentWaiters.splice(index, 1)[0]!.resolve();
       }
     },
     buildEnv: () => ({ PATH: process.env.PATH ?? "", HOME: cwd, TMPDIR: cwd, GROK_MOCK_SCENARIO: scenario, ...env }),
@@ -188,10 +188,10 @@ async function rig(scenario: string, env: Record<string, string> = {}) {
         if (existing !== undefined) resolve(existing);
         else waiters.push({ predicate, resolve });
       }),
-    waitForSent: (method: string) =>
+    waitForSent: (method: string, after = 0) =>
       new Promise<void>((resolve) => {
-        if (sent.some((frame) => frame.method === method)) resolve();
-        else sentWaiters.push({ method, resolve });
+        if (sent.slice(after).some((frame) => frame.method === method)) resolve();
+        else sentWaiters.push({ method, after, resolve });
       })
   };
 }
@@ -229,7 +229,6 @@ describe("grok MCP Apps — the adapter", () => {
     assert.ok(reply !== -1, "the reply was emitted");
     assert.ok(index < reply, "before the reply");
     assert.ok(index < r.events.findIndex((event) => event.type === "turn.completed"), "before the turn's end");
-    await r.dispose();
   });
 
   test("a read slower than the 4 s probe deadline is still captured, and a second turn reuses it without reading", async (t) => {
@@ -247,9 +246,12 @@ describe("grok MCP Apps — the adapter", () => {
     await listed;
     const first = r.events.find(isAppCompletion) as Extract<RuntimeEvent, { type: "item.completed" }>;
     assert.equal(((first.payload.data as Record<string, unknown>).mcpApp as { attachmentId?: string })?.attachmentId, STORED_ID);
+    const beforeAgain = r.sent.length;
     await r.adapter.sendTurn({ threadId: "t1", input: "again", attachments: [], interactionMode: "default" });
-    await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2);
+    const completedAgain = r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2);
+    await Promise.race([completedAgain, r.waitForSent("_x.ai/mcp/read_resource", beforeAgain)]);
     assert.equal(r.sent.filter((frame) => frame.method === "_x.ai/mcp/read_resource").length, 1, "read once");
+    await completedAgain;
     assert.equal(r.stored.length, 1, "stored once");
     const second = r.events.find(
       (event) => event.type === "item.completed" && event.itemId === "call-app-2"
@@ -266,7 +268,6 @@ describe("grok MCP Apps — the adapter", () => {
       prefersBorder: true
     });
     assert.deepEqual(mcpAppReferenceOfActivityPayload({ itemType: "dynamic_tool_call", data }), data.mcpApp);
-    await r.dispose();
   });
 
   test("a stop lets a hanging capture go: the call completes plain, in order, before the turn's end", async () => {
@@ -282,7 +283,6 @@ describe("grok MCP Apps — the adapter", () => {
     assert.equal("mcpApp" in (completion.payload.data as Record<string, unknown>), false);
     assert.ok(index < r.events.findIndex((event) => event.type === "turn.completed"));
     assert.equal(r.stored.length, 0);
-    await r.dispose();
   });
 
   test("an app's requests go through the CLI's own MCP client; no model context is offered", async () => {
@@ -317,6 +317,5 @@ describe("grok MCP Apps — the adapter", () => {
       false
     );
     await assert.rejects(apps.listTools("nope", "apps"), /session is not running/);
-    await r.dispose();
   });
 });

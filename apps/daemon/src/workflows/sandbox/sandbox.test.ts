@@ -1,25 +1,40 @@
 import assert from "node:assert/strict";
+import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_process";
+import { once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { createServer, type AddressInfo } from "node:net";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, before, describe, mock, test } from "node:test";
 
 import type { SandboxHandle, SandboxSpawnRequest } from "../contracts.ts";
 import { AGENT_LAUNCH_ENV_VAR } from "../../agent-host/support/leftover-processes.ts";
 import { isSameProcessAlive, readStarttime, signalGroupIfOurs } from "./proc.ts";
 import { createSandboxRunner, type SandboxExitDetail } from "./sandbox.ts";
+import { waitForFileState } from "../testing/daemon-harness.ts";
 
 const runner = createSandboxRunner();
 
 let root: string;
 let counter = 0;
+const exits = new Map<number, { child: ChildProcess; closed: Promise<void> }>();
+const spawn = childProcess.spawn;
+const observed = mock.method(childProcess, "spawn", (command: string, args: readonly string[], options: SpawnOptions) => {
+  const child = spawn(command, args, options);
+  if (child.pid !== undefined) exits.set(child.pid, { child, closed: new Promise((resolve) => child.once("close", () => resolve())) });
+  return child;
+});
+syncBuiltinESMExports();
 
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "orq-sandbox-test-"));
 });
 
 after(async () => {
+  observed.mock.restore();
+  syncBuiltinESMExports();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -62,15 +77,11 @@ async function shell(source: string, extra: Partial<SandboxSpawnRequest> = {}) {
   return run(request({ kind: "shell", source, attemptDir: await freshDir(), ...extra }));
 }
 
-/** Polls a condition (never a fixed sleep): resolves once it holds, fails past `ms`. */
-async function until(what: string, condition: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
-  const endAt = Date.now() + ms;
-  while (!(await condition())) {
-    if (Date.now() > endAt) {
-      throw new Error(`Timed out waiting for ${what}`);
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+async function runnerExited(handle: SandboxHandle): Promise<void> {
+  const exited = exits.get(handle.pid);
+  assert.ok(exited, "the fixture observed the spawned runner");
+  exited.child.ref();
+  await exited.closed;
 }
 
 describe("code blocks", () => {
@@ -84,7 +95,7 @@ describe("code blocks", () => {
     assert.equal(stdout, "hello 21\nplain\n", "log() and console.log both go to stdout.log");
     assert.equal(exit.stdoutBytes, Buffer.byteLength(stdout), "stdoutBytes counts the log");
     assert.equal(existsSync(join(handle.attemptDir, "input.json")), false, "input.json is gone once the attempt ends");
-    await until("the runner to exit", () => !runner.isAlive(handle), 5_000);
+    await runnerExited(handle);
   });
 
   test("undefined returns as null", async () => {
@@ -236,7 +247,7 @@ describe("deadlines, cancels and restarts", () => {
         attemptDir
       })
     );
-    await until("the trap to be installed", () => existsSync(ready));
+    await waitForFileState(ready, async () => existsSync(ready), Boolean);
     const controller = new AbortController();
     const waiting = runner.wait(handle, waitOpts(controller.signal));
     controller.abort();
@@ -256,7 +267,7 @@ describe("deadlines, cancels and restarts", () => {
       request({ kind: "shell", source: `sleep 60 & echo $! > ${JSON.stringify(pidFile)}; wait`, attemptDir })
     );
     assert.equal(runner.isAlive(handle), true, "the runner is alive while the work runs");
-    await until("the grandchild's pid", async () => (await stat(pidFile).catch(() => null))?.size !== undefined && (await readFile(pidFile, "utf8")).trim().length > 0);
+    await waitForFileState(pidFile, () => readFile(pidFile, "utf8").catch(() => ""), (text) => /^\d+\s*$/.test(text));
     const grandchild = Number((await readFile(pidFile, "utf8")).trim());
     const grandchildStart = readStarttime(grandchild);
     assert.ok(grandchildStart > 0, "the grandchild is running");
@@ -268,8 +279,8 @@ describe("deadlines, cancels and restarts", () => {
     assert.equal(exit.cancelled, true, "exit.json records the cancel");
     assert.equal(exit.timedOut, false, "a cancel is not a timeout");
     // exit.json is written just before the runner exits.
-    await until("the runner to exit", () => !runner.isAlive(handle), 5_000);
-    await until("the grandchild to be gone", () => !isSameProcessAlive(grandchild, grandchildStart), 5_000);
+    await runnerExited(handle);
+    assert.equal(isSameProcessAlive(grandchild, grandchildStart), false, "the grandchild is gone when the runner exits");
   });
 
   test("kill() ends a running attempt", async () => {
@@ -289,22 +300,31 @@ describe("deadlines, cancels and restarts", () => {
       return;
     }
     const attemptDir = await freshDir();
-    const handle = await runner.spawn(request({ kind: "shell", source: "sleep 60", attemptDir }));
+    const server = createServer();
+    t.after(() => server.close());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const connected = once(server, "connection");
+    const port = (server.address() as AddressInfo).port;
+    const handle = await runner.spawn(request({ kind: "shell", source: `node -e 'require("node:net").connect(${port}, "127.0.0.1");'`, attemptDir }));
+    const [socket] = await connected;
+    t.after(() => socket.destroy());
     let child: { pid: number; starttime: number } | undefined;
     t.after(() => {
       signalGroupIfOurs(handle.pid, handle.starttime, "SIGKILL");
       if (child) signalGroupIfOurs(child.pid, child.starttime, "SIGKILL");
     });
-    await until("child.json", () => existsSync(join(attemptDir, "child.json")));
+    await waitForFileState(join(attemptDir, "child.json"), async () => existsSync(join(attemptDir, "child.json")), Boolean);
     child = JSON.parse(await readFile(join(attemptDir, "child.json"), "utf8")) as { pid: number; starttime: number };
     assert.equal(isSameProcessAlive(child.pid, child.starttime), true, "the work is running before the runner dies");
     process.kill(handle.pid, "SIGKILL");
-    await until("the runner to exit", () => !runner.isAlive(handle));
+    await runnerExited(handle);
     // The live work and its SIGTERM remain real. Once it is gone, advance only the host's
     // documented 5 s escalation grace; the separate SIGTERM-resistant case keeps real time.
     t.mock.timers.enable({ apis: ["setTimeout"] });
+    const gone = once(socket, "close");
     const waiting = runner.wait(handle, waitOpts());
-    await until("the orphaned work to be gone", () => !isSameProcessAlive(child!.pid, child!.starttime), 5_000);
+    await gone;
+
     t.mock.timers.tick(5_000);
     const exit = await waiting;
     assert.equal(exit.interrupted, true, "no exit.json: interrupted");
@@ -316,7 +336,7 @@ describe("deadlines, cancels and restarts", () => {
     const attemptDir = await freshDir();
     const go = join(attemptDir, "go");
     const handle = await runner.spawn(
-      request({ kind: "shell", source: `while [ ! -f ${JSON.stringify(go)} ]; do sleep 0.02; done; echo finished; exit 4`, attemptDir })
+      request({ kind: "shell", source: `node -e 'const fs = require("node:fs"); const file = process.argv[1]; const done = () => { if (fs.existsSync(file)) { console.log("finished"); process.exit(4); } }; fs.watch(require("node:path").dirname(file), done); done();' ${JSON.stringify(go)}`, attemptDir })
     );
     // What run.json would persist; a new runner instance knows nothing else.
     const persisted = JSON.parse(await readFile(join(attemptDir, "handle.json"), "utf8")) as SandboxHandle;
@@ -329,7 +349,7 @@ describe("deadlines, cancels and restarts", () => {
     const exit = await waiting;
     assert.equal(exit.code, 4, "the exit code came from exit.json");
     // exit.json is written just before the runner exits.
-    await until("the adopted runner to exit", () => !adopter.isAlive(persisted), 5_000);
+    await runnerExited(persisted);
     assert.deepEqual(sizes.at(-1), { stdout: 9, stderr: 0 }, "onLogs reported the final sizes");
   });
 

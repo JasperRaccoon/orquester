@@ -89,6 +89,8 @@ test("a newer graph during a computation restarts it; only complete sets are pub
   const embedder = new FakeEmbedder({ dimensions: 16, groups: [] });
   let release!: () => void;
   let held = false;
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => (enter = resolve));
   const vectors = new ConceptVectors({
     embedders: new FakeEmbedderSource(embedder),
     dir,
@@ -96,6 +98,7 @@ test("a newer graph during a computation restarts it; only complete sets are pub
     pause: () => {
       if (held) return Promise.resolve();
       held = true;
+      enter();
       return new Promise<void>((resolve) => (release = resolve));
     }
   });
@@ -103,7 +106,7 @@ test("a newer graph during a computation restarts it; only complete sets are pub
   const published: number[] = [];
   vectors.onComputed(() => published.push(vectors.current()!.vectors.size));
   vectors.update(concepts(40));
-  while (!held) await new Promise((resolve) => setImmediate(resolve));
+  await entered;
   assert.equal(vectors.current(), null, "nothing until complete");
   vectors.update(concepts(20));
   release();
@@ -125,7 +128,8 @@ test("concept embedding runs in the background: the graph loads and search answe
   const search = new KnowledgeSearch({ store, graph, embedders: source, indexDir: knowledgeIndexDir(appdir), logger });
   await search.start();
   let release!: () => void;
-  let held = 0;
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => (enter = resolve));
   const gate = new Promise<void>((resolve) => (release = resolve));
   const merges = new KnowledgeConceptMerges({
     graph,
@@ -135,7 +139,7 @@ test("concept embedding runs in the background: the graph loads and search answe
     logger,
     thresholds: () => ({ merge: 0.9, similar: 0.5 }),
     pause: () => {
-      held += 1;
+      enter();
       return gate;
     }
   });
@@ -147,7 +151,7 @@ test("concept embedding runs in the background: the graph loads and search answe
   await merges.start();
   const nodes = Array.from({ length: 40 }, (_, i) => node(`tactic-${i}`, `Alternatives pages variant ${i}`, [`${entry}.md`]));
   await loadGraph(graph, nodes);
-  while (held === 0) await new Promise((resolve) => setImmediate(resolve));
+  await entered;
   // Concept embedding is parked between two batches: search and concept details still answer.
   const result = await search.search({ query: "alternatives pages" }, { kind: "all" });
   assert.ok(result.hits.length > 0);

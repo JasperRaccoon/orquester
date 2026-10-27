@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test, type TestContext } from "node:test";
 
 import { exoscaleAdapter, exoscaleAuthorization, exoscaleTiming } from "./exoscale.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest } from "./fixtures/vm-replay.ts";
 
 exoscaleTiming.pollMs = 0;
+
+beforeEach((t) => (t as TestContext).mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-20T12:00:00Z") }));
 
 const GVA = "https://api-ch-gva-2.exoscale.com/v2";
 const FRA = "https://api-de-fra-1.exoscale.com/v2";
@@ -36,7 +38,7 @@ function catalogRoutes(base: string) {
 function assertSigned(request: RecordedRequest): void {
   const header = request.headers.authorization ?? "";
   const expires = Number(/expires=(\d+)/.exec(header)?.[1]);
-  assert.ok(expires > Date.now() / 1000, "the signature expires in the future");
+  assert.equal(expires, Date.parse("2026-10-20T12:10:00Z") / 1000, "signatures remain usable for ten minutes");
   assert.equal(
     header,
     exoscaleAuthorization(credentials.apiKey, credentials.apiSecret, { method: request.method, url: request.url, body: request.rawBody ?? "" }, expires)

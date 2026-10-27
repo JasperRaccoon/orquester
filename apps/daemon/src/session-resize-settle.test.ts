@@ -70,7 +70,11 @@ describe("settleResize on the tmux backend", { skip: tmuxAvailable() && tmuxVers
     await manager.settleResize(session.id, AbortSignal.timeout(20_000));
     // The same size again changes nothing, so there is nothing to wait for.
     manager.resize(session.id, 100, 30);
-    await manager.settleResize(session.id);
+    let settled = false;
+    const settling = manager.settleResize(session.id).then(() => { settled = true; }, () => undefined);
+    await Promise.resolve();
+    assert.equal(settled, true, "an unchanged size resolves without another backend read");
+    await settling;
   });
 
   test("resolves on abort and for an unknown session", async () => {
@@ -79,6 +83,10 @@ describe("settleResize on the tmux backend", { skip: tmuxAvailable() && tmuxVers
     const abort = new AbortController();
     abort.abort();
     manager.resize(session.id, 90, 20);
-    await manager.settleResize(session.id, abort.signal);
+    let settled = false;
+    const settling = manager.settleResize(session.id, abort.signal).then(() => { settled = true; }, () => undefined);
+    await Promise.resolve();
+    assert.equal(settled, true, "an already-cancelled wait resolves without backend I/O");
+    await settling;
   });
 });

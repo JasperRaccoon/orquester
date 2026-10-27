@@ -9,10 +9,17 @@ import { FileRunStore, persistedRunToWire } from "./run-store.ts";
 import { toRunSummary } from "./run-context.ts";
 
 const roots: string[] = [];
+const stores: FileRunStore[] = [];
 after(async () => {
-  // A store's debounced index write can still land while the tree is removed (ENOTEMPTY): retry.
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
+  await Promise.all(stores.map((store) => store.flush()));
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
+
+function runStore(options: ConstructorParameters<typeof FileRunStore>[0]): FileRunStore {
+  const store = new FileRunStore(options);
+  stores.push(store);
+  return store;
+}
 
 async function scratch(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "orq-wf-runs-"));
@@ -60,7 +67,7 @@ function at(minutesAgo: number): string {
 
 test("create/save: run.json is atomic and 0600, the last save wins, the index follows", async () => {
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   const r = run("run-a", { status: "running", startedAt: at(1) });
   await store.create(r);
@@ -81,12 +88,15 @@ test("create/save: run.json is atomic and 0600, the last save wins, the index fo
   assert.equal(store.activeForWorkflow("wf-1").length, 0);
   assert.equal(store.latestForWorkflow("wf-1")!.status, "succeeded");
   assert.deepEqual((await store.load("run-a"))!.status, "succeeded");
-  assert.equal(await store.load("../etc"), null);
+  const outside = await scratch();
+  const outsideId = relative(dir, outside);
+  await writeFile(join(outside, "run.json"), JSON.stringify(run(outsideId)));
+  assert.equal(await store.load(outsideId), null, "an existing run outside the store is never read");
 });
 
 test("init rebuilds the index from the run directories; an unreadable run.json is skipped", async () => {
   const dir = await scratch();
-  const first = new FileRunStore({ dir, logger: quiet().logger });
+  const first = runStore({ dir, logger: quiet().logger });
   await first.init();
   await first.create(run("run-old", { queuedAt: at(30) }));
   await first.create(run("run-new", { queuedAt: at(10), status: "running" }));
@@ -99,7 +109,7 @@ test("init rebuilds the index from the run directories; an unreadable run.json i
   await writeFile(join(dir, "index.json"), JSON.stringify({ version: 1, runs: { ghost: { size: 1, mtimeMs: 1, summary: { id: "ghost", workflowId: "wf-1", queuedAt: at(1), status: "running" } } } }));
 
   const { lines, logger } = quiet();
-  const second = new FileRunStore({ dir, logger });
+  const second = runStore({ dir, logger });
   await second.init();
   const page = await second.listForWorkflow("wf-1", { limit: 10 });
   assert.deepEqual(page.runs.map((r) => r.id), ["run-new", "run-old"]);
@@ -111,14 +121,14 @@ test("init rebuilds the index from the run directories; an unreadable run.json i
 
   // The rewritten cache is reused on the next boot (same answer).
   await second.flush();
-  const third = new FileRunStore({ dir, logger: quiet().logger });
+  const third = runStore({ dir, logger: quiet().logger });
   await third.init();
   assert.deepEqual((await third.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-new", "run-old"]);
 });
 
 test("paging: `before` is a run id cursor, newest first; an unknown cursor is a first page", async () => {
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   for (let i = 0; i < 5; i += 1) await store.create(run(`run-${i}`, { queuedAt: at(50 - i) }));
   const one = await store.listForWorkflow("wf-1", { limit: 2 });
@@ -136,7 +146,7 @@ test("paging: `before` is a run id cursor, newest first; an unknown cursor is a 
 test("sweep keeps the newest 100 and nothing older than 30 days, preserving active runs", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-28T12:00:00.000Z") });
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   for (let i = 0; i < 102; i += 1) {
     await store.create(run(`run-${i}`, { queuedAt: at(i * 10), endedAt: at(i * 10) }));
@@ -159,7 +169,7 @@ test("sweep keeps the newest 100 and nothing older than 30 days, preserving acti
 test("sweep keeps a run whose temporary project is still there, until the project is deleted", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-28T12:00:00.000Z") });
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   const kept = { path: "/w/ws/wf-kept", deleted: false, deleteAfter: at(-60) };
   await store.create(run("run-new", { queuedAt: at(0), endedAt: at(0), status: "succeeded" }));
@@ -177,7 +187,7 @@ test("sweep keeps a run whose temporary project is still there, until the projec
 
 test("events append as NDJSON; attempt dirs and output files live under the run", async () => {
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   await store.create(run("run-x"));
   await Promise.all([store.appendEvent("run-x", { n: 1 }), store.appendEvent("run-x", { n: 2 }), store.appendEvent("run-x", { n: 3 })]);
@@ -204,7 +214,7 @@ test("events append as NDJSON; attempt dirs and output files live under the run"
 
 test("deleteForWorkflow removes every run of that workflow only", async () => {
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   await store.create(run("run-a"));
   await store.create(run("run-b", { status: "running" }));
@@ -260,7 +270,7 @@ test("toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to th
 
 test("exists: a recorded run (readable or not) is true; a missing one false; another I/O error throws; deleted and invalid ids are false", async () => {
   const dir = await scratch();
-  const store = new FileRunStore({ dir, logger: quiet().logger });
+  const store = runStore({ dir, logger: quiet().logger });
   await store.init();
   await store.create(run("run-a", { workflowId: "wf-x" }));
   assert.equal(await store.exists("run-a"), true);
@@ -273,7 +283,9 @@ test("exists: a recorded run (readable or not) is true; a missing one false; ano
   // A run id whose directory is a file: ENOTDIR, which says nothing definite — thrown.
   await writeFile(join(dir, "run-file"), "x");
   await assert.rejects(store.exists("run-file"), (error: NodeJS.ErrnoException) => error.code === "ENOTDIR");
-  assert.equal(await store.exists("../escape"), false, "an invalid id is never looked up");
+  const outside = await scratch();
+  await writeFile(join(outside, "run.json"), "{}");
+  assert.equal(await store.exists(relative(dir, outside)), false, "an existing run outside the store is never looked up");
   assert.equal(await store.exists(""), false);
   await store.deleteForWorkflow("wf-x");
   assert.equal(await store.exists("run-a"), false, "deleted");

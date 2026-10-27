@@ -217,7 +217,7 @@ test("teardown (plugin off): every emulator stops, then the hub, agent-device an
   });
 });
 
-test("teardown while hub health is pending leaves no hub or later agent daemon", { timeout: 10_000 }, async (t) => {
+test("teardown while hub health is pending leaves no hub or later agent daemon", async (t) => {
   await withHost({ sdk: true }, async ({ appDir, host, exec }) => {
     const toolchain = createDeviceToolchain({ appDir, env: {}, logger: quiet, npmCli: null });
     // The external SDK fixture makes a real marker through the normal toolchain entry point.

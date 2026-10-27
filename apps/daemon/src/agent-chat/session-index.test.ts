@@ -88,7 +88,7 @@ async function harness(
 }
 
 test("reattach routes chat records to their contributor and never attaches a PTY to them", async () => {
-  const h = await harness([chatRecord("chat-1", 0), terminalRecord("bash-1", "shell", 1)], ["bash-1"]);
+  const h = await harness([chatRecord("chat-1", 0), terminalRecord("bash-1", "shell", 1)], ["chat-1", "bash-1"]);
   await h.manager.reattach();
   assert.equal(h.chat.get("chat-1")?.kind, "agent-chat");
   assert.equal(h.chat.lastSeq("chat-1"), 7, "the render cursor survives a daemon restart");

@@ -198,18 +198,16 @@ describe("InboxBroker", () => {
     h.broker.release("w3");
     assert.equal(h.broker.giveUpsOf(bad), 2);
     assert.deepEqual(abandoned, [bad]);
-    assert.ok(h.broker.isAbandoned(bad));
     assert.deepEqual({ pending: h.broker.counts().pending, leased: h.broker.counts().leased }, { pending: 1, leased: 0 }, "an abandoned task is neither pending nor leased");
     const next = await h.broker.next("w4");
     assert.equal(next.kind === "task" && next.task.taskId, good, "the round goes on with the other tasks");
     // Without the option (a linking run: myKG waits for every task) a task is never abandoned.
     const run = await harness();
-    const only = await run.addTask("S", "ONLY");
+    await run.addTask("S", "ONLY");
     for (const chat of ["c1", "c2", "c3", "c4"]) {
       await run.broker.next(chat);
       run.broker.release(chat);
     }
-    assert.equal(run.broker.isAbandoned(only), false);
     assert.equal(run.broker.counts().pending, 1);
   });
 
@@ -325,7 +323,7 @@ describe("InboxBroker", () => {
     assert.deepEqual(await h.broker.next("w3"), { kind: "done", reason: "run-finished" });
   });
 
-  it("wakes a waiting chat from the inbox watcher (fs.watch), no rescan asked", { timeout: 20_000 }, async () => {
+  it("wakes a waiting chat from the inbox watcher (fs.watch), no rescan asked", async () => {
     const h = await harness();
     const watched = new InboxBroker({ clock: h.clock });
     await watched.attach(h.dir);
@@ -356,6 +354,7 @@ describe("InboxBroker", () => {
   it("retires a chat that waited the whole long-poll with nothing to do", async () => {
     const h = await harness({ nextWaitMs: 60_000 });
     const waiting = h.broker.next("w1");
+    await untilWaiting(h.broker, 1);
     await h.clock.advance(60_000);
     assert.deepEqual(await waiting, { kind: "done", reason: "session-budget" });
     assert.equal(h.broker.counts().waiting, 0);
@@ -431,7 +430,10 @@ describe("InboxBroker — what a worker is shown (phase 2 neighbour context)", (
     });
     const id = await h.addTask("S", "u", "pair-check");
     await h.broker.next("w1");
+    const unexpectedAnswer = () => assert.fail("an invalid answer must never be recorded");
+    h.broker.events.once("answered", unexpectedAnswer);
     const refused = await h.broker.submit("w1", id, '{"x":1}');
+    h.broker.events.off("answered", unexpectedAnswer);
     assert.equal(refused.accepted, false);
     assert.match(!refused.accepted ? refused.error : "", /"verdict" is missing\./);
     assert.deepEqual(await readdir(h.outbox), [], "nothing written for a refused answer");

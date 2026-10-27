@@ -56,7 +56,7 @@ describe("Claude names (as observed on Claude Code 2.1.285)", () => {
   });
 
   it("plugin ids: commands then skills; manifest skills add to skills/, manifest commands replace commands/", async () => {
-    const dir = await root();
+    const dir = join(await root(), "plugin");
     await write(join(dir, "skills", "s1", "SKILL.md"), skill());
     await write(join(dir, "commands", "c1.md"), "x");
     assert.deepEqual(await claudePluginEntryIds(dir, "pl"), ["pl:c1", "pl:s1"]);
@@ -65,10 +65,13 @@ describe("Claude names (as observed on Claude Code 2.1.285)", () => {
     await write(join(dir, "one-skill", "SKILL.md"), skill("solo"));
     await write(join(dir, "custom", "sub", "c2.md"), "x");
     await write(join(dir, "single.md"), "x");
+    await write(join(dir, "..", "outside.md"), "outside");
+    const absolute = join(dir, "absolute.md");
+    await write(absolute, "absolute");
     assert.deepEqual(
       await claudePluginEntryIds(dir, "pl", {
         skills: ["./extra-skills/", "./one-skill"],
-        commands: ["./custom/", "./single.md", "../outside.md", "/abs"]
+        commands: ["./custom/", "./single.md", "../outside.md", absolute]
       }),
       ["pl:sub:c2", "pl:single", "pl:s1", "pl:s2", "pl:solo"]
     );

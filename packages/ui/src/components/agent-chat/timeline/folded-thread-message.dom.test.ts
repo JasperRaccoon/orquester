@@ -131,7 +131,7 @@ describe("another chat's message folds to one line", () => {
     assert.equal(button.getAttribute("aria-expanded"), "true");
     assert.equal(body(scope).hasAttribute("hidden"), false);
     assert.match(body(scope).textContent ?? "", /Audit the auth module\.\s*Then report back\./);
-    assert.equal(scope.querySelector("[data-folded]"), null);
+    assert.ok(scope.querySelector("[data-folded]") === null, "the element is absent");
     act(() => button.click());
     assert.equal(button.getAttribute("aria-expanded"), "false");
     assert.equal(body(scope).getAttribute("hidden"), "until-found");
@@ -151,7 +151,7 @@ describe("another chat's message folds to one line", () => {
 describe("messages that stay open", () => {
   it("a request for the user's input keeps its caption over the full bubble", () => {
     const scope = render(sentBy("attention"));
-    assert.equal(scope.querySelector("button[aria-expanded]"), null);
+    assert.ok(scope.querySelector("button[aria-expanded]") === null, "the element is absent");
     assert.equal(scope.querySelector("[data-from-thread]")?.getAttribute("data-from-thread"), "attention");
     assert.match(scope.textContent ?? "", /Then report back\./);
   });
@@ -159,14 +159,14 @@ describe("messages that stay open", () => {
   it("a merged-back result is never folded", () => {
     const text = buildMergeBackMessage({ childTitle: "Try B", relation: "fork", text: "B works." });
     const scope = render(messageRow(text, [mergeBackContext("merge-1")]));
-    assert.equal(scope.querySelector("button[aria-expanded]"), null);
+    assert.ok(scope.querySelector("button[aria-expanded]") === null, "the element is absent");
     assert.ok(scope.querySelector("[data-merged-back]"));
     assert.match(scope.textContent ?? "", /B works\./);
   });
 
   it("the user's own message is never folded, even one that types another chat's header", () => {
     const scope = render(messageRow(buildThreadMessage({ origin: "sent", fromTitle: "Main", text: "Do X." }), undefined));
-    assert.equal(scope.querySelector("button[aria-expanded]"), null);
-    assert.equal(scope.querySelector("[data-from-thread]"), null);
+    assert.ok(scope.querySelector("button[aria-expanded]") === null, "the element is absent");
+    assert.ok(scope.querySelector("[data-from-thread]") === null, "the element is absent");
   });
 });

@@ -197,6 +197,7 @@ describe("claude goal — Stop-hook feedback and the check-in (goals §6.1.3)", 
 
   it("ignores text that is not a Stop-hook feedback frame", () => {
     assert.equal(matchGoalStopHookFeedback("[ship it]: no", "ship it"), undefined);
+    assert.equal(matchGoalStopHookFeedback("Post hook feedback:\n[ship it]: no", "ship it"), undefined);
     assert.equal(matchGoalStopHookFeedback("Stop hook feedback: ship it", "ship it"), undefined);
   });
 

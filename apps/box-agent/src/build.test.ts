@@ -21,7 +21,7 @@ const targets = {
   "win32-x64": { exe: "orq-agent.exe", format: "pe", arch: "x64" }
 };
 
-test("every platform cross-compiles and links for its OS and CPU", { skip: haveGo ? false : "Go toolchain not installed", timeout: 1_800_000 }, async (t) => {
+test("every platform cross-compiles and links for its OS and CPU", { skip: haveGo ? false : "Go toolchain not installed" }, async (t) => {
   const out = await mkdtemp(join(tmpdir(), "orq-agent-build-"));
   t.after(() => rm(out, { recursive: true, force: true }));
   const manifest = await buildBoxAgent({ outDir: out, version: "0.0.0+test" });

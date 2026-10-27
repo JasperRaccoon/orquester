@@ -35,7 +35,7 @@ test("picks the first MIT cookie whose number is empty or the display", () => {
 
 test("rejects a truncated file and accepts an empty one", () => {
   assert.deepEqual(parseXauthority(Buffer.alloc(0)), []);
-  assert.throws(() => parseXauthority(hex("ffff 0000 0000 0012 4d49")), /truncated/);
+  assert.throws(() => parseXauthority(hex("ffff 0000 0000 0012 4d49542d4d414749432d434f4f4b49452d31 0010 0011")), /truncated/);
   assert.throws(() => parseXauthority(hex("ff")), /truncated/);
 });
 

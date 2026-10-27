@@ -44,9 +44,10 @@ process.on("SIGUSR2", () => process.stdout.write("during-drop\\n"));
 process.stdin.on("end", () => process.exit(0));
 `;
 
-test("a box child has the ProviderChild shape: stdio, exit code, no local pid", async () => {
+test("a box child has the ProviderChild shape: stdio, exit code, no local pid", async (t) => {
   const connection = localBoxConnection();
   const child = spawnBoxChild({ connection, command: process.execPath, args: ["-e", ECHO], env: {}, cwd: process.cwd() });
+  t.after(async () => { await child.kill("SIGKILL"); });
   assert.equal(child.pid, undefined);
   assert.equal(child.process, null);
   assert.equal(child.box.boxId, connection.boxId);
@@ -83,7 +84,7 @@ test("a command the box cannot start is a spawn-error outcome, never a throw", a
 
 test("a detached child survives a dropped link and reattaches from the bytes it had", async (t) => {
   const connection = reattachableBoxConnection();
-  t.after(() => connection.killAll());
+  t.after(() => { connection.restoreLink(); return connection.killAll(); });
   let bufferBytes: number | undefined;
   const exec = connection.exec.bind(connection);
   connection.exec = (options: BoxExecOptions) => {
@@ -122,8 +123,9 @@ test("a detached child survives a dropped link and reattaches from the bytes it 
   assert.deepEqual(await child.exited, { kind: "exit", code: 7, signal: null });
 });
 
-test("a detached child whose box never comes back ends as SIGHUP at the reattach deadline", async () => {
+test("a detached child whose box never comes back ends as SIGHUP at the reattach deadline", async (t) => {
   const connection = reattachableBoxConnection();
+  t.after(() => connection.killAll());
   const notices: string[] = [];
   const child = spawnBoxChild({
     connection,
@@ -141,8 +143,6 @@ test("a detached child whose box never comes back ends as SIGHUP at the reattach
   assert.deepEqual(await child.exited, { kind: "signal", code: null, signal: "SIGHUP" });
   assert.ok(notices.some((notice) => notice.includes("did not come back")));
   connection.restoreLink();
-  // The test's own process in the "box" is cleaned up.
-  await connection.killAll();
 });
 
 /** A detached child that saw `ready`, its link dropped, and `orq-agent` restarted under it. */

@@ -254,6 +254,15 @@ test("the thread's denied MCP servers are disconnected and ruled out — also wi
     const consumed = (async () => {
       for await (const _event of adapter.events) void _event;
     })();
+    t.after(async () => {
+      await adapter.stopAll();
+      abort.abort();
+      await consumed;
+      fake.http.closeAllConnections();
+      await new Promise<void>((resolve) => fake.http.close(() => resolve()));
+      peer.cleanup();
+      await rm(project, { recursive: true, force: true });
+    });
     const started = await adapter.startSession({
       threadId: "thread-d",
       projectPath: project,
@@ -265,13 +274,5 @@ test("the thread's denied MCP servers are disconnected and ruled out — also wi
     const session = (started.resumeCursor as { sessionId: string }).sessionId;
     assert.equal(decides(fake.rulesetOf(session), "remote_list"), "deny", `the denied server's tools (grant ${!failGrant})`);
     assert.ok(fake.requests.some((request) => request.method === "POST" && request.path === "/mcp/remote/disconnect"), "disconnected on the instance");
-    await adapter.stopAll();
-    abort.abort();
-    await consumed;
-    fake.http.closeAllConnections();
-    await new Promise<void>((resolve) => fake.http.close(() => resolve()));
-    peer.cleanup();
-    await rm(project, { recursive: true, force: true });
   }
-  void t;
 });

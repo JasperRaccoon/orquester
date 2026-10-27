@@ -268,11 +268,12 @@ test("long previews: the summary is cut to 64 KiB and marked fullPreview; the de
   assert.equal(detail!.fullPreview, false);
   assert.deepEqual(detail!.sections, [{ kind: "code", title: "big", text }]);
   assert.equal(h.registry.detail("t2", "a1"), null);
-  await assert.rejects(
+  const refused = assert.rejects(
     h.registry.open(card({ sections: [{ kind: "code", title: "huge", text: "y".repeat(1024 * 1024 + 1) }] }), new AbortController().signal),
     (error: Error & { code?: string }) => error.code === "PREVIEW_TOO_LARGE"
   );
   assert.equal(h.registry.list("t1").length, 1, "no card for a too-large preview");
+  await refused;
   await h.registry.shutdown();
 });
 
@@ -377,8 +378,9 @@ test("routes: list, detail, answer; only a person answers (agent and external pr
 test("at most MAX_PENDING_TOOL_APPROVALS_PER_THREAD cards wait per chat (APPROVAL_LIMIT); other chats are not affected", async () => {
   const h = harness();
   for (let i = 0; i < MAX_PENDING_TOOL_APPROVALS_PER_THREAD; i += 1) void h.registry.open(card(), new AbortController().signal);
-  await assert.rejects(h.registry.open(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === TOOL_APPROVAL_LIMIT);
+  const refused = assert.rejects(h.registry.open(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === TOOL_APPROVAL_LIMIT);
   assert.equal(h.registry.list("t1").length, MAX_PENDING_TOOL_APPROVALS_PER_THREAD);
+  await refused;
   void h.registry.open(card({ threadId: "t2" }), new AbortController().signal);
   assert.equal(h.registry.list("t2").length, 1);
   // One answered frees a slot.

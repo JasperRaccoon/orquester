@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
@@ -50,6 +50,10 @@ beforeEach(() => {
   root = createRoot(mount);
 });
 
+afterEach(async () => {
+  await act(async () => root.unmount());
+});
+
 /** The chat's box with its composer, and the notice over it once the thread is gone — as AgentChatView places it. */
 const chat = (gone: boolean) =>
   createElement(
@@ -73,19 +77,16 @@ describe("the gone notice", () => {
     dom.window.document.querySelector("textarea")!.focus();
     await show();
     assert.equal(dom.window.document.activeElement?.textContent, "Close tab");
-    await act(async () => root.unmount());
   });
 
   it("takes focus when nothing had it", async () => {
     await show();
     assert.equal(dom.window.document.activeElement?.textContent, "Close tab");
-    await act(async () => root.unmount());
   });
 
   it("leaves focus that is elsewhere in the app", async () => {
     elsewhere.focus();
     await show();
-    assert.equal(dom.window.document.activeElement, elsewhere);
-    await act(async () => root.unmount());
+    assert.ok(dom.window.document.activeElement === elsewhere, "focus stays in the other pane");
   });
 });

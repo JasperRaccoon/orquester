@@ -591,7 +591,13 @@ test("download: never into git metadata — a .git path (any spelling), through 
 // ---------------------------------------------------------------------------
 
 test("forwards: a host loopback URL to the box port, reused for the same port, closed when the box is destroyed", async (t) => {
-  const { tools } = world();
+  const { tools, connection } = world();
+  const forwardToHost = connection.forwardToHost.bind(connection);
+  connection.forwardToHost = async (port, options) => {
+    const relay = await forwardToHost(port, options);
+    t.after(() => relay.close());
+    return relay;
+  };
   const server = createServer((socket) => socket.end("hello from the box"));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());

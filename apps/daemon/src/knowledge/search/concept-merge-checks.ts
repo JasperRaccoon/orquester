@@ -16,6 +16,10 @@
  * least one name word in common; not merged together already, not in an undone merge, not checked
  * at these names. Sharing an entry first (myKG often extracts one thing twice from one entry), then
  * closest first; at most {@link CONCEPT_CHECK_MAX_PER_ROUND} a round.
+ *
+ * Each concept is shown with an excerpt of one of its entries: the passage naming it best among its
+ * first entries ({@link conceptExcerptFor}), not an entry's opening. A check records its input
+ * version ({@link CONCEPT_CHECK_INPUT_VERSION}).
  */
 
 import type { KnowledgeConceptMergeCheck, KnowledgeConceptMergeRejection } from "@orquester/config";
@@ -37,6 +41,16 @@ export const CONCEPT_CHECK_STEP = "concept-check";
 export const CONCEPT_CHECK_MAX_PER_ROUND = 40;
 /** Characters of an entry shown beside a concept. */
 export const CONCEPT_CHECK_EXCERPT_CHARS = 360;
+/** A concept's entries searched (in order) for the passage that names it best. */
+export const CONCEPT_CHECK_EXCERPT_ENTRIES = 3;
+/**
+ * The version of a check's input, recorded with it (`inputVersion`). 1 (absent): the sentence of
+ * the concept's first entry with the most of its name's words. 2: the passage naming it best, by
+ * its name or an alias whole, else the largest share of one's words, among its first
+ * {@link CONCEPT_CHECK_EXCERPT_ENTRIES} entries ({@link conceptExcerpt}). Version 1 answers are not
+ * asked again: on the live graph every one of them showed a sentence with the concept's words.
+ */
+export const CONCEPT_CHECK_INPUT_VERSION = 2;
 const REASON_MAX = 300;
 /** Types never checked (see the module header). */
 const SKIP_TYPES: ReadonlySet<string> = new Set(["Person"]);
@@ -202,21 +216,44 @@ export function conceptCheckInput(a: ConceptCheckSide, b: ConceptCheckSide): str
   return `${block("CONCEPT A", a)}\n\n${block("CONCEPT B", b)}\n\nAre A and B the same thing? Answer with the JSON object only.`;
 }
 
+/** A name as a phrase to look for: folded, runs of anything but letters and digits as one space. */
+function phrase(text: string): string {
+  return ` ${text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()} `;
+}
+
+/** How well a piece of text names a concept: 2 when it has its name or an alias whole, else the largest share of one's words (0 to 1). */
+function namingScore(piece: string, variants: readonly { phrase: string; tokens: ReadonlySet<string> }[]): number {
+  const text = phrase(piece);
+  const tokens = conceptNameTokens(piece);
+  let best = 0;
+  for (const variant of variants) {
+    if (variant.phrase.trim().length >= 3 && text.includes(variant.phrase)) return 2;
+    if (variant.tokens.size === 0) continue;
+    let hit = 0;
+    for (const token of variant.tokens) if (tokens.has(token)) hit += 1;
+    best = Math.max(best, hit / variant.tokens.size);
+  }
+  return best;
+}
+
 /**
- * The part of an entry's body that best shows a concept: the sentence (or line) with the most of
- * its name's words, with what follows it, up to {@link CONCEPT_CHECK_EXCERPT_CHARS} characters,
- * as one line; the body's start when no sentence names any of them.
+ * The part of an entry's body that best shows a concept: the sentence (or line) that names it best
+ * (its name or an alias whole, else the largest share of one's words; the first such), with what
+ * follows it, up to {@link CONCEPT_CHECK_EXCERPT_CHARS} characters, as one line; the body's start
+ * when no sentence has any of its words (`score` 0).
  */
-export function conceptExcerpt(body: string, concept: { name: string; aliases: readonly string[] }): string {
-  const words = new Set<string>();
-  for (const name of [concept.name, ...concept.aliases]) for (const token of conceptNameTokens(name)) words.add(token);
+export function conceptExcerpt(body: string, concept: { name: string; aliases: readonly string[] }): { text: string; score: number } {
+  const variants = [concept.name, ...concept.aliases].map((name) => ({ phrase: phrase(name), tokens: conceptNameTokens(name) }));
   const pieces = body.split(/(?<=[.!?])\s+|\n+/).map(oneLine).filter((piece) => piece.length > 0);
   let best = 0;
   let bestScore = 0;
   pieces.forEach((piece, i) => {
-    const tokens = conceptNameTokens(piece);
-    let score = 0;
-    for (const word of words) if (tokens.has(word)) score += 1;
+    const score = namingScore(piece, variants);
     if (score > bestScore) {
       best = i;
       bestScore = score;
@@ -224,7 +261,27 @@ export function conceptExcerpt(body: string, concept: { name: string; aliases: r
   });
   let text = "";
   for (let i = best; i < pieces.length && text.length < CONCEPT_CHECK_EXCERPT_CHARS; i += 1) text = text ? `${text} ${pieces[i]}` : pieces[i]!;
-  return text.length <= CONCEPT_CHECK_EXCERPT_CHARS ? text : `${text.slice(0, CONCEPT_CHECK_EXCERPT_CHARS).trimEnd()} […]`;
+  return { text: text.length <= CONCEPT_CHECK_EXCERPT_CHARS ? text : `${text.slice(0, CONCEPT_CHECK_EXCERPT_CHARS).trimEnd()} […]`, score: bestScore };
+}
+
+/**
+ * A concept's excerpt: of its first {@link CONCEPT_CHECK_EXCERPT_ENTRIES} entries (in order), the
+ * one whose passage names it best ({@link conceptExcerpt}; a tie keeps the earlier entry). Null
+ * when none of them can be read.
+ */
+export async function conceptExcerptFor(
+  concept: Pick<GraphConcept, "name" | "aliases" | "entryIds">,
+  entry: (entryId: string) => Promise<{ title: string; body: string } | null>
+): Promise<{ title: string; text: string; score: number } | null> {
+  let best: { title: string; text: string; score: number } | null = null;
+  for (const entryId of concept.entryIds.slice(0, CONCEPT_CHECK_EXCERPT_ENTRIES)) {
+    const found = await entry(entryId).catch(() => null);
+    if (!found) continue;
+    const excerpt = conceptExcerpt(found.body, concept);
+    if (best === null || excerpt.score > best.score) best = { title: found.title, ...excerpt };
+    if (best.score >= 2) break;
+  }
+  return best;
 }
 
 /** `null` when `value` is a valid answer, else why not (the worker is asked to answer again). */
@@ -261,18 +318,21 @@ export interface ConceptCheckPayload {
   nameA: string;
   nameB: string;
   similarity: number;
+  /** {@link CONCEPT_CHECK_INPUT_VERSION} when the task was written; absent in an older build's task (1). */
+  inputVersion?: number;
 }
 
 function readPayload(value: unknown): ConceptCheckPayload | null {
   if (value === null || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
+  const inputVersion = typeof v.inputVersion === "number" && Number.isInteger(v.inputVersion) && v.inputVersion >= 1 ? v.inputVersion : 1;
   return typeof v.a === "string" &&
     typeof v.b === "string" &&
     typeof v.type === "string" &&
     typeof v.nameA === "string" &&
     typeof v.nameB === "string" &&
     typeof v.similarity === "number"
-    ? { a: v.a, b: v.b, type: v.type, nameA: v.nameA, nameB: v.nameB, similarity: v.similarity }
+    ? { a: v.a, b: v.b, type: v.type, nameA: v.nameA, nameB: v.nameB, similarity: v.similarity, inputVersion }
     : null;
 }
 
@@ -320,7 +380,8 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
         type: candidate.a.type,
         nameA: candidate.a.name,
         nameB: candidate.b.name,
-        similarity: Math.round(candidate.similarity * 10_000) / 10_000
+        similarity: Math.round(candidate.similarity * 10_000) / 10_000,
+        inputVersion: CONCEPT_CHECK_INPUT_VERSION
       };
       const task: KnowledgeRoundTask = { label: `${CONCEPT_CHECK_STEP} ${candidate.a.id} ${candidate.b.id}`, system: CONCEPT_CHECK_SYSTEM, user: conceptCheckInput(a, b), payload };
       if (!options.skip?.(task)) tasks.push(task);
@@ -346,7 +407,8 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
       keep: parsed.keep === "a" ? task.a : task.b,
       reason: parsed.reason,
       similarity: task.similarity,
-      checkedAt: (this.options.now ?? (() => new Date()))().toISOString()
+      checkedAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      inputVersion: task.inputVersion ?? 1
     });
   }
 
@@ -355,14 +417,13 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
   }
 
   private async side(concept: GraphConcept): Promise<ConceptCheckSide> {
-    const entryId = concept.entryIds[0];
-    const entry = entryId ? await this.options.entry(entryId).catch(() => null) : null;
+    const excerpt = await conceptExcerptFor(concept, this.options.entry);
     return {
       type: concept.type,
       name: concept.name,
       aliases: concept.aliases,
       description: concept.description,
-      excerpt: entry ? { title: entry.title, text: conceptExcerpt(entry.body, concept) } : null
+      excerpt: excerpt ? { title: excerpt.title, text: excerpt.text } : null
     };
   }
 }

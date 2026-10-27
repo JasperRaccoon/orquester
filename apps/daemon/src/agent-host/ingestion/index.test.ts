@@ -556,10 +556,12 @@ describe("mandatory flush points (§5.6)", () => {
     await ingestion.ingest(
       runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
     );
-    const order = sink.events().map((event) => event.type);
+    const order = sink.events().map((event) =>
+      event.type === "thread.message-sent" ? `${event.type}:${event.payload.streaming}` : event.type
+    );
     assert.deepEqual(order, [
-      "thread.message-sent",
-      "thread.message-sent",
+      "thread.message-sent:true",
+      "thread.message-sent:false",
       "thread.session-set"
     ]);
     assert.equal(

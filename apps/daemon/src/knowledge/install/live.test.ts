@@ -30,7 +30,7 @@ import { tempRoot } from "./testing.ts";
 const live = process.env.ORQUESTER_KG_LIVE_INSTALL === "1";
 const exec = promisify(execFile);
 
-test("live: the pinned runtime installs, relocates and runs", { skip: !live, timeout: 30 * 60_000 }, async (t) => {
+test("live: the pinned runtime installs, relocates and runs", { skip: !live }, async (t) => {
   const uv = uvBuildFor(process.platform, process.arch, process.platform === "linux" ? detectHostLibc() : "glibc");
   assert.ok(uv, `uv has no build for ${process.platform}/${process.arch}`);
   const root = await tempRoot("orq-kg-live-");

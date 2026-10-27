@@ -496,6 +496,8 @@ test("an unresolvable repository shows why and polls nothing; stop() leaves no t
   ]);
   await poller.start();
   await run(60 * S);
+  assert.ok(poller.triggerState("wf", "g")?.lastError, "a missing project remote is reported on its trigger");
+  assert.ok(poller.triggerState("bad", "g")?.lastError, "an unsupported URL is reported on its trigger");
   assert.equal(remote.lsCalls.length, 0);
   poller.stop();
 });

@@ -587,7 +587,7 @@ test("a failed status poll during a destroy is retried, not taken as a failed de
   assert.equal(adapter.failStatusTimes, 0);
 });
 
-test("with the plugin off, live boxes stay managed: the reconciler still enforces their time limit", { timeout: 30_000 }, async (t) => {
+test("with the plugin off, live boxes stay managed: the reconciler still enforces their time limit", async (t) => {
   const base = await tempDir(t, "orq-box-life-");
   const adapter = new FakeAdapter();
   let now = Date.now();

@@ -3,6 +3,7 @@ import { Writable } from "node:stream";
 import { test } from "node:test";
 
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import type { FastifyInstance } from "fastify";
 
 import { testAuthSessions } from "./auth/testing.ts";
 import { createServer } from "./index.js";
@@ -15,7 +16,20 @@ type CreateServerArgs = Parameters<typeof createServer>;
 // at every daemon shutdown. Registered before any child context, it closes it once.
 test("shutting the app down leaves no WebSocketServer listener warning", async (t) => {
   const { authSessions } = await testAuthSessions();
-  const services = { authSessions } as unknown as CreateServerArgs[4];
+  const services = {
+    authSessions,
+    devices: {
+      // Reproduce a populated daemon: late plugin hooks exceed Node's listener limit.
+      registerRoutes: (app: FastifyInstance) => {
+        for (let route = 0; route < 12; route += 1) {
+          void app.register(async (scope) => {
+            scope.get(`/device-fixture/${route}`, () => ({}));
+          });
+        }
+      },
+      registerWsRoutes: async () => {}
+    }
+  } as unknown as CreateServerArgs[4];
   const resolved = { daemonDir: "/tmp", workspacesDir: "/tmp", workspacesMetaFile: "/tmp/workspaces.json", fsRoot: "/tmp" } as unknown as CreateServerArgs[1];
   const log = new Writable({ write: (_chunk, _encoding, done) => done() });
   const app = createServer(createDefaultDaemonConfig({ env: {} }), resolved, createDefaultClientConfig("/tmp/daemon.sock"), log, services, {

@@ -90,6 +90,7 @@ describe("a collab child never hijacks the parent's turn", () => {
       "thread/tokenUsage/updated" as never,
       usageNotification(CHILD, "child-turn", 99_999)
     );
+    assert.equal(usage.threadUsage().totalProcessedTokens, 100, "the child's usage never replaces the parent's running total");
     normaliser.notification("thread/tokenUsage/updated" as never, usageNotification(PARENT, "parent-turn", 150));
 
     const settled = usage.completeTurn("parent-turn");

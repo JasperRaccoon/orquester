@@ -26,6 +26,7 @@ import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } fr
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
 import { MAX_REFUSALS } from "./inbox.ts";
+import { PAIR_CHECK_BODY_CHARS, PAIR_CHECK_INPUT_VERSION } from "./pair-checks.ts";
 import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
 import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
 
@@ -648,7 +649,7 @@ describe("KnowledgeLinkingService — link states (metadata edits)", () => {
   });
 });
 
-describe("KnowledgeLinkingService — runs against a fake myKG and fake worker chats", { timeout: 60_000 }, () => {
+describe("KnowledgeLinkingService — runs against a fake myKG and fake worker chats", () => {
   it("links new entries through worker chats, then re-links only an edited one with --update", async () => {
     const h = await harness();
     await h.service.start();
@@ -1030,7 +1031,7 @@ function fakeGraphView() {
 const pass2Inputs = (h: Harness) => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pass2");
 const withContext = (h: Harness) => pass2Inputs(h).filter((i) => i.input.includes(CONTEXT_HEADING)).length;
 
-describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: re-linking with neighbour context", () => {
   it("re-links entries linked without context in batches of 25 once no save waits, myKG really asks again, and the status counts", async () => {
     const graph = fakeGraphView();
     const h = await harness({ extra: { graphView: graph.view } });
@@ -1290,7 +1291,7 @@ async function tempAppdir(): Promise<string> {
   return appdir;
 }
 
-describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: link-gap scans", () => {
   it("a graph load that changed nothing the scan reads (the vectors, the graph's content) is not scanned again", async () => {
     const graph = fakeGraphView();
     let revision = 1;
@@ -1322,7 +1323,7 @@ describe("KnowledgeLinkingService — phase 2: link-gap scans", { timeout: 120_0
   });
 });
 
-describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", () => {
   it("after a graph load, link gaps are queued once; a pair-check round answers close pairs and counts its tokens", async () => {
     const graph = fakeGraphView();
     const h = await harness({ extra: { graphView: graph.view } });
@@ -1373,6 +1374,61 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check").length, 1, "each pair is checked once per pair of content hashes");
     await h.service.stop();
   });
+
+  it("a consistent check on input version 1 that saw a cut body is asked again once, with excerpts, and recorded on the current version", async () => {
+    const graph = fakeGraphView();
+    const h = await harness({ extra: { graphView: graph.view } });
+    const ids = [ID(1), ID(2), ID(3)];
+    graph.ready(ids);
+    graph.concepts.set(ID(3), [{ id: "tool-x", type: "Tool", name: "X" }]);
+    const bodies: Record<string, string> = {
+      [ID(1)]: Array.from({ length: 100 }, (_, i) => `Step ${i}: filler line number ${i} about phones.`).join("\n") + "\nUse Gmail specifically, never Outlook.",
+      [ID(2)]: "make an outlook/proton email for the account",
+      [ID(3)]: "body of 3"
+    };
+    assert.ok(bodies[ID(1)]!.length > PAIR_CHECK_BODY_CHARS, "longer than the old cut, and excerpted now");
+    const hash = (id: string) => createHash("sha256").update(bodies[id]!).digest("hex");
+    const v1 = (a: string, b: string) => ({ a, b, hashA: hash(a), hashB: hash(b), verdict: "consistent", note: "Same playbook.", checkedAt: "t" });
+    await mkdir(dirname(knowledgePairChecksPath(h.appdir)), { recursive: true });
+    await writeFile(knowledgePairChecksPath(h.appdir), JSON.stringify({ version: 1, checks: [v1(ID(1), ID(2))] }));
+    await h.service.start();
+    for (const id of ids) h.service.entriesChanged(await h.store.put(id, bodies[id]!));
+    const pairInputs = () => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "pair-check");
+    const reasked = new Promise<void>((resolve) => {
+      const off = h.service.pairChecks.onChange(() => {
+        if (h.service.pairChecks.get(ID(1), ID(2))?.note !== "Both say the same.") return;
+        off();
+        resolve();
+      });
+    });
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    // The gap entries are re-linked first; then linking is idle and the round runs.
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    await reasked;
+    await h.service.pairChecksIdle();
+    const asked = pairInputs();
+    assert.equal(asked.length, 1, "the version-1 check of the cut body is asked again");
+    assert.ok(asked[0]!.input.includes("Use Gmail specifically, never Outlook."), "with the passage that bears on the other entry");
+    assert.ok(asked[0]!.input.includes("(Excerpts chosen for relevance to the other entry"));
+    await h.service.pairChecks.flush();
+    const file = JSON.parse(await readFile(knowledgePairChecksPath(h.appdir), "utf8")) as { checks: { a: string; b: string; inputVersion?: number; note: string }[] };
+    assert.deepEqual(
+      file.checks.map((c) => [c.a, c.b, c.inputVersion, c.note]),
+      [[ID(1), ID(2), PAIR_CHECK_INPUT_VERSION, "Both say the same."]]
+    );
+
+    // The next rounds (gap re-links, an edit elsewhere) do not ask it again.
+    h.service.entriesChanged(await h.store.put(ID(3), "body of 3, edited"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 3));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 4));
+    await h.service.pairChecksIdle();
+    assert.equal(pairInputs().filter((i) => i.input.includes(`(${ID(1)})`) && i.input.includes(`(${ID(2)})`)).length, 1, "asked again once");
+    await h.service.stop();
+  });
 });
 
 /** The attempt key of the round-test source's task for `item`: its task id (myKG's, of its prompt and label). */
@@ -1416,7 +1472,7 @@ function fakeRoundSource(items: string[]) {
   };
 }
 
-describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 }, () => {
+describe("KnowledgeLinkingService — round task sources", () => {
   it("answers a source's capped tasks in the idle rounds only, counts their tokens, and asks each item once", async () => {
     const graph = fakeGraphView();
     const round = fakeRoundSource(["x", "y", "z"]);
@@ -1491,7 +1547,7 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     assert.ok(!h.service.pairChecks.gaveUp(roundTaskKey("bad")), "one failed round");
     for (let round = 2; round <= 3; round += 1) {
       work();
-      await h.until(() => h.service.pairChecks.givenUp().length > 0 || attemptsOf(h, "bad") >= round);
+      await h.until(() => h.service.pairChecks.gaveUp(roundTaskKey("bad")) || attemptsOf(h, "bad") >= round);
       await h.service.pairChecksIdle();
     }
     assert.ok(h.service.pairChecks.gaveUp(roundTaskKey("bad")), "given up after three rounds");

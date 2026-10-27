@@ -223,7 +223,8 @@ describe("the Knowledge Graph plugin section", () => {
     assert.deepEqual(puts, [{ accountPolicy: { ...AUTO, strategy: "fixed" }, accountId: null }]);
   });
 
-  it("shows the activity and follows knowledge.status events", async () => {
+  it("shows the activity and follows knowledge.status events", async (t) => {
+    t.mock.method(Date, "now", () => Date.parse("2026-10-27T12:00:00.000Z"));
     await show();
     assert.match(text(), /2 entries · 3 concepts · 2 collections/);
     assert.match(text(), /Linking idle/);

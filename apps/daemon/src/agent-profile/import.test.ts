@@ -497,10 +497,10 @@ test("the sweep removes directories a previous run leaked once they are old", as
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixture = await makeFixture(root);
   const { store, clock, dir } = await scratch(t, { fixture });
-  clock.now = Date.now();
   await put(join(dir, "old-import", "tree", "x"), "x");
   await put(join(dir, "convert-abc123", "SKILL.md"), "x");
   await put(join(dir, "fresh", "x"), "x");
+  await utimes(join(dir, "fresh"), new Date(clock.now), new Date(clock.now));
   const old = new Date(clock.now - 16 * 60_000);
   await utimes(join(dir, "old-import"), old, old);
   await utimes(join(dir, "convert-abc123"), old, old);

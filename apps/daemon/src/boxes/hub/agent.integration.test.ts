@@ -26,7 +26,6 @@ import { createBoxHub, type BoxHubServer } from "./hub.ts";
 import { MemoryRecords, buildTestAgent, startCuttableProxy, startHubServer } from "./test-helpers.ts";
 
 const BOX_ID = "box-it-000001";
-const TIMEOUT = { timeout: 180_000 };
 
 interface Ran {
   stdout: string;
@@ -178,7 +177,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("handshake: credential stored 0600, bootstrap file removed, sys info", TIMEOUT, async (t) => {
+  test("handshake: credential stored 0600, bootstrap file removed, sys info", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     assert.equal(connection.agentVersion, "it-1");
     assert.equal(connection.sys.os, "linux");
@@ -197,7 +196,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.ok(ports.some((p) => p.port === echo.port), "the echo server's port is listed");
   });
 
-  test("exec with pipes: stdin, stdout, stderr, exit code, env merge, shell mode, spawn errors", TIMEOUT, async (t) => {
+  test("exec with pipes: stdin, stdout, stderr, exit code, env merge, shell mode, spawn errors", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const piped = await run(connection.exec({ command: "sh", args: ["-c", 'read l; echo "out:$l"; echo err >&2; exit 3'] }), "hi\n");
     assert.deepEqual(piped, { stdout: "out:hi\n", stderr: "err\n", code: 3, signal: null });
@@ -228,7 +227,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.deepEqual(ended, [null, "SIGTERM"]);
   });
 
-  test("exec with a PTY: terminal size, resize", TIMEOUT, async (t) => {
+  test("exec with a PTY: terminal size, resize", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const sized = await run(connection.exec({ command: "sh", args: ["-c", "stty size; tty"], pty: { cols: 100, rows: 30 } }));
     assert.match(sized.stdout, /30 100/);
@@ -245,7 +244,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.match(await output, /40 120/);
   });
 
-  test("detached process survives a dropped link and replays on attach", TIMEOUT, async (t) => {
+  test("detached process survives a dropped link and replays on attach", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const proc = connection.exec({ command: "sh", args: ["-c", 'echo one; read x; echo "two:$x"'], detach: { procId: "p1" } });
     await waitForText(proc.stdout, "one\n");
@@ -292,7 +291,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await connection.request("proc.release", { procId: "p2" });
   });
 
-  test("fs requests", TIMEOUT, async (t) => {
+  test("fs requests", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const dir = join(work, "fs");
     await connection.request("fs.mkdir", { path: join(dir, "a", "b"), recursive: true });
@@ -319,7 +318,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await assert.rejects(connection.requestRaw("nope.method", {}), { code: "UNKNOWN_METHOD" });
   });
 
-  test("fs.watch emits debounced fs.change events (recursive, ignore)", TIMEOUT, async (t) => {
+  test("fs.watch emits debounced fs.change events (recursive, ignore)", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const dir = join(work, "watched");
     await mkdir(join(dir, "sub"), { recursive: true });
@@ -346,7 +345,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await connection.request("fs.unwatch", { watchId: "w1" });
   });
 
-  test("file write/read: atomic, mkdirs, large with flow control, ranges, failures", TIMEOUT, async (t) => {
+  test("file write/read: atomic, mkdirs, large with flow control, ranges, failures", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const small = join(work, "files", "deep", "hello.txt");
     await connection.writeFile(small, "hello", { mkdirs: true, mode: 0o640 });
@@ -369,7 +368,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await assert.rejects(connection.readFile(join(work, "files", "missing")), { code: "ENOENT" });
   });
 
-  test("tar both ways", TIMEOUT, async (t) => {
+  test("tar both ways", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const local = join(root, "tar-src", "proj");
     await mkdir(join(local, "src"), { recursive: true });
@@ -405,7 +404,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await assert.rejects(connection.writeTar(join(work, "cut"), cut, { compression: "gzip" }));
   });
 
-  test("tcp: host → box, box port on host, and forward.listen to a host target", TIMEOUT, async (t) => {
+  test("tcp: host → box, box port on host, and forward.listen to a host target", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const tcp = await connection.openTcp(echo.port);
     tcp.end("ping");
@@ -429,7 +428,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await connection.request("forward.unlisten", { boxPort });
   });
 
-  test("ssh-agent and mcp-bridge channels reach the host handlers", TIMEOUT, async (t) => {
+  test("ssh-agent and mcp-bridge channels reach the host handlers", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     hub.handleChannel("ssh-agent", (_context, _spec, stream) => {
       stream.once("data", (chunk: Buffer) => stream.end(`agent:${chunk.toString()}`));
@@ -458,7 +457,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.equal(bridged.stdout, "srv1:HELLO\n");
   });
 
-  test("token, git-credential and rpc subcommands round-trip through the control socket", TIMEOUT, async (t) => {
+  test("token, git-credential and rpc subcommands round-trip through the control socket", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     hub.handle("token.get", async (context, params) => ({
       accessToken: `tok-${params.agent}-${params.accountId}-${context.boxId}`,
@@ -493,7 +492,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.deepEqual(JSON.parse(status.stdout), { connected: true, boxId: BOX_ID, version: "it-1" });
   });
 
-  test("the relay socket gives local processes the same BoxConnection", TIMEOUT, async (t) => {
+  test("the relay socket gives local processes the same BoxConnection", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
     try {
@@ -535,7 +534,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     }
   });
 
-  test("an agent child in the box keeps running across a dropped link and reattaches through the relay", TIMEOUT, async (t) => {
+  test("an agent child in the box keeps running across a dropped link and reattaches through the relay", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
     try {
@@ -569,7 +568,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     }
   });
 
-  test("an agent child whose output the box dropped while it was away is ended, and its process killed", TIMEOUT, async (t) => {
+  test("an agent child whose output the box dropped while it was away is ended, and its process killed", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const go = join(root, "rc2-go");
     const done = join(root, "rc2-done");
@@ -605,7 +604,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     }
   });
 
-  test("an agent child whose orq-agent was stopped (an OOM-failed unit) ends as lost, never as a clean exit", TIMEOUT, async (t) => {
+  test("an agent child whose orq-agent was stopped (an OOM-failed unit) ends as lost, never as a clean exit", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
     try {
@@ -641,7 +640,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     }
   });
 
-  test("agent.shutdown ends orq-agent for good", TIMEOUT, async (t) => {
+  test("agent.shutdown ends orq-agent for good", async (t) => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const lost = waitStatus(connection, false);
     await connection.request("agent.shutdown", { reason: "test over" });
@@ -651,7 +650,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
 });
 
 describe("orq-agent version handshake", { concurrency: false }, () => {
-  test("an outdated agent downloads the current build, verifies it, replaces itself and reconnects", TIMEOUT, async (t) => {
+  test("an outdated agent downloads the current build, verifies it, replaces itself and reconnects", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "orq-up-"));
     try {
       const oldBin = join(root, "bin", "orq-agent");

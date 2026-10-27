@@ -218,7 +218,7 @@ describe("the Ephemeral AI VMs settings section", () => {
     await click(buttonNamed("Save"));
     assert.deepEqual(puts, [["vultr", { credentials: { key: "VULTR-SECRET-KEY" } }]]);
     // The form closed; the row shows the new state; the key is nowhere in the page.
-    assert.equal(keyInput(), null);
+    assert.equal(keyInput() === null, true);
     assert.ok(text().includes("Key …wxyz"));
     assert.equal(document.body.innerHTML.includes("VULTR-SECRET-KEY"), false);
     // Reopened, the field starts empty again.
@@ -317,7 +317,7 @@ describe("the Ephemeral AI VMs settings section", () => {
 
       await click(buttonNamed("Use https://my-pc.tail1234.ts.net:10000"));
       assert.equal(urlField().value, "https://my-pc.tail1234.ts.net:10000");
-      assert.equal(buttonNamed("Use https://my-pc.tail1234.ts.net:10000"), undefined, "no suggestion once the field holds it");
+      assert.equal(buttonNamed("Use https://my-pc.tail1234.ts.net:10000") === undefined, true, "no suggestion once the field holds it");
 
       await click(buttonNamed("Set up for me"));
       assert.equal(setupCalls, 1);
@@ -325,7 +325,7 @@ describe("the Ephemeral AI VMs settings section", () => {
       release();
       await settle();
       assert.ok(text().includes("Tailscale on this machine: my-pc.tail1234.ts.net · serving Orquester on :10000"));
-      assert.equal(buttonNamed("Set up for me"), undefined, "no button once serving");
+      assert.equal(buttonNamed("Set up for me") === undefined, true, "no button once serving");
       assert.equal(urlField().value, "https://my-pc.tail1234.ts.net:10000");
       assert.ok(text().includes("Reachable"));
     });
@@ -352,7 +352,7 @@ describe("the Ephemeral AI VMs settings section", () => {
       local = { ...LOCAL, running: false };
       await remount();
       assert.ok(text().includes("Tailscale isn't running on this machine."));
-      assert.equal(buttonNamed("Set up for me"), undefined);
+      assert.equal(buttonNamed("Set up for me") === undefined, true);
     });
   });
 
@@ -406,7 +406,7 @@ describe("the Ephemeral AI VMs settings section", () => {
       assert.ok(text().includes(message));
       await click(buttonNamed("Retry"));
       assert.deepEqual(blacksmithSaves, [{}]);
-      assert.equal(buttonNamed("Retry"), undefined);
+      assert.equal(buttonNamed("Retry") === undefined, true);
       assert.ok(text().includes("Org/orquester-macos-boxes"));
     } finally {
       Object.assign(api, originals);
@@ -515,7 +515,7 @@ describe("the Ephemeral AI VMs settings section", () => {
       assert.ok(text().includes("Agent chat: build on macOS"));
       assert.equal(text().includes("long gone"), false);
       // Nothing of the plugin's setup while it is off.
-      assert.equal(buttonNamed("Add API key"), undefined);
+      assert.equal(buttonNamed("Add API key") === undefined, true);
       const destroyButtons = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === "Destroy");
       assert.equal(destroyButtons.length, 1);
       await click(destroyButtons[0]);

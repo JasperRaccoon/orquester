@@ -265,6 +265,7 @@ test("a VM that is not connected refuses new desktops and stops, but not closes"
 test("a restart whose install fails leaves the desktop failed with the reason and its hint", async (t) => {
   const { box, manager } = await setup(t);
   const desktop = await manager.create({ projectPath: "/ws/p", projectRealPath: "/ws/p", boxId: "b1" });
+  await assert.rejects(manager.restart(desktop.id), { status: 409, code: "DESKTOP_NOT_STOPPED" });
   await manager.stop(desktop.id);
   box.status = MISSING;
   box.ensure = async () => {
@@ -450,14 +451,10 @@ test("a host that came up after its start timed out on a dropped link is killed 
   assert.ok(box.sessions.has(session), "nothing could be killed while the VM was away");
   // It came up after all.
   await atomicWrite(join(appdir, "box-home", ".orquester", "desktops", desktop.id, "ready"), "42\n");
-  // The cleanup's last step: the host's group, only while it is still the desktop's.
-  const hostSignalled = new Promise<void>((resolve) => {
-    box.onSignal = (signal) => {
-      if (signal.pgid === 4242) resolve();
-    };
-  });
+  // Reconciliation completes even when cleanup fails; then inspect its outcome.
+  const reconciled = new Promise<DesktopSummary>((resolve) => manager.once("updated", resolve));
   box.setConnected(true);
-  await hostSignalled;
+  await reconciled;
   assert.ok(box.killed.includes(session));
   assert.equal(box.sessions.has(session), false);
   assert.equal(manager.get(desktop.id)?.status, "error");

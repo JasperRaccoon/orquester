@@ -400,8 +400,8 @@ test("the card in the registry: approve rents, deny refuses with the owner's wor
     const running = call(api, "create_box", createArgs, { port: h.port });
     await h.registry.answer("me", await h.nextCard(), { decision: "deny", reason: "use the host" });
     const outcome = await running;
-    assert.ok(!outcome.ok && outcome.code === "APPROVAL_DENIED" && outcome.message.includes("use the host"));
     assert.equal(created.length, 0);
+    assert.ok(!outcome.ok && outcome.code === "APPROVAL_DENIED" && outcome.message.includes("use the host"));
   }
   // Nobody answers within 30 minutes.
   {
@@ -413,8 +413,8 @@ test("the card in the registry: approve rents, deny refuses with the owner's wor
     assert.equal(h.registry.list("me").length, 1, "the card remains available until its 30-minute deadline");
     h.clock.advance(1);
     const outcome = await running;
-    assert.ok(!outcome.ok && outcome.code === "APPROVAL_TIMEOUT");
     assert.equal(created.length, 0);
+    assert.ok(!outcome.ok && outcome.code === "APPROVAL_TIMEOUT");
   }
   // The call is aborted while the card waits.
   {
@@ -433,10 +433,12 @@ test("the card in the registry: approve rents, deny refuses with the owner's wor
   {
     const h = registryHarness();
     const { api, created } = fakeApi();
-    const outcome = await call(api, "create_box", createArgs, { port: h.port, caller: chat({ planning: true }) });
-    assert.ok(!outcome.ok && outcome.code === "PERMISSION_DENIED");
-    assert.equal(created.length, 0);
+    const running = call(api, "create_box", createArgs, { port: h.port, caller: chat({ planning: true }) });
+    await Promise.race([running, h.nextCard()]);
     assert.equal(h.registry.list("me").length, 0);
+    assert.equal(created.length, 0);
+    const outcome = await running;
+    assert.ok(!outcome.ok && outcome.code === "PERMISSION_DENIED");
   }
 });
 
@@ -497,16 +499,20 @@ test("box_upload / box_download claim local_path: outside every project refused,
   mkdirSync(join(ROOT, "acme", "other"), { recursive: true });
   for (const tool of ["box_download", "box_upload"] as const) {
     const { api, ops } = fakeApi();
+    Object.assign(api, { boxDownload: async (boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions) => {
+      ops.push({ op: "download", args: [boxId, request], principal: opts?.principal });
+      return { ok: true, value: { kind: "file", bytes: 3, ...request } };
+    } });
     const outside = await call(api, tool, { box_id: "tmp-1", remote_path: "out", local_path: join(ROOT, "loose.txt") });
-    assert.ok(!outside.ok && outside.code === "PERMISSION_DENIED", tool);
     assert.equal(ops.length, 0, "refused before the daemon is asked");
+    assert.ok(!outside.ok && outside.code === "PERMISSION_DENIED", tool);
 
     const port = new FakeApprovalPort({ outcome: "denied", approvalId: "", reason: "no" });
     const elsewhere = await call(api, tool, { box_id: "tmp-1", remote_path: "out", local_path: join(ROOT, "acme", "other", ".git", "config") }, { caller: chat({ runtimeMode: "auto" }), port });
     assert.equal(port.cards.length, 1, `${tool}: a card for another project's path`);
     assert.equal(port.cards[0]!.family, "cross-project");
-    assert.ok(!elsewhere.ok, tool);
     assert.equal(ops.length, 0);
+    assert.ok(!elsewhere.ok, tool);
 
     // In its own project the call goes on to the daemon (which owns the .git refusal).
     const own = new FakeApprovalPort();
@@ -567,8 +573,10 @@ test("create_box on one of the owner's own machines: a 'Use your machine' card (
 
 test("create_box with provider byo when none of the owner's machines is free: a refusal saying so, and no card", async () => {
   const { api } = fakeApi();
+  api.on("GET", boxRoutes.providers, { status: 200, body: { providers: [...PROVIDERS.providers, provider({ id: "byo", label: "Your machines", kinds: ["linux"], keyHint: null })] } })
+    .on("GET", boxRoutes.offers("byo", "linux"), { status: 200, body: { ...OFFERS, provider: "byo" } });
   const port = new FakeApprovalPort();
   const refused = await call(api, "create_box", { ...createArgs, provider: "byo" }, { port });
-  assert.ok(!refused.ok && refused.code === "BOX_NOT_READY");
   assert.equal(port.cards.length, 0);
+  assert.ok(!refused.ok && refused.code === "BOX_NOT_READY");
 });

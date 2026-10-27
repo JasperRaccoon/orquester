@@ -184,6 +184,13 @@ test("the active engine and the engines to choose from parse as sent", () => {
   assert.deepEqual(parsePluginInfo(value), value);
 });
 
+test("a daemon from before the engine choice: no engine fields, and the plugin still parses", () => {
+  const parsed = parsePluginInfo(plugin());
+  assert.ok(parsed);
+  assert.equal("engine" in parsed, false);
+  assert.equal("engines" in parsed, false);
+});
+
 test("an unknown engine reads as absent; unknown or malformed engine entries are left out", () => {
   const parsed = parsePluginInfo({
     ...plugin(),

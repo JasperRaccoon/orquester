@@ -430,7 +430,7 @@ describe("config change cards", () => {
   it("shows no diff for a binary or empty file, and makes hidden characters visible", () => {
     const base = { path: "/p", change: "modified" as const, executable: false, truncated: false };
     assert.deepEqual(
-      [configChangeFileRow({ ...base, diff: "", binary: true }).diff, configChangeFileRow({ ...base, diff: "", binary: true }).note],
+      [configChangeFileRow({ ...base, diff: "raw binary content", binary: true }).diff, configChangeFileRow({ ...base, diff: "raw binary content", binary: true }).note],
       [null, "Binary file — no diff to show."]
     );
     assert.equal(configChangeFileRow({ ...base, diff: "", binary: false }).note, "No textual changes.");

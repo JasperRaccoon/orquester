@@ -47,7 +47,7 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
       await writeFile(fresh, "an upload in flight");
 
       const swept = new Promise<void>((resolve, reject) => {
-        const watcher = watch(pendingDir, { signal: AbortSignal.timeout(10_000) }, (_event, filename) => {
+        const watcher = watch(pendingDir, (_event, filename) => {
           if (filename === "attachment-1-abcdef.part") resolve();
         });
         watcher.once("error", reject);

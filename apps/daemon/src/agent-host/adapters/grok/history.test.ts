@@ -492,6 +492,7 @@ test("a call id seen in an earlier turn opens a new row in the next one", () => 
   const collector = new GrokHistoryCollector();
   collector.observeAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "call-1", title: "a", status: "completed" });
   collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  collector.observeAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "call-fresh", title: "fresh", status: "completed" });
   collector.observeAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "call-1", title: "b", status: "completed" });
   collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p2" });
   const turns = collector.snapshotTurns();
@@ -499,7 +500,7 @@ test("a call id seen in an earlier turn opens a new row in the next one", () => 
     turns.map((turn) => [turn.id, (turn.items as GrokHistoryItem[]).map((item) => (item as { title?: string }).title)]),
     [
       ["p1", ["a"]],
-      ["p2", ["b"]]
+      ["p2", ["fresh", "b"]]
     ]
   );
 });

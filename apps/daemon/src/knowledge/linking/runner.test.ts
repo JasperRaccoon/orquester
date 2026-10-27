@@ -94,7 +94,7 @@ describe("mykg argv and env", () => {
   });
 });
 
-describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
+describe("MykgRun (against a fake myKG)", () => {
   it("a first run creates and names its session, and its tasks are answered through the inbox", async () => {
     const dirs = await setup({ ke_aaaaaaaaaaaa: "Author: A\nalpha", ke_bbbbbbbbbbbb: "Author: B\nbeta" });
     const clock = new FakeClock();

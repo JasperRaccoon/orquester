@@ -5,6 +5,7 @@
  */
 
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import test, { type TestContext } from "node:test";
@@ -34,13 +35,13 @@ interface FakeHub {
   origin: string;
   requests: HubRequest[];
   upgrades: { url: string; headers: IncomingHttpHeaders }[];
-  messages: string[];
+  socket: WebSocket | null;
 }
 
 const FRAME = (n: number) => Buffer.concat([Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\n`), Buffer.from([0xff, 0xd8, n, 0xd9]), Buffer.from("\r\n")]);
 
 async function startHub(t: TestContext): Promise<FakeHub> {
-  const hub: FakeHub = { origin: "", requests: [], upgrades: [], messages: [] };
+  const hub: FakeHub = { origin: "", requests: [], upgrades: [], socket: null };
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -57,9 +58,9 @@ async function startHub(t: TestContext): Promise<FakeHub> {
   });
   const wss = new WebSocketServer({ server, handleProtocols: (protocols) => (protocols.has("other") ? "other" : false) });
   wss.on("connection", (socket, req) => {
+    hub.socket = socket;
     hub.upgrades.push({ url: req.url ?? "", headers: req.headers });
     socket.send(Buffer.from([0x53, 0x45, 0x4d, 0x55]));
-    socket.on("message", (data) => hub.messages.push(data.toString()));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   hub.origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -95,13 +96,20 @@ async function startApp(t: TestContext, service: DeviceService): Promise<number>
 async function setup(t: TestContext, token: string | null = "hub-secret") {
   const hub = await startHub(t);
   const host = new FakeDeviceHost();
+  let viewerLeft!: () => void;
+  const viewersClosed = new Promise<void>((resolve) => { viewerLeft = resolve; });
+  const viewersChanged = host.viewersChanged.bind(host);
+  host.viewersChanged = (deviceId, count) => {
+    viewersChanged(deviceId, count);
+    if (count === 0) viewerLeft();
+  };
   host.hubOriginValue = hub.origin;
   host.hubTokenValue = token;
   const svc = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: { android: { enabled: true } } });
   t.after(() => svc.cleanup());
   const opened = await svc.service.toolOpen("t1", { platform: "android" }, new AbortController().signal);
   const port = await startApp(t, svc.service);
-  return { hub, host, svc, port, lease: opened.lease, base: `http://127.0.0.1:${port}` };
+  return { hub, host, svc, port, viewersClosed, lease: opened.lease, base: `http://127.0.0.1:${port}` };
 }
 
 test("HTTP: allowlisted paths only, methods per path, the device must be leased here", async (t) => {
@@ -197,7 +205,8 @@ test("HTTP: the fold route — reading is watching, a POST is the user's input; 
 });
 
 test("HTTP: an MJPEG stream repeats its still frame, counts viewers, and leaves agent control intact", async (t) => {
-  const { base, svc, lease, host } = await setup(t);
+  const { base, svc, lease, host, viewersClosed } = await setup(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   assert.equal(svc.service.lease(lease.id)!.controller, "agent");
 
   // A stream: the hub sends one part and goes quiet; the proxy repeats it once.
@@ -207,9 +216,12 @@ test("HTTP: an MJPEG stream repeats its still frame, counts viewers, and leaves 
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => {
         chunks.push(chunk);
-        if (Buffer.concat(chunks).length >= FRAME(1).length * 2) {
+        const received = Buffer.concat(chunks);
+        if (received.length >= FRAME(1).length * 2) {
           req.destroy();
-          resolve(Buffer.concat(chunks));
+          resolve(received);
+        } else if (received.length >= FRAME(1).length) {
+          t.mock.timers.tick(100);
         }
       });
     });
@@ -219,20 +231,12 @@ test("HTTP: an MJPEG stream repeats its still frame, counts viewers, and leaves 
   assert.deepEqual(received.subarray(0, FRAME(1).length * 2), Buffer.concat([FRAME(1), FRAME(1)]));
   assert.equal(svc.service.lease(lease.id)!.controller, "agent", "watching never takes control");
   // The viewer was counted while the stream was open, and leaves.
-  await waitFor(() => host.viewerCounts.some((entry) => entry.count === 0));
+  await viewersClosed;
   assert.deepEqual(host.viewerCounts, [
     { deviceId: lease.deviceId, count: 1 },
     { deviceId: lease.deviceId, count: 0 }
   ]);
 });
-
-async function waitFor(check: () => boolean, ms = 5_000): Promise<void> {
-  const start = Date.now();
-  while (!check()) {
-    if (Date.now() - start > ms) throw new Error("timed out");
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
 
 function opened(socket: WebSocket): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -246,7 +250,7 @@ function closeOf(socket: WebSocket): Promise<{ code: number; reason: string }> {
 }
 
 test("WebSocket: the relay adds the hub token, drops client token subprotocols, pumps frames, and hands control over on input only", async (t) => {
-  const { port, hub, svc, lease, host } = await setup(t);
+  const { port, hub, svc, lease, host, viewersClosed } = await setup(t);
   const url = `ws://127.0.0.1:${port}${deviceRoutes.socket("local", "vendor/serve-emu/ws")}?device=${lease.deviceId}&frame-meta=1&token=good`;
   const client = new WebSocket(url, ["serve-emu.token.stolen", "other"]);
   const first = new Promise<Buffer>((resolve) => client.once("message", (data) => resolve(data as Buffer)));
@@ -259,19 +263,21 @@ test("WebSocket: the relay adds the hub token, drops client token subprotocols, 
   assert.equal(upgrade.headers["sec-websocket-protocol"], "other");
 
   // A keyframe request is not input: watching never changes control.
+  const reset = once(hub.socket!, "message");
   client.send(JSON.stringify({ type: "reset-video" }));
-  await waitFor(() => hub.messages.length === 1);
+  assert.equal((await reset)[0].toString(), JSON.stringify({ type: "reset-video" }));
   assert.equal(svc.service.lease(lease.id)!.controller, "agent");
   // A touch is: the user takes control at once, and the frame still goes through.
+  const touch = once(hub.socket!, "message");
   client.send(JSON.stringify({ type: "touch", action: "down", x: 0.5, y: 0.5 }));
-  await waitFor(() => hub.messages.length === 2);
+  assert.equal((await touch)[0].toString(), JSON.stringify({ type: "touch", action: "down", x: 0.5, y: 0.5 }));
   assert.equal(svc.service.lease(lease.id)!.controller, "user");
   assert.deepEqual(host.viewerCounts.at(-1), { deviceId: lease.deviceId, count: 1 });
 
   const closed = closeOf(client);
   client.close();
   await closed;
-  await waitFor(() => host.viewerCounts.at(-1)?.count === 0);
+  await viewersClosed;
 });
 
 test("WebSocket: off-list paths and devices not leased here are refused", async (t) => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAgentCreatedPrompt, parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
+import { parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
 
 const record = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: "p-1",
@@ -105,19 +105,15 @@ test("createdBy survives a read and a rewrite verbatim — newer kinds and field
   const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy }), record({ id: "p-2", createdBy: newer }), broken] });
   assert.deepEqual(parsed.prompts[0]?.createdBy, createdBy);
   assert.deepEqual(parsed.prompts[1]?.createdBy, newer);
-  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), true);
-  assert.equal(isAgentCreatedPrompt(parsed.prompts[1]?.createdBy), false, "an unknown kind reads as the user's");
   assert.deepEqual(parsed.rejected, [broken]);
   const older = parseSavedPromptsConfig({ version: 1, prompts: [record()] }).prompts[0];
   assert.equal(older?.createdBy, undefined);
-  assert.equal(isAgentCreatedPrompt(older?.createdBy), false, "older prompts are the user's");
 });
 
 test("a null createdBy reads (and is rewritten) as absent; only a structurally invalid non-null value sets the record aside", () => {
   const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy: null }), record({ id: "p-2", createdBy: [] }), record({ id: "p-3", createdBy: {} })] });
   assert.deepEqual(parsed.prompts.map((prompt) => prompt.id), ["p-1"]);
   assert.equal(parsed.prompts[0]?.createdBy, undefined);
-  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), false);
   assert.equal("createdBy" in JSON.parse(JSON.stringify(parsed.prompts[0])), false);
   assert.equal(parsed.rejected.length, 2);
 });

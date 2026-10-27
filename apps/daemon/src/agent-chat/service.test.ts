@@ -507,8 +507,8 @@ test("trust is granted for the validated projectPath, NEVER the request's cwd", 
   );
   const config = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
   const projects = config.projects as Record<string, unknown>;
-  assert.deepEqual(Object.keys(projects), [projectPath]);
   assert.equal(projects["/some/other/repo"], undefined, "an arbitrary cwd is never trusted");
+  assert.deepEqual(Object.keys(projects), [projectPath]);
   await rm(dir, { recursive: true, force: true });
   await f.cleanup();
 });
@@ -861,7 +861,7 @@ test("an OpenCode thread cannot switch accounts", async () => {
     0
   );
   await assert.rejects(
-    () => f.service.switchAccount(summary.id, { commandId: "c1", accountId: "acc-2" }),
+    () => f.service.switchAccount(summary.id, { commandId: "c1", accountId: "system" }),
     (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
   );
   assert.equal(f.identities.length, 0);
@@ -961,7 +961,7 @@ test("agent goals §5.7: a blocked deploy drain posts the goal hold, with authen
   assert.equal(f.holdRequests[0]!.headers.authorization, "Bearer test-token");
 });
 
-test("agent goals §5.7, a host from before the hold: the snapshot read, the session stop and the hand-over reach the host as sent", { timeout: 10_000 }, async (t) => {
+test("agent goals §5.7, a host from before the hold: the snapshot read, the session stop and the hand-over reach the host as sent", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const f = await makeFixture(CLAUDE, null, {
     health: STALE_BUSY_HOST,
@@ -1298,11 +1298,7 @@ test("a host refusal keeps the client connection open once all upload bytes are 
 // with no keep-alive or request timeout. Left open, it holds one daemon↔host
 // socket pair until the host restarts.
 
-// The timeout is a deadline for a failure, never a wait. A real teardown
-// closes the host's end of the connection within milliseconds, and nothing
-// else ever closes it. So a teardown that never reaches the socket fails here
-// instead of hanging the suite.
-test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", { timeout: 10_000 }, async (t) => {
+test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", async (t) => {
   const f = await makeFixture(CLAUDE, { env: {} });
   t.after(() => f.cleanup());
   // The real host's answer to an upload with no `name`, before it reads a byte.
@@ -1971,18 +1967,41 @@ test("a fork tab the host never created is taken back by the reconcile, and its 
   await f.cleanup();
 });
 
-test("the reconcile never deletes a child the host did create, and leaves a fork in flight alone", async () => {
+test("the reconcile never deletes a child the host did create, and leaves a fork in flight alone", async (t) => {
   const f = await makeFixture(CLAUDE, null);
+  t.after(() => f.cleanup());
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
-  f.dropForkAnswer = true;
+  f.dropForkUncreated = true;
   await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
   const id = f.forks[0]!.body.threadId;
-  // The GUI's retry of the same key and a reconcile at once: one tab, confirmed, no delete.
-  await Promise.all([f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), f.service.reconcileForks()]);
+  // Hold the retry at the host boundary so reconciliation really sees it in flight.
+  const client = f.service.routeDeps().client;
+  const send = client.json.bind(client);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  t.mock.method(client, "json", async (...args: Parameters<typeof client.json>) => {
+    if (args[0] === "POST" && args[1] === `/threads/${parent.id}/fork` &&
+        (args[2] as ForkHostThreadRequest | undefined)?.confirmOnly !== true) {
+      entered();
+      await held;
+    }
+    return send(...args);
+  });
+  const retry = f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1);
+  try {
+    await started;
+    await f.service.reconcileForks();
+    assert.equal(f.service.chat.has(id), true, "an in-flight retry owns its provisional tab");
+    assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false);
+  } finally {
+    release();
+    await retry;
+  }
   assert.equal(f.service.chat.has(id), true);
   assert.deepEqual(f.service.chat.unconfirmedForks(), []);
   assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false);
-  await f.cleanup();
 });
 
 test("a new chat is announced as pending until the host has its thread, then confirmed with an update", async () => {

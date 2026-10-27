@@ -80,14 +80,15 @@ describe("clipboard: paste", () => {
   });
 
   it("does not turn A→B, B→C renames into A→C", () => {
-    const base = workflow([
+    const copied = workflow([
       node("x", "http", { url: "{{ nodes.Post.output }} {{ nodes.Post2.output }}" }, { name: "Post" }),
       node("y", "http", {}, { name: "Post2" })
     ]);
-    const clip = parseWorkflowClipboard(serializeWorkflowSelection(base, ["x", "y"]))!;
+    const base = workflow([node("existing", "http", {}, { name: "Post" })]);
+    const clip = parseWorkflowClipboard(serializeWorkflowSelection(copied, ["x", "y"]))!;
     const { workflow: pasted, nodeIds } = pasteWorkflowClipboard(base, clip, { mintId: sequentialIds() });
     const x = pasted.nodes.find((n) => n.id === nodeIds[0]);
-    assert.equal(x?.name, "Post3");
-    assert.equal(x?.type === "http" ? x.config.url : null, "{{ nodes.Post3.output }} {{ nodes.Post4.output }}");
+    assert.equal(x?.name, "Post2");
+    assert.equal(x?.type === "http" ? x.config.url : null, "{{ nodes.Post2.output }} {{ nodes.Post3.output }}");
   });
 });

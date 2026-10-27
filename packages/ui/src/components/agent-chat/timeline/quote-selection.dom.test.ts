@@ -150,10 +150,10 @@ describe("which selection can be quoted", () => {
   });
 
   it("not one in a user message, a tool row, or across two replies", () => {
-    assert.equal(resolveQuoteSelection(select(text("user"), 0, text("user"), 4), viewport), null);
-    assert.equal(resolveQuoteSelection(select(text("tool"), 0, text("tool"), 4), viewport), null);
-    assert.equal(resolveQuoteSelection(select(text("p2"), 0, text("other"), 6), viewport), null);
-    assert.equal(resolveQuoteSelection(select(text("p2"), 0, text("tool"), 4), viewport), null);
+    assert.ok(resolveQuoteSelection(select(text("user"), 0, text("user"), 4), viewport) === null, "the element is absent");
+    assert.ok(resolveQuoteSelection(select(text("tool"), 0, text("tool"), 4), viewport) === null, "the element is absent");
+    assert.ok(resolveQuoteSelection(select(text("p2"), 0, text("other"), 6), viewport) === null, "the element is absent");
+    assert.ok(resolveQuoteSelection(select(text("p2"), 0, text("tool"), 4), viewport) === null, "the element is absent");
   });
 
   it("a triple click that runs to the start of the next row: trimmed to what it selects", () => {
@@ -163,13 +163,13 @@ describe("which selection can be quoted", () => {
   });
 
   it("not one of only unselectable chrome, nor a collapsed one", () => {
-    assert.equal(resolveQuoteSelection(select(text("label"), 0, text("label"), 2), viewport), null);
-    assert.equal(resolveQuoteSelection(select(text("p1"), 3, text("p1"), 3), viewport), null);
+    assert.ok(resolveQuoteSelection(select(text("label"), 0, text("label"), 2), viewport) === null, "the element is absent");
+    assert.ok(resolveQuoteSelection(select(text("p1"), 3, text("p1"), 3), viewport) === null, "the element is absent");
   });
 
   it("not one outside the timeline it watches", () => {
     const elsewhere = document.createElement("div");
-    assert.equal(resolveQuoteSelection(select(text("p1"), 0, text("p1"), 5), elsewhere), null);
+    assert.ok(resolveQuoteSelection(select(text("p1"), 0, text("p1"), 5), elsewhere) === null, "the element is absent");
   });
 });
 
@@ -311,7 +311,7 @@ describe("the selection toolbar", () => {
       quote.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
     });
     assert.deepEqual(quoted, ["```ts\nconst a = 1;\n\nconst b = `x`;\n```"]);
-    assert.equal(toolbar(), null, "gone once quoted");
+    assert.ok(toolbar() === null, "gone once quoted");
     assert.equal(window.getSelection()?.rangeCount, 0, "and the selection let go");
     assert.equal(isAnyLayerOpen(), false);
   });
@@ -323,7 +323,7 @@ describe("the selection toolbar", () => {
     await act(async () => {
       document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    assert.equal(toolbar(), null);
+    assert.ok(toolbar() === null, "the element is absent");
 
     await mouseSelect(text("p2"), 0, text("p2"), 5);
     assert.ok(toolbar(), "back for a new selection");
@@ -331,7 +331,7 @@ describe("the selection toolbar", () => {
       window.getSelection()?.collapseToStart();
       document.dispatchEvent(new dom.window.Event("selectionchange"));
     });
-    assert.equal(toolbar(), null);
+    assert.ok(toolbar() === null, "the element is absent");
   });
 
   it("goes on a press elsewhere, and on a scroll of the timeline", async () => {
@@ -341,13 +341,13 @@ describe("the selection toolbar", () => {
     await act(async () => {
       viewport.dispatchEvent(new dom.window.Event("scroll"));
     });
-    assert.equal(toolbar(), null, "gone while it scrolls");
+    assert.ok(toolbar() === null, "gone while it scrolls");
     await settle();
     assert.ok(toolbar(), "back once still, the selection still in sight");
     await act(async () => {
       pointer("pointerdown", byId("other"));
     });
-    assert.equal(toolbar(), null);
+    assert.ok(toolbar() === null, "the element is absent");
   });
 
   it("follows a keyboard selection once it settles", async () => {
@@ -357,7 +357,7 @@ describe("the selection toolbar", () => {
       select(text("p2"), 0, text("p2"), 5);
       document.dispatchEvent(new dom.window.Event("selectionchange"));
     });
-    assert.equal(toolbar(), null, "not while the keys may still be moving it");
+    assert.ok(toolbar() === null, "not while the keys may still be moving it");
     await settle();
     assert.ok(toolbar());
   });
@@ -365,10 +365,10 @@ describe("the selection toolbar", () => {
   it("never shows for a user message, nor where no composer takes quotes", async () => {
     withComposer();
     await mouseSelect(text("user"), 0, text("user"), 4);
-    assert.equal(toolbar(), null);
+    assert.ok(toolbar() === null, "the element is absent");
     unregister?.();
     unregister = null;
     await mouseSelect(text("p2"), 0, text("p2"), 5);
-    assert.equal(toolbar(), null);
+    assert.ok(toolbar() === null, "the element is absent");
   });
 });

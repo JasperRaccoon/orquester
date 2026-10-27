@@ -181,11 +181,13 @@ describe("BoxDeviceHost with simslim", () => {
 
     box.holdSlim = null;
     const steps: string[] = [];
-    const result = await host.boot({ leaseId: "L1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal, (progress) => steps.push(progress.step));
+    const booting = host.boot({ leaseId: "L1", profile: deviceProfile("iphone-17-pro")!, fresh: true }, new AbortController().signal, (progress) => steps.push(progress.step));
+    await host.listDevices(); // receipt after the foreground boot's catalog command
+    release();
+    const result = await booting;
     assert.equal(box.sims.has(preparing.udid), false, "the preempted simulator is gone");
     assert.equal(box.sims.get(result.deviceId)?.name, "orq-L1");
     assert.equal(box.sims.get(result.deviceId)?.slim, true);
-    release();
     await until(() => poolSims().length === 2, "refill after preemption");
     assert.equal([...box.sims.values()].filter((sim) => sim.name.startsWith("orq-poolprep-")).length, 0);
     assert.ok(steps.includes("boot"));
@@ -206,7 +208,8 @@ describe("BoxDeviceHost with simslim", () => {
   it("keeps no pool on the owner's own Mac, and boots stock where simslim cannot run", async () => {
     const own = makeHost({ kind: "byo", label: "Studio (your Mac)", record: () => boxRecord({ provider: "byo", purpose: "machine" }) });
     assert.deepEqual(await prepared(own), {});
-    assert.equal(poolSims().length, 0);
+    await box.drain();
+    assert.deepEqual([...box.sims.values()].filter((sim) => sim.name.startsWith("orq-pool")), []);
     await own.dispose();
 
     box = new FakeMacBox();

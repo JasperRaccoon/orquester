@@ -72,7 +72,9 @@ export const knowledgeConceptMergeCheckSchema = z
     keep: z.string().nullable().catch(null),
     reason: z.string().catch(""),
     similarity: z.number().catch(0),
-    checkedAt: z.string().catch("")
+    checkedAt: z.string().catch(""),
+    /** The version of the input it was asked on (the daemon's `CONCEPT_CHECK_INPUT_VERSION`); absent: 1. */
+    inputVersion: z.number().int().min(1).optional().catch(undefined)
   })
   .passthrough();
 export type KnowledgeConceptMergeCheck = z.infer<typeof knowledgeConceptMergeCheckSchema>;

@@ -167,7 +167,7 @@ describe("the profile settings dialog's Knowledge section", () => {
 
   it("is absent while the plugin is off", async () => {
     await show(false, profile(["kc_seo"]));
-    assert.equal(doc().querySelector('fieldset[aria-label="Knowledge"]'), null);
+    assert.equal((doc().querySelector('fieldset[aria-label="Knowledge"]')) === null, true);
   });
 
   it("lists every collection with its description and the visibility line", async () => {
@@ -178,7 +178,7 @@ describe("the profile settings dialog's Knowledge section", () => {
     assert.match(section.textContent!, /SEO\s*Ranking in search engines/);
     assert.equal(box("kc_seo")?.checked, true);
     assert.equal(box("kc_ads")?.checked, false);
-    assert.equal(box("kc_gone"), null, "a deleted collection is not shown");
+    assert.equal((box("kc_gone")) === null, true, "a deleted collection is not shown");
   });
 
   it("reads the collections when they never loaded, and offers a retry when the read fails", async () => {
@@ -195,7 +195,7 @@ describe("the profile settings dialog's Knowledge section", () => {
     useAppStore.setState({ plugins: [knowledgePlugin(true)], api: api as never });
     for (let i = 0; i < 5; i += 1) await act(async () => await Promise.resolve());
     // The load when the plugin turned on failed: no collections, only the error.
-    assert.equal(knowledgeStore.getState().collections, null);
+    assert.equal((knowledgeStore.getState().collections) === null, true);
     reads.length = 0;
     await act(async () =>
       root.render(

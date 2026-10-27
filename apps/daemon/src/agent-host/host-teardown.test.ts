@@ -41,7 +41,6 @@ import { writeMockCodexServer } from "./adapters/codex/testing.ts";
 import { startAgentHost, type AgentHost } from "./main.ts";
 import { AgentHostClient } from "../agent-chat/host-client.ts";
 import { agentHostRoutes, daemonRoutesForHost, type SessionToolsManifest } from "./host-protocol.ts";
-import { withDeadline } from "./support/deadline.ts";
 
 const GROK_MOCK = join(dirname(fileURLToPath(import.meta.url)), "adapters/grok/testing/mock-grok.mjs");
 
@@ -200,7 +199,7 @@ async function stopThroughHttp(rig: Rig, markedThreadIds: string[]): Promise<voi
   const response = await client.json("POST", agentHostRoutes.stop);
   assert.equal(response.status, 200);
   assert.deepEqual(response.value, { ok: true, markedThreadIds });
-  await withDeadline(rig.stopped, { label: "intentional host stop", timeoutMs: 15_000 });
+  await rig.stopped;
 }
 
 /**
@@ -429,14 +428,11 @@ async function untilLog(
   host: AgentHost,
   appdir: string,
   threadId: string,
-  holds: (log: DomainEvent[]) => boolean,
-  label: string
+  holds: (log: DomainEvent[]) => boolean
 ): Promise<DomainEvent[]> {
   let unsubscribe: (() => void) | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await new Promise<DomainEvent[]>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 30_000);
       let chain = Promise.resolve();
       const check = (): void => {
         chain = chain.then(async () => {
@@ -452,7 +448,6 @@ async function untilLog(
         }, reject);
     });
   } finally {
-    clearTimeout(timer);
     unsubscribe?.();
   }
 }
@@ -496,7 +491,7 @@ async function handover(
     runtimeMode: "approval-required",
     ...(thread.launchEnv === undefined ? {} : { launchEnv: thread.launchEnv })
   });
-  const running = untilLog(rig.host, rig.appdir, rig.threadId, (log) => runningTurn(log) !== null, "the turn running");
+  const running = untilLog(rig.host, rig.appdir, rig.threadId, (log) => runningTurn(log) !== null);
   await rig.host.orchestrator.command(rig.threadId, "turn", {
     commandId: randomUUID(),
     input: "a long job",
@@ -522,8 +517,7 @@ async function handover(
     (entries) => {
       const turn = runningTurn(entries);
       return turn !== null && turn !== first;
-    },
-    "the continuation's turn"
+    }
   );
   // The continuation's effect clears the marker once the turn runs.
   await next.orchestrator.drain();

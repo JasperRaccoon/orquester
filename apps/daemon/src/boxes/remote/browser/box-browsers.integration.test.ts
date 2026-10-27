@@ -30,7 +30,6 @@ import { BoxBrowsers, type BoxBrowserInstaller } from "./box-browsers.ts";
 const CHROME = "/usr/bin/google-chrome";
 const SKIP = existsSync(CHROME) ? false : `${CHROME} is not installed`;
 const PROJECT = "/srv/workspaces/acme/vm-app";
-const TIMEOUT = 120_000;
 
 interface Detached {
   proc: BoxProcess;
@@ -281,7 +280,7 @@ function getThrough(port: number, path: string): Promise<{ status: number; body:
   });
 }
 
-test("a Linux box project's tab runs Chromium in the box: frames, navigation, no DevTools, and nothing left after close", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+test("a Linux box project's tab runs Chromium in the box: frames, navigation, no DevTools, and nothing left after close", { skip: SKIP }, async (t) => {
   const r = await rig(t);
   const created = await r.manager.create(PROJECT);
   assert.equal(created.runsIn, "box");
@@ -324,7 +323,7 @@ test("a Linux box project's tab runs Chromium in the box: frames, navigation, no
   assert.deepEqual(r.vm.ownPorts("box-vm"), []);
 });
 
-test("a dropped link evicts the box Chromium; the leftover is stopped on reconnect and Relaunch starts a new one", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+test("a dropped link evicts the box Chromium; the leftover is stopped on reconnect and Relaunch starts a new one", { skip: SKIP }, async (t) => {
   const r = await rig(t);
   const created = await r.manager.create(PROJECT, r.pageUrl);
   const first = await subscribeForFrame(r.manager, created.id);
@@ -357,7 +356,7 @@ test("a dropped link evicts the box Chromium; the leftover is stopped on reconne
   assert.equal(r.connection.detached.size, 0);
 });
 
-test("a sandbox failure in the box relaunches unsandboxed and says so; the daemon's shutdown ends it", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+test("a sandbox failure in the box relaunches unsandboxed and says so; the daemon's shutdown ends it", { skip: SKIP }, async (t) => {
   const r = await rig(t);
   r.connection.failNextWithSandbox();
   const created = await r.manager.create(PROJECT);
@@ -376,7 +375,7 @@ test("a sandbox failure in the box relaunches unsandboxed and says so; the daemo
   assert.equal(r.connection.forwards.every((entry) => entry.closed), true);
 });
 
-test("a Chromium channel that fails after the launch (an output overrun) closes that Chromium instead of crashing the daemon", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+test("a Chromium channel that fails after the launch (an output overrun) closes that Chromium instead of crashing the daemon", { skip: SKIP }, async (t) => {
   const r = await rig(t);
   const created = await r.manager.create(PROJECT);
   const { unsubscribe } = await subscribeForFrame(r.manager, created.id);

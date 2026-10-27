@@ -172,7 +172,12 @@ test("loading every omitted agent, one frame at a time, gives back the full wind
 test("a frame places each row after the nearest row every client holds", () => {
   reset();
   const events = fleet();
-  const { fold, snapshot } = fullSnapshot(events);
+  const liveEnd = events.findIndex((event) => event.type === "thread.activity-appended" && event.payload.activity.id === "l1-done");
+  const between = words("dw-between", "A row after another agent's call", "done");
+  between.occurredAt = new Date(Date.parse(events[liveEnd]!.occurredAt) + 1).toISOString();
+  events.splice(liveEnd + 1, 0, between);
+  const ordered = events.map((event, index) => ({ ...event, seq: index + 1 }));
+  const { fold, snapshot } = fullSnapshot(ordered);
   const frame = agentRowsFrameOf({ items: snapshot.items, roster: fold.roster, seq: fold.seq, agentIds: ["done"] });
   const placement = Object.fromEntries(frame.items.map((item, index) => [item.id, frame.after[index]]));
   // After the launches (kept), never after another omittable agent's row.

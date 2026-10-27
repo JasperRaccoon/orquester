@@ -339,13 +339,13 @@ test("the wget fallback never follows a redirect with the bearer token", async (
   await writeFile(scriptPath, boot.posixScript);
 
   const { code, output } = await runScript(box, ["sh", scriptPath], { onlyPath: true });
-  assert.equal(code, 0, output);
   // The 302 is answered as a failed attempt and retried; its target is never asked.
-  assert.match(output, /download failed \(HTTP 302\); retrying/);
   assert.deepEqual(
     daemon.requests.map((request) => request.path.replace(/linux-(x64|arm64)(-musl)?$/, "linux")),
     ["/api/boxes/agent/linux", "/api/boxes/agent/linux"]
   );
+  assert.equal(code, 0, output);
+  assert.match(output, /download failed \(HTTP 302\); retrying/);
   await assertAgentStarted(box, daemon, output);
 });
 

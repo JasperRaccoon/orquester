@@ -353,12 +353,12 @@ test("list_projects: repoId per project, each workspace's git account joined fro
     .on("GET", "/api/sessions", { status: 200, body: [] })
     .on("GET", "/api/accounts", { status: 200, body: [account] });
   const r = await tool("list_projects").run({ includeArchived: false }, ctx(api));
+  assert.ok(!JSON.stringify(r).includes("ssh-ed25519") && !JSON.stringify(r).includes("j@x.io"), "no key, no git email");
   assert.deepEqual(r.workspaces, [
     { name: "acme", gitAccount: { label: "Work GitHub", login: "jasper", provider: "github" } },
     { name: "solo", gitAccount: null },
     { name: "free", gitAccount: null }
   ]);
-  assert.ok(!JSON.stringify(r).includes("ssh-ed25519") && !JSON.stringify(r).includes("j@x.io"), "no key, no git email");
   const byName = new Map((r.projects as { workspace: string; name: string; repoId?: string; current?: true; sameRepo?: true }[]).map((p) => [`${p.workspace}/${p.name}`, p]));
   assert.equal(byName.get("acme/orquester")!.repoId, "github.com/acme/orquester");
   assert.equal(byName.get("free/notes")!.repoId, undefined);
@@ -449,10 +449,10 @@ test("list_agents for a chat: thisThread, allowedRuntimeModes, and no email anyw
   assert.deepEqual(r.thisThread, { agent: "codex", model: "gpt-6-sol", options: { effort: "low" }, runtimeMode: "auto-accept-edits", accountId: "acc-9" });
   assert.deepEqual(r.allowedRuntimeModes, ["approval-required", "auto-accept-edits"]);
   const codex = (r.agents as Record<string, any>[]).find((a) => a.id === "codex")!;
+  assert.ok(!JSON.stringify(r).includes("@x.io"), "no email in the chat view");
   assert.deepEqual(codex.accounts, [{ id: "system", label: "System", plan: null, needsReauth: false, isDefault: false }, { id: "acc-9", label: "Work", plan: "pro", needsReauth: false, isDefault: true }]);
   assert.equal(codex.runtimeModes, undefined);
   assert.equal(codex.defaultRuntimeMode, undefined);
-  assert.ok(!JSON.stringify(r).includes("@x.io"), "no email in the chat view");
   // The external view keeps them, as it always did.
   const external = await tool("list_agents").run({}, ctx(api));
   assert.ok(JSON.stringify(external).includes("work@x.io"));

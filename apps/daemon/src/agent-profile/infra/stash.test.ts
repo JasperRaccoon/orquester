@@ -151,6 +151,7 @@ test("list is sorted, per agent, and skips broken entries with a warning", async
     join(commands, "foreign", "manifest.json"),
     JSON.stringify({ version: 1, agent: "claude", kind: "command", id: "c", name: "c", stashedAt: "x", original: { type: "path", path: "/x" } })
   );
+  await writeFile(join(commands, "foreign", "payload"), "another agent's command");
   await mkdir(join(commands, "no-payload"));
   await writeFile(
     join(commands, "no-payload", "manifest.json"),

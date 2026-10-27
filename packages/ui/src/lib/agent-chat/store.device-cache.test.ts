@@ -341,9 +341,9 @@ describe("a thread opened with a copy on the device", () => {
     const reopened = await openPage(log, backend);
     await settle();
     const { actions } = reopened.state();
-    await assert.rejects(actions.rewindTo({ messageId: "u1", targetTurnCount: 0 }), /catching up/);
-    await assert.rejects(actions.interrupt(), /catching up/);
     await assert.rejects(actions.stopTask({ taskId: "task-1" }), /catching up/);
+    await assert.rejects(actions.interrupt(), /catching up/);
+    await assert.rejects(actions.rewindTo({ messageId: "u1", targetTurnCount: 0 }), /catching up/);
     assert.equal(reopened.host.commands.length, 0, "nothing reached the host");
     reopened.host.push(...eventFrames(log, 5), { kind: "synchronized", hostInstanceId: "host-1" });
     await reopened.state().actions.interrupt();
@@ -432,7 +432,9 @@ describe("a thread opened with a copy on the device", () => {
     const log = hostLog();
     const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
-    for (const meta of await backend.all("thread-meta")) await backend.put("thread-meta", { ...meta, v: 999 });
+    for (const table of ["thread-meta", "thread-body"]) {
+      for (const record of await backend.all(table)) await backend.put(table, { ...record, v: 999 });
+    }
 
     const reopened = await openPage(log, backend);
     await settle();

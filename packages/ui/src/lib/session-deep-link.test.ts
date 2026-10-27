@@ -63,6 +63,7 @@ describe("where a session's link leads", () => {
   const archivedWorkspace = { name: "old", path: "/w/old", isArchived: true } as WorkspaceSummary;
   const project = { name: "app", workspace: "main", path: "/w/main/app", isArchived: false } as ProjectSummary;
   const archivedProject = { name: "gone", workspace: "main", path: "/w/main/gone", isArchived: true } as ProjectSummary;
+  const archivedWorkspaceProject = { ...project, name: "thing", workspace: "old", path: "/w/old/thing" };
 
   function fakeApi(options: { sessions: Array<Partial<SessionSummary>>; failProjects?: boolean }) {
     const asked: string[] = [];
@@ -72,7 +73,7 @@ describe("where a session's link leads", () => {
       listProjects: async (name: string) => {
         asked.push(name);
         if (options.failProjects) throw new Error("offline");
-        return name === "main" ? [project, archivedProject] : [];
+        return name === "main" ? [project, archivedProject] : [archivedWorkspaceProject];
       }
     } as unknown as Pick<ApiClient, "listSessions" | "listWorkspaces" | "listProjects">;
     return { api, asked };

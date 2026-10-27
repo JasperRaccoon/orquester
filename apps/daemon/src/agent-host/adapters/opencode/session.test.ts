@@ -10,7 +10,8 @@
  */
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import { EventEmitter, once } from "node:events";
+import test, { afterEach } from "node:test";
 
 import {
   applyDomainEvent,
@@ -36,6 +37,13 @@ import {
 } from "./testing/woken.ts";
 import { deferred } from "./util.ts";
 import { openCodeSessionToolsServerName, type OpenCodeSessionToolsLaunch } from "./session-tools.ts";
+
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // The fake server
@@ -272,15 +280,10 @@ function json(body: unknown, status = 200): Response {
 // Harness
 // ---------------------------------------------------------------------------
 
-interface Waiter {
-  type: string;
-  predicate?: (event: RuntimeEvent) => boolean;
-  resolve: (event: RuntimeEvent) => void;
-}
-
 interface Harness {
   fake: FakeOpenCode;
   events: RuntimeEvent[];
+  eventStream: EventEmitter;
   server: OpenCodeServerHandle;
   ctx: AdapterContext;
   emit: (event: RuntimeEvent) => void;
@@ -291,18 +294,13 @@ interface Harness {
 function makeHarness(): Harness {
   const fake = new FakeOpenCode();
   const events: RuntimeEvent[] = [];
-  const waiters = new Set<Waiter>();
+  const eventStream = new EventEmitter();
   const abort = new AbortController();
   const exit = deferred<{ kind: "exit"; code: number; signal: null }>();
 
   const emit = (event: RuntimeEvent): void => {
     events.push(event);
-    for (const waiter of [...waiters]) {
-      if (waiter.type === event.type && (waiter.predicate?.(event) ?? true)) {
-        waiters.delete(waiter);
-        waiter.resolve(event);
-      }
-    }
+    eventStream.emit(event.type);
   };
 
   let ids = 0;
@@ -345,38 +343,31 @@ function makeHarness(): Harness {
   const harness: Harness = {
     fake,
     events,
+    eventStream,
     server,
     ctx,
     emit,
     killServer: () => exit.resolve({ kind: "exit", code: 1, signal: null }),
     dispose: () => abort.abort()
   };
-  harnessWaiters.set(harness, waiters);
+  cleanups.push(harness.dispose);
   return harness;
 }
 
-const harnessWaiters = new WeakMap<Harness, Set<Waiter>>();
-
-function waitFor<T extends RuntimeEvent["type"]>(
+async function waitFor<T extends RuntimeEvent["type"]>(
   harness: Harness,
   type: T,
   predicate?: (event: RuntimeEvent) => boolean
 ): Promise<Extract<RuntimeEvent, { type: T }>> {
   type Narrowed = Extract<RuntimeEvent, { type: T }>;
-  const found = harness.events.find(
-    (event): event is Narrowed =>
-      event.type === type && (predicate === undefined || predicate(event))
-  );
-  if (found !== undefined) {
-    return Promise.resolve(found);
+  for (;;) {
+    const found = harness.events.find(
+      (event): event is Narrowed =>
+        event.type === type && (predicate === undefined || predicate(event))
+    );
+    if (found !== undefined) return found;
+    await once(harness.eventStream, type);
   }
-  return new Promise<Narrowed>((resolve) => {
-    harnessWaiters.get(harness)?.add({
-      type,
-      ...(predicate !== undefined ? { predicate } : {}),
-      resolve: (event) => resolve(event as Narrowed)
-    });
-  });
 }
 
 /** Start a session on the harness. */
@@ -394,7 +385,7 @@ async function startSession(
     deniedMcpServers?: readonly string[];
   } = {}
 ): Promise<OpenCodeThreadSession> {
-  return await OpenCodeThreadSession.start(
+  const session = await OpenCodeThreadSession.start(
     {
       ctx: harness.ctx,
       emit: harness.emit,
@@ -412,6 +403,8 @@ async function startSession(
       ...(options.deniedMcpServers !== undefined ? { deniedMcpServers: options.deniedMcpServers } : {})
     }
   );
+  cleanups.push(() => session.stop({ reason: "test", hostInitiated: true }));
+  return session;
 }
 
 /** Narrow to one arm of the union, so payload fields typecheck. */
@@ -541,7 +534,7 @@ function driveTurn(
 
 test("a fresh session is created WITH the ruleset in the create body", async () => {
   const harness = makeHarness();
-  const session = await startSession(harness);
+  await startSession(harness);
   const create = harness.fake.find("POST", "/session");
   assert.ok(create !== undefined, "expected POST /session");
   const body = create.body as { permission?: { permission: string; action: string }[] };
@@ -553,14 +546,12 @@ test("a fresh session is created WITH the ruleset in the create body", async () 
     "thread.started",
     "session.state.changed"
   ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("resume in the same directory reuses the session and RE-ASSERTS the ruleset", async () => {
   const harness = makeHarness();
   harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/repo" });
-  const session = await startSession(harness, {
+  await startSession(harness, {
     resumeCursor: { schemaVersion: 1, sessionId: "ses_old" }
   });
   assert.equal(harness.fake.find("POST", "/session"), undefined, "must not create a session");
@@ -568,18 +559,14 @@ test("resume in the same directory reuses the session and RE-ASSERTS the ruleset
   assert.ok(patch !== undefined, "a runtime-mode change must reach the reused session");
   const started = firstOfType(harness.events, "session.started");
   assert.deepEqual(started?.payload.resume, { schemaVersion: 1, sessionId: "ses_old" });
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("resume against a confirmed 404 falls through to a fresh session", async () => {
   const harness = makeHarness();
-  const session = await startSession(harness, {
+  await startSession(harness, {
     resumeCursor: { schemaVersion: 1, sessionId: "ses_gone" }
   });
   assert.ok(harness.fake.find("POST", "/session") !== undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("resume against a 500 PROPAGATES — a blip must never reset a live thread", async () => {
@@ -594,7 +581,6 @@ test("resume against a 500 PROPAGATES — a blip must never reset a live thread"
     /500/
   );
   assert.equal(harness.fake.find("POST", "/session"), undefined, "no silent new session");
-  harness.dispose();
 });
 
 test("a cursor carrying unknown extra fields still resumes", async () => {
@@ -611,24 +597,21 @@ test("a cursor carrying unknown extra fields still resumes", async () => {
   });
   assert.equal(session.sessionId, "ses_old");
   assert.equal(harness.fake.find("POST", "/session"), undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a cursor of the wrong shape means `no resume`, never an error", async () => {
   const harness = makeHarness();
-  const session = await startSession(harness, {
+  harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/repo" });
+  await startSession(harness, {
     resumeCursor: { schemaVersion: 99, sessionId: "ses_old" }
   });
   assert.ok(harness.fake.find("POST", "/session") !== undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a cwd change forks rather than minting an empty session", async () => {
   const harness = makeHarness();
   harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/elsewhere" });
-  const session = await startSession(harness, {
+  await startSession(harness, {
     resumeCursor: { schemaVersion: 1, sessionId: "ses_old" },
     cwd: "/repo"
   });
@@ -636,8 +619,6 @@ test("a cwd change forks rather than minting an empty session", async () => {
   assert.equal(harness.fake.find("POST", "/session"), undefined);
   // The fork gets the ruleset too.
   assert.ok(harness.fake.requests.some((r) => r.method === "PATCH" && r.path.includes("fork")));
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -686,8 +667,6 @@ test("a turn submits prompt_async with a minted id, the system addendum and the 
   const started = firstOfType(harness.events, "turn.started");
   assert.equal(started?.turnId, result.turnId);
   assert.equal(started?.payload.effort, "high");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("an xlsx rides as a path line in the text part; a csv is still a native file part (§4.5)", async () => {
@@ -721,8 +700,6 @@ test("an xlsx rides as a path line in the text part; a csv is still a native fil
   assert.equal(body.parts[1]?.type, "file");
   assert.equal(body.parts[1]?.filename, "rows.csv");
   assert.equal(body.parts[1]?.url, "file:///attachments/att-c");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("an attachment-only turn with a non-native file no longer throws: the block is the text", async () => {
@@ -739,8 +716,6 @@ test("an attachment-only turn with a non-native file no longer throws: the block
   assert.deepEqual(body.parts, [
     { type: "text", text: "Attached files:\n- q3.xlsx: /attachments/att-x" }
   ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a text file over the native cap rides as a path line, not a file part (§4.5)", async () => {
@@ -765,8 +740,6 @@ test("a text file over the native cap rides as a path line, not a file part (§4
   assert.deepEqual((submit.body as { parts: unknown[] }).parts, [
     { type: "text", text: "read this\n\nAttached files:\n- huge.log: /attachments/att-big" }
   ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("an attachment whose path cannot be resolved fails the turn instead of vanishing", async () => {
@@ -786,8 +759,6 @@ test("an attachment whose path cannot be resolved fails the turn instead of vani
   );
   assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "nothing reached the server");
   assert.equal(firstOfType(harness.events, "turn.started"), undefined, "no turn was opened");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("plan mode rides the `agent` field, per turn", async () => {
@@ -801,8 +772,6 @@ test("plan mode rides the `agent` field, per turn", async () => {
   });
   const submit = harness.fake.find("POST", "/prompt_async");
   assert.equal((submit?.body as { agent?: string }).agent, "plan");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a turn completes on idle, with accumulated usage and cost", async () => {
@@ -837,8 +806,6 @@ test("a turn completes on idle, with accumulated usage and cost", async () => {
     eventsOfType(harness.events, "content.delta").map((e) => e.payload.delta),
     ["done"]
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("the premature-idle race still completes the turn (machine 3)", async () => {
@@ -873,8 +840,6 @@ test("the premature-idle race still completes the turn (machine 3)", async () =>
   const completed = await waitFor(harness, "turn.completed");
   assert.equal(completed.turnId, turn.turnId);
   assert.equal(completed.payload.state, "completed");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a second sendTurn during a live turn STEERS: same turn id, one turn.started", async () => {
@@ -902,8 +867,6 @@ test("a second sendTurn during a live turn STEERS: same turn id, one turn.starte
     harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).length,
     2
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a refused submit settles the turn as failed rather than leaving it running", async () => {
@@ -923,7 +886,6 @@ test("a refused submit settles the turn as failed rather than leaving it running
   const completed = firstOfType(harness.events, "turn.completed");
   assert.equal(completed?.payload.state, "failed");
   assert.ok(harness.events.some((event) => event.type === "runtime.error"));
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -965,8 +927,6 @@ test("a name in `command.list` is dispatched through session.command", async () 
   // The model is a STRING here, an object on prompt_async. The asymmetry is real.
   assert.equal(body.model, "openrouter/google/gemini-2.5-flash-lite");
   assert.equal("system" in body, false, "session.command accepts no system addendum");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a name that is NOT in `command.list` falls through to an ordinary prompt", async () => {
@@ -984,8 +944,6 @@ test("a name that is NOT in `command.list` falls through to an ordinary prompt",
   assert.deepEqual((submit.body as { parts: unknown[] }).parts, [
     { type: "text", text: "/definitely-not-a-command hi" }
   ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a native command with a non-native file carries the path block in its arguments (§4.5)", async () => {
@@ -1033,8 +991,6 @@ test("a native command with a non-native file carries the path block in its argu
   // — after the typed arguments, never before them (§4.6.9).
   assert.equal(body.arguments, "hello there\n\nAttached files:\n- q3.xlsx: /attachments/att-x");
   assert.deepEqual(body.parts, [], "a non-native file is never a file part");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -1073,8 +1029,6 @@ test("an approval reply reaches `POST /permission/{id}/reply`, never the SDK tra
   );
   const resolved = await waitFor(harness, "request.resolved");
   assert.equal(resolved.payload.decision, "acceptForSession");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a redirecting decline rejects WITH the redirect message; a plain decline rejects bare", async () => {
@@ -1131,8 +1085,6 @@ test("a child session's permission names its subagent, and a decline with the us
   });
   const parent = await waitFor(harness, "request.opened", (event) => event.requestId === "per_parent");
   assert.equal("requestingAgentId" in parent.payload, false);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("interrupt is turn-scoped: a Stop on a settled turn cannot kill the next one", async () => {
@@ -1146,8 +1098,6 @@ test("interrupt is turn-scoped: a Stop on a settled turn cannot kill the next on
   });
   await session.interruptTurn("opencode-turn-does-not-exist");
   assert.equal(harness.fake.find("POST", "/abort"), undefined, "a stale Stop is a no-op");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a question is answered on its reply route and dismissed on its reject route", async () => {
@@ -1192,8 +1142,6 @@ test("a question is answered on its reply route and dismissed on its reject rout
   await waitFor(harness, "user-input.requested", (event) => event.requestId === "que_2");
   await session.respondToUserInput("que_2", {});
   assert.ok(harness.fake.find("POST", "/question/que_2/reject") !== undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -1211,8 +1159,6 @@ test("compaction is REFUSED while a turn runs — the server has no such backsto
   });
   await assert.rejects(session.compact(), /cannot compact while a turn is running/);
   assert.equal(harness.fake.find("POST", "/summarize"), undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("compaction on an idle session posts summarize with auto:false", async () => {
@@ -1225,8 +1171,6 @@ test("compaction on an idle session posts summarize with auto:false", async () =
     modelID: "google/gemini-2.5-flash-lite",
     auto: false
   });
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("rollback forks, verifies the boundary count, re-applies the ruleset and re-points", async () => {
@@ -1257,8 +1201,6 @@ test("rollback forks, verifies the boundary count, re-applies the ruleset and re
   );
   assert.ok(harness.events.some((event) => event.type === "thread.started"));
   assert.equal(snapshot.turns.length, 1);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("rollback refuses when the fork did not preserve the boundary", async () => {
@@ -1283,8 +1225,6 @@ test("rollback refuses when the fork did not preserve the boundary", async () =>
     [`/session/${forkedId}`],
     "the unusable fork is deleted, never the thread's own session"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 /** Three exchanges as OpenCode stores them: each prompt, then its answer. */
@@ -1321,8 +1261,6 @@ test("rollback by turn ID forks at the NAMED turn's prompt, wherever the count p
   );
   assert.notEqual(session.sessionId, before, "the fork becomes the thread's session");
   assert.equal(snapshot.turns.length, 1, "exactly the first exchange survives");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a live turn is named by the prompt that opened it, so a rewind finds it again", async () => {
@@ -1364,8 +1302,6 @@ test("a live turn is named by the prompt that opened it, so a rewind finds it ag
   const fork = harness.fake.find("POST", `/session/${sessionId}/fork`);
   assert.equal((fork?.body as { messageID: string }).messageID, promptId);
   assert.notEqual(session.sessionId, sessionId);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("rollback refuses a turn ID the session no longer holds, before forking anything", async () => {
@@ -1391,8 +1327,6 @@ test("rollback refuses a turn ID the session no longer holds, before forking any
     "no fork and no ruleset patch: an unresolvable id is never a count-based guess"
   );
   assert.equal(session.sessionId, before, "a refused rollback must not re-point the thread");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a second rewind finds a turn the first one kept, under the fork's re-minted ids", async () => {
@@ -1440,8 +1374,6 @@ test("a second rewind finds a turn the first one kept, under the fork's re-minte
     /opencode: the turn to rewind to is no longer in this session/
   );
   assert.equal(session.sessionId, third);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a live subagent is closed `stopped` before session.exited", async () => {
@@ -1471,7 +1403,6 @@ test("a live subagent is closed `stopped` before session.exited", async () => {
     "a subagent row must never outlive the process that ran it"
   );
   assert.equal(session.hasLiveSubagents(), false);
-  harness.dispose();
 });
 
 test("a child session's question rides no turn, and so does its answer; the parent's own ride its turn", async () => {
@@ -1519,8 +1450,6 @@ test("a child session's question rides no turn, and so does its answer; the pare
   assert.ok(childAnswer !== undefined && parentAnswer !== undefined);
   assert.equal(childAnswer.turnId, undefined, "its answer rides the same: none");
   assert.equal(parentAnswer.turnId, turn.turnId);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("interrupting a turn closes its subagents too", async () => {
@@ -1542,7 +1471,6 @@ test("interrupting a turn closes its subagents too", async () => {
   assert.equal(completed[0]?.payload.status, "stopped");
   const order = typesOf(harness.events);
   assert.ok(order.lastIndexOf("task.completed") < order.lastIndexOf("turn.aborted"));
-  harness.dispose();
 });
 
 test("§6.2: an interrupt with NO active turn still stops all background work", async () => {
@@ -1589,7 +1517,6 @@ test("§6.2: an interrupt with NO active turn still stops all background work", 
     .filter((request) => request.path.endsWith("/abort"));
   assert.ok(aborts.length >= 1, "the session abort is still issued");
   assert.equal(turn.turnId.length > 0, true);
-  harness.dispose();
 });
 
 test("§6.2: a session-scoped interrupt with nothing live is a clean no-op", async () => {
@@ -1599,8 +1526,6 @@ test("§6.2: a session-scoped interrupt with nothing live is a clean no-op", asy
   assert.equal(session.hasLiveSubagents(), false);
   assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), []);
   assert.deepEqual(eventsOfType(harness.events, "task.completed"), []);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("stop is idempotent and emits exactly one session.exited", async () => {
@@ -1612,7 +1537,6 @@ test("stop is idempotent and emits exactly one session.exited", async () => {
     eventsOfType(harness.events, "session.exited").length,
     1
   );
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -1693,13 +1617,11 @@ test("a background answer wakes the parent: its reply runs as a turn named by th
     }
   }
   assert.deepEqual([session.session.status, session.session.activeTurnId], ["ready", undefined]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a session.error during the woken reply fails its turn, as it fails any", async () => {
   const harness = makeHarness();
-  const { session, sessionId } = await wokenMidReply(harness);
+  const { sessionId } = await wokenMidReply(harness);
   harness.fake.push({
     type: "session.error",
     properties: { sessionID: sessionId, error: { name: "UnknownError", data: { message: "Rate limit exceeded" } } }
@@ -1709,8 +1631,6 @@ test("a session.error during the woken reply fails its turn, as it fails any", a
     [completed.turnId, completed.payload.state, completed.payload.errorMessage],
     ["msg_injected", "failed", "Rate limit exceeded"]
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("the user's message during the woken reply steers it: one turn, which the run's idle ends", async () => {
@@ -1742,13 +1662,11 @@ test("the user's message during the woken reply steers it: one turn, which the r
     eventsOfType(harness.events, "content.delta").filter((event) => event.turnId === "msg_injected").length,
     2
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a second answer that arrives while the woken reply runs joins its turn: one turn, one completion", async () => {
   const harness = makeHarness();
-  const { session, sessionId } = await wokenMidReply(harness);
+  const { sessionId } = await wokenMidReply(harness);
   const second = wokenReply({ sessionId, promptId: "msg_injected_2", replyId: "msg_woken_2", text: "And a.ts." });
   pushAll(harness.fake, [
     ...injectedAnswer({ sessionId, promptId: "msg_injected_2", childId: "ses_child_2", answer: "Found a.ts." }),
@@ -1763,8 +1681,6 @@ test("a second answer that arrives while the woken reply runs joins its turn: on
   assert.deepEqual(eventsOfType(harness.events, "turn.started").map((event) => event.turnId), ["msg_injected"]);
   assert.equal(eventsOfType(harness.events, "turn.completed").length, 1);
   assert.equal(completed.payload.tokenUsage?.inputTokens, 2 * (1_346 + 42_514));
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop during the woken reply aborts its turn, and what the aborted run still sends opens nothing", async () => {
@@ -1785,8 +1701,6 @@ test("a Stop during the woken reply aborts its turn, and what the aborted run st
   await drainedWith(harness, sessionId, "after the stop");
   assert.deepEqual(eventsOfType(harness.events, "turn.started").map((event) => event.turnId), ["msg_injected"]);
   assert.equal(session.session.activeTurnId, undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop's leftovers end once a later turn fails: a background answer after it still wakes the parent into a turn", async () => {
@@ -1837,8 +1751,6 @@ test("a Stop's leftovers end once a later turn fails: a background answer after 
     eventsOfType(harness.events, "content.delta").some((event) => event.turnId === FIRST.promptId),
     "the woken reply is written, on its own turn"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 /**
@@ -2060,8 +1972,6 @@ test("a rewind ends a relaunched child the fork leaves behind: aborted, its call
   await drainedWith(harness, session.sessionId, "after its late end");
   assert.deepEqual(rowsOfAgent(harness.events, after, "ses_bg"), []);
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 /** One of the child's calls, running, as a `bash` part reports it — {@link childCall} under another id. */
@@ -2132,8 +2042,6 @@ test("a rewind closes a left-behind child's calls on the turns it keeps only: a 
     assert.deepEqual([...rows.keys()].filter((key) => key.endsWith(":call_b")), [], "no lone closer");
     assert.equal(fold.roster.find((row) => row.id === "ses_bg")?.status, "interrupted");
   }
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a rewind ends a background child still running between turns: aborted, closed, and the drain released", async () => {
@@ -2188,8 +2096,6 @@ test("a rewind ends a background child still running between turns: aborted, clo
   pushAll(harness.fake, runSettles("ses_bg"));
   await drainedWith(harness, session.sessionId, "after its late end");
   assert.deepEqual(rowsOfAgent(harness.events, after, "ses_bg"), []);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a child whose abort frames beat the Stop's own close ends stopped — its own abort error, or its call's cleanup — never failed", async () => {
@@ -2286,8 +2192,6 @@ test("a background child outlives its launching turn's failure — running in th
   const end = host.fold();
   const child = end.roster.find((row) => row.id === "ses_bg");
   assert.deepEqual([child?.status, child?.result], ["completed", "Found README.md."]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a foreground child of a failed turn is still closed stopped", async () => {
@@ -2298,8 +2202,6 @@ test("a foreground child of a failed turn is still closed stopped", async () => 
   ]);
   assert.deepEqual(taskEnds(harness.events), ["ses_fg:stopped:Rate limit exceeded"]);
   assert.equal(session.hasLiveSubagents(), false);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop closes every child — a background one too: the abort cancels its job", async () => {
@@ -2315,8 +2217,6 @@ test("a Stop closes every child — a background one too: the abort cancels its 
   await session.interruptTurn(turn.turnId);
   assert.deepEqual(taskEnds(harness.events).sort(), ["ses_bg:stopped:interrupted", "ses_fg:stopped:interrupted"]);
   assert.equal(session.hasLiveSubagents(), false);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -2444,7 +2344,6 @@ test("a child that survives the Stop is relaunched on the server's word: the ros
   assert.deepEqual([end?.status, end?.result], ["completed", "Found README.md."]);
   await session.stop({ reason: "test", hostInitiated: true });
   assert.deepEqual(taskEnds(harness.events).filter((row) => row.endsWith(":stopped:test")), [], "a finished run is not closed again");
-  harness.dispose();
 });
 
 test("a second Stop closes a relaunched child, and a confirmed report relaunches it again under its next id", async () => {
@@ -2481,7 +2380,6 @@ test("a second Stop closes a relaunched child, and a confirmed report relaunches
     ["ses_bg:stopped:interrupted", "ses_bg:stopped:interrupted", "ses_bg:stopped:tab closed"],
     "and the exit closes the run in progress, as any"
   );
-  harness.dispose();
 });
 
 test("a NESTED subagent that survives the Stop is relaunched too: its first start names its call, and it reads running, then completed with its own answer", async () => {
@@ -2534,8 +2432,6 @@ test("a NESTED subagent that survives the Stop is relaunched too: its first star
   const end = host.fold().roster.find((row) => row.id === "ses_gc");
   assert.deepEqual([end?.status, end?.result], ["completed", "Deep answer."]);
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a failed admission a relaunched child holds the drain, but reads interrupted: that session reads error, which the roster takes for dead", async (t) => {
@@ -2565,8 +2461,6 @@ test("after a failed admission a relaunched child holds the drain, but reads int
     "interrupted",
     "the documented exception: the roster reads no run of a session it takes for dead"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a child the Stop ended sends its leftovers: the server says it runs nothing, and it stays ended", async () => {
@@ -2585,6 +2479,7 @@ test("a child the Stop ended sends its leftovers: the server says it runs nothin
   await asked;
   await nextTurn();
   assert.equal(statusReads() - readsBefore, 1, "one question for the whole burst");
+  assert.deepEqual(harness.events.slice(fed).filter((event) => event.type === "task.started"), [], "the idle child stays ended");
   // Told it runs nothing, more of its text asks nothing more; a `busy` asks again.
   pushAll(harness.fake, [
     { type: "message.part.delta", properties: { sessionID: "ses_bg", messageID: "msg_child_reply", partID: "prt_child_text", field: "text", delta: ", b.ts" } }
@@ -2608,20 +2503,16 @@ test("a child the Stop ended sends its leftovers: the server says it runs nothin
     "no start, no end: it stays ended on the Stop's word"
   );
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a child the Stop closed that reports while the server cannot say counts live again: the drain outranks a duplicate row", async () => {
   const harness = makeHarness();
-  const { session } = await stoppedWithChild(harness);
+  await stoppedWithChild(harness);
   harness.fake.overrides.set("GET /session/status", () => new Response("boom", { status: 500 }));
   const revival = nextStartOf(harness, "ses_bg");
   pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
   await revival;
   assert.equal(livenessOf(harness).liveness("thread-1"), "working");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a report from a child the Stop closed, arriving while a later Stop is under way, is judged after that Stop: its abort may end the child", async () => {
@@ -2655,8 +2546,6 @@ test("a report from a child the Stop closed, arriving while a later Stop is unde
   await asked;
   await nextTurn();
   assert.deepEqual(harness.events.slice(fed).filter((event) => event.type === "task.started"), [], "the abort ended it: no revival");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop that begins and ends while the server is asked about a child makes that answer stale: it asks again, and does not relaunch a child it ended", async () => {
@@ -2679,7 +2568,7 @@ test("a Stop that begins and ends while the server is asked about a child makes 
   await session.interruptTurn();
   const askedAgain = harness.fake.nextRequest("GET", "/session/status");
   answer.resolve();
-  await askedAgain;
+  await Promise.race([askedAgain, nextStartOf(harness, "ses_bg")]);
   await nextTurn();
   assert.deepEqual(
     harness.events.slice(fed).filter((event) => event.type === "task.started"),
@@ -2687,8 +2576,6 @@ test("a Stop that begins and ends while the server is asked about a child makes 
     "the second answer is the one that counts: the Stop ended it"
   );
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a child whose own idle arrives while the server is asked about it is not revived: that report was its last", async () => {
@@ -2714,8 +2601,6 @@ test("a child whose own idle arrives while the server is asked about it is not r
   await nextTurn();
   assert.deepEqual(harness.events.slice(fed).filter((event) => event.type.startsWith("task.")), []);
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("the session stopping during the woken reply settles its turn before session.exited", async () => {
@@ -2726,7 +2611,6 @@ test("the session stopping during the woken reply settles its turn before sessio
   assert.deepEqual([completed?.turnId, completed?.payload.state], ["msg_injected", "interrupted"]);
   const order = typesOf(harness.events);
   assert.ok(order.lastIndexOf("turn.completed") < order.lastIndexOf("session.exited"));
-  harness.dispose();
 });
 
 test("the host's own /compact runs no turn: its summary streams while summarize runs, and opens nothing", async () => {
@@ -2759,8 +2643,6 @@ test("the host's own /compact runs no turn: its summary streams while summarize 
   await drainedWith(harness, sessionId, "after the compaction");
   assert.deepEqual(eventsOfType(harness.events, "turn.started"), []);
   assert.equal(session.session.activeTurnId, undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a woken run that compacts first runs as one turn from its summary on, which the run's idle settles", async () => {
@@ -2803,8 +2685,6 @@ test("a woken run that compacts first runs as one turn from its summary on, whic
     "the reply's step alone: the summary call stays off the turn's usage"
   );
   assert.deepEqual(eventsOfType(harness.events, "turn.started").length, 1);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a rewind's fork is the past: its copied messages, delivered late, open no turn", async () => {
@@ -2827,6 +2707,7 @@ test("a rewind's fork is the past: its copied messages, delivered late, open no 
   const forkId = session.sessionId;
   // The copy's frames, reaching the stream only after the thread moved onto the fork.
   pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: forkId, status: { type: "busy" } } },
     { type: "message.updated", properties: { sessionID: forkId, info: { id: `${forkId}-msg-1`, role: "user", sessionID: forkId } } },
     {
       type: "message.updated",
@@ -2839,8 +2720,6 @@ test("a rewind's fork is the past: its copied messages, delivered late, open no 
   await drainedWith(harness, forkId, "after the rewind");
   assert.deepEqual(eventsOfType(harness.events, "turn.started"), []);
   assert.equal(session.session.activeTurnId, undefined);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -2965,8 +2844,6 @@ test("after a Stop, a background answer's run is a new run: its reply is written
     [[FIRST.promptId, FIRST.text]],
     "the woken reply is written, on its turn, and nothing of the stopped run"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a new run whose busy arrives before the abort answers still gets its woken turn once the abort is over", async () => {
@@ -3008,8 +2885,6 @@ test("after a Stop, a new run whose busy arrives before the abort answers still 
     eventsOfType(harness.events, "content.delta").some((event) => event.turnId === FIRST.promptId),
     "the woken reply is written on its own turn"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("while a Stop is under way, a run the abort then cancels says busy after an idle: its reply opens no turn, before the abort answers or after", async () => {
@@ -3049,8 +2924,6 @@ test("while a Stop is under way, a run the abort then cancels says busy after an
   pushAll(harness.fake, reply.ends);
   await drainedWith(harness, sessionId, "after the abort");
   assert.deepEqual(timelineRows(harness.events, fed), [], "its idle came after its busy: nothing to end");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("when the stream wins the race and the boundary is crossed early, the cancelled run's own abort error is an echo: no failure, no error", async () => {
@@ -3099,8 +2972,6 @@ test("when the stream wins the race and the boundary is crossed early, the cance
   });
   const reported = await waitFor(harness, "runtime.error");
   assert.equal((reported as Extract<RuntimeEvent, { type: "runtime.error" }>).payload.message, "Aborted");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("the echo is expected only until the parent's next idle, in either spelling: after a real new run, an abort error nobody here sent is reported", async () => {
@@ -3286,8 +3157,6 @@ test("after a Stop whose abort request failed, an abort error before the run's i
     { type: "session.idle", properties: { sessionID: sessionId } }
   ]);
   await waitFor(harness, "turn.aborted", (event) => event.turnId === stopped.turnId);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop whose abort request failed: the stream's or the server's word that the run ended settles the turn as the abort would have — two idle frames or a lone one, before the failure or after it, or a reconnect's status poll; without that word, the next Stop asks the server again — and the next run is a new one", async (t) => {
@@ -3437,7 +3306,11 @@ test("a steer after a failed Stop takes the turn back: the run's own end complet
     { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
     { type: "session.idle", properties: { sessionID: sessionId } }
   ]);
-  const ended = await waitFor(harness, "turn.completed", (event) => event.turnId === stopped.turnId);
+  const ended = await Promise.race([
+    waitFor(harness, "turn.completed", (event) => event.turnId === stopped.turnId),
+    waitFor(harness, "turn.aborted", (event) => event.turnId === stopped.turnId)
+  ]);
+  assert.ok(ended.type === "turn.completed", "a steer takes the turn back from the failed Stop");
   assert.equal(ended.payload.state, "completed", "the run's own end, not the failed Stop's");
   assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), []);
   assert.deepEqual(taskEnds(harness.events), [], "the background child it started runs on");
@@ -3451,8 +3324,6 @@ test("a steer after a failed Stop takes the turn back: the run's own end complet
   // A later Stop is a fresh one: it stops the background work.
   await session.interruptTurn();
   assert.deepEqual(taskEnds(harness.events), ["ses_after:stopped:interrupted"]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 /**
@@ -3547,7 +3418,7 @@ test("the end of a Stop whose abort request failed closes the children, then abo
 
 test("the end of a Stop whose abort request failed: a request from a child that end is aborting is judged after that abort — an ask it ends gets no card", async () => {
   const harness = makeHarness();
-  const { session, sessionId, turnId } = await failedStopWithChild(harness);
+  const { sessionId, turnId } = await failedStopWithChild(harness);
   // The server lists the child's ask until the abort ends its run (1.18.32).
   harness.fake.permissionsOpen = [permissionAsk("per_bg", "ses_bg")];
   const childAbort = holdChildAbort(harness, "ses_bg", () => {
@@ -3569,8 +3440,6 @@ test("the end of a Stop whose abort request failed: a request from a child that 
   const rejected = await harness.fake.waitForRequest("POST", "/permission/per_bg/reply");
   assert.deepEqual(rejected.body, { reply: "reject" }, "its asker is gone: released on the wire");
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), [], "and no card");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a child's report the server is being asked about when a failed Stop's run ends is asked about again once that end's abort is over: the answer from before it is stale", async () => {
@@ -3635,8 +3504,6 @@ test("a child's report the server is being asked about when a failed Stop's run 
     "asked again once that abort is over: it ended the child"
   );
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a busy from before the stopped run's idle ends nothing: a reply to an unclaimed prompt after it still opens no turn", async () => {
@@ -3657,8 +3524,6 @@ test("after a Stop, a busy from before the stopped run's idle ends nothing: a re
   ]);
   await drainedWith(harness, sessionId, "after the late busy");
   assert.deepEqual(timelineRows(harness.events, fed), [], "no idle since the Stop: that busy may be the stopped run's own");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -3701,13 +3566,11 @@ test("a reconnect clears a stale busy: a reply the host never started, after the
   await drainedWith(harness, sessionId, "after the gap");
   assert.deepEqual(eventsOfType(harness.events, "turn.started"), [], "a busy from before the gap opens nothing");
   assert.deepEqual([session.session.status, session.session.activeTurnId], ["ready", undefined]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a reconnect keeps what a live run says after it: a busy after the gap still opens the woken turn", async (t) => {
   const harness = makeHarness();
-  const { session, sessionId } = await reconnectedAfterBusy(harness, t);
+  const { sessionId } = await reconnectedAfterBusy(harness, t);
 
   const reply = wokenReply({ sessionId, ...FIRST });
   pushAll(harness.fake, [
@@ -3724,8 +3587,6 @@ test("a reconnect keeps what a live run says after it: a busy after the gap stil
   pushAll(harness.fake, [...reply.ends, ...runSettles(sessionId)]);
   const completed = await waitFor(harness, "turn.completed");
   assert.deepEqual([completed.turnId, completed.payload.state], [FIRST.promptId, "completed"]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -3784,8 +3645,6 @@ test("after a Stop, a question from a child the abort never reached is shown on 
   assert.equal(resolved.requestId, "que_survivor");
   await host.ingest(harness.events.slice(fed));
   assert.deepEqual(host.fold().pending.userInputs, [], "answered");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a live asker's approval is shown — on the turn running then, none here — and answered on its reply route", async () => {
@@ -3802,13 +3661,11 @@ test("after a Stop, a live asker's approval is shown — on the turn running the
   assert.deepEqual(harness.fake.find("POST", "/permission/per_survivor/reply")?.body, { reply: "once" });
   const resolved = await waitFor(harness, "request.resolved");
   assert.deepEqual([resolved.requestId, resolved.payload.decision], ["per_survivor", "accept"]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a request whose asker the abort ended is rejected on the wire and writes no card — nor a row when it closes", async () => {
   const harness = makeHarness();
-  const { session, sessionId } = await stoppedAfterLaunching(harness);
+  const { sessionId } = await stoppedAfterLaunching(harness);
   // 1.18.32 drops an interrupted ask from its lists (`Permission.ask` awaits under
   // `ensuring`): the frames of the aborted run's last asks reach the stream late.
   // Unlisted is enough, whatever the asker's session runs now.
@@ -3816,9 +3673,16 @@ test("after a Stop, a request whose asker the abort ended is rejected on the wir
   harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_late", sessionId) });
   harness.fake.push({ type: "question.asked", properties: questionAsk("que_late", "ses_bg") });
 
-  const rejectedAsk = await harness.fake.waitForRequest("POST", "/permission/per_late/reply");
-  assert.deepEqual(rejectedAsk.body, { reply: "reject" });
-  await harness.fake.waitForRequest("POST", "/question/que_late/reject");
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/permission/per_late/reply"),
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_late")
+  ]);
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_late/reply")?.body, { reply: "reject" });
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/question/que_late/reject"),
+    waitFor(harness, "user-input.requested", (event) => event.requestId === "que_late")
+  ]);
+  assert.ok(harness.fake.find("POST", "/question/que_late/reject") !== undefined);
   harness.fake.push({ type: "permission.replied", properties: { sessionID: sessionId, requestID: "per_late", reply: "reject" } });
   harness.fake.push({ type: "question.rejected", properties: { sessionID: "ses_bg", requestID: "que_late" } });
   await drainedWith(harness, sessionId, "after the late asks");
@@ -3829,13 +3693,11 @@ test("after a Stop, a request whose asker the abort ended is rejected on the wir
       `no ${type} for an ask nobody waits on`
     );
   }
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a request answered elsewhere while the server is asked about it is dropped: no card, no row, nothing sent", async () => {
   const harness = makeHarness();
-  const { session, sessionId } = await stoppedAfterLaunching(harness);
+  const { sessionId } = await stoppedAfterLaunching(harness);
   harness.fake.statusMap = { ses_bg: { type: "busy" } };
   const judging = deferred<void>();
   const listRead = deferred<void>();
@@ -3861,22 +3723,21 @@ test("after a Stop, a request answered elsewhere while the server is asked about
     );
   }
   assert.equal(harness.fake.find("POST", "/permission/per_elsewhere/reply"), undefined, "nothing sent for it");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, an older server's orphan — still listed, its session idle — is rejected too, and shown nowhere", async () => {
   const harness = makeHarness();
-  const { session, sessionId } = await stoppedAfterLaunching(harness);
+  const { sessionId } = await stoppedAfterLaunching(harness);
   // Fixture 06 (1.18.5): the aborted run's ask stays in `GET /permission`, and nothing runs.
   harness.fake.permissionsOpen = [permissionAsk("per_orphan", sessionId)];
   harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_orphan", sessionId) });
 
-  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_orphan/reply");
-  assert.deepEqual(rejected.body, { reply: "reject" });
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/permission/per_orphan/reply"),
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_orphan")
+  ]);
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_orphan/reply")?.body, { reply: "reject" });
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a request that arrives while the Stop's abort is in flight is judged after it: an asker the abort ended gets no card on the stopped turn", async () => {
@@ -3910,8 +3771,6 @@ test("a request that arrives while the Stop's abort is in flight is judged after
   assert.deepEqual(rejected.body, { reply: "reject" });
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
   assert.equal(firstOfType(harness.events, "turn.aborted")?.turnId, turn.turnId);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a request that arrives once the next turn is sent, before its run says busy, is judged too: the stopped run's leftover is no card on the new turn", async () => {
@@ -3920,12 +3779,13 @@ test("a request that arrives once the next turn is sent, before its run says bus
   const next = await session.sendTurn({ threadId: "thread-1", input: "try again", attachments: [], interactionMode: "default" });
   harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_leftover", sessionId) });
 
-  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_leftover/reply");
-  assert.deepEqual(rejected.body, { reply: "reject" });
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/permission/per_leftover/reply"),
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_leftover")
+  ]);
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_leftover/reply")?.body, { reply: "reject" });
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
   assert.equal(session.session.activeTurnId, next.turnId, "the new turn runs on");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("an ask that arrives while the Stop withdraws the parked cards is held too: judged after the abort, no card on the stopped turn", async () => {
@@ -3969,8 +3829,6 @@ test("an ask that arrives while the Stop withdraws the parked cards is held too:
     ["per_1"],
     "the parked card only, never one for the ended asker"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a prompt admission fails and aborts the session, a request is judged as after a Stop: the aborted run's is rejected, a live asker's shown", async (t) => {
@@ -3987,8 +3845,11 @@ test("after a prompt admission fails and aborts the session, a request is judged
 
   // The aborted run's last ask, late: no longer listed.
   harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_after_admission", sessionId) });
-  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_after_admission/reply");
-  assert.deepEqual(rejected.body, { reply: "reject" });
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/permission/per_after_admission/reply"),
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_after_admission")
+  ]);
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_after_admission/reply")?.body, { reply: "reject" });
   // A run the abort never reached, asking: listed, its session busy.
   harness.fake.permissionsOpen = [permissionAsk("per_live", sessionId)];
   harness.fake.statusMap = { [sessionId]: { type: "busy" } };
@@ -3996,8 +3857,6 @@ test("after a prompt admission fails and aborts the session, a request is judged
   const opened = await waitFor(harness, "request.opened");
   assert.equal(opened.requestId, "per_live");
   assert.deepEqual(eventsOfType(harness.events, "request.opened").map((event) => event.requestId), ["per_live"]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("a Stop that begins and ends while the server is asked about a held request makes that answer stale: it asks again", async () => {
@@ -4024,34 +3883,37 @@ test("a Stop that begins and ends while the server is asked about a held request
   await session.interruptTurn();
   answer.resolve();
 
-  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_quick/reply");
-  assert.deepEqual(rejected.body, { reply: "reject" }, "asked again after that Stop: its asker is gone");
+  await Promise.race([
+    harness.fake.waitForRequest("POST", "/permission/per_quick/reply"),
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_quick")
+  ]);
+  assert.deepEqual(harness.fake.find("POST", "/permission/per_quick/reply")?.body, { reply: "reject" }, "asked again after that Stop: its asker is gone");
   assert.deepEqual(
     eventsOfType(harness.events, "request.opened").filter((event) => event.requestId === "per_quick"),
     [],
     "no card for an asker the Stop ended while it was being judged"
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("after a Stop, a request the server cannot say anything about is shown: the user answers it, never a reject on their behalf", async () => {
   const harness = makeHarness();
-  const { session } = await stoppedAfterLaunching(harness);
+  await stoppedAfterLaunching(harness);
   harness.fake.overrides.set("GET /permission", () => new Response("boom", { status: 500 }));
   harness.fake.overrides.set("GET /session/status", () => new Response("boom", { status: 500 }));
   harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_unknown", "ses_bg") });
 
-  const opened = await waitFor(harness, "request.opened");
-  assert.equal(opened.requestId, "per_unknown");
+  await Promise.race([
+    waitFor(harness, "request.opened", (event) => event.requestId === "per_unknown"),
+    harness.fake.waitForRequest("POST", "/permission/per_unknown/reply")
+  ]);
+  const opened = firstOfType(harness.events, "request.opened");
+  assert.equal(opened?.requestId, "per_unknown");
   assert.equal(harness.fake.find("POST", "/permission/per_unknown/reply"), undefined, "nothing answered for the user");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("full access: a live asker's request after a Stop is answered once, as any; a reply the server refuses shows the card once", async () => {
   const harness = makeHarness();
-  const { session } = await stoppedAfterLaunching(harness, { runtimeMode: "full-access" });
+  await stoppedAfterLaunching(harness, { runtimeMode: "full-access" });
   harness.fake.permissionsOpen = [permissionAsk("per_auto", "ses_bg"), permissionAsk("per_refused", "ses_bg")];
   harness.fake.statusMap = { ses_bg: { type: "busy" } };
 
@@ -4069,8 +3931,6 @@ test("full access: a live asker's request after a Stop is answered once, as any;
     "the card, not a second automatic reply"
   );
   assert.deepEqual(eventsOfType(harness.events, "request.opened").map((event) => event.requestId), ["per_refused"]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("full access: an automatic reply the server refuses falls back to the card while a turn runs", async () => {
@@ -4084,8 +3944,6 @@ test("full access: an automatic reply the server refuses falls back to the card 
   const opened = await waitFor(harness, "request.opened");
   assert.equal(opened.requestId, "per_refused");
   assert.equal(opened.turnId, session.session.activeTurnId, "on the running turn");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -4191,7 +4049,7 @@ function failReadsOf(harness: Harness, sessionId: string): void {
 test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
-  const session = await startSession(harness);
+  await startSession(harness);
   // A session that exists on this shared server and has no parent: the walk
   // completes at a root that is not ours, which is a definitive answer.
   harness.fake.sessions.set("ses_cotenant", { id: "ses_cotenant", directory: "/repo" });
@@ -4213,15 +4071,13 @@ test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", asyn
   assert.equal(probeCount(harness, "ses_cotenant"), 1, "a walked foreign root is not retried");
   // And it never became this thread's card.
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
   failReadsOf(harness, "ses_unreadable");
-  const session = await startSession(harness);
+  await startSession(harness);
 
   // A non-`asked` request frame has a five-probe budget. The backoff schedule
   // is incidental; only real provider requests and eventual termination matter.
@@ -4239,8 +4095,6 @@ test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async 
   t.mock.timers.runAll();
   await nextTurn();
   assert.equal(probeCount(harness, "ses_unreadable"), 5, "no later request survives the cap");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async (t) => {
@@ -4264,7 +4118,6 @@ test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async (t
     1,
     "a closed session must not keep polling the provider"
   );
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -4336,7 +4189,6 @@ test("a stop withdraws every parked card, once each", async () => {
   const abortIndex = harness.fake.indexOf("POST", "/abort");
   const childrenIndex = harness.fake.indexOf("GET", "/children");
   assert.ok(abortIndex >= 0 && (childrenIndex === -1 || abortIndex < childrenIndex), "abort the parent before reading its children");
-  harness.dispose();
 });
 
 test("an interrupt withdraws every parked card, once each", async () => {
@@ -4349,7 +4201,6 @@ test("an interrupt withdraws every parked card, once each", async () => {
   assert.ok(rejectIndex >= 0 && rejectIndex < abortIndex, "release the parked ask before aborting its run");
   await session.stop({ reason: "test", hostInitiated: true });
   assert.equal(closingsOf(harness, "per_1").length, 1, "the stop finds nothing left to close");
-  harness.dispose();
 });
 
 test("a dead server withdraws every parked card once, before session.exited", async () => {
@@ -4369,7 +4220,6 @@ test("a dead server withdraws every parked card once, before session.exited", as
     order.lastIndexOf("user-input.resolved") < order.lastIndexOf("session.exited"),
     "the cards close before the exit"
   );
-  harness.dispose();
 });
 
 test("the user's own answers are never withdrawn — and the server's echo adds no row", async () => {
@@ -4395,7 +4245,6 @@ test("the user's own answers are never withdrawn — and the server's echo adds 
   const question = closingsOf(harness, "que_1");
   assert.equal(question.length, 1);
   assert.deepEqual(question[0]?.payload, { answers: {} });
-  harness.dispose();
 });
 
 // ---------------------------------------------------------------------------
@@ -4453,7 +4302,6 @@ test("session tools: the thread's own server is registered before its session, i
   await session.stop({ reason: "test", hostInitiated: true });
   assert.equal(launch.revoked, true, "the credential dies with the session");
   await disconnected;
-  harness.dispose();
 });
 
 test("session tools: a resumed session gets the isolation rules re-asserted", async () => {
@@ -4461,7 +4309,7 @@ test("session tools: a resumed session gets the isolation rules re-asserted", as
   harness.fake.overrides.set("POST /mcp", () => json({}));
   harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/repo" });
   const launch = sessionToolsLaunch();
-  const session = await startSession(harness, {
+  await startSession(harness, {
     resumeCursor: { schemaVersion: 1, sessionId: "ses_old" },
     sessionTools: launch
   });
@@ -4470,28 +4318,22 @@ test("session tools: a resumed session gets the isolation rules re-asserted", as
     patch.permission.slice(-2).map((rule) => rule.permission),
     ["orquester-????????????????_*", `${launch.serverName}_*`]
   );
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("session tools: a failed registration costs the tools, never the thread", async () => {
   const harness = makeHarness();
   harness.fake.overrides.set("POST /mcp", () => json({ name: "BadRequest" }, 400));
-  const session = await startSession(harness, { sessionTools: sessionToolsLaunch() });
+  await startSession(harness, { sessionTools: sessionToolsLaunch() });
   assert.ok(harness.fake.find("POST", "/session"), "the session still opened");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("session tools: a thread whose grant failed still sends the deny, and no allow", async () => {
   const harness = makeHarness();
-  const session = await startSession(harness, { isolateSessionTools: true });
+  await startSession(harness, { isolateSessionTools: true });
   assert.equal(harness.fake.find("POST", "/mcp"), undefined, "nothing of its own to register");
   const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string; action: string }> };
   assert.deepEqual(create.permission.at(-1), { permission: "orquester-????????????????_*", pattern: "*", action: "deny" });
   assert.equal(create.permission.some((rule) => rule.action === "allow" && rule.permission.startsWith("orquester-")), false);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("session tools: a denial by disconnect alone (an overlapping name) is re-asserted at every turn start, and ruled once it cannot be", async () => {
@@ -4522,8 +4364,6 @@ test("session tools: a denial by disconnect alone (an overlapping name) is re-as
   assert.equal(disconnects(), 3);
   const patch = harness.fake.find("PATCH", `/session/${session.sessionId}`)?.body as { permission: Rule[] } | undefined;
   assert.ok(ruledOut(patch?.permission), "the denied server's tools are ruled out");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("session tools: a rule whose send failed is not taken as sent — the next turn start sends it again", async () => {
@@ -4547,8 +4387,6 @@ test("session tools: a rule whose send failed is not taken as sent — the next 
   await session.sendTurn({ threadId: "thread-1", input: "again", attachments: [], interactionMode: "default" });
   assert.equal(patches().length, 2);
   assert.ok(ruledOut((patches().at(-1)?.body as { permission: Rule[] }).permission));
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });
 
 test("session tools: stop waits for the pending disconnect before a relaunch can proceed", async () => {
@@ -4571,7 +4409,6 @@ test("session tools: stop waits for the pending disconnect before a relaunch can
   release.resolve();
   await stopping;
   assert.equal(stopped, true);
-  harness.dispose();
 });
 
 test("without session tools nothing is registered and the ruleset is unchanged", async () => {
@@ -4583,6 +4420,4 @@ test("without session tools nothing is registered and the ruleset is unchanged",
   await session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" });
   const submit = harness.fake.find("POST", "/prompt_async")?.body as { system?: string };
   assert.ok(!String(submit.system).includes("## Orquester"));
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
 });

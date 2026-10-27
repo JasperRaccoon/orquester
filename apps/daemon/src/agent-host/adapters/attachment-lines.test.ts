@@ -102,37 +102,45 @@ describe("stripping the block from a replayed native history", () => {
     assert.equal(stripAttachmentPathLines(blank), blank);
   });
 
+  it("returns text without a trailing block by identity, including a mid-text mention", () => {
+    const plain = "see /a/q3.xlsx please";
+    assert.equal(stripAttachmentPathLines(plain), plain);
+    const mid = "my own prose\n\nAttached files:\n- a: /x\n\nand then I wrote more";
+    assert.equal(stripAttachmentPathLines(mid), mid);
+    assert.equal(stripAttachmentPathLines(""), "");
+  });
+
   it("answers in linear time when a block-shaped run fails at its last line", () => {
     // Each `- a: b: c` line splits into a name and a path two ways, and a
     // per-line `[^\n]*: [^\n]+` retries every combination of splits before a
     // run that fails at its end gives up: 2^14 of them here, on the event loop
     // every thread shares. The guard is RELATIVE, as in `glob.test.ts`: the
-    // baseline is a run of the same length whose lines split one way only,
-    // CPU contention on a loaded suite scales both measurements together, and
+    // baseline is a run of the same length whose lines split one way only.
+    // Process CPU usage excludes scheduler delays, and
     // the exponential case overshoots a generous factor by orders of magnitude.
     const run = (line: string): string =>
       `hi\n\nAttached files:\n${Array.from({ length: 14 }, () => line).join("\n")}\nand then more`;
     const pathological = run("- a: b: c");
     const trivial = run("- abcd: e");
     const time = (text: string): number => {
-      const start = performance.now();
+      const start = process.cpuUsage();
       for (let i = 0; i < 2000; i++) {
         assert.equal(stripAttachmentPathLines(text), text);
       }
-      return performance.now() - start;
+      const used = process.cpuUsage(start);
+      return used.user + used.system;
     };
-    // Warm the JIT, then take the best of three runs on each — the minimum is
-    // the measurement least polluted by a scheduler preemption.
+    // Warm the JIT, then use the least CPU consumption of three runs on each.
     const best = (text: string): number => {
       time(text);
       return Math.min(time(text), time(text), time(text));
     };
-    const baseline = Math.max(best(trivial), 1);
+    const baseline = Math.max(best(trivial), 1_000);
     const elapsed = best(pathological);
     // Observed ratio is ~1x: both are linear in the length of the text.
     assert.ok(
       elapsed < baseline * 25,
-      `expected <${(baseline * 25).toFixed(1)}ms (25x the ${baseline.toFixed(1)}ms linear baseline), took ${elapsed.toFixed(1)}ms`
+      `expected <${(baseline * 25).toFixed(1)}µs CPU (25x the ${baseline.toFixed(1)}µs linear baseline), took ${elapsed.toFixed(1)}µs`
     );
     // The same lines closing the text are still one block: a name may hold ": ".
     assert.equal(stripAttachmentPathLines(pathological.slice(0, -"\nand then more".length)), "hi");

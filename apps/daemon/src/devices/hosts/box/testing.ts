@@ -118,6 +118,17 @@ export interface FakeMacBoxOptions {
 }
 
 export class FakeMacBox {
+  private readonly pendingCommands = new Set<Promise<void>>();
+
+  /** Finite command exit receipts, including commands their continuations start. */
+  async drain(): Promise<void> {
+    for (;;) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (this.pendingCommands.size === 0) return;
+      await Promise.all([...this.pendingCommands]);
+    }
+  }
+
   readonly log: string[] = [];
   readonly files = new Map<string, string>();
   readonly sims = new Map<string, FakeSim>();
@@ -271,6 +282,11 @@ export class FakeMacBox {
       box.execs.push(options);
       const args = options.args ?? [];
       const proc = new FakeProcess(box.nextPid++, options.detach?.procId ?? null);
+      if (!options.detach) {
+        const done = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+        box.pendingCommands.add(done);
+        void done.then(() => box.pendingCommands.delete(done));
+      }
       if (options.command === "/bin/sh" && args[0] === "-c") {
         const script = args[1];
         if (script === PROBE_SCRIPT) {

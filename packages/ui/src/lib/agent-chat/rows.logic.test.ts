@@ -1168,7 +1168,7 @@ describe("goal marker rows", () => {
 
   it("a goal update is its own marker row, carrying its label, change and objective", () => {
     const rows = deriveTimelineRowsWithState(
-      baseInput(entriesFrom([goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1)]), running)
+      baseInput(entriesFrom([goalRow({ goal: { ...goal, rounds: 1 }, change: "set" }, "Goal set: Make CI green", 1)]), running)
     ).rows;
     const [marker] = goalMarkers(rows);
     assert.ok(marker, "a goal row projects a goal marker");
@@ -1504,7 +1504,7 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
           ...call(
             {
               itemType: "mcp_tool_call",
-              data: marked({ toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } })
+              data: { toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true }, sessionTool: { name: "html_render", references: { htmlRender: reference } } }
             },
             1,
             { status: "failed" }
@@ -1520,7 +1520,7 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
     const started = deriveTimelineRowsWithState(
       baseInput(
         entriesFrom([
-          activity("tool.started", { itemType: "mcp_tool_call", toolUseId: "call-9", status: "inProgress", data: { toolName: "mcp__orquester__html_render" } }, {
+          activity("tool.started", { itemType: "mcp_tool_call", toolUseId: "call-9", status: "inProgress", data: { toolName: "mcp__orquester__html_render", sessionTool: { name: "html_render", references: { htmlRender: reference } } } }, {
             turnId: "t1",
             createdAt: stamp(1)
           })

@@ -380,7 +380,7 @@ describe("box hub relay across a dropped link", () => {
     return { box, credential: credential ?? welcome.credential! };
   };
 
-  test("relay clients learn the box is away before their channels close, so a viewer waits to reattach", { timeout: 30_000 }, async () => {
+  test("relay clients learn the box is away before their channels close, so a viewer waits to reattach", async () => {
     records.add("box-relay-0001");
     const first = await link("box-relay-0001");
     // The hub's relay socket appears once the box has connected.
@@ -398,7 +398,7 @@ describe("box hub relay across a dropped link", () => {
     }
   });
 
-  test("an open relayed while the box is away waits for the link instead of failing", { timeout: 30_000 }, async () => {
+  test("an open relayed while the box is away waits for the link instead of failing", async () => {
     records.add("box-relay-0002");
     const first = await link("box-relay-0002");
     // The relay socket is up once a client gets through it.

@@ -46,16 +46,24 @@ describe("knowledge citation answers", () => {
     assert.equal(knowledgeCitationAnswer(ID)?.state, undefined);
   });
 
-  it("never re-ask through the client of a connection that was reset", async () => {
+  it("a connection switch forgets the old answer and refreshes through the new client", async () => {
     const one = fakeApi("c1");
     const asked = checkKnowledgeCitation(one.api, ID);
     one.pending.shift()!.resolve();
     await asked;
 
-    resetKnowledge();
+    const two = fakeApi("c2");
+    const switched = checkKnowledgeCitation(two.api, ID);
+    assert.deepEqual(two.reads, [ID], "the other connection must read its own entry");
+    two.pending.shift()!.reject(notFound);
+    await switched;
+    assert.equal(knowledgeCitationAnswer(ID)?.state, "deleted", "the old connection's cached answer is gone");
+
     applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: [ID] }));
-    await flush();
     assert.deepEqual(one.reads, [ID], "the old connection's client is not asked again");
+    assert.deepEqual(two.reads, [ID, ID], "a change refreshes through the current client");
+    two.pending.shift()!.resolve();
+    await flush();
   });
 
   it("drop an answer from before a reset that lands after it", async () => {

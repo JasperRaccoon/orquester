@@ -43,6 +43,10 @@ async function harness(t: TestContext) {
   const service = new RepoIdentitiesService({ file: join(root, "repo-identities.json"), iconsDir, logger: quiet });
   await service.load();
   const app = Fastify();
+  // Injection buffers stream payloads and adds a length; restore chunked HTTP's header shape.
+  app.addHook("onRequest", async (request) => {
+    if (request.headers["transfer-encoding"] === "chunked") delete request.headers["content-length"];
+  });
   registerRepoIdentityRoutes(app, { service });
   t.after(async () => {
     await app.close();
@@ -59,7 +63,10 @@ async function harness(t: TestContext) {
       inject({
         method: "POST",
         url: `${repoIdentityRoutes.icon}?repoKey=${encodeURIComponent(repoKey)}&contentType=${encodeURIComponent(contentType)}`,
-        headers: { "content-type": "application/octet-stream" },
+        headers: {
+          "content-type": "application/octet-stream",
+          ...(body instanceof Readable ? { "transfer-encoding": "chunked" } : {})
+        },
         payload: body
       })
   };
@@ -275,7 +282,17 @@ test("favicon: one fetch per repo across servers; other repos and later fetches 
   let running = nextFetch();
   const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
   await running;
-  refused(await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 409, "FAVICON_BUSY");
+  const releaseFirst = release;
+  const duplicateStarted = nextFetch();
+  const duplicate = second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
+  const busy = await Promise.race([duplicate, duplicateStarted.then(() => null)]);
+  if (busy === null) {
+    release();
+    releaseFirst();
+    await Promise.all([duplicate, first]);
+  }
+  assert.ok(busy, "a concurrent fetch is refused before another transport starts");
+  refused(busy, 409, "FAVICON_BUSY");
   const other = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: "github.com/acme/other", domain: "other.com" } });
   assert.equal(other.statusCode, 200);
 

@@ -69,13 +69,15 @@ const refusalOf = async (work: Promise<unknown>): Promise<string> => {
 
 test("a read-only tool runs without asking", async () => {
   const { actions, queue, requests } = setup({ readOnly: true });
-  const result = await actions.callTool({ name: "list", arguments: {} });
+  const call = actions.callTool({ name: "list", arguments: {} });
+  await flush();
+  assert.equal(queue.pending("s1").length, 0);
+  const result = await call;
   assert.deepEqual(result, { content: [{ type: "text", text: "done" }] });
   assert.deepEqual(
     requests.map((entry) => entry.operation),
     ["tool-info", "call-tool"]
   );
-  assert.equal(queue.pending("s1").length, 0);
 });
 
 test("any other tool waits on the user's consent, with its arguments shown", async () => {
@@ -105,8 +107,10 @@ test("a declined tool never runs", async () => {
 
 test("a tool hidden from apps is refused before anyone is asked", async () => {
   const { actions, queue } = setup({ callable: false });
-  assert.equal(await refusalOf(actions.callTool({ name: "admin", arguments: {} })), "This app cannot call that tool.");
+  const refused = refusalOf(actions.callTool({ name: "admin", arguments: {} }));
+  await flush();
   assert.equal(queue.pending("s1").length, 0);
+  assert.equal(await refused, "This app cannot call that tool.");
 });
 
 test("with no dock to ask, nothing runs and the app is told so", async () => {
@@ -135,9 +139,11 @@ test("a message always asks, then is sent as the user", async () => {
   let writable = true;
   const live = setup({ overrides: { canSendMessage: () => writable } });
   writable = false;
-  assert.equal(await refusalOf(live.actions.sendMessage("x")), "Messages cannot be sent from here.");
+  const refused = refusalOf(live.actions.sendMessage("x"));
+  await flush();
   assert.equal(live.queue.pending("s1").length, 0);
   assert.deepEqual(live.sent, []);
+  assert.equal(await refused, "Messages cannot be sent from here.");
 });
 
 test("a download asks, reads a linked file from the app's server, and keeps the size bound", async () => {
@@ -193,7 +199,9 @@ test("links open only while the app may act", async () => {
 
 test("the queue: one session's requests, withdrawn with their frame, unanswerable once the dock goes", async () => {
   const queue = new McpAppConsentQueue();
-  assert.equal(await queue.ask("f", { sessionId: "s1", kind: "tool", appName: "a", title: "t", detail: "" }), undefined);
+  const unavailable = queue.ask("f", { sessionId: "s1", kind: "tool", appName: "a", title: "t", detail: "" });
+  assert.equal(queue.pending("s1").length, 0, "no prompt without a dock that can answer it");
+  assert.equal(await unavailable, undefined);
   const detach = queue.attachDock("s1");
   const second = queue.attachDock("s1");
   const first = queue.ask("f1", { sessionId: "s1", kind: "tool", appName: "a", title: "one", detail: "" });
