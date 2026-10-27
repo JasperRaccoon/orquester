@@ -433,7 +433,24 @@ export interface KnowledgeEntryDetail {
    * similarity cluster it sits in. Absent from an older daemon, or before the entry has vectors.
    */
   novelty?: KnowledgeNovelty;
+  /**
+   * Every visible entry this one disagrees with (graph or checked), checked first then closest, up to
+   * 20 — independent of the `similar` cap, so none is hidden. Absent from an older daemon.
+   */
+  disagreements?: KnowledgeDisagreement[];
+  /** How many disagreements there are in total, when more than `disagreements` holds. */
+  disagreementsTotal?: number;
   citation: string;
+}
+
+/** One entry an entry disagrees with (phase 2 spec, "Contradictions"). */
+export interface KnowledgeDisagreement {
+  entry: KnowledgeEntrySummary;
+  /** Similarity of the two entries; null when either has no vectors. */
+  similarity: number | null;
+  source: "graph" | "checked";
+  pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[];
+  note: string | null;
 }
 
 export interface KnowledgeNovelty {
