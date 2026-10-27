@@ -4,6 +4,8 @@
 
 import {
   knowledgeMergeKeep,
+  type KnowledgeConceptMerge,
+  type KnowledgeConceptRef,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
@@ -20,7 +22,7 @@ import { formatKnowledgeDate, knowledgeErrorText } from "./knowledge.logic";
 /** Entries the "Similar" section lists at most (the daemon's own cap). */
 const SIMILAR_MAX = 8;
 
-const REASON_ORDER: Record<KnowledgeRelatedReason["kind"], number> = { meaning: 0, concepts: 1, author: 2 };
+const REASON_ORDER: Record<KnowledgeRelatedReason["kind"], number> = { contradicts: 0, meaning: 1, concepts: 2, author: 3 };
 
 /** A 0..1 similarity as a whole percentage ("91"). */
 export function similarityPercent(similarity: number): number {
@@ -43,6 +45,8 @@ export function reasonLabel(reason: KnowledgeRelatedReason): string {
     }
     case "author":
       return "Same author";
+    case "contradicts":
+      return "Disagrees";
   }
 }
 
@@ -53,38 +57,15 @@ export function reasonTitle(reason: KnowledgeRelatedReason): string | undefined 
   return undefined;
 }
 
-function sharedConcepts(item: KnowledgeSimilarEntry): number {
-  const reason = item.reasons.find((r) => r.kind === "concepts");
-  return reason?.kind === "concepts" ? reason.shared : 0;
-}
-
-function time(iso: string): number {
-  const at = Date.parse(iso);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-
-/** The spec's order: similarity desc (none last), shared concepts desc, saved desc, then id. */
-function compareSimilar(a: KnowledgeSimilarEntry, b: KnowledgeSimilarEntry): number {
-  if (a.similarity !== b.similarity) {
-    if (a.similarity === null) return 1;
-    if (b.similarity === null) return -1;
-    return b.similarity - a.similarity;
-  }
-  const shared = sharedConcepts(b) - sharedConcepts(a);
-  if (shared !== 0) return shared;
-  const saved = time(b.entry.savedAt) - time(a.entry.savedAt);
-  if (saved !== 0 && !Number.isNaN(saved)) return saved;
-  return a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0;
-}
-
 interface SimilarSection {
   items: KnowledgeSimilarEntry[];
 }
 
 /**
- * What the "Similar" section lists: the daemon's `similar` (each entry once, never the entry
- * itself, reasons meaning first, in the spec's order, at most {@link SIMILAR_MAX}); from a daemon
- * without it, the concept-related entries, as they came.
+ * What the "Similar" section lists: the daemon's `similar` in the daemon's order (its hybrid ranking
+ * of meaning, shared concepts and more, which the UI cannot rebuild: each entry once, never the entry
+ * itself, reasons meaning first, at most {@link SIMILAR_MAX}); from a daemon without it, the
+ * concept-related entries, as they came (that daemon's own order).
  */
 export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "related" | "similar">): SimilarSection {
   const self = detail.entry.id;
@@ -99,10 +80,70 @@ export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "rel
   }
   const items = detail.similar
     .filter((item) => once(item.entry.id))
-    .map((item) => ({ ...item, reasons: [...item.reasons].sort((a, b) => REASON_ORDER[a.kind] - REASON_ORDER[b.kind]) }))
-    .sort(compareSimilar)
-    .slice(0, SIMILAR_MAX);
+    .slice(0, SIMILAR_MAX)
+    .map((item) => ({ ...item, reasons: [...item.reasons].sort((a, b) => REASON_ORDER[a.kind] - REASON_ORDER[b.kind]) }));
   return { items };
+}
+
+/** The distinctive concepts of a "concepts" reason (few entries have them): none for another reason or an older daemon. */
+export function distinctiveConcepts(reason: KnowledgeRelatedReason): KnowledgeConceptRef[] {
+  return reason.kind === "concepts" ? (reason.distinctive ?? []) : [];
+}
+
+export interface Disagreement {
+  entry: KnowledgeEntrySummary;
+  source: "graph" | "checked";
+  pairs: { from: KnowledgeConceptRef; to: KnowledgeConceptRef }[];
+  note: string | null;
+}
+
+/**
+ * The "Disagrees with" section (phase 2 spec, "Contradictions"): the similar entries carrying a
+ * `contradicts` reason, each once and never the entry itself, in the daemon's order.
+ */
+export function disagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "similar">): Disagreement[] {
+  const seen = new Set<string>([detail.entry.id]);
+  const out: Disagreement[] = [];
+  for (const item of detail.similar ?? []) {
+    const reason = item.reasons.find((r) => r.kind === "contradicts");
+    if (reason?.kind !== "contradicts" || seen.has(item.entry.id)) continue;
+    seen.add(item.entry.id);
+    out.push({ entry: item.entry, source: reason.source, pairs: reason.pairs, note: reason.note });
+  }
+  return out;
+}
+
+/** Where a contradiction was found, in words. */
+export function contradictionSourceText(source: "graph" | "checked"): string {
+  return source === "checked" ? "Checked by an agent" : "From the concept graph";
+}
+
+/** A similarity cluster in words: "“Paywalls” (12 entries)", or "a cluster of 12 entries" without a label. */
+export function clusterText(cluster: { label: string | null; size: number }): string {
+  const size = `${cluster.size.toLocaleString("en-US")} ${cluster.size === 1 ? "entry" : "entries"}`;
+  return cluster.label ? `“${cluster.label}” (${size})` : `a cluster of ${size}`;
+}
+
+// ---------------------------------------------------------------------------
+// Concept merges (phase 2 spec, "Concept merges")
+// ---------------------------------------------------------------------------
+
+/**
+ * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it; null when none
+ * is in effect. Never another merge into it: a stale panel would undo the wrong one, and the daemon
+ * then keeps that one from merging again for good.
+ */
+export function findConceptMerge<M extends Pick<KnowledgeConceptMerge, "id" | "into" | "merged">>(
+  merges: readonly M[],
+  intoId: string,
+  mergedId: string
+): M | null {
+  return merges.find((m) => m.into.id === intoId && m.merged.some((c) => c.id === mergedId)) ?? null;
+}
+
+/** The undo confirmation's text. */
+export function undoMergeMessage(concept: Pick<KnowledgeConceptRef, "name">, merged: Pick<KnowledgeConceptRef, "name">): string {
+  return `“${merged.name}” becomes a concept of its own again, with its own entries and links (and so does any other concept merged into “${concept.name}” in the same step). They are not merged automatically again.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 // graph and list views.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, Loader2, Pencil, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, Pencil, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
 import type {
   KnowledgeCollectionView,
   KnowledgeConceptDetail,
@@ -23,8 +23,10 @@ import { deleteKnowledgeEntry, knowledgeStore, mergeKnowledgeEntries, type Knowl
 import { CollectionChip, ErrorLine, Eyebrow, SectionLabel } from "./parts";
 import { KnowledgeEntryEditor } from "./KnowledgeEntryEditor";
 import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
-import { DuplicatesBanner, EntryBody, SimilarEntries } from "./KnowledgeEntrySections";
+import { Disagreements, DuplicatesBanner, EntryBody, NoveltyLine, SimilarEntries } from "./KnowledgeEntrySections";
+import { MergedFrom, SimilarConcepts, type KnowledgeConceptSectionsApi } from "./KnowledgeConceptSections";
 import { entryPanelIds, type KnowledgeMergePlan } from "./panel.logic";
+import { conceptMarksOf, type ConceptMarks } from "./graph.logic";
 
 /** What the panel shows; `edit` opens an entry straight in its editor. */
 export interface KnowledgeSelection {
@@ -39,7 +41,7 @@ export interface KnowledgeSelectOptions {
 }
 
 /** The routes the panel reads, on top of the store's. `ApiClient` satisfies it. */
-export interface KnowledgePanelApi extends KnowledgeApi {
+export interface KnowledgePanelApi extends KnowledgeConceptSectionsApi {
   getKnowledgeItem(id: string, signal?: AbortSignal): Promise<KnowledgeItemResponse>;
 }
 
@@ -57,17 +59,31 @@ function relevantIds(item: KnowledgeItemResponse | null, id: string): Set<string
   return ids;
 }
 
+/** The id of the item an answer holds (a concept asked for by a merged-away id answers as the kept one). */
+function itemId(item: KnowledgeItemResponse): string {
+  return item.kind === "entry" ? item.entry.entry.id : item.concept.concept.id;
+}
+
 /**
  * Read one item, and read it again when the store says it changed: the graph
- * was reloaded, or entries it shows were edited or deleted.
+ * was reloaded, or entries it shows were edited or deleted. `onRead` hears each
+ * answer with the id it was read for.
  */
-function useKnowledgeItem(api: KnowledgePanelApi | null, id: string): { load: Load; retry: () => void } {
+function useKnowledgeItem(
+  api: KnowledgePanelApi | null,
+  id: string,
+  onRead?: (item: KnowledgeItemResponse, id: string) => void
+): { load: Load; retry: () => void } {
   const [load, setLoad] = useState<Load>({ status: "loading", item: null });
   const [tick, setTick] = useState(0);
   const relevant = useRef<Set<string>>(new Set([id]));
   const held = useRef<KnowledgeItemResponse | null>(null);
+  const onReadRef = useRef(onRead);
+  onReadRef.current = onRead;
 
   useEffect(() => {
+    // Moved to the id the held answer already is (a merged-away concept's kept one): keep showing it.
+    if (held.current && itemId(held.current) === id) return;
     held.current = null;
     relevant.current = new Set([id]);
     setLoad({ status: "loading", item: null });
@@ -96,6 +112,7 @@ function useKnowledgeItem(api: KnowledgePanelApi | null, id: string): { load: Lo
         held.current = item;
         relevant.current = relevantIds(item, id);
         setLoad({ status: "ready", item });
+        onReadRef.current?.(item, id);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -129,10 +146,34 @@ export interface KnowledgePanelProps {
   onItem?: (item: KnowledgeItemResponse | null) => void;
   /** "More like this" on an entry: search for entries similar to it (hidden when absent). */
   onFindSimilar?: (entryId: string) => void;
+  /** "Show its entries in Similarity" on a concept: mark them on the graph's Similarity layer (hidden when absent). */
+  onShowConceptEntries?: (marks: ConceptMarks) => void;
 }
 
-export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, collections, onSelect, onClose, onBack, onItem, onFindSimilar }) => {
-  const { load, retry } = useKnowledgeItem(api, selection.id);
+export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({
+  api,
+  selection,
+  collections,
+  onSelect,
+  onClose,
+  onBack,
+  onItem,
+  onFindSimilar,
+  onShowConceptEntries
+}) => {
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  // The daemon answers a merged-away concept id with the concept kept in its place: the selection
+  // takes the kept id (the graph selects, centres and marks by it), leaving no way Back to the old one.
+  const resolved = useCallback((item: KnowledgeItemResponse, id: string) => {
+    const current = selectionRef.current;
+    if (item.kind !== "concept" || current.kind !== "concept" || current.id !== id) return;
+    const kept = item.concept.concept.id;
+    if (kept !== id) onSelectRef.current({ kind: "concept", id: kept }, { replace: true });
+  }, []);
+  const { load, retry } = useKnowledgeItem(api, selection.id, resolved);
   const item = load.status === "gone" ? null : load.item;
   const onItemRef = useRef(onItem);
   onItemRef.current = onItem;
@@ -144,8 +185,6 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
   const [merging, setMerging] = useState(false);
   const selectedId = useRef(selection.id);
   selectedId.current = selection.id;
-  const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
   const merge = useCallback(
     async (plan: KnowledgeMergePlan) => {
       if (!api) throw new Error("Not connected.");
@@ -218,7 +257,15 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
                 onFindSimilar={onFindSimilar}
               />
             ) : (
-              <ConceptDetailView api={api} detail={item.concept} collections={collections} onSelect={onSelect} />
+              <ConceptDetailView
+                key={item.concept.concept.id}
+                api={api}
+                detail={item.concept}
+                collections={collections}
+                onSelect={onSelect}
+                onRefresh={retry}
+                onShowEntries={onShowConceptEntries}
+              />
             )}
           </>
         )}
@@ -385,8 +432,10 @@ const EntryDetailView: React.FC<{
             ))}
           </div>
         )}
+        <NoveltyLine novelty={detail.novelty} onOpenConcept={(id) => onSelect({ kind: "concept", id })} />
       </section>
 
+      <Disagreements detail={detail} onOpen={(id) => onSelect({ kind: "entry", id })} onOpenConcept={(id) => onSelect({ kind: "concept", id })} />
       <SimilarEntries detail={detail} onOpen={(id) => onSelect({ kind: "entry", id })} onFindSimilar={onFindSimilar} />
     </div>
   );
@@ -401,9 +450,15 @@ const ConceptDetailView: React.FC<{
   detail: KnowledgeConceptDetail;
   collections: readonly KnowledgeCollectionView[];
   onSelect: (selection: KnowledgeSelection) => void;
-}> = ({ api, detail, collections, onSelect }) => {
+  /** Read the concept again (a merge it lists is no longer in effect). */
+  onRefresh: () => void;
+  /** "Show its entries in Similarity" (hidden when absent). */
+  onShowEntries?: ((marks: ConceptMarks) => void) | undefined;
+}> = ({ api, detail, collections, onSelect, onRefresh, onShowEntries }) => {
   const { concept } = detail;
   const confidence = Math.round(Math.min(1, Math.max(0, concept.confidence)) * 100);
+  // Every entry from `entryIds` (an older daemon: the newest 50 it details).
+  const marks = conceptMarksOf(detail);
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
@@ -419,6 +474,12 @@ const ConceptDetailView: React.FC<{
           </div>
         )}
       </div>
+
+      {onShowEntries && marks.entryIds.length > 0 && (
+        <Button size="sm" variant="outline" className="max-w-full" onClick={() => onShowEntries(marks)}>
+          <Sparkles size={12} className="shrink-0" /> <span className="truncate">Show its entries in Similarity</span>
+        </Button>
+      )}
 
       <section>
         <SectionLabel>Entries ({detail.entries.length})</SectionLabel>
@@ -465,6 +526,9 @@ const ConceptDetailView: React.FC<{
           </ul>
         )}
       </section>
+
+      <SimilarConcepts detail={detail} onOpen={(id) => onSelect({ kind: "concept", id })} />
+      <MergedFrom api={api} detail={detail} onRefresh={onRefresh} />
     </div>
   );
 };

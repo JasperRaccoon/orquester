@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { knowledgeRoutes, type SessionOwner } from "@orquester/api";
 import type { KnowledgeLinkingSnapshot } from "./linking/service.ts";
 import {
+  buildKnowledgeStatus,
   KNOWLEDGE_WORKER_ANSWER_MAX,
   registerKnowledgeLinkingRoutes,
   type KnowledgeLinkingRouteService,
@@ -134,5 +135,16 @@ describe("knowledge linking routes", () => {
     const ok = await app.inject({ method: "POST", url: knowledgeRoutes.workerSubmit, headers: { "x-test-agent": "worker" }, payload: { taskId: "t", answer: "{}" } });
     assert.deepEqual(ok.json(), { accepted: false, error: "nope" });
     assert.deepEqual(calls, [{ method: "submit", args: ["worker", "t", "{}"] }]);
+  });
+});
+
+describe("buildKnowledgeStatus — re-linking (phase 2)", () => {
+  it("carries the snapshot's relink as it is (null when nothing is left), and omits it when linking has none", () => {
+    const counts: KnowledgeStatusCounts = { enabled: true, installed: true, entries: 5, concepts: 9, edges: 4, collections: 2, failedEntries: 0 };
+    assert.deepEqual(buildKnowledgeStatus({ ...SNAPSHOT, relink: { pending: 89, done: 37, total: 126 } }, counts).relink, { pending: 89, done: 37, total: 126 });
+    assert.equal(buildKnowledgeStatus({ ...SNAPSHOT, relink: null }, counts).relink, null);
+    assert.ok(!("relink" in buildKnowledgeStatus(SNAPSHOT, counts)));
+    const both = buildKnowledgeStatus({ ...SNAPSHOT, relink: { pending: 1, done: 0, total: 1 } }, { ...counts, conceptMerges: 3 });
+    assert.deepEqual([both.conceptMerges, both.relink], [3, { pending: 1, done: 0, total: 1 }], "concept merges and re-linking side by side");
   });
 });

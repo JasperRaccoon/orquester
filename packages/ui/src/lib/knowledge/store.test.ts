@@ -12,6 +12,7 @@ import {
   loadKnowledgeStatus,
   mergeKnowledgeEntries,
   resetKnowledge,
+  undoKnowledgeConceptMerge,
   updateKnowledgeCollection,
   updateKnowledgeEntry,
   type KnowledgeApi
@@ -192,6 +193,25 @@ describe("the knowledge store", () => {
     assert.ok(fake.calls.includes("merge:ke_1,ke_2"), "the merge reaches the daemon API");
     assert.deepEqual(state().changedEntryIds, ["ke_1", "ke_2"], "the kept entry and the deleted one");
     assert.equal(state().graphRevision, 3, "a deleted entry's concepts go at once");
+  });
+
+  it("undoing a concept merge reads only the status (its merges count); the daemon's graph event reloads the graph", async () => {
+    const fake = fakeApi();
+    fake.answerAll({ status: status({ conceptMerges: 2 }), collections: collections() });
+    const api = { ...fake.api, undoKnowledgeConceptMerge: async (id: string) => (fake.calls.push(`undo:${id}`), {}) };
+    await undoKnowledgeConceptMerge(api, "cm_1");
+    assert.deepEqual(fake.calls, ["undo:cm_1", "status"], "no collections reload");
+    assert.equal(state().status?.conceptMerges, 2, "Settings → Plugins reads the new count");
+    assert.equal(state().graphRevision, 0, "no local graph bump");
+    assert.equal(state().entriesRevision, 0);
+
+    applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { graph: true }));
+    assert.equal(state().graphRevision, 1, "the daemon's knowledge.changed { graph } reloads it once");
+
+    const refused = { ...fake.api, undoKnowledgeConceptMerge: async () => Promise.reject(new Error("busy")) };
+    fake.calls.length = 0;
+    await assert.rejects(undoKnowledgeConceptMerge(refused, "cm_1"), /busy/);
+    assert.deepEqual(fake.calls, [], "a refused undo reads nothing");
   });
 
   it("a refused mutation rejects and refetches nothing", async () => {

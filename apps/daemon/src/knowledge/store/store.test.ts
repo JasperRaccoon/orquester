@@ -200,6 +200,54 @@ test("dedup: same URL, same normalized text, near-identical text; new collection
   assert.equal(fourth.results[0]!.status, "saved");
 });
 
+test("linkContext: absent reads null; recorded in the frontmatter, it survives relabels and a reopen; no change event", async (t) => {
+  const { appdir, open } = await setup(t);
+  const { store, changes } = await open();
+  const { results } = await store.save({ entries: [{ body: POST, title: "Alt pages", collections: ["SEO"] }], newCollections: [{ name: "SEO", description: "Search" }] });
+  const id = results[0]!.entryId;
+  assert.equal(store.linkContext(id), null, "an entry linked before neighbour context has none");
+  assert.equal(store.linkContext("ke_000000000000"), null);
+  changes.length = 0;
+  await store.setLinkContext([id, "ke_000000000000"], 1);
+  assert.equal(store.linkContext(id), 1);
+  assert.deepEqual(changes, [], "nothing to re-link or re-index");
+  const path = join(knowledgeEntriesDir(appdir), `${id}.md`);
+  assert.match(await readFile(path, "utf8"), /\nlinkContext: 1\n/);
+  await store.updateEntry(id, { url: "https://example.com/alt" });
+  await store.setLinkState([id], "linked");
+  assert.equal(store.linkContext(id), 1, "a rewrite that links nothing again carries it");
+  const reopened = (await open()).store;
+  assert.equal(reopened.linkContext(id), 1);
+  // A value this build cannot read (a hand edit) reads as none; the file still loads.
+  await writeFile(path, (await readFile(path, "utf8")).replace("linkContext: 1", "linkContext: soon"));
+  const third = (await open()).store;
+  assert.equal(third.getMeta(id)?.url, "https://example.com/alt");
+  assert.equal(third.linkContext(id), null);
+});
+
+test("linkContext: an edit drops it (the entry is linked again, and that run records its own)", async (t) => {
+  const { appdir, open } = await setup(t);
+  const { store } = await open();
+  const { results } = await store.save({
+    entries: [
+      { body: POST, title: "Alt pages", collections: ["SEO"] },
+      { body: "Annual billing lifts cash flow.", title: "Billing", collections: ["SEO"] },
+      { body: "A third note.", title: "Third", collections: ["SEO"] }
+    ],
+    newCollections: [{ name: "SEO", description: "Search" }]
+  });
+  const [body, title, merged] = results.map((r) => r.entryId!);
+  await store.setLinkContext([body!, title!, merged!], 1);
+  await store.updateEntry(body!, { body: `${POST}\n\nOne more line.` });
+  assert.equal(store.linkContext(body!), null, "a body edit");
+  assert.doesNotMatch(await readFile(join(knowledgeEntriesDir(appdir), `${body}.md`), "utf8"), /linkContext/);
+  await store.updateEntry(title!, { title: "Annual billing" });
+  assert.equal(store.linkContext(title!), null, "a title edit (it reaches the mirror)");
+  await store.mergeEntries({ ids: [merged!, title!], keep: merged!, body: "A third note, merged." });
+  assert.equal(store.linkContext(merged!), null, "a merge that changed the kept entry's text");
+  assert.equal((await open()).store.linkContext(body!), null, "and so after a reopen");
+});
+
 test("url normalization", () => {
   assert.equal(normalizeKnowledgeUrl("https://twitter.com/a/status/1?s=20"), "https://x.com/i/status/1");
   assert.equal(normalizeKnowledgeUrl("http://www.Example.com/Path/?utm_medium=x&b=2&a=1#frag"), "https://example.com/Path?a=1&b=2");

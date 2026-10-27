@@ -29,7 +29,9 @@ import {
   knowledgeEntriesDir,
   knowledgeMykgInputDir,
   parseKnowledgeCollectionsConfig,
-  serializeKnowledgeCollectionsFile
+  readKnowledgeLinkContext,
+  serializeKnowledgeCollectionsFile,
+  KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY
 } from "@orquester/config";
 import type { KnowledgeEntryChange, KnowledgeStorePort } from "../ports.ts";
 import { parseEntryFile, renderMykgInput, serializeEntryFile } from "./entry-file.ts";
@@ -104,6 +106,11 @@ const MIRROR_FILE = /^(ke_[a-z0-9]{12})\.md$/;
 
 function frozenMeta(meta: KnowledgeEntryMeta): KnowledgeEntryMeta {
   return Object.freeze({ ...meta, savedFrom: Object.freeze({ ...meta.savedFrom }), collections: Object.freeze([...meta.collections]) as string[] });
+}
+
+/** A copy without `key` (`fromEntries`: a key such as `__proto__` stays an own key). */
+function withoutKey(record: Record<string, unknown>, key: string): Record<string, unknown> {
+  return Object.prototype.hasOwnProperty.call(record, key) ? Object.fromEntries(Object.entries(record).filter(([k]) => k !== key)) : record;
 }
 
 function sha(text: string): string {
@@ -213,6 +220,29 @@ export class KnowledgeStore implements KnowledgeStorePort {
         }
       }
     }
+  }
+
+  linkContext(id: string): number | null {
+    const stored = this.entries.get(id);
+    return stored ? readKnowledgeLinkContext(stored.extra) : null;
+  }
+
+  /**
+   * The frontmatter's `linkContext` (phase 2 spec, "Context version"), kept with the entry's extra
+   * keys so every later rewrite carries it. No change event: nothing needs re-linking or re-indexing.
+   */
+  async setLinkContext(ids: readonly string[], version: number): Promise<void> {
+    await this.serialize(async () => {
+      for (const id of new Set(ids)) {
+        const stored = this.entries.get(id);
+        if (!stored || readKnowledgeLinkContext(stored.extra) === version) continue;
+        const body = await this.readBody(id);
+        if (body === null) continue;
+        const extra = { ...stored.extra, [KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY]: version };
+        await writeFileAtomic(this.entryPath(id), serializeEntryFile(stored.meta, extra, body));
+        this.entries.set(id, { ...stored, extra });
+      }
+    });
   }
 
   onChange(listener: (change: KnowledgeEntryChange) => void): () => void {
@@ -589,11 +619,14 @@ export class KnowledgeStore implements KnowledgeStorePort {
       updatedAt: new Date().toISOString(),
       linkState: edited ? "pending" : before.linkState
     });
-    await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
+    // An edit is linked again: the linking-context version it was linked with no longer holds (the
+    // run that links it records its own, `setLinkContext`).
+    const extra = edited ? withoutKey(stored.extra, KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY) : stored.extra;
+    await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, extra, body));
     const shingles = body === currentBody ? null : knowledgeShingles(body);
     const urlKey = meta.url ? normalizeKnowledgeUrl(meta.url) : null;
     this.unindex(id, before.contentHash, stored.urlKey);
-    this.entries.set(id, { meta, extra: stored.extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
+    this.entries.set(id, { meta, extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
     this.index(id, meta.contentHash, urlKey);
     this.metaCache = null;
     if (edited) await this.writeMirror(meta, body);

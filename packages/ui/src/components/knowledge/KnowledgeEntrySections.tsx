@@ -3,8 +3,8 @@
 // entries with their reasons. Logic in `panel.logic.ts`.
 
 import React, { useState, useSyncExternalStore } from "react";
-import { Copy, Loader2, Sparkles } from "lucide-react";
-import type { KnowledgeEntry, KnowledgeEntryDetail, KnowledgeSimilarEntry } from "@orquester/api";
+import { Copy, Gem, Loader2, Sparkles, Swords } from "lucide-react";
+import type { KnowledgeConceptRef, KnowledgeEntry, KnowledgeEntryDetail, KnowledgeNovelty, KnowledgeSimilarEntry } from "@orquester/api";
 
 import { Button } from "../ui";
 // Directly, not through `../ui`: that index and confirm-dialog import each other, which a lazy chunk cannot split.
@@ -14,6 +14,10 @@ import { ChatMarkdown } from "../agent-chat/timeline/markdown/ChatMarkdown";
 import { ErrorLine, SectionLabel } from "./parts";
 import { entryByline } from "./knowledge.logic";
 import {
+  clusterText,
+  contradictionSourceText,
+  disagreements,
+  distinctiveConcepts,
   duplicateText,
   isPlainTextBody,
   keepDuplicatePair,
@@ -189,6 +193,89 @@ const DuplicateRow: React.FC<{
 };
 
 // ---------------------------------------------------------------------------
+// Disagreements and novelty (phase 2 spec)
+// ---------------------------------------------------------------------------
+
+/** A concept as a small chip that opens it. */
+const ConceptChip: React.FC<{ concept: KnowledgeConceptRef; onOpen: (id: string) => void }> = ({ concept, onOpen }) => (
+  <button
+    type="button"
+    title={concept.type}
+    onClick={() => onOpen(concept.id)}
+    className="max-w-full truncate rounded-full border border-neutral-800 px-1.5 py-px text-[10.5px] text-neutral-300 hover:border-neutral-600 hover:text-neutral-100"
+  >
+    {concept.name}
+  </button>
+);
+
+/** "Disagrees with": entries that contradict this one, each with the note and the concepts that clash. */
+export const Disagreements: React.FC<{
+  detail: Pick<KnowledgeEntryDetail, "entry" | "similar">;
+  onOpen: (id: string) => void;
+  onOpenConcept: (id: string) => void;
+}> = ({ detail, onOpen, onOpenConcept }) => {
+  const items = disagreements(detail);
+  if (items.length === 0) return null;
+  return (
+    <section aria-label="Disagrees with">
+      <SectionLabel>Disagrees with</SectionLabel>
+      <ul className="space-y-1.5">
+        {items.map((item) => (
+          <li key={item.entry.id} data-knowledge-disagrees={item.entry.id} className="space-y-1 rounded-md border border-danger/30 bg-danger/5 px-2.5 py-2">
+            <button type="button" onClick={() => onOpen(item.entry.id)} className="flex w-full items-start gap-1.5 text-left">
+              <Swords size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs text-neutral-200 hover:underline">{item.entry.title || "Untitled"}</span>
+                {entryByline(item.entry) && <span className="block truncate text-[11px] text-neutral-500">{entryByline(item.entry)}</span>}
+              </span>
+            </button>
+            {item.note && <p className="pl-[18px] text-xs leading-relaxed text-neutral-300">{item.note}</p>}
+            {item.pairs.length > 0 && (
+              <ul aria-label="Clashing concepts" className="space-y-0.5 pl-[18px]">
+                {item.pairs.map((pair) => (
+                  <li key={`${pair.from.id}|${pair.to.id}`} className="flex min-w-0 flex-wrap items-center gap-1">
+                    <ConceptChip concept={pair.from} onOpen={onOpenConcept} />
+                    <span aria-label="contradicts" className="text-[10.5px] text-danger">
+                      ≠
+                    </span>
+                    <ConceptChip concept={pair.to} onOpen={onOpenConcept} />
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="pl-[18px] text-[10.5px] text-neutral-500">{contradictionSourceText(item.source)}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+};
+
+/** "New here: A, B · Part of “Paywalls” (12 entries)" — what only this entry brings, and its cluster. */
+export const NoveltyLine: React.FC<{ novelty: KnowledgeNovelty | undefined; onOpenConcept: (id: string) => void }> = ({ novelty, onOpenConcept }) => {
+  if (!novelty || (novelty.newConcepts.length === 0 && !novelty.cluster)) return null;
+  return (
+    <div data-knowledge-novelty className="mt-2 flex flex-wrap items-center gap-1 text-[11px] text-neutral-400">
+      {novelty.newConcepts.length > 0 && (
+        <>
+          <span className="inline-flex items-center gap-1 text-neutral-300">
+            <Gem size={11} aria-hidden className="text-info" /> New here:
+          </span>
+          {novelty.newConcepts.map((concept) => (
+            <ConceptChip key={concept.id} concept={concept} onOpen={onOpenConcept} />
+          ))}
+        </>
+      )}
+      {novelty.cluster && (
+        <span className="min-w-0">
+          {novelty.newConcepts.length > 0 ? "· " : ""}Part of {clusterText(novelty.cluster)}
+        </span>
+      )}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Similar entries
 // ---------------------------------------------------------------------------
 
@@ -229,13 +316,28 @@ export const SimilarEntries: React.FC<{
                 {item.reasons.length > 0 && (
                   <span className="mt-1 flex flex-wrap gap-1">
                     {item.reasons.map((reason) => (
-                      <span
-                        key={reason.kind}
-                        title={reasonTitle(reason)}
-                        className="max-w-full truncate rounded-full border border-neutral-800 px-1.5 py-px text-[10.5px] text-neutral-400"
-                      >
-                        {reasonLabel(reason)}
-                      </span>
+                      <React.Fragment key={reason.kind}>
+                        <span
+                          title={reasonTitle(reason)}
+                          className={cn(
+                            "max-w-full truncate rounded-full border px-1.5 py-px text-[10.5px]",
+                            reason.kind === "contradicts" ? "border-danger/40 text-danger" : "border-neutral-800 text-neutral-400"
+                          )}
+                        >
+                          {reasonLabel(reason)}
+                        </span>
+                        {distinctiveConcepts(reason).map((concept) => (
+                          <span
+                            key={`distinctive:${concept.id}`}
+                            data-knowledge-distinctive={concept.id}
+                            title={`${concept.type}: few entries share it`}
+                            className="inline-flex max-w-full items-center gap-0.5 truncate rounded-full border border-info/40 px-1.5 py-px text-[10.5px] text-info"
+                          >
+                            <Gem size={9} aria-hidden className="shrink-0" />
+                            <span className="truncate">{concept.name}</span>
+                          </span>
+                        ))}
+                      </React.Fragment>
                     ))}
                   </span>
                 )}

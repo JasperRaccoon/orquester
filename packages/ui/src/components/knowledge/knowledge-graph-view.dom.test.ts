@@ -7,10 +7,11 @@
 
 import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type {
+  KnowledgeGraphQuery,
   KnowledgeGraphResponse,
   KnowledgeSearchRequest,
   KnowledgeSearchResponse,
@@ -22,6 +23,8 @@ import { collection, node, status, summary } from "../../lib/knowledge/fixtures.
 import type { KnowledgeQuery } from "./query-state";
 import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 import type { KnowledgeSelection } from "./KnowledgePanel";
+import type { ConceptMarksRequest } from "./KnowledgeGraphView";
+import type { ConceptMarks } from "./graph.logic";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
@@ -483,6 +486,197 @@ describe("the Graph view", () => {
         doc().body.dispatchEvent(new dom.window.MouseEvent("mousedown", { bubbles: true }));
       });
       assert.match(text(), /Matches: 1 entry \(marked\)\./);
+    });
+  });
+
+  describe("cross navigation between the layers (phase 2)", () => {
+    const concept = (id: string, name: string) => ({ id, name, type: "Tactic" });
+    const CROSS: KnowledgeSimilarityGraphResponse = {
+      ...SIMILARITY,
+      edges: [
+        { from: "ke_a", to: "ke_b", similarity: 0.9, tree: true, contradicts: true },
+        { from: "ke_b", to: "ke_c", similarity: 0.7, tree: false }
+      ],
+      clusters: [
+        { id: 0, size: 2, label: "Paywalls", concepts: [concept("tactic-b", "Competitor vs you"), concept("tactic-far", "Hard paywall")] },
+        { id: 1, size: 1, label: null }
+      ]
+    };
+
+    /** What the held view reported: the requests it took, and what it learnt of the Similarity layer. */
+    let marksShown: number;
+    let support: (boolean | null)[];
+    /** Ask the held view to mark a concept's entries, as the concept panel's button does through the Knowledge view. */
+    let requestMarks: (marks: ConceptMarks) => Promise<void>;
+
+    /** The view with its selection and the panel's marks request held as the Knowledge view holds them. */
+    const showHeld = async (opts: { selection?: KnowledgeSelection | null; marks?: ConceptMarks | null; api?: Record<string, unknown> } = {}) => {
+      const graphReads: string[] = [];
+      marksShown = 0;
+      support = [];
+      const client = api({
+        getKnowledgeGraph: async (query: KnowledgeGraphQuery = {}) => (graphReads.push(query.focus ?? ""), GRAPH),
+        getKnowledgeSimilarityGraph: async (query: KnowledgeSimilarityGraphQuery = {}) => (similarityReads.push(query), CROSS),
+        ...opts.api
+      });
+      let nonce = 0;
+      const Host = () => {
+        const [selection, setSelection] = useState<KnowledgeSelection | null>(opts.selection ?? null);
+        const [request, setRequest] = useState<ConceptMarksRequest | null>(opts.marks ? { marks: opts.marks, nonce: ++nonce } : null);
+        requestMarks = async (marks) => {
+          await act(async () => setRequest({ marks, nonce: ++nonce }));
+          await settle();
+        };
+        return createElement(KnowledgeGraphView, {
+          api: client as never,
+          status: status(),
+          collections: [collection()],
+          filter: [],
+          onFilter: () => undefined,
+          selection,
+          onSelect: (s: KnowledgeSelection | null) => {
+            selections.push(s);
+            setSelection(s);
+          },
+          entryConceptIds: [],
+          onShowList: () => undefined,
+          active: true,
+          Canvas: StubCanvas,
+          toolbarEnd: null,
+          conceptMarks: request,
+          onConceptMarksShown: () => {
+            marksShown += 1;
+            setRequest(null);
+          },
+          onSimilaritySupport: (supported: boolean | null) => void support.push(supported)
+        });
+      };
+      await act(async () => root.render(createElement(Host)));
+      await settle();
+      return graphReads;
+    };
+
+    it("a cluster's top concept opens in the Concepts layer: selected, and its neighbourhood read when it is not shown", async () => {
+      const graphReads = await showHeld();
+      await click(layerRadio("Similarity")!);
+      const top = doc().querySelector('[role="group"][aria-label="Top concepts of Paywalls"]');
+      assert.ok(top, "the cluster's line lists its concepts");
+      assert.deepEqual(
+        [...top.querySelectorAll("button")].map((b) => b.textContent),
+        ["Competitor vs you", "Hard paywall"]
+      );
+
+      // On the overview already: selected where it is.
+      await click(top.querySelector('[data-cluster-concept="tactic-b"]')!);
+      assert.equal(layerRadio("Concepts")?.getAttribute("aria-checked"), "true");
+      assert.equal(lastCanvas().layer, "concepts");
+      assert.equal(lastCanvas().selectedId, "tactic-b");
+      assert.deepEqual(selections.at(-1), { kind: "concept", id: "tactic-b" });
+      assert.deepEqual(graphReads, [""]);
+
+      // Not on the canvas: its neighbourhood.
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-far"]')!);
+      assert.deepEqual(selections.at(-1), { kind: "concept", id: "tactic-far" });
+      assert.deepEqual(graphReads, ["", "tactic-far"]);
+      assert.equal(lastCanvas().layer, "concepts");
+    });
+
+    it("a cluster's concept that is already selected but not drawn centres the Concepts layer on it again", async () => {
+      const graphReads = await showHeld();
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-far"]')!);
+      assert.deepEqual(graphReads, ["", "tactic-far"]);
+      // Back to the overview, where it is not drawn; it stays selected.
+      await click([...doc().querySelectorAll("button")].find((b) => b.textContent === "Back to the overview")!);
+      assert.deepEqual(graphReads, ["", "tactic-far", ""]);
+      assert.deepEqual(selections.at(-1), { kind: "concept", id: "tactic-far" });
+
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-far"]')!);
+      assert.equal(lastCanvas().layer, "concepts");
+      assert.deepEqual(graphReads, ["", "tactic-far", "", "tactic-far"], "its neighbourhood, though the selection did not move");
+
+      // One that is drawn leaves the overview as it is.
+      await click([...doc().querySelectorAll("button")].find((b) => b.textContent === "Back to the overview")!);
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-b"]')!);
+      await click(layerRadio("Similarity")!);
+      await click(doc().querySelector('[data-cluster-concept="tactic-b"]')!);
+      assert.deepEqual(graphReads, ["", "tactic-far", "", "tactic-far", ""]);
+    });
+
+    it("an older daemon's clusters offer no concepts", async () => {
+      await showHeld({ api: { getKnowledgeSimilarityGraph: async () => SIMILARITY } });
+      await click(layerRadio("Similarity")!);
+      assert.equal(doc().querySelector('[role="group"][aria-label^="Top concepts of"]'), null);
+    });
+
+    it("marks a concept's entries in Similarity when the panel asks: those drawn, until cleared, once per request", async () => {
+      const marks: ConceptMarks = { id: "tactic-a", name: "Alternatives pages", entryIds: ["ke_a", "ke_c", "ke_not_embedded"], newest: null };
+      await showHeld({ selection: { kind: "concept", id: "tactic-a" } });
+      assert.equal(
+        [...doc().querySelectorAll("button")].some((b) => b.textContent === "Show its entries in Similarity"),
+        false,
+        "the graph offers no button of its own: the concept panel does"
+      );
+      await requestMarks(marks);
+      assert.equal(marksShown, 1, "taken once");
+      assert.equal(layerRadio("Similarity")?.getAttribute("aria-checked"), "true");
+      assert.equal(lastCanvas().layer, "similarity");
+      assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_c"], "the concept's entries ∩ the drawn nodes");
+      assert.match(text(), /Marked 2 of the 3 entries behind “Alternatives pages” \(the rest are not drawn\)\./);
+
+      await click([...doc().querySelectorAll("button")].find((b) => b.textContent === "Clear")!);
+      assert.equal(lastCanvas().highlightIds.size, 0);
+
+      // Marked again (also from the Concepts layer), then let go when the user switches layers.
+      await click(layerRadio("Concepts")!);
+      await requestMarks(marks);
+      assert.equal(marksShown, 2);
+      assert.equal(lastCanvas().layer, "similarity");
+      assert.equal(lastCanvas().highlightIds.size, 2);
+      await click(layerRadio("Concepts")!);
+      await click(layerRadio("Similarity")!);
+      assert.equal(lastCanvas().highlightIds.size, 0, "a taken request does not come back");
+    });
+
+    it("applies a request that mounts it (the panel asked from the List view), and says only the newest are marked from a capped list", async () => {
+      const marks: ConceptMarks = { id: "tactic-a", name: "Alternatives pages", entryIds: ["ke_a", "ke_b", "ke_c"], newest: 50 };
+      await showHeld({ marks });
+      assert.equal(marksShown, 1);
+      assert.equal(lastCanvas().layer, "similarity");
+      assert.deepEqual([...lastCanvas().highlightIds].sort(), ["ke_a", "ke_b", "ke_c"]);
+      assert.match(text(), /Marked the 3 newest entries behind “Alternatives pages”\./);
+    });
+
+    it("tells the Knowledge view whether the daemon serves the Similarity layer", async () => {
+      await showHeld();
+      assert.equal(support.at(-1), true);
+
+      act(() => root.unmount());
+      root = createRoot(doc().body.appendChild(doc().createElement("div")));
+      await showHeld({
+        api: {
+          getKnowledgeSimilarityGraph: async () => {
+            throw missingRoute();
+          }
+        }
+      });
+      assert.equal(support.at(-1), false);
+    });
+
+    it("hands the canvas the edges of entries that disagree, and counts them in the legend", async () => {
+      await showHeld();
+      await click(layerRadio("Similarity")!);
+      assert.deepEqual(
+        lastCanvas().edges.map((e) => [e.from, e.to, e.contradicts ?? false]),
+        [
+          ["ke_a", "ke_b", true],
+          ["ke_b", "ke_c", false]
+        ]
+      );
+      assert.match(doc().querySelector("[data-legend-contradictions]")?.textContent ?? "", /1 pair disagrees/);
     });
   });
 });

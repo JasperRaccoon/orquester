@@ -9,9 +9,10 @@ import {
 } from "@orquester/api";
 import { agentChatCommandPath, agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../../chat-client/index.ts";
+import type { DaemonMethod } from "../../mcp/daemon-api.ts";
 import type { AccountsReader } from "../../workflows/contracts.ts";
 import { emptyMemory } from "../../workflows/agent/failover.ts";
-import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
+import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import { createDaemonWorkerSessions, type DaemonWorkerCandidate } from "./daemon-workers.ts";
 import { KNOWLEDGE_INDEXER_PROFILE_ID, KNOWLEDGE_WORKER_PROMPT } from "./indexer-profile.ts";
 import { WorkerStartError } from "./workers.ts";
@@ -141,6 +142,57 @@ describe("createDaemonWorkerSessions", () => {
       }).start({ candidate, runId: "kr_1", memory: emptyMemory() }),
       (error: unknown) => error instanceof WorkerStartError && error.fatal && /disk full/.test(error.message)
     );
+  });
+
+  it("interrupt() resolves only once the interrupted turn has ended (on the session's events), so its usage counts", async () => {
+    const { api, requests } = fakeApi();
+    // The chat is mid-turn: t3 runs and has not reported its usage yet.
+    let running = true;
+    const thread = () => ({
+      head: { session: { status: running ? "running" : "ready", activeTurnId: running ? "t3" : null } },
+      turns: [
+        { turnId: "t1", state: "completed", tokenUsage: { inputTokens: 1000, outputTokens: 40 } },
+        running ? { turnId: "t3", state: "running" } : { turnId: "t3", state: "interrupted", tokenUsage: { inputTokens: 200, outputTokens: 7 } }
+      ],
+      items: [],
+      pending: { approvals: [], userInputs: [] }
+    });
+    const listeners = new Set<(event: { channel: string; payload: unknown }) => void>();
+    const base = api.request.bind(api);
+    // Resolves when the wait first reads the thread after the interrupt was sent.
+    let readAfterInterrupt!: () => void;
+    const waiting = new Promise<void>((resolve) => (readAfterInterrupt = resolve));
+    const live = {
+      async request(method: DaemonMethod, path: string, opts?: { body?: unknown }) {
+        if (method === "GET" && path === agentChatRoutes.thread("s1")) {
+          requests.push({ method, path });
+          if (requests.some((r) => r.path === agentChatCommandPath("s1", "interrupt"))) readAfterInterrupt();
+          return { status: 200, body: { kind: "snapshot", thread: thread() } };
+        }
+        if (method === "GET" && path === "/api/sessions") {
+          requests.push({ method, path });
+          const [summary] = (await base(method, path)).body as SessionSummary[];
+          return { status: 200, body: [{ ...summary, chatSessionStatus: running ? "running" : "ready" }] };
+        }
+        return base(method, path, opts);
+      },
+      subscribe: (listener: (event: { channel: string; payload: unknown }) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    } as unknown as DaemonApi;
+    const sessions = port(live);
+    let ended = false;
+    const interrupting = sessions.interrupt("s1").then(() => (ended = true));
+    // The interrupt was sent and the session read: the turn has not ended yet.
+    await waiting;
+    await flushAsync();
+    assert.equal(ended, false, "still running: interrupt() waits");
+    // The turn ends; the session's event wakes the wait.
+    running = false;
+    for (const listener of listeners) listener({ channel: "sessions", payload: { id: "s1" } });
+    await interrupting;
+    assert.deepEqual(await sessions.usage("s1"), { in: 1200, out: 47 }, "the interrupted turn's usage counts");
   });
 
   it("counts every input token of the chat's turns once (cached and cache writes are inside inputTokens) and closes the tab", async () => {

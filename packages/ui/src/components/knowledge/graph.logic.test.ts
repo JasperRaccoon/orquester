@@ -5,7 +5,12 @@ import type { KnowledgeColor, KnowledgeSimilarityGraphResponse, KnowledgeSimilar
 
 import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
+  canvasEdgeClasses,
   collectionLegend,
+  conceptMarksOf,
+  conceptMarksText,
+  contradictingEdgeCount,
+  drawnEntryIds,
   focusFor,
   graphQueryOf,
   graphScopeKey,
@@ -208,5 +213,79 @@ describe("the similarity layer", () => {
     assert.equal(similarityEmptyState(none, true), "no-entries");
     assert.equal(similarityEmptyState(none, false), "no-entries");
     assert.equal(similarityEmptyState({ nodes: [], totals: { entries: 4, embedded: 0 } }, undefined), "computing");
+  });
+});
+
+describe("cross-graph navigation and contradictions (phase 2)", () => {
+  const concept = (id: string) => ({ id, name: `Name ${id}`, type: "Tactic" });
+
+  it("draws the edges of entries that disagree in the destructive colour, whatever their variant", () => {
+    const graph = {
+      edges: [
+        { from: "a", to: "b", similarity: 0.92, tree: true, contradicts: true },
+        { from: "a", to: "c", similarity: 0.81, tree: false, contradicts: true },
+        { from: "d", to: "e", similarity: 0.88, tree: true, contradicts: false },
+        { from: "e", to: "f", similarity: 0.7, tree: false }
+      ]
+    };
+    const edges = similarityCanvasEdges(graph);
+    assert.deepEqual(
+      edges.map((e) => [e.id, e.variant, e.contradicts ?? false]),
+      [
+        ["s:a|b", "tree", true],
+        ["s:a|c", "knn", true],
+        ["s:d|e", "tree", false],
+        ["s:e|f", "knn", false]
+      ]
+    );
+    assert.deepEqual(edges.map(canvasEdgeClasses), ["tree contradicts", "knn contradicts", "tree", "knn"], "the canvas class that carries the colour");
+    assert.equal(canvasEdgeClasses({}), "", "a concept edge has none");
+    assert.equal(contradictingEdgeCount(graph), 2);
+    assert.equal(contradictingEdgeCount(SIM), 0, "an older daemon marks none");
+  });
+
+  it("gives a cluster's legend line its top concepts, absent from an older daemon", () => {
+    const withConcepts = { ...SIM, clusters: [{ ...SIM.clusters[0]!, concepts: [concept("t-1"), concept("t-2")] }, { ...SIM.clusters[1]!, concepts: [] }, SIM.clusters[2]!] };
+    const items = similarityLegend(withConcepts).items;
+    assert.deepEqual(items[0]!.concepts, [concept("t-1"), concept("t-2")]);
+    assert.equal("concepts" in items[1]!, false, "an empty list adds nothing");
+    assert.ok(similarityLegend(SIM).items.every((item) => !("concepts" in item)));
+  });
+
+  it("marks a concept's entries that the similarity layer draws, and says how many", () => {
+    assert.deepEqual(drawnEntryIds(["c", "zz", "a", "c"], SIM), ["c", "a"], "drawn ones only, each once, in the concept's order");
+    assert.deepEqual(drawnEntryIds(["a"], null), [], "nothing before the graph is read");
+    const pricing = (ids: string[]) => ({ name: "Pricing", entryIds: ids });
+    assert.equal(conceptMarksText(pricing(["a", "b"]), 2), "Marked the 2 entries behind “Pricing”.");
+    assert.equal(conceptMarksText(pricing(["a"]), 1), "Marked the entry behind “Pricing”.");
+    assert.equal(conceptMarksText(pricing(["a", "b", "zz"]), 2), "Marked 2 of the 3 entries behind “Pricing” (the rest are not drawn).");
+    assert.equal(conceptMarksText(pricing(["zz", "yy"]), 0), "None of the 2 entries behind “Pricing” is drawn here.");
+  });
+
+  it("marks every entry of a concept from `entryIds`, else says it marks only the 50 newest", () => {
+    const summaries = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `ke_${String(i).padStart(3, "0")}` }));
+    const concept = { id: "tactic-pricing", name: "Pricing" };
+    // A current daemon lists every visible entry id, past the 50 entries it details.
+    const all = conceptMarksOf({ concept, entries: summaries(50), entryIds: [...summaries(120).map((e) => e.id), "ke_000"] });
+    assert.equal(all.entryIds.length, 120, "every id, each once");
+    assert.equal(all.newest, null);
+    assert.equal(conceptMarksText(all, 120), "Marked the 120 entries behind “Pricing”.");
+    assert.equal(conceptMarksText(all, 70), "Marked 70 of the 120 entries behind “Pricing” (the rest are not drawn).");
+    // Capped at 2,000: those are the newest.
+    const capped = conceptMarksOf({ concept, entries: summaries(50), entryIds: summaries(2_000).map((e) => e.id) });
+    assert.equal(capped.newest, 2_000);
+    assert.equal(conceptMarksText(capped, 2_000), "Marked the 2,000 newest entries behind “Pricing”.");
+
+    // An older daemon: only `entries`, capped at the newest 50, so never "all".
+    const older = conceptMarksOf({ concept, entries: summaries(50) });
+    assert.equal(older.entryIds.length, 50);
+    assert.equal(older.newest, 50);
+    assert.equal(conceptMarksText(older, 50), "Marked the 50 newest entries behind “Pricing”.");
+    assert.equal(conceptMarksText(older, 30), "Marked 30 of the 50 newest entries behind “Pricing” (the rest are not drawn).");
+    assert.equal(conceptMarksText(older, 0), "None of the 50 newest entries behind “Pricing” is drawn here.");
+    // Fewer than 50 from an older daemon: that is all of them.
+    const few = conceptMarksOf({ concept, entries: summaries(3) });
+    assert.equal(few.newest, null);
+    assert.equal(conceptMarksText(few, 3), "Marked the 3 entries behind “Pricing”.");
   });
 });

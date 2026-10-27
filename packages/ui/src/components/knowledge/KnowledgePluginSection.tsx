@@ -33,7 +33,7 @@ import { relativeTime } from "../../lib/relative-time";
 import { useAppStore } from "../../store/app";
 import { Button, ConfirmDialog, Input } from "../ui";
 import { InfoRow, Notice, SettingRow, SettingsSection } from "../settings/primitives";
-import { knowledgeCountsText, knowledgeErrorText, linkingView } from "./knowledge.logic";
+import { conceptMergesText, knowledgeCountsText, knowledgeErrorText, linkingView } from "./knowledge.logic";
 import {
   KNOWLEDGE_DEFAULT_MODEL,
   KNOWLEDGE_MODEL_INPUT_MAX,
@@ -125,6 +125,7 @@ const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) 
   const linking = linkingView(status.linking, runs, Date.now(), status.failedEntries);
   const last = status.lastRun ? knowledgeRunLine(status.lastRun, relativeTime) : null;
   const workers = knowledgeWorkersShown(status.workers);
+  const mergesText = conceptMergesText(status.conceptMerges);
   const [transcript, setTranscript] = useState<string | null>(null);
   return (
     <>
@@ -136,6 +137,7 @@ const KnowledgeStatusRows: React.FC<{ status: KnowledgeStatus }> = ({ status }) 
         </div>
       )}
       <InfoRow label="Knowledge" value={knowledgeCountsText(status)} />
+      {mergesText !== null && <InfoRow label="Concept merges" value={<span className="tabular-nums">{mergesText}</span>} />}
       <DetailRow
         label="Linking"
         value={<span className={cn((linking.tone === "paused" || linking.tone === "failed") && "text-warn")}>{linking.label}</span>}

@@ -370,10 +370,10 @@ test("knowledge tools end to end: save from Global and profile chats, visibility
   }
   // The manifests: knowledge tools by what each chat sees; an indexer gets the two worker tools alone.
   const globalTools = await h.toolsOf("global");
-  for (const name of ["knowledge_search", "knowledge_get", "knowledge_save", "knowledge_collections"]) assert.ok(globalTools.includes(name), name);
+  for (const name of ["knowledge_search", "knowledge_get", "knowledge_save", "knowledge_collections", "knowledge_insights"]) assert.ok(globalTools.includes(name), name);
   assert.ok(!globalTools.some((name) => KNOWLEDGE_WORKER_TOOLS.includes(name)));
   const plainTools = await h.toolsOf("plain-chat");
-  assert.ok(plainTools.includes("knowledge_save") && !plainTools.includes("knowledge_search"), "a profile that ticks nothing can save, not search");
+  assert.ok(plainTools.includes("knowledge_save") && !plainTools.includes("knowledge_search") && !plainTools.includes("knowledge_insights"), "a profile that ticks nothing can save, not search");
   assert.deepEqual(await h.toolsOf("worker"), [...KNOWLEDGE_WORKER_TOOLS]);
 
   // --- the plugin switch -----------------------------------------------------------------------

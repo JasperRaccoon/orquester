@@ -16,6 +16,8 @@ import {
   type KnowledgeCollection,
   type KnowledgeCollectionView,
   type KnowledgeCollectionsResponse,
+  type KnowledgeConceptMerge,
+  type KnowledgeConceptMergesResponse,
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
   type KnowledgeFacetsResponse,
@@ -32,7 +34,9 @@ import type { KnowledgeLinkingPort, KnowledgeSettingsPort, KnowledgeVisibilityPo
 import { computeKnowledgeFacets } from "./search/facets.ts";
 import { entryMatchesFilter, parseKnowledgeFilters } from "./search/filters.ts";
 import type { KnowledgeSearch } from "./search/search.ts";
-import { entryInScope } from "./search/visibility.ts";
+import { KNOWLEDGE_INSIGHTS_MAX_LIMIT } from "./search/insights.ts";
+import type { KnowledgeInsightsResponse } from "@orquester/api";
+import { entryInScope, type KnowledgeScope } from "./search/visibility.ts";
 import { KnowledgeError, type KnowledgeLogger, knowledgeFrameworkError } from "./store/errors.ts";
 import type { KnowledgeStore } from "./store/store.ts";
 
@@ -59,6 +63,15 @@ export interface KnowledgeDataRoutesDeps {
   /** Agent Profiles that include each collection id (`knowledgeCollections`), by collection id. */
   profilesForCollection(): Promise<Map<string, { id: string; name: string }[]>>;
   logger?: KnowledgeLogger;
+  /** Automatic concept merges (`search/concept-merges.ts`), read per request; absent: none to list or undo. */
+  conceptMerges?: KnowledgeConceptMergesRoutePort | null;
+}
+
+/** What the concept merge routes need (`KnowledgeConceptMerges` satisfies it). */
+export interface KnowledgeConceptMergesRoutePort {
+  list(scope: KnowledgeScope): KnowledgeConceptMerge[];
+  /** False when the scope sees no such merge. */
+  undo(id: string, scope: KnowledgeScope): Promise<boolean>;
 }
 
 /** A save can carry KNOWLEDGE_SAVE_MAX_ENTRIES bodies of KNOWLEDGE_ENTRY_MAX_BYTES, JSON-escaped. */
@@ -573,13 +586,65 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
       // Possible duplicates already in the knowledge base, among what the caller can see (no extra
       // wait: entries not embedded within the indexing wait above get none).
       const saved = outcome.results.filter((r) => r.status === "saved").map((r) => r.entryId);
-      const similar = saved.length > 0 ? deps.search.similarity.similarForSaved(saved, deps.search.scope(await visibilityOf(request, body.sessionId))) : null;
+      const savedScope = saved.length > 0 ? deps.search.scope(await visibilityOf(request, body.sessionId)) : null;
+      const similar = savedScope ? deps.search.similarity.similarForSaved(saved, savedScope) : null;
+      // The cluster each joins, from the similarity graph already drawn (no wait of its own).
+      const clusters = savedScope ? deps.search.similarity.clustersForSaved(saved, savedScope) : null;
       const linking = deps.linking.status();
       return {
-        results: similar ? outcome.results.map((r) => (r.status === "saved" ? { ...r, similar: similar.get(r.entryId) ?? [] } : r)) : outcome.results,
+        results: similar
+          ? outcome.results.map((r) => (r.status === "saved" ? { ...r, similar: similar.get(r.entryId) ?? [], cluster: clusters?.get(r.entryId) ?? null } : r))
+          : outcome.results,
         createdCollections: outcome.createdCollections,
         linking: linking.state === "running" ? "running" : linking.state === "queued" || linking.state === "paused" ? "queued" : "not-needed"
       };
     })
   );
+
+  // --- concept merges (phase 2 spec, "Concept merges") ---------------------
+
+  app.get(
+    knowledgeRoutes.conceptMerges,
+    handle(async (request): Promise<KnowledgeConceptMergesResponse> => {
+      const query = parse(sessionQuerySchema, request.query, "query");
+      const scope = deps.search.scope(await visibilityOf(request, query.sessionId));
+      return { merges: deps.conceptMerges?.list(scope) ?? [] };
+    })
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    `${knowledgeRoutes.conceptMerge("")}:id`,
+    handle(async (request, reply) => {
+      const query = parse(sessionQuerySchema, request.query, "query");
+      const scope = deps.search.scope(await visibilityOf(request, query.sessionId));
+      const id = (request.params as { id: string }).id;
+      // Undone: the concepts come apart in the graph and are never merged again.
+      if (!(await deps.conceptMerges?.undo(id, scope))) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such concept merge.");
+      changed({ graph: true });
+      return reply.code(204).send();
+    })
+  );
+
+  // --- insights (phase 2 spec, "Insights") ----------------------------------
+
+  // Scoped exactly like the similarity graph: the caller's visibility, narrowed by `collections`.
+  app.get(
+    knowledgeRoutes.insights,
+    handle(async (request): Promise<KnowledgeInsightsResponse> => {
+      const query = parse(insightsQuerySchema, request.query, "query");
+      const visibility = await visibilityOf(request, query.sessionId);
+      const refs = (query.collections ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const narrow = refs.length > 0 ? deps.search.resolveVisible(refs, visibility, true) : null;
+      return deps.search.insights.list({ limit: query.limit }, deps.search.scope(visibility, narrow));
+    })
+  );
 }
+
+const insightsQuerySchema = z.object({
+  collections: z.string().optional(),
+  limit: intFromQuery(1, KNOWLEDGE_INSIGHTS_MAX_LIMIT),
+  sessionId
+});

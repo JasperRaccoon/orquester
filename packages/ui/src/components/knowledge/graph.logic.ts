@@ -8,6 +8,7 @@ import {
   KNOWLEDGE_COLORS,
   type KnowledgeCollectionView,
   type KnowledgeColor,
+  type KnowledgeConceptRef,
   type KnowledgeGraphNode,
   type KnowledgeGraphQuery,
   type KnowledgeGraphResponse,
@@ -127,6 +128,8 @@ export interface CanvasEdge {
   to: string;
   /** Similarity layer: a spanning-forest edge (drawn solid) or a nearest-neighbour one (thinner, dashed). */
   variant?: "tree" | "knn";
+  /** Similarity layer: the two entries disagree (drawn in the destructive colour). */
+  contradicts?: boolean;
 }
 
 /** The canvas' nodes for a graph. */
@@ -234,9 +237,76 @@ export function similarityCanvasNodes(
   });
 }
 
-/** The canvas' edges for a similarity graph: spanning-forest edges solid, nearest-neighbour ones dashed. */
+/**
+ * The canvas' edges for a similarity graph: spanning-forest edges solid, nearest-neighbour ones
+ * dashed, and those between entries that disagree marked to be drawn in the destructive colour.
+ */
 export function similarityCanvasEdges(graph: Pick<KnowledgeSimilarityGraphResponse, "edges">): CanvasEdge[] {
-  return graph.edges.map((edge) => ({ id: `s:${edge.from}|${edge.to}`, from: edge.from, to: edge.to, variant: edge.tree ? "tree" : "knn" }));
+  return graph.edges.map((edge) => {
+    const out: CanvasEdge = { id: `s:${edge.from}|${edge.to}`, from: edge.from, to: edge.to, variant: edge.tree ? "tree" : "knn" };
+    if (edge.contradicts) out.contradicts = true;
+    return out;
+  });
+}
+
+/** The Cytoscape classes of a canvas edge: its variant, and `contradicts` when the entries disagree. */
+export function canvasEdgeClasses(edge: Pick<CanvasEdge, "variant" | "contradicts">): string {
+  return [edge.variant ?? "", edge.contradicts ? "contradicts" : ""].filter(Boolean).join(" ");
+}
+
+/** Pairs of drawn entries that disagree (the legend's "Disagree" line). */
+export function contradictingEdgeCount(graph: Pick<KnowledgeSimilarityGraphResponse, "edges">): number {
+  return graph.edges.reduce((n, edge) => n + (edge.contradicts ? 1 : 0), 0);
+}
+
+/**
+ * The entries of a concept that the similarity layer draws ("Show its entries in Similarity"):
+ * the concept's entries that are nodes of `graph`, in the concept's order.
+ */
+export function drawnEntryIds(entryIds: readonly string[], graph: Pick<KnowledgeSimilarityGraphResponse, "nodes"> | null): string[] {
+  if (!graph) return [];
+  const drawn = new Set(graph.nodes.map((n) => n.id));
+  return [...new Set(entryIds)].filter((id) => drawn.has(id));
+}
+
+/** A concept's entries to mark on the Similarity layer ("Show its entries in Similarity"). */
+export interface ConceptMarks {
+  id: string;
+  name: string;
+  /** Each once, newest first. */
+  entryIds: readonly string[];
+  /** When `entryIds` are only the newest this many of a concept's entries (a capped list), else null (all of them). */
+  newest: number | null;
+}
+
+/** Entries a concept detail lists in full (the newest), and ids it lists at most (`entryIds`). */
+const CONCEPT_ENTRIES_MAX = 50;
+const CONCEPT_ENTRY_IDS_MAX = 2_000;
+
+/**
+ * The entries of a concept the panel has read: every visible one from `entryIds`, or from an older
+ * daemon without it the entries it details (the newest 50 at most). A list at its cap says so.
+ */
+export function conceptMarksOf(detail: {
+  concept: Pick<KnowledgeConceptRef, "id" | "name">;
+  entries: readonly { id: string }[];
+  entryIds?: readonly string[];
+}): ConceptMarks {
+  const ids = [...new Set(detail.entryIds ?? detail.entries.map((e) => e.id))];
+  const cap = detail.entryIds ? CONCEPT_ENTRY_IDS_MAX : CONCEPT_ENTRIES_MAX;
+  return { id: detail.concept.id, name: detail.concept.name, entryIds: ids, newest: ids.length >= cap ? ids.length : null };
+}
+
+/** What the Similarity layer says while a concept's entries are marked: how many of them it draws. */
+export function conceptMarksText(concept: { name: string; entryIds: readonly string[]; newest?: number | null }, drawn: number): string {
+  const total = new Set(concept.entryIds).size;
+  const of = `behind “${concept.name}”`;
+  // A capped list ("the 50 newest") never claims to be every entry.
+  const entries = concept.newest != null ? "newest entries" : "entries";
+  const count = total.toLocaleString("en-US");
+  if (drawn === 0) return total === 1 ? `The entry ${of} is not drawn here.` : `None of the ${count} ${entries} ${of} is drawn here.`;
+  if (drawn >= total) return total === 1 ? `Marked the entry ${of}.` : `Marked the ${count} ${entries} ${of}.`;
+  return `Marked ${drawn.toLocaleString("en-US")} of the ${count} ${entries} ${of} (the rest are not drawn).`;
 }
 
 /** Which entries a legend line stands for. */
@@ -250,6 +320,8 @@ export interface LegendItem {
   /** Null: neutral. */
   color: KnowledgeColor | null;
   members: LegendMembers;
+  /** A cluster's most distinctive concepts (phase 2; absent from an older daemon): each opens it in the Concepts layer. */
+  concepts?: KnowledgeConceptRef[];
 }
 
 export interface Legend {
@@ -288,7 +360,9 @@ export function similarityLegend(graph: Pick<KnowledgeSimilarityGraphResponse, "
     }
     const anchor = anchors.get(index);
     const key = anchor === undefined ? `cluster#${index}` : `cluster:${anchor}`;
-    items.push({ key, label: cluster.label ?? "Untitled", size: cluster.size, color: palette[index] ?? null, members: { kind: "cluster", index } });
+    const item: LegendItem = { key, label: cluster.label ?? "Untitled", size: cluster.size, color: palette[index] ?? null, members: { kind: "cluster", index } };
+    if (cluster.concepts && cluster.concepts.length > 0) item.concepts = cluster.concepts;
+    items.push(item);
   });
   const alone = graph.nodes.filter((node) => palette[node.cluster] == null).length;
   if (alone > 0) items.push({ key: "singletons", label: "In no cluster", size: alone, color: null, members: { kind: "singletons" } });

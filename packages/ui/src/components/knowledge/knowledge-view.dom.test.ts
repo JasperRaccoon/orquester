@@ -11,12 +11,16 @@ import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type {
+  KnowledgeConceptDetail,
   KnowledgeEntriesQuery,
   KnowledgeEntryDetail,
   KnowledgeGraphQuery,
   KnowledgeGraphResponse,
+  KnowledgeInsightsQuery,
+  KnowledgeInsightsResponse,
   KnowledgeItemResponse,
   KnowledgeMergeRequest,
+  KnowledgeSimilarityGraphResponse,
   UpdateKnowledgeCollectionRequest,
   UpdateKnowledgeEntryRequest
 } from "@orquester/api";
@@ -77,13 +81,17 @@ after(() => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
-/** The canvas stand-in: a button per concept, marking the selected one. */
-const StubCanvas = ({ nodes, selectedId, onSelect }: KnowledgeGraphCanvasProps) =>
+/** The canvas stand-in: a button per node, marking the selected and the highlighted ones. */
+const StubCanvas = ({ nodes, selectedId, highlightIds, layer, onSelect }: KnowledgeGraphCanvasProps) =>
   createElement(
     "div",
-    { "data-testid": "canvas" },
+    { "data-testid": "canvas", "data-layer": layer ?? "concepts" },
     nodes.map((n) =>
-      createElement("button", { key: n.id, type: "button", "data-node": n.id, "data-selected": String(n.id === selectedId), onClick: () => onSelect(n.id) }, n.label)
+      createElement(
+        "button",
+        { key: n.id, type: "button", "data-node": n.id, "data-selected": String(n.id === selectedId), "data-hit": String(highlightIds.has(n.id)), onClick: () => onSelect(n.id) },
+        n.label
+      )
     )
   );
 
@@ -107,6 +115,10 @@ const CONCEPT: KnowledgeItemResponse = {
   }
 };
 
+/** The concept answer for `id` (as the daemon answers it: under the id asked for). */
+const conceptItem = (id: string): KnowledgeItemResponse =>
+  CONCEPT.kind === "concept" && id !== CONCEPT.concept.concept.id ? { kind: "concept", concept: { ...CONCEPT.concept, concept: { ...CONCEPT.concept.concept, id } } } : CONCEPT;
+
 const ENTRY: KnowledgeItemResponse = {
   kind: "entry",
   entry: { entry: entry(), concepts: [{ id: "tactic-alternatives", name: "Alternatives pages", type: "Tactic" }], related: [], citation: "" }
@@ -124,7 +136,7 @@ describe("the Knowledge view", () => {
     listKnowledgeCollections: async () => (calls.push("collections"), collections([collection({ profiles: [{ id: "p1", name: "SaaS expert" }] }), collection({ id: "kc_ads", name: "Ads", color: "chart-2", entryCount: 0 })])),
     getKnowledgeGraph: async (query: KnowledgeGraphQuery = {}) => (calls.push(`graph:${query.focus ?? ""}`), GRAPH),
     searchKnowledge: async () => ({ hits: [], searched: [] }),
-    getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : CONCEPT),
+    getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : conceptItem(id)),
     listKnowledgeEntries: async (query: KnowledgeEntriesQuery = {}) => (calls.push(`entries:${query.collection ?? "all"}`), { entries: [summary()], nextCursor: null }),
     createKnowledgeCollection: async () => (calls.push("create"), {}),
     updateKnowledgeCollection: async (id: string, req: UpdateKnowledgeCollectionRequest) => (patches.push([id, req]), {}),
@@ -349,6 +361,94 @@ describe("the Knowledge view", () => {
     assert.equal(doc().querySelector('form[aria-label="Edit entry"]'), null);
   });
 
+  it("a concept asked for by a merged-away id becomes the kept concept it resolves to, without a Back to the old id", async () => {
+    // The daemon answers a merged-away id with the concept it was merged into.
+    await show({
+      focus: { kind: "concept", id: "tactic-merged-away", nonce: 1 },
+      api: { getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : CONCEPT) }
+    });
+    const aside = doc().querySelector('aside[aria-label="Concept details"]');
+    assert.ok(aside, "the panel shows the kept concept");
+    assert.equal(doc().querySelector('[data-node="tactic-alternatives"]')?.getAttribute("data-selected"), "true", "the canvas selects the kept concept");
+    assert.ok(calls.includes("item:tactic-alternatives"), "the selection moved to the kept id");
+    assert.equal([...doc().querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Back"), undefined, "the old id is not a place to go back to");
+  });
+
+  describe("the concept panel's Show its entries in Similarity", () => {
+    const ids = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(2, "0")}`);
+    const simNode = (id: string) => ({ id, title: `Entry ${id}`, kind: "post", author: null, handle: null, savedAt: "2026-10-20T10:00:00.000Z", collections: [], cluster: 0, degree: 1 });
+    // The Similarity layer draws two of the concept's entries: one of the 50 newest, one past them.
+    const SIM: KnowledgeSimilarityGraphResponse = {
+      nodes: ["ke_m00", "ke_m55", "ke_other"].map(simNode),
+      edges: [{ from: "ke_m00", to: "ke_m55", similarity: 0.9, tree: true }],
+      clusters: [{ id: 0, size: 3, label: null }],
+      truncated: false,
+      totals: { entries: 3, embedded: 3 }
+    };
+    const conceptWith = (extra: Partial<KnowledgeConceptDetail>): KnowledgeItemResponse =>
+      CONCEPT.kind === "concept" ? { kind: "concept", concept: { ...CONCEPT.concept, ...extra } } : CONCEPT;
+    const similarityApi = (item: KnowledgeItemResponse) => ({
+      getKnowledgeSimilarityGraph: async () => SIM,
+      getKnowledgeItem: async (id: string) => (calls.push(`item:${id}`), id.startsWith("ke_") ? ENTRY : item)
+    });
+    const panelButton = () =>
+      [...(doc().querySelector('aside[aria-label="Concept details"]')?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.trim() === "Show its entries in Similarity");
+    const canvas = () => doc().querySelector('[data-testid="canvas"]');
+    const hits = () => [...doc().querySelectorAll('[data-node][data-hit="true"]')].map((b) => b.getAttribute("data-node")).sort();
+    const backToConcepts = async () => {
+      // The layer is remembered for the session: leave the next test on Concepts.
+      const concepts = [...doc().querySelectorAll('[role="radiogroup"][aria-label="Layer"] button')].find((b) => b.textContent === "Concepts");
+      if (concepts) await click(concepts);
+    };
+    const setDesktop = (desktop: boolean | null) => {
+      const target = dom.window as unknown as { matchMedia?: unknown };
+      if (desktop === null) delete target.matchMedia;
+      else target.matchMedia = () => ({ matches: desktop, addEventListener: () => undefined, removeEventListener: () => undefined });
+    };
+    afterEach(() => setDesktop(null));
+
+    it("on a phone, closes the panel and shows every entry of the concept marked on the Similarity layer, past the 50 it details", async () => {
+      await show({ api: similarityApi(conceptWith({ entries: [summary()], entryIds: ids("ke_m", 60) })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      const offer = panelButton();
+      assert.ok(offer, "the concept panel offers it (the graph is out of sight behind it on a phone)");
+      await click(offer);
+      assert.equal(doc().querySelector("aside"), null, "the panel closed so the graph shows");
+      assert.equal(canvas()?.getAttribute("data-layer"), "similarity");
+      assert.deepEqual(hits(), ["ke_m00", "ke_m55"], "marked from entryIds: one past the 50 newest too");
+      assert.match(text(), /Marked 2 of the 60 entries behind “Alternatives pages” \(the rest are not drawn\)\./);
+      await backToConcepts();
+    });
+
+    it("on a desktop, keeps the panel open beside the graph", async () => {
+      setDesktop(true);
+      await show({ api: similarityApi(conceptWith({ entries: [summary()], entryIds: ["ke_m00", "ke_m01"] })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      await click(panelButton()!);
+      assert.ok(doc().querySelector('aside[aria-label="Concept details"]'), "still open");
+      assert.equal(canvas()?.getAttribute("data-layer"), "similarity");
+      assert.deepEqual(hits(), ["ke_m00"]);
+      await backToConcepts();
+    });
+
+    it("from an older daemon (no entryIds), marks the 50 newest it details and says so", async () => {
+      const newest = ids("ke_m", 50).map((id) => summary({ id }));
+      await show({ api: similarityApi(conceptWith({ entries: newest })) });
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      await click(panelButton()!);
+      assert.deepEqual(hits(), ["ke_m00"], "ke_m55 is not among the 50 it knows of");
+      assert.match(text(), /Marked 1 of the 50 newest entries behind “Alternatives pages” \(the rest are not drawn\)\./);
+      await backToConcepts();
+    });
+
+    it("is not offered where the daemon has no Similarity layer", async () => {
+      await show();
+      await click(doc().querySelector('[data-node="tactic-alternatives"]')!);
+      assert.ok(doc().querySelector('aside[aria-label="Concept details"]'));
+      assert.equal(panelButton(), undefined);
+    });
+  });
+
   it("deleting an entry asks first, then closes the panel", async () => {
     await show({ focus: { kind: "entry", id: "ke_aaaaaaaaaaaa", nonce: 1 } });
     await click(buttonNamed("Delete"));
@@ -552,5 +652,119 @@ describe("the Knowledge view", () => {
     assert.deepEqual(calls.filter((c) => c.startsWith("graph:")), ["graph:", "graph:ke_aaaaaaaaaaaa", "graph:"]);
     assert.doesNotMatch(text(), /Nothing visible has that id/);
     assert.match(text(), /Showing the 2 most connected of 5,000 concepts/);
+  });
+
+  it("shows the automatic re-linking in the status bar while entries are left to it", async () => {
+    await show();
+    const bar = () => doc().querySelector('[role="status"][aria-label="Knowledge status"]')!;
+    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "an older daemon says nothing");
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: { pending: 89, done: 37, total: 126 } }) }));
+    const relink = bar().querySelector("[data-knowledge-relink]");
+    assert.equal(relink?.textContent, "Re-linking 37/126");
+    assert.match(relink?.getAttribute("title") ?? "", /89 entries are still to be linked again/);
+    assert.match(bar().textContent!, /Linking idle/, "beside the linking state");
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, relink: null }) }));
+    assert.equal(bar().querySelector("[data-knowledge-relink]"), null, "nothing left");
+  });
+
+  it("fits the status bar on a phone while re-linking: the linking progress bar steps aside and the re-linking text truncates", async () => {
+    await show();
+    const bar = () => doc().querySelector('[role="status"][aria-label="Knowledge status"]')!;
+    const classes = (element: Element | null) => new Set((element?.getAttribute("class") ?? "").split(/\s+/));
+    const running = { state: "running" as const, runId: "r1", mode: "update" as const, step: "pass2", progress: { done: 3, total: 10 }, pendingEntries: 0 };
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, linking: running }) }));
+    assert.ok(!classes(bar().querySelector('[role="progressbar"]')).has("max-md:hidden"), "shown on a phone without re-linking");
+
+    await act(async () => knowledgeStore.setState({ status: status({ entries: 2, linking: running, relink: { pending: 89, done: 37, total: 126 } }) }));
+    assert.ok(classes(bar().querySelector('[role="progressbar"]')).has("max-md:hidden"), "below md, the progress bar steps aside for the re-linking");
+    assert.ok(!classes(bar().querySelector('[role="progressbar"]')).has("hidden"), "still shown on a desktop");
+    const relink = bar().querySelector("[data-knowledge-relink]");
+    assert.ok(classes(relink).has("min-w-0") && !classes(relink).has("shrink-0"), "the re-linking may shrink");
+    const label = [...(relink?.querySelectorAll("span") ?? [])].find((s) => s.textContent === "Re-linking 37/126");
+    assert.ok(label && classes(label).has("truncate") && classes(label).has("min-w-0"), "and its text truncates");
+    // Every item but the icons can shrink: nothing in the bar keeps a fixed width on a phone.
+    for (const child of bar().children) {
+      if (child.getAttribute("role") === "progressbar") continue;
+      assert.ok(!classes(child).has("shrink-0"), `${child.textContent} shrinks`);
+    }
+  });
+
+  describe("the Insights view (phase 2)", () => {
+    const INSIGHTS: KnowledgeInsightsResponse = {
+      contradictions: [{ a: summary(), b: summary({ id: "ke_bbbbbbbbbbbb", title: "Other" }), similarity: 0.8, source: "graph", pairs: [], note: "They disagree." }],
+      bridges: [],
+      singleSource: [],
+      gaps: [],
+      totals: { contradictions: 1, bridges: 0, singleSource: 0, gaps: 0 }
+    };
+    const missingRoute = () => Object.assign(new Error("404"), { status: 404, body: { message: "Route GET:/api/knowledge/insights not found", error: "Not Found", statusCode: 404 } });
+    const viewRadio = (label: string) =>
+      ([...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === label) as HTMLButtonElement | undefined) ?? null;
+    const insightsApi = (read: (query: KnowledgeInsightsQuery) => Promise<KnowledgeInsightsResponse>) => ({
+      getKnowledgeInsights: (query: KnowledgeInsightsQuery = {}) => {
+        calls.push(`insights:${JSON.stringify(query)}`);
+        return read(query);
+      }
+    });
+
+    it("is not offered by a client without it", async () => {
+      await show();
+      assert.equal(viewRadio("Insights"), null);
+      assert.ok(viewRadio("Graph") && viewRadio("List"));
+    });
+
+    it("is not offered by a daemon that predates it (a one-item read asks)", async () => {
+      await show({
+        api: insightsApi(async () => {
+          throw missingRoute();
+        })
+      });
+      assert.deepEqual(
+        calls.filter((c) => c.startsWith("insights:")),
+        ['insights:{"limit":1}']
+      );
+      assert.equal(viewRadio("Insights"), null);
+    });
+
+    it("is offered where the daemon serves it: its items open in the side panel, narrowed by the graph's chips", async () => {
+      await show({ api: insightsApi(async () => INSIGHTS) });
+      const insights = viewRadio("Insights");
+      assert.ok(insights, "a third view option");
+      assert.ok(insights.querySelector("svg"), "with its icon (a phone shows the icons only)");
+      await click(insights);
+      assert.equal(doc().querySelector('[data-testid="canvas"]'), null);
+      const contradictions = doc().querySelector('section[aria-label="Contradictions"]');
+      assert.ok(contradictions);
+      assert.match(contradictions.textContent!, /They disagree\./);
+      assert.deepEqual(calls.filter((c) => c.startsWith("insights:")).slice(1), ["insights:{}"]);
+
+      await click(contradictions.querySelector('[data-insight-entry="ke_bbbbbbbbbbbb"]')!);
+      assert.equal(doc().querySelector("aside")?.getAttribute("aria-label"), "Entry details");
+      assert.ok(calls.includes("item:ke_bbbbbbbbbbbb"));
+
+      const chips = doc().querySelector('[role="group"][aria-label="Filter by collection"]')!;
+      await click([...chips.querySelectorAll("button")].find((b) => b.textContent === "SEO")!);
+      assert.equal(calls.filter((c) => c.startsWith("insights:")).at(-1), 'insights:{"collections":"kc_seo"}');
+      // The same chips narrow the graph.
+      await click(viewRadio("Graph")!);
+      assert.equal([...doc().querySelectorAll('[aria-label="Filter by collection"] button')].find((b) => b.textContent === "SEO")?.getAttribute("aria-pressed"), "true");
+    });
+
+    it("falls back to the graph, and stops offering it, when the daemon no longer serves it", async () => {
+      let served = true;
+      await show({
+        api: insightsApi(async () => {
+          if (served) return INSIGHTS;
+          throw missingRoute();
+        })
+      });
+      await click(viewRadio("Insights")!);
+      assert.ok(doc().querySelector('section[aria-label="Contradictions"]'));
+      served = false;
+      await act(async () => knowledgeStore.setState((s) => ({ graphRevision: s.graphRevision + 1 })));
+      await settle();
+      assert.ok(doc().querySelector('[data-testid="canvas"]'), "back on the graph");
+      assert.equal(viewRadio("Insights"), null);
+    });
   });
 });

@@ -43,6 +43,11 @@
  * `next` long-polls: with no task waiting it holds the call until one appears, the run ends, or
  * `nextWaitMs` passes (then the chat is retired; the pool restarts one when work appears). Every
  * wait is an event or the injected clock — no sleeps.
+ *
+ * What a worker sees of a task (`view`) may say more than myKG's prompt: `contextFor` adds a block
+ * after it (phase 2 spec, "Neighbour context": the concepts of similar entries for a Pass 2 task).
+ * The task file, its id and so myKG's cache key stay as myKG wrote them. A step can have a stricter
+ * answer check than "parses as JSON" (`validate`: the daemon's own pair-check tasks).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -135,6 +140,13 @@ export interface InboxBrokerOptions {
   /** `null` = no watcher (rescans on demand only). */
   watch?: InboxWatch | null;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
+  /**
+   * Extra input shown to the worker after myKG's prompt (`null`: none), computed once per task
+   * before it is first handed out. Never changes the task file, its id, or myKG's cache.
+   */
+  contextFor?: (envelope: InboxTaskEnvelope) => Promise<string | null>;
+  /** A stricter check of a parsed answer for some steps: an error message refuses it like a parse error. */
+  validate?: (step: string, value: unknown) => string | null;
 }
 
 export type ParsedAnswer = { ok: true; text: string } | { ok: false; error: string };
@@ -162,6 +174,8 @@ export function parseWorkerAnswer(raw: string): ParsedAnswer {
 interface TaskEntry {
   id: string;
   envelope: InboxTaskEnvelope | null;
+  /** What the worker is shown (`envelope.user` plus any context); null until first prepared. */
+  input: string | null;
   instructionsHash: string | null;
   leasedTo: string | null;
   done: boolean;
@@ -199,8 +213,8 @@ export interface InboxCounts {
 export interface InboxBrokerEvents {
   /** Tasks appeared, were answered, or a lease was released. */
   change: [];
-  /** One accepted answer. */
-  answered: [{ sessionId: string; taskId: string; step: string }];
+  /** One accepted answer (`answer`: the JSON text written). */
+  answered: [{ sessionId: string; taskId: string; step: string; answer: string }];
 }
 
 export class InboxBroker {
@@ -211,6 +225,8 @@ export class InboxBroker {
   private readonly files: InboxFiles;
   private readonly watchFn: InboxWatch | null;
   private readonly logger: InboxBrokerOptions["logger"];
+  private readonly contextFor: InboxBrokerOptions["contextFor"];
+  private readonly validate: InboxBrokerOptions["validate"];
   private inbox: string | null = null;
   private outbox: string | null = null;
   private reuseIndex: string | null = null;
@@ -235,6 +251,8 @@ export class InboxBroker {
     this.files = options.files ?? nodeInboxFiles;
     this.watchFn = options.watch === undefined ? nodeWatch : options.watch;
     this.logger = options.logger;
+    this.contextFor = options.contextFor;
+    this.validate = options.validate;
   }
 
   /** Points the broker at a myKG session's `intermediate/` directory and starts watching. */
@@ -259,6 +277,11 @@ export class InboxBroker {
   /** The run ended (`finish`): no task is handed out any more. */
   get isFinished(): boolean {
     return this.finished !== null;
+  }
+
+  /** The chat registered with (or called) this broker. */
+  knows(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
   }
 
   /** A worker chat of this run (also implicit on its first call). */
@@ -365,6 +388,11 @@ export class InboxBroker {
       // The run may have ended, or the chat been released, while the scan ran.
       if (this.finished || session.retired) continue;
       const task = this.firstPending();
+      if (task && task.input === null) {
+        // Its view is prepared once, before the lease; then everything is checked again.
+        await this.prepare(task);
+        continue;
+      }
       if (task) {
         task.leasedTo = session.id;
         session.lease = task.id;
@@ -398,7 +426,11 @@ export class InboxBroker {
       if (session.lease === task.id) session.lease = null;
       return { accepted: true, next: await this.next(sessionId, signal) };
     }
-    const parsed = parseWorkerAnswer(answer);
+    let parsed = parseWorkerAnswer(answer);
+    if (parsed.ok && this.validate) {
+      const error = this.validate(task.envelope!.step, JSON.parse(parsed.text));
+      if (error !== null) parsed = { ok: false, error };
+    }
     if (!parsed.ok) {
       // The chat keeps the task and redoes it.
       if (task.leasedTo === null) task.leasedTo = session.id;
@@ -429,15 +461,29 @@ export class InboxBroker {
     task.leasedTo = null;
     if (session.lease === task.id) session.lease = null;
     session.tasks += 1;
-    session.tokens += estimateTokens(task.envelope!.user) + estimateTokens(parsed.text);
+    session.tokens += estimateTokens(task.input ?? task.envelope!.user) + estimateTokens(parsed.text);
     this.answered += 1;
     await this.indexForReuse(task);
-    this.events.emit("answered", { sessionId, taskId: task.id, step: task.envelope!.step });
+    this.events.emit("answered", { sessionId, taskId: task.id, step: task.envelope!.step, answer: parsed.text });
     this.changed();
     return { accepted: true, next: await this.next(sessionId, signal) };
   }
 
   // --- internals ---------------------------------------------------------------------------------
+
+  /** Computes what the worker is shown (`contextFor`); a context that fails costs only the context. */
+  private async prepare(task: TaskEntry): Promise<void> {
+    const envelope = task.envelope!;
+    let extra: string | null = null;
+    if (this.contextFor) {
+      try {
+        extra = await this.contextFor(envelope);
+      } catch (error) {
+        this.logger?.warn("knowledge inbox: a task's context could not be built", { taskId: task.id, error: String(error) });
+      }
+    }
+    task.input ??= extra ? `${envelope.user}\n\n${extra}` : envelope.user;
+  }
 
   private view(session: SessionEntry, task: TaskEntry): KnowledgeWorkerTask {
     const envelope = task.envelope!;
@@ -452,7 +498,8 @@ export class InboxBroker {
       session.seen.set(hash, task.id);
       session.tokens += estimateTokens(envelope.system);
     }
-    const size = estimateTokens(envelope.user) + (instructions ? estimateTokens(instructions) : 0);
+    const input = task.input ?? envelope.user;
+    const size = estimateTokens(input) + (instructions ? estimateTokens(instructions) : 0);
     if (size > MAX_TASK_TOKENS) {
       // myKG's chunk and batch sizes (`mykg-config.ts`) keep tasks far below this; say so if one is not.
       this.logger?.warn("knowledge inbox: a task is larger than a worker's tool result should be", { taskId: task.id, step: envelope.step, tokens: size });
@@ -463,7 +510,7 @@ export class InboxBroker {
       step: envelope.step,
       instructions,
       sameInstructionsAs: sameAs,
-      input: envelope.user,
+      input,
       maxTokens: envelope.max_tokens,
       remaining: pending
     };
@@ -501,7 +548,7 @@ export class InboxBroker {
       const id = name.slice(0, -TASK_SUFFIX.length);
       if (!id || this.tasks.has(id)) continue;
       if (await this.files.exists(join(outbox, `${id}.done`))) {
-        this.tasks.set(id, { id, envelope: null, instructionsHash: null, leasedTo: null, done: true, writing: false });
+        this.tasks.set(id, { id, envelope: null, input: null, instructionsHash: null, leasedTo: null, done: true, writing: false });
         continue;
       }
       let envelope: InboxTaskEnvelope | null = null;
@@ -518,6 +565,7 @@ export class InboxBroker {
       const entry: TaskEntry = {
         id,
         envelope,
+        input: null,
         instructionsHash: createHash("sha256").update(envelope.system).digest("hex"),
         leasedTo: null,
         done: false,
@@ -653,6 +701,42 @@ export async function clearUnansweredTasks(intermediateDir: string): Promise<str
   return removed;
 }
 
+/**
+ * Removes the answered tasks whose envelope `match`es — their `.done`, answer and task file — so
+ * myKG asks again instead of reusing the cached answer (phase 2 spec, "Automatic re-linking": an
+ * unchanged entry re-linked with neighbour context). Only while no myKG process runs on the session:
+ * the caller runs it before spawning one. Answers the ids removed.
+ */
+export async function clearAnsweredTasks(intermediateDir: string, match: (envelope: InboxTaskEnvelope) => boolean): Promise<string[]> {
+  const inbox = join(intermediateDir, INBOX_DIR);
+  const outbox = join(intermediateDir, OUTBOX_DIR);
+  let names: string[];
+  try {
+    names = await readdir(inbox);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.endsWith(TASK_SUFFIX)) continue;
+    const id = name.slice(0, -TASK_SUFFIX.length);
+    if (!id) continue;
+    let envelope: InboxTaskEnvelope | null;
+    try {
+      envelope = readEnvelope(JSON.parse(await readFile(join(inbox, name), "utf8")), id);
+    } catch {
+      envelope = null;
+    }
+    if (!envelope || !match(envelope)) continue;
+    // `.done` first: myKG only reads an answer whose `.done` exists.
+    await rm(join(outbox, `${id}.done`), { force: true });
+    await rm(join(outbox, `${id}.answer.json`), { force: true });
+    await rm(join(inbox, name), { force: true });
+    removed.push(id);
+  }
+  return removed;
+}
+
 function compareTasks(a: TaskEntry, b: TaskEntry): number {
   const at = a.envelope!.created_at;
   const bt = b.envelope!.created_at;
@@ -660,7 +744,7 @@ function compareTasks(a: TaskEntry, b: TaskEntry): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-function readEnvelope(value: unknown, id: string): InboxTaskEnvelope | null {
+export function readEnvelope(value: unknown, id: string): InboxTaskEnvelope | null {
   if (value === null || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
   if (typeof v.system !== "string" || typeof v.user !== "string") return null;

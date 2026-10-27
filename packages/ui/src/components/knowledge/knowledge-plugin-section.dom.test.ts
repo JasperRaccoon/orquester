@@ -263,6 +263,15 @@ describe("the Knowledge Graph plugin section", () => {
     assert.match(text(), /myKG exited with 1/);
   });
 
+  it("counts the concept merges in effect, and says nothing of them for an older daemon", async () => {
+    await show();
+    assert.doesNotMatch(text(), /Concept merges/, "an older daemon's status has no count");
+    await act(async () => {
+      applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_STATUS_EVENT, { ...status(), conceptMerges: 42 }) as never);
+    });
+    assert.match(text(), /Concept merges\s*42 in effect/);
+  });
+
   it("opens a live worker's transcript read-only in place, never its folder as a project; a closed one offers its id", async () => {
     await show();
     // A worker chat's "project" is the plugin's workers folder (no workspace, no project).

@@ -200,6 +200,11 @@ export function knowledgeStatePath(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "state.json");
 }
 
+/** The automatic concept merges overlaid on myKG's graph (`knowledge-concept-merges.ts`). */
+export function knowledgeConceptMergesPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "concept-merges.json");
+}
+
 export function knowledgeRuntimeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "runtime");
 }
@@ -212,6 +217,16 @@ export function knowledgeWorkersDir(baseDir: string): string {
 /** `HOME` of the myKG child, so it writes nothing into the user's real home. */
 export function knowledgeMykgHomeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
+}
+
+/** LLM pair checks of two entries (phase 2 spec, "Pair checks"; schema in `knowledge-linking.ts`). */
+export function knowledgePairChecksPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks.json");
+}
+
+/** The pair checks' own inbox (`agent_inbox/`, `agent_outbox/`), answered by worker chats between linking runs. */
+export function knowledgePairChecksInboxDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks");
 }
 
 // appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target path helpers.
@@ -2898,4 +2913,5 @@ export * from "./tooling.ts";
 // boxes:
 export * from "./box-mcp.ts";
 export * from "./knowledge-store.ts";
+export * from "./knowledge-concept-merges.ts";
 export * from "./devices.ts";

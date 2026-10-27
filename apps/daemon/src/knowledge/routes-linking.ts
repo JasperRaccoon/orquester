@@ -43,6 +43,8 @@ export interface KnowledgeStatusCounts {
   failedEntries: number;
   /** Whether the embedding model is installed and loadable (`KnowledgeStatus.embeddingModelReady`). */
   embeddingModelReady?: boolean;
+  /** Automatic concept merges in effect (`KnowledgeStatus.conceptMerges`). */
+  conceptMerges?: number;
 }
 
 export type KnowledgeLinkingRouteService = Pick<
@@ -75,7 +77,9 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
     workers: snapshot.workers,
     tokens: snapshot.tokens,
     lastError: snapshot.lastError,
-    ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {})
+    ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {}),
+    ...(counts.conceptMerges !== undefined ? { conceptMerges: counts.conceptMerges } : {}),
+    ...(snapshot.relink !== undefined ? { relink: snapshot.relink } : {})
   };
 }
 

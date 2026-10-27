@@ -573,6 +573,7 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   knowledge_delete: "Deleted knowledge entries",
   knowledge_merge: "Merged knowledge entries",
   knowledge_collections: "Listed knowledge collections",
+  knowledge_insights: "Read knowledge insights",
   knowledge_worker_next_task: "Took an indexing task",
   knowledge_worker_submit: "Submitted an indexing answer",
   // devices (Device simulators plugin): the generic words; a row with a

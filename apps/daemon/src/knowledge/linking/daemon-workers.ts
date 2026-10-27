@@ -32,7 +32,7 @@ import type { AccountsReader, Clock, CooldownStore, UsageReader } from "../../wo
 import { takeBaseline, type AgentBaseline } from "../../workflows/agent/classify.ts";
 import { AgentCatalog, createSession, profileRefusalMessage } from "../../workflows/agent/create.ts";
 import { candidateKey, coolDown, pickCandidate, type AgentCandidate, type FailoverDeps, type FailoverMemory } from "../../workflows/agent/failover.ts";
-import { autonomousAnswers, autonomousDecision, observe, watchAgent } from "../../workflows/agent/watch.ts";
+import { autonomousAnswers, autonomousDecision, observe, waitForIdle, watchAgent } from "../../workflows/agent/watch.ts";
 import { KNOWLEDGE_WORKER_PROMPT } from "./indexer-profile.ts";
 import { WorkerStartError, type WorkerCandidate, type WorkerOutcome, type WorkerPick, type WorkerSessionPort } from "./workers.ts";
 
@@ -40,6 +40,8 @@ import { WorkerStartError, type WorkerCandidate, type WorkerOutcome, type Worker
 const DEFAULT_KNOWLEDGE_MODEL = "sonnet";
 /** A worker's turn never runs this long; past it the chat is treated as failed. */
 const WATCH_DEADLINE_MS = 24 * 60 * 60_000;
+/** How long an interrupted turn may take to end (the session's events end the wait sooner). */
+const INTERRUPT_WAIT_MS = 60_000;
 
 export interface DaemonWorkerCandidate extends WorkerCandidate {
   agent: AgentCandidate;
@@ -204,6 +206,19 @@ export function createDaemonWorkerSessions(deps: DaemonWorkerSessionsDeps): Work
         tokensOut += usage.outputTokens ?? 0;
       }
       return { in: tokensIn, out: tokensOut };
+    },
+
+    async interrupt(sessionId: string): Promise<void> {
+      try {
+        await sendCommand(deps.api, sessionId, "interrupt", {}, { retryDelayMs: () => 0 });
+      } catch {
+        // No turn to interrupt, or the chat is gone: nothing to wait for.
+        return;
+      }
+      // The turn reports its usage when it ends: wait for that on the session's events (the
+      // watcher's bus subscription and clock timers; bounded), never a fixed sleep.
+      const until = new Date(deps.clock.now().getTime() + INTERRUPT_WAIT_MS);
+      await waitForIdle({ api: deps.api, sessionId, clock: deps.clock, signal: new AbortController().signal, until }).catch(() => undefined);
     },
 
     async stop(sessionId: string, options: { interrupt: boolean }): Promise<void> {
