@@ -216,7 +216,7 @@ export function DevicePicker(props: {
               {group.rows.map((row) => {
                 const opening = props.opening === row.profile.id;
                 return (
-                  <li key={row.profile.id} className="flex items-center gap-3 px-3 py-2.5" data-profile={row.profile.id} aria-disabled={!row.enabled || undefined}>
+                  <li key={row.profile.id} className="flex items-center gap-3 px-3 py-2.5" data-profile={row.profile.id} aria-disabled={!row.enabled || undefined} title={row.hint ?? undefined}>
                     <FormFactorIcon formFactor={row.profile.formFactor} className={row.enabled ? "text-neutral-400" : "text-neutral-600"} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
@@ -238,9 +238,15 @@ export function DevicePicker(props: {
                     {row.enabled ? (
                       <>
                         {row.badge !== "Ready" ? <span className="hidden shrink-0 text-[11px] text-neutral-500 min-[380px]:inline">{row.badge}</span> : null}
-                        <PanelButton tone="primary" disabled={props.opening !== null} onClick={() => props.onOpen(row.profile)} aria-label={`Open ${row.profile.label}`}>
+                        <PanelButton
+                          tone="primary"
+                          disabled={props.opening !== null}
+                          onClick={() => props.onOpen(row.profile)}
+                          aria-label={`${row.action === "queue" ? "Queue" : "Open"} ${row.profile.label}`}
+                          title={row.hint ?? undefined}
+                        >
                           {opening ? <Spinner /> : null}
-                          {opening ? "Opening" : "Open"}
+                          {opening ? "Opening" : row.action === "queue" ? "Queue" : "Open"}
                         </PanelButton>
                       </>
                     ) : (

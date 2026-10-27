@@ -332,8 +332,12 @@ export interface PickerRow {
   enabled: boolean;
   /** Why not, in one line (links to Settings → Devices). */
   reason: string | null;
-  /** A short state chip: "Ready", "Needs setup", "Rents a Mac", "Installing…". */
+  /** A short state chip: "Ready", "Needs setup", "Rents a Mac", "Installing…", "Full". */
   badge: string;
+  /** What Open does: opens now, or queues in the pool (the host is full; it answers with a stand-in at once). */
+  action: "open" | "queue";
+  /** A tooltip for an enabled row (what queueing means). */
+  hint: string | null;
 }
 
 export interface PickerGroup {
@@ -373,6 +377,7 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
     let note: string | null = null;
     let reason: string | null = null;
     let badge = "Ready";
+    let queueHint: string | null = null;
     if (!enabledInSettings) {
       reason = `${DEVICE_PLATFORM_LABELS[platform]} is off. Turn it on in Settings → Devices.`;
       badge = "Off";
@@ -388,8 +393,19 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
       } else if (local.status === "disabled") {
         reason = "Android on this host is off. Turn it on in Settings → Devices.";
         badge = "Off";
-      } else if (local.capacity.total > 0 && local.capacity.used >= local.capacity.total) {
-        reason = `This host is full (${local.capacity.used} of ${local.capacity.total} devices running).`;
+      } else if (local.capacity.total === 0 && input.settings?.pool.placement === "local-only") {
+        // Kept on this host, which runs none: the pool can never place it.
+        reason = "This host has no room for an Android device (too little free memory, or Settings allow none here), and Settings keep devices on this host.";
+        badge = "No room";
+      } else if (local.capacity.used >= local.capacity.total) {
+        // Open queues it in the pool (a stand-in answers at once): it opens when a slot frees up, or on a rented host.
+        const { used, total } = local.capacity;
+        const rents = input.settings?.pool.placement !== "local-only";
+        note = total > 0 ? `Runs on this host · ${used} of ${total} in use — a new device waits for a slot` : "This host runs no devices — a new device waits for a rented host";
+        queueHint =
+          total > 0
+            ? `All ${total} slot${total === 1 ? " is" : "s are"} in use — it opens when one frees up${rents ? ", or on a rented host if the fleet allows" : ""}.`
+            : "This host runs no devices — it opens on a rented host if the fleet allows.";
         badge = "Full";
       } else {
         note = local.capacity.total > 0 ? `Runs on this host · ${local.capacity.used} of ${local.capacity.total} in use` : "Runs on this host";
@@ -412,7 +428,14 @@ export function pickerGroups(input: PickerInput): PickerGroup[] {
       platform,
       title: platform === "android" ? "Android" : DEVICE_PLATFORM_LABELS.ios,
       note,
-      rows: profiles.map((profile) => ({ profile, enabled: reason === null, reason, badge: reason === fullReason ? "Limit reached" : badge }))
+      rows: profiles.map((profile) => ({
+        profile,
+        enabled: reason === null,
+        reason,
+        badge: reason === fullReason ? "Limit reached" : badge,
+        action: reason === null && queueHint ? "queue" : "open",
+        hint: reason === null ? queueHint : null
+      }))
     });
   }
   return groups;
