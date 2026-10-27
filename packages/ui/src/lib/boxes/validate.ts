@@ -14,6 +14,7 @@ import {
   BOX_STATES,
   isBoxKind,
   isBoxProviderId,
+  isBoxPurpose,
   type BlacksmithSetupResponse,
   type BlacksmithSetupStep,
   type BlacksmithSetupStepId,
@@ -100,7 +101,6 @@ function listOf<T>(value: unknown, sanitize: (raw: unknown) => T | null, key: (i
 // Boxes
 // ---------------------------------------------------------------------------
 
-const PURPOSES = ["project", "temporary"] as const;
 const OSES: readonly BoxOs[] = ["linux", "win32", "darwin"];
 const ARCHES: readonly BoxArch[] = ["x64", "arm64"];
 const SETUP_STATES: readonly BoxSetupStepState[] = ["pending", "running", "done", "failed", "skipped"];
@@ -144,7 +144,7 @@ function sanitizeProjectRef(value: unknown): BoxProjectRef | null {
 export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
   if (!isRecord(value) || !nonEmpty(value.id)) return null;
   const { purpose, kind, provider, state } = value;
-  if (!oneOf(PURPOSES, purpose) || !isBoxKind(kind) || !isBoxProviderId(provider) || !oneOf<BoxState>(BOX_STATES, state)) {
+  if (!isBoxPurpose(purpose) || !isBoxKind(kind) || !isBoxProviderId(provider) || !oneOf<BoxState>(BOX_STATES, state)) {
     return null;
   }
   const region = stringOr(value.region, "");

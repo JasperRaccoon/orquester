@@ -79,6 +79,7 @@ export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
 export * from "./knowledge.ts";
+export * from "./devices.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).

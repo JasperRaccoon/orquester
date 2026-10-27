@@ -13,6 +13,7 @@ import {
   Search,
   Server,
   SlidersHorizontal,
+  Smartphone,
   Users,
   Wrench,
   X
@@ -27,6 +28,7 @@ import { AgentsSettings } from "./AgentsSettings";
 import { AgentToolsSettings } from "./AgentToolsSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { ChatSettings } from "./ChatSettings";
+import { DevicesSettings } from "./DevicesSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { HostStatusSettings } from "./HostStatusSettings";
@@ -47,7 +49,8 @@ type SectionId =
   | "git-hosting"
   | "plugins"
   | "server"
-  | "system";
+  | "system"
+  | "devices";
 
 type GroupId = "personal" | "agents" | "integrations" | "server";
 
@@ -202,6 +205,16 @@ const SECTIONS: SectionDef[] = [
     desc: "CPU, memory, disk, processes and listening ports",
     keywords: ["system", "cpu", "memory", "ram", "disk", "processes", "ports", "kill", "resources"],
     render: () => <HostStatusSettings />
+  },
+  {
+    // Device simulators plugin (devices spec §10.5).
+    id: "devices",
+    group: "server",
+    label: "Devices",
+    icon: <Smartphone size={15} />,
+    desc: "iOS simulators and Android emulators for chats",
+    keywords: ["device", "devices", "simulator", "emulator", "ios", "iphone", "ipad", "android", "pixel", "mac", "kvm", "avd"],
+    render: () => <DevicesSettings />
   }
 ];
 

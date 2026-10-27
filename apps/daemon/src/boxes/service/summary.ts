@@ -7,6 +7,7 @@ import {
   BOX_SETUP_STEP_IDS,
   isBoxKind,
   isBoxProviderId,
+  isBoxPurpose,
   type BoxArch,
   type BoxDestroyedReason,
   type BoxOs,
@@ -40,6 +41,7 @@ const DESTROYED_REASONS: readonly BoxDestroyedReason[] = [
 export const SETUP_STEP_LABELS: Readonly<Record<BoxSetupStepId, string>> = {
   create: "Create the machine",
   connect: "Wait for orq-agent to connect",
+  devices: "Prepare the device tools",
   paths: "Create the host paths",
   config: "Sync agent configuration",
   tooling: "Install plugin tooling",
@@ -49,9 +51,19 @@ export const SETUP_STEP_LABELS: Readonly<Record<BoxSetupStepId, string>> = {
   ready: "Ready"
 };
 
-/** The steps a box runs: all of them for a project box, create/connect/ready for a temporary one. */
+/**
+ * The steps a box runs: create/connect/ready for a temporary one, create/connect/devices/ready for a
+ * device host (devices spec §6.3), every other step for a project box.
+ */
 export function setupStepIds(purpose: BoxPurpose): BoxSetupStepId[] {
-  return purpose === "temporary" ? ["create", "connect", "ready"] : [...BOX_SETUP_STEP_IDS];
+  if (purpose === "temporary") return ["create", "connect", "ready"];
+  if (purpose === "device-host") return ["create", "connect", "devices", "ready"];
+  return BOX_SETUP_STEP_IDS.filter((id) => id !== "devices");
+}
+
+/** A stored purpose as this build reads it: one it does not know is a project box (as before device hosts). */
+function purposeOf(record: StoredBox): BoxPurpose {
+  return isBoxPurpose(record.purpose) ? record.purpose : "project";
 }
 
 export function initialSetup(purpose: BoxPurpose): BoxSetupStep[] {
@@ -136,7 +148,7 @@ function roundUsd(value: number): number {
 }
 
 function setupOf(record: StoredBox): BoxSetupStep[] {
-  const purpose: BoxPurpose = record.purpose === "temporary" ? "temporary" : "project";
+  const purpose = purposeOf(record);
   const stored = new Map((record.setup ?? []).map((step) => [step.id, step]));
   return setupStepIds(purpose).map((id) => {
     const step = stored.get(id);
@@ -170,7 +182,7 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
   const adapter = options.providers.get(record.provider);
   return {
     id: record.id,
-    purpose: record.purpose === "temporary" ? "temporary" : "project",
+    purpose: purposeOf(record),
     kind: record.kind,
     provider: record.provider,
     providerLabel: adapter?.label ?? record.provider,

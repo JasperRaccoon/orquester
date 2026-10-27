@@ -196,3 +196,20 @@ test("knowledge: a workflow-owned chat keeps the knowledge tools (none is Admin)
   assert.match(manifest.instructions, KNOWLEDGE_LINE);
   assert.ok(Buffer.byteLength(manifest.instructions, "utf8") <= 2_304);
 });
+
+test("devices: the device tools and their instruction line only while devices are available", () => {
+  const chat = catalogFor("chat");
+  const DEVICE_TOOLS = ["list_devices", "open_device", "device_action", "device_install", "close_device"];
+  const off = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [] });
+  const on = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [], devicesAvailable: true });
+  const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], devicesAvailable: true });
+  for (const name of DEVICE_TOOLS) {
+    assert.ok(!off.tools.includes(name), `${name}: not advertised while devices are unavailable`);
+    assert.ok(on.tools.includes(name), name);
+    assert.ok(owned.tools.includes(name), `${name}: none is Admin, so a workflow-owned chat keeps it`);
+  }
+  assert.doesNotMatch(off.instructions, /list_devices/);
+  assert.match(on.instructions, /Mobile devices: call list_devices\/open_device/);
+  // Gated independently of the box tools.
+  assert.ok(!on.tools.includes("create_box"));
+});

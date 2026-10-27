@@ -91,6 +91,8 @@ import {
   BROWSER_FRAME_TYPE_JPEG,
   DESKTOP_CHANNEL,
   DESKTOP_WS_PREFIXES,
+  DEVICE_QUERY_TOKEN_ROUTES,
+  DEVICE_WS_PREFIXES,
   MAX_INITIAL_COMMAND,
   SECRET_REQUEST_EVENT_TYPE,
   SYSTEM_ACCOUNT_ID
@@ -177,6 +179,8 @@ import { createDaemonWorkerSessions } from "./knowledge/linking/daemon-workers.t
 import { ensureKnowledgeIndexerProfile } from "./knowledge/linking/indexer-profile.ts";
 // boxes: Ephemeral AI VMs — the box service (projects in boxes, the plugin's routes).
 import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
+// Device simulators plugin: the device service, its routes and the device tools' backend.
+import { createDaemonDevices, type DaemonDevices } from "./devices/wiring.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -1547,6 +1551,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const authSessions = new AuthSessionStore({ file: authSessionsPath(paths.baseDir), logger: console });
   await authSessions.load();
   await authSessions.syncPassword(config.transports.http.passwordHash);
+  // Device simulators (devices spec 2026-10-27): the device service exists while the plugin is on
+  // (`devices/wiring.ts`); it follows the plugin from `devices.start()` below. Chats are read from
+  // their tab records (loaded by the reattach above; a failed reattach releases nothing).
+  const devices: DaemonDevices = createDaemonDevices({
+    baseDir: paths.baseDir,
+    env,
+    plugins,
+    broadcaster,
+    boxes: () => boxes,
+    threadTitle: (id) => agentChat.chat.get(id)?.title ?? null,
+    threadProject: (id) => agentChat.chat.get(id)?.projectPath || null,
+    threadExists: (id) => !sessionsReattached || agentChat.chat.has(id),
+    logger: console
+  });
   const services: Services = {
     buildInfo,
     authSessions,
@@ -1569,7 +1587,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // boxes: the box service, which paths are in box projects, and the rest of the box wiring.
     boxes: boxes.service,
     boxRegistry: boxes.registry,
-    boxWiring: boxes
+    boxWiring: boxes,
+    devices
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1609,6 +1628,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) temporaryBoxTools.chatClosed(id);
   });
   services.temporaryBoxTools = temporaryBoxTools;
+  // Devices: a closed chat's leases end (their devices are turned off).
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) devices.chatClosed(id);
+  });
+  await devices.start().catch((error) => console.error("Device service start failed", error instanceof Error ? error.message : error));
   // The rest of the box wiring over the session list, browser tabs and chats: the token broker,
   // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
   // the box tools (connected while the plugin is on).
@@ -1639,6 +1663,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     catalog: () => catalogFor("chat"),
     // boxes: the box tools are advertised only while a box can be rented.
     boxesAvailable: () => temporaryBoxTools.available(),
+    // Devices: the device tools only while the plugin is on, agents may use devices and a platform is enabled.
+    devicesAvailable: () => devices.toolsAvailable(),
     // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
     knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
@@ -1659,6 +1685,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // boxes: when boxes become rentable (or stop being), every open chat gets its new tool list.
   temporaryBoxTools.onAvailabilityChange(() => {
     void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: box tools refresh failed", error instanceof Error ? error.message : String(error)));
+  });
+  // Devices: likewise when the device tools come or go.
+  devices.onToolsChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: device tools refresh failed", error instanceof Error ? error.message : String(error)));
   });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
@@ -1733,7 +1763,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // boxes: the box MCP tools' streamed operations.
     boxes: temporaryBoxTools,
     // boxes: read_file / directory reads of box projects go to the box.
-    boxRegistry: () => services.boxRegistry
+    boxRegistry: () => services.boxRegistry,
+    // Devices: the device MCP tools' operations (null while the plugin is off).
+    devices: () => devices.service()
   });
 
   lineage.attachApi(services.internalApi);
@@ -1835,6 +1867,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // store's queued writes land. Started here, before the plugins and the agent host stop; awaited
     // last, bounded, with the secret files below.
     const knowledgeStopped = knowledge.stop().catch((error) => console.error("Knowledge Graph stop failed", error instanceof Error ? error.message : error));
+    // Devices: before the plugins (no switch is followed any more). Setups and boots in flight are
+    // cancelled; devices keep running and a restart reattaches.
+    await devices.stop().catch((error) => console.error("Device service stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -2062,6 +2097,8 @@ interface Services {
   boxRegistry?: BoxRegistry;
   // boxes: the rest of the box wiring (hub, sync, tooling, forwards, broker routes). Optional: route tests build a partial `services`.
   boxWiring?: DaemonBoxes;
+  /** Device simulators: the device service (while the plugin is on) and its routes. Optional: route tests build a partial `services`. */
+  devices?: DaemonDevices;
 }
 
 export function createServer(
@@ -2221,11 +2258,15 @@ export function createServer(
 
     // A browser download navigation (<a download>) can't set an Authorization
     // header, so /api/fs/download also accepts the token as ?token= — the
-    // same trick /ws uses. Scoped to this one route; the token is redacted from
-    // logs by the request serializer above. Only a live session or API token
+    // same trick /ws uses. Scoped to that route (and the device media routes
+    // below); the token is redacted from logs by the request serializer
+    // above. Only a live session or API token
     // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    const queryToken = url === "/api/fs/download" ? (request.query as { token?: string }).token : undefined;
+    // Devices: the hub proxy's media and a kept screenshot load from `<img>`/`<video>` the same way
+    // (matched route patterns only, never a prefix).
+    const queryTokenRoute = url === "/api/fs/download" || (routePath !== undefined && DEVICE_QUERY_TOKEN_ROUTES.includes(routePath));
+    const queryToken = queryTokenRoute ? (request.query as { token?: string }).token : undefined;
     const session = authSessions.verify(headerToken ?? queryToken);
     if (!session) {
       throttle.recordFailure(ip);
@@ -4899,6 +4940,8 @@ export function createServer(
   services.knowledge?.registerRoutes(app, options.mode);
   // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
   services.boxes?.registerRoutes(app);
+  // Devices (`deviceRoutes`): both transports; the hub proxy on the remote one only (streams need HTTP).
+  services.devices?.registerRoutes(app, options.mode);
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.
@@ -5220,6 +5263,15 @@ export function createServer(
     });
   });
 
+  // Device streams (devices spec §8): the hub relay, `?token=` checked after the upgrade like the
+  // desktop relay above.
+  if (services.devices) {
+    const devicesWiring = services.devices;
+    void app.register(async (instance) => {
+      await devicesWiring.registerWsRoutes(instance, { authorize: (token, socket) => authorizeSocket(token, socket) });
+    });
+  }
+
   // Embedded-DevTools CDP WebSocket — remote-only (HTTP transport). The real
   // DevTools frontend speaks raw CDP to the tab's page target through this
   // authenticated pipe (?token= because browsers can't set WS headers). Routed
@@ -5410,7 +5462,8 @@ export function createServer(
         url.startsWith("/mcp") ||
         url.startsWith("/devtools-frontend") ||
         url.startsWith("/ws-devtools") ||
-        DESKTOP_WS_PREFIXES.some((prefix) => url.startsWith(prefix));
+        DESKTOP_WS_PREFIXES.some((prefix) => url.startsWith(prefix)) ||
+        DEVICE_WS_PREFIXES.some((prefix) => url.startsWith(prefix));
       if (request.method !== "GET" || isApi) {
         return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
       }

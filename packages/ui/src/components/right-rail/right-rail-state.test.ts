@@ -48,30 +48,30 @@ async function persistRail(open: "prompts" | "history", width: number) {
 
 test("a well-formed payload round-trips", async () => {
   assert.deepEqual(await persistRail("history", 412), {
-    v: 1, open: "history", width: 412
+    v: 1, open: "history", width: 412, deviceWidth: 420
   });
   assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":412}'), {
-    open: "history", width: 412
+    open: "history", width: 412, deviceWidth: 420
   });
 });
 
 test("each field is validated on its own: one bad field never costs the others", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"files","width":400}'), { open: null, width: 400, deviceWidth: 420 });
   const badWidth = await loadStoredRail('{"v":1,"open":"prompts","width":"wide"}');
   assert.equal(badWidth.open, "prompts");
   assert.ok(Number.isFinite(badWidth.width) && badWidth.width > 0);
-  assert.deepEqual(await loadStoredRail('{"width":300}'), { open: null, width: 300 });
+  assert.deepEqual(await loadStoredRail('{"width":300}'), { open: null, width: 300, deviceWidth: 420 });
   assert.equal((await loadStoredRail('{"open":null}')).open, null);
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400, deviceWidth: 420 });
   for (const open of ["true", "1", '"History"', '"Workflows"', '{"id":"prompts"}', '["prompts"]']) {
     assert.equal((await loadStoredRail(`{"open":${open}}`)).open, null);
   }
 });
 
 test("workflows (now in the left sidebar) and the agent profile (now Settings → Agent config) no longer open the dock", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: null, width: 360 });
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: null, width: 420 });
-  assert.deepEqual(await persistRail("prompts", 360), { v: 1, open: "prompts", width: 360 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: null, width: 360, deviceWidth: 420 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: null, width: 420, deviceWidth: 420 });
+  assert.deepEqual(await persistRail("prompts", 360), { v: 1, open: "prompts", width: 360, deviceWidth: 420 });
 });
 
 test("malformed stored widths fall back without losing the panel", async () => {
@@ -83,12 +83,12 @@ test("malformed stored widths fall back without losing the panel", async () => {
 });
 
 test("a payload written by another version is still read field by field", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480 });
+  assert.deepEqual(await loadStoredRail('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480, deviceWidth: 420 });
   assert.equal((await loadStoredRail('{"v":"one","open":"prompts"}')).open, "prompts");
 });
 
 test("load and save swallow storage errors and missing storage", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"prompts","width":350}'), { open: "prompts", width: 350 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"prompts","width":350}'), { open: "prompts", width: 350, deviceWidth: 420 });
   denyStorage();
   const denied = await freshRail();
   assert.doesNotThrow(() => denied.rightRailState());
@@ -138,5 +138,24 @@ test("a storage that throws never breaks the store", () => {
   denyStorage();
   toggleRightRailPanel("history");
   setRightRailWidth(480, { persist: true });
-  assert.deepEqual(rightRailState(), { open: "history", width: 480 });
+  assert.deepEqual(rightRailState(), { open: "history", width: 480, deviceWidth: 420 });
+});
+
+test("the Device panel keeps its own, wider width: stored, clamped and reset apart from the others", async () => {
+  const rail = await freshRail();
+  rail.setRightRailOpen("device");
+  rail.setRightRailWidth(700, { persist: true, panel: "device" });
+  assert.deepEqual(rail.rightRailState(), { open: "device", width: 320, deviceWidth: 700 });
+  assert.equal(rail.rightRailWidthOf(rail.rightRailState(), "device"), 700);
+  assert.equal(rail.rightRailWidthOf(rail.rightRailState(), "history"), 320);
+  assert.deepEqual(JSON.parse(stored.get(key)!), { v: 1, open: "device", width: 320, deviceWidth: 700 });
+  // Its range is 320–900; the others' stays 260–560.
+  assert.equal(rail.clampRightRailWidth(2000, null, "device"), 900);
+  assert.equal(rail.clampRightRailWidth(100, null, "device"), 320);
+  assert.equal(rail.clampRightRailWidth(2000), 560);
+  assert.equal(rail.clampRightRailWidth(Number.NaN, null, "device"), 420);
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"device","width":300,"deviceWidth":5000}'), { open: "device", width: 300, deviceWidth: 900 });
+  rail.resetRightRailWidth("device");
+  assert.equal(rail.rightRailState().deviceWidth, 420);
+  assert.match(rail.rightRailCssBounds("device").maxWidth, /900px/);
 });

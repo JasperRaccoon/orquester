@@ -5,8 +5,10 @@ import { cn } from "../../lib/cn";
 import { useAppStore, useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
+import { useDevicesEnabled } from "../../lib/devices/hooks";
 import { MobileSectionOverlay } from "./MobileSections";
-import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
+import { RIGHT_RAIL_PANEL_ORDER, visibleRailPanels } from "./panels";
+import { rightRailWidthOf, toggleRightRailPanel, useRightRailState } from "./right-rail-state";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 import type { DockPanelId } from "./types";
 
@@ -30,8 +32,10 @@ export interface RightRailRowProps {
   projectPath: string | null;
   /** The docked panel, or `null` with the dock closed. */
   open: DockPanelId | null;
-  /** The dock's stored width (px). */
+  /** The docked panel's stored width (px). */
   width: number;
+  /** The panels the rail offers (default: all of them). */
+  panels?: readonly DockPanelId[];
   /**
    * Drawn over the tab content (the row is its containing block): a phone's
    * section, full screen (`MobileSections.tsx`).
@@ -61,6 +65,7 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
   projectPath,
   open,
   width,
+  panels,
   overlay,
   isolateContent = false
 }) => {
@@ -84,7 +89,7 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
         />
       ) : null}
       {projectPath !== null ? (
-        <RightRail open={open} onToggle={toggleRightRailPanel} />
+        <RightRail open={open} {...(panels ? { panels } : {})} onToggle={toggleRightRailPanel} />
       ) : null}
     </div>
   );
@@ -102,12 +107,17 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
   const openProjectPath = useOpenProjectPath();
   const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
   const projectPath = knowledgeOpen ? null : openProjectPath;
-  const { open, width } = useRightRailState();
+  const railState = useRightRailState();
+  // Devices: the Device panel exists only while its plugin is on.
+  const devicesOn = useDevicesEnabled();
+  const panels = React.useMemo(() => visibleRailPanels(RIGHT_RAIL_PANEL_ORDER, { devices: devicesOn }), [devicesOn]);
+  const open = railState.open !== null && panels.includes(railState.open) ? railState.open : null;
   return (
     <RightRailRow
       projectPath={isDesktop ? projectPath : null}
       open={open}
-      width={width}
+      width={open ? rightRailWidthOf(railState, open) : railState.width}
+      panels={panels}
       overlay={<MobileSectionOverlay projectPath={isDesktop ? null : projectPath} />}
       isolateContent={!isDesktop}
     >

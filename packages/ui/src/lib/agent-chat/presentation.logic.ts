@@ -571,6 +571,12 @@ const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   knowledge_collections: "Listed knowledge collections",
   knowledge_worker_next_task: "Took an indexing task",
   knowledge_worker_submit: "Submitted an indexing answer",
+  // devices (Device simulators plugin; a row's own words — "Tapped @e7" — come from its deviceRef later)
+  list_devices: "Listed devices",
+  open_device: "Opened a device",
+  device_action: "Used a device",
+  device_install: "Installed a build on a device",
+  close_device: "Closed a device",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
   // Older builds' toolset request (every chat tool is on now).
