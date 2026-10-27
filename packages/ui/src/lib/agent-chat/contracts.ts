@@ -40,6 +40,7 @@ import type {
   ToolApprovalReference
 } from "@orquester/api/agent-chat";
 import type { InterruptCause } from "@orquester/api/agent-chat";
+import type { DeviceToolReference } from "@orquester/api";
 import type { DelegateChildRef } from "./delegates.logic";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -333,6 +334,13 @@ export interface WorkLogEntry {
    * from its result's `threadRef` — the row links to it.
    */
   threadLink?: ThreadToolReference;
+  /**
+   * The device a device session tool opened or drove (devices spec §10.3:
+   * `open_device`, `device_action`, …), from its result's `deviceRef` — with
+   * the action and its summary when known. The row offers "Show device" and,
+   * for a kept screenshot, its thumbnail.
+   */
+  deviceLink?: DeviceToolReference;
   /**
    * How the Orquester approval card (or grant) that gated this call ended
    * (unified MCP §7.3, the row's `toolApproval` reference) — no arguments, no

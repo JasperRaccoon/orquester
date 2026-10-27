@@ -45,6 +45,9 @@ import {
   toolApprovalReferenceOfActivityData
 } from "@orquester/api/agent-chat";
 
+import { deviceToolReferenceOfActivityData } from "@orquester/api";
+
+import { completeDeviceReference } from "../devices/chat-rows.logic";
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
 import { goalMarkerOf, goalUpdateOf, isHiddenGoalActivity } from "./goal.logic";
 import { normalizeCompactToolLabel } from "./presentation.logic";
@@ -266,6 +269,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       const threadLink = threadToolReferenceOfActivityData(data);
       if (threadLink) {
         entry.threadLink = threadLink;
+      }
+      // Devices §10.3: the device the call opened or drove ("Show device", a
+      // screenshot's thumbnail), with the action's words a live row still has.
+      const deviceLink = deviceToolReferenceOfActivityData(data);
+      if (deviceLink && data) {
+        entry.deviceLink = completeDeviceReference(deviceLink, data);
       }
       const toolApproval = toolApprovalReferenceOfActivityData(data);
       if (toolApproval) {
