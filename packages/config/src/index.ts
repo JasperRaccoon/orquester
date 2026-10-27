@@ -200,6 +200,11 @@ export function knowledgeStatePath(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "state.json");
 }
 
+/** The automatic concept merges overlaid on myKG's graph (`knowledge-concept-merges.ts`). */
+export function knowledgeConceptMergesPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "concept-merges.json");
+}
+
 export function knowledgeRuntimeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "runtime");
 }
@@ -2898,4 +2903,5 @@ export * from "./tooling.ts";
 // boxes:
 export * from "./box-mcp.ts";
 export * from "./knowledge-store.ts";
+export * from "./knowledge-concept-merges.ts";
 export * from "./devices.ts";

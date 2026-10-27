@@ -20,6 +20,19 @@ import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibil
 export interface GraphConcept extends KnowledgeConcept {
   /** Entry ids from the node's `source_files` (only files named `<entryId>.md`). */
   entryIds: readonly string[];
+  /**
+   * Set on a concept other concepts were merged into (phase 2 spec, "Concept merges"): its own
+   * aliases, and each folded concept with the entries it came from (so a caller only sees the ones
+   * a visible entry backs). `aliases` and `entryIds` above are the unions.
+   */
+  merge?: { id: string; ownAliases: readonly string[]; members: readonly GraphMergedConcept[] };
+}
+
+/** A concept folded into another by a merge. */
+export interface GraphMergedConcept {
+  ref: KnowledgeConceptRef;
+  aliases: readonly string[];
+  entryIds: readonly string[];
 }
 
 /** An edge as held in memory. */
@@ -30,6 +43,37 @@ export interface GraphEdge extends KnowledgeEdge {
    * never visible.
    */
   entryIds: readonly string[] | null;
+  /** myKG's `context` attribute of a `contradicts` edge (what the two disagree on); absent otherwise. */
+  context?: string;
+}
+
+/**
+ * A merge the overlay applies (`concept-merges.json`, phase 2 spec "Concept merges"): `merged`
+ * concepts of `type` folded into `into`.
+ */
+export interface ConceptMergeOverlay {
+  id: string;
+  type: string;
+  into: string;
+  merged: readonly string[];
+  similarity: number;
+  createdAt: string;
+}
+
+/** A merge in effect on the current graph: only its concepts that exist (at least one folded one). */
+export interface EffectiveConceptMerge {
+  id: string;
+  type: string;
+  into: KnowledgeConceptRef;
+  merged: KnowledgeConceptRef[];
+  similarity: number;
+  createdAt: string;
+}
+
+/** myKG's graph as read, before the merge overlay: valid concepts and edges only. */
+interface BaseGraph {
+  concepts: ReadonlyMap<string, GraphConcept>;
+  edges: readonly GraphEdge[];
 }
 
 interface Snapshot {
@@ -38,9 +82,27 @@ interface Snapshot {
   adjacency: ReadonlyMap<string, readonly GraphEdge[]>;
   entryConcepts: ReadonlyMap<string, readonly string[]>;
   bm25: Bm25Index;
+  /** Folded concept id → the concept it was merged into. */
+  mergedInto: ReadonlyMap<string, string>;
+  merges: readonly EffectiveConceptMerge[];
 }
 
-const EMPTY: Snapshot = { concepts: new Map(), edges: [], adjacency: new Map(), entryConcepts: new Map(), bm25: new Bm25Index() };
+const EMPTY_BASE: BaseGraph = { concepts: new Map(), edges: [] };
+const EMPTY: Snapshot = {
+  concepts: new Map(),
+  edges: [],
+  adjacency: new Map(),
+  entryConcepts: new Map(),
+  bm25: new Bm25Index(),
+  mergedInto: new Map(),
+  merges: []
+};
+
+/** Similar concepts of a concept (by meaning), best first; ids of concepts in the current graph. */
+export type SimilarConceptsProvider = (conceptId: string) => readonly { id: string; similarity: number }[];
+
+/** Similar concepts a concept detail lists. */
+const SIMILAR_CONCEPTS_LIMIT = 5;
 
 /** `ke_xxx.md`, `input/ke_xxx.md`, `session_a/ke_xxx.md`, `ke_xxx.md::3` → `ke_xxx`. */
 function entryIdOfSourceFile(sourceFile: string): string | null {
@@ -124,7 +186,12 @@ function parseEdge(raw: unknown): GraphEdge | null {
   if (typeof edge.id !== "string" || typeof edge.type !== "string" || typeof edge.from !== "string" || typeof edge.to !== "string") {
     return null;
   }
-  return { id: edge.id, type: edge.type, from: edge.from, to: edge.to, confidence: confidenceOf(edge.confidence), entryIds: entryIdsOf(edge.source_files) };
+  const parsed: GraphEdge = { id: edge.id, type: edge.type, from: edge.from, to: edge.to, confidence: confidenceOf(edge.confidence), entryIds: entryIdsOf(edge.source_files) };
+  if (edge.type === "contradicts" && edge.attributes !== null && typeof edge.attributes === "object") {
+    const context = attributeOf((edge.attributes as Record<string, unknown>).context);
+    if (context) parsed.context = context.value;
+  }
+  return parsed;
 }
 
 async function readJsonl(path: string, logger: KnowledgeLogger, what: string): Promise<unknown[]> {
@@ -150,8 +217,8 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-/** Build a snapshot from parsed records. */
-function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]): { snapshot: Snapshot; skipped: number } {
+/** myKG's records parsed: the valid concepts and the edges between them. */
+function parseGraph(nodes: readonly unknown[], edges: readonly unknown[]): { base: BaseGraph; skipped: number } {
   let skipped = 0;
   const concepts = new Map<string, GraphConcept>();
   for (const raw of nodes) {
@@ -163,7 +230,6 @@ function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]
     concepts.set(concept.id, concept);
   }
   const edgeList: GraphEdge[] = [];
-  const adjacency = new Map<string, GraphEdge[]>();
   const seen = new Set<string>();
   for (const raw of edges) {
     const edge = parseEdge(raw);
@@ -174,6 +240,118 @@ function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]
     }
     seen.add(edge.id);
     edgeList.push(edge);
+  }
+  return { base: { concepts, edges: edgeList }, skipped };
+}
+
+function unionIds(lists: readonly (readonly string[])[]): string[] {
+  const out = new Set<string>();
+  for (const list of lists) for (const id of list) out.add(id);
+  return [...out];
+}
+
+/** Names folded in become aliases of the kept concept: case-insensitively distinct, never its own name. */
+function unionAliases(name: string, lists: readonly (readonly string[])[]): string[] {
+  const seen = new Set([name.trim().toLowerCase()]);
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const alias of list) {
+      const key = alias.trim().toLowerCase();
+      if (key.length === 0 || seen.has(key)) continue;
+      seen.add(key);
+      out.push(alias);
+    }
+  }
+  return out;
+}
+
+/**
+ * The merge overlay over myKG's graph (phase 2 spec, "Concept merges"): each merge whose kept
+ * concept exists folds in its other concepts that exist (same type, not claimed by an earlier
+ * merge). The kept concept gets the union of their entries, their names and aliases as aliases,
+ * and its edges; edges are re-pointed, and self-loops and repeated (type, from, to) edges dropped.
+ */
+function applyConceptMerges(
+  base: BaseGraph,
+  merges: readonly ConceptMergeOverlay[]
+): { concepts: Map<string, GraphConcept>; edges: GraphEdge[]; mergedInto: Map<string, string>; effective: EffectiveConceptMerge[] } {
+  const claimed = new Set<string>();
+  const mergedInto = new Map<string, string>();
+  const effective: EffectiveConceptMerge[] = [];
+  const replaced = new Map<string, GraphConcept>();
+  for (const merge of merges) {
+    const keep = base.concepts.get(merge.into);
+    if (!keep || keep.type !== merge.type || claimed.has(keep.id)) continue;
+    const members: GraphConcept[] = [];
+    for (const id of merge.merged) {
+      const member = base.concepts.get(id);
+      if (!member || member.type !== merge.type || claimed.has(id) || id === keep.id || members.includes(member)) continue;
+      members.push(member);
+    }
+    if (members.length === 0) continue;
+    claimed.add(keep.id);
+    for (const member of members) {
+      claimed.add(member.id);
+      mergedInto.set(member.id, keep.id);
+    }
+    const attributes: GraphConcept["attributes"] = {};
+    for (const source of [...members].reverse()) Object.assign(attributes, source.attributes);
+    Object.assign(attributes, keep.attributes);
+    replaced.set(keep.id, {
+      ...keep,
+      confidence: Math.max(keep.confidence, ...members.map((m) => m.confidence)),
+      description: keep.description ?? members.find((m) => m.description !== null)?.description ?? null,
+      aliases: unionAliases(keep.name, [keep.aliases, ...members.flatMap((m) => [[m.name], m.aliases])]),
+      attributes,
+      entryIds: unionIds([keep.entryIds, ...members.map((m) => m.entryIds)]),
+      merge: {
+        id: merge.id,
+        ownAliases: keep.aliases,
+        members: members.map((m) => ({ ref: toRef(m), aliases: m.aliases, entryIds: m.entryIds }))
+      }
+    });
+    effective.push({
+      id: merge.id,
+      type: merge.type,
+      into: toRef(keep),
+      merged: members.map(toRef),
+      similarity: merge.similarity,
+      createdAt: merge.createdAt
+    });
+  }
+  if (effective.length === 0) return { concepts: new Map(base.concepts), edges: [...base.edges], mergedInto, effective };
+  const concepts = new Map<string, GraphConcept>();
+  for (const [id, concept] of base.concepts) {
+    if (mergedInto.has(id)) continue;
+    concepts.set(id, replaced.get(id) ?? concept);
+  }
+  const edges: GraphEdge[] = [];
+  const byKey = new Map<string, GraphEdge>();
+  for (const edge of base.edges) {
+    const from = mergedInto.get(edge.from) ?? edge.from;
+    const to = mergedInto.get(edge.to) ?? edge.to;
+    if (from === to) continue;
+    const key = `${edge.type}\u0000${from}\u0000${to}`;
+    const same = byKey.get(key);
+    if (same) {
+      // One edge for the pair: the first's id, every source (none at all wins: visible iff both ends are).
+      same.entryIds = same.entryIds === null || edge.entryIds === null ? null : unionIds([same.entryIds, edge.entryIds]);
+      same.confidence = Math.max(same.confidence, edge.confidence);
+      if (same.context === undefined && edge.context !== undefined) same.context = edge.context;
+      continue;
+    }
+    const next: GraphEdge = from === edge.from && to === edge.to ? { ...edge } : { ...edge, from, to };
+    byKey.set(key, next);
+    edges.push(next);
+  }
+  return { concepts, edges, mergedInto, effective };
+}
+
+/** Build a snapshot from myKG's parsed graph and the merge overlay. */
+function buildGraphSnapshot(base: BaseGraph, merges: readonly ConceptMergeOverlay[]): Snapshot {
+  const { concepts, edges: edgeList, mergedInto, effective } = applyConceptMerges(base, merges);
+  const adjacency = new Map<string, GraphEdge[]>();
+  for (const edge of edgeList) {
     for (const end of [edge.from, edge.to]) {
       let list = adjacency.get(end);
       if (!list) adjacency.set(end, (list = []));
@@ -195,7 +373,7 @@ function buildGraphSnapshot(nodes: readonly unknown[], edges: readonly unknown[]
       { tokens: tokenize(concept.description ?? ""), weight: 1 }
     ]);
   }
-  return { snapshot: { concepts, edges: edgeList, adjacency, entryConcepts, bm25 }, skipped };
+  return { concepts, edges: edgeList, adjacency, entryConcepts, bm25, mergedInto, merges: effective };
 }
 
 /**
@@ -305,17 +483,31 @@ export interface KnowledgeConceptView {
   /** Visible entries behind it, in the graph's order. */
   entryIds: string[];
   neighbors: { edge: KnowledgeEdge; concept: KnowledgeConceptRef }[];
+  /** Concepts merged into it that a visible entry backs. */
+  mergedFrom: KnowledgeConceptRef[];
+  /** Visible concepts close in meaning (not merged with it), best first, up to 5. */
+  similarConcepts: { concept: KnowledgeConceptRef; similarity: number }[];
 }
 
 /**
  * myKG's graph in memory (spec "Querying"), with every query scoped while it walks: hidden
  * entries never make a concept, an edge or a path visible. `load` swaps in a new snapshot
  * atomically; a query holds the snapshot it started with.
+ *
+ * The concept-merge overlay (phase 2 spec, "Concept merges") is applied to every load, and
+ * {@link setConceptMerges} re-applies a changed one over the graph last loaded.
  */
 export class KnowledgeGraph implements KnowledgeGraphPort {
   private snapshot: Snapshot = EMPTY;
-  /** Numbers loads in the order they start; `applied` is the current snapshot's. */
-  private generation = 0;
+  /** myKG's graph as last loaded, before the overlay. */
+  private base: BaseGraph = EMPTY_BASE;
+  private merges: readonly ConceptMergeOverlay[] = [];
+  private similarProvider: SimilarConceptsProvider | null = null;
+  private readonly loadListeners = new Set<() => void>();
+  /** Numbers loads in the order they start; `appliedLoad` is the current base graph's. */
+  private loadSeq = 0;
+  private appliedLoad = 0;
+  /** Moves with every snapshot swapped in (a load, or the overlay re-applied). */
   private applied = 0;
   private readonly getMeta: (id: string) => KnowledgeEntryMeta | null;
   private readonly logger: KnowledgeLogger;
@@ -327,21 +519,74 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
 
   /** Reads `nodes.jsonl` / `edges.jsonl` from `outputDir` (or its `output/`). Throws when there is no nodes file. */
   async load(outputDir: string): Promise<{ nodes: number; edges: number }> {
-    const generation = ++this.generation;
+    const seq = ++this.loadSeq;
     const dir = (await exists(join(outputDir, "nodes.jsonl"))) ? outputDir : join(outputDir, "output");
     const nodesPath = join(dir, "nodes.jsonl");
     const edgesPath = join(dir, "edges.jsonl");
     const nodes = await readJsonl(nodesPath, this.logger, "nodes.jsonl");
     const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl") : [];
-    const { snapshot, skipped } = buildGraphSnapshot(nodes, edges);
+    const { base, skipped } = parseGraph(nodes, edges);
     if (skipped > 0) this.logger.warn(`knowledge: skipped ${skipped} graph record(s) (unreadable, repeated, or an edge to an unknown concept)`);
-    if (generation < this.applied) {
+    if (seq < this.appliedLoad) {
       // A load that started later has already swapped in the newer graph.
-      return { nodes: snapshot.concepts.size, edges: snapshot.edges.length };
+      return { nodes: base.concepts.size, edges: base.edges.length };
     }
-    this.snapshot = snapshot;
-    this.applied = generation;
+    this.base = base;
+    this.appliedLoad = seq;
+    this.swap(buildGraphSnapshot(base, this.merges));
+    for (const listener of this.loadListeners) {
+      try {
+        listener();
+      } catch (error) {
+        this.logger.warn(`knowledge: a graph load listener failed (${(error as Error).message})`);
+      }
+    }
     return this.counts();
+  }
+
+  private swap(snapshot: Snapshot): void {
+    this.snapshot = snapshot;
+    this.applied += 1;
+  }
+
+  /**
+   * Replace the merge overlay and re-apply it over the graph last loaded now (the revision moves).
+   * Applied in order: a concept already claimed by an earlier merge is left out of a later one.
+   */
+  setConceptMerges(merges: readonly ConceptMergeOverlay[]): void {
+    this.merges = [...merges];
+    this.swap(buildGraphSnapshot(this.base, this.merges));
+  }
+
+  /** The merges in effect on the current graph. */
+  conceptMerges(): readonly EffectiveConceptMerge[] {
+    return this.snapshot.merges;
+  }
+
+  /** myKG's concepts as last loaded, before the merge overlay (what concept vectors and merges are computed over). */
+  baseConcepts(): readonly GraphConcept[] {
+    return [...this.base.concepts.values()];
+  }
+
+  /** Moves with every load swapped in (not with the overlay). */
+  loadRevision(): number {
+    return this.appliedLoad;
+  }
+
+  /** Called after every load swapped in a graph. */
+  onLoad(listener: () => void): () => void {
+    this.loadListeners.add(listener);
+    return () => this.loadListeners.delete(listener);
+  }
+
+  /** Where concept details read similar concepts from (null: none). */
+  setSimilarConcepts(provider: SimilarConceptsProvider | null): void {
+    this.similarProvider = provider;
+  }
+
+  /** The concept a folded concept was merged into, or the id itself. */
+  canonicalConceptId(id: string): string {
+    return this.snapshot.mergedInto.get(id) ?? id;
   }
 
   counts(): { nodes: number; edges: number } {
@@ -354,7 +599,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     return types;
   }
 
-  /** Moves whenever a load or replace swaps in a snapshot (even one of the same size). */
+  /** Moves whenever a load or {@link setConceptMerges} swaps in a snapshot (even one of the same size). */
   revision(): number {
     return this.applied;
   }
@@ -385,8 +630,9 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
         frontier = [...(view.snapshot.entryConcepts.get(options.focus) ?? [])].filter((id) => view.concept(id));
         hops = 1; // the entry's own concepts are the first hop
       } else {
-        if (!view.concept(options.focus)) return null;
-        frontier = [options.focus];
+        const focus = view.snapshot.mergedInto.get(options.focus) ?? options.focus;
+        if (!view.concept(focus)) return null;
+        frontier = [focus];
         hops = 0;
       }
       for (const id of frontier) pinned.add(id);
@@ -433,21 +679,55 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     };
   }
 
-  /** A visible concept with its visible collections, entries and neighbours; null when hidden or unknown. */
-  concept(id: string, scope: KnowledgeScope): KnowledgeConceptView | null {
+  /**
+   * A visible concept with its visible collections, entries and neighbours, the concepts merged
+   * into it and similar ones; null when hidden or unknown. The id of a concept merged into another
+   * answers that one (links to it keep working).
+   */
+  concept(requested: string, scope: KnowledgeScope): KnowledgeConceptView | null {
     const view = this.view(scope);
+    const id = view.snapshot.mergedInto.get(requested) ?? requested;
     const concept = view.snapshot.concepts.get(id);
     if (!concept || !view.concept(id)) return null;
-    const { entryIds: _entries, ...wire } = concept;
+    const { entryIds: _entries, merge, ...wire } = concept;
+    // A folded concept shows (as "merged from" and as aliases) only when a visible entry backs it.
+    const members = (merge?.members ?? []).filter((member) => member.entryIds.some((entryId) => view.entry(entryId)));
+    const aliases = merge ? unionAliases(concept.name, [merge.ownAliases, ...members.flatMap((m) => [[m.ref.name], m.aliases])]) : [...wire.aliases];
+    const similarConcepts: KnowledgeConceptView["similarConcepts"] = [];
+    for (const hit of this.similarProvider?.(id) ?? []) {
+      if (similarConcepts.length >= SIMILAR_CONCEPTS_LIMIT) break;
+      const other = view.snapshot.concepts.get(hit.id);
+      if (!other || other.id === id || !view.concept(other.id) || similarConcepts.some((s) => s.concept.id === other.id)) continue;
+      similarConcepts.push({ concept: toRef(other), similarity: hit.similarity });
+    }
     return {
-      concept: { ...wire, aliases: [...wire.aliases], attributes: { ...wire.attributes } },
+      concept: { ...wire, aliases, attributes: { ...wire.attributes } },
       collections: view.collectionsOf(id),
       entryIds: view.entriesOf(id),
       neighbors: view.visibleEdges(id).map((edge) => ({
         edge: toEdge(edge),
         concept: toRef(view.snapshot.concepts.get(edge.from === id ? edge.to : edge.from)!)
-      }))
+      })),
+      mergedFrom: members.map((member) => ({ ...member.ref })),
+      similarConcepts
     };
+  }
+
+  /**
+   * The merges in effect whose kept concept the scope can see, each with only its folded concepts
+   * a visible entry backs (a merge with none of those is left out).
+   */
+  visibleConceptMerges(scope: KnowledgeScope): EffectiveConceptMerge[] {
+    const view = this.view(scope);
+    const out: EffectiveConceptMerge[] = [];
+    for (const merge of view.snapshot.merges) {
+      const concept = view.snapshot.concepts.get(merge.into.id);
+      if (!concept?.merge || !view.concept(concept.id)) continue;
+      const visible = new Set(concept.merge.members.filter((m) => m.entryIds.some((entryId) => view.entry(entryId))).map((m) => m.ref.id));
+      const merged = merge.merged.filter((ref) => visible.has(ref.id));
+      if (merged.length > 0) out.push({ ...merge, into: { ...merge.into }, merged: merged.map((ref) => ({ ...ref })) });
+    }
+    return out;
   }
 
   conceptRef(id: string): (KnowledgeConceptRef & { description: string | null }) | null {

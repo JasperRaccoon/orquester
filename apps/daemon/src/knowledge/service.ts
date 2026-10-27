@@ -22,6 +22,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   KNOWLEDGE_CHANGED_EVENT,
@@ -32,7 +33,7 @@ import {
   type KnowledgeStatus,
   type SessionOwner
 } from "@orquester/api";
-import { knowledgeIndexDir } from "@orquester/config";
+import { knowledgeConceptMergesPath, knowledgeIndexDir } from "@orquester/config";
 
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
@@ -42,6 +43,7 @@ import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linkin
 import type { KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
+import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
@@ -120,6 +122,8 @@ interface Opening {
   search: KnowledgeSearch;
   embedders: KnowledgeEmbedderSource & { dispose?(): Promise<void> };
   linking: KnowledgeLinking;
+  /** Automatic concept merges over the graph (phase 2 spec, "Concept merges"). */
+  conceptMerges: KnowledgeConceptMerges;
   unsubscribe: (() => void)[];
 }
 
@@ -280,6 +284,7 @@ export class KnowledgeService {
     await this.chain;
     await this.profileChain;
     await this.opening?.search.idle();
+    await this.opening?.conceptMerges.idle();
   }
 
   /** The linking module (null until the knowledge base opened). */
@@ -329,7 +334,19 @@ export class KnowledgeService {
     // Text indexing runs in the background; queries wait for it.
     void search.start().catch((error) => this.logger.warn("knowledge: indexing the entries failed", error));
     const linking = this.buildLinking(store, graph);
-    const opening: Opening = { store, graph, search, embedders, linking, unsubscribe: [] };
+    // The merge overlay is read and applied before linking loads the graph; concept vectors and
+    // merge planning follow every load in the background.
+    const conceptMerges = new KnowledgeConceptMerges({
+      graph,
+      embedders,
+      path: knowledgeConceptMergesPath(appdir),
+      vectorsDir: join(knowledgeIndexDir(appdir), "concepts"),
+      logger: this.logger,
+      ...(this.options.now ? { now: this.options.now } : {})
+    });
+    await conceptMerges.start();
+    const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, unsubscribe: [] };
+    opening.unsubscribe.push(conceptMerges.onChange(() => this.linkingMoved()));
     opening.unsubscribe.push(
       store.onChange((change) => {
         try {
@@ -386,6 +403,7 @@ export class KnowledgeService {
     this.opening = null;
     for (const unsubscribe of opening.unsubscribe.splice(0)) unsubscribe();
     await opening.linking.stop().catch((error: unknown) => this.logger.warn("knowledge: stopping linking failed", error));
+    await opening.conceptMerges.stop().catch((error: unknown) => this.logger.warn("knowledge: stopping concept merges failed", error));
     await opening.search.stop().catch((error: unknown) => this.logger.warn("knowledge: stopping search failed", error));
     await opening.store.idle();
     await opening.embedders.dispose?.().catch((error: unknown) => this.logger.warn("knowledge: releasing the embedder failed", error));
@@ -435,7 +453,8 @@ export class KnowledgeService {
       failedEntries: metas.filter((meta) => meta.linkState === "failed").length,
       concepts: graph.nodes,
       edges: graph.edges,
-      collections: opening?.store.listCollections().length ?? 0
+      collections: opening?.store.listCollections().length ?? 0,
+      conceptMerges: opening?.conceptMerges.count() ?? 0
     };
   }
 
@@ -586,12 +605,19 @@ export class KnowledgeService {
       linking: { status: () => this.linkingStatus() },
       publisher: {
         publish: (channel, type, payload) => {
+          // A route that moved the graph (a concept merge undone) announced it: not again; the status counts it.
+          const graphMoved = type === KNOWLEDGE_CHANGED_EVENT && (payload as KnowledgeChangedEvent | null)?.graph === true;
+          if (graphMoved) this.graphRevision = this.opening?.graph.revision() ?? this.graphRevision;
           this.options.publisher.publish(channel, type, payload);
+          if (graphMoved) this.publishStatus();
           if (type === KNOWLEDGE_CHANGED_EVENT && (payload as KnowledgeChangedEvent | null)?.collections === true) this.collectionsMaybeChanged();
         }
       },
       profilesForCollection: () => this.profilesForCollection(),
-      logger
+      logger,
+      get conceptMerges() {
+        return service.opening?.conceptMerges ?? null;
+      }
     });
     // Linking's routes read the module of the moment (none before the knowledge base opened).
     const current = (): KnowledgeLinkingRouteService => this.opening?.linking ?? new NoLinking(this.settings, "The knowledge base is not open.");
