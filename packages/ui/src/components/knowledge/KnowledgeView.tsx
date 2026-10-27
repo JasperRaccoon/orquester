@@ -21,7 +21,7 @@ import { KnowledgeListView, type ListCollection } from "./KnowledgeListView";
 import { KnowledgePanel, type KnowledgeSelection } from "./KnowledgePanel";
 import { KnowledgeStatusBar } from "./KnowledgeStatusBar";
 import { KnowledgeCollectionDialog } from "./KnowledgeCollectionDialog";
-import { EMPTY_KNOWLEDGE_QUERY, type KnowledgeQuery } from "./query-state";
+import { EMPTY_KNOWLEDGE_QUERY, type KnowledgeQuery, findSimilarQuery } from "./query-state";
 import type { KnowledgeGraphCanvasProps } from "./KnowledgeGraphCanvas";
 
 const LazyCanvas = React.lazy(() => import("./KnowledgeGraphCanvas"));
@@ -210,6 +210,10 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onSelect={select}
                 entryConceptIds={entryConceptIds}
                 onShowList={() => setView("list")}
+                query={query}
+                onQueryChange={setQuery}
+                // The graph's one collection chip, when exactly one is on, narrows the list the same way.
+                onOpenInList={() => openList(query, graphFilter.length === 1 ? graphFilter[0] : "all")}
                 active={active}
                 Canvas={Canvas}
                 toolbarEnd={toggle}
@@ -240,6 +244,7 @@ export const KnowledgeView: React.FC<KnowledgeViewProps> = ({ focus, active, Can
                 onClose={() => select(null)}
                 onBack={history.length > 0 ? back : undefined}
                 onItem={setPanelItem}
+                onFindSimilar={(id) => openList(findSimilarQuery(id), "all")}
               />
             </div>
           )}

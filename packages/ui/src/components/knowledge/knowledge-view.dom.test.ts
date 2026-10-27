@@ -357,6 +357,25 @@ describe("the Knowledge view", () => {
     assert.equal(doc().querySelector("aside"), null);
   });
 
+  it("the panel's More like this opens the List view searching for entries like that one", async () => {
+    const searches: unknown[] = [];
+    await show({
+      focus: { kind: "entry", id: "ke_aaaaaaaaaaaa", nonce: 1 },
+      api: { searchKnowledge: async (req: unknown) => (searches.push(req), { hits: [], searched: [], total: 0, nextCursor: null }) }
+    });
+    assert.ok(doc().querySelector('[role="radiogroup"][aria-label="View"] button[aria-checked="true"]')?.textContent !== "List", "starts outside the List view");
+    await click(buttonNamed("More like this"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    await settle();
+    assert.equal(doc().querySelector('[role="radiogroup"][aria-label="View"] button[aria-checked="true"]')?.textContent, "List");
+    assert.ok(
+      searches.some((req) => (req as { similarTo?: string[] }).similarTo?.[0] === "ke_aaaaaaaaaaaa"),
+      `a search for entries like it (${JSON.stringify(searches)})`
+    );
+  });
+
   const showList = async () =>
     click([...doc().querySelectorAll('[role="radiogroup"][aria-label="View"] button')].find((b) => b.textContent === "List")!);
 
