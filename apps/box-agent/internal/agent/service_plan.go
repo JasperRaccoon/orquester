@@ -387,7 +387,9 @@ type launchAgentData struct {
 }
 
 // launchAgentPlist is a per-user LaunchAgent, not a LaunchDaemon: it runs in the user's Aqua
-// session, which the iOS Simulator and ScreenCaptureKit need.
+// session, which the iOS Simulator and ScreenCaptureKit need. KeepAlive restarts it after a
+// failure only (as the systemd units' Restart=on-failure): orq-agent exits 0 when it is done for
+// good (shut down, box destroyed), and launchd must not start it again every ten seconds.
 var launchAgentPlist = template.Must(template.New("plist").Funcs(template.FuncMap{"xml": xmlText}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -403,7 +405,10 @@ var launchAgentPlist = template.Must(template.New("plist").Funcs(template.FuncMa
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardOutPath</key>
