@@ -692,7 +692,9 @@ export class DeviceService implements DeviceToolsPort {
   /** A viewer is watching (the stream relay calls it while connected): the idle clock restarts. */
   viewerActive(leaseId: string): void {
     const lease = this.leases.find((entry) => entry.id === leaseId);
-    if (lease) this.replace(touchLease(lease, this.iso()));
+    if (!lease) return;
+    this.replace(touchLease(lease, this.iso()));
+    if (lease.deviceId !== null) this.hosts.get(lease.hostId)?.viewerActive?.(lease.deviceId);
   }
 
   /** The lease on a device, for the proxy's view checks: null when none is live. */
