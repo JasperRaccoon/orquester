@@ -19,6 +19,7 @@ import {
   type DeviceAccessorySource,
 } from "./model.ts";
 import { createImportedPhoneScene, loadDeviceModel } from "./modelScene.ts";
+import { createImportedFoldScene, foldRigHinge } from "./foldModelScene.ts";
 import { createPhoneScene, phoneDisplayLayout } from "./phoneScene.ts";
 import {
   createAndroidFoldScene,
@@ -122,7 +123,10 @@ export function createPhoneViewer(options: {
     const eased = progress * progress * (3 - 2 * progress);
     return foldTurn.from + (foldTurn.to - foldTurn.from) * eased;
   };
-  let phone: ReturnType<typeof createPhoneScene> | ReturnType<typeof createAndroidFoldScene> =
+  let phone:
+    | ReturnType<typeof createPhoneScene>
+    | ReturnType<typeof createAndroidFoldScene>
+    | ReturnType<typeof createImportedFoldScene> =
     foldAngle !== null && profile.id.startsWith("android")
       ? createFoldScene(foldAngle)
       : createPhoneScene(texture, layout, profile);
@@ -292,11 +296,19 @@ export function createPhoneViewer(options: {
       const next = disposed
         ? null
         : model
-          ? createImportedPhoneScene(model.asset, texture, layout)
+          ? foldRigHinge(model.asset)
+            ? // A foldable model without a reported hinge angle shows open.
+              createImportedFoldScene(model.asset, texture, layout, foldAngle ?? 180)
+            : createImportedPhoneScene(model.asset, texture, layout)
           : foldAngle !== null && profile.id.startsWith("android")
             ? createFoldScene(foldAngle)
             : createPhoneScene(texture, layout, profile);
       foldTurn = null;
+      if (next && ("setAngle" in next || "setAngle" in phone)) {
+        // Foldables keep their frame upright, like the procedural fold.
+        orientationTurn = null;
+        orientationAngle = "setAngle" in next ? 0 : layout.rotation;
+      }
       scene.remove(phone.root);
       phone.dispose();
       imported = model;
@@ -355,8 +367,9 @@ export function createPhoneViewer(options: {
       if (disposed || next === foldAngle) return;
       const previous = foldAngle;
       foldAngle = next;
-      if (imported) return;
       if (next === null || !("setAngle" in phone)) {
+        // A single-body model has no hinge; a foldable model holds its pose without an angle.
+        if (imported) return;
         scene.remove(phone.root);
         phone.dispose();
         phone = next === null ? createPhoneScene(texture, layout, profile) : createFoldScene(next);
@@ -367,7 +380,8 @@ export function createPhoneViewer(options: {
         applyPose();
         fit(true);
       } else {
-        const from = visibleFoldAngle(previous ?? next);
+        // A foldable model installed without an angle shows open.
+        const from = visibleFoldAngle(previous ?? (imported ? 180 : next));
         if (reducedMotion()) {
           foldTurn = null;
           phone.setAngle(next);

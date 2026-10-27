@@ -16,6 +16,11 @@ import ipadPro13M5 from "./ipad-pro-13-m5.glb?url";
 import ipadAir from "./ipad-air.glb?url";
 import ipadA16 from "./ipad-a16.glb?url";
 import magicKeyboard from "./ipad-pro-13-m5-magic-keyboard.glb?url";
+import galaxyS26 from "./galaxy-s26.glb?url";
+import galaxyS26Plus from "./galaxy-s26-plus.glb?url";
+import galaxyS26Ultra from "./galaxy-s26-ultra.glb?url";
+import galaxyZFold8 from "./galaxy-z-fold8.glb?url";
+import galaxyZFlip8 from "./galaxy-z-flip8.glb?url";
 
 const urls: Record<DeviceModelId, string> = {
   "iphone-duo": iphoneDuo,
@@ -27,6 +32,11 @@ const urls: Record<DeviceModelId, string> = {
   "ipad-pro-13-m5": ipadPro13M5,
   "ipad-air": ipadAir,
   "ipad-a16": ipadA16,
+  "galaxy-s26": galaxyS26,
+  "galaxy-s26-plus": galaxyS26Plus,
+  "galaxy-s26-ultra": galaxyS26Ultra,
+  "galaxy-z-fold8": galaxyZFold8,
+  "galaxy-z-flip8": galaxyZFlip8,
 };
 
 export function deviceModelSource(id: DeviceModelId): DeviceModelSource {

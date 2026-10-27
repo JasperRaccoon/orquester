@@ -1,8 +1,17 @@
 // Adapted from T3 Code (MIT, Copyright 2026 T3 Tools Inc.): packages/client-runtime/src/device/phoneViewer.test.ts
 import assert from "node:assert/strict";
 import { afterEach, it, mock } from "node:test";
-import { Group, Quaternion, type Object3D, type PerspectiveCamera, type Scene } from "three";
+import {
+  Group,
+  Mesh,
+  PlaneGeometry,
+  Quaternion,
+  type Object3D,
+  type PerspectiveCamera,
+  type Scene,
+} from "three";
 import { createPhoneViewer } from "./phoneViewer.ts";
+import { createFoldRig } from "./foldRig.testing.ts";
 import { type DeviceShapeProfile } from "./shapeProfile.ts";
 import type { DeviceRenderer } from "./types.ts";
 
@@ -136,5 +145,43 @@ it("rejects incompatible accessories and releases an accessory that finishes aft
   await Promise.resolve();
   assert.equal(asset.parent, null);
   assert.equal(dispose.mock.callCount(), 1);
+  viewer.dispose();
+});
+
+it("folds a foldable model to the reported hinge angle; a slab model ignores it", async () => {
+  const { viewer, draw, state, onUnavailable } = fixture();
+  viewer.setModel({ id: "galaxy-z-fold8", url: "/fold.glb" });
+  const asset = createFoldRig("vertical");
+  models.pending[0]!.resolve({ asset, dispose: () => {} });
+  await Promise.resolve();
+  draw();
+  const leaf = asset.getObjectByName("left-half")!;
+  // No angle reported yet: shown open, upright.
+  assert.equal(leaf.quaternion.w, 1);
+  assert.equal(state.frames.at(-1)!.displayAngle, 0);
+  viewer.setFoldAngle(0);
+  draw(100);
+  const midway = leaf.rotation.y;
+  assert.ok(midway > 0 && midway < Math.PI, `animating, at ${midway}`);
+  draw(2000);
+  draw(2000);
+  assert.ok(Math.abs(leaf.quaternion.angleTo(new Quaternion()) - Math.PI) < 1e-6);
+  viewer.setFoldAngle(null);
+  draw(3000);
+  assert.ok(Math.abs(leaf.quaternion.angleTo(new Quaternion()) - Math.PI) < 1e-6);
+
+  viewer.setModel({ id: "galaxy-s26", url: "/s26.glb" });
+  // Uninstalling the foldable restores its authored pose before the slot disposes it.
+  assert.equal(leaf.quaternion.w, 1);
+  const slab = new Group();
+  const screen = new Mesh(new PlaneGeometry(1, 2.2));
+  screen.name = "device-screen";
+  slab.add(screen);
+  models.pending[1]!.resolve({ asset: slab, dispose: () => {} });
+  await Promise.resolve();
+  viewer.setFoldAngle(90);
+  draw(4000);
+  assert.equal(state.frames.at(-1)!.phone?.children[0]?.children[0], slab);
+  assert.equal(onUnavailable.mock.callCount(), 0);
   viewer.dispose();
 });
