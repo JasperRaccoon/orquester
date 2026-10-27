@@ -38,7 +38,8 @@ import { DropdownItem } from "../ui/dropdown";
 import { BottomSheet } from "../ui/sheet";
 import { useActiveChatTarget } from "./chat-target";
 import { setMobileSection, useMobileSection } from "./mobile-section";
-import { MOBILE_SECTION_ORDER, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
+import { useDevicesEnabled } from "../../lib/devices/hooks";
+import { MOBILE_SECTION_ORDER, RIGHT_RAIL_PANEL_REGISTRY, visibleRailPanels } from "./panels";
 import type { RightRailPanelId } from "./types";
 
 /** The most items the bar shows side by side, "More" included. */
@@ -133,6 +134,8 @@ export interface MobileSectionBarProps {
   onSelect: (section: RightRailPanelId | null) => void;
   /** The visible tab is a chat: the first item says "Chat" rather than "Tab". */
   chatTab: boolean;
+  /** The sections to offer, in order (default: all of `MOBILE_SECTION_ORDER`). */
+  sections?: readonly RightRailPanelId[];
 }
 
 /**
@@ -182,7 +185,8 @@ const BarButton: React.FC<{
 export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
   active,
   onSelect,
-  chatTab
+  chatTab,
+  sections = MOBILE_SECTION_ORDER
 }) => {
   const [moreOpen, setMoreOpen] = React.useState(false);
   const closeMore = React.useCallback(() => setMoreOpen(false), []);
@@ -193,7 +197,7 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
       title: chatTab ? "Back to the chat" : "Back to the tab",
       Icon: chatTab ? MessageSquare : AppWindow
     },
-    ...MOBILE_SECTION_ORDER.map((id) => ({
+    ...sections.map((id) => ({
       id,
       label: RIGHT_RAIL_PANEL_REGISTRY[id].shortTitle,
       title: RIGHT_RAIL_PANEL_REGISTRY[id].title,
@@ -257,6 +261,9 @@ export const MobileSectionNav: React.FC = () => {
   const section = useMobileSection();
   const chatTab = useActiveChatTarget() !== null;
   const keyboardOpen = useSoftKeyboardOpen();
+  // Devices: the Device section exists only while its plugin is on.
+  const devicesOn = useDevicesEnabled();
+  const sections = React.useMemo(() => visibleRailPanels(MOBILE_SECTION_ORDER, { devices: devicesOn }), [devicesOn]);
   if (isDesktop || !projectOpen || keyboardOpen) return null;
-  return <MobileSectionBar active={section} onSelect={setMobileSection} chatTab={chatTab} />;
+  return <MobileSectionBar active={section} onSelect={setMobileSection} chatTab={chatTab} sections={sections} />;
 };

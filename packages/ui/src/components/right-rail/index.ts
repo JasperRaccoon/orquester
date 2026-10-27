@@ -39,15 +39,23 @@ export {
   RIGHT_RAIL_DOCK_ID,
   RIGHT_RAIL_PANEL_ORDER,
   RIGHT_RAIL_PANEL_REGISTRY,
+  visibleRailPanels,
+  type RailPanelAvailability,
   type RightRailPanelRegistry,
   type RightRailPanelSpec
 } from "./panels";
 export {
+  RIGHT_RAIL_DEVICE_WIDTH_DEFAULT,
+  RIGHT_RAIL_DEVICE_WIDTH_MAX,
+  RIGHT_RAIL_DEVICE_WIDTH_MIN,
   RIGHT_RAIL_WIDTH_DEFAULT,
   RIGHT_RAIL_WIDTH_MAX,
   RIGHT_RAIL_WIDTH_MIN,
+  RIGHT_RAIL_WIDTH_RANGES,
   resetRightRailWidth,
+  rightRailCssBounds,
   rightRailState,
+  rightRailWidthOf,
   setRightRailOpen,
   setRightRailWidth,
   subscribeRightRail,

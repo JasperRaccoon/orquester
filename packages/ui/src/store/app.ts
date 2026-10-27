@@ -193,6 +193,9 @@ import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn
 // The Knowledge Graph plugin's module store (status + collections; loaded while the plugin is on).
 import { KNOWLEDGE_CHANNEL, KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { applyKnowledgeEvent, loadKnowledge, resetKnowledge } from "../lib/knowledge/store";
+// The Device simulators plugin's module store (hosts, leases, settings; loaded while the plugin is on).
+import { DEVICES_CHANNEL, DEVICES_PLUGIN_ID } from "@orquester/api";
+import { applyDevicesEvent, loadDevices, resetDevices, setDevicesPluginOn } from "../lib/devices/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1695,6 +1698,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // boxes: same rule as the secret files — a reconnect with the plugin on reloads.
     const boxesWasOn = boxesOn(get().plugins);
     const knowledgeWasOn = knowledgeOn(get().plugins);
+    const devicesWasOn = devicesOn(get().plugins);
     await Promise.all([
       get().loadWorkspaces(),
       get().loadRecentProjects(),
@@ -1745,6 +1749,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           // The knowledge status and collections, likewise.
           if (knowledgeWasOn && knowledgeOn(get().plugins) && get().api === active) {
             void loadKnowledge(active).catch(() => undefined);
+          }
+          // The devices' hosts, leases and settings, likewise.
+          if (devicesWasOn && devicesOn(get().plugins) && get().api === active) {
+            void loadDevices(active).catch(() => undefined);
           }
           // boxes: with the plugin off, boxes may still be running (and billing): the list
           // is read to find them (the store keeps it only while one is). An older daemon
@@ -2106,6 +2114,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // boxes: another daemon's boxes.
     resetBoxes();
     resetKnowledge();
+    resetDevices();
     stopSetupFollows();
     projectsLoadSeq += 1;
     resetSecretRequests();
@@ -3933,6 +3942,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (get().plugins !== null) applyBoxesEvent(event);
       return;
     }
+    // Devices: hosts, leases, action logs, setup jobs and settings (validated in their module store;
+    // held only while the plugin is on).
+    if (event.channel === DEVICES_CHANNEL) {
+      if (devicesOn(get().plugins)) applyDevicesEvent(event);
+      return;
+    }
     if (event.channel === KNOWLEDGE_CHANNEL) {
       // Knowledge status and collections live in their own module store (validated); held only
       // while the plugin is on.
@@ -4103,6 +4118,22 @@ useAppStore.subscribe((state, previous) => {
   if (state.plugins === null) resetBoxes();
   if (on === boxesOn(previous.plugins)) return;
   if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
+});
+
+// Devices: wired like the secret files — hosts, leases and settings load when the plugin turns on
+// (a connection's first plugins list included; `establish` reloads them on a reconnect with it
+// already on) and are forgotten when it turns off or the plugins list goes with a connection switch.
+function devicesOn(plugins: readonly PluginInfo[] | null): boolean {
+  return isGlobalPluginEnabled(plugins, DEVICES_PLUGIN_ID);
+}
+
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === previous.plugins) return;
+  const on = devicesOn(state.plugins);
+  setDevicesPluginOn(on);
+  if (state.plugins === null) resetDevices();
+  if (on === devicesOn(previous.plugins)) return;
+  if (on && state.api) void loadDevices(state.api).catch(() => undefined);
 });
 
 // Knowledge Graph: wired like the secret files — status and collections load when

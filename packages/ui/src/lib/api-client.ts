@@ -122,6 +122,23 @@ import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { boxRoutes } from "@orquester/api";
+// Devices: the Device simulators plugin's routes and payloads (answers validated by `lib/devices/validate.ts`).
+import { deviceRoutes } from "@orquester/api";
+import type {
+  DeviceActionsResponse,
+  DeviceController,
+  DeviceHostsResponse,
+  DeviceLeaseResponse,
+  DeviceLeasesResponse,
+  DeviceOpenRequest,
+  DevicePlatform,
+  DevicesListResponse,
+  DevicesSettingsPatch,
+  DevicesSettingsResponse,
+  DevicesStateResponse,
+  DeviceSetupRequest,
+  DeviceSetupResponse
+} from "@orquester/api";
 // The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
 import { knowledgeRoutes } from "@orquester/api";
 import type {
@@ -919,6 +936,88 @@ export class ApiClient {
     signal?: AbortSignal
   ): Promise<SecretFileCompareResponse> {
     return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
+  }
+
+  // --- Devices (`deviceRoutes`; answers are validated by `lib/devices/store.ts`) ---
+
+  /** Everything the Device panel and Settings → Devices start from (`enabled: false` while the plugin is off). */
+  devicesState(signal?: AbortSignal): Promise<DevicesStateResponse> {
+    return this.send("GET", deviceRoutes.state, { signal });
+  }
+
+  listDeviceHosts(signal?: AbortSignal): Promise<DeviceHostsResponse> {
+    return this.send("GET", deviceRoutes.hosts, { signal });
+  }
+
+  /** Settings → Devices "Destroy" on a rented host. */
+  destroyDeviceHost(hostId: string): Promise<void> {
+    return this.send("DELETE", deviceRoutes.host(hostId));
+  }
+
+  listDevices(signal?: AbortSignal): Promise<DevicesListResponse> {
+    return this.send("GET", deviceRoutes.devices, { signal });
+  }
+
+  listDeviceLeases(threadId?: string, signal?: AbortSignal): Promise<DeviceLeasesResponse> {
+    return this.send("GET", deviceRoutes.leases, { query: threadId ? { threadId } : undefined, signal });
+  }
+
+  /** The panel's picker: the lease answers `starting`; its boot arrives as `devices.lease` events. */
+  openDeviceLease(req: DeviceOpenRequest): Promise<DeviceLeaseResponse> {
+    return this.send("POST", deviceRoutes.leases, { body: req });
+  }
+
+  releaseDeviceLease(leaseId: string, shutdown = false): Promise<DeviceLeaseResponse> {
+    return this.send("DELETE", deviceRoutes.lease(leaseId), { query: shutdown ? { shutdown: "1" } : undefined });
+  }
+
+  /** Take over (`user`) or give back (`agent`). */
+  setDeviceController(leaseId: string, controller: DeviceController): Promise<DeviceLeaseResponse> {
+    return this.send("PUT", deviceRoutes.controller(leaseId), { body: { controller } });
+  }
+
+  deviceLeaseActions(leaseId: string, signal?: AbortSignal): Promise<DeviceActionsResponse> {
+    return this.send("GET", deviceRoutes.actions(leaseId), { signal });
+  }
+
+  devicesSettings(signal?: AbortSignal): Promise<DevicesSettingsResponse> {
+    return this.send("GET", deviceRoutes.settings, { signal });
+  }
+
+  updateDevicesSettings(patch: DevicesSettingsPatch): Promise<DevicesSettingsResponse> {
+    return this.send("PUT", deviceRoutes.settings, { body: patch });
+  }
+
+  deviceSetup(platform: DevicePlatform, signal?: AbortSignal): Promise<DeviceSetupResponse> {
+    return this.send("GET", deviceRoutes.setup(platform), { signal });
+  }
+
+  /** Settings → Devices "Install all" / "Repair" (`actions` limits it to those fixes). */
+  startDeviceSetup(platform: DevicePlatform, req: DeviceSetupRequest = {}): Promise<DeviceSetupResponse> {
+    return this.send("POST", deviceRoutes.setup(platform), { body: req });
+  }
+
+  /**
+   * Authenticated ws(s):// URL for a device hub path (`deviceRoutes.socket(hostId, path)`), or null
+   * on transports without WebSockets (the desktop app's unix socket: live devices need a server
+   * connection). The bearer rides as ?token=, as for desktops.
+   */
+  deviceSocketUrl(path: string): string | null {
+    return this.desktopSocketUrl(path);
+  }
+
+  /**
+   * Authenticated http(s):// URL for a device media path an `<img>` or a fetch the browser starts
+   * loads (`deviceRoutes.hub(...)` MJPEG, `deviceRoutes.screenshot(...)`), or null off HTTP. The
+   * daemon accepts `?token=` on exactly those routes and never forwards it.
+   */
+  deviceMediaUrl(path: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const token = this.connection.password ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.connection.password)}` : "";
+    return `${base}${path}${token}`;
   }
 
   // boxes: --- Ephemeral AI VMs (`boxRoutes`; answers are validated by `lib/boxes/store.ts`) ---
