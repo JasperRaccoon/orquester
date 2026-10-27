@@ -362,6 +362,11 @@ export interface KnowledgeConceptDetail {
   mergedFrom?: KnowledgeConceptRef[];
   /** Other concepts of the same type close in meaning but below the merge bar, closest first, up to 5. Absent from an older daemon. */
   similarConcepts?: { concept: KnowledgeConceptRef; similarity: number }[];
+  /**
+   * Every visible entry linked to it (ids, newest first, up to 2,000), where `entries` holds only the
+   * newest 50 in full; the graph's "show its entries" marks these. Absent from an older daemon.
+   */
+  entryIds?: string[];
 }
 
 /** One automatic concept merge (phase 2 spec, "Concept merges"). */
