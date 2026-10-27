@@ -61,6 +61,8 @@ import {
   sanitizeSetupPayload,
   sanitizeUserActionResponse
 } from "./validate";
+import { resetLocalDeviceActions } from "./local-actions";
+import { resetDevicePanelFocus } from "./panel-focus";
 
 /** The routes this store calls — `ApiClient` satisfies it; tests pass a fake. */
 export interface DevicesApi {
@@ -128,12 +130,17 @@ function write(slot: Slot, patch: Partial<DevicesState>): void {
   devicesStore.setState(patch);
 }
 
-/** A connection switch: forget everything; answers still in flight are dropped. */
+/**
+ * A connection switch: forget everything — the store, each chat's selected device and the panel's
+ * own action rows (lease ids of another daemon mean nothing here); answers still in flight are dropped.
+ */
 export function resetDevices(): void {
   generation += 1;
   boundConnectionId = null;
   for (const slot of Object.keys(revisions) as Slot[]) revisions[slot] = 0;
   devicesStore.setState(INITIAL, true);
+  resetDevicePanelFocus();
+  resetLocalDeviceActions();
 }
 
 /** The plugin turned on or off (the app store calls this on every plugins list). Off empties the store. */

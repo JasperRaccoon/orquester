@@ -32,6 +32,8 @@ import {
   updateDevicesSettings,
   type DevicesApi
 } from "./store.ts";
+import { localDeviceActions, logLocalDeviceAction } from "./local-actions.ts";
+import { selectDeviceLease, selectedDeviceLease } from "./panel-focus.ts";
 import { sanitizeDeviceHost, sanitizeDeviceLease, sanitizeDevicesState } from "./validate.ts";
 
 const host = (over: Partial<DeviceHostSummary> = {}): DeviceHostSummary => ({
@@ -173,6 +175,24 @@ describe("devices store", () => {
     await assert.rejects(runDeviceUserAction(fakeApi({ deviceUserAction: async () => ({ lease: lease("a"), entry: { id: "x" } }) as never }), "a", { kind: "restart_app" }));
     await runDeviceUserAction(api, "a", { kind: "power_off" });
     assert.equal(devicesStore.getState().leases?.some((l) => l.id === "a"), false);
+  });
+
+  it("a connection switch also clears each chat's selected device and the panel's own rows", async () => {
+    await loadDevices(fakeApi());
+    selectDeviceLease("t1", "a");
+    logLocalDeviceAction("a", "Pressed Home");
+    assert.equal(selectedDeviceLease("t1"), "a");
+    assert.equal(localDeviceActions("a").length, 1);
+    resetDevices();
+    assert.equal(selectedDeviceLease("t1"), undefined);
+    assert.deepEqual(localDeviceActions("a"), []);
+    // Through a client of another connection too.
+    selectDeviceLease("t1", "a");
+    logLocalDeviceAction("a", "Pressed Back");
+    await loadDevices(fakeApi({}, "c1"));
+    await loadDevices(fakeApi({}, "c2"));
+    assert.equal(selectedDeviceLease("t1"), undefined);
+    assert.deepEqual(localDeviceActions("a"), []);
   });
 
   it("the plugin off empties the store and drops events", async () => {
