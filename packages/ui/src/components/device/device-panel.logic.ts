@@ -278,6 +278,15 @@ export function deviceStreamUrls(api: DeviceUrlApi, lease: Pick<DeviceLeaseSumma
   return null;
 }
 
+/**
+ * What the lease's host can stream, as `useDeviceStream`'s `hostCaps`: iOS H.264 only where the
+ * host's summary says serve-sim's encoder works (a physical Mac); an Apple VM (Blacksmith) or a host
+ * that says nothing streams MJPEG. The transport then picks the default view (H.264 → 3D).
+ */
+export function hostStreamCaps(hosts: readonly Pick<DeviceHostSummary, "id" | "stream">[], hostId: string): { h264: boolean } {
+  return { h264: hosts.find((host) => host.id === hostId)?.stream?.iosH264 === true };
+}
+
 /** The Android fold route (`vendor/serve-emu/api/fold`), or null off HTTP. */
 export function deviceFoldUrl(api: DeviceUrlApi, lease: Pick<DeviceLeaseSummary, "hostId" | "stream">): string | null {
   if (lease.stream?.kind !== "serve-emu") return null;

@@ -312,6 +312,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
   const state = host.state();
   const box = host.box?.() ?? null;
   const pool = host.pool?.() ?? null;
+  const stream = host.streamCapabilities?.() ?? null;
   return {
     id: host.id,
     kind: host.kind,
@@ -322,6 +323,7 @@ export function deviceHostSummary(host: DeviceHost): DeviceHostSummary {
     readiness: host.readiness(),
     capacity: host.capacity(),
     ...(box ? { box } : {}),
-    ...(pool ? { pool } : {})
+    ...(pool ? { pool } : {}),
+    ...(stream ? { stream: { iosH264: stream.iosH264 === true } } : {})
   };
 }

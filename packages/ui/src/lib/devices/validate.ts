@@ -107,6 +107,8 @@ export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   }
   const pool = value.pool;
   if (isRecord(pool)) host.pool = { draining: pool.draining === true, warm: pool.warm === true, idleSince: strOrNull(pool.idleSince) };
+  const stream = value.stream;
+  if (isRecord(stream)) host.stream = { iosH264: stream.iosH264 === true };
   return host;
 }
 

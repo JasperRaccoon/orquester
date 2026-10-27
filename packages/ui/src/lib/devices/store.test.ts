@@ -174,6 +174,9 @@ describe("devices validation", () => {
     const parsed = sanitizeDeviceHost({ ...host(), box: { boxId: "b", provider: "blacksmith", hourlyUsd: "x", startedAt: "s" }, readiness: "nope" });
     assert.deepEqual(parsed?.box, { boxId: "b", provider: "blacksmith", hourlyUsd: null, startedAt: "s", deadlineAt: null });
     assert.deepEqual(parsed?.readiness, { ready: false, checks: [], checkedAt: null });
+    assert.equal(parsed?.stream, undefined);
+    assert.deepEqual(sanitizeDeviceHost({ ...host(), stream: { iosH264: true } })?.stream, { iosH264: true });
+    assert.deepEqual(sanitizeDeviceHost({ ...host(), stream: { iosH264: "yes" } })?.stream, { iosH264: false });
     assert.equal(sanitizeDeviceLease({ ...lease("a"), state: "parked" }), null);
     assert.deepEqual(sanitizeDeviceLease({ ...lease("a"), stream: { kind: "webrtc", deviceParam: "x" } })?.stream, undefined);
   });

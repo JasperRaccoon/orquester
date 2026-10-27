@@ -21,13 +21,14 @@ import { copyText } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { deliverToComposerDraft } from "../../lib/composer-inbox";
 import { deviceViewKey, effectiveDeviceViewMode, readDeviceViewPrefs, writeDeviceViewPrefs, type DeviceViewPrefs } from "../../lib/devices/device-view-prefs";
+import { useDeviceHosts } from "../../lib/devices/hooks";
 import { logLocalDeviceAction } from "../../lib/devices/local-actions";
 import { setDeviceController } from "../../lib/devices/store";
 import { DeviceAgentOverlay } from "./DeviceAgentOverlay";
 import { DeviceActionLog } from "./DeviceActionLog";
 import type { ActionLogRow } from "./action-log.logic";
 import { gestureSummary } from "./action-log.logic";
-import { controllerPill, deviceFoldUrl, deviceKeyOf, deviceStreamUrls, inputTakesOver, takeOverToast } from "./device-panel.logic";
+import { controllerPill, deviceFoldUrl, deviceKeyOf, deviceStreamUrls, hostStreamCaps, inputTakesOver, takeOverToast } from "./device-panel.logic";
 import { DeviceToolbar, type ToolbarLayout } from "./DeviceToolbar";
 import { requestAndroidFold, type AndroidFoldState } from "./fold";
 import { useDeviceStream, type DeviceButton, type DeviceOrientation } from "./stream";
@@ -129,9 +130,13 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
     () => ({ video: urls?.video ?? "", ...(urls?.input ? { input: urls.input } : {}), ...(urls?.screenshot ? { screenshot: urls.screenshot } : {}) }),
     [urls]
   );
+  // iOS: H.264 (and with it the 3D view) only where the host says its encoder works (physical Macs).
+  const h264 = hostStreamCaps(useDeviceHosts(), lease.hostId).h264;
+  const hostCaps = React.useMemo(() => ({ h264 }), [h264]);
   const stream = useDeviceStream({
     platform: lease.platform,
     urls: streamUrls,
+    hostCaps,
     enabled: props.visible && docVisible && urls !== null && !restarting,
     onFrame: () => viewport.current?.notifyFrame()
   });
