@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { DeviceProfile } from "@orquester/api";
 
 import type { DeviceHostProgress } from "../host.ts";
-import { avdName } from "./avd-config.ts";
+import { avdName, cutoutSpecInDp } from "./avd-config.ts";
 import { type EmulatorLaunch, findQemuPid, type KvmMode, type ProcessMarker, serialOf, signalLauncher, spawnEmulator, stopEmulator, waitForBootCompleted } from "./emulator.ts";
 import { type ExecFn, lastLine } from "./exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "./executor.ts";
@@ -75,6 +75,59 @@ export interface GoldenDeps {
   snapshotName?: string;
   /** How long the cold boot may take (absent: 10 minutes). */
   bootTimeoutMs?: number;
+  /**
+   * The density of the device definition the AVD was made from (avdmanager's `hw.lcd.density`):
+   * the system image's cutout is in pixels of that panel. When the framebuffer's density differs,
+   * the snapshot gets the cutout in dp ({@link fixDisplayCutout}). Absent: kept as it is.
+   */
+  cutoutDensity?: number;
+  /** The AVD's framebuffer density (`hw.lcd.density` after the patch). */
+  density?: number;
+}
+
+/** The fabricated overlay that carries a snapshot's display cutout in dp. */
+export const CUTOUT_OVERLAY = "com.android.shell:OrqCutout";
+
+/**
+ * Re-express the running device's display cutout in dp: the system image's device emulation
+ * overlay (`com.android.internal.emulation.<device>`) defines it in pixels of the real panel, so
+ * on a scaled framebuffer the camera hole lands off-centre. Reads `cutoutSpec` from `dumpsys
+ * display`, fabricates `config_mainBuiltInDisplayCutout` in dp (needs `adb root`, Google APIs
+ * images allow it; `adb unroot` after), disables the pixel one. Resolves what it did.
+ */
+export async function fixDisplayCutout(input: { exec: ExecFn; adb: string; env: NodeJS.ProcessEnv; serial: string; cutoutDensity: number; signal: AbortSignal }): Promise<"kept" | "fixed"> {
+  const { exec, adb, env, serial, signal } = input;
+  const adbRun = (args: string[], timeoutMs = 30_000) => exec(adb, ["-s", serial, ...args], { env, signal, timeoutMs });
+  const shell = (command: string) => adbRun(["shell", command]);
+  const spec = /cutoutSpec=\{([^}]*)\}/.exec((await shell("dumpsys display")).stdout)?.[1]?.trim() ?? "";
+  const dp = cutoutSpecInDp(spec, input.cutoutDensity);
+  if (!dp) return "kept";
+  if (/'/.test(dp)) throw new Error("unexpected cutout spec");
+  const emulation = (await shell("cmd overlay list")).stdout
+    .split("\n")
+    .map((line) => /^\s*\[x\]\s+(com\.android\.internal\.emulation\.[A-Za-z0-9_.]+)/.exec(line)?.[1])
+    .filter((name): name is string => name !== undefined);
+  const root = await adbRun(["root"]);
+  if (root.exitCode !== 0 || /cannot run as root/i.test(root.stdout + root.stderr)) throw new Error(`adb root failed: ${lastLine(root)}`);
+  await delay(1_000, signal);
+  await adbRun(["wait-for-device"], 60_000);
+  try {
+    const made = await shell(`cmd overlay fabricate --target android --name OrqCutout android:string/config_mainBuiltInDisplayCutout 0x03 '${dp}'`);
+    if (made.exitCode !== 0 || /error|exception/i.test(made.stdout + made.stderr)) throw new Error(`fabricating the cutout overlay failed: ${lastLine(made)}`);
+    for (const overlay of emulation) await shell(`cmd overlay disable ${overlay}`);
+    const enabled = await shell(`cmd overlay enable ${CUTOUT_OVERLAY}`);
+    if (enabled.exitCode !== 0 || /exception/i.test(enabled.stdout + enabled.stderr)) throw new Error(`enabling the cutout overlay failed: ${lastLine(enabled)}`);
+  } finally {
+    await adbRun(["unroot"]).catch(() => undefined);
+    await delay(1_000, signal);
+    await adbRun(["wait-for-device"], 60_000).catch(() => undefined);
+  }
+  // The display picks the new spec up at once.
+  for (let tries = 0; tries < 10; tries++) {
+    if (/cutoutSpec=\{[^}]*@dp/.test((await shell("dumpsys display")).stdout)) return "fixed";
+    await delay(500, signal);
+  }
+  throw new Error("the display did not take the dp cutout");
 }
 
 /** Where a golden snapshot lands (`snapshots/<name>/snapshot.pb`). */
@@ -163,6 +216,14 @@ export async function createGoldenSnapshot(profile: DeviceProfile, deps: GoldenD
     report("Applying settings", 82);
     const settings = await deps.exec(adb, ["-s", serial, "shell", GUEST_SETTINGS_SCRIPT], { env: deps.env, signal, timeoutMs: 60_000 });
     if (settings.exitCode !== 0) throw new Error(`applying guest settings failed: ${lastLine(settings)}`);
+    if (deps.cutoutDensity !== undefined && deps.density !== undefined && deps.cutoutDensity !== deps.density) {
+      // Best effort: a cutout left in pixels only misplaces the camera hole.
+      const how = await fixDisplayCutout({ exec: deps.exec, adb, env: deps.env, serial, cutoutDensity: deps.cutoutDensity, signal }).catch((error: unknown) => {
+        deps.logger.warn(`[devices] golden ${profile.id}: the display cutout stays in pixels: ${error instanceof Error ? error.message : String(error)}`);
+        return "failed";
+      });
+      deps.logger.info(`[devices] golden ${profile.id}: display cutout ${how}`);
+    }
     for (const apk of deps.helperApks) {
       if (!(await x.exists(apk))) continue;
       const installed = await deps.exec(adb, ["-s", serial, "install", "-r", "-g", apk], { env: deps.env, signal, timeoutMs: 120_000 });

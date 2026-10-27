@@ -66,7 +66,7 @@ import { evaluateReadiness, ffmpegHasLibx264, FIX_ACTIONS, groupMembers, type Kv
 import { type EmulatorRecord, emptyHostState, type HostStateFile, type HubRecord, planReattach, readHostState, writeHostState } from "../android/state.ts";
 import { DeviceError } from "../errors.ts";
 import type { AgentDeviceCommand, DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress, DeviceHostState } from "../host.ts";
-import { clearGolden, goldenReady, writeGoldenMarker } from "../toolchain/android-sdk.ts";
+import { clearGolden, goldenReady, readAvdMarker, writeGoldenMarker } from "../toolchain/android-sdk.ts";
 import { DEVICE_TOOL_NAMES, type LocalDeviceToolchain } from "../toolchain/index.ts";
 
 export interface LocalAndroidHostDeps {
@@ -512,6 +512,7 @@ export class LocalAndroidHost implements DeviceHost {
       }
       if (!this.kvm) throw new DeviceError("PLATFORM_NOT_READY", "/dev/kvm is not usable; see Settings → Devices.");
       await clearGolden(this.layout.avd, profile.id);
+      const deviceDensity = (await readAvdMarker(this.layout.avd, profile.id))?.deviceDensity;
       await createGoldenSnapshot(
         profile,
         {
@@ -532,6 +533,8 @@ export class LocalAndroidHost implements DeviceHost {
           },
           helperApks: await this.helperApks(),
           marker: this.marker,
+          density: avdHardware(profile).density,
+          ...(deviceDensity ? { cutoutDensity: deviceDensity } : {}),
           logger: this.deps.logger
         },
         signal,
@@ -605,7 +608,8 @@ export class LocalAndroidHost implements DeviceHost {
     const devices: DeviceSummary[] = [];
     for (const profileId of androidProfiles(this.ctx.settings())) {
       const profile = deviceProfile(profileId)!;
-      if (!(await this.deps.toolchain.avdStatus(profileId)).created) continue;
+      const status = await this.deps.toolchain.avdStatus(profileId);
+      if (!status.created && !status.outdated) continue;
       const name = avdName(profileId);
       devices.push({ key: deviceKey(this.id, name), hostId: this.id, id: name, platform: "android", name: profile.label, osVersion: profile.os, profile: profileId, booted: false, leaseId: null });
     }

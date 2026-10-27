@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { ANDROID_SYSTEM_IMAGE, type DeviceProfile } from "@orquester/api";
 
-import { avdConfigHash, avdHardware, avdName, hasAvdPlaceholders, patchAvdConfig } from "../android/avd-config.ts";
+import { avdConfigHash, avdHardware, avdName, hasAvdPlaceholders, parseIni, patchAvdConfig } from "../android/avd-config.ts";
 import { type ExecFn, lastLine } from "../android/exec.ts";
 import { type DeviceExecutor, LOCAL_EXECUTOR } from "../android/executor.ts";
 import type { DownloadFn, PinnedDownload } from "./download.ts";
@@ -170,6 +170,8 @@ export interface AvdMarker {
   profile: string;
   configHash: string;
   createdAt: string;
+  /** avdmanager's `hw.lcd.density` of the device definition (the system image's cutout is in its pixels). */
+  deviceDensity?: number;
 }
 
 /** `<avd>/orq-<profile>.avd/orq-golden.json`: its golden snapshot was saved for this config and emulator. */
@@ -192,6 +194,17 @@ async function readJson<T>(path: string, executor: DeviceExecutor): Promise<T | 
 
 export function profileHash(profile: DeviceProfile): string {
   return avdConfigHash(profile.id, avdHardware(profile), profile.systemImage ?? ANDROID_SYSTEM_IMAGE);
+}
+
+/** The AVD's marker, or null. */
+export function readAvdMarker(avdHome: string, profileId: string, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<AvdMarker | null> {
+  return readJson<AvdMarker>(join(avdDir(avdHome, profileId), "orq-avd.json"), executor);
+}
+
+/** An AVD of the profile exists but was made for an older config (it is made again on the profile's next open). */
+export async function avdOutdated(avdHome: string, profile: DeviceProfile, executor: DeviceExecutor = LOCAL_EXECUTOR): Promise<boolean> {
+  if (!(await executor.exists(join(avdDir(avdHome, profile.id), "config.ini")))) return false;
+  return !(await avdReady(avdHome, profile, executor));
 }
 
 /** The AVD exists, was patched, and matches the current hardware table. */
@@ -244,10 +257,17 @@ export async function createAvd(paths: SdkPaths, profile: DeviceProfile, deps: P
   const ini = join(paths.avd, `${name}.ini`);
   const stray = deps.env.ANDROID_USER_HOME ? join(deps.env.ANDROID_USER_HOME, "avd", `${name}.ini`) : null;
   if (!(await x.exists(ini)) && stray && (await x.exists(stray))) await x.rename(stray, ini);
-  const patched = patchAvdConfig((await x.readText(configPath)) ?? "", { name, hardware });
+  const original = (await x.readText(configPath)) ?? "";
+  const patched = patchAvdConfig(original, { name, hardware });
   if (hasAvdPlaceholders(patched)) throw new Error(`The ${profile.label} emulator's config.ini still has avdmanager placeholders.`);
   await x.writeText(configPath, patched);
-  const marker: AvdMarker = { profile: profile.id, configHash: profileHash(profile), createdAt: new Date().toISOString() };
+  const deviceDensity = Number(parseIni(original).get("hw.lcd.density"));
+  const marker: AvdMarker = {
+    profile: profile.id,
+    configHash: profileHash(profile),
+    createdAt: new Date().toISOString(),
+    ...(Number.isInteger(deviceDensity) && deviceDensity > 0 ? { deviceDensity } : {})
+  };
   await x.writeText(join(dir, "orq-avd.json"), `${JSON.stringify(marker)}\n`);
 }
 

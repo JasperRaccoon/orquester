@@ -28,6 +28,7 @@ import { DeviceError } from "../errors.ts";
 import type { DeviceHostProgress } from "../host.ts";
 import {
   acceptLicenses,
+  avdOutdated,
   avdReady,
   createAvd,
   goldenReady,
@@ -62,8 +63,8 @@ export interface DeviceToolStatus {
 export interface AndroidSdkStatus {
   /** `cmdline-tools`, `platform-tools`, `emulator`, the system image package. */
   packages: { id: string; installed: boolean }[];
-  /** Profiles with an AVD, and whether each has its golden snapshot. */
-  avds: { profile: string; created: boolean; snapshot: boolean }[];
+  /** Profiles with an AVD, and whether each has its golden snapshot (`outdated`: made for an older config; remade on next open). */
+  avds: { profile: string; created: boolean; snapshot: boolean; outdated?: boolean }[];
 }
 
 /** The toolchain seam every host uses (box hosts: the pinned tools on this machine). */
@@ -91,7 +92,7 @@ export interface LocalDeviceToolchain extends DeviceToolchain {
   /** A profile's AVD, made again when its hardware changed. `force` remakes it. The caller makes sure none of its instances runs. */
   ensureAvd(profileId: string, signal: AbortSignal, options?: { force?: boolean }): Promise<void>;
   /** Whether the AVD and its golden snapshot are current. */
-  avdStatus(profileId: string): Promise<{ created: boolean; snapshot: boolean }>;
+  avdStatus(profileId: string): Promise<{ created: boolean; snapshot: boolean; outdated?: boolean }>;
   /** The installed emulator's revision (part of a golden snapshot's identity). */
   emulatorRevision(): Promise<string | null>;
   /** The appdir's paths and the tools' private environment. */
@@ -251,7 +252,8 @@ export function createDeviceToolchain(deps: DeviceToolchainDeps): LocalDeviceToo
       const profile = deviceProfile(profileId);
       if (!profile || profile.platform !== "android") return { created: false, snapshot: false };
       const created = await avdReady(layout.avd, profile);
-      return { created, snapshot: created && (await goldenReady(layout.avd, profile, await toolchain.emulatorRevision())) };
+      if (!created) return { created, snapshot: false, ...((await avdOutdated(layout.avd, profile)) ? { outdated: true } : {}) };
+      return { created, snapshot: await goldenReady(layout.avd, profile, await toolchain.emulatorRevision()) };
     },
 
     emulatorRevision() {

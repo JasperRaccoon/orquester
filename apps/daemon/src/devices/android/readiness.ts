@@ -24,7 +24,8 @@ export interface ReadinessProbe {
   ffmpeg: "libx264" | "no-libx264" | "missing";
   java: boolean;
   packages: { cmdlineTools: boolean; platformTools: boolean; emulator: boolean; systemImage: boolean };
-  avds: { profile: string; label: string; created: boolean; snapshot: boolean }[];
+  /** `outdated`: made for an older config; it is made again on the profile's next open (not a blocker). */
+  avds: { profile: string; label: string; created: boolean; snapshot: boolean; outdated?: boolean }[];
   tools: { name: string; version: string; installed: boolean }[];
 }
 
@@ -85,7 +86,9 @@ export function evaluateReadiness(probe: ReadinessProbe): DeviceReadinessCheck[]
     checks.push(
       avd.created
         ? ok(id, label, avd.snapshot ? "Ready" : "Ready; prepared on first use (about 4 minutes, once)", FIX_ACTIONS.avd(avd.profile))
-        : missing(id, label, "Not created yet", FIX_ACTIONS.avd(avd.profile))
+        : avd.outdated
+          ? ok(id, label, "Updated on its next open (about 4 minutes, once)", FIX_ACTIONS.avd(avd.profile))
+          : missing(id, label, "Not created yet", FIX_ACTIONS.avd(avd.profile))
     );
   }
 
