@@ -65,8 +65,6 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
     }
     if (!adapter.kinds.includes(kind)) throw new BoxError(400, "BOX_UNSUPPORTED", `${adapter.label} does not rent ${BOX_KIND_LABELS[kind]} boxes.`);
     if (!settings.configured(adapter.id)) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", `${adapter.label} is not connected.`);
-    const blocker = settings.kindBlocker(adapter, kind);
-    if (blocker) throw new BoxError(409, "BOX_UNSUPPORTED", blocker);
   } else {
     const kinds = await settings.kinds();
     const available = kinds.find((entry) => entry.kind === kind);
@@ -81,11 +79,15 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
 
   const offers = await settings.offers(adapter.id, kind);
   let size: BoxSizeOffer | undefined;
+  // The owner's own machines: each free, connected machine is a "size".
+  const byo = adapter.id === "byo";
   if (sizeId) {
     size = offers.sizes.find((candidate) => candidate.id === sizeId);
+    if (!size && byo) throw new BoxError(409, "BOX_NOT_READY", "That machine of yours is in use or not connected right now.");
     if (!size) throw invalid(`${adapter.label} does not offer the size "${sizeId}" for ${BOX_KIND_LABELS[kind]} boxes.`);
   } else {
     size = [...offers.sizes].sort(bySizePrice)[0];
+    if (!size && byo) throw new BoxError(409, "BOX_NOT_READY", `None of your ${kind === "macos" ? "macOS" : "Linux"} machines is free and connected right now.`);
     if (!size) throw new BoxError(409, "BOX_PROVIDER_ERROR", `${adapter.label} offers no ${BOX_KIND_LABELS[kind]} size right now.`);
   }
   const inSize = (id: string) => size!.regions.length === 0 || size!.regions.includes(id);
@@ -99,15 +101,8 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
     if (!region) throw new BoxError(409, "BOX_PROVIDER_ERROR", `${size.label} is not available in any region right now.`);
   }
 
-  let image: string | null = settings.windowsImageId(adapter, kind);
-  if (image === null) {
-    if (imageId) {
-      if (!offers.images.some((candidate) => candidate.id === imageId)) throw invalid(`${adapter.label} has no image "${imageId}".`);
-      image = imageId;
-    } else {
-      image = offers.images[0]?.id ?? null;
-    }
-  }
+  if (imageId && !offers.images.some((candidate) => candidate.id === imageId)) throw invalid(`${adapter.label} has no image "${imageId}".`);
+  const image = imageId ?? offers.images[0]?.id ?? null;
 
   const max = adapter.maxLifetimeMinutes;
   let lifetimeMinutes: number | null;

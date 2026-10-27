@@ -79,6 +79,7 @@ export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
 export * from "./knowledge.ts";
+export * from "./devices.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
@@ -1730,17 +1731,6 @@ export interface SessionUploadResponse {
   /** Bytes written. */
   size: number;
 }
-
-/** Frames pushed from daemon to client over the session stream. */
-export type SessionStreamMessage =
-  | { type: "buffer"; data: string }
-  | { type: "output"; data: string }
-  | { type: "exit"; exitCode: number };
-
-/** Frames sent from client to daemon over the session stream. */
-export type SessionInputMessage =
-  | { type: "input"; data: string }
-  | { type: "resize"; cols: number; rows: number };
 
 // Browsers — a server-side headless Chromium tab owned by the daemon (one
 // Chromium PROCESS per project, one CDP page per tab). Streamed over /ws-browser.

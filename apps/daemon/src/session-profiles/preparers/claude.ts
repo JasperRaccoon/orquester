@@ -73,7 +73,7 @@ function claudeLocalPluginName(profileName: string, taken: ReadonlySet<string>):
 }
 
 /** A profile MCP server as Claude's `--mcp-config` entry (SDK `McpServerConfig` shape). */
-export function claudeMcpDefinition(server: ResolvedMcpServer): Record<string, unknown> {
+function claudeMcpDefinition(server: ResolvedMcpServer): Record<string, unknown> {
   const timeout = Number(server.advanced.timeout);
   const extra = Number.isFinite(timeout) && timeout > 0 ? { timeout: Math.round(timeout) } : {};
   if (server.transport === "stdio") {
@@ -95,7 +95,7 @@ export function claudeMcpDefinition(server: ResolvedMcpServer): Record<string, u
 }
 
 /** The profile's hooks in Claude's `settings.hooks` format, grouped by event then matcher. */
-export function claudeHooksSetting(hooks: readonly ResolvedHook[]): ClaudePreparedHooks {
+function claudeHooksSetting(hooks: readonly ResolvedHook[]): ClaudePreparedHooks {
   const out: ClaudePreparedHooks = {};
   for (const hook of hooks) {
     const groups = (out[hook.event] ??= []);

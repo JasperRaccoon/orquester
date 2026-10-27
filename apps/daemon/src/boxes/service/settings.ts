@@ -1,6 +1,6 @@
 /**
  * The plugin's settings (spec §6, §11.2, §11.3): provider credentials and their offers, the
- * "Runs on" kinds, Windows prepared images, the connection route boxes dial, and the Blacksmith
+ * "Runs on" kinds, the connection route boxes dial, and the Blacksmith
  * macOS setup. Secret values go into box-secrets.json and never come back out: responses carry a
  * `keyHint` (last four characters) at most.
  */
@@ -22,15 +22,15 @@ import {
   type BoxProviderId,
   type BoxProviderInfo,
   type BoxProvidersResponse,
-  type BoxWindowsImageState,
   type SetBlacksmithSetupRequest,
   type SetBoxConnectionRequest,
   type SetBoxProviderCredentialsRequest
 } from "@orquester/api";
 
-import type { BoxProviderAdapter, BoxProviderRegistry, BuildBootstrap, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import type { BoxProviderAdapter, BoxProviderRegistry, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
+import { byoOffers } from "../providers/byo.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
-import type { BoxSetupLog } from "./box-exec.ts";
 import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import type { BoxClock, BoxConnectivity, ConnectRoute } from "./lifecycle.ts";
@@ -40,6 +40,8 @@ import { isActiveRecord } from "./summary.ts";
 /** How long a provider's offers are reused. */
 export const OFFERS_TTL_MS = 10 * 60_000;
 const PROVIDER_CALL_TIMEOUT_MS = 30_000;
+/** A device-cache dispatch may first re-commit the workflows and wait for GitHub to index them. */
+const DEVICE_CACHE_CALL_TIMEOUT_MS = 120_000;
 const MAX_CREDENTIAL_CHARS = 16 * 1024;
 
 export interface TailscaleCredentials extends TailscaleSecrets {
@@ -79,8 +81,15 @@ export interface BlacksmithSetupDriver {
     org: string,
     options: { daemonUrl: string; tailscale?: BlacksmithTailnetJoin | null; signal: AbortSignal }
   ): Promise<{ repo: string; workflowFile: string }>;
-  /** The credentials the Blacksmith adapter takes for this setup. */
-  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string }): ProviderCredentials;
+  /**
+   * The credentials the Blacksmith adapter takes for this setup. `tailscale`: the identity runs
+   * join the tailnet with now (the adapter re-commits the workflow when its template changed).
+   */
+  adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string; tailscale?: BlacksmithTailnetJoin | null }): ProviderCredentials;
+  /** Start the device-cache workflow for one OS (Devices phase 2); resolves its run. */
+  dispatchDeviceCacheWarm(credentials: ProviderCredentials, request: DeviceCacheWarmRequest, signal: AbortSignal): Promise<DeviceCacheWarmRun>;
+  /** A device-cache run's state. */
+  deviceCacheWarmStatus(credentials: ProviderCredentials, runId: string, signal: AbortSignal): Promise<DeviceCacheWarmStatus>;
 }
 
 export type BlacksmithCheck = { ok: true; message?: string } | { ok: false; message: string; actionUrl: string | null };
@@ -107,7 +116,6 @@ const WORKLOAD_VALUE = /^[A-Za-z0-9._:/-]{1,200}$/;
 export interface BoxSettingsDeps {
   store: BoxStore;
   providers: BoxProviderRegistry;
-  buildBootstrap: BuildBootstrap;
   tailscale: (credentials: TailscaleCredentials) => TailscaleKeys;
   accounts: BoxHostingAccounts;
   blacksmith?: BlacksmithSetupDriver;
@@ -117,12 +125,12 @@ export interface BoxSettingsDeps {
   localTailscale?: LocalTailscale;
   /** Where the daemon's HTTP transport listens (the Check's reverse proxy hint names its port). */
   daemonHttp?: () => DaemonHttpAddress;
-  setupLog: BoxSetupLog;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error">;
-  /** Provider settings changed (credentials, Windows image, Blacksmith steps). */
+  /** Provider settings changed (credentials, Blacksmith steps). */
   providersChanged(): void;
+  /** Whether a box's `orq-agent` is connected now (bring-your-own machines are offered only then). Absent: never. */
+  connected?: (boxId: string) => boolean;
 }
 
 const BLACKSMITH_STEPS: readonly { id: BlacksmithSetupStepId; label: string }[] = [
@@ -195,7 +203,6 @@ export function tailscalePolicySnippet(daemonUrl: string | null, local?: Pick<Bo
 export class BoxSettings implements BoxConnectivity {
   private readonly offersCache = new Map<string, { at: number; value: Promise<BoxOffersResponse> }>();
   private readonly checking = new Set<string>();
-  private readonly windowsImageRuns = new Map<string, Promise<void>>();
   private serving: Promise<BoxConnectionSettings> | null = null;
   /** Blacksmith checks run one at a time; a re-run queues behind the current one. */
   private blacksmithRuns: Promise<void> = Promise.resolve();
@@ -221,7 +228,10 @@ export class BoxSettings implements BoxConnectivity {
     let status: BoxProviderInfo["status"];
     let error = settings.error ?? null;
     let hint: string | null = null;
-    if (adapter.id === "blacksmith") {
+    if (adapter.id === "byo") {
+      // Nothing to connect: the owner's machines are there whenever the plugin is on.
+      status = "connected";
+    } else if (adapter.id === "blacksmith") {
       const steps = this.blacksmithSteps();
       const failed = steps.find((step) => step.state === "failed");
       status = this.blacksmithReady() ? "connected" : failed ? "error" : "not-configured";
@@ -235,7 +245,7 @@ export class BoxSettings implements BoxConnectivity {
       const secret = adapter.credentialFields.find((field) => field.secret) ?? adapter.credentialFields[0];
       hint = secret ? keyHint(credentials[secret.id]) : null;
     }
-    const info: BoxProviderInfo = {
+    return {
       id: adapter.id,
       label: adapter.label,
       kinds: [...adapter.kinds],
@@ -248,12 +258,6 @@ export class BoxSettings implements BoxConnectivity {
       accountNote: adapter.accountNote,
       maxLifetimeMinutes: adapter.maxLifetimeMinutes
     };
-    if (adapter.needsWindowsImage) {
-      const image = settings.windowsImage;
-      const state: BoxWindowsImageState = image && ["none", "preparing", "ready", "failed"].includes(image.state) ? (image.state as BoxWindowsImageState) : "none";
-      info.windowsImage = { state, message: image?.message ?? null, updatedAt: image?.updatedAt ?? null };
-    }
-    return info;
   }
 
   /** Validate with a cheap read, then save. Bad credentials are refused (400) and nothing is saved. */
@@ -262,6 +266,7 @@ export class BoxSettings implements BoxConnectivity {
     if (adapter.id === "blacksmith") {
       throw new BoxError(409, "BOX_UNSUPPORTED", "Blacksmith is set up through its own steps (a Git hosting account and an org).");
     }
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines need no credentials: add one with Add your machine.");
     const raw = body && typeof body === "object" && typeof body.credentials === "object" && body.credentials !== null ? body.credentials : null;
     if (!raw) throw new BoxError(400, "BOX_INVALID_REQUEST", "Send `credentials`: field id → value.");
     const credentials: Record<string, string> = {};
@@ -336,6 +341,7 @@ export class BoxSettings implements BoxConnectivity {
   /** Forget a provider's credentials. Refused while a box of it may still exist (it could not be destroyed without them). */
   async deleteCredentials(id: string): Promise<BoxProviderInfo> {
     const adapter = this.adapter(id);
+    if (adapter.id === "byo") throw new BoxError(409, "BOX_UNSUPPORTED", "Your own machines have no credentials: remove a machine from its row.");
     const live = this.deps.store.list().filter((record) => record.provider === adapter.id && isActiveRecord(record));
     if (live.length > 0) {
       throw new BoxError(
@@ -357,6 +363,7 @@ export class BoxSettings implements BoxConnectivity {
 
   /** Whether the provider can rent boxes now. */
   configured(id: BoxProviderId): boolean {
+    if (id === "byo") return true;
     if (id === "blacksmith") return this.blacksmithReady();
     return this.deps.store.providerCredentials(id) !== null && this.deps.store.providerSettings(id).status !== "error";
   }
@@ -368,7 +375,13 @@ export class BoxSettings implements BoxConnectivity {
     if (!driver || !setup.gitAccountId || !setup.org || !setup.repo || !setup.workflowFile) return null;
     const token = await this.deps.accounts.token(setup.gitAccountId);
     if (!token) return null;
-    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile });
+    let tailscale: BlacksmithTailnetJoin | null = null;
+    try {
+      tailscale = this.blacksmithRoute().join;
+    } catch {
+      // No route: creates fail on it before they need the workflow.
+    }
+    return driver.adapterCredentials({ token, org: setup.org, repo: setup.repo, workflowFile: setup.workflowFile, tailscale });
   }
 
   // ---- offers and kinds --------------------------------------------------------------------------
@@ -382,6 +395,11 @@ export class BoxSettings implements BoxConnectivity {
     const boxKind = kind as BoxKind;
     if (!adapter.kinds.includes(boxKind)) {
       throw new BoxError(400, "BOX_UNSUPPORTED", `${adapter.label} does not rent ${BOX_KIND_LABELS[boxKind]} boxes.`);
+    }
+    if (adapter.id === "byo") {
+      // The machines free right now (never cached: they come and go with their connections).
+      const offers = byoOffers(this.deps.store.list(), boxKind, (boxId) => this.deps.connected?.(boxId) ?? false);
+      return { provider: adapter.id, kind: boxKind, ...offers, fetchedAt: new Date(this.deps.clock.now()).toISOString() };
     }
     const key = `${adapter.id}\u0000${boxKind}`;
     const cached = this.offersCache.get(key);
@@ -423,15 +441,6 @@ export class BoxSettings implements BoxConnectivity {
     }
   }
 
-  /** A provider that rents `kind` but cannot right now (its Windows image is not prepared), or null. */
-  kindBlocker(adapter: BoxProviderAdapter, kind: BoxKind): string | null {
-    if ((kind === "windows" || kind === "windows-gpu") && adapter.needsWindowsImage) {
-      const image = this.deps.store.providerSettings(adapter.id).windowsImage;
-      if (image?.state !== "ready" || !image.imageId) return `Prepare ${adapter.label}'s Windows image first.`;
-    }
-    return null;
-  }
-
   /** The cheapest priced size of a provider's offers for a kind (null when none has a price or the fetch failed). */
   async cheapest(adapter: BoxProviderAdapter, kind: BoxKind): Promise<number | null> {
     try {
@@ -446,19 +455,30 @@ export class BoxSettings implements BoxConnectivity {
   async kinds(): Promise<BoxKindAvailability[]> {
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
-        const renting = [...this.deps.providers.values()].filter((adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id));
-        const blocked = renting.map((adapter) => this.kindBlocker(adapter, kind));
-        const usable = renting.filter((_adapter, index) => blocked[index] === null);
-        const priced = await Promise.all(usable.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
-        priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
+        // The owner's machines count only while one of the kind is free, and come after every
+        // rented provider: they are never the default pick unless nothing else is connected.
+        const freeMachine = (adapter: BoxProviderAdapter) =>
+          adapter.id !== "byo" || byoOffers(this.deps.store.list(), kind, (boxId) => this.deps.connected?.(boxId) ?? false).sizes.length > 0;
+        const renting = [...this.deps.providers.values()].filter(
+          (adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id) && freeMachine(adapter)
+        );
+        const priced = await Promise.all(renting.map(async (adapter) => ({ adapter, price: await this.cheapest(adapter, kind) })));
+        priced.sort(
+          (a, b) =>
+            Number(a.adapter.id === "byo") - Number(b.adapter.id === "byo") ||
+            (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY)
+        );
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
-        const lifetimes = usable.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
+        // A kind caps lifetimes only when every provider does: Blacksmith's Linux runners (5 days)
+        // next to clouds without a cap must not put a deadline on every Linux box. A box still
+        // gets its own provider's maximum (placement).
+        const caps = renting.map((adapter) => adapter.maxLifetimeMinutes);
+        const lifetimes = caps.every((value) => value !== null) ? (caps as number[]) : [];
         // macOS runners route differently: a kind is blocked only when none of its providers has a route.
-        const routeProblems = usable.map((adapter) => this.routeProblem(adapter.id));
+        const routeProblems = renting.map((adapter) => this.routeProblem(adapter.id));
         const routeProblem = routeProblems.every((problem) => problem !== null) ? (routeProblems[0] ?? null) : null;
         let unavailableReason: string | null = null;
         if (renting.length === 0) unavailableReason = `No connected provider rents ${BOX_KIND_LABELS[kind]} boxes.`;
-        else if (usable.length === 0) unavailableReason = blocked.find((reason) => reason !== null) ?? null;
         else if (routeProblem) unavailableReason = routeProblem;
         return {
           kind,
@@ -471,72 +491,10 @@ export class BoxSettings implements BoxConnectivity {
     );
   }
 
-  // ---- Windows prepared images -------------------------------------------------------------------
-
-  /** Start building the provider's prepared Windows image in the background (202). */
+  /** Keep the existing endpoint's refusal: every provider bootstraps Windows boxes directly. */
   async prepareWindowsImage(id: string): Promise<void> {
     const adapter = this.adapter(id);
-    if (!adapter.needsWindowsImage || !adapter.prepareWindowsImage) {
-      throw new BoxError(409, "BOX_UNSUPPORTED", `${adapter.label} needs no prepared Windows image.`);
-    }
-    if (this.windowsImageRuns.has(adapter.id)) throw new BoxError(409, "BOX_INVALID_REQUEST", "The Windows image is already being prepared.");
-    const credentials = await this.credentials(adapter.id);
-    if (!credentials) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", `${adapter.label} is not connected.`);
-    const route = this.route();
-    const windowsKind: BoxKind = adapter.kinds.includes("windows") ? "windows" : "windows-gpu";
-    const offers = await this.offers(adapter.id, windowsKind);
-    const region = offers.regions[0]?.id;
-    if (!region) throw new BoxError(502, "BOX_PROVIDER_ERROR", `${adapter.label} lists no region for Windows.`);
-    await this.setWindowsImage(adapter.id, { state: "preparing", message: `Preparing in ${offers.regions[0]!.label}…`, region });
-    const logId = `windows-image-${adapter.id}`;
-    // The image installs orq-agent as a service but carries no token: each box created from it
-    // gets its own bootstrap token through its startup script.
-    const bootstrap = this.deps.buildBootstrap({ boxId: logId, daemonUrl: route.daemonUrl, bootstrapToken: "", tailscaleAuthKey: null, container: false });
-    const run = (async () => {
-      try {
-        const { imageId } = await adapter.prepareWindowsImage!(
-          credentials,
-          { region, bootstrap, log: (line) => void this.deps.setupLog.append(logId, line) },
-          { signal: AbortSignal.timeout(2 * 60 * 60_000), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
-        );
-        await this.setWindowsImage(adapter.id, { state: "ready", message: null, imageId, region });
-      } catch (error) {
-        this.deps.logger.error(`Preparing the ${adapter.label} Windows image failed`, errorLine(error));
-        await this.setWindowsImage(adapter.id, { state: "failed", message: errorLine(error), region }).catch(() => undefined);
-      } finally {
-        this.windowsImageRuns.delete(adapter.id);
-      }
-    })();
-    this.windowsImageRuns.set(adapter.id, run);
-  }
-
-  /** The prepared image to create a Windows box from, when the provider needs one. */
-  windowsImageId(adapter: BoxProviderAdapter, kind: BoxKind): string | null {
-    if (!adapter.needsWindowsImage || (kind !== "windows" && kind !== "windows-gpu")) return null;
-    const image = this.deps.store.providerSettings(adapter.id).windowsImage;
-    return image?.state === "ready" && image.imageId ? image.imageId : null;
-  }
-
-  private async setWindowsImage(
-    providerId: string,
-    image: { state: BoxWindowsImageState; message: string | null; imageId?: string; region?: string }
-  ): Promise<void> {
-    const at = new Date(this.deps.clock.now()).toISOString();
-    await this.deps.store.updateProviderSettings(providerId, (settings) => {
-      settings.windowsImage = {
-        ...(settings.windowsImage ?? {}),
-        state: image.state,
-        message: image.message,
-        updatedAt: at,
-        ...(image.region ? { region: image.region } : {}),
-        ...(image.imageId ? { imageId: image.imageId } : {})
-      };
-    });
-    this.deps.providersChanged();
-  }
-
-  async windowsImagesSettled(): Promise<void> {
-    await Promise.all([...this.windowsImageRuns.values()]);
+    throw new BoxError(409, "BOX_UNSUPPORTED", `${adapter.label} needs no prepared Windows image.`);
   }
 
   // ---- connection --------------------------------------------------------------------------------
@@ -669,7 +627,7 @@ export class BoxSettings implements BoxConnectivity {
       message = mode === "tailscale" ? "Enter the daemon's tailnet URL first." : "Enter the daemon's public URL first.";
     } else {
       try {
-        const response = await (this.deps.fetch ?? fetch)(`${url}/api/boxes/agent/linux-x64`, {
+        const response = await fetch(`${url}/api/boxes/agent/linux-x64`, {
           method: "GET",
           redirect: "manual",
           signal: AbortSignal.timeout(15_000)
@@ -735,6 +693,18 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   route(provider?: BoxProviderId): ConnectRoute {
+    if (provider === "byo") {
+      // The owner's machine dials the configured URL as it is: in Tailscale mode it must already be
+      // on the tailnet (Orquester never joins someone's own machine to it with an ephemeral key).
+      if (this.mode() === "tailscale") {
+        const daemonUrl = this.deps.store.connection().tailscaleDaemonUrl ?? null;
+        if (!daemonUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Set the daemon's tailnet URL in Connection first.");
+        return { mode: "tailscale", daemonUrl, tailscale: null };
+      }
+      const publicUrl = this.publicUrl();
+      if (!publicUrl) throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Your machine has no way to reach this daemon: set its public URL (or Tailscale) in Connection.");
+      return { mode: "public-url", daemonUrl: publicUrl, tailscale: null };
+    }
     if (provider === "blacksmith") {
       const route = this.blacksmithRoute();
       // The runner joins the tailnet itself (federated identity): no auth key is minted for it.
@@ -782,6 +752,38 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   // ---- Blacksmith ---------------------------------------------------------------------------------
+
+  /**
+   * Start the Blacksmith device-cache workflow (Devices phase 2 §2 goal 6): builds and saves the
+   * device caches of `request.os` that are missing. Resolves the run id for {@link deviceCacheWarmStatus}.
+   */
+  async dispatchDeviceCacheWarm(request: DeviceCacheWarmRequest): Promise<DeviceCacheWarmRun> {
+    if (request?.os !== "macos" && request?.os !== "linux") throw new BoxError(400, "BOX_INVALID_REQUEST", '`os` must be "macos" or "linux".');
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.dispatchDeviceCacheWarm(credentials, request, AbortSignal.timeout(DEVICE_CACHE_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not start the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  /** A device-cache run's state (`queued` → `running` → `completed`, `conclusion: "success"` when the caches exist). */
+  async deviceCacheWarmStatus(runId: string): Promise<DeviceCacheWarmStatus> {
+    if (typeof runId !== "string" || !/^\d{1,20}$/.test(runId)) throw new BoxError(400, "BOX_INVALID_REQUEST", "`runId` must be a workflow run id.");
+    const { driver, credentials } = await this.blacksmithCalls();
+    try {
+      return await driver.deviceCacheWarmStatus(credentials, runId, AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS));
+    } catch (error) {
+      throw new BoxError(502, "BOX_PROVIDER_ERROR", `Could not read the device cache run: ${errorLine(error)}`);
+    }
+  }
+
+  private async blacksmithCalls(): Promise<{ driver: BlacksmithSetupDriver; credentials: ProviderCredentials }> {
+    const driver = this.deps.blacksmith;
+    const credentials = await this.credentials("blacksmith");
+    if (!driver || !credentials) throw new BoxError(409, "BOX_PROVIDER_NOT_CONFIGURED", "Finish the Blacksmith setup steps first.");
+    return { driver, credentials };
+  }
 
   blacksmithReady(): boolean {
     const setup = this.deps.store.blacksmith();
@@ -951,6 +953,6 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   private callOptions() {
-    return { signal: AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    return { signal: AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS) };
   }
 }

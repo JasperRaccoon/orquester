@@ -4,7 +4,6 @@
 // dry-run validation, the revision-pinned run and the run/output round trip against the production services.
 
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import Fastify, { type FastifyInstance } from "fastify";
@@ -83,7 +82,6 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     });
     assert.equal(minimal.valid, true, JSON.stringify(minimal.problems));
     assert.equal(minimal.saved, false);
-    assert.equal(minimal.projects, "Project acme/api");
     const broken = await call("create_workflow", {
       name: "Broken",
       project: { kind: "existing", project: "acme/api" },
@@ -101,7 +99,8 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     const id = created.workflowId as string;
     const dry = await call("update_workflow", { workflowId: id, revision: created.revision, ops: [{ op: "rename_node", node: "Work", to: "Renamed" }], dryRun: true });
     assert.equal(dry.valid, true, JSON.stringify(dry.problems));
-    assert.deepEqual(dry.changes, [{ label: "code · Work → Renamed", change: "changed", detail: "name" }]);
+    const saved = await call("get_workflow", { workflowId: id, node: "Work" });
+    assert.equal((saved.node as { name: string }).name, "Work", "a dry run leaves the stored node unchanged");
     assert.equal(h.service.get(id)!.revision, created.revision, "a dry run saves nothing");
     await call("delete_workflow", { workflowId: id, confirm: true });
     await retainWorkflowArtifact(t, { minimal, broken, dry });

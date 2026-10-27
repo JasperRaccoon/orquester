@@ -2,7 +2,7 @@
 // token's whereabouts — all against a scripted fetch. Nothing here reaches the network.
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 
 import type { GitHubPreviewTarget } from "@orquester/api";
 
@@ -86,18 +86,19 @@ function scripted(routes: Record<string, Reply | Reply[]>) {
 }
 
 function service(
+  t: TestContext,
   fetchImpl: typeof fetch,
   options: { credential?: GitHubReadCredential | null; now?: () => number; maxConcurrent?: number } = {}
 ) {
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  if (options.now) t.mock.method(Date, "now", options.now);
   const warnings: string[] = [];
   const resolved: Array<{ owner: string; projectPath?: string }> = [];
   const svc = new GitHubLinkPreviewService({
-    fetch: fetchImpl,
     resolveCredential: async (input) => {
       resolved.push(input);
       return options.credential ?? null;
     },
-    ...(options.now ? { now: options.now } : {}),
     ...(options.maxConcurrent ? { maxConcurrent: options.maxConcurrent } : {}),
     logger: { warn: (message: string) => warnings.push(message) }
   });
@@ -115,12 +116,12 @@ async function refusal(promise: Promise<unknown>): Promise<GitHubLinkPreviewErro
 }
 
 describe("GitHubLinkPreviewService", () => {
-  it("previews an open PR with its branches and a checks summary", async () => {
+  it("previews an open PR with its branches and a checks summary", async (t) => {
     const { calls, fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": { status: 200, body: pullJson() },
       [`/repos/acme/app/commits/${HEAD}/check-runs?per_page=100`]: { status: 200, body: CHECKS }
     });
-    const { svc } = service(fetchImpl);
+    const { svc } = service(t, fetchImpl);
     const preview = await svc.preview(PULL);
     assert.equal(preview.kind, "pull");
     assert.ok(preview.kind === "pull");
@@ -137,7 +138,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.ok(calls.every((call) => call.authorization === null), "anonymous without a credential");
   });
 
-  it("maps draft, merged and closed PRs, and skips checks once closed", async () => {
+  it("maps draft, merged and closed PRs, and skips checks once closed", async (t) => {
     const states: Array<[Record<string, unknown>, string]> = [
       [{ draft: true }, "draft"],
       [{ state: "closed", merged_at: "2026-10-03T00:00:00Z" }, "merged"],
@@ -148,7 +149,7 @@ describe("GitHubLinkPreviewService", () => {
         "/repos/acme/app/pulls/12": { status: 200, body: pullJson(overrides) },
         [`/repos/acme/app/commits/${HEAD}/check-runs?per_page=100`]: { status: 200, body: CHECKS }
       });
-      const preview = await service(fetchImpl).svc.preview(PULL);
+      const preview = await service(t, fetchImpl).svc.preview(PULL);
       assert.ok(preview.kind === "pull");
       assert.equal(preview.state, expected);
       assert.equal(calls.length, expected === "draft" ? 2 : 1, expected);
@@ -156,17 +157,17 @@ describe("GitHubLinkPreviewService", () => {
     }
   });
 
-  it("still previews a PR whose checks cannot be read", async () => {
+  it("still previews a PR whose checks cannot be read", async (t) => {
     const { fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": { status: 200, body: pullJson() },
       [`/repos/acme/app/commits/${HEAD}/check-runs?per_page=100`]: { status: 403, body: { message: "Resource not accessible" } }
     });
-    const preview = await service(fetchImpl).svc.preview(PULL);
+    const preview = await service(t, fetchImpl).svc.preview(PULL);
     assert.ok(preview.kind === "pull");
     assert.equal(preview.checks, null);
   });
 
-  it("previews an issue, and reads an /issues/N that is a PR as the PR", async () => {
+  it("previews an issue, and reads an /issues/N that is a PR as the PR", async (t) => {
     const issue = scripted({
       "/repos/acme/app/issues/7": {
         status: 200,
@@ -182,7 +183,7 @@ describe("GitHubLinkPreviewService", () => {
         }
       }
     });
-    const preview = await service(issue.fetchImpl).svc.preview(ISSUE);
+    const preview = await service(t, issue.fetchImpl).svc.preview(ISSUE);
     assert.ok(preview.kind === "issue");
     assert.equal(preview.state, "closed");
     assert.equal(preview.stateReason, "not_planned");
@@ -192,13 +193,13 @@ describe("GitHubLinkPreviewService", () => {
       "/repos/acme/app/issues/7": { status: 200, body: { title: "x", state: "closed", pull_request: { url: "…" } } },
       "/repos/acme/app/pulls/7": { status: 200, body: pullJson({ number: 7, state: "closed", merged_at: "2026-10-03T00:00:00Z" }) }
     });
-    const asPull = await service(pr.fetchImpl).svc.preview(ISSUE);
+    const asPull = await service(t, pr.fetchImpl).svc.preview(ISSUE);
     assert.ok(asPull.kind === "pull");
     assert.equal(asPull.number, 7);
     assert.equal(asPull.state, "merged");
   });
 
-  it("previews a commit with its headline and body", async () => {
+  it("previews a commit with its headline and body", async (t) => {
     const { fetchImpl } = scripted({
       "/repos/acme/app/commits/0123456": {
         status: 200,
@@ -214,7 +215,7 @@ describe("GitHubLinkPreviewService", () => {
         }
       }
     });
-    const preview = await service(fetchImpl).svc.preview(COMMIT);
+    const preview = await service(t, fetchImpl).svc.preview(COMMIT);
     assert.ok(preview.kind === "commit");
     assert.equal(preview.sha, SHA);
     assert.equal(preview.title, "fix: the thing");
@@ -223,22 +224,22 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(preview.committedAt, "2026-10-01T01:00:00Z");
   });
 
-  it("never trusts a non-GitHub html_url", async () => {
+  it("never trusts a non-GitHub html_url", async (t) => {
     const { fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": { status: 200, body: pullJson({ html_url: "https://evil.example/x", state: "closed" }) }
     });
-    const preview = await service(fetchImpl).svc.preview(PULL);
+    const preview = await service(t, fetchImpl).svc.preview(PULL);
     assert.equal(preview.url, "https://github.com/acme/app/pull/12");
   });
 
-  it("caches by state: open briefly, closed longer, commits longest", async () => {
+  it("caches by state: open briefly, closed longer, commits longest", async (t) => {
     let now = 1_000_000;
     const { calls, fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": { status: 200, body: pullJson({ state: "closed" }) },
       "/repos/acme/app/issues/7": { status: 200, body: { title: "open one", state: "open" } },
       "/repos/acme/app/commits/0123456": { status: 200, body: { sha: SHA, commit: { message: "m" } } }
     });
-    const { svc } = service(fetchImpl, { now: () => now });
+    const { svc } = service(t, fetchImpl, { now: () => now });
     const count = (suffix: string) => calls.filter((call) => call.url.endsWith(suffix)).length;
 
     await svc.preview(PULL);
@@ -264,7 +265,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(count("/commits/0123456"), 2);
   });
 
-  it("shares one read between concurrent asks", async () => {
+  it("shares one read between concurrent asks", async (t) => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let requests = 0;
@@ -273,7 +274,7 @@ describe("GitHubLinkPreviewService", () => {
       await gate;
       return new Response(JSON.stringify(pullJson({ state: "closed" })), { status: 200 });
     }) as typeof fetch;
-    const { svc } = service(fetchImpl);
+    const { svc } = service(t, fetchImpl);
     const asks = [svc.preview(PULL), svc.preview(PULL), svc.preview({ ...PULL, owner: "ACME", repo: "App" })];
     // Every ask has to reach the in-flight map before the read settles.
     await new Promise((resolve) => setImmediate(resolve));
@@ -283,7 +284,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.ok(previews.every((preview) => preview.title === "Add the thing"));
   });
 
-  it("runs at most maxConcurrent reads at once", async () => {
+  it("runs at most maxConcurrent reads at once", async (t) => {
     let active = 0;
     let peak = 0;
     const releases: Array<() => void> = [];
@@ -295,7 +296,7 @@ describe("GitHubLinkPreviewService", () => {
       const number = Number(/pulls\/(\d+)/.exec(String(input))?.[1]);
       return new Response(JSON.stringify(pullJson({ number, state: "closed" })), { status: 200 });
     }) as typeof fetch;
-    const { svc } = service(fetchImpl, { maxConcurrent: 2 });
+    const { svc } = service(t, fetchImpl, { maxConcurrent: 2 });
     const asks = [1, 2, 3, 4, 5].map((number) => svc.preview({ ...PULL, number }));
     for (let settled = 0; settled < 5; ) {
       await new Promise((resolve) => setImmediate(resolve));
@@ -309,10 +310,10 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(peak, 2);
   });
 
-  it("maps 404 to NOT_FOUND and caches it", async () => {
+  it("maps 404 to NOT_FOUND and caches it", async (t) => {
     let now = 0;
     const { calls, fetchImpl } = scripted({ "/repos/acme/app/pulls/12": { status: 404, body: { message: "Not Found" } } });
-    const { svc } = service(fetchImpl, { now: () => now });
+    const { svc } = service(t, fetchImpl, { now: () => now });
     const error = await refusal(svc.preview(PULL));
     assert.equal(error.code, "NOT_FOUND");
     assert.equal(error.status, 404);
@@ -324,7 +325,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(calls.length, 2);
   });
 
-  it("maps a spent quota to RATE_LIMITED and stops calling until it resets", async () => {
+  it("maps a spent quota to RATE_LIMITED and stops calling until it resets", async (t) => {
     let now = 1_700_000_000_000;
     const reset = Math.floor(now / 1000) + 120;
     const { calls, fetchImpl } = scripted({
@@ -335,7 +336,7 @@ describe("GitHubLinkPreviewService", () => {
       },
       "/repos/acme/app/issues/7": { status: 200, body: { title: "t", state: "open" } }
     });
-    const { svc } = service(fetchImpl, { now: () => now });
+    const { svc } = service(t, fetchImpl, { now: () => now });
     const error = await refusal(svc.preview(PULL));
     assert.equal(error.code, "RATE_LIMITED");
     assert.equal(error.status, 429);
@@ -349,19 +350,19 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(issue.title, "t");
   });
 
-  it("reads 429 with Retry-After as RATE_LIMITED", async () => {
+  it("reads 429 with Retry-After as RATE_LIMITED", async (t) => {
     const { fetchImpl } = scripted({ "/repos/acme/app/pulls/12": { status: 429, headers: { "retry-after": "90" } } });
-    const error = await refusal(service(fetchImpl).svc.preview(PULL));
+    const error = await refusal(service(t, fetchImpl).svc.preview(PULL));
     assert.equal(error.code, "RATE_LIMITED");
     assert.equal(error.retryAfterMs, 90_000);
   });
 
-  it("maps network failures and 5xx to UPSTREAM, cached briefly", async () => {
+  it("maps network failures and 5xx to UPSTREAM, cached briefly", async (t) => {
     let now = 0;
     const { calls, fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": [new TypeError("fetch failed"), { status: 502 }, { status: 200, body: pullJson({ state: "closed" }) }]
     });
-    const { svc } = service(fetchImpl, { now: () => now });
+    const { svc } = service(t, fetchImpl, { now: () => now });
     assert.equal((await refusal(svc.preview(PULL))).code, "UPSTREAM");
     await refusal(svc.preview(PULL));
     assert.equal(calls.length, 1);
@@ -373,13 +374,13 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal((await svc.preview(PULL)).title, "Add the thing");
   });
 
-  it("uses the stored token only in the Authorization header, never in a URL, message or preview", async () => {
+  it("uses the stored token only in the Authorization header, never in a URL, message or preview", async (t) => {
     const { calls, fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": { status: 200, body: pullJson() },
       [`/repos/acme/app/commits/${HEAD}/check-runs?per_page=100`]: { status: 200, body: CHECKS },
       "/repos/acme/app/issues/7": { status: 404, body: { message: `Bad credentials ${TOKEN}` } }
     });
-    const { svc, warnings, resolved } = service(fetchImpl, { credential: { accountId: "gh1", token: TOKEN } });
+    const { svc, warnings, resolved } = service(t, fetchImpl, { credential: { accountId: "gh1", token: TOKEN } });
     const preview = await svc.preview(PULL, "/w/ws/app");
     assert.deepEqual(resolved[0], { owner: "acme", projectPath: "/w/ws/app" });
     assert.ok(calls.every((call) => call.authorization === `Bearer ${TOKEN}`));
@@ -391,14 +392,14 @@ describe("GitHubLinkPreviewService", () => {
     assert.ok(warnings.every((warning) => !warning.includes(TOKEN)));
   });
 
-  it("falls back to one anonymous read when GitHub refuses the token", async () => {
+  it("falls back to one anonymous read when GitHub refuses the token", async (t) => {
     const { calls, fetchImpl } = scripted({
       "/repos/acme/app/pulls/12": [
         { status: 401, body: { message: "Bad credentials" } },
         { status: 200, body: pullJson({ state: "closed" }) }
       ]
     });
-    const { svc } = service(fetchImpl, { credential: { accountId: "gh1", token: TOKEN } });
+    const { svc } = service(t, fetchImpl, { credential: { accountId: "gh1", token: TOKEN } });
     const preview = await svc.preview(PULL);
     assert.equal(preview.title, "Add the thing");
     assert.deepEqual(
@@ -407,15 +408,16 @@ describe("GitHubLinkPreviewService", () => {
     );
   });
 
-  it("an anonymous 403 that is no rate limit reads as NOT_FOUND", async () => {
+  it("an anonymous 403 that is no rate limit reads as NOT_FOUND", async (t) => {
     const { fetchImpl } = scripted({ "/repos/acme/app/pulls/12": { status: 403, body: { message: "Repository access blocked" } } });
-    assert.equal((await refusal(service(fetchImpl).svc.preview(PULL))).code, "NOT_FOUND");
+    assert.equal((await refusal(service(t, fetchImpl).svc.preview(PULL))).code, "NOT_FOUND");
   });
 
-  it("keeps separate cache entries per credential", async () => {
+  it("keeps separate cache entries per credential", async (t) => {
     const { calls, fetchImpl } = scripted({ "/repos/acme/app/pulls/12": { status: 200, body: pullJson({ state: "closed" }) } });
     let credential: GitHubReadCredential | null = null;
-    const svc = new GitHubLinkPreviewService({ fetch: fetchImpl, resolveCredential: async () => credential, logger: { warn: () => {} } });
+    t.mock.method(globalThis, "fetch", fetchImpl);
+    const svc = new GitHubLinkPreviewService({ resolveCredential: async () => credential, logger: { warn: () => {} } });
     await svc.preview(PULL);
     credential = { accountId: "gh1", token: TOKEN };
     await svc.preview(PULL);
@@ -423,10 +425,10 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(calls.length, 2);
   });
 
-  it("treats a failing credential lookup as anonymous", async () => {
+  it("treats a failing credential lookup as anonymous", async (t) => {
     const { calls, fetchImpl } = scripted({ "/repos/acme/app/pulls/12": { status: 200, body: pullJson({ state: "closed" }) } });
+    t.mock.method(globalThis, "fetch", fetchImpl);
     const svc = new GitHubLinkPreviewService({
-      fetch: fetchImpl,
       resolveCredential: async () => {
         throw new Error("accounts.json is unreadable");
       },

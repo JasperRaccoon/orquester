@@ -16,25 +16,21 @@ import { useMemo } from "react";
 
 import {
   projectBoxInfo,
-  type BoxConfigChangeSet,
   type BoxSummary,
-  type DecideBoxConfigChangeRequest,
   type ProjectBoxInfo
 } from "@orquester/api";
 
 import {
-  decideBoxConfigChange,
-  destroyBox as destroyStoreBox,
   projectBoxIn,
   useBoxConfigChanges,
-  useBoxes,
-  type BoxesApi
+  useBoxes
 } from "../../../lib/boxes/store";
 import { readDestroyedReason } from "../../../lib/boxes/validate";
 import { useAppStore, type AppState } from "../../../store/app";
 import { boxShellRefId, boxTerminalTitle, currentSetupStep, setupStepText } from "./box-surfaces.logic";
 
 export { useBoxConfigChanges, useBoxes };
+export { decideBoxConfigChange as decideConfigChange, destroyBox } from "../../../lib/boxes/store";
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -89,20 +85,6 @@ export function useProjectBox(projectPath: string | null | undefined, listed?: P
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
-
-/** Approve or deny a config change set; resolves with the decided set (null if the answer did not read). */
-export function decideConfigChange(
-  api: BoxesApi,
-  id: string,
-  decision: DecideBoxConfigChangeRequest["decision"]
-): Promise<BoxConfigChangeSet | null> {
-  return decideBoxConfigChange(api, id, decision);
-}
-
-/** Destroy one of a chat's temporary boxes (`DELETE boxRoutes.box`); the answer lands in the store. */
-export function destroyBox(api: BoxesApi, id: string): Promise<void> {
-  return destroyStoreBox(api, id);
-}
 
 /**
  * "Watch": a terminal tab in the open project attached to the box — a shell

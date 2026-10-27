@@ -41,7 +41,7 @@ test("nodeCredentialFiles: missing files read as null, lock ages, and the watch 
   t.after(() => rm(base, { recursive: true, force: true }));
   const home = join(base, "home");
   await mkdir(home);
-  const files = nodeCredentialFiles(base, () => Date.now());
+  const files = nodeCredentialFiles(base);
   const path = join(home, "auth.json");
   assert.equal(await files.read(path), null);
   assert.equal(await files.ageOfNewest(claudeRefreshLockPaths(home)), null);

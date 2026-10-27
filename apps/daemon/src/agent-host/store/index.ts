@@ -230,12 +230,6 @@ const defaultClock: Clock = {
   nowIso: () => new Date().toISOString()
 };
 
-const defaultIdGen: IdGen = {
-  eventId: () => randomUUID(),
-  messageId: (prefix: string) => `${prefix}:${randomUUID()}`,
-  uuid: () => randomUUID()
-};
-
 interface ThreadRuntime {
   /** Highest sequence known to be on disk. */
   seq: number;
@@ -341,7 +335,7 @@ export interface AgentThreadStore extends ThreadStore {
 export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore {
   const { rootDir } = options;
   const clock = options.clock ?? defaultClock;
-  const ids = options.idGen ?? defaultIdGen;
+  const ids = options.idGen ?? { uuid: randomUUID };
   const homeDirs = options.homeDirs;
   const deleteThreadRefs = options.deleteThreadRefs;
 
@@ -1091,10 +1085,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         if (keep(attachmentId)) {
           continue;
         }
-        maxAgeMs =
-          parseThreadSegmentFromAttachmentId(attachmentId) === PENDING_ATTACHMENT_THREAD_SEGMENT
-            ? PENDING_ATTACHMENT_MAX_AGE_MS
-            : UNREFERENCED_ATTACHMENT_GRACE_MS;
+        maxAgeMs = UNREFERENCED_ATTACHMENT_GRACE_MS;
       }
       try {
         const stat = await fsp.stat(filePath);
@@ -1261,7 +1252,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     /** The log from a recorded cursor to its end ({@link readEventsFrom}). */
-    readEventsFrom: (threadId, input) => readEventsFrom(threadId, input),
+    readEventsFrom,
 
     /**
      * A history page's bytes: exactly `[fromByte, toByte)`, both line
@@ -1540,11 +1531,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         );
       }
 
-      const attachmentId = createAttachmentId(
-        input.threadId,
-        ids.uuid(),
-        extension.replace(/^\./, "")
-      );
+      const attachmentId = createAttachmentId(input.threadId, ids.uuid(), extension);
       if (attachmentId === null) {
         throw new Error("agent-chat: thread id cannot be expressed as an attachment segment");
       }

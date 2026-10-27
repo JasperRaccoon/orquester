@@ -100,7 +100,6 @@ import {
   workflowCallers,
   frozenChildMismatch,
   workflowFields,
-  workflowPin,
   workflowProjectLabel,
   workflowUnion,
   type PassedBy,

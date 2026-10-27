@@ -89,7 +89,6 @@ import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import { PREPARED_MANIFEST_FILE, parsePreparedManifest, writePreparedManifest, type PreparedManifest } from "./manifest.ts";
 import {
-  preparerFor,
   sessionProfilePreparers,
   type SessionProfilePrepareContext,
   type SessionProfilePrepareInputsContext,
@@ -229,8 +228,6 @@ export class SessionProfileLifecycle {
   private readonly profiles = new Map<string, { revision: string; updatedAt: string }>();
   /** Profiles being (or already) removed: nothing new is scheduled for them. */
   private readonly deleted = new Set<string>();
-  /** Every job and removal in flight, for {@link idle}. */
-  private readonly background = new Set<Promise<unknown>>();
   /** Version dirs answered by `ensureReady` → when their grace ends (ms). */
   private readonly handedOut = new Map<string, number>();
   private readonly graceMs: number;
@@ -317,7 +314,7 @@ export class SessionProfileLifecycle {
   /** Subscribes to the profile service's `changed` / `deleted`. Returns the unsubscribe. */
   attach(events: EventEmitter<SessionProfileServiceEvents>): () => void {
     const onChanged = ({ profileId, revision }: { profileId: string; revision: string }): void => this.onChanged(profileId, revision);
-    const onDeleted = ({ profileId }: { profileId: string }): void => void this.onDeleted(profileId);
+    const onDeleted = ({ profileId }: { profileId: string }): void => void this.onDeleted(profileId).catch(noop);
     events.on("changed", onChanged);
     events.on("deleted", onDeleted);
     const detach = (): void => {
@@ -363,7 +360,9 @@ export class SessionProfileLifecycle {
    */
   gc(): Promise<void> {
     if (this.stopped) return Promise.resolve();
-    return this.track(this.collect());
+    const pass = this.collect();
+    void pass.catch(noop);
+    return pass;
   }
 
   /** Stops scheduling, aborts preparations in flight (`ctx.signal`) and detaches from the service. */
@@ -376,13 +375,6 @@ export class SessionProfileLifecycle {
     if (this.gcTimer !== null) clearInterval(this.gcTimer);
     this.gcTimer = null;
     this.abort.abort();
-  }
-
-  /** Resolves once no job or removal is in flight (tests, shutdown drains). */
-  async idle(): Promise<void> {
-    while (this.background.size > 0) {
-      await Promise.allSettled([...this.background]);
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -411,18 +403,14 @@ export class SessionProfileLifecycle {
     }
   }
 
-  private onDeleted(profileId: string): Promise<void> {
-    if (this.deleted.has(profileId)) return Promise.resolve();
+  private async onDeleted(profileId: string): Promise<void> {
+    if (this.deleted.has(profileId)) return;
     this.deleted.add(profileId);
     const states = [...this.keys.values()].filter((state) => state.profileId === profileId);
-    return this.track(
-      (async () => {
-        await Promise.all(states.map((state) => state.tail));
-        for (const state of states) this.keys.delete(state.id);
-        this.profiles.delete(profileId);
-        await this.dropProfile(profileId);
-      })()
-    );
+    await Promise.all(states.map((state) => state.tail));
+    for (const state of states) this.keys.delete(state.id);
+    this.profiles.delete(profileId);
+    await this.dropProfile(profileId);
   }
 
   /** Registers the current version of every key on disk; drops the pointers of deleted profiles. */
@@ -497,7 +485,7 @@ export class SessionProfileLifecycle {
       });
     state.queued = job;
     state.tail = job.promise.then(noop);
-    this.track(job.promise);
+    void job.promise.catch(noop);
     return job.promise;
   }
 
@@ -623,7 +611,7 @@ export class SessionProfileLifecycle {
         `Agent Profiles: prepared profile ${state.profileId} r${source.revision} for ${state.agent} (${state.accountKey}) as ${version}.`
       );
       // The previous version (or legacy content) goes once no session leases it — after this job.
-      void this.track(this.collect([state.keyDir]));
+      void this.collect([state.keyDir]).catch(noop);
       return { ok: true, ready: this.ready(state, source.revision, ctx.preparedDir) };
     } catch (error) {
       await rm(stagingDir, { recursive: true, force: true }).catch(noop);
@@ -651,7 +639,7 @@ export class SessionProfileLifecycle {
     if (state.pending > 1 || state.queued) return;
     if (this.keys.get(state.id) === state) this.keys.delete(state.id);
     await rm(join(state.keyDir, SESSION_PROFILE_PREPARED_CURRENT_FILE), { force: true }).catch(noop);
-    void this.track(this.collect([state.keyDir]));
+    void this.collect([state.keyDir]).catch(noop);
     this.emitStatus(state.profileId);
   }
 
@@ -789,7 +777,7 @@ export class SessionProfileLifecycle {
   // -------------------------------------------------------------------------
 
   private preparerOf(agent: SessionProfileAgentId): SessionProfilePreparer | null {
-    return preparerFor(agent, this.preparers) as SessionProfilePreparer | null;
+    return this.preparers[agent] as SessionProfilePreparer | null;
   }
 
   /** The key's state, created on first use. Throws `PROFILE_NOT_FOUND`/`INVALID_REQUEST` for ids that cannot be path segments. */
@@ -888,13 +876,6 @@ export class SessionProfileLifecycle {
     for (const [dir, until] of this.handedOut) if (until <= now) this.handedOut.delete(dir);
     this.handedOut.set(preparedDir, now + this.graceMs);
     return { profileId: state.profileId, agent: state.agent, accountKey: state.accountKey, revision, preparedDir };
-  }
-
-  private track<T>(promise: Promise<T>): Promise<T> {
-    const tracked = promise.finally(() => this.background.delete(tracked));
-    this.background.add(tracked);
-    tracked.catch(noop);
-    return promise;
   }
 }
 

@@ -2,6 +2,10 @@
 // see docs/superpowers/specs/2026-10-14-plugins-ts-rust-design.md) and the
 // Excalidraw whiteboard (docs/superpowers/specs/2026-10-15-excalidraw-whiteboard-design.md).
 
+// "Device simulators" (docs/superpowers/specs/2026-10-27-devices-phase-1-core.md): its id is
+// declared with its contracts in `devices.ts`.
+import { DEVICES_PLUGIN_ID } from "./devices.ts";
+
 export const TS_RUST_PLUGIN_ID = "ts-rust";
 export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
 /** "Secret files" (docs/superpowers/specs/2026-10-19-secret-files-plugin-design.md; contracts in `secret-files.ts`). */
@@ -15,13 +19,15 @@ export type PluginId =
   | typeof EXCALIDRAW_PLUGIN_ID
   | typeof SECRET_FILES_PLUGIN_ID
   | typeof EPHEMERAL_VMS_PLUGIN_ID
-  | typeof KNOWLEDGE_GRAPH_PLUGIN_ID;
+  | typeof KNOWLEDGE_GRAPH_PLUGIN_ID
+  | typeof DEVICES_PLUGIN_ID;
 export const PLUGIN_IDS: readonly PluginId[] = [
   TS_RUST_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   EPHEMERAL_VMS_PLUGIN_ID,
-  KNOWLEDGE_GRAPH_PLUGIN_ID
+  KNOWLEDGE_GRAPH_PLUGIN_ID,
+  DEVICES_PLUGIN_ID
 ];
 
 export function isPluginId(value: unknown): value is PluginId {

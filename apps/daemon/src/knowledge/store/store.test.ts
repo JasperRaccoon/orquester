@@ -15,12 +15,10 @@ import { KnowledgeStore } from "./store.ts";
 async function setup(t: TestContext) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-store-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
-  let clock = Date.parse("2026-10-23T10:00:00.000Z");
-  const now = () => new Date((clock += 1000));
   const warnings: string[] = [];
   const logger = { warn: (m: string) => warnings.push(m), error: (m: string) => warnings.push(m) };
   const open = async () => {
-    const store = await KnowledgeStore.open({ appdir, now, logger });
+    const store = await KnowledgeStore.open({ appdir, logger });
     const changes: KnowledgeEntryChange[] = [];
     store.onChange((c) => changes.push(c));
     return { store, changes };
@@ -468,6 +466,7 @@ test("savedFrom: unknown keys and an unknown `by` are read tolerantly and writte
 
 /** Three entries saved one after the other (oldest first), in SEO, Ads and Growth+SEO. */
 async function threeToMerge(t: TestContext) {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-23T10:00:00.000Z") });
   const env = await setup(t);
   const { store, changes } = await env.open();
   const seo = await store.createCollection({ name: "SEO" });
@@ -475,7 +474,9 @@ async function threeToMerge(t: TestContext) {
   const growth = await store.createCollection({ name: "Growth" });
   const save = async (body: string, collections: string[]) => (await store.save({ entries: [{ body, title: body.slice(0, 20), collections }] })).results[0]!.entryId;
   const oldest = await save("Alternatives pages convert well for every competitor.", ["SEO"]);
+  t.mock.timers.setTime(Date.parse("2026-10-23T10:00:01.000Z"));
   const middle = await save("Comparison tables beat feature lists on landing pages.", ["Ads"]);
+  t.mock.timers.setTime(Date.parse("2026-10-23T10:00:02.000Z"));
   const newest = await save("Programmatic SEO needs one honest page per competitor.", ["Growth", "SEO"]);
   changes.length = 0;
   return { ...env, store, changes, seo, ads, growth, oldest, middle, newest };

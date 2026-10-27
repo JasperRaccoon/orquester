@@ -11,30 +11,30 @@ const credentials = { token: "FlyV1 fm2_test-token" };
 const unauthorized = { status: 401, body: fixture("fly", "error-unauthorized") };
 
 // Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
-test("validate: ok with a working token, a message for a bad or missing one", async () => {
+test("validate: ok with a working token, a message for a bad or missing one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/apps?org_slug=personal&limit=1`, body: fixture("fly", "apps-empty") },
     { method: "GET", url: `${API}/apps?org_slug=my-team&limit=1`, ...unauthorized }
   ]);
-  assert.deepEqual(await flyAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await flyAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   // A `FlyV1` token is sent as is.
   assert.equal(replay.requests[0]!.headers.authorization, "FlyV1 fm2_test-token");
 
-  const bad = await flyAdapter.validate({ token: "wrong-token", orgSlug: "my-team" }, replayOptions(replay));
+  const bad = await flyAdapter.validate({ token: "wrong-token", orgSlug: "my-team" }, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /Authenticate: token validation error/);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /wrong-token/);
   // Any other token is a bearer token.
   assert.equal(replay.requests[1]!.headers.authorization, "Bearer wrong-token");
 
-  const missing = await flyAdapter.validate({ orgSlug: "personal" }, replayOptions(replay));
+  const missing = await flyAdapter.validate({ orgSlug: "personal" }, replayOptions(t, replay));
   assert.deepEqual(missing, { ok: false, message: "Fly.io: Access token is missing" });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: bundled preset prices per live region, regional groups, curated images", async () => {
+test("offers: bundled preset prices per live region, regional groups, curated images", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${API}/platform/regions`, body: fixture("fly", "regions") }]);
-  const offers = await flyAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await flyAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
 
   // The deprecated region is dropped; the live order is kept.
@@ -84,13 +84,13 @@ test("offers: bundled preset prices per live region, regional groups, curated im
   );
 });
 
-test("create: one app and one Machine named after the box, the script delivered as a file", async () => {
+test("create: one app and one Machine named after the box, the script delivered as a file", async (t) => {
   const replay = replayFetch([
     { method: "POST", url: `${API}/apps`, status: 201, body: fixture("fly", "create-app") },
     { method: "POST", url: `${API}/apps/${APP}/machines`, body: fixture("fly", "create-machine") }
   ]);
   const request = testCreateRequest({ size: "shared-cpu-2x-4gb@fra", region: "fra" });
-  const result = await flyAdapter.create({ ...credentials, orgSlug: "my-team" }, request, replayOptions(replay));
+  const result = await flyAdapter.create({ ...credentials, orgSlug: "my-team" }, request, replayOptions(t, replay));
 
   assert.deepEqual(replay.requests[0]!.body, { name: APP, app_name: APP, org_slug: "my-team", idempotency_key: TEST_BOX_ID });
   assert.deepEqual(replay.requests[1]!.body, {
@@ -114,14 +114,14 @@ test("create: one app and one Machine named after the box, the script delivered 
   assert.equal(result.hourlyUsd, 0.0407);
 });
 
-test("create: a failed Machine create is not retried and removes the app", async () => {
+test("create: a failed Machine create is not retried and removes the app", async (t) => {
   const replay = replayFetch([
     { method: "POST", url: `${API}/apps`, status: 201, body: fixture("fly", "create-app") },
     { method: "POST", url: `${API}/apps/${APP}/machines`, status: 500, body: fixture("fly", "error-capacity"), times: 2 },
     { method: "DELETE", url: `${API}/apps/${APP}?force=true`, status: 202 }
   ]);
   await assert.rejects(
-    flyAdapter.create(credentials, testCreateRequest({ size: "performance-2x-8gb", region: "iad", image: "buildpack-deps:noble" }), replayOptions(replay)),
+    flyAdapter.create(credentials, testCreateRequest({ size: "performance-2x-8gb", region: "iad", image: "buildpack-deps:noble" }), replayOptions(t, replay)),
     (error) => {
       assert.ok(error instanceof ProviderHttpError);
       assert.equal(error.status, 500);
@@ -134,14 +134,14 @@ test("create: a failed Machine create is not retried and removes the app", async
   assert.equal(replay.pending().length, 1);
 });
 
-test("create: a failed app create is not retried; a taken name says so", async () => {
+test("create: a failed app create is not retried; a taken name says so", async (t) => {
   const request = testCreateRequest({ size: "shared-cpu-1x-1gb", region: "iad" });
   const unavailable = replayFetch([{ method: "POST", url: `${API}/apps`, status: 503, body: fixture("fly", "error-rate-limit"), times: 2 }]);
-  await assert.rejects(flyAdapter.create(credentials, request, replayOptions(unavailable)), /rate limit/);
+  await assert.rejects(flyAdapter.create(credentials, request, replayOptions(t, unavailable)), /rate limit/);
   assert.equal(unavailable.requests.length, 1);
 
   const taken = replayFetch([{ method: "POST", url: `${API}/apps`, status: 422, body: fixture("fly", "error-name-taken") }]);
-  await assert.rejects(flyAdapter.create(credentials, request, replayOptions(taken)), (error) => {
+  await assert.rejects(flyAdapter.create(credentials, request, replayOptions(t, taken)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 422);
     assert.match(error.message, new RegExp(`the app name ${APP} is already taken on Fly\\.io`));
@@ -149,17 +149,17 @@ test("create: a failed app create is not retried; a taken name says so", async (
   });
 });
 
-test("create: rejects unknown sizes and invalid app names before any call", async () => {
+test("create: rejects unknown sizes and invalid app names before any call", async (t) => {
   const replay = replayFetch([]);
-  await assert.rejects(flyAdapter.create(credentials, testCreateRequest({ size: "shared-cpu-1x-256mb", region: "iad" }), replayOptions(replay)), /unknown size/);
+  await assert.rejects(flyAdapter.create(credentials, testCreateRequest({ size: "shared-cpu-1x-256mb", region: "iad" }), replayOptions(t, replay)), /unknown size/);
   await assert.rejects(
-    flyAdapter.create(credentials, testCreateRequest({ size: "shared-cpu-1x-1gb", region: "iad", name: "orq-ABC12345" }), replayOptions(replay)),
+    flyAdapter.create(credentials, testCreateRequest({ size: "shared-cpu-1x-1gb", region: "iad", name: "orq-ABC12345" }), replayOptions(t, replay)),
     /not a valid Fly app name/
   );
   assert.equal(replay.requests.length, 0);
 });
 
-test("status: maps Machine states, 404 is gone, 429 is retried", async () => {
+test("status: maps Machine states, 404 is gone, 429 is retried", async (t) => {
   const started = fixture<Record<string, unknown>>("fly", "machine-started");
   const url = `${API}/apps/${APP}/machines/1111111a2b3c4d`;
   const replay = replayFetch([
@@ -173,48 +173,48 @@ test("status: maps Machine states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url, status: 404, body: fixture("fly", "error-not-found") }
   ]);
   const ref = { app: APP, machineId: "1111111a2b3c4d", region: "fra" };
-  assert.deepEqual(await flyAdapter.status(credentials, ref, replayOptions(replay)), { state: "running", detail: null, publicIp: null, hourlyUsd: null });
-  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const stopped = await flyAdapter.status(credentials, ref, replayOptions(replay));
+  assert.deepEqual(await flyAdapter.status(credentials, ref, replayOptions(t, replay)), { state: "running", detail: null, publicIp: null, hourlyUsd: null });
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const stopped = await flyAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Fly.io reports the Machine stopped");
-  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
-  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: without a Machine id, the app's Machine; a deleted app is gone", async () => {
+test("status: without a Machine id, the app's Machine; a deleted app is gone", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/apps/${APP}/machines?summary=true`, body: fixture("fly", "machines-list") },
     { method: "GET", url: `${API}/apps/${APP}/machines?summary=true`, status: 404, body: fixture("fly", "error-app-not-found") }
   ]);
-  assert.equal((await flyAdapter.status(credentials, { app: APP }, replayOptions(replay))).state, "running");
-  const gone = await flyAdapter.status(credentials, { app: APP }, replayOptions(replay));
+  assert.equal((await flyAdapter.status(credentials, { app: APP }, replayOptions(t, replay))).state, "running");
+  const gone = await flyAdapter.status(credentials, { app: APP }, replayOptions(t, replay));
   assert.equal(gone.state, "gone");
 });
 
-test("destroy: force-deletes the app and is idempotent", async () => {
+test("destroy: force-deletes the app and is idempotent", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: `${API}/apps/${APP}?force=true`, status: 202 },
     { method: "DELETE", url: `${API}/apps/${APP}?force=true`, status: 404, body: fixture("fly", "error-app-not-found") }
   ]);
   const ref = { app: APP, machineId: "1111111a2b3c4d", region: "fra" };
-  await flyAdapter.destroy(credentials, ref, replayOptions(replay));
-  await flyAdapter.destroy(credentials, ref, replayOptions(replay));
+  await flyAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await flyAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
-  await assert.rejects(flyAdapter.destroy(credentials, {}, replayOptions(replay)), /instance reference has no app/);
+  await assert.rejects(flyAdapter.destroy(credentials, {}, replayOptions(t, replay)), /instance reference has no app/);
 });
 
-test("listManaged: the org's orq- apps with their Machine", async () => {
+test("listManaged: the org's orq- apps with their Machine", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/apps?org_slug=personal`, body: fixture("fly", "apps-managed") },
     { method: "GET", url: `${API}/apps/${APP}/machines?summary=true`, body: fixture("fly", "machines-list") },
     { method: "GET", url: `${API}/apps/orq-ffeeddccbbaa/machines?summary=true`, body: [] }
   ]);
-  const managed = await flyAdapter.listManaged(credentials, replayOptions(replay));
+  const managed = await flyAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(managed, [
     {
       ref: { app: APP, machineId: "1111111a2b3c4d", region: "fra" },

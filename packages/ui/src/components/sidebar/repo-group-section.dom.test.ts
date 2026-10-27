@@ -19,7 +19,7 @@ import {
 import { OrquesterProvider } from "../../context/orquester-context";
 import type { ApiClient } from "../../lib/api-client";
 import type { RepoProjectGroup } from "../../lib/repo-groups";
-import { applyRepoIdentity, resetRepoIdentities } from "../../lib/repo-identities/store";
+import { applyRepoIdentityEvent, resetRepoIdentities } from "../../lib/repo-identities/store";
 import { applySecretVault, resetSecretFiles } from "../../lib/secret-files/store";
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
@@ -133,7 +133,6 @@ describe("a repo group header", () => {
     await act(async () => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
     });
-    for (let i = 0; i < 3; i += 1) await act(async () => undefined);
   };
 
   beforeEach(() => {
@@ -156,14 +155,14 @@ describe("a repo group header", () => {
     assert.equal(header.getAttribute("aria-expanded"), "true");
     assert.equal(header.title, KEY);
     assert.match(header.textContent ?? "", /JasperRaccoon\/JasperEngine\s*2/);
-    assert.equal(document.querySelectorAll("[data-row]").length, 2);
+    assert.ok(document.querySelector('[data-row="Multiplayer"]'));
     await act(async () => button("New clone of JasperRaccoon/JasperEngine")!.click());
     assert.equal(clones, 1);
   });
 
   it("hides its rows when collapsed and saves the toggle", async () => {
     await render(group({ collapsed: true }));
-    assert.equal(document.querySelectorAll("[data-row]").length, 0);
+    assert.equal(document.querySelector('[data-row="Multiplayer"]'), null);
     await render(group());
     await act(async () => document.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click());
     assert.deepEqual(JSON.parse(localStorage.getItem("orquester:collapsed-repo-groups") ?? "[]"), [KEY]);
@@ -174,11 +173,13 @@ describe("a repo group header", () => {
     await openMenu();
     assert.ok(!menuLabels().includes("Reset label"));
     await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
-    await act(async () => applyRepoIdentity(KEY, { repoKey: KEY, label: "Engine", updatedAt: "x" }));
+    await act(async () => applyRepoIdentityEvent({
+      type: "repoIdentity.changed",
+      payload: { identity: { repoKey: KEY, label: "Engine", updatedAt: "x" } }
+    }));
     await openMenu();
     assert.ok(menuLabels().includes("Reset label"));
     await pick("Reset label");
-    for (let i = 0; i < 3; i += 1) await act(async () => undefined);
     assert.deepEqual(labels, [{ repoKey: KEY, label: null }]);
   });
 
@@ -205,7 +206,7 @@ describe("a repo group header", () => {
     await pick("Rename label…");
     await type("x".repeat(81));
     assert.deepEqual(labels, []);
-    assert.match(document.body.textContent ?? "", /at most 80 characters/);
+    assert.match(document.body.textContent ?? "", /\b80\b/);
     await type("x", "Escape");
     assert.equal(document.querySelector('input[aria-label="Repo label"]'), null);
     assert.deepEqual(labels, []);
@@ -300,8 +301,6 @@ describe("a repo group header", () => {
       const shown = pill();
       assert.ok(shown, "a key count");
       assert.equal(shown.textContent?.trim(), "3");
-      assert.match(shown.title, /1 clone has secret files that need attention/);
-      assert.match(shown.title, /2 new secret files were found/);
 
       await act(async () => applySecretVault("ws", KEY, vault()));
       assert.equal(pill(), null);

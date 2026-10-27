@@ -9,15 +9,14 @@ import type { KnowledgeCollectionView, KnowledgeMatchBand, KnowledgeSearchHit, K
 
 import { cn } from "../../lib/cn";
 import { ErrorLine } from "./parts";
-import { entryByline } from "./knowledge.logic";
+import { entryByline, searchHitKey, viaBadges } from "./knowledge.logic";
 import {
   bandLabel,
   highlightParts,
   readEntryMatch,
   SEARCH_NAV_EMPTY,
   searchNavReducer,
-  showAllLabel,
-  viaBadges
+  showAllLabel
 } from "./graph-search.logic";
 
 export type GraphSearchState =
@@ -41,8 +40,6 @@ export interface GraphSearchBoxProps {
   /** The List view's filters or examples narrow the results too. */
   narrowed: boolean;
 }
-
-const hitKey = (hit: KnowledgeSearchHit) => (hit.kind === "entry" ? `entry:${hit.entry.id}` : `concept:${hit.concept.id}`);
 
 export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, state, open, onOpen, collections, onPick, onShowAll, filter, narrowed }) => {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -148,7 +145,7 @@ export const GraphSearchBox: React.FC<GraphSearchBoxProps> = ({ text, onText, st
             ) : (
               state.answer.hits.map((hit, index) => (
                 <SearchOption
-                  key={hitKey(hit)}
+                  key={searchHitKey(hit)}
                   id={optionId(index)}
                   index={index}
                   hit={hit}
@@ -238,8 +235,8 @@ const SearchOption: React.FC<{
               <span className="mt-0.5 flex flex-wrap items-center gap-1">
                 <span className={cn("rounded border px-1 text-[10px] font-medium leading-4", BAND_CLASS[match.band])}>{bandLabel(match.band)}</span>
                 {viaBadges(match).map((badge) => (
-                  <span key={badge} className="max-w-[10rem] truncate rounded bg-neutral-800 px-1 text-[10px] leading-4 text-neutral-400">
-                    {badge}
+                  <span key={badge.key} className="max-w-[10rem] truncate rounded bg-neutral-800 px-1 text-[10px] leading-4 text-neutral-400">
+                    {badge.label}
                   </span>
                 ))}
               </span>

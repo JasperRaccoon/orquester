@@ -395,11 +395,6 @@ export function isThreadAuthoredMessage(message: { context?: readonly { kind: st
   return hasContext(message, THREAD_MESSAGE_CONTEXT_KIND) || hasContext(message, THREAD_REPLY_CONTEXT_KIND);
 }
 
-/** Whether a user message is a reply delivery, never by its text alone. */
-export function isThreadReplyMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
-  return hasContext(message, THREAD_REPLY_CONTEXT_KIND);
-}
-
 /** Whether a user message is a merge back Orquester delivered, never by its text alone. */
 export function isMergeBackMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
   return hasContext(message, MERGE_BACK_CONTEXT_KIND);

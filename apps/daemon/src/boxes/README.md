@@ -11,11 +11,11 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `apps/box-agent/` | `orq-agent`, the program in every box: dials the daemon, serves channels and requests, detached processes, forwards, file transfer. Written in Go (PTY and ConPTY without native addons), cross-compiled per platform by `pnpm --filter @orquester/box-agent build`; `fixtures/*.json` keep its wire types in step with `box-protocol.ts`. |
 | `boxes/hub/` | The connect WebSocket route, box authentication (bootstrap token, box credential, GitHub OIDC via `VerifyGithubOidc`), the `BoxHub`/`BoxConnection` implementation, per-box local relay sockets (`boxSocketPath`), serving `orq-agent` builds and the staged bootstrap's second stage. |
 | `boxes/client/` | A `BoxConnection` over a relay socket, for the agent host and other local processes (static imports only — agent-host rule). |
-| `boxes/providers/` | One adapter per provider (`BoxProviderAdapter`), price tables, recorded API fixtures. `vm-providers.ts`, `gpu-providers.ts` and `blacksmith.ts` each export their adapters; `index.ts` assembles the registry. |
+| `boxes/providers/` | One adapter per provider (`BoxProviderAdapter`), price tables, recorded API fixtures. `vm-providers.ts`, `gpu-providers.ts` and `blacksmith.ts` each export their adapters; `byo.ts` is the owner's own machines (no calls, price 0, offers built from the records); `index.ts` assembles the registry. |
 | `boxes/bootstrap/` | `BuildBootstrap`: POSIX, PowerShell, container and cloud-init bootstraps that fetch and start `orq-agent`, and the staged POSIX bootstrap for size-capped startup scripts (its generic second stage is served by the hub). |
 | `boxes/tailscale/` | `TailscaleKeys` over the Tailscale API (API token or OAuth client); `LocalTailscale` (`local.ts`): this machine's `tailscale` CLI — status, whether `tailscale serve` proxies an HTTPS port to the daemon, and the Connection's "Set up for me". |
-| `boxes/github/` | GitHub Actions OIDC verification, the Blacksmith control repo (create, workflow commit, dispatch, cancel), the workflow template. |
-| `boxes/service/` | Box records (`boxes.json`, `box-secrets.json`), `BoxRegistry`, the lifecycle and provisioning pipeline, reconciler, costs, project integration (create/list/delete), the plugin's HTTP routes and events. |
+| `boxes/github/` | GitHub Actions OIDC verification, the Blacksmith control repo (create, workflow commit — re-committed at box create when a template changed —, dispatch, cancel), the workflow templates (`orquester-box.yml` for macOS and Linux boxes, `orquester-device-cache.yml`), and `device-cache.ts`: device-host box paths, cache keys and the cache-building scripts the device service shares. |
+| `boxes/service/` | Box records (`boxes.json`, `box-secrets.json`), `BoxRegistry`, the lifecycle and provisioning pipeline, reconciler, costs, project integration (create/list/delete), the plugin's HTTP routes and events. `byo.ts`: bring-your-own machines — pairing codes (the hub's `pair` route serves their script), removal, lending a machine to a project or chat. |
 | `boxes/broker/` | `AgentTokenBroker` and the refresh-scheduling rules (spec §7). |
 | `boxes/sync/` | `BoxConfigSync`, `BoxTranscriptSync`, the box → host approval queue and its routes. |
 | `boxes/tooling/` | `BoxToolingProvisioner`: per-target plugin tooling (Better TS Typecheck in boxes). |
@@ -36,6 +36,13 @@ Rules every module follows:
 
 Known behaviour and provider limits:
 
+- **Bring-your-own machines are never destroyed.** A `byo` record is the owner's machine: `pairing`
+  until its one-time command ran, then `ready` while `orq-agent` is connected and `offline`
+  otherwise. A project or an approved chat borrows it (the record takes their purpose); "destroy"
+  releases it back to `purpose: "machine"`. Only "Remove machine" deletes the record (after
+  `agent.shutdown` with `uninstall`). A project on one needs the host paths creatable there
+  (root or passwordless sudo on macOS), like any box.
+
 - **Plugin MCP servers run in the box.** A box chat's MCP servers from the account config, a
   profile's server list and Orquester's own tools are planned per server (bridged to the host or
   "Run in box"). Servers that an installed agent plugin declares are started by the CLI from the
@@ -48,8 +55,5 @@ Known behaviour and provider limits:
   no snapshot API for a prepared image.
 - **Scaleway and UpCloud offer no Windows boxes.** Their Windows images run no cloud-init or
   first-boot script; the only automation path is SSH.
-- **Prepared Windows images are unused.** No adapter sets `needsWindowsImage`, so
-  `BoxProviderAdapter.prepareWindowsImage` and the settings route that calls it are never reached.
-  Every Windows-capable provider bootstraps a fresh box from its startup script. A provider that
-  needs one later must also teach the PowerShell bootstrap an install-only mode: the image is
-  built without a per-box token, and `buildBootstrap` refuses an empty token.
+- **Windows boxes bootstrap directly.** Every Windows-capable provider uses its startup script;
+  no provider needs a prepared image.

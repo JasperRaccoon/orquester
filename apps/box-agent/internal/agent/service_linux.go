@@ -3,38 +3,16 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
-
-const systemdUnitPath = "/etc/systemd/system/orq-agent.service"
-
-// needrestartDir is needrestart's config dir. Ubuntu and Debian run needrestart after every apt
-// run, unattended-upgrades included, and it restarts a unit when a process in the unit's cgroup
-// still maps an upgraded library. KillMode=process keeps the agent CLIs and terminals orq-agent
-// started in its cgroup, so after one upgrade every later apt run restarts orq-agent again, and
-// each restart loses its record of those processes: no reattach can reach them.
-const needrestartDir = "/etc/needrestart"
-
-// needrestartOverride tells needrestart never to restart orq-agent.service by itself.
-const needrestartOverride = "# Written by orq-agent: restarting orq-agent.service loses the agent CLIs and terminals it runs.\n" +
-	"$nrconf{override_rc}->{qr(^orq-agent\\.service$)} = 0;\n"
-
-// systemdDropInDir holds orq-agent.service's drop-ins.
-const systemdDropInDir = "/etc/systemd/system/orq-agent.service.d"
-
-// oomPolicyDropIn: systemd's default OOMPolicy=stop stops the whole unit when the kernel's OOM
-// killer kills any process in its cgroup. KillMode=process keeps the agent CLIs and test runs
-// orq-agent starts in that cgroup, so one test run that exhausts the box's memory stopped
-// orq-agent, and every agent CLI it served ended with it (their stdin is orq-agent's pipe).
-const oomPolicyDropIn = "# Written by orq-agent: a process of this unit killed for memory (a test run) must not stop\n" +
-	"# orq-agent, and with it every agent CLI it serves.\n" +
-	"[Service]\n" +
-	"OOMPolicy=continue\n"
 
 // ProtectService keeps package upgrades (see needrestartDir) and a process killed for memory
 // (see oomPolicyDropIn) from stopping orq-agent. It runs at every start, so boxes installed
@@ -88,69 +66,46 @@ func writeNeedrestartOverride(dir string) error {
 	return writeFileAtomic(path, []byte(needrestartOverride), 0o644)
 }
 
-// InstallService installs and starts orq-agent as a systemd unit when systemd
-// runs; otherwise (containers, Fly machines) it starts `orq-agent run` as a
-// detached background process.
-func InstallService(cfg Config) error {
-	if err := writeServiceEnv(cfg); err != nil {
-		return err
+// detectServiceManager reads which systemd managers install-service can use.
+func detectServiceManager(f *serviceFacts) {
+	f.SystemSystemd = pathExists("/run/systemd/system")
+	f.Needrestart = pathExists(needrestartDir)
+	if f.Euid == 0 || !f.SystemSystemd {
+		return
 	}
-	exe, err := executablePath()
-	if err != nil {
-		return err
+	// The user manager's runtime dir: present while it runs (a login session, or lingering).
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		f.UserSystemd = pathExists(filepath.Join(runtimeDir, "systemd"))
 	}
-	if !pathExists("/run/systemd/system") || os.Geteuid() != 0 {
-		return startBackground(exe, cfg)
+	if f.UserSystemd {
+		f.Linger = lingerEnabled(f.Username)
 	}
-	// KillMode=process: a crash or restart of orq-agent must not take the
-	// detached processes (agent CLIs, terminals) it owns with it.
-	unit := strings.Join([]string{
-		"[Unit]",
-		"Description=Orquester box agent (orq-agent)",
-		"Wants=network-online.target",
-		"After=network-online.target",
-		"",
-		"[Service]",
-		"Type=simple",
-		fmt.Sprintf("ExecStart=%s run --data-dir %s", systemdQuote(exe), systemdQuote(cfg.DataDir)),
-		"Restart=on-failure",
-		"RestartSec=2",
-		"KillMode=process",
-		"",
-		"[Install]",
-		"WantedBy=multi-user.target",
-		"",
-	}, "\n")
-	if err := writeFileAtomic(systemdUnitPath, []byte(unit), 0o644); err != nil {
-		return err
-	}
-	if err := ProtectService(); err != nil {
-		return fmt.Errorf("writing the needrestart override: %w", err)
-	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "orq-agent.service"}, {"restart", "orq-agent.service"}} {
-		out, err := exec.Command("systemctl", args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-		}
-	}
-	return nil
 }
 
-func systemdQuote(value string) string {
-	if !strings.ContainsAny(value, " \t\"'\\") {
-		return value
+// lingerEnabled: the user's manager runs without a login session, so a user unit starts at
+// boot and survives logout. False when it cannot tell.
+func lingerEnabled(username string) bool {
+	if username == "" {
+		return false
 	}
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
+	if pathExists(filepath.Join("/var/lib/systemd/linger", username)) {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "loginctl", "show-user", username, "-p", "Linger").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "Linger=yes"
 }
 
-func startBackground(exe string, cfg Config) error {
-	logPath := filepath.Join(cfg.DataDir, "agent.log")
+// startDetached runs argv in its own session, outliving install-service, with its output
+// appended to logPath.
+func startDetached(argv []string, logPath string) error {
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
-	cmd := exec.Command(exe, "run", "--data-dir", cfg.DataDir)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = os.Environ()
@@ -160,6 +115,12 @@ func startBackground(exe string, cfg Config) error {
 	}
 	return cmd.Process.Release()
 }
+
+// installWindowsService is only meaningful on Windows.
+func installWindowsService(Config) error { return errors.New("not Windows") }
+
+// uninstallWindowsService is only meaningful on Windows.
+func uninstallWindowsService() error { return errors.New("not Windows") }
 
 // RunService is only meaningful on Windows.
 func RunService(func() int) (bool, error) { return false, nil }

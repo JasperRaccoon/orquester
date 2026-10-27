@@ -73,6 +73,8 @@ export const storedBoxSchema = z
     os: z.string().nullable().optional(),
     arch: z.string().nullable().optional(),
     libc: z.string().nullable().optional(),
+    /** Whether `/dev/kvm` was usable by `orq-agent` at connect (Linux; absent: not reported). */
+    kvm: z.boolean().optional(),
     hourlyUsd: z.number().nullable().optional(),
     createdAt: isoString,
     readyAt: isoString.nullable().optional(),
@@ -92,6 +94,13 @@ export const storedBoxSchema = z
     bootstrapExpiresAt: isoString.optional(),
     /** Which route the box was told to dial: "public-url" | "tailscale". */
     connectRoute: z.string().optional(),
+    /** Bring-your-own machines (`provider: "byo"`): the owner's name for it. */
+    machineName: z.string().optional(),
+    /** Bring-your-own machines: "Use for device simulators" (consumed by the device service). */
+    deviceHost: z.boolean().optional(),
+    /** Bring-your-own machines: SHA-256 (hex) of the one-time pairing code, until fetched or expired. */
+    pairingCodeHash: z.string().optional(),
+    pairingExpiresAt: isoString.optional(),
     setup: z.array(storedBoxSetupStepSchema).optional()
   })
   .passthrough();
@@ -170,12 +179,6 @@ export const boxesStoreSchema = z
   })
   .passthrough();
 
-export type BoxesStore = z.infer<typeof boxesStoreSchema>;
-
-export function emptyBoxesStore(): BoxesStore {
-  return { version: BOXES_STORE_VERSION, boxes: {} };
-}
-
 export const boxSecretsSchema = z
   .object({
     version: z.number().int().optional(),
@@ -193,12 +196,6 @@ export const boxSecretsSchema = z
     windowsPasswords: z.record(z.string()).optional()
   })
   .passthrough();
-
-export type BoxSecrets = z.infer<typeof boxSecretsSchema>;
-
-export function emptyBoxSecrets(): BoxSecrets {
-  return { version: BOX_SECRETS_VERSION, providers: {} };
-}
 
 // ---------------------------------------------------------------------------
 // boxes (sync): box → host config changes waiting for approval (spec §8.3), and the per-box

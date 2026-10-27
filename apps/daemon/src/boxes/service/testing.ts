@@ -42,7 +42,6 @@ export interface FakeAdapterOptions {
   kinds?: BoxKind[];
   sizes?: BoxSizeOffer[];
   maxLifetimeMinutes?: number | null;
-  needsWindowsImage?: boolean;
   credentialFields?: BoxProviderCredentialField[];
 }
 
@@ -56,7 +55,6 @@ export class FakeAdapter implements BoxProviderAdapter {
   readonly credentialFields: readonly BoxProviderCredentialField[];
   readonly accountNote = null;
   readonly maxLifetimeMinutes: number | null;
-  readonly needsWindowsImage: boolean;
 
   readonly instances = new Map<string, FakeInstance>();
   readonly creates: ProviderCreateRequest[] = [];
@@ -86,7 +84,6 @@ export class FakeAdapter implements BoxProviderAdapter {
     this.label = options.label ?? "Fake Cloud";
     this.kinds = options.kinds ?? ["linux"];
     this.maxLifetimeMinutes = options.maxLifetimeMinutes ?? null;
-    this.needsWindowsImage = options.needsWindowsImage ?? false;
     this.credentialFields = options.credentialFields ?? [{ id: "apiKey", label: "API key", secret: true }];
     this.sizes = options.sizes ?? [
       { id: "big", label: "Big 8 vCPU", vcpu: 8, ramGb: 16, diskGb: 160, gpu: null, hourlyUsd: 0.2, regions: [] },

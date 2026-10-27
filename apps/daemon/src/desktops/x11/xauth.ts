@@ -3,7 +3,7 @@
 // length plus bytes.
 
 import { randomBytes } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 
 import type { XAuthData } from "./protocol.ts";
 
@@ -84,10 +84,4 @@ export function newXauthority(): Buffer {
     name: MIT_MAGIC_COOKIE,
     data: randomBytes(16)
   });
-}
-
-/** Replace the host's authority file with a fresh cookie ({@link newXauthority}), 0600. */
-export async function writeXauthority(path: string): Promise<void> {
-  await rm(path, { force: true });
-  await writeFile(path, newXauthority(), { mode: 0o600 });
 }

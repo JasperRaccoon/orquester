@@ -40,7 +40,7 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
 | File | Imported by | What |
 |---|---|---|
 | `contract.ts` | both | `SessionSecretRequests` (the one port besides `DaemonApi`), `SESSION_TOOL_CALL_TIMEOUT_MS`, the result type |
-| `results.ts` | both | `jsonResult`, `textResult`, `imageResult`, `errorResult`, `ToolError`, the daemon-down and cancelled results |
+| `results.ts` | both | `jsonResult`, `imageResult`, `errorResult`, `ToolError`, the daemon-down and cancelled results |
 | `instructions.ts` | both | the per-thread "Orquester" instruction block (§10) |
 | `manifest.ts` | daemon | the manifest of one thread: advertised tools, block, denials |
 | `session-tools-refresh.ts` | daemon | the manifest route, the daemon-pointing reads behind its denials, and the manifests pushed to the host |
@@ -51,7 +51,7 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
 **The agent host loads the catalog statically** (it advertises the definitions:
 `agent-host/session-tools/definitions.ts`), so a tool module never imports a daemon service: it
 reaches the daemon through `ctx.api` (the daemon's own REST API in-process, `../mcp/daemon-api.ts`).
-`mcp/catalog/registry.test.ts` walks the import graph from `catalog/index.ts` against an allow-list.
+`mcp/catalog/registry.test.ts` checks the emitted audience metadata and documented context budgets.
 No dynamic `import()` either.
 
 ## Toolsets: groups, never switches (§9.1, §9.5)

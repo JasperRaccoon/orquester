@@ -17,7 +17,7 @@
  */
 
 /** UTF-16 code units the ring retains (the retention of the old `.slice(-256 KiB)`). */
-export const TERMINAL_REPLAY_MAX_CHARS = 256 * 1024;
+const TERMINAL_REPLAY_MAX_CHARS = 256 * 1024;
 /** Small appends are joined into the newest chunk up to this length. */
 const CHUNK_CHARS = 16 * 1024;
 /** How far past the minimum cut trimming looks for a line or sequence start. */

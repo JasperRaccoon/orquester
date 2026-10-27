@@ -511,7 +511,6 @@ export const scalewayAdapter: BoxProviderAdapter = {
   accountNote:
     "Scaleway asks for an identity check before most Instance types and every GPU type can be used; after it an account may run one L4-1-24G or L40S-1-48G, while H100 and multi-GPU types need a quota increase from Scaleway support.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, async () => {
@@ -671,7 +670,6 @@ export const scalewayAdapter: BoxProviderAdapter = {
     } catch (error) {
       // The server never started: remove it and its volume. If that fails too, its tags let the reconciler find it.
       await destroyServer(credentials, zone, server.id, volumeIds, {
-        fetch: options.fetch,
         signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS)
       }).catch(() => undefined);
       throw error;

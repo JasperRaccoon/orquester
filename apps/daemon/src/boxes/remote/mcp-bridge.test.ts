@@ -73,7 +73,7 @@ function hubCapture(): { hub: { handleChannel: (kind: string, handler: BoxChanne
 
 const context = (boxId: string): BoxRequestContext => ({ boxId, record: { id: boxId } as BoxRequestContext["record"] });
 
-function entry(appdir: string, overrides: Partial<McpBridgeEntry>): McpBridgeEntry {
+function entry(overrides: Partial<McpBridgeEntry>): McpBridgeEntry {
   return {
     version: MCP_BRIDGE_ENTRY_VERSION,
     boxId: "box-1",
@@ -100,7 +100,7 @@ test("a bridged stdio server runs on the host with its own env, piped to the box
   );
   await writeMcpBridgeEntry(
     appdir,
-    entry(appdir, { target: { transport: "stdio", command: process.execPath, args: [server], env: { FAKE_SECRET: "host-only" } } })
+    entry({ target: { transport: "stdio", command: process.execPath, args: [server], env: { FAKE_SECRET: "host-only" } } })
   );
   const capture = hubCapture();
   let exited!: (detail: Record<string, unknown> | undefined) => void;
@@ -134,7 +134,7 @@ test("a bridged stdio server runs on the host with its own env, piped to the box
 test("an id the box's directory does not hold is refused: the channel closes, nothing runs", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
-  await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-1" }));
+  await writeMcpBridgeEntry(appdir, entry({ boxId: "box-1" }));
   const capture = hubCapture();
   let starts = 0;
   registerMcpBridge(capture.hub, { appdir, spawn: () => { starts++; throw new Error("test spawn"); } });
@@ -178,7 +178,7 @@ test("a bridged HTTP server is reached from the host with its headers; the box n
   try {
     await writeMcpBridgeEntry(
       appdir,
-      entry(appdir, {
+      entry({
         name: "orquester",
         target: { transport: "http", url: `http://127.0.0.1:${port}/mcp`, headers: { Authorization: "Bearer session-credential" } }
       })
@@ -212,8 +212,8 @@ test("a box holds at most maxChannelsPerBox open bridges: more are refused until
     args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"],
     env: {}
   };
-  await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-1", serverId, target }));
-  await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-2", serverId, target }));
+  await writeMcpBridgeEntry(appdir, entry({ boxId: "box-1", serverId, target }));
+  await writeMcpBridgeEntry(appdir, entry({ boxId: "box-2", serverId, target }));
   const children: ChildProcess[] = [];
   t.after(async () => {
     await Promise.all(children.map(async (child) => {

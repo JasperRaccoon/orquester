@@ -1,7 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { accessSync, constants } from "node:fs";
-import { sessionEnvBase } from "./tmux.ts";
+import { sessionEnvBase, tmuxVersionOutputOk } from "./tmux.ts";
+
+test("tmux version floor accepts numeric, letter-suffixed and development versions", () => {
+  for (const version of ["tmux 3.2", "tmux 3.2a", "tmux next-3.4", "tmux 4.0"]) {
+    assert.equal(tmuxVersionOutputOk(version), true, version);
+  }
+  for (const version of ["tmux 2.9a", "tmux 3.1c", "tmux next", ""]) {
+    assert.equal(tmuxVersionOutputOk(version), false, version);
+  }
+});
 
 test("sessionEnvBase replaces nologin shell for child PTYs", () => {
   const originalShell = process.env.SHELL;

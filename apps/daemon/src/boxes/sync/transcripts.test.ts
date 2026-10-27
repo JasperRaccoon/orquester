@@ -45,7 +45,7 @@ async function fixture(t: test.TestContext, options: { paths?: BoxPathMap; realp
   await mkdir(box.local(cwd), { recursive: true });
   const reads = recordReads(box);
   const imports: { args: string[]; cwd: string; content: string }[] = [];
-  const runHost: HostRunner = async (command, args, runOptions) => {
+  const runHost: HostRunner = async (_command, args, runOptions) => {
     if (args[0] === "export") {
       return { code: 0, stdout: Buffer.from(JSON.stringify({ info: { id: args[1] }, messages: [{ host: true }] })), stderr: "" };
     }
@@ -231,7 +231,7 @@ test("OpenCode: sessions travel as export/import in the project's cwd", async (t
     appdir: join(f.base, "app"),
     hub: fakeBoxHub({ b1: f.box }),
     opencode: { boxCommand: script },
-    runHost: async (command, args, options) => {
+    runHost: async (_command, args, options) => {
       if (args[0] === "export") return { code: 0, stdout: Buffer.from(JSON.stringify({ info: { id: args[1] }, messages: [] })), stderr: "" };
       f.imports.push({ args, cwd: options.cwd, content: await readFile(args[1]!, "utf8") });
       return { code: 0, stdout: Buffer.alloc(0), stderr: "" };

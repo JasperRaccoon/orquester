@@ -2144,7 +2144,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     pendingTurnStart: boolean,
     goal: { carryGoal: boolean }
   ): Promise<ProviderSession> => {
-    const adapter = adapterFor(head.adapter);
+    adapterFor(head.adapter);
     // §3.2: an out-of-range CLI is refused with the required version in the
     // message rather than started and allowed to fail on the first frame.
     // boxes: a box thread's CLI is the box's, gated by the adapter against the box's own version.

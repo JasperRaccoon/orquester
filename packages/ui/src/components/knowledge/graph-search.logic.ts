@@ -118,19 +118,6 @@ export function bandLabel(band: KnowledgeMatchBand): string {
   return BAND_LABEL[band];
 }
 
-/** The via badges: "Keyword", "Meaning", "Similar", and one "Concept X" per concept that led to it ("Concept" without names). */
-export function viaBadges(match: Pick<KnowledgeEntryMatch, "via" | "concepts">): string[] {
-  const out: string[] = [];
-  for (const signal of match.via) {
-    if (signal === "keyword") out.push("Keyword");
-    else if (signal === "meaning") out.push("Meaning");
-    else if (signal === "similar") out.push("Similar");
-    else if (match.concepts.length === 0) out.push("Concept");
-    else for (const concept of match.concepts.slice(0, 3)) out.push(`Concept ${concept.name}`);
-  }
-  return out;
-}
-
 interface TextPart {
   text: string;
   /** A query term (drawn highlighted). */

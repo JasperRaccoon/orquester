@@ -77,23 +77,6 @@ let loadsApplied = 0;
 const tombstones = new Map<string, number>();
 
 // ---------------------------------------------------------------------------
-// Reads
-// ---------------------------------------------------------------------------
-
-export function getRepoIdentity(repoKey: string | undefined): RepoIdentity | undefined {
-  return repoKey ? repoIdentitiesStore.getState().identities.get(repoKey) : undefined;
-}
-
-/** The label a repo shows: its custom label, else `fallback` (the remote's `owner/repo`). */
-export function repoLabelOf(
-  identities: ReadonlyMap<string, RepoIdentity>,
-  repoKey: string,
-  fallback: string
-): string {
-  return identities.get(repoKey)?.label ?? fallback;
-}
-
-// ---------------------------------------------------------------------------
 // Wire validation
 // ---------------------------------------------------------------------------
 
@@ -168,7 +151,7 @@ function timeOf(value: string): number {
 function sameIcon(a: RepoIcon | undefined, b: RepoIcon | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;
   if (a.kind === "emoji" || b.kind === "emoji") {
-    return a.kind === b.kind && a.kind === "emoji" && b.kind === "emoji" && a.value === b.value;
+    return a.kind === "emoji" && b.kind === "emoji" && a.value === b.value;
   }
   return (
     a.contentType === b.contentType &&
@@ -218,19 +201,6 @@ function removeLocal(repoKey: string): void {
   const next = new Map(identities);
   next.delete(repoKey);
   repoIdentitiesStore.setState({ identities: next });
-}
-
-/**
- * Apply an identity a mutation answered (`null`: the repo has none left). The
- * identity is validated first; one for another repo, or malformed, is ignored.
- */
-export function applyRepoIdentity(repoKey: string, identity: RepoIdentity | null): void {
-  if (identity === null) {
-    if (repoKeyProblem(repoKey) === null) removeLocal(repoKey);
-    return;
-  }
-  const clean = sanitizeRepoIdentity(identity);
-  if (clean !== null && clean.repoKey === repoKey) upsertLocal(clean);
 }
 
 // ---------------------------------------------------------------------------

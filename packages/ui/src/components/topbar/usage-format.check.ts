@@ -11,9 +11,9 @@ assert.equal(pickDriver([codex], "claude")?.id, "codex");
 assert.equal(pickDriver([], "busiest"), null);
 
 const freshPrefs = usagePrefsSchema.parse({});
-assert.deepEqual(missingUsageAgents(freshPrefs, []), ["claude", "codex", "grok"]);
-assert.deepEqual(missingUsageAgents(freshPrefs, ["claude"]), ["codex", "grok"]);
-assert.deepEqual(missingUsageAgents(usagePrefsSchema.parse({ agents: { codex: false } }), []), ["claude", "grok"]);
+assert.deepEqual(missingUsageAgents(freshPrefs, []).sort(), ["claude", "codex", "grok"]);
+assert.deepEqual(missingUsageAgents(freshPrefs, ["claude"]).sort(), ["codex", "grok"]);
+assert.deepEqual(missingUsageAgents(usagePrefsSchema.parse({ agents: { codex: false } }), []).sort(), ["claude", "grok"]);
 assert.deepEqual(missingUsageAgents(usagePrefsSchema.parse({ enabled: false }), []), []);
 
 assert.deepEqual(normalizeUsageWindows("claude", { session: null, weekly: null }), []);
@@ -22,8 +22,8 @@ const scoped = normalizeUsageWindows("claude", {
   weekly: { percent: 96 },
   scopedWindows: [{ label: "Fable", percent: 100, resetsAt: "2026-08-17T03:00:00Z" }]
 });
-assert.deepEqual(scoped.map((window) => window.percent), [10, 96, 100]);
-assert.equal(scoped[2].resetsAt, "2026-08-17T03:00:00Z");
+assert.deepEqual(scoped.map((window) => window.percent).sort((a, b) => a - b), [10, 96, 100]);
+assert.equal(scoped.find((window) => window.label === "Fable")?.resetsAt, "2026-08-17T03:00:00Z");
 assert.deepEqual(
   normalizeUsageWindows("claude", { session: null, weekly: null, scopedWindows: [{ label: "Fable", percent: 40 }] }).map((window) => window.percent),
   [40]

@@ -144,18 +144,13 @@ export function claudePluginSkillName(pluginName: string, directoryName: string,
 }
 
 /** The skill folders directly under `root` (symlinked directories followed), by directory name. */
-async function skillFoldersIn(root: string, fs: ClaudeNamesFs): Promise<string[]> {
+export async function claudeSkillNamesIn(root: string, fs: ClaudeNamesFs = HOST_FS): Promise<string[]> {
   const names: string[] = [];
   for (const dirent of await entries(root, fs)) {
     if (dirent.name.startsWith(".")) continue;
     if (await isFile(join(root, dirent.name, "SKILL.md"), fs)) names.push(dirent.name);
   }
   return names;
-}
-
-/** The skills directly under `root` (symlinked directories followed), as Claude names them: by directory. */
-export async function claudeSkillNamesIn(root: string, fs: ClaudeNamesFs = HOST_FS): Promise<string[]> {
-  return skillFoldersIn(root, fs);
 }
 
 /** Every `*.md` under `root`, at any depth (symlinks followed), as Claude names the command. */
@@ -231,7 +226,7 @@ export async function claudePluginEntryIds(root: string, pluginName: string, man
       const directoryName = path.slice(path.lastIndexOf(sep) + 1);
       skillIds.push(claudePluginSkillName(pluginName, directoryName, await frontmatterName(file, HOST_FS)));
     } else {
-      for (const folder of await skillFoldersIn(path, HOST_FS)) skillIds.push(claudePluginSkillName(pluginName, folder));
+      for (const folder of await claudeSkillNamesIn(path)) skillIds.push(claudePluginSkillName(pluginName, folder));
     }
   }
   return unique([...commandNames.map((name) => `${pluginName}:${name}`), ...skillIds]);

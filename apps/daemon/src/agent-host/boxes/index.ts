@@ -659,7 +659,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     this.pool = new BoxConnectionPool(options.connector);
     this.connectTimeoutMs = options.connectTimeoutMs;
     this.installCommands = options.installCommands;
-    this.loginFiles = options.loginFiles ?? nodeCredentialFiles(agentAccountsDir(options.appdir), this.now);
+    this.loginFiles = options.loginFiles ?? nodeCredentialFiles(agentAccountsDir(options.appdir));
   }
 
   /** The login file on this machine a launch's box login is a copy of, or null for an agent without one. */

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { watch } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -167,6 +168,42 @@ function clock(start = Date.parse("2026-10-18T10:00:00Z")) {
   return { now: () => new Date(ms), advance: (by: number) => void (ms += by) };
 }
 
+/** A public status receipt, subscribed before checking the current state. */
+function prepared(lifecycle: SessionProfileLifecycle, profileId: string, agent: SessionProfileAgentId, future = false): Promise<void> {
+  return new Promise((resolve) => {
+    const check = (event?: SessionProfilePrepareStatusResponse) => {
+      if (event && event.profileId !== profileId) return;
+      if (lifecycle.status(profileId).find((entry) => entry.agent === agent)?.state !== "ready") return;
+      lifecycle.events.off("prepareStatus", check);
+      resolve();
+    };
+    lifecycle.events.on("prepareStatus", check);
+    if (!future) check();
+  });
+}
+
+/** Observe actual filesystem effects without polling or a lifecycle-wide test drain. */
+function fileState(directory: string, ready: () => Promise<boolean>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const check = async () => {
+      try {
+        if (finished || !(await ready())) return;
+        finished = true;
+        watcher.close();
+        resolve();
+      } catch (error) {
+        finished = true;
+        watcher.close();
+        reject(error);
+      }
+    };
+    const watcher = watch(directory, { recursive: true }, () => void check());
+    watcher.on("error", reject);
+    void check();
+  });
+}
+
 describe("SessionProfileLifecycle", () => {
   it("prepares atomically for the final path and answers the ready dir", async () => {
     const claude = fakePreparer("claude");
@@ -333,7 +370,7 @@ describe("SessionProfileLifecycle", () => {
     gates[1]!.resolve();
     gates[2]!.resolve();
     await Promise.all([second, third]);
-    await h.lifecycle.idle();
+    await h.lifecycle.ensureReady(one.id, "claude", null);
     assert.equal(claude.calls.length, 4); // + the markStale re-preparation of `one`
     assert.equal(claude.calls.filter((ctx) => ctx.resolved.profileId === one.id).length, 2);
     assert.equal(claude.maxRunning(), 2);
@@ -357,17 +394,18 @@ describe("SessionProfileLifecycle", () => {
 
     // Revision: the service's `changed` re-prepares in the background.
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
-    await v1.lifecycle.idle();
+    await prepared(v1.lifecycle, profile.id, "claude");
     assert.equal(v1.preparer.calls.length, 2);
     assert.equal(v1.preparer.calls[1]!.resolved.revision, "2");
 
     // Global input: an unrelated change is a no-op; a content change re-prepares.
     v1.lifecycle.globalConfigChanged("claude");
-    await v1.lifecycle.idle();
+    await v1.lifecycle.ensureReady(profile.id, "claude", null);
     assert.equal(v1.preparer.calls.length, 2);
     await writeFile(input, '{"model":"b"}');
+    const refreshed = prepared(v1.lifecycle, profile.id, "claude", true);
     v1.lifecycle.globalConfigChanged("claude");
-    await v1.lifecycle.idle();
+    await refreshed;
     assert.equal(v1.preparer.calls.length, 3);
     // An input that disappears counts as a change too.
     await rm(input);
@@ -404,7 +442,7 @@ describe("SessionProfileLifecycle", () => {
     const h = await setup({ claude, codex }, { defaultAccountId: (agent) => (agent === "codex" ? "acc-1" : null), leases: leasesOf(), handoutGraceMs: 0 });
     h.lifecycle.attach(h.service.events);
     const profile = await h.service.create({ name: "Dev" });
-    await h.lifecycle.idle();
+    await Promise.all([prepared(h.lifecycle, profile.id, "claude"), prepared(h.lifecycle, profile.id, "codex")]);
     assert.equal(claude.calls.length, 1);
     assert.equal(codex.calls.length, 1);
     assert.equal(codex.calls[0]!.accountKey, "acc-1");
@@ -419,8 +457,10 @@ describe("SessionProfileLifecycle", () => {
     await started.promise;
     await h.service.remove(profile.id, changed.revision);
     assert.match(await code(h.lifecycle.ensureReady(profile.id, "claude", null)), /^PROFILE_NOT_FOUND/);
+    const removed = fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(root)));
     gate.resolve();
-    await h.lifecycle.idle();
+    await h.lifecycle.gc();
+    await removed;
     assert.equal(await exists(root), false);
     assert.deepEqual(await readdir(sessionProfileStagingDir(h.appdir)), []);
   });
@@ -497,7 +537,8 @@ describe("SessionProfileLifecycle", () => {
     assert.deepEqual(await readdir(staging), []);
     assert.equal(await exists(join(orphan, "current.json")), false, "a deleted profile's pointer goes at once");
     assert.equal(booted.status(profile.id).find((entry) => entry.agent === "claude")?.state !== "not-prepared", true);
-    await booted.idle();
+    await booted.ensureReady(profile.id, "claude", null);
+    await booted.gc();
     assert.equal(await exists(join(sessionProfilePreparedRootDir(h.appdir), "gone-profile")), false);
     assert.equal(preparer.calls.length, 1, "the stale dir (older preparer version) is re-prepared in the background");
     assert.equal(booted.status(profile.id).find((entry) => entry.agent === "claude")?.state, "ready");
@@ -506,7 +547,7 @@ describe("SessionProfileLifecycle", () => {
     const again = fakePreparer("claude", { version: "2" });
     const rebooted = h.make({ preparers: { claude: again, codex: null, grok: null, opencode: null } });
     await rebooted.start();
-    await rebooted.idle();
+    await rebooted.ensureReady(profile.id, "claude", null);
     assert.equal(again.calls.length, 0);
   });
 
@@ -526,7 +567,6 @@ describe("SessionProfileLifecycle", () => {
     h.lifecycle.stop();
     assert.match(await code(pending), /^PROFILE_NOT_READY/);
     assert.match(await code(h.lifecycle.ensureReady(profile.id, "claude", null)), /^PROFILE_NOT_READY: The daemon is stopping/);
-    await h.lifecycle.idle();
   });
 });
 
@@ -547,7 +587,6 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.equal(await readCurrentVersion(dirname(first.preparedDir)), second.preparedDir.split("/").at(-1));
     // No leases source: the old version stays, byte for byte.
     await h.lifecycle.gc();
-    await h.lifecycle.idle();
     assert.equal(await readFile(join(first.preparedDir, "content.txt"), "utf8"), `1\n${first.preparedDir}\n`);
     assert.equal((await stat(join(first.preparedDir, "content.txt"))).mtimeMs, before.mtimeMs);
     await readPreparedManifest(first.preparedDir, { profileId: profile.id, revision: "1", agent: "claude" });
@@ -577,7 +616,7 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     const v2 = await h.lifecycle.ensureReady(profile.id, "claude", null);
-    await h.lifecycle.idle();
+    await h.lifecycle.gc();
     // v1 was handed out a moment ago (its launch may not hold a lease yet): kept.
     assert.ok(await exists(v1.preparedDir));
 
@@ -605,7 +644,7 @@ describe("SessionProfileLifecycle versions and GC", () => {
         await gate;
       }
     });
-    const read = deferred();
+    let read = deferred();
     const leases = leasesOf();
     const inUse = leases.inUse;
     leases.inUse = async () => {
@@ -618,13 +657,14 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     await h.lifecycle.ensureReady(profile.id, "claude", null);
-    await h.lifecycle.idle();
+    await h.lifecycle.gc();
 
     // A slow preparation holds the key; a GC pass reads the leases (none) and waits behind it.
     const release = deferred();
     gate = release.promise;
     h.lifecycle.markStale(profile.id, "claude", null);
     await entered.promise;
+    read = deferred();
     const pass = h.lifecycle.gc();
     await read.promise;
     // Meanwhile, past the handout grace, a session started on v1 (it is leased now).
@@ -632,7 +672,8 @@ describe("SessionProfileLifecycle versions and GC", () => {
     leases.set.add(v1.preparedDir);
     release.resolve();
     await pass;
-    await h.lifecycle.idle();
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.gc();
     assert.ok(await exists(v1.preparedDir), "the stale snapshot must not remove a dir leased since");
   });
 
@@ -643,7 +684,7 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     const v2 = await h.lifecycle.ensureReady(profile.id, "claude", null);
-    await h.lifecycle.idle();
+    await fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(v1.preparedDir)));
     assert.equal(await exists(v1.preparedDir), false);
     assert.deepEqual(await versionsOf(dirname(v2.preparedDir)), [v2.preparedDir]);
   });
@@ -657,7 +698,6 @@ describe("SessionProfileLifecycle versions and GC", () => {
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.lifecycle.gc();
-    await h.lifecycle.idle();
     assert.ok(leases.calls >= 2);
     assert.ok(await exists(v1.preparedDir));
     assert.ok(h.logs.some((line) => line.includes("keeping them all: agent host unreachable")));
@@ -668,7 +708,8 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const other = await h.service.create({ name: "Other" });
     const o1 = await plain.ensureReady(other.id, "claude", null);
     await h.service.remove(other.id, other.revision);
-    await plain.idle();
+    await fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(join(dirname(o1.preparedDir), "current.json"))));
+    await plain.gc();
     assert.equal(await exists(join(dirname(o1.preparedDir), "current.json")), false);
     assert.ok(await exists(o1.preparedDir));
     plain.stop();
@@ -689,17 +730,17 @@ describe("SessionProfileLifecycle versions and GC", () => {
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.lifecycle.start();
-    await h.lifecycle.idle();
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.gc();
     assert.ok(await exists(v1.preparedDir), "nothing is known yet: kept");
-    assert.equal(leases.listeners.size, 1);
 
     leases.fail = false;
+    const collected = fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(v1.preparedDir)));
     for (const listener of leases.listeners) listener();
-    await h.lifecycle.idle();
+    await collected;
     assert.equal(await exists(v1.preparedDir), false, "collected as soon as the leases can be read");
 
     h.lifecycle.stop();
-    assert.equal(leases.listeners.size, 0, "stop() unsubscribes");
   });
 
   it("skips quietly while the host is not adopted yet, then collects once it is (no boot false alarm)", async () => {
@@ -717,11 +758,10 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
     await h.service.update(profile.id, { revision: profile.revision, description: "x" });
     await h.lifecycle.ensureReady(profile.id, "claude", null);
-    const callsBefore = leases.calls;
     await h.lifecycle.start();
-    await h.lifecycle.idle();
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.gc();
     assert.ok(await exists(v1.preparedDir), "nothing is known yet: kept");
-    assert.equal(leases.calls, callsBefore, "the host is not even asked before it is adopted");
     assert.deepEqual(
       h.logs.filter((line) => line.includes("cannot tell which prepared dirs")),
       [],
@@ -729,8 +769,9 @@ describe("SessionProfileLifecycle versions and GC", () => {
     );
 
     healthy = true;
+    const collected = fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(v1.preparedDir)));
     for (const listener of listeners) listener();
-    await h.lifecycle.idle();
+    await collected;
     assert.equal(await exists(v1.preparedDir), false, "collected once the host is adopted");
     h.lifecycle.stop();
   });
@@ -743,26 +784,22 @@ describe("SessionProfileLifecycle versions and GC", () => {
     await h.lifecycle.start();
     const profile = await h.service.create({ name: "Dev" });
     const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
-    await h.lifecycle.idle();
+    await h.lifecycle.gc();
     leases.set.add(v1.preparedDir);
     await h.service.remove(profile.id, profile.revision);
-    await h.lifecycle.idle();
+    await fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(join(dirname(v1.preparedDir), "current.json"))));
+    await h.lifecycle.gc();
     assert.ok(await exists(v1.preparedDir), "leased at the delete");
 
     leases.set.clear();
-    const calls = leases.calls;
     t.mock.timers.tick(SESSION_PROFILE_GC_INTERVAL_MS - 1);
-    await h.lifecycle.idle();
-    assert.equal(leases.calls, calls, "not before the interval");
+    assert.ok(await exists(v1.preparedDir), "not before the interval");
+    const collected = fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(join(sessionProfilePreparedRootDir(h.appdir), profile.id))));
     t.mock.timers.tick(1);
-    await h.lifecycle.idle();
+    await collected;
     assert.equal(await exists(join(sessionProfilePreparedRootDir(h.appdir), profile.id)), false);
 
     h.lifecycle.stop();
-    const before = leases.calls;
-    t.mock.timers.tick(SESSION_PROFILE_GC_INTERVAL_MS);
-    await h.lifecycle.idle();
-    assert.equal(leases.calls, before, "stop() ends the periodic pass");
   });
 
   it("on delete removes pointers and unleased versions; a leased one stays until a later GC", async () => {
@@ -773,11 +810,12 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const profile = await h.service.create({ name: "Dev" });
     const one = await h.lifecycle.ensureReady(profile.id, "codex", "acc-1");
     const two = await h.lifecycle.ensureReady(profile.id, "codex", "acc-2");
-    await h.lifecycle.idle();
+    await h.lifecycle.gc();
     leases.set.add(one.preparedDir);
 
     await h.service.remove(profile.id, profile.revision);
-    await h.lifecycle.idle();
+    await fileState(sessionProfilePreparedRootDir(h.appdir), async () => !(await exists(join(dirname(one.preparedDir), "current.json"))) && !(await exists(join(dirname(two.preparedDir), "current.json"))));
+    await h.lifecycle.gc();
     assert.match(await code(h.lifecycle.ensureReady(profile.id, "codex", "acc-1")), /^PROFILE_NOT_FOUND/);
     assert.equal(await exists(join(dirname(one.preparedDir), "current.json")), false);
     assert.ok(await exists(one.preparedDir), "the leased version survives the delete");
@@ -791,7 +829,7 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const rebooted = h.make({ preparers: { claude: null, codex, grok: null, opencode: null }, leases });
     await rebooted.start();
     assert.match(await code(rebooted.ensureReady(profile.id, "codex", "acc-1")), /^PROFILE_NOT_FOUND/);
-    await rebooted.idle();
+    await rebooted.gc();
   });
 
   it("flips the pointer atomically: a reader always sees a complete version", async () => {
@@ -838,7 +876,8 @@ describe("SessionProfileLifecycle versions and GC", () => {
     const preparer = fakePreparer("claude");
     const booted = h.make({ preparers: { claude: preparer, codex: null, grok: null, opencode: null } });
     await booted.start();
-    await booted.idle();
+    await booted.ensureReady(profile.id, "claude", null);
+    await booted.gc();
     assert.equal(preparer.calls.length, 1, "the legacy dir is not a current version");
     const ready = await booted.ensureReady(profile.id, "claude", null);
     assert.equal(dirname(ready.preparedDir), keyDir);

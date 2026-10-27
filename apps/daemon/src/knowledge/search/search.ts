@@ -34,7 +34,7 @@ import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledg
 import type { KnowledgeGraph } from "./graph.ts";
 import { computeKnowledgeFacets } from "./facets.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
-import { type TextSpan, bestSnippet, leadSnippet, tokenize } from "./text.ts";
+import { type TextSpan, bestSnippet, tokenize } from "./text.ts";
 import { InProcessVectorIndex } from "./vector-index.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
 
@@ -73,11 +73,6 @@ const MATCH_CONCEPTS = 3;
 const SORTS: readonly KnowledgeSearchSort[] = ["relevance", "recent", "newest"];
 const DAY_MS = 86_400_000;
 
-interface TextDoc {
-  id: string;
-  body: string;
-}
-
 /** One ranked entry of a search. */
 interface Ranked {
   id: string;
@@ -115,7 +110,7 @@ export class KnowledgeSearch {
   private readonly store: KnowledgeSearchStore;
   private readonly graph: KnowledgeGraph;
   private readonly logger: KnowledgeLogger;
-  private readonly docs = new Map<string, TextDoc>();
+  private readonly bodies = new Map<string, string>();
   private readonly bm25 = new Bm25Index();
   private readonly vectors: InProcessVectorIndex;
   private ready: Promise<void> | null = null;
@@ -407,7 +402,7 @@ export class KnowledgeSearch {
     const exampleTerms: string[] = [];
     for (const id of similarTo) {
       const meta = this.store.getMeta(id);
-      const body = this.docs.get(id)?.body ?? "";
+      const body = this.bodies.get(id) ?? "";
       exampleTerms.push(...tokenize(meta?.title ?? ""), ...tokenize(firstWords(body, EXAMPLE_WORDS)));
     }
     return { ids: this.bm25.search(exampleTerms, accept, CANDIDATES).map((hit) => hit.key), hits: new Map() };
@@ -480,9 +475,8 @@ export class KnowledgeSearch {
         .filter((ref): ref is NonNullable<typeof ref> => ref !== null)
         .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
     };
-    const doc = this.docs.get(id);
     const span: TextSpan | undefined = meaningHit?.span ?? similarHit?.span;
-    const snippet = doc ? bestSnippet(doc.body, signals.terms, span) : "";
+    const snippet = bestSnippet(this.bodies.get(id) ?? "", signals.terms, span);
     return { kind: "entry", score, entry: this.summary(meta, scope, snippet), match };
   }
 
@@ -500,12 +494,11 @@ export class KnowledgeSearch {
   }
 
   summary(meta: KnowledgeEntryMeta, scope: KnowledgeScope, snippet?: string): KnowledgeEntrySummary {
-    const doc = this.docs.get(meta.id);
     return {
       ...meta,
       savedFrom: { ...meta.savedFrom },
       collections: visibleCollections(meta, scope),
-      snippet: snippet ?? (doc ? leadSnippet(doc.body) : ""),
+      snippet: snippet ?? bestSnippet(this.bodies.get(meta.id) ?? "", []),
       linkCount: this.graph.linkCount(meta.id),
       citation: knowledgeCitation(meta)
     };
@@ -698,8 +691,7 @@ export class KnowledgeSearch {
       this.removeDoc(id);
       return;
     }
-    const existing = this.docs.get(id);
-    this.docs.set(id, existing && existing.body === entry.body ? existing : { id, body: entry.body });
+    this.bodies.set(id, entry.body);
     // The vector index keys its cache on the text it embeds (header and body), never on the hash
     // the metadata claims: a hand-edited file must not file vectors under another body.
     this.vectors.setEntry(id, entry);
@@ -711,7 +703,7 @@ export class KnowledgeSearch {
   }
 
   private removeDoc(id: string): void {
-    this.docs.delete(id);
+    this.bodies.delete(id);
     this.bm25.remove(id);
     this.vectors.removeEntry(id);
   }

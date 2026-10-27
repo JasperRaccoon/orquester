@@ -96,6 +96,12 @@ export interface Transporter {
    */
   requestBytes?(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>>;
   /**
+   * Optional: the headers that authenticate a request the caller sends itself
+   * (a streaming `fetch` whose body it reads frame by frame, such as a device
+   * video stream). Present on HTTP transports; `{}` without a credential.
+   */
+  authHeaders?(): Record<string, string>;
+  /**
    * Open a long-lived chunked GET stream (session output, event bus). Runtime
    * specific: web uses streaming fetch, desktop bridges over IPC.
    */

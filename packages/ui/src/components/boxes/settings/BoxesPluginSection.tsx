@@ -7,6 +7,7 @@ import { loadBlacksmithSetup, loadBoxConnection, loadBoxes, loadBoxesList, useAc
 import { Button } from "../../ui";
 import { Notice, SettingsSection } from "../../settings/primitives";
 import { BoxesList } from "./BoxesList";
+import { ByoMachinesCard } from "./ByoMachinesCard";
 import { ConnectionCard } from "./ConnectionCard";
 import { ProvidersCard } from "./ProvidersCard";
 
@@ -55,6 +56,10 @@ export const BoxesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) 
             approve each one.
           </p>
           <p>
+            You can also pair a Mac or Linux machine of your own under Your machines: it costs nothing, and an agent
+            uses it only after you approve.
+          </p>
+          <p>
             Provider keys and agent logins stay on this server. Prices are estimates from each provider; boxes bill
             until they are destroyed.
           </p>
@@ -78,6 +83,7 @@ export const BoxesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) 
           )}
           <ProvidersCard />
           <ConnectionCard />
+          <ByoMachinesCard />
           <BoxesList />
         </>
       )}

@@ -75,13 +75,9 @@ type ProfileLaunchContributor<A extends SessionProfileAgentId = SessionProfileAg
 /** One contributor per agent. */
 type ProfileLaunchContributors = { [A in SessionProfileAgentId]: ProfileLaunchContributor<A> };
 
-const contributesNothing = (): ProfileLaunchContribution => ({});
-
-/**
- * The registry read by the resolver. Each agent has one contribution.
- */
+/** Per-agent launch contributions. Claude's isolation is read from its prepared manifest. */
 const profileLaunchContributors: ProfileLaunchContributors = {
-  claude: contributesNothing,
+  claude: () => ({}),
   codex: codexProfileLaunchContribution,
   grok: grokProfileLaunchContribution,
   opencode: opencodeLaunchContribution
@@ -183,7 +179,7 @@ export function createProfileLaunchResolver(options: ProfileLaunchResolverOption
         accountHome,
         projectPath: request.projectPath,
         launchEnv: { ...request.base.launchEnv }
-      } as ProfileLaunchContext<typeof agent>);
+      });
     } catch (error) {
       if (error instanceof SessionProfileError) throw error;
       throw sessionProfileErrors.notReady(
@@ -205,7 +201,7 @@ export function deletedProfileNotice(name: string | undefined): string {
 }
 
 /**
- * Follows which profiles EXIST now ({@link liveIds}): what workflow validation checks an agent
+ * Follows which profiles exist now ({@link liveIds}): what workflow validation checks an agent
  * block's `profileId` against (§5.5), synchronously.
  */
 export class SessionProfileNames {
@@ -223,8 +219,8 @@ export class SessionProfileNames {
   }
 
   /**
-   * Fill from the service's list now and follow creates and deletes.
-   * Never throws; a failed first list leaves the live ids unknown.
+   * Fill from the service's list now and follow its changes. Never throws; a failed initial
+   * read leaves the live ids unknown.
    */
   track(service: {
     list(): Promise<{ profiles: Array<{ id: string }>; errors?: Array<{ profileId: string }> }>;

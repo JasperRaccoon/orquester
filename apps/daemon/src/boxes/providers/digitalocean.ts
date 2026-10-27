@@ -258,7 +258,6 @@ export const digitaloceanAdapter: BoxProviderAdapter = {
     "GPU Droplets depend on the account's resource tier (new accounts may have a GPU limit of 0): request an increase " +
     "in the control panel, and ask support for access before using AMD GPUs.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () =>

@@ -1444,10 +1444,12 @@ export class BoxConfigSyncService implements BoxConfigSync {
     const boxFile = info?.kind === "file" ? info : null;
     const tooLarge = boxFile !== null && boxFile.size > DIFF_READ_MAX_BYTES && root.rule.codec(rel) === "raw";
     let boxBytes: Buffer | null = null;
+    let boxView: Buffer | null = null;
     let bh: string | null = null;
     if (boxFile && !tooLarge) {
       boxBytes = await readBoxFile(connection, path);
-      bh = boxBytes === null ? null : sha256(codec.boxView(boxBytes, hostBytes, ctx));
+      boxView = boxBytes === null ? null : codec.boxView(boxBytes, hostBytes, ctx);
+      bh = boxView === null ? null : sha256(boxView);
     } else if (boxFile) {
       bh = (await this.hasher(connection, [{ path }]))[0] ?? null;
     }
@@ -1461,7 +1463,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
       boxSize: boxFile?.size ?? 0,
       boxMtimeMs: boxFile?.mtimeMs ?? 0,
       boxBytes,
-      boxView: boxBytes === null ? null : codec.boxView(boxBytes, hostBytes, ctx),
+      boxView,
       bh,
       tooLarge,
       unsyncable: hostBytes !== null && hostView === null

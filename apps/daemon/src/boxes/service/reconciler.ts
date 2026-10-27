@@ -22,6 +22,11 @@
  * - A box past its `deadlineAt` (temporary boxes, macOS jobs) is destroyed (`time-limit`), whether
  *   or not its provider could be listed.
  *
+ * - Bring-your-own machines (`provider: "byo"`) are never destroyed, marked gone or unreachable:
+ *   nothing is listed for them, and a disconnected one is `offline` (the lifecycle's doing). A chat's
+ *   lease past its deadline is released (`release`), and a project's setup a restart interrupted
+ *   is resumed.
+ *
  * {@link decideReconcile} is the pure decision; {@link BoxReconciler} gathers its inputs and acts.
  */
 
@@ -62,6 +67,8 @@ export type ReconcileAction =
   | { kind: "destroy"; boxId: string; reason: BoxDestroyedReason; message: string | null; ref?: ProviderInstanceRef }
   | { kind: "mark-gone"; boxId: string; reason: BoxDestroyedReason; message: string | null }
   | { kind: "resume"; boxId: string; ref?: ProviderInstanceRef }
+  /** A bring-your-own machine lent to a chat whose time limit passed: given back, never destroyed. */
+  | { kind: "release"; boxId: string; reason: BoxDestroyedReason }
   | { kind: "mark-unreachable"; boxId: string };
 
 /** The next retry of a `destroy-failed` record's destroy. */
@@ -171,6 +178,14 @@ export function decideReconcile(input: ReconcileInput): ReconcileDecision {
       if (previousError !== undefined) errorSince.set(record.id, previousError);
       // A retry in flight is `destroying`: its backoff carries over to the next failure.
       if (previousRetry) retries.set(record.id, previousRetry);
+      continue;
+    }
+    if (record.provider === "byo") {
+      if (record.purpose === "temporary" && deadlinePassed(record, now)) {
+        actions.push({ kind: "release", boxId: record.id, reason: "time-limit" });
+      } else if (record.state === "provisioning" && record.purpose === "project" && input.resumeAllowed) {
+        actions.push({ kind: "resume", boxId: record.id });
+      }
       continue;
     }
     const instances = input.listings.get(record.provider);
@@ -296,7 +311,6 @@ export interface BoxReconcilerDeps {
   lifecycle: BoxLifecycle;
   connectivity: BoxConnectivity;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error" | "log">;
   /** The plugin switch: interrupted setups are resumed only while it is on. */
   enabled(): boolean;
@@ -504,6 +518,9 @@ export class BoxReconciler {
       case "resume":
         await lifecycle.resume(action.boxId, action.ref);
         return;
+      case "release":
+        await lifecycle.release(action.boxId, action.reason);
+        return;
       case "mark-unreachable":
         await lifecycle.markUnreachable(action.boxId);
         return;
@@ -531,6 +548,6 @@ export class BoxReconciler {
   }
 
   private callOptions(timeoutMs: number) {
-    return { signal: AbortSignal.timeout(timeoutMs), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    return { signal: AbortSignal.timeout(timeoutMs) };
   }
 }

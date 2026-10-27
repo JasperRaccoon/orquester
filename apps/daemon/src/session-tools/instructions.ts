@@ -3,10 +3,12 @@
  * 2026-10-15 §10, D-13): composed PER THREAD by the manifest (`manifest.ts`) — a fixed part, for a
  * chat inside an automated workflow the line saying approvals are not available, and (Knowledge
  * Graph plugin) for a chat that can see at least one knowledge collection the knowledge line
- * naming them. Every chat tool is on in every chat, so nothing here names tools that are off.
- * Detail stays in tool descriptions. The worst case stays under 2 048 bytes,
+ * naming them, and (Device simulators plugin) the devices line while the device tools are
+ * advertised. Every chat tool is on in every chat, so nothing here names tools that are off.
+ * Detail stays in tool descriptions. Without devices, the worst case stays under 2 048 bytes,
  * plus exactly {@link KNOWLEDGE_LINE_MAX_BYTES} when the knowledge line is present (asserted by
- * `instructions.test.ts`). A knowledge worker session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
+ * `instructions.test.ts`). Devices add their guidance only while advertised. A knowledge worker
+ * session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
  *
  * Pure: the daemon composes it; the agent host only passes it on.
  */
@@ -36,6 +38,10 @@ Changes outside your sandbox (workflows, agent profiles, desktops, other project
 
 /** Spec §10's workflow-owned line. */
 const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: changes that need approval are not available.";
+
+/** Devices spec §9: the one line the devices toolset adds (the rest travels in `open_device`'s quick start). */
+const DEVICES_LINE =
+  "Mobile devices: list_devices, open_device; prefer device_action snapshot refs to coordinates; the user watches the Device panel and may take control.";
 
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";
 const KNOWLEDGE_LINE_SUFFIX = ". Search it (knowledge_search) before deciding on these topics.";
@@ -79,6 +85,8 @@ This is a Knowledge Graph indexing session: work only through knowledge_worker_n
 export interface OrquesterInstructionsInput {
   /** The chat is workflow-owned (spec §5.4). */
   workflowOwned: boolean;
+  /** Devices: the device tools are advertised to it (the devices line is added). */
+  devices?: boolean;
   /**
    * Knowledge Graph: the names of the collections the chat can see while the plugin is on; absent
    * or empty = no knowledge line.
@@ -90,6 +98,7 @@ export interface OrquesterInstructionsInput {
 export function composeOrquesterInstructions(input: OrquesterInstructionsInput): string {
   const lines: string[] = [ORQUESTER_INSTRUCTIONS_FIXED];
   if (input.workflowOwned) lines.push(WORKFLOW_OWNED_LINE);
+  if (input.devices === true) lines.push(DEVICES_LINE);
   const knowledge = knowledgeLine(input.knowledgeCollections ?? []);
   if (knowledge !== null) lines.push(knowledge);
   return lines.join("\n");

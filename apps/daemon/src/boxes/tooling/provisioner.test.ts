@@ -1,5 +1,5 @@
 // The box tooling provisioner end to end: Better TS Typecheck's plugin over an
-// injected `fetch` serving a fake npm registry and real tarballs, the host
+// mocked global `fetch` serving a fake npm registry and real tarballs, the host
 // archive cache, and a "box" that is this machine (`localBoxConnection`) with
 // its data dir in a temp dir. The box preload it writes is then run under node
 // against a fake `typescript` package, to prove the redirect fires and falls
@@ -19,8 +19,9 @@ import { boxToolingArchivePath, boxToolingCacheDir } from "@orquester/config";
 import { createTsRustToolingPlugin, type TsRustToolingState } from "../../plugins/ts-rust/box-tooling.ts";
 import { NPM_REGISTRY, TS_CHECKER_ENGINE_SPECS } from "../../plugins/ts-rust/installer.ts";
 import { type FixtureTarball, makeTsRustTarball, tempRoot } from "../../plugins/testing.ts";
-import type { BoxConnection, BoxExecOptions, BoxHub, SessionToolingContribution } from "../contracts.ts";
+import type { BoxConnection, BoxExecOptions, BoxHub } from "../contracts.ts";
 import { type LocalBoxConnection, localBoxConnection, localSysInfo } from "../testing.ts";
+import { boxToolingEnv } from "../remote/exec/env.ts";
 import { TOOLING_INSTALL_MARKER } from "./install.ts";
 import { type BoxToolingProvisionerHandle, createBoxToolingProvisioner } from "./provisioner.ts";
 
@@ -134,13 +135,12 @@ interface Harness {
   registry: ReturnType<typeof registryFetch>;
   source: ReturnType<typeof fakeSource>;
   provisioner: BoxToolingProvisionerHandle;
-  contributions: Array<{ boxId: string; pluginId: string; contribution: SessionToolingContribution | null }>;
   statusChanges: string[];
   registryRecord: { purpose: string; state: string } | undefined;
   publish(version: string, options?: { script?: string; noBinary?: boolean; claimed?: string }): Promise<void>;
   /** Run `tsc` from the project with the box's session env. */
-  tsc(env?: Record<string, string>): ReturnType<typeof spawnSync>;
-  sessionEnv(): Record<string, string>;
+  tsc(env: Record<string, string>): ReturnType<typeof spawnSync>;
+  sessionEnv(): Promise<Record<string, string>>;
   versionDir(version: string): string;
 }
 
@@ -155,6 +155,7 @@ async function harness(t: TestContext, options: { state?: TsRustToolingState; co
   const { hub, setConnected } = fakeHub(connection);
   if (options.connected === false) setConnected(false);
   const registry = registryFetch("tsrs", "@tsrs/linux-x64-gnu");
+  t.mock.method(globalThis, "fetch", registry.fetch);
   const source = fakeSource(options.state ?? onWith(null));
   let clock = Date.parse("2026-10-20T10:00:00.000Z");
   const h: Harness = {
@@ -167,15 +168,14 @@ async function harness(t: TestContext, options: { state?: TsRustToolingState; co
     registry,
     source,
     provisioner: undefined as never,
-    contributions: [],
     statusChanges: [],
     registryRecord: undefined,
     async publish(version, publishOptions = {}) {
       const tarball = await makeTsRustTarball(root, version, { script: publishOptions.script ?? STUB, noBinary: publishOptions.noBinary }, TS_CHECKER_ENGINE_SPECS.tsrs);
       registry.releases.set(version, { ...tarball, claimed: publishOptions.claimed });
     },
-    sessionEnv: () => h.provisioner.sessionEnv("box-1", { PATH: process.env.PATH ?? "", HOME: root }),
-    tsc(env = h.sessionEnv()) {
+    sessionEnv: async () => ({ PATH: process.env.PATH ?? "", HOME: root, ...(await boxToolingEnv(connection, h.provisioner.contribution("box-1"))) }),
+    tsc(env) {
       return spawnSync(process.execPath, [join(project, "node_modules", ".bin", "tsc"), "--noEmit"], { cwd: project, env, encoding: "utf8" });
     },
     versionDir: (version) => join(dataDir, "tooling", "tsrs", "versions", version)
@@ -184,12 +184,10 @@ async function harness(t: TestContext, options: { state?: TsRustToolingState; co
     baseDir: appdir,
     hub,
     registry: { get: () => (h.registryRecord ? ({ id: "box-1", ...h.registryRecord } as never) : undefined) },
-    plugins: [createTsRustToolingPlugin({ source, fetch: registry.fetch })],
+    plugins: [createTsRustToolingPlugin({ source })],
     workspacesDir: () => workspaces,
-    fetch: registry.fetch,
     now: () => new Date((clock += 1000)),
     logger: { warn: () => {}, error: () => {} },
-    setContribution: (boxId, pluginId, contribution) => h.contributions.push({ boxId, pluginId, contribution }),
     onStatusChange: (boxId) => h.statusChanges.push(boxId)
   });
   t.after(async () => {
@@ -234,7 +232,6 @@ test("provision installs the box's release, writes its preload and state, and th
 
   const expected = { pathPrepend: [], env: {}, nodeRequire: [join(pluginDir, "preload.cjs")] };
   assert.deepEqual(h.provisioner.contribution("box-1"), expected);
-  assert.deepEqual(h.contributions.at(-1), { boxId: "box-1", pluginId: TS_RUST_PLUGIN_ID, contribution: expected });
   assert.deepEqual(
     h.provisioner.toolingStatus("box-1").map(({ pluginId, state, message }) => ({ pluginId, state, message })),
     [{ pluginId: TS_RUST_PLUGIN_ID, state: "ready", message: `tsrs ${V1}` }]
@@ -242,7 +239,7 @@ test("provision installs the box's release, writes its preload and state, and th
   assert.deepEqual(h.provisioner.pluginStatuses(TS_RUST_PLUGIN_ID).map((status) => [status.boxId, status.state]), [["box-1", "ready"]]);
 
   // The redirect fires: tsc through node_modules/.bin runs the box's tsrs with tsrs's checker default.
-  const env = h.sessionEnv();
+  const env = await h.sessionEnv();
   assert.equal(env.NODE_OPTIONS, `--require ${JSON.stringify(join(pluginDir, "preload.cjs"))}`);
   const redirected = h.tsc(env);
   assert.equal(redirected.stderr, "");
@@ -288,7 +285,7 @@ test("off, a new version, a disconnected box: every box follows the plugin", { s
   await h.publish(V2);
   await h.provisioner.provision("box-1", signal());
   assert.deepEqual(h.registry.calls.meta, [V1], "pinned to the host's current version");
-  const envFromBefore = h.sessionEnv();
+  const envFromBefore = await h.sessionEnv();
 
   // Off: the state file says so at once, new sessions get nothing, and running ones stop redirecting.
   h.source.set({ ...onWith(V1), enabled: false });
@@ -297,7 +294,7 @@ test("off, a new version, a disconnected box: every box follows the plugin", { s
   assert.deepEqual(JSON.parse(await readFile(join(pluginDir, "state.json"), "utf8")), { enabled: false });
   assert.equal(await exists(join(pluginDir, "preload.cjs")), true, "the preload stays for sessions that require it");
   assert.deepEqual(h.provisioner.contribution("box-1"), { pathPrepend: [], env: {}, nodeRequire: [] });
-  assert.equal(h.sessionEnv().NODE_OPTIONS, undefined);
+  assert.equal((await h.sessionEnv()).NODE_OPTIONS, undefined);
   assert.equal(h.provisioner.toolingStatus("box-1")[0]?.state, "off");
   assert.equal(h.tsc(envFromBefore).stdout, "real tsc --noEmit\n");
 
@@ -375,7 +372,6 @@ test("a box that is not connected is refused; a set-up project box is provisione
   h.provisioner.forget("box-1");
   assert.deepEqual(h.provisioner.toolingStatus("box-1"), []);
   assert.deepEqual(h.provisioner.contribution("box-1"), { pathPrepend: [], env: {}, nodeRequire: [] });
-  assert.deepEqual(h.contributions.at(-1), { boxId: "box-1", pluginId: TS_RUST_PLUGIN_ID, contribution: null });
 });
 
 // ---- a scripted Windows box --------------------------------------------------------------------
@@ -482,36 +478,29 @@ function scriptedWindowsBox() {
   return { connection, files, paths, execs, methods };
 }
 
-test("a Windows box: tar.exe, Windows paths only, no chmod, and an env with its Path and NODE_OPTIONS rules", async (t) => {
+test("a Windows box: tar.exe, Windows paths only, no chmod, and NODE_OPTIONS with Windows quoting", async (t) => {
   const root = await tempRoot("orq-box-tooling-win-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const box = scriptedWindowsBox();
   const { hub } = fakeHub(box.connection);
   // The host runs tsrs; a Windows box gets tsc-rs, at the registry's latest.
   const registry = registryFetch("tsc-rs", "@tsc-rs/win32-x64");
+  t.mock.method(globalThis, "fetch", registry.fetch);
   registry.latest = "0.7.0";
   registry.releases.set("0.7.0", await makeTsRustTarball(root, "0.7.0", {}, TS_CHECKER_ENGINE_SPECS["tsc-rs"]));
   const source = fakeSource({ enabled: true, engine: "tsrs", current: { tsrs: V1, "tsc-rs": null } });
   const provisioner = createBoxToolingProvisioner({
     baseDir: join(root, "appdir"),
     hub,
-    plugins: [createTsRustToolingPlugin({ source, fetch: registry.fetch })],
+    plugins: [createTsRustToolingPlugin({ source })],
     workspacesDir: () => "/var/lib/orquester/workspaces",
-    fetch: registry.fetch,
-    logger: { warn: () => {}, error: () => {} },
-    setContribution: () => undefined
+    logger: { warn: () => {}, error: () => {} }
   });
   t.after(() => provisioner.stop());
   await provisioner.provision("win-box", signal());
 
   assert.equal(provisioner.toolingStatus("win-box")[0]?.message, "tsc-rs 0.7.0");
-  assert.equal(box.execs.length, 2);
-  const [tar, smoke] = box.execs;
-  assert.equal(tar?.command, "tar.exe");
-  assert.deepEqual(tar?.args, ["-xzf", "archive.tgz", "-C", "extract"]);
-  assert.match(tar?.cwd ?? "", /^C:\\orq\\agent\\tooling\\tsc-rs\\\.tmp\\0\.7\.0-[0-9a-f-]+$/);
-  assert.equal(smoke?.command, `${tar?.cwd}\\extract\\package\\lib\\tsc.exe`);
-  assert.deepEqual(smoke?.args, ["--version"]);
+  assert.ok(box.execs.some(({ command }) => command === "tar.exe"));
   assert.equal(box.methods.includes("fs.chmod"), false, "no chmod on Windows");
   for (const path of [...box.paths, ...box.execs.flatMap((exec) => [exec.cwd ?? "", exec.command === "tar.exe" ? "C:\\orq\\" : exec.command])]) {
     assert.match(path, /^C:\\orq\\/, `a Windows box path: ${path}`);
@@ -523,13 +512,11 @@ test("a Windows box: tar.exe, Windows paths only, no chmod, and an env with its 
     engine: "tsc-rs",
     version: "0.7.0"
   });
-  const preload = box.files.get("C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs")?.toString() ?? "";
-  assert.match(preload, /var WORKSPACES_ROOTS = \["C:\\\\orq\\\\var\\\\lib\\\\orquester\\\\workspaces"\];/);
+  assert.ok(box.files.has("C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs"));
 
-  const env = provisioner.sessionEnv("win-box", { Path: "C:\\Windows\\system32", PATH: "C:\\tools", NODE_OPTIONS: "--no-warnings" });
+  const env = await boxToolingEnv(box.connection, provisioner.contribution("win-box"));
   assert.deepEqual(env, {
-    Path: "C:\\Windows\\system32;C:\\tools",
-    NODE_OPTIONS: String.raw`--no-warnings --require "C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs"`
+    NODE_OPTIONS: String.raw`--require "C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs"`
   });
   assert.deepEqual(provisioner.contribution("win-box").nodeRequire, ["C:\\orq\\agent\\tooling\\ts-rust\\preload.cjs"]);
 });

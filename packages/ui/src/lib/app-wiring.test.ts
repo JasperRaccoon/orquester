@@ -8,6 +8,7 @@ import {
   BOXES_CHANNEL,
   DAEMON_EVENTS_CHANNEL,
   DAEMON_STOPPING_EVENT,
+  DEVICES_PLUGIN_ID,
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_STATUS_EVENT,
   type AgentProfileAgentId,
@@ -25,7 +26,7 @@ import { boxesStore, resetBoxes } from "./boxes/store.ts";
 import { box, change, kind, provider } from "./boxes/fixtures.test-helpers.ts";
 import { knowledgeStore, resetKnowledge } from "./knowledge/store.ts";
 import { collections, knowledgePlugin, status } from "./knowledge/fixtures.test-helpers.ts";
-import { getRepoIdentity, resetRepoIdentities } from "./repo-identities/store.ts";
+import { repoIdentitiesStore, resetRepoIdentities } from "./repo-identities/store.ts";
 import { resetSavedPrompts, savedPromptsStore } from "./saved-prompts/store.ts";
 import { getSecretVault, resetSecretFiles } from "./secret-files/store.ts";
 import { getConnectionLog, resetConnectionLog } from "./connection/connection-log.ts";
@@ -335,7 +336,8 @@ afterEach(async () => {
       assert.equal(first?.id, "ke_aaaaaaaaaaaa");
       store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
       const second = store().knowledgeView.focus;
-      assert.ok(second && first && second.nonce > first.nonce, "the same citation clicked again asks again");
+      assert.ok(second);
+      assert.notEqual(second.nonce, first?.nonce, "the same citation clicked again asks again");
 
       store().openKnowledgeConcept("tactic-alternatives");
       assert.equal(store().knowledgeView.focus?.kind, "concept");
@@ -343,7 +345,7 @@ afterEach(async () => {
       // Closing and opening again keeps what the view was showing (same request, same nonce).
       store().closeKnowledge();
       store().openKnowledge();
-      assert.equal(store().knowledgeView.focus, concept);
+      assert.deepEqual(store().knowledgeView.focus, concept);
     });
 
     it("going to the project, a tab or a tool leaves it, keeping its focus", () => {
@@ -360,7 +362,7 @@ afterEach(async () => {
         const focus = store().knowledgeView.focus;
         leave();
         assert.equal(store().knowledgeView.open, false, name);
-        assert.equal(store().knowledgeView.focus, focus, `${name} keeps the focus`);
+        assert.deepEqual(store().knowledgeView.focus, focus, `${name} keeps the focus`);
       }
     });
 
@@ -406,6 +408,86 @@ afterEach(async () => {
       assert.deepEqual(store().knowledgeView, { open: false, focus: null });
     });
   });
+
+  describe("the Devices fleet view", () => {
+    const P = "/w/acme/app";
+    const project = (path: string) => ({ name: path.split("/").pop(), workspace: "acme", path }) as ProjectSummary;
+    const store = () => useAppStore.getState();
+    const devicesPlugin = (enabled: boolean): PluginInfo => ({ ...knowledgePlugin(enabled), id: DEVICES_PLUGIN_ID, name: "Device simulators" });
+
+    beforeEach(() => {
+      useAppStore.setState({
+        api: null,
+        currentProject: project(P),
+        knowledgeView: { open: false, focus: null },
+        devicesFleetOpen: false,
+        whiteboardTabsByProject: {},
+        gitTabsByProject: {},
+        activeTabByProject: {},
+        sessions: [],
+        browsers: [],
+        desktops: []
+      });
+    });
+
+    it("opens over the main area in Knowledge's place, and the other way round", () => {
+      useAppStore.setState({ sidebarDrawerOpen: true });
+      store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+      store().openDevicesFleet();
+      assert.equal(store().devicesFleetOpen, true);
+      assert.equal(store().knowledgeView.open, false, "one server-level view at a time");
+      assert.partialDeepStrictEqual(store().knowledgeView.focus, { kind: "entry", id: "ke_aaaaaaaaaaaa" });
+      assert.equal(store().sidebarDrawerOpen, false);
+      store().openKnowledge();
+      assert.equal(store().devicesFleetOpen, false);
+      assert.equal(store().knowledgeView.open, true);
+    });
+
+    it("going to the project, a tab, a tool or a session leaves it", () => {
+      const leaves: Array<[string, () => void]> = [
+        ["openProject (the same project)", () => store().openProject(project(P))],
+        ["activateTab", () => store().activateTab("tab-1")],
+        ["openGit", () => store().openGit()],
+        ["openFileBrowser", () => store().openFileBrowser()],
+        ["openWorkflowTab", () => store().openWorkflowTab(P, "wf_1", { title: "Flow" })]
+      ];
+      for (const [name, leave] of leaves) {
+        store().openDevicesFleet();
+        leave();
+        assert.equal(store().devicesFleetOpen, false, name);
+      }
+    });
+
+    it("a chat turn ending under it stays unread until closing it reveals the chat", () => {
+      const done = "2026-10-26T10:00:00.000Z";
+      const chat = { id: "c1", kind: "agent-chat", projectPath: P, latestTurn: { completedAt: done } } as unknown as SessionSummary;
+      useAppStore.setState({ activeTabByProject: { [P]: "c1" }, threadVisits: {} });
+      store().openDevicesFleet();
+      store().applyEvent({ channel: "sessions", type: "session.updated", payload: chat } as EventMessage);
+      assert.equal(store().threadVisits.c1, undefined, "hidden under the view, the finished turn is not seen");
+      store().closeDevicesFleet();
+      assert.equal(store().devicesFleetOpen, false);
+      assert.equal(store().threadVisits.c1, done, "closing the view shows the chat: that is the visit");
+    });
+
+    it("closes when a loaded plugins list says the plugin is off, not while the list is unknown", () => {
+      useAppStore.setState({ plugins: [devicesPlugin(true)] });
+      store().openDevicesFleet();
+      useAppStore.setState({ plugins: null });
+      assert.equal(store().devicesFleetOpen, true, "a list not loaded yet says nothing");
+      useAppStore.setState({ plugins: [devicesPlugin(false)] });
+      assert.equal(store().devicesFleetOpen, false);
+    });
+
+    it("closes on a connection switch", async () => {
+      const target = { id: "target", name: "Target", kind: "local", endpoint: "unix:/x", status: "disconnected" } as const;
+      useAppStore.setState({ connect: async () => undefined, connectionStatus: "disconnected" });
+      await store().initConnections({ localConnection: target, localTransporter: { kind: "stub" } as never, defaultUseTitlebar: false });
+      useAppStore.setState({ activeConnectionId: "previous", connections: [target, { ...target, id: "previous" }], devicesFleetOpen: true });
+      await store().selectConnection("target");
+      assert.equal(store().devicesFleetOpen, false);
+    });
+  });
 }
 
 // repo-identities: only shared app routing is exercised here; the feature store owns its state rules.
@@ -417,15 +499,15 @@ afterEach(async () => {
     it("a change and a delete on the repo-identities channel reach the store", () => {
       resetRepoIdentities();
       useAppStore.getState().applyEvent(event("repo-identities", "repoIdentity.changed", { identity: record }));
-      assert.equal(getRepoIdentity(KEY)?.label, "Engine");
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY)?.label, "Engine");
       useAppStore.getState().applyEvent(event("repo-identities", "repoIdentity.changed", { repoKey: KEY, deleted: true }));
-      assert.equal(getRepoIdentity(KEY), undefined);
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY), undefined);
     });
 
     it("the same message on another channel does not", () => {
       resetRepoIdentities();
       useAppStore.getState().applyEvent(event("elsewhere", "repoIdentity.changed", { identity: record }));
-      assert.equal(getRepoIdentity(KEY), undefined);
+      assert.equal(repoIdentitiesStore.getState().identities.get(KEY), undefined);
     });
   });
 }

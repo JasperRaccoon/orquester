@@ -145,8 +145,6 @@ export type SessionToolsApplied = "live" | "next-idle" | "next-start" | "unchang
 export type LiveSessionToolsListener = (prepared: PreparedSessionTools) => boolean | Promise<boolean>;
 
 export interface SessionToolsHost {
-  /** Always true for a host an adapter is handed; kept for tests. */
-  readonly enabled: boolean;
   /** Every name this host may advertise (catalog ∪ legacy) — the provenance marker of rows. */
   readonly knownNames: ReadonlySet<string>;
   /** Read the thread's manifest (nothing recorded: a look). */
@@ -677,7 +675,6 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   };
 
   return {
-    enabled: true,
     knownNames,
     prepare: (threadId, launch) => readPrepared(threadId, launch),
     async launchInProcess(threadId, launch, listener) {

@@ -80,6 +80,7 @@ test("hostLocalAccountIds leaves out box-project sessions; liveAccountIds still 
 });
 
 async function service(t: TestContext, now: number, fetchImpl: typeof fetch) {
+  t.mock.method(Date, "now", () => now);
   const calls: string[] = [];
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     calls.push(String(input));
@@ -105,7 +106,7 @@ function claudeBlob(accessToken: string, expiresAt: number): string {
 
 function realBroker(
   svc: AgentAccountsService, accountsDir: string, sessions: ChatAwareSessionManager, now: number,
-  files = nodeCredentialFiles(accountsDir, () => now)
+  files = nodeCredentialFiles(accountsDir)
 ) {
   const fakes = brokerWorld(); // its registry: box-1 owns BOX_PROJECT
   return createAgentTokenBroker({
@@ -210,7 +211,7 @@ test("a held Claude account whose CLI holds the refresh lock, over real files: t
   openChat("chat-host", HOST_PROJECT, acct.id);
   const home = svc.homePath("claude", acct.id);
   await mkdir(join(home, ".oauth_refresh.lock")); // the CLI is refreshing right now
-  const files = nodeCredentialFiles(accountsDir, () => now);
+  const files = nodeCredentialFiles(accountsDir);
   const read = files.read.bind(files);
   const watch = files.watch.bind(files);
   let armed!: () => void;

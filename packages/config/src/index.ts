@@ -214,7 +214,7 @@ export function knowledgeMykgHomeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
 }
 
-// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
+// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target path helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
 export function boxesStorePath(baseDir: string): string {
@@ -287,6 +287,59 @@ export function boxPendingTerminalKillsPath(baseDir: string): string {
 // boxes: the Agent config servers that run inside a box chat's box (`box-mcp.ts`, spec §8.4).
 export function boxMcpSettingsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "box-mcp.json");
+}
+
+// Devices ("Device simulators" plugin; schemas in `devices.ts`): devices.json, device-leases.json and
+// devices/ (pinned tools, the Android SDK and AVDs, runtime files, screenshots).
+
+/** `<appdir>/daemon/devices`: tools, the Android SDK, AVDs, runtime files and screenshots (0700). */
+export function devicesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "devices");
+}
+
+/** Pinned npm tool installs: `<devicesToolsDir>/<name>@<version>` (expo-device-hub, agent-device). */
+export function devicesToolsDir(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "tools");
+}
+
+/** The Android SDK root (`ANDROID_HOME`): cmdline-tools, platform-tools, emulator, system images. */
+export function androidSdkDir(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "android-sdk");
+}
+
+/** The AVD home (`ANDROID_AVD_HOME`): one AVD per Android profile, each with its golden snapshot. */
+export function androidAvdDir(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "avd");
+}
+
+/** `XDG_RUNTIME_DIR` of the hub and its emulators (gRPC tokens live here); mode 0700. */
+export function devicesRuntimeDir(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "runtime");
+}
+
+/** The local hub's pid and port (`hub.json`), so a restarted daemon reattaches or reaps it. */
+export function devicesHubStatePath(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "hub.json");
+}
+
+/** Screenshots kept per lease (`<dir>/<leaseId>/<screenshotId>.<ext>`, the last 20 of each). */
+export function deviceScreenshotsDir(baseDir: string): string {
+  return joinPath(devicesDir(baseDir), "screenshots");
+}
+
+/** Settings → Devices (`devices.json`). */
+export function devicesSettingsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "devices.json");
+}
+
+/** The live leases (`device-leases.json`). */
+export function deviceLeasesPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "device-leases.json");
+}
+
+/** The device pool's record (`device-pool.json`): rented hosts, learned capacity, drains, cache warms. */
+export function devicePoolPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "device-pool.json");
 }
 
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
@@ -2845,3 +2898,4 @@ export * from "./tooling.ts";
 // boxes:
 export * from "./box-mcp.ts";
 export * from "./knowledge-store.ts";
+export * from "./devices.ts";

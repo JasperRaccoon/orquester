@@ -1,7 +1,7 @@
 import type { ClientRequest, IncomingMessage } from "node:http";
 
 /** Where a chunked GET stream's chunks and its single end go (the renderer's IPC channel). */
-export interface HttpStreamSink {
+interface HttpStreamSink {
   data(chunk: string): void;
   /** Called exactly once. `status`: the error status the server answered instead of a stream. */
   end(status?: number): void;

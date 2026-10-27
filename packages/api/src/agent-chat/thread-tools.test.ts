@@ -14,18 +14,15 @@ import {
   exceedsExchangeLimit,
   isMergeBackMessage,
   isThreadAuthoredMessage,
-  isThreadReplyMessage,
   isToolsetContinueMessage,
   MAX_EXCHANGE_HOPS,
   mergeBackContext,
   nextCausedBy,
   parseCausedBy,
   parseThreadMessage,
-  replyDeliveryContext,
   replyNoticeText,
   stripThreadProvenance,
   threadMessageContext,
-  TOOLSET_CONTINUE_CONTEXT_KIND,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   readThreadToolReference,
   threadToolReference,
@@ -202,12 +199,9 @@ test("the v2 overhead stays within THREAD_MESSAGE_OVERHEAD_CHARS at every field'
 });
 
 test("a reply delivery reads as another chat's by its chip; an older build's continue turn is Orquester's, never another chat's", () => {
-  assert.equal(isThreadAuthoredMessage({ context: [replyDeliveryContext("codex")] }), true);
-  assert.equal(isThreadReplyMessage({ context: [replyDeliveryContext("codex")] }), true);
-  assert.equal(isThreadReplyMessage({ context: [threadMessageContext("codex")] }), false);
+  assert.equal(isThreadAuthoredMessage({ context: [{ kind: "thread-reply" }] }), true);
   // The legacy chip older builds wrote on their automatic continue turn (as it reads in old logs).
-  const legacyContinue = { kind: TOOLSET_CONTINUE_CONTEXT_KIND, label: "Orquester", ref: "notes" };
-  assert.equal(TOOLSET_CONTINUE_CONTEXT_KIND, "toolset-continue");
+  const legacyContinue = { kind: "toolset-continue", label: "Orquester", ref: "notes" };
   assert.equal(isThreadAuthoredMessage({ context: [legacyContinue] }), false);
   assert.equal(isToolsetContinueMessage({ context: [legacyContinue] }), true);
   const reply = buildThreadMessage({ origin: "reply", fromTitle: "Codex review", fromSessionId: "s-9", text: "LGTM" });

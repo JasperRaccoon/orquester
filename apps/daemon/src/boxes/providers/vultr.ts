@@ -222,7 +222,6 @@ export const vultrAdapter: BoxProviderAdapter = {
   ],
   accountNote: "The API key's access control list must allow this Orquester host's public IP.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () =>

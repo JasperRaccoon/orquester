@@ -215,7 +215,6 @@ export const jarvislabsAdapter: BoxProviderAdapter = {
   credentialFields: [{ id: "apiKey", label: "API key", secret: true, help: "Settings → API keys." }],
   accountNote: "GPU boxes are Jarvislabs template containers (no systemd, no Docker inside). Regions are in India and Europe.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(PROVIDER, options.signal, () => call({ url: `${DEFAULT_HOST}users/balance`, headers: headers(credentials) }, options));

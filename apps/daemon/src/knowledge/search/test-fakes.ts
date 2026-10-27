@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnowledgeCollection, KnowledgeEntry, KnowledgeEntryMeta } from "@orquester/api";
-import type { KnowledgeEntryChange } from "../ports.ts";
+import type { KnowledgeEntryChange, KnowledgeVectorThresholds } from "../ports.ts";
 import { knowledgeContentHash } from "../store/normalize.ts";
-import type { KnowledgeEmbedKind, KnowledgeEmbedder, KnowledgeEmbedderSource, KnowledgeSimilarityThresholds } from "./embedder.ts";
+import type { KnowledgeEmbedKind, KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import type { KnowledgeSearchStore } from "./search.ts";
 
@@ -109,14 +109,14 @@ export class FakeStore implements KnowledgeSearchStore {
 export class FakeEmbedder implements KnowledgeEmbedder {
   readonly dimensions: number;
   readonly modelId: string;
-  readonly thresholds: KnowledgeSimilarityThresholds;
+  readonly thresholds: KnowledgeVectorThresholds;
   calls = 0;
   texts = 0;
   /** The kind of every `embed` call, in order. */
   kinds: KnowledgeEmbedKind[] = [];
   failWith: Error | null = null;
 
-  constructor(options: { dimensions?: number; modelId?: string; groups?: string[][]; thresholds?: KnowledgeSimilarityThresholds } = {}) {
+  constructor(options: { dimensions?: number; modelId?: string; groups?: string[][]; thresholds?: KnowledgeVectorThresholds } = {}) {
     this.dimensions = options.dimensions ?? 32;
     this.modelId = options.modelId ?? "fake/semantic";
     this.thresholds = options.thresholds ?? { minimum: 0.25, good: 0.4, strong: 0.6, duplicate: 0.92 };

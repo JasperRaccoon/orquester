@@ -59,7 +59,7 @@ class FakeHost implements DaemonApi {
   compactions: string[] = [];
   receipts = new Map<string, number>();
   answer: DaemonResponse | null = null;
-  async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
+  async request(_method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
     const body = (opts?.body ?? {}) as Record<string, unknown>;
     this.posts.push({ path, body });
     if (this.answer) return this.answer;

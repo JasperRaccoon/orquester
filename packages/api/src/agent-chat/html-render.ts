@@ -480,28 +480,6 @@ export function htmlRenderStockTheme(
   return htmlRenderThemeFromPalette((variable) => HTML_RENDER_STOCK_PALETTES[appearance][variable], appearance, fonts);
 }
 
-/** Agent-facing reference for the injected variables, for tool descriptions. */
-export const HTML_RENDER_THEME_GUIDE = [
-  "Orquester injects the user's live theme as CSS custom properties on :root (hex colours), and they follow the user's colour scheme and light/dark mode live:",
-  "--background (page background, identical to the thread around the frame), --foreground, --muted, --muted-foreground,",
-  "--card, --card-foreground, --popover, --popover-foreground, --secondary, --secondary-foreground, --border, --input, --ring,",
-  "--primary, --primary-foreground (solid buttons), --accent, --accent-foreground (brand accent), --accent-surface, --accent-surface-foreground,",
-  "--destructive, --destructive-foreground, --destructive-surface, --warning, --warning-foreground, --warning-surface,",
-  "--success, --success-foreground, --info, --info-foreground, --code-background, --code-foreground,",
-  "--chart-1 … --chart-6 (categorical series for charts), --radius, --font-sans, --font-mono.",
-  "The base stylesheet sets html background/color/font from these, body margin to 0, and hides the page's scrollbar; your own CSS overrides it."
-].join(" ");
-
-/** Agent-facing layout rules for a page that sits inside a reply. */
-export const HTML_RENDER_LAYOUT_GUIDE = [
-  `The frame is borderless on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px on desktop by default, wider if the reader widens chat, about 360px on phones), and its left edge lines up with your reply text.`,
-  "The page sits on the thread's own background, so by default leave html, body, and the outermost element with no background colour (transparent). This overrides general style preferences such as a fixed black page background.",
-  "Use a fluid width with no horizontal padding on the outermost element, and no outer card, border, or banner title: the page is part of your reply.",
-  "If a box needs its own background (a mock of a specific screen, a panel that must stand apart), give it at least 16px of padding on every side and var(--radius) corners, so content never touches its edge.",
-  "Give charts fixed pixel heights rather than heights that scale with width.",
-  "Let content set the page's height. Avoid viewport-based heights such as 100vh or height:100% on html or body; the frame grows to fit the page, so they can make it grow again and again."
-].join(" ");
-
 // ---------------------------------------------------------------------------
 // The bridge (JSON-RPC over postMessage)
 // ---------------------------------------------------------------------------

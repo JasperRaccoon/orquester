@@ -17,7 +17,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boxesDir } from "@orquester/config";
@@ -153,22 +153,4 @@ export async function removeMcpBridgeEntries(appdir: string, boxId: string, serv
   await Promise.all(
     serverIds.filter(isMcpBridgeId).map((serverId) => rm(entryPath(appdir, boxId, serverId), { force: true }).catch(() => undefined))
   );
-}
-
-/** Remove every entry a thread registered in a box (a host restart's leftovers, a deleted thread). */
-export async function removeThreadMcpBridgeEntries(appdir: string, boxId: string, threadId: string): Promise<void> {
-  let names: string[];
-  try {
-    names = await readdir(mcpBridgeBoxDir(appdir, boxId));
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const serverId = name.slice(0, -".json".length);
-    const entry = await readMcpBridgeEntry(appdir, boxId, serverId);
-    if (entry !== null && entry.threadId === threadId) {
-      await rm(entryPath(appdir, boxId, serverId), { force: true }).catch(() => undefined);
-    }
-  }
 }

@@ -2,8 +2,9 @@
  * The per-thread manifest of the in-chat `orquester` server (unified MCP design 2026-10-15 §9.4):
  * which chat tools ONE provider session of a thread advertises — every chat tool, but no
  * always-Admin one to a workflow-owned chat (§5.4), the box tools only while a box can be
- * rented (Ephemeral AI VMs §13), and the knowledge tools only while the Knowledge Graph plugin is
- * on (its spec, "Agent tools") — its instruction block (§10) and the MCP servers it must deny
+ * rented (Ephemeral AI VMs §13), the knowledge tools only while the Knowledge Graph plugin is
+ * on (its spec, "Agent tools"), the device tools only while devices can be used (devices spec §9)
+ * — its instruction block (§10) and the MCP servers it must deny
  * (§12.1). The agent host asks for it at every provider-session start
  * (`daemonRoutesForHost.sessionToolsManifest`) and is handed a new one when the daemon pushes one
  * (`agentHostRoutes.sessionToolsRefresh`).
@@ -51,6 +52,8 @@ export interface ManifestInput {
   daemonPointing: readonly DaemonPointingServer[];
   /** boxes: whether temporary boxes can be rented now (the Ephemeral AI VMs plugin is wired); absent = no. */
   boxesAvailable?: boolean;
+  /** Devices: whether the device tools are usable (the plugin is on, agents may use devices, a platform is enabled); absent = no. */
+  devicesAvailable?: boolean;
   /** Knowledge Graph: the plugin's view of this chat; absent = the plugin is off. */
   knowledge?: ManifestKnowledge;
 }
@@ -75,19 +78,21 @@ export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next
 /** The knowledge tools a chat that sees no collection is not advertised: they act on entries it can see (saving and listing collections stay). */
 export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get", "knowledge_update", "knowledge_delete", "knowledge_merge"];
 
-/** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
-function alwaysAdmin(tool: AnyOrquesterTool): boolean {
-  return tool.tier === "admin";
-}
-
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
  * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
- * chat pays for tools it cannot use. Knowledge Graph: the `knowledge` toolset only while the plugin
- * is on, without the entry tools ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never
- * the worker tools; a worker session gets ONLY the worker tools.
+ * chat pays for tools it cannot use; (devices) less the `devices` toolset likewise. Knowledge Graph:
+ * the `knowledge` toolset only while the plugin is on, without the entry tools
+ * ({@link KNOWLEDGE_SEARCH_TOOLS}) for a chat that sees no collection, and never the worker tools; a
+ * worker session gets ONLY the worker tools.
  */
-function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false, knowledge?: ManifestKnowledge): string[] {
+function advertisedChatTools(
+  catalog: readonly AnyOrquesterTool[],
+  workflowOwned: boolean,
+  boxesAvailable = false,
+  knowledge?: ManifestKnowledge,
+  devicesAvailable = false
+): string[] {
   if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
   const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
     if (KNOWLEDGE_WORKER_TOOLS.includes(tool.name)) return false;
@@ -96,11 +101,15 @@ function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned
     return knowledge.searchable || !KNOWLEDGE_SEARCH_TOOLS.includes(tool.name);
   };
   return catalog
-    .filter((tool) => !(workflowOwned && alwaysAdmin(tool)) && (boxesAvailable || tool.toolset !== "boxes") && knowledgeTool(tool))
+    .filter(
+      (tool) =>
+        !(workflowOwned && tool.tier === "admin") &&
+        (boxesAvailable || tool.toolset !== "boxes") &&
+        (devicesAvailable || tool.toolset !== "devices") &&
+        knowledgeTool(tool)
+    )
     .map((tool) => tool.name);
 }
-
-const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
 
 /** `dir` is `parent` or a directory inside it (lexically). */
 export const isWithinDir = (dir: string, parent: string): boolean => {
@@ -117,8 +126,7 @@ export const isWithinDir = (dir: string, parent: string): boolean => {
 const loadsProjectConfigIn = (thread: ManifestThread, dir: string): boolean =>
   thread.projectPaths.some(
     (root) =>
-      samePath(root, dir) ||
-      // An ancestor of the project (Codex reads from its project root — the git root, maybe above).
+      // The project root or an ancestor (Codex's git root may be above it).
       isWithinDir(root, dir) ||
       (isWithinDir(dir, root) && (thread.cwdPaths ?? []).some((cwd) => isWithinDir(cwd, dir)))
   );
@@ -154,12 +162,14 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   const knowledge = input.knowledge;
-  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge);
+  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge, input.devicesAvailable === true);
   const instructions =
     knowledge?.worker === true
       ? KNOWLEDGE_WORKER_INSTRUCTIONS
       : composeOrquesterInstructions({
           workflowOwned: input.thread.workflowOwned,
+          // The devices line names list_devices: only where it is advertised.
+          devices: tools.includes("list_devices"),
           // The line names knowledge_search: only where it is advertised.
           ...(knowledge?.enabled === true && tools.includes("knowledge_search") ? { knowledgeCollections: knowledge.visibleCollectionNames } : {})
         });

@@ -48,7 +48,7 @@ import type { ResolvedHook, ResolvedMcpServer } from "../resolve.ts";
 /** Bump when the prepared output changes for the same inputs. */
 const GROK_PREPARER_VERSION = "1";
 
-export const GROK_CONFIG_BASE_FILE = "profile/config.base.toml";
+const GROK_CONFIG_BASE_FILE = "profile/config.base.toml";
 const PLUGINS_DIR = "profile/plugins";
 const HOOKS_PLUGIN_DIR = "profile/hooks-plugin";
 const HOOKS_PLUGIN_NAME = "orquester-profile-hooks";
@@ -59,7 +59,7 @@ const GROK_MCP_ADVANCED_KEYS = ["startup_timeout_sec", "tool_timeout_sec", "bear
 type Doc = Record<string, unknown>;
 
 /** A profile MCP server as Grok's `[mcp_servers.<name>]` table (the Agent config editor's shape). */
-export function grokMcpTable(server: ResolvedMcpServer): Doc {
+function grokMcpTable(server: ResolvedMcpServer): Doc {
   const table: Doc = {};
   if (server.transport === "stdio") {
     table.command = server.command ?? "";
@@ -81,7 +81,7 @@ export function grokMcpTable(server: ResolvedMcpServer): Doc {
 }
 
 /** The profile's hooks as a Grok hook file (`{hooks: {<Event>: [{matcher?, hooks: [...]}]}}`). */
-export function grokHooksFile(hooks: readonly ResolvedHook[]): { hooks: Record<string, Doc[]> } {
+function grokHooksFile(hooks: readonly ResolvedHook[]): { hooks: Record<string, Doc[]> } {
   const out: Record<string, Array<{ matcher?: string; hooks: Doc[] }>> = {};
   for (const hook of hooks) {
     const groups = (out[hook.event] ??= []);

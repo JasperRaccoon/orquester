@@ -15,20 +15,20 @@ const f = (name: string): string => fixture("jarvislabs", name);
 const NOIDA = "https://backendn.jarvislabs.net";
 const CHENNAI = "https://backendc.jarvislabs.net";
 
-test("jarvislabs: validate reads the balance on the default host; 403 Not authenticated is ok:false", async () => {
+test("jarvislabs: validate reads the balance on the default host; 403 Not authenticated is ok:false", async (t) => {
   const good = routedFetch([{ path: "/users/balance", replies: [{ body: f("balance.json") }] }]);
-  assert.deepEqual(await jarvislabsAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await jarvislabsAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(new URL(good.seen[0]!.url).origin, NOIDA);
   assert.equal(good.seen[0]!.headers.authorization, "Bearer jl_test");
   const bad = routedFetch([{ path: "/users/balance", replies: [{ status: 403, body: f("not-authenticated.json") }] }]);
-  const result = await jarvislabsAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await jarvislabsAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Not authenticated/);
 });
 
-test("jarvislabs: offers list container GPUs with free devices, live-priced, per region", async () => {
+test("jarvislabs: offers list container GPUs with free devices, live-priced, per region", async (t) => {
   const { fetch, seen } = routedFetch([{ path: "/misc/server_meta?workload_type=container", replies: [{ body: f("server-meta.json") }] }]);
-  const offers = await jarvislabsAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await jarvislabsAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.equal(new URL(seen[0]!.url).origin, NOIDA);
   assert.equal(offers.priceSource, "live");
   // H100 is VM-only there; L4/H200 have both rows but appear once.
@@ -60,13 +60,13 @@ test("jarvislabs: offers list container GPUs with free devices, live-priced, per
   for (const row of meta.server_meta) if (row.gpu_type === "A30") row.effective_num_free_devices = 0;
   for (const row of meta.server_meta) if (row.gpu_type === "L4") row.price_per_hour = null;
   const changed = routedFetch([{ path: "/misc/server_meta", replies: [{ body: JSON.stringify(meta) }] }]);
-  const offers2 = await jarvislabsAdapter.offers(creds, "linux-gpu", callOptions(changed.fetch));
+  const offers2 = await jarvislabsAdapter.offers(creds, "linux-gpu", callOptions(t, changed.fetch));
   assert.ok(!offers2.sizes.some((size) => size.id === "A30"), "no free devices");
   assert.equal(offers2.sizes.find((size) => size.id === "L4")!.hourlyUsd, 0.44, "table price");
   assert.equal(offers2.priceSource, "table");
 });
 
-test("jarvislabs: create uploads the startup script, finds its id, creates once on the region host", async () => {
+test("jarvislabs: create uploads the startup script, finds its id, creates once on the region host", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/misc/server_meta", replies: [{ body: f("server-meta.json") }] },
     { method: "POST", path: "/scripts/add?name=orq-box-0123abcd", replies: [{ body: f("script-added.json") }] },
@@ -74,7 +74,7 @@ test("jarvislabs: create uploads the startup script, finds its id, creates once 
     { method: "POST", path: "/templates/pytorch/create", replies: [{ body: f("create.json") }] }
   ]);
   const request = sampleCreateRequest({ size: "RTX-PRO6000", region: "india-chennai-01" });
-  const result = await jarvislabsAdapter.create(creds, request, callOptions(fetch));
+  const result = await jarvislabsAdapter.create(creds, request, callOptions(t, fetch));
   const upload = seen.find((call) => call.url.includes("/scripts/add"))!;
   assert.equal(new URL(upload.url).origin, NOIDA);
   assert.match(upload.headers["content-type"]!, /^multipart\/form-data; boundary=----orq[0-9a-f]+$/);
@@ -101,7 +101,7 @@ test("jarvislabs: create uploads the startup script, finds its id, creates once 
   assert.deepEqual(result, { ref: { machineId: 314159, region: "india-chennai-01", scriptId: 27, name: "orq-box-0123abcd" }, hourlyUsd: 2.19 });
 });
 
-test("jarvislabs: a create answered without machine_id fails and removes the script; long names are cut to 40", async () => {
+test("jarvislabs: a create answered without machine_id fails and removes the script; long names are cut to 40", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/misc/server_meta", replies: [{ body: f("server-meta.json") }] },
     { method: "POST", path: "/scripts/add", replies: [{ body: f("script-added.json") }] },
@@ -111,7 +111,7 @@ test("jarvislabs: a create answered without machine_id fails and removes the scr
   ]);
   const boxId = "0123456789abcdef0123456789abcdef0123456789";
   await assert.rejects(
-    jarvislabsAdapter.create(creds, sampleCreateRequest({ boxId, size: "L4", region: "india-noida-01" }), callOptions(fetch)),
+    jarvislabsAdapter.create(creds, sampleCreateRequest({ boxId, size: "L4", region: "india-noida-01" }), callOptions(t, fetch)),
     /Insufficient balance/
   );
   const create = seen.find((call) => call.url.includes("/templates/pytorch/create"))!;
@@ -124,35 +124,35 @@ test("jarvislabs: a create answered without machine_id fails and removes the scr
     { path: "/scripts/", replies: [{ body: f("scripts-empty.json") }] }
   ]);
   await assert.rejects(
-    jarvislabsAdapter.create(creds, sampleCreateRequest({ size: "L4", region: "india-noida-01" }), callOptions(missingScript.fetch)),
+    jarvislabsAdapter.create(creds, sampleCreateRequest({ size: "L4", region: "india-noida-01" }), callOptions(t, missingScript.fetch)),
     /startup script was not stored \(Script name already exists\)/
   );
   await assert.rejects(
-    jarvislabsAdapter.create(creds, sampleCreateRequest({ size: "H100", region: "india-noida-01" }), callOptions(missingScript.fetch)),
+    jarvislabsAdapter.create(creds, sampleCreateRequest({ size: "H100", region: "india-noida-01" }), callOptions(t, missingScript.fetch)),
     /not offered/
   );
 });
 
-test("jarvislabs: status reads users/fetch; success:false (any spelling) means gone", async () => {
+test("jarvislabs: status reads users/fetch; success:false (any spelling) means gone", async (t) => {
   const running = routedFetch([{ path: "/users/fetch/314159", replies: [{ body: f("fetch-one.json") }] }]);
-  assert.deepEqual(await jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(running.fetch)), {
+  assert.deepEqual(await jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(t, running.fetch)), {
     state: "running",
     detail: "Running",
     publicIp: null,
     hourlyUsd: null
   });
   const missing = routedFetch([{ path: "/users/fetch/", replies: [{ body: f("fetch-missing.json") }] }]);
-  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 1 }, callOptions(missing.fetch))).state, "gone");
+  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 1 }, callOptions(t, missing.fetch))).state, "gone");
   const destroying = routedFetch([{ path: "/users/fetch/", replies: [{ body: f("fetch-destroying.json") }] }]);
-  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 1 }, callOptions(destroying.fetch))).state, "gone");
+  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 1 }, callOptions(t, destroying.fetch))).state, "gone");
 });
 
-test("jarvislabs: destroy on the region host, tolerating gone instances, then deletes the script", async () => {
+test("jarvislabs: destroy on the region host, tolerating gone instances, then deletes the script", async (t) => {
   const ok = routedFetch([
     { method: "POST", path: "/misc/destroy?machine_id=314159", replies: [{ body: f("destroy.json") }] },
     { method: "DELETE", path: "/scripts/?script_id=27", replies: [{ body: f("script-deleted.json") }] }
   ]);
-  await jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-chennai-01", scriptId: 27 }, callOptions(ok.fetch));
+  await jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-chennai-01", scriptId: 27 }, callOptions(t, ok.fetch));
   assert.equal(new URL(ok.seen[0]!.url).origin, CHENNAI);
   assert.equal(new URL(ok.seen[1]!.url).origin, NOIDA);
 
@@ -163,35 +163,35 @@ test("jarvislabs: destroy on the region host, tolerating gone instances, then de
     { method: "DELETE", path: "/scripts/?script_id=27", replies: [{ status: 404, body: '{"detail":"Not Found"}' }] }
   ]);
   // A reconciler ref: the script is found by the instance name.
-  await jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01", name: "orq-box-0123abcd" }, callOptions(gone.fetch));
+  await jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01", name: "orq-box-0123abcd" }, callOptions(t, gone.fetch));
 
   const busy = routedFetch([
     { method: "POST", path: "/misc/destroy", replies: [{ body: f("destroy-error.json") }] },
     { path: "/users/fetch/314159", replies: [{ body: f("fetch-one.json") }] }
   ]);
-  await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(busy.fetch)), /Machine is busy/);
+  await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(t, busy.fetch)), /Machine is busy/);
 });
 
-test("jarvislabs: an HTTP-200 error reply is an error, not a gone instance or an empty account", async () => {
+test("jarvislabs: an HTTP-200 error reply is an error, not a gone instance or an empty account", async (t) => {
   const busy = JSON.stringify({ success: false, message: "Something went wrong, please try again" });
   const status = routedFetch([{ path: "/users/fetch/314159", replies: [{ body: busy }] }]);
-  await assert.rejects(jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(status.fetch)), /Something went wrong/);
+  await assert.rejects(jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(t, status.fetch)), /Something went wrong/);
   const notFound = routedFetch([{ path: "/users/fetch/314159", replies: [{ status: 404, body: '{"detail":"Not Found"}' }] }]);
-  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(notFound.fetch))).state, "gone");
+  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(t, notFound.fetch))).state, "gone");
   const list = routedFetch([{ path: "/users/fetch", replies: [{ body: busy }] }]);
-  await assert.rejects(jarvislabsAdapter.listManaged(creds, callOptions(list.fetch)), /Something went wrong/);
+  await assert.rejects(jarvislabsAdapter.listManaged(creds, callOptions(t, list.fetch)), /Something went wrong/);
   // A destroy that cannot tell whether the instance is gone fails rather than calling it done.
   const unsure = routedFetch([
     { method: "POST", path: "/misc/destroy", replies: [{ body: f("destroy-error.json") }] },
     { path: "/users/fetch/314159", replies: [{ body: busy }] }
   ]);
-  await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(unsure.fetch)));
+  await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(t, unsure.fetch)));
 });
 
-test("jarvislabs: listManaged keeps orq- names with their region", async () => {
+test("jarvislabs: listManaged keeps orq- names with their region", async (t) => {
   const { fetch } = routedFetch([{ path: "/users/fetch", replies: [{ body: f("fetch-all.json") }] }]);
   assert.deepEqual(
-    (await jarvislabsAdapter.listManaged(creds, callOptions(fetch))).map((instance) => [instance.ref.machineId, instance.ref.region, instance.boxId, instance.state]),
+    (await jarvislabsAdapter.listManaged(creds, callOptions(t, fetch))).map((instance) => [instance.ref.machineId, instance.ref.region, instance.boxId, instance.state]),
     [
       [314159, "india-noida-01", "box-0123abcd", "running"],
       [161803, "india-chennai-01", "box-99887766", "stopped"]
@@ -199,7 +199,7 @@ test("jarvislabs: listManaged keeps orq- names with their region", async () => {
   );
 });
 
-test("jarvislabs: multipart and startup script helpers; GET 429 is retried", async () => {
+test("jarvislabs: multipart and startup script helpers; GET 429 is retried", async (t) => {
   const part = multipartScript("echo hi", "x.sh");
   const boundary = part.contentType.split("boundary=")[1]!;
   assert.ok(part.body.startsWith(`--${boundary}\r\n`));
@@ -208,6 +208,6 @@ test("jarvislabs: multipart and startup script helpers; GET 429 is retried", asy
   const { fetch, seen } = routedFetch([
     { path: "/users/balance", replies: [{ status: 429, headers: { "retry-after": "0" }, body: '{"detail":"Too Many Requests"}' }, { body: f("balance.json") }] }
   ]);
-  assert.deepEqual(await jarvislabsAdapter.validate(creds, callOptions(fetch)), { ok: true });
+  assert.deepEqual(await jarvislabsAdapter.validate(creds, callOptions(t, fetch)), { ok: true });
   assert.equal(seen.length, 2);
 });

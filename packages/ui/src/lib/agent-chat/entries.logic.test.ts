@@ -782,6 +782,21 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     assert.equal(unmarked.threadLink, undefined);
   });
 
+  it("links live and persisted device rows, ignoring unmarked and malformed result fields", () => {
+    const deviceRef = { device: "local/emulator-5554", leaseId: "l1", screenshotId: "s1" };
+    const result = (fields: Record<string, unknown>) => ({ type: "tool_result", content: [{ type: "text", text: JSON.stringify({ ...fields, deviceRef }) }] });
+    const row = (data: Record<string, unknown>) => workLogEntryFromActivity(activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", data }));
+    const marked = { toolName: "mcp__orquester__device_action", sessionTool: { name: "device_action" } };
+    const liveResult = result({ action: "tap", summary: "Tapped @e7 “Search”" });
+    assert.deepEqual(row({ ...marked, result: liveResult }).deviceLink, { ...deviceRef, action: "tap", summary: "Tapped @e7 “Search”" });
+    const saved = { ...deviceRef, name: "Pixel 9", action: "screenshot", summary: "Kept screenshot" };
+    for (const result of [undefined, liveResult]) {
+      assert.deepEqual(row({ ...marked, sessionTool: { name: "device_action", references: { deviceRef: saved } }, result }).deviceLink, saved);
+    }
+    assert.deepEqual(row({ ...marked, result: result({ action: "hack", summary: "a\nb" }) }).deviceLink, deviceRef);
+    assert.equal(row({ toolName: marked.toolName, result: liveResult }).deviceLink, undefined);
+  });
+
   it("labels the visual-replies tools in words: a preview, and a render while it runs or when it failed", () => {
     for (const [name, label, status] of [
       ["html_preview", "Previewed HTML", "completed"],

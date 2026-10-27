@@ -48,7 +48,6 @@ import { canonicalProject, projectNamesFor, type CanonicalProject } from "./addr
 import type {
   AnyOrquesterTool,
   ApprovalCancelReason,
-  ApprovalOutcome,
   ApprovalPort,
   ApprovalPreview,
   ApprovalRequest,
@@ -306,6 +305,8 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     // the gate, the card, grant options and the turn policy.
     const tier: Tier = typeof tool.tier === "function" ? tool.tier(args, scope) : tool.tier;
     const adminFamily: AdminFamily | undefined = typeof tool.adminFamily === "function" ? tool.adminFamily(args, scope) : tool.adminFamily;
+    // A per-call spend (devices: a rental only some calls need) is decided once, like the tier.
+    const spendFamily = typeof tool.spendFamily === "function" ? tool.spendFamily(args, scope) : tool.spendFamily;
     const facts = await gateFacts(api, caller, scope);
     const gateInput = (who: ThreadCaller): GateInput => ({
       tool: tool.name,
@@ -313,7 +314,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       ...(adminFamily ? { adminFamily } : {}),
       planSafe: tool.planSafe === true,
       // boxes: a tool that spends money cards in every mode.
-      ...(tool.spendFamily ? { spendFamily: tool.spendFamily } : {}),
+      ...(spendFamily ? { spendFamily } : {}),
       caller: who,
       scope,
       ...facts

@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { BoxesResponse, BoxProvidersResponse, ProjectSummary } from "@orquester/api";
+import type { BoxesResponse, BoxKindsResponse, BoxProvidersResponse, BoxResponse, ByoPairingResponse, ProjectSummary } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 
 import { createServer } from "../../index.ts";
+import { byoAdapter } from "../providers/byo.ts";
 import { createLocalTailscale, type CommandRunner } from "../tailscale/local.ts";
+import { localBoxConnection } from "../testing.ts";
 import type { BoxService } from "./index.ts";
 import { connectProvider, FakeAdapter, testBoxService, type TestService } from "./testing.ts";
 
@@ -28,18 +30,18 @@ interface Harness extends TestService {
 
 async function harness(
   t: test.TestContext,
-  options: { publicOrigin?: string | null; fetch?: typeof fetch; tailscale?: CommandRunner } = {}
+  options: { publicOrigin?: string | null; fetch?: typeof fetch; tailscale?: CommandRunner; byo?: boolean } = {}
 ): Promise<Harness> {
+  if (options.fetch) t.mock.method(globalThis, "fetch", options.fetch);
   const root = await mkdtemp(join(tmpdir(), "orq-box-routes-"));
   const workspacesDir = join(root, "workspaces");
   await mkdir(join(workspacesDir, "acme"), { recursive: true });
   const adapter = new FakeAdapter();
   const test = testBoxService({
     baseDir: root,
-    adapters: [adapter],
+    adapters: options.byo ? [adapter, byoAdapter] : [adapter],
     overrides: {
       publicOrigin: () => (options.publicOrigin === undefined ? "https://orq.example.test" : options.publicOrigin),
-      ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.tailscale
         ? {
             localTailscale: createLocalTailscale({ daemonHttp: () => ({ host: "127.0.0.1", port: 47831 }), run: options.tailscale, user: () => "orq" }),
@@ -238,6 +240,11 @@ test("plugin routes: boxes, providers, kinds and offers, connection, refusals", 
   assert.ok(!good.body.includes(h.adapter.validKey), "the key never comes back");
   const providers = (await h.inject({ method: "GET", url: "/api/boxes/providers" })).json() as BoxProvidersResponse;
   assert.equal(providers.providers[0]!.status, "connected");
+  assert.equal(providers.providers[0]!.windowsImage, undefined);
+  const image = await h.inject({ method: "POST", url: "/api/boxes/providers/hetzner/windows-image" });
+  assert.equal(image.statusCode, 409);
+  assert.equal(image.json().code, "BOX_UNSUPPORTED");
+  assert.equal((await h.inject({ method: "POST", url: "/api/boxes/providers/nope/windows-image" })).statusCode, 404);
 
   const kinds = (await h.inject({ method: "GET", url: "/api/boxes/kinds" })).json();
   const linux = kinds.kinds.find((entry: { kind: string }) => entry.kind === "linux");
@@ -445,4 +452,66 @@ test("the Check explains a failure and, in Tailscale mode, how to fix it", async
   assert.equal(checked.reachable, "failed");
   assert.ok(checked.reachableMessage.includes(`${TS_NAME}:443`));
   assert.ok(checked.reachableMessage.includes("tailscale serve --bg --https=10000 http://127.0.0.1:47831"));
+});
+
+test("your machines: add, flag, new command, remove; a project placed on one keeps it on a failed setup and gives it back on delete", async (t) => {
+  const h = await harness(t, { byo: true });
+  const added = await h.inject({ method: "POST", url: "/api/boxes/byo", payload: { kind: "linux", name: "Build server" } });
+  assert.equal(added.statusCode, 200, added.body);
+  const pairing = added.json() as ByoPairingResponse;
+  assert.match(pairing.command, /^curl -fsSL https:\/\/orq\.example\.test\/api\/boxes\/pair\/\S+ \| sh$/);
+  const id = pairing.box.id;
+
+  const flagged = await h.inject({ method: "PATCH", url: `/api/boxes/byo/${id}`, payload: { deviceHost: true } });
+  assert.equal((flagged.json() as BoxResponse).box.deviceHost, true);
+  const renewed = await h.inject({ method: "POST", url: `/api/boxes/byo/${id}/pairing` });
+  assert.notEqual((renewed.json() as ByoPairingResponse).command, pairing.command);
+  // The providers list shows the machines as connected, with no credentials to give.
+  const providers = (await h.inject({ method: "GET", url: "/api/boxes/providers" })).json() as BoxProvidersResponse;
+  assert.deepEqual(
+    providers.providers.filter((entry) => entry.id === "byo").map((entry) => [entry.status, entry.credentialFields.length]),
+    [["connected", 0]]
+  );
+
+  // Paired and online: offered for Linux (after any rented provider), a project goes on it.
+  const connection = localBoxConnection({ boxId: id });
+  const request = connection.request.bind(connection);
+  connection.request = ((method: string, params: unknown, options?: unknown) =>
+    method === "agent.ensurePaths" ? Promise.reject(new Error("permission denied")) : request(method as never, params as never, options as never)) as typeof connection.request;
+  h.hub.connect(id, connection);
+  await until(h.service, id, () => h.service.registry.get(id)?.state === "ready");
+  // Flagged for device simulators: the device service's, never offered to a chat or a project.
+  const flaggedOffers = (await h.inject({ method: "GET", url: "/api/boxes/providers/byo/offers?kind=linux" })).json();
+  assert.deepEqual(flaggedOffers.sizes, []);
+  await h.inject({ method: "PATCH", url: `/api/boxes/byo/${id}`, payload: { deviceHost: false } });
+  const kinds = (await h.inject({ method: "GET", url: "/api/boxes/kinds" })).json() as BoxKindsResponse;
+  assert.deepEqual(kinds.kinds.find((entry) => entry.kind === "linux")?.providers, ["byo"]);
+  const offers = (await h.inject({ method: "GET", url: "/api/boxes/providers/byo/offers?kind=linux" })).json();
+  assert.deepEqual(offers.sizes.map((size: { id: string }) => size.id), [id]);
+
+  const created = await h.inject({
+    method: "POST",
+    url: "/api/workspaces/acme/projects",
+    payload: { source: "empty", name: "own", location: { kind: "box", boxKind: "linux", provider: "byo", size: id, region: "own" } }
+  });
+  assert.equal(created.statusCode, 200, created.body);
+  assert.equal((created.json() as ProjectSummary).box?.boxId, id);
+  await until(h.service, id, () => h.service.registry.get(id)?.state === "ready");
+  const record = h.service.registry.get(id)!;
+  assert.equal(record.purpose, "project");
+  assert.match(record.stateReason ?? "", /permission denied/);
+  const busy = await h.inject({ method: "DELETE", url: `/api/boxes/byo/${id}` });
+  assert.equal(busy.statusCode, 409);
+  assert.equal(busy.json().code, "BOX_IN_USE");
+
+  const deleted = await h.inject({ method: "DELETE", url: "/api/workspaces/acme/projects/own" });
+  assert.equal(deleted.statusCode, 204, deleted.body);
+  const back = h.service.registry.get(id)!;
+  assert.equal(back.purpose, "machine");
+  assert.equal(back.state, "ready");
+  assert.equal(back.project, null);
+
+  const removed = await h.inject({ method: "DELETE", url: `/api/boxes/byo/${id}` });
+  assert.deepEqual(removed.json(), { uninstalled: true });
+  assert.equal(((await h.inject({ method: "GET", url: "/api/boxes" })).json() as BoxesResponse).boxes.length, 0);
 });

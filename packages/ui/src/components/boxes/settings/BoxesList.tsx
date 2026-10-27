@@ -28,6 +28,7 @@ import {
   boxStateView,
   boxTitle,
   canDestroyBox,
+  destroyBoxLabel,
   listedBoxes,
   setupProgress
 } from "./boxes-list.logic";
@@ -98,9 +99,13 @@ export const BoxesList: React.FC<{ runningOnly?: boolean }> = ({ runningOnly = f
 
       <ConfirmDialog
         open={confirmDestroy !== null}
-        title="Destroy this box?"
-        message="The box is deleted at the provider with everything on it. The agent that made it can't use it any more."
-        confirmLabel="Destroy"
+        title={confirmDestroy?.provider === "byo" ? "Give this machine back?" : "Destroy this box?"}
+        message={
+          confirmDestroy?.provider === "byo"
+            ? "The agent chat can't use your machine any more and its background jobs stop. Nothing on the machine is deleted."
+            : "The box is deleted at the provider with everything on it. The agent that made it can't use it any more."
+        }
+        confirmLabel={confirmDestroy ? destroyBoxLabel(confirmDestroy) : "Destroy"}
         onCancel={() => setConfirmDestroy(null)}
         onConfirm={() => {
           const box = confirmDestroy;
@@ -148,8 +153,8 @@ const BoxRow: React.FC<{
             {state.label}
           </Badge>
           {canDestroyBox(box) && (
-            <Button size="sm" variant="outline" disabled={destroying} aria-label={`Destroy ${boxTitle(box)}`} onClick={onDestroy}>
-              {destroying ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Destroy
+            <Button size="sm" variant="outline" disabled={destroying} aria-label={`${destroyBoxLabel(box)} ${boxTitle(box)}`} onClick={onDestroy}>
+              {destroying ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {destroyBoxLabel(box)}
             </Button>
           )}
         </div>

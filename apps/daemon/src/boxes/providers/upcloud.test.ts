@@ -14,37 +14,37 @@ const UBUNTU_2404 = "01000000-0000-4000-8000-000030240200";
 const unauthorized = { status: 401, body: fixture("upcloud", "error-unauthorized") };
 
 // Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
-test("validate: bearer token or Basic subaccount; a message for bad or missing credentials", async () => {
+test("validate: bearer token or Basic subaccount; a message for bad or missing credentials", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/account`, body: fixture("upcloud", "account"), times: 2 },
     { method: "GET", url: `${API}/account`, ...unauthorized }
   ]);
-  assert.deepEqual(await upcloudAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await upcloudAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer ucat_01TESTTOKEN0000000000000000");
 
-  assert.deepEqual(await upcloudAdapter.validate({ username: "orq-api", password: "pw-123", token: " " }, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await upcloudAdapter.validate({ username: "orq-api", password: "pw-123", token: " " }, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[1]!.headers.authorization, `Basic ${Buffer.from("orq-api:pw-123").toString("base64")}`);
 
-  const bad = await upcloudAdapter.validate({ token: "ucat_wrong" }, replayOptions(replay));
+  const bad = await upcloudAdapter.validate({ token: "ucat_wrong" }, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /^UpCloud: Authentication failed using the given username and password\./);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /ucat_wrong/);
 
-  assert.deepEqual(await upcloudAdapter.validate({ username: "orq-api" }, replayOptions(replay)), {
+  assert.deepEqual(await upcloudAdapter.validate({ username: "orq-api" }, replayOptions(t, replay)), {
     ok: false,
     message: "UpCloud: an API token, or a username and password, is missing"
   });
   assert.equal(replay.requests.length, 3);
 });
 
-test("offers: current non-GPU plans priced per zone, Cloud Native with its disk, Linux templates", async () => {
+test("offers: current non-GPU plans priced per zone, Cloud Native with its disk, Linux templates", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/plan`, body: fixture("upcloud", "plans") },
     { method: "GET", url: `${API}/price`, body: fixture("upcloud", "prices") },
     { method: "GET", url: `${API}/zone`, body: fixture("upcloud", "zones") },
     { method: "GET", url: `${API}/storage/template`, body: fixture("upcloud", "templates") }
   ]);
-  const offers = await upcloudAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await upcloudAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   // No 512 MB starter, no plan out of offering, no GPU plan; 1xCPU-1GB costs more in New York.
   assert.deepEqual(
@@ -82,7 +82,7 @@ test("offers: current non-GPU plans priced per zone, Cloud Native with its disk,
   assert.equal(offers.images[0]!.id, UBUNTU_2404);
 });
 
-test("offers: USD accounts are not converted; Windows is refused", async () => {
+test("offers: USD accounts are not converted; Windows is refused", async (t) => {
   const prices = fixture<{ prices: Record<string, unknown> }>("upcloud", "prices");
   const replay = replayFetch([
     { method: "GET", url: `${API}/plan`, body: fixture("upcloud", "plans") },
@@ -90,9 +90,9 @@ test("offers: USD accounts are not converted; Windows is refused", async () => {
     { method: "GET", url: `${API}/zone`, body: fixture("upcloud", "zones") },
     { method: "GET", url: `${API}/storage/template`, body: fixture("upcloud", "templates") }
   ]);
-  const offers = await upcloudAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await upcloudAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.sizes.find((size) => size.id === "2xCPU-4GB")?.hourlyUsd, 0.0298);
-  await assert.rejects(upcloudAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
+  await assert.rejects(upcloudAdapter.offers(credentials, "windows", replayOptions(t, replayFetch([]))), /does not rent windows/);
 });
 
 function createRoutes() {
@@ -103,10 +103,10 @@ function createRoutes() {
   ];
 }
 
-test("create: one POST with title, labels, cloud-init, metadata and the throwaway SSH key", async () => {
+test("create: one POST with title, labels, cloud-init, metadata and the throwaway SSH key", async (t) => {
   const replay = replayFetch([...createRoutes(), { method: "POST", url: `${API}/server`, status: 202, body: fixture("upcloud", "create-server") }]);
   const request = testCreateRequest({ size: "1xCPU-1GB", region: "de-fra1" });
-  const result = await upcloudAdapter.create(credentials, request, replayOptions(replay));
+  const result = await upcloudAdapter.create(credentials, request, replayOptions(t, replay));
 
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   assert.equal(replay.requests.at(-1), post, "every read comes before the create");
@@ -140,13 +140,13 @@ test("create: one POST with title, labels, cloud-init, metadata and the throwawa
   assert.equal(result.windowsPassword, undefined);
 });
 
-test("create: a regional Cloud Native size gets its own MaxIOPS disk and the chosen template", async () => {
+test("create: a regional Cloud Native size gets its own MaxIOPS disk and the chosen template", async (t) => {
   const replay = replayFetch([...createRoutes(), { method: "POST", url: `${API}/server`, status: 202, body: fixture("upcloud", "create-server") }]);
   const debian = "01000000-0000-4000-8000-000020080100";
   const result = await upcloudAdapter.create(
     credentials,
     testCreateRequest({ size: "CLOUDNATIVE-2xCPU-8GB@de-fra1", region: "de-fra1", image: debian }),
-    replayOptions(replay)
+    replayOptions(t, replay)
   );
   const server = (replay.requests.find((entry) => entry.method === "POST")!.body as { server: Record<string, unknown> }).server;
   assert.equal(server.plan, "CLOUDNATIVE-2xCPU-8GB");
@@ -156,12 +156,12 @@ test("create: a regional Cloud Native size gets its own MaxIOPS disk and the cho
   assert.equal(result.hourlyUsd, 0.0372);
 });
 
-test("create: a 5xx on the create is never retried; unknown plans and templates fail before it", async () => {
+test("create: a 5xx on the create is never retried; unknown plans and templates fail before it", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${API}/server`, status: 503, body: fixture("upcloud", "error-unavailable"), times: 2 }
   ]);
-  await assert.rejects(upcloudAdapter.create(credentials, testCreateRequest({ size: "1xCPU-1GB", region: "de-fra1" }), replayOptions(replay)), (error) => {
+  await assert.rejects(upcloudAdapter.create(credentials, testCreateRequest({ size: "1xCPU-1GB", region: "de-fra1" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 503);
     assert.equal(error.message, "UpCloud: The API service is not in use because of maintenance.");
@@ -171,21 +171,21 @@ test("create: a 5xx on the create is never retried; unknown plans and templates 
 
   const reads = replayFetch([...createRoutes(), ...createRoutes()]);
   await assert.rejects(
-    upcloudAdapter.create(credentials, testCreateRequest({ size: "GPU-8xCPU-64GB-1xL40S", region: "de-fra1" }), replayOptions(reads)),
+    upcloudAdapter.create(credentials, testCreateRequest({ size: "GPU-8xCPU-64GB-1xL40S", region: "de-fra1" }), replayOptions(t, reads)),
     /UpCloud: no plan GPU-8xCPU-64GB-1xL40S/
   );
   await assert.rejects(
     upcloudAdapter.create(
       credentials,
       testCreateRequest({ size: "1xCPU-1GB", region: "de-fra1", image: "01000000-0000-4000-8000-000010080300" }),
-      replayOptions(reads)
+      replayOptions(t, reads)
     ),
     /UpCloud: no Linux template 01000000-0000-4000-8000-000010080300/
   );
   assert.equal(reads.requests.some((entry) => entry.method === "POST"), false);
 });
 
-test("status: maps server states, 404 is gone, 429 is retried", async () => {
+test("status: maps server states, 404 is gone, 429 is retried", async (t) => {
   const started = fixture<{ server: Record<string, unknown> }>("upcloud", "server-started");
   const url = `${API}/server/${SERVER_ID}`;
   const replay = replayFetch([
@@ -198,20 +198,20 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url, status: 404, body: fixture("upcloud", "error-not-found") }
   ]);
   const ref = { serverUuid: SERVER_ID, zone: "de-fra1" };
-  assert.deepEqual(await upcloudAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await upcloudAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.30",
     hourlyUsd: null
   });
-  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const stopped = await upcloudAdapter.status(credentials, ref, replayOptions(replay));
+  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const stopped = await upcloudAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "UpCloud reports the server stopped");
-  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.deepEqual(await upcloudAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.deepEqual(await upcloudAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The server no longer exists in UpCloud",
     publicIp: null,
@@ -220,7 +220,7 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: hard stop, poll until stopped, then delete the server with its storage", async () => {
+test("destroy: hard stop, poll until stopped, then delete the server with its storage", async (t) => {
   const started = fixture<{ server: Record<string, unknown> }>("upcloud", "server-started");
   const url = `${API}/server/${SERVER_ID}`;
   const replay = replayFetch([
@@ -233,7 +233,7 @@ test("destroy: hard stop, poll until stopped, then delete the server with its st
     { method: "GET", url, body: { server: { ...started.server, state: "stopped" } } },
     { method: "DELETE", url: `${url}?storages=1&backups=delete`, status: 204 }
   ]);
-  await upcloudAdapter.destroy(credentials, { serverUuid: SERVER_ID, zone: "de-fra1" }, replayOptions(replay));
+  await upcloudAdapter.destroy(credentials, { serverUuid: SERVER_ID, zone: "de-fra1" }, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
   assert.deepEqual(replay.requests.find((entry) => entry.method === "POST")?.body, { stop_server: { stop_type: "hard" } });
   assert.deepEqual(
@@ -242,7 +242,7 @@ test("destroy: hard stop, poll until stopped, then delete the server with its st
   );
 });
 
-test("destroy: idempotent when the server is already gone, and gives up after its deadline", async () => {
+test("destroy: idempotent when the server is already gone, and gives up after its deadline", async (t) => {
   const url = `${API}/server/${SERVER_ID}`;
   const gone = replayFetch([
     { method: "GET", url, status: 404, body: fixture("upcloud", "error-not-found") },
@@ -250,8 +250,8 @@ test("destroy: idempotent when the server is already gone, and gives up after it
     { method: "DELETE", url: `${url}?storages=1&backups=delete`, status: 404, body: fixture("upcloud", "error-not-found") }
   ]);
   const ref = { serverUuid: SERVER_ID, zone: "de-fra1" };
-  await upcloudAdapter.destroy(credentials, ref, replayOptions(gone));
-  await upcloudAdapter.destroy(credentials, ref, replayOptions(gone));
+  await upcloudAdapter.destroy(credentials, ref, replayOptions(t, gone));
+  await upcloudAdapter.destroy(credentials, ref, replayOptions(t, gone));
   assert.equal(gone.pending().length, 0);
 
   const deadline = upcloudTiming.destroyDeadlineMs;
@@ -260,14 +260,14 @@ test("destroy: idempotent when the server is already gone, and gives up after it
     const stuck = replayFetch([
       { method: "GET", url, body: { server: { ...fixture<{ server: object }>("upcloud", "server-started").server, state: "maintenance" } } }
     ]);
-    await assert.rejects(upcloudAdapter.destroy(credentials, ref, replayOptions(stuck)), /UpCloud: the server .* did not stop in time \(state maintenance\)/);
+    await assert.rejects(upcloudAdapter.destroy(credentials, ref, replayOptions(t, stuck)), /UpCloud: the server .* did not stop in time \(state maintenance\)/);
   } finally {
     upcloudTiming.destroyDeadlineMs = deadline;
   }
-  await assert.rejects(upcloudAdapter.destroy(credentials, {}, replayOptions(gone)), /instance reference has no serverUuid/);
+  await assert.rejects(upcloudAdapter.destroy(credentials, {}, replayOptions(t, gone)), /instance reference has no serverUuid/);
 });
 
-test("listManaged: the label filter, paged", async () => {
+test("listManaged: the label filter, paged", async (t) => {
   const managed = fixture<{ servers: { server: unknown[] } }>("upcloud", "servers-managed");
   const replay = replayFetch([
     {
@@ -277,7 +277,7 @@ test("listManaged: the label filter, paged", async () => {
     },
     { method: "GET", url: `${API}/server?label=orquester-box&limit=100&offset=100`, body: { servers: { server: managed.servers.server.slice(1) } } }
   ]);
-  const list = await upcloudAdapter.listManaged(credentials, replayOptions(replay));
+  const list = await upcloudAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.equal(list.length, 101);
   assert.deepEqual(list[0], {
     ref: { serverUuid: SERVER_ID, zone: "de-fra1" },

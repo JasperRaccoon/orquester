@@ -224,6 +224,11 @@ export interface ProviderCreateRequest {
   /** Windows: an administrator password to set where the provider asks for one. */
   windowsPassword: string | null;
   lifetimeMinutes: number | null;
+  /**
+   * What the provider prepares before `orq-agent` starts, where it can (Blacksmith: `devices`
+   * restores the device caches for a device host). Absent: `none`.
+   */
+  prepare?: "none" | "devices";
 }
 
 export type ProviderInstanceState = "pending" | "running" | "stopped" | "gone" | "error";
@@ -267,8 +272,6 @@ export interface ProviderOffers {
 
 export interface ProviderCallOptions {
   signal: AbortSignal;
-  /** Injected for tests; defaults to global fetch. */
-  fetch?: typeof fetch;
 }
 
 export interface BoxProviderAdapter {
@@ -280,8 +283,6 @@ export interface BoxProviderAdapter {
   readonly credentialFields: readonly BoxProviderCredentialField[];
   readonly accountNote: string | null;
   readonly maxLifetimeMinutes: number | null;
-  /** Whether Windows boxes need a prepared image first (spec §11.1). */
-  readonly needsWindowsImage: boolean;
 
   /** A cheap authenticated read. Never throws for bad credentials: returns `{ ok: false }`. */
   validate(credentials: ProviderCredentials, options: ProviderCallOptions): Promise<{ ok: true } | { ok: false; message: string }>;
@@ -296,12 +297,6 @@ export interface BoxProviderAdapter {
   destroy(credentials: ProviderCredentials, ref: ProviderInstanceRef, options: ProviderCallOptions): Promise<void>;
   /** Every instance carrying Orquester's marker (tag or `orq-` name prefix). */
   listManaged(credentials: ProviderCredentials, options: ProviderCallOptions): Promise<ProviderManagedInstance[]>;
-  /** Providers with `needsWindowsImage`: build and snapshot the prepared Windows image; returns its id. */
-  prepareWindowsImage?(
-    credentials: ProviderCredentials,
-    request: { region: string; bootstrap: BoxBootstrap; log: (line: string) => void },
-    options: ProviderCallOptions
-  ): Promise<{ imageId: string }>;
 }
 
 /** All adapters by id (boxes/providers/index.ts). */
@@ -343,7 +338,7 @@ export interface GithubOidcExpectation {
 export type VerifyGithubOidc = (
   jwt: string,
   expectation: GithubOidcExpectation,
-  options: { signal: AbortSignal; fetch?: typeof fetch; now?: () => number }
+  options: { signal: AbortSignal; now?: () => number }
 ) => Promise<{ ok: true } | { ok: false; message: string }>;
 
 // ---------------------------------------------------------------------------

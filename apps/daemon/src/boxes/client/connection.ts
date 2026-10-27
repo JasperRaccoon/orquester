@@ -24,7 +24,6 @@ import {
   type BoxMethodParams,
   type BoxMethodResult,
   type BoxPathMap,
-  type BoxStream,
   type BoxSysInfo
 } from "@orquester/api";
 

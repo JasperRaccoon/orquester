@@ -1,5 +1,5 @@
 /**
- * The Blacksmith (macOS) row of the Providers card (spec §11.2): five steps —
+ * The Blacksmith (macOS and Linux) row of the Providers card (spec §11.2): five steps —
  * a connected GitHub account, an org, the Blacksmith app, the control repo
  * (automatic) and a test run — each with the state the daemon reports.
  */

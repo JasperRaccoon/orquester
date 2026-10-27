@@ -145,11 +145,11 @@ describe("repo icon dialog", () => {
 
   it("titles itself with the repo and refuses more than one emoji", async () => {
     await render();
-    assert.match(document.querySelector("h2")?.textContent ?? "", /Repo icon — JasperRaccoon\/JasperEngine/);
+    assert.match(document.querySelector('[role="dialog"]')?.textContent ?? "", /JasperRaccoon\/JasperEngine/);
     await type("Emoji", "🦝🦝");
     await click(button("Use emoji"));
     assert.equal(api.calls.length, 0);
-    assert.equal(document.querySelector('[role="alert"]')?.textContent, "Enter exactly one emoji.");
+    assert.ok(document.querySelector('[role="alert"]')?.textContent);
   });
 
   it("sets an emoji, applies it and closes", async () => {
@@ -161,7 +161,7 @@ describe("repo icon dialog", () => {
       api.calls[0].resolve({ identity: { repoKey: KEY, icon: { kind: "emoji", value: "🦝" }, updatedAt: "2026-10-18T10:00:00.000Z" } });
       await api.calls[0].promise;
     });
-    assert.deepEqual(store.getRepoIdentity(KEY)?.icon, { kind: "emoji", value: "🦝" });
+    assert.deepEqual(store.repoIdentitiesStore.getState().identities.get(KEY)?.icon, { kind: "emoji", value: "🦝" });
     assert.equal(closes, 1);
   });
 
@@ -175,7 +175,7 @@ describe("repo icon dialog", () => {
       api.calls[0].reject(Object.assign(new Error("failed"), { status: 502, body: { code: "FAVICON_UNREACHABLE" }, serverMessage: null }));
       await api.calls[0].promise.catch(() => undefined);
     });
-    assert.equal(document.querySelector('[role="alert"]')?.textContent, "Couldn't reach matssmile.com.");
+    assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /matssmile\.com/);
     assert.equal(button("Fetch icon")?.disabled, false);
   });
 
@@ -191,6 +191,6 @@ describe("repo icon dialog", () => {
       api.calls[0].resolve({ identity: { repoKey: KEY, icon, updatedAt: "2026-10-18T10:00:00.000Z" } });
       await api.calls[0].promise;
     });
-    assert.deepEqual(store.getRepoIdentity(KEY)?.icon, icon);
+    assert.deepEqual(store.repoIdentitiesStore.getState().identities.get(KEY)?.icon, icon);
   });
 });

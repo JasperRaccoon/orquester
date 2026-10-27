@@ -137,6 +137,8 @@ describe("SessionProfileNames", () => {
     assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p1", "p3"], "a list read older than the delete does not revive p2");
     events.emit("deleted", { profileId: "p1" });
     assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p3"]);
+    events.emit("changed", { profileId: "p1" });
+    assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p1", "p3"], "a recreated profile becomes live again");
   });
 
   it("liveIds stays unknown when the list cannot be read", async () => {

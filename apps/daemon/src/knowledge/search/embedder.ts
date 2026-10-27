@@ -1,23 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type * as Ort from "onnxruntime-node";
-import type { KnowledgeRuntimePort } from "../ports.ts";
-
-/**
- * Cosine-similarity cut-offs for one model (retrieval spec, "Similarity thresholds"). Models
- * differ: an unrelated pair scores ~0.1 on all-MiniLM-L6-v2 but ~0.7 on multilingual-e5-small,
- * so every threshold search uses comes from the model, never a constant.
- */
-export interface KnowledgeSimilarityThresholds {
-  /** Below this a chunk is not a semantic match at all. */
-  minimum: number;
-  /** At or above: a "good" match band. */
-  good: number;
-  /** At or above: a "strong" match band. */
-  strong: number;
-  /** Entry-to-entry at or above: a possible duplicate (reposts, near-copies). */
-  duplicate: number;
-}
+import type { KnowledgeRuntimePort, KnowledgeVectorThresholds } from "../ports.ts";
 
 /**
  * What a text is embedded as. Asymmetric models (the e5 family) prefix them differently
@@ -33,13 +17,13 @@ export interface KnowledgeEmbedder {
   /** Cache key: vectors from another model are never mixed in. */
   readonly modelId: string;
   readonly dimensions: number;
-  readonly thresholds: KnowledgeSimilarityThresholds;
+  readonly thresholds: KnowledgeVectorThresholds;
   /** `kind` defaults to "passage". */
   embed(texts: readonly string[], kind?: KnowledgeEmbedKind): Promise<Float32Array[]>;
 }
 
 /** all-MiniLM-L6-v2's cut-offs (the model shipped before the retrieval spec). */
-export const MINILM_THRESHOLDS: KnowledgeSimilarityThresholds = { minimum: 0.25, good: 0.4, strong: 0.55, duplicate: 0.92 };
+export const MINILM_THRESHOLDS: KnowledgeVectorThresholds = { minimum: 0.25, good: 0.4, strong: 0.55, duplicate: 0.92 };
 
 /** The embedder to use right now (null while the runtime is not installed). */
 export interface KnowledgeEmbedderSource {
@@ -59,7 +43,7 @@ export interface OnnxEmbedderOptions {
   queryPrefix?: string;
   passagePrefix?: string;
   /** The model's cut-offs (all-MiniLM-L6-v2's by default). */
-  thresholds?: KnowledgeSimilarityThresholds;
+  thresholds?: KnowledgeVectorThresholds;
   /** ONNX intra-op threads; small so search never starves the daemon. */
   threads?: number;
   batchSize?: number;
@@ -170,7 +154,7 @@ interface Loaded {
 export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
   readonly modelId: string;
   readonly dimensions: number;
-  readonly thresholds: KnowledgeSimilarityThresholds;
+  readonly thresholds: KnowledgeVectorThresholds;
   readonly maxTokens: number;
   private readonly modelDir: string;
   private readonly prefixes: Record<KnowledgeEmbedKind, string>;

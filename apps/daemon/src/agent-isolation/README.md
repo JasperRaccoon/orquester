@@ -94,8 +94,8 @@ commands must be on that list, or they vanish from the model's listing.
 **Claude names (`claude-names.ts`, §6.1).** A profile chat's `skills`
 allow-list hides every skill or command not on it, and `strictMcpConfig`
 drops the project's `.mcp.json` and plugin MCP servers, so the launcher names
-what must stay. Observed on 2.1.285 without a model call: a skill is its
-`SKILL.md` frontmatter `name`, else its directory; a command is its path with
+what must stay. A skill folder is named by its directory; its frontmatter `name`
+is display only (see `claude-names.ts` and its tests). A command is its path with
 `:` between folders; a plugin's entries are prefixed `<plugin>:`, its
 `plugin.json` `skills` paths add to `skills/` and its `commands` paths replace
 `commands/`. Project skills and commands come from `.claude/` of the cwd and

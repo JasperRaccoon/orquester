@@ -8,7 +8,7 @@ import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
 import { InboxBroker } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
-import { mykgArgs, mykgEnv, procMykgProbe, startMykgRun, stopStaleMykg, type MykgProcessProbe } from "./runner.ts";
+import { mykgArgs, mykgEnv, MykgRun, procMykgProbe, stopStaleMykg, type MykgProcessProbe } from "./runner.ts";
 import { FAKE_RUNTIME as RUNTIME, defaultAnswer, fakeSpawn } from "./testing.ts";
 
 const roots: string[] = [];
@@ -98,7 +98,7 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
   it("a first run creates and names its session, and its tasks are answered through the inbox", async () => {
     const dirs = await setup({ ke_aaaaaaaaaaaa: "Author: A\nalpha", ke_bbbbbbbbbbbb: "Author: B\nbeta" });
     const clock = new FakeClock();
-    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
+    const run = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
     const broker = new InboxBroker({ clock });
     const sessions: string[] = [];
     let answering: Promise<number> | null = null;
@@ -127,7 +127,7 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
     const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
     await writeFile(join(dirs.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
     const clock = new FakeClock();
-    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
+    const run = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
     const broker = new InboxBroker({ clock });
     run.onSession((session) => void broker.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate).then(() => answerAll(broker)));
     const result = await run.done;
@@ -141,7 +141,7 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
 
   it("cancel stops the child and reports cancelled", async () => {
     const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
-    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock: new FakeClock(), spawn: fakeSpawn });
+    const run = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock: new FakeClock(), spawn: fakeSpawn });
     run.onSession(() => run.cancel());
     const result = await run.done;
     assert.equal(result.kind, "cancelled");

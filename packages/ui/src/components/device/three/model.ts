@@ -1,0 +1,132 @@
+// Adapted from T3 Code (MIT, Copyright 2026 T3 Tools Inc.): packages/client-runtime/src/device/model.ts
+import type { DevicePlatform } from "./types.ts";
+
+export type DeviceModelId =
+  | "iphone-18-pro"
+  | "iphone-18-pro-max"
+  | "iphone-17"
+  | "iphone-air"
+  | "iphone-17e"
+  | "ipad-pro-13-m5"
+  | "ipad-air"
+  | "ipad-a16"
+  | "iphone-duo"
+  | "galaxy-s26"
+  | "galaxy-s26-plus"
+  | "galaxy-s26-ultra"
+  | "galaxy-z-fold8"
+  | "galaxy-z-flip8";
+
+export interface DeviceModelSource {
+  readonly id: DeviceModelId;
+  readonly url: string;
+}
+
+export interface DeviceAccessorySource {
+  readonly id: "ipad-pro-13-m5-magic-keyboard";
+  readonly modelId: "ipad-pro-13-m5";
+  readonly url: string;
+}
+
+export type DeviceAssetSource = DeviceModelSource | DeviceAccessorySource;
+
+/**
+ * Simulator device-type names, matched whole and case-insensitively. A name that is not listed
+ * gets the procedural body from its shape profile.
+ */
+const MODEL_NAMES: ReadonlyArray<readonly [RegExp, DeviceModelId]> = [
+  [/^iPhone Duo$/i, "iphone-duo"],
+  [/^iPhone 18 Pro Max$/i, "iphone-18-pro-max"],
+  [/^iPhone 18 Pro$/i, "iphone-18-pro"],
+  // The 17 Pro generation shares the 18 Pro's industrial design and dimensions.
+  [/^iPhone 17 Pro Max$/i, "iphone-18-pro-max"],
+  [/^iPhone 17 Pro$/i, "iphone-18-pro"],
+  [/^iPhone 17$/i, "iphone-17"],
+  [/^iPhone Air$/i, "iphone-air"],
+  [/^iPhone 17e$/i, "iphone-17e"],
+  [/^iPad Pro 13-inch \(M5\)$/i, "ipad-pro-13-m5"],
+  [/^iPad Air 13-inch \((M3|M4)\)$/i, "ipad-air"],
+  // Apple publishes only the 13-inch Air; the iPad (A16) has the 11-inch Air's 2360x1640 screen
+  // and the same flat-edged body, so the framebuffer is not stretched.
+  [/^iPad Air 11-inch \((M3|M4)\)$/i, "ipad-a16"],
+  [/^iPad \(A16\)$/i, "ipad-a16"],
+];
+
+/**
+ * Emulator display names and Orquester AVD profile names (`orq-galaxy-s26`, also without the
+ * prefix), matched whole and case-insensitively. Other Android devices, Pixels included, get the
+ * procedural body. The foldables carry a hinge rig (see foldModelScene.ts).
+ */
+const ANDROID_MODEL_NAMES: ReadonlyArray<readonly [RegExp, DeviceModelId]> = [
+  [/^(Galaxy S26|(orq-)?galaxy-s26)$/i, "galaxy-s26"],
+  [/^(Galaxy S26\+|(orq-)?galaxy-s26-plus)$/i, "galaxy-s26-plus"],
+  [/^(Galaxy S26 Ultra|(orq-)?galaxy-s26-ultra)$/i, "galaxy-s26-ultra"],
+  [/^(Galaxy Z Fold8|(orq-)?galaxy-z-fold8)$/i, "galaxy-z-fold8"],
+  [/^(Galaxy Z Flip8|(orq-)?galaxy-z-flip8)$/i, "galaxy-z-flip8"],
+];
+
+export function resolveDeviceModelId(platform: DevicePlatform, name: string): DeviceModelId | null {
+  const names = platform === "ios" ? MODEL_NAMES : ANDROID_MODEL_NAMES;
+  return names.find(([pattern]) => pattern.test(name))?.[1] ?? null;
+}
+
+/** Each request owns its result. A cancelled or superseded parse must still release its resources. */
+export function createDeviceModelSlot<
+  T extends { dispose: () => void },
+  Source extends DeviceAssetSource = DeviceModelSource,
+>(options: {
+  load: (source: Source, signal: AbortSignal) => Promise<T>;
+  install: (model: T | null) => void;
+  onError?: ((cause: unknown) => void) | undefined;
+}) {
+  let request: { source: Source; controller: AbortController } | null = null;
+  let current: T | null = null;
+  let disposed = false;
+  const clear = () => {
+    if (current) options.install(null);
+    current?.dispose();
+    current = null;
+  };
+  return {
+    set(source: Source | null) {
+      if (disposed) return;
+      if (source?.id === request?.source.id && source?.url === request?.source.url) return;
+      request?.controller.abort();
+      request = null;
+      clear();
+      if (!source) return;
+      const next = { source, controller: new AbortController() };
+      request = next;
+      void options.load(source, next.controller.signal).then(
+        (model) => {
+          if (disposed || request !== next) {
+            model.dispose();
+            return;
+          }
+          try {
+            options.install(model);
+            current = model;
+          } catch (cause) {
+            options.install(null);
+            model.dispose();
+            request = null;
+            options.onError?.(cause);
+          }
+        },
+        (cause: unknown) => {
+          if (!disposed && request === next) {
+            request = null;
+            options.onError?.(cause);
+          }
+        },
+      );
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      request?.controller.abort();
+      request = null;
+      clear();
+    },
+  };
+}

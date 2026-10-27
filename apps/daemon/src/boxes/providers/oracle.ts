@@ -722,7 +722,6 @@ export const oracleAdapter: BoxProviderAdapter = {
   accountNote:
     "After the 30-day free trial an Oracle Cloud account can only launch Always Free resources until it is upgraded to Pay As You Go. New tenancies have low compute service limits, and Ampere A1 capacity is often exhausted in popular regions — try another availability domain or shape.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, async () => {

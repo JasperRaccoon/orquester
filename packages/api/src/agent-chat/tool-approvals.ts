@@ -49,21 +49,14 @@ export type AdminFamily = (typeof ADMIN_FAMILIES)[number];
 export const BOUNDARY_FAMILIES = ["cross-project", "cross-project-read", "cross-workspace-read"] as const;
 export type BoundaryFamily = (typeof BOUNDARY_FAMILIES)[number];
 
-// boxes: the `spend` kind's families (Ephemeral AI VMs spec §13.2) — `boxes`: renting a temporary box (`create_box`).
-export const SPEND_FAMILIES = ["boxes"] as const;
+// boxes: the `spend` kind's families (Ephemeral AI VMs spec §13.2) — `boxes`: renting a temporary box (`create_box`);
+// `devices`: renting a device host for a device an agent opens (`open_device`, devices spec §6.3).
+export const SPEND_FAMILIES = ["boxes", "devices"] as const;
 export type SpendFamily = (typeof SPEND_FAMILIES)[number];
-
-export function isSpendFamily(value: unknown): value is SpendFamily {
-  return typeof value === "string" && (SPEND_FAMILIES as readonly string[]).includes(value);
-}
 
 /** Every card family (`toolset`: legacy, see {@link ApprovalKind}). */
 export type ApprovalFamily = AdminFamily | BoundaryFamily | "toolset" | SpendFamily;
 export const APPROVAL_FAMILIES: readonly ApprovalFamily[] = [...ADMIN_FAMILIES, ...BOUNDARY_FAMILIES, "toolset", ...SPEND_FAMILIES];
-
-export function isAdminFamily(value: unknown): value is AdminFamily {
-  return typeof value === "string" && (ADMIN_FAMILIES as readonly string[]).includes(value);
-}
 
 export function isApprovalFamily(value: unknown): value is ApprovalFamily {
   return typeof value === "string" && (APPROVAL_FAMILIES as readonly string[]).includes(value);
@@ -117,7 +110,6 @@ export type ApprovalPreviewSection =
   | { kind: "warning"; level: "caution" | "danger"; text: string };
 
 export type ApprovalPreviewSectionKind = ApprovalPreviewSection["kind"];
-export const APPROVAL_PREVIEW_SECTION_KINDS: readonly ApprovalPreviewSectionKind[] = ["text", "code", "diff", "fields", "changes", "file", "warning"];
 
 /** A `fields` row: `set` — a value is configured; `asked` — typed in this card; `flagged` — a plain value that looks secret. */
 export interface ApprovalPreviewFieldRow {

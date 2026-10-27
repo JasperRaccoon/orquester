@@ -80,9 +80,6 @@ export class GitHubLinkPreviewError extends Error {
 export interface GitHubLinkPreviewServiceOptions {
   /** Picks the stored token for `owner`, preferring the account bound to `projectPath`'s workspace. */
   resolveCredential: (input: { owner: string; projectPath?: string }) => Promise<GitHubReadCredential | null>;
-  /** Injectable for tests; defaults to the global `fetch`. */
-  fetch?: typeof fetch;
-  now?: () => number;
   timeoutMs?: number;
   maxConcurrent?: number;
   maxEntries?: number;
@@ -294,16 +291,12 @@ export class GitHubLinkPreviewService {
   private readonly inflight = new Map<string, Promise<Outcome>>();
   /** Credential key → when its spent quota resets. */
   private readonly blockedUntil = new Map<string, number>();
-  private readonly fetchImpl: typeof fetch;
-  private readonly now: () => number;
   private readonly timeoutMs: number;
   private readonly maxEntries: number;
   private readonly limiter: Limiter;
   private readonly logger: Pick<Console, "warn">;
 
   constructor(private readonly options: GitHubLinkPreviewServiceOptions) {
-    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
-    this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_MAX_ENTRIES);
     this.limiter = new Limiter(Math.max(1, options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT));
@@ -323,7 +316,7 @@ export class GitHubLinkPreviewService {
     const key = `${credentialKey}|${githubPreviewKey(target)}`;
 
     const cached = this.cache.get(key);
-    if (cached && cached.expiresAt > this.now()) return this.settle(cached.outcome);
+    if (cached && cached.expiresAt > Date.now()) return this.settle(cached.outcome);
     if (cached) this.cache.delete(key);
 
     let pending = this.inflight.get(key);
@@ -344,7 +337,7 @@ export class GitHubLinkPreviewService {
   }
 
   private remember(key: string, outcome: Outcome): void {
-    const now = this.now();
+    const now = Date.now();
     let ttl: number;
     if (outcome.ok) ttl = ttlFor(outcome.preview);
     else if (outcome.error.code === "NOT_FOUND") ttl = NOT_FOUND_TTL_MS;
@@ -362,7 +355,7 @@ export class GitHubLinkPreviewService {
   private rateLimited(credentialKey: string): GitHubLinkPreviewError | null {
     const until = this.blockedUntil.get(credentialKey);
     if (until === undefined) return null;
-    const wait = until - this.now();
+    const wait = until - Date.now();
     if (wait <= 0) {
       this.blockedUntil.delete(credentialKey);
       return null;
@@ -412,7 +405,7 @@ export class GitHubLinkPreviewService {
           );
         case "rate_limited": {
           const wait = Math.min(RATE_LIMIT_MAX_MS, Math.max(RATE_LIMIT_MIN_MS, refusal.waitMs ?? RATE_LIMIT_DEFAULT_MS));
-          this.blockedUntil.set(credentialKey, this.now() + wait);
+          this.blockedUntil.set(credentialKey, Date.now() + wait);
           throw new GitHubLinkPreviewError(
             "RATE_LIMITED",
             token ? "GitHub's rate limit for this account is spent." : "GitHub's anonymous rate limit is spent; connect a GitHub account for more.",
@@ -457,7 +450,7 @@ export class GitHubLinkPreviewService {
   private async get(path: string, token: string | null): Promise<Json> {
     let response: Response;
     try {
-      response = await this.fetchImpl(`${GITHUB_API}${path}`, {
+      response = await fetch(`${GITHUB_API}${path}`, {
         method: "GET",
         headers: {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -474,10 +467,10 @@ export class GitHubLinkPreviewService {
     // Drain the body without reading it into any message.
     await response.body?.cancel().catch(() => undefined);
     const remaining = response.headers.get("x-ratelimit-remaining");
-    const retryAfter = parseRetryAfter(response.headers.get("retry-after"), this.now());
+    const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now());
     if (response.status === 429 || (response.status === 403 && (remaining === "0" || retryAfter !== undefined))) {
       const reset = Number(response.headers.get("x-ratelimit-reset"));
-      const wait = retryAfter ?? (Number.isFinite(reset) && reset > 0 ? Math.max(0, reset * 1000 - this.now()) : undefined);
+      const wait = retryAfter ?? (Number.isFinite(reset) && reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : undefined);
       throw new RefusalError({ kind: "rate_limited", waitMs: wait });
     }
     if (response.status === 401 || response.status === 403) throw new RefusalError({ kind: "auth" });

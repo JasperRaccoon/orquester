@@ -293,10 +293,6 @@ export interface GoneWatch {
   record: unknown;
 }
 
-export function initialGoneWatch(input: { pending: boolean; record: unknown }): GoneWatch {
-  return { sawPending: input.pending, record: input.record };
-}
-
 /**
  * The watches of the threads' live slices, kept past a view's unmount: a
  * slice lingers for a short grace after its last view goes, still `gone`,
@@ -310,7 +306,7 @@ export class GoneWatches {
 
   /** The watch a view mounting on `slice` starts from: the last view's, else a fresh one. */
   watchFor(slice: object, input: { pending: boolean; record: unknown }): GoneWatch {
-    return this.watches.get(slice) ?? initialGoneWatch(input);
+    return this.watches.get(slice) ?? { sawPending: input.pending, record: input.record };
   }
 
   remember(slice: object, watch: GoneWatch): void {

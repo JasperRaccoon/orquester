@@ -93,36 +93,36 @@ test("ovhSignature: $1$ + SHA-1 of secret+consumer+method+url+body+timestamp", (
   );
 });
 
-test("validate: ok with working keys, a message for bad, missing or malformed ones", async () => {
+test("validate: ok with working keys, a message for bad, missing or malformed ones", async (t) => {
   const replay = replayFetch([
     authTime,
     { method: "GET", url: P, body: fixture("ovh", "project") },
     { method: "GET", url: P, status: 403, body: fixture("ovh", "error-invalid-credential") }
   ]);
-  assert.deepEqual(await ovhAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await ovhAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.url, `${API}/auth/time`);
   // /auth/time is unauthenticated.
   assert.equal(replay.requests[0]!.headers["x-ovh-signature"], undefined);
   assertSigned(replay.requests[1]!);
 
-  const bad = await ovhAdapter.validate({ ...credentials, consumerKey: "ck-wrong" }, replayOptions(replay));
+  const bad = await ovhAdapter.validate({ ...credentials, consumerKey: "ck-wrong" }, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /^OVHcloud: This credential is not valid \(check the key/);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /ck-wrong|as-test-secret/);
 
   const before = replay.requests.length;
-  assert.deepEqual(await ovhAdapter.validate({ ...credentials, consumerKey: " " }, replayOptions(replay)), {
+  assert.deepEqual(await ovhAdapter.validate({ ...credentials, consumerKey: " " }, replayOptions(t, replay)), {
     ok: false,
     message: "OVHcloud: Consumer key is missing"
   });
-  assert.deepEqual(await ovhAdapter.validate({ ...credentials, endpoint: "ovh-asia" }, replayOptions(replay)), {
+  assert.deepEqual(await ovhAdapter.validate({ ...credentials, endpoint: "ovh-asia" }, replayOptions(t, replay)), {
     ok: false,
     message: "OVHcloud: API endpoint must be ovh-eu, ovh-ca or ovh-us"
   });
   assert.equal(replay.requests.length, before);
 });
 
-test("validate: an empty project ID picks the account's only project, and asks when there are several", async () => {
+test("validate: an empty project ID picks the account's only project, and asks when there are several", async (t) => {
   const { projectId: _projectId, ...withoutProject } = credentials;
   const replay = replayFetch([
     authTime,
@@ -130,17 +130,17 @@ test("validate: an empty project ID picks the account's only project, and asks w
     { method: "GET", url: P, body: fixture("ovh", "project") },
     { method: "GET", url: `${API}/cloud/project`, body: [PROJECT, "11111111111111111111111111111112"] }
   ]);
-  assert.deepEqual(await ovhAdapter.validate(withoutProject, replayOptions(replay)), { ok: true });
-  assert.deepEqual(await ovhAdapter.validate(withoutProject, replayOptions(replay)), {
+  assert.deepEqual(await ovhAdapter.validate(withoutProject, replayOptions(t, replay)), { ok: true });
+  assert.deepEqual(await ovhAdapter.validate(withoutProject, replayOptions(t, replay)), {
     ok: false,
     message: "OVHcloud: the account has 2 Public Cloud projects: enter the project ID"
   });
   assert.equal(replay.pending().length, 0);
 });
 
-test("offers (linux): hourly flavors in stock, catalog prices from EUR, one offer per regional price", async () => {
+test("offers (linux): hourly flavors in stock, catalog prices from EUR, one offer per regional price", async (t) => {
   const replay = replayFetch(offersRoutes("linux"));
-  const offers = await ovhAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await ovhAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   // The catalog is fetched unsigned; the project calls are signed.
   assert.equal(replay.requests.find((entry) => entry.url.includes("/order/catalog"))?.headers["x-ovh-signature"], undefined);
@@ -177,9 +177,9 @@ test("offers (linux): hourly flavors in stock, catalog prices from EUR, one offe
   );
 });
 
-test("offers (windows): Windows flavors with the licence — per vCore on b3, included in win-* plans", async () => {
+test("offers (windows): Windows flavors with the licence — per vCore on b3, included in win-* plans", async (t) => {
   const replay = replayFetch(offersRoutes("windows"));
-  const offers = await ovhAdapter.offers(credentials, "windows", replayOptions(replay));
+  const offers = await ovhAdapter.offers(credentials, "windows", replayOptions(t, replay));
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
     [
@@ -199,9 +199,9 @@ test("offers (windows): Windows flavors with the licence — per vCore on b3, in
   );
 });
 
-test("offers (GPU kinds): only GPU flavors, described from the catalog", async () => {
+test("offers (GPU kinds): only GPU flavors, described from the catalog", async (t) => {
   const linux = replayFetch(offersRoutes("linux"));
-  const linuxGpu = await ovhAdapter.offers(credentials, "linux-gpu", replayOptions(linux));
+  const linuxGpu = await ovhAdapter.offers(credentials, "linux-gpu", replayOptions(t, linux));
   // t1-45 has no quota left in the project: not offered.
   assert.deepEqual(linuxGpu.sizes, [
     {
@@ -217,16 +217,16 @@ test("offers (GPU kinds): only GPU flavors, described from the catalog", async (
   ]);
 
   const windows = replayFetch(offersRoutes("windows"));
-  const windowsGpu = await ovhAdapter.offers(credentials, "windows-gpu", replayOptions(windows));
+  const windowsGpu = await ovhAdapter.offers(credentials, "windows-gpu", replayOptions(t, windows));
   assert.deepEqual(
     windowsGpu.sizes.map((size) => [size.id, size.hourlyUsd, size.gpu?.model]),
     [["win-l4-90", 1.7516, "L4"]]
   );
 
-  await assert.rejects(ovhAdapter.offers(credentials, "macos", replayOptions(replayFetch([]))), /does not rent macos/);
+  await assert.rejects(ovhAdapter.offers(credentials, "macos", replayOptions(t, replayFetch([]))), /does not rent macos/);
 });
 
-test("offers (ovh-ca): the Canadian endpoint and catalog, CAD converted to USD", async () => {
+test("offers (ovh-ca): the Canadian endpoint and catalog, CAD converted to USD", async (t) => {
   const CA = "https://ca.api.ovh.com/1.0";
   const catalog = { ...fixture<Record<string, unknown>>("ovh", "catalog"), locale: { currencyCode: "CAD", subsidiary: "CA", taxRate: 0 } };
   const replay = replayFetch([
@@ -235,19 +235,19 @@ test("offers (ovh-ca): the Canadian endpoint and catalog, CAD converted to USD",
     { method: "GET", url: `${CA}/cloud/project/${PROJECT}/image?osType=linux`, body: fixture("ovh", "images-linux") },
     { method: "GET", url: `${CA}/order/catalog/public/cloud?ovhSubsidiary=CA`, body: catalog }
   ]);
-  const offers = await ovhAdapter.offers({ ...credentials, endpoint: "OVH-CA" }, "linux", replayOptions(replay));
+  const offers = await ovhAdapter.offers({ ...credentials, endpoint: "OVH-CA" }, "linux", replayOptions(t, replay));
   assert.equal(offers.sizes[0]!.hourlyUsd, 0.0075);
   assert.equal(replay.pending().length, 0);
 });
 
-test("create (linux): registers the box's SSH key, then one POST with name, flavor, image and raw cloud-init", async () => {
+test("create (linux): registers the box's SSH key, then one POST with name, flavor, image and raw cloud-init", async (t) => {
   const replay = replayFetch([
     ...createReads("linux", "GRA11"),
     { method: "POST", url: `${P}/sshkey`, body: fixture("ovh", "sshkey-created") },
     { method: "POST", url: `${P}/instance`, body: fixture("ovh", "instance-created") }
   ]);
   const request = testCreateRequest({ size: "b3-8", region: "GRA11" });
-  const result = await ovhAdapter.create(credentials, request, replayOptions(replay));
+  const result = await ovhAdapter.create(credentials, request, replayOptions(t, replay));
 
   const posts = replay.requests.filter((entry) => entry.method === "POST");
   assert.equal(posts.length, 2);
@@ -271,11 +271,11 @@ test("create (linux): registers the box's SSH key, then one POST with name, flav
   assert.equal(result.windowsPassword, undefined);
 });
 
-test("create (windows): no SSH key, cloudbase-init user data, licence in the price", async () => {
+test("create (windows): no SSH key, cloudbase-init user data, licence in the price", async (t) => {
   const created = { ...fixture<Record<string, unknown>>("ovh", "instance-created"), sshKeyId: null };
   const replay = replayFetch([...createReads("windows", "GRA11"), { method: "POST", url: `${P}/instance`, body: created }]);
   const request = testCreateRequest({ kind: "windows", size: "b3-8", region: "GRA11" });
-  const result = await ovhAdapter.create(credentials, request, replayOptions(replay));
+  const result = await ovhAdapter.create(credentials, request, replayOptions(t, replay));
 
   const posts = replay.requests.filter((entry) => entry.method === "POST");
   assert.equal(posts.length, 1);
@@ -291,7 +291,7 @@ test("create (windows): no SSH key, cloudbase-init user data, licence in the pri
   assert.equal(result.hourlyUsd, 0.1399);
 });
 
-test("create: a regional size id resolves to the flavor of that region; unknown sizes fail before anything is created", async () => {
+test("create: a regional size id resolves to the flavor of that region; unknown sizes fail before anything is created", async (t) => {
   const region = "AF-NORTH-LZ-RBA-A";
   const replay = replayFetch([
     authTime,
@@ -301,27 +301,27 @@ test("create: a regional size id resolves to the flavor of that region; unknown 
     { method: "POST", url: `${P}/sshkey`, body: fixture("ovh", "sshkey-created") },
     { method: "POST", url: `${P}/instance`, body: { ...fixture<Record<string, unknown>>("ovh", "instance-created"), region } }
   ]);
-  const result = await ovhAdapter.create(credentials, testCreateRequest({ size: `b3-8@${region}`, region }), replayOptions(replay));
+  const result = await ovhAdapter.create(credentials, testCreateRequest({ size: `b3-8@${region}`, region }), replayOptions(t, replay));
   const post = replay.requests.find((entry) => entry.url === `${P}/instance`)?.body as Record<string, unknown>;
   assert.equal(post.flavorId, "33333333-3333-4333-8333-333333333307");
   assert.equal(result.hourlyUsd, 0.1079);
 
   const unknown = replayFetch(createReads("linux", "GRA11"));
   await assert.rejects(
-    ovhAdapter.create(credentials, testCreateRequest({ size: "c3-4", region: "GRA11" }), replayOptions(unknown)),
+    ovhAdapter.create(credentials, testCreateRequest({ size: "c3-4", region: "GRA11" }), replayOptions(t, unknown)),
     /OVHcloud: size c3-4 is not offered for linux in GRA11/
   );
   assert.equal(unknown.requests.some((entry) => entry.method === "POST"), false);
 });
 
-test("create: a failed create is never retried, surfaces OVH's message and removes the SSH key", async () => {
+test("create: a failed create is never retried, surfaces OVH's message and removes the SSH key", async (t) => {
   const replay = replayFetch([
     ...createReads("linux", "GRA11"),
     { method: "POST", url: `${P}/sshkey`, body: fixture("ovh", "sshkey-created") },
     { method: "POST", url: `${P}/instance`, status: 500, body: fixture("ovh", "error-internal"), times: 2 },
     { method: "DELETE", url: `${P}/sshkey/${encodeURIComponent(SSH_KEY_ID)}`, body: null }
   ]);
-  await assert.rejects(ovhAdapter.create(credentials, testCreateRequest({ size: "b3-8", region: "GRA11" }), replayOptions(replay)), (error) => {
+  await assert.rejects(ovhAdapter.create(credentials, testCreateRequest({ size: "b3-8", region: "GRA11" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.equal(error.message, "OVHcloud: Internal server error");
@@ -333,19 +333,19 @@ test("create: a failed create is never retried, surfaces OVH's message and remov
   assertSigned(cleanup);
 });
 
-test("create: a quota refusal on the SSH key creates nothing else", async () => {
+test("create: a quota refusal on the SSH key creates nothing else", async (t) => {
   const replay = replayFetch([
     ...createReads("linux", "GRA11"),
     { method: "POST", url: `${P}/sshkey`, status: 400, body: fixture("ovh", "error-quota") }
   ]);
   await assert.rejects(
-    ovhAdapter.create(credentials, testCreateRequest({ size: "b3-8", region: "GRA11" }), replayOptions(replay)),
+    ovhAdapter.create(credentials, testCreateRequest({ size: "b3-8", region: "GRA11" }), replayOptions(t, replay)),
     /OVHcloud: Quota exceeded for instances in region GRA11/
   );
   assert.equal(replay.requests.some((entry) => entry.url === `${P}/instance`), false);
 });
 
-test("status: maps instance states, 404 is gone, 429 is retried", async () => {
+test("status: maps instance states, 404 is gone, 429 is retried", async (t) => {
   const active = fixture<Record<string, unknown>>("ovh", "instance-active");
   const url = `${P}/instance/${INSTANCE_ID}`;
   const replay = replayFetch([
@@ -362,22 +362,22 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   ]);
   const ref = { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11", sshKeyId: SSH_KEY_ID };
   // Public IPv4 over the public IPv6 and the private address.
-  assert.deepEqual(await ovhAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await ovhAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.20",
     hourlyUsd: null
   });
-  const building = await ovhAdapter.status(credentials, ref, replayOptions(replay));
+  const building = await ovhAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([building.state, building.publicIp], ["pending", null]);
-  const stopped = await ovhAdapter.status(credentials, ref, replayOptions(replay));
+  const stopped = await ovhAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([stopped.state, stopped.detail], ["stopped", "OVHcloud reports the instance SHUTOFF"]);
-  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
-  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(t, replay))).state, "stopped");
+  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // OpenStack's UNKNOWN (the hypervisor did not answer) is transient: never a failure that destroys the box.
-  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
-  assert.deepEqual(await ovhAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
+  assert.deepEqual(await ovhAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The instance no longer exists in OVHcloud",
     publicIp: null,
@@ -386,7 +386,7 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: deletes the instance and its SSH key, idempotent on 404", async () => {
+test("destroy: deletes the instance and its SSH key, idempotent on 404", async (t) => {
   const instanceUrl = `${P}/instance/${INSTANCE_ID}`;
   const keyUrl = `${P}/sshkey/${encodeURIComponent(SSH_KEY_ID)}`;
   const replay = replayFetch([
@@ -398,23 +398,23 @@ test("destroy: deletes the instance and its SSH key, idempotent on 404", async (
     { method: "DELETE", url: instanceUrl, body: null }
   ]);
   const ref = { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11", sshKeyId: SSH_KEY_ID };
-  await ovhAdapter.destroy(credentials, ref, replayOptions(replay));
-  await ovhAdapter.destroy(credentials, ref, replayOptions(replay));
+  await ovhAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await ovhAdapter.destroy(credentials, ref, replayOptions(t, replay));
   // A Windows box has no key.
-  await ovhAdapter.destroy(credentials, { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11" }, replayOptions(replay));
+  await ovhAdapter.destroy(credentials, { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11" }, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
   for (const request of replay.requests.filter((entry) => entry.method === "DELETE")) assertSigned(request);
-  await assert.rejects(ovhAdapter.destroy(credentials, { projectId: PROJECT }, replayOptions(replay)), /instance reference has no instanceId/);
+  await assert.rejects(ovhAdapter.destroy(credentials, { projectId: PROJECT }, replayOptions(t, replay)), /instance reference has no instanceId/);
 });
 
-test("listManaged: every orq- instance of the project, with refs destroy can use", async () => {
+test("listManaged: every orq- instance of the project, with refs destroy can use", async (t) => {
   const { projectId: _projectId, ...withoutProject } = credentials;
   const replay = replayFetch([
     authTime,
     { method: "GET", url: `${API}/cloud/project`, body: fixture("ovh", "projects") },
     { method: "GET", url: `${P}/instance`, body: fixture("ovh", "instances") }
   ]);
-  assert.deepEqual(await ovhAdapter.listManaged(withoutProject, replayOptions(replay)), [
+  assert.deepEqual(await ovhAdapter.listManaged(withoutProject, replayOptions(t, replay)), [
     {
       ref: { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11", sshKeyId: SSH_KEY_ID },
       name: `orq-${TEST_BOX_ID}`,

@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import type { HostLibc } from "../../plugins/ts-rust/installer.ts";
-import type { KnowledgeSimilarityThresholds } from "../search/embedder.ts";
+import type { KnowledgeVectorThresholds } from "../ports.ts";
 
 // ---- uv (astral-sh/uv) -----------------------------------------------------------------------
 
@@ -161,7 +161,7 @@ export const EMBEDDING_MODEL_FILES: readonly { path: string; sha256: string; siz
  * non-answer or two. duplicate 0.95: well above any two distinct entries (≤ 0.885), below every
  * near-copy (≥ 0.987).
  */
-export const EMBEDDING_MODEL_THRESHOLDS: KnowledgeSimilarityThresholds = { minimum: 0.78, good: 0.83, strong: 0.87, duplicate: 0.95 };
+export const EMBEDDING_MODEL_THRESHOLDS: KnowledgeVectorThresholds = { minimum: 0.78, good: 0.83, strong: 0.87, duplicate: 0.95 };
 
 export function embeddingModelFileUrl(path: string): string {
   return `https://huggingface.co/${EMBEDDING_MODEL_ID}/resolve/${EMBEDDING_MODEL_REVISION}/${path}`;
@@ -180,7 +180,7 @@ export interface EmbeddingModelSpec {
   passagePrefix: string;
   /** Tokens per input, special tokens included; a longer input is truncated (and counted). */
   maxTokens: number;
-  thresholds: KnowledgeSimilarityThresholds;
+  thresholds: KnowledgeVectorThresholds;
 }
 
 export const EMBEDDING_MODEL: EmbeddingModelSpec = {

@@ -63,10 +63,11 @@ function fakeGithub(keys: Array<Record<string, unknown>>): { fetch: typeof fetch
 
 const signal = new AbortController().signal;
 
-test("accepts a correctly signed token for the expected run and caches the keys", async () => {
+test("accepts a correctly signed token for the expected run and caches the keys", async (t) => {
   const github = fakeGithub([{ ...primary.jwk, kid: "key-1", use: "sig", alg: "RS256" }]);
   const verify = createGithubOidcVerifier();
-  const options = { signal, fetch: github.fetch, now: () => NOW };
+  t.mock.method(globalThis, "fetch", github.fetch);
+  const options = { signal, now: () => NOW };
   assert.deepEqual(await verify(jwt({}), EXPECT, options), { ok: true });
   // Repository names compare case-insensitively; a numeric run_id claim is accepted.
   assert.deepEqual(await verify(jwt({ repository: "arakuma-studio/Orquester-macOS-boxes", run_id: 1234567890 }), EXPECT, options), { ok: true });
@@ -74,10 +75,11 @@ test("accepts a correctly signed token for the expected run and caches the keys"
   assert.equal(github.jwksFetches(), 1);
 });
 
-test("rejects wrong claims, bad signatures and unsupported tokens with a reason", async () => {
+test("rejects wrong claims, bad signatures and unsupported tokens with a reason", async (t) => {
   const github = fakeGithub([{ ...primary.jwk, kid: "key-1" }]);
   const verify = createGithubOidcVerifier();
-  const options = { signal, fetch: github.fetch, now: () => NOW };
+  t.mock.method(globalThis, "fetch", github.fetch);
+  const options = { signal, now: () => NOW };
   const cases: Array<[string, RegExp]> = [
     [jwt({ iss: "https://evil.example.com" }), /not issued by GitHub/],
     [jwt({ aud: "https://other.example.com" }), /audience/],
@@ -101,11 +103,12 @@ test("rejects wrong claims, bad signatures and unsupported tokens with a reason"
   assert.deepEqual(await verify(jwt({ exp: NOW_S - 30 }), EXPECT, options), { ok: true });
 });
 
-test("an unknown kid refetches the keys (rotation), but not more than once a minute", async () => {
+test("an unknown kid refetches the keys (rotation), but not more than once a minute", async (t) => {
   const github = fakeGithub([{ ...primary.jwk, kid: "key-1" }]);
   const verify = createGithubOidcVerifier();
   let now = NOW;
-  const options = { signal, fetch: github.fetch, now: () => now };
+  t.mock.method(globalThis, "fetch", github.fetch);
+  const options = { signal, now: () => now };
   assert.deepEqual(await verify(jwt({}), EXPECT, options), { ok: true });
 
   github.setKeys([{ ...primary.jwk, kid: "key-1" }, { ...other.jwk, kid: "key-2" }]);
@@ -118,10 +121,11 @@ test("an unknown kid refetches the keys (rotation), but not more than once a min
   assert.equal(github.jwksFetches(), 2);
 });
 
-test("a discovery failure is reported, not thrown", async () => {
+test("a discovery failure is reported, not thrown", async (t) => {
   const verify = createGithubOidcVerifier();
   const failing = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
-  const result = await verify(jwt({}), EXPECT, { signal, fetch: failing, now: () => NOW });
+  t.mock.method(globalThis, "fetch", failing);
+  const result = await verify(jwt({}), EXPECT, { signal, now: () => NOW });
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /signing keys.*HTTP 503/);
 });

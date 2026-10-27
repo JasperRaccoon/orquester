@@ -53,11 +53,6 @@ function put(entry: Entry): void {
   repoIconImagesStore.setState({ images: next });
 }
 
-/** The image a mounted icon of `repoKey` should show, if any. */
-export function getRepoIconImage(repoKey: string): RepoIconImage | undefined {
-  return entries().get(repoKey);
-}
-
 /**
  * Make sure the bytes of `repoKey`'s image icon are fetched (once). A no-op
  * for an emoji, for a version already loading, shown or failed, and for an icon

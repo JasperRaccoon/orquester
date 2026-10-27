@@ -26,7 +26,7 @@ import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
 import type { McpAppCallToolResult } from "./mcp-app.ts";
 import type { DelegateView, InterruptCause } from "./delegation.ts";
-import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
+import type { MergeBackRequest } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type { UsageLimitAction } from "./usage-limit.ts";
 import type {

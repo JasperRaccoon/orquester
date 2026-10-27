@@ -237,7 +237,6 @@ export const morphAdapter: BoxProviderAdapter = {
   ],
   accountNote: "Morph bills compute in MCUs ($0.05 each) from the account's credits; a plan's included MCUs make boxes cheaper than shown.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => providerRequest(PROVIDER, { url: `${API}/image`, headers: headers(credentials) }, options));

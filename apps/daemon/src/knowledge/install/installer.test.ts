@@ -21,7 +21,6 @@ import {
   knowledgeRuntimeReady,
   knowledgeStagingDir,
   knowledgeVersionDir,
-  parseLockVersions,
   pruneKnowledgeVersions,
   readKnowledgeManifest,
   resolveMykgRelease
@@ -94,6 +93,17 @@ async function failsAt(promise: Promise<unknown>, step: string, pattern?: RegExp
     if (pattern) assert.match(error.message, pattern);
     return true;
   });
+}
+
+/** `name==version[ ; marker]` of every requirement in a hashed lock (hashes and comments dropped). */
+function parseLockVersions(lock: string): string[] {
+  const out: string[] = [];
+  for (const raw of lock.split(/\r?\n/)) {
+    if (raw.startsWith(" ") || raw.startsWith("\t") || raw.startsWith("#")) continue;
+    const line = raw.replace(/\\\s*$/, "").trim();
+    if (/^[A-Za-z0-9._-]+==[^\s;]+/.test(line)) out.push(line);
+  }
+  return out;
 }
 
 async function list(dir: string): Promise<string[]> {
@@ -598,11 +608,11 @@ test("the uv pins: one build per supported host, none elsewhere", () => {
 
 test("the shipped lock pins the pinned myKG by its wheel hash and every dependency by version", async () => {
   const lock = await readFile(join(MYKG_LOCKS_DIR, MYKG_LOCKS[MYKG_PINNED_VERSION] ?? ""), "utf8");
-  assert.ok(lock.includes(`--hash=sha256:${MYKG_PINNED_WHEEL_SHA256}`));
-  const versions = parseLockVersions(lock);
-  assert.ok(versions.includes(`mykg==${MYKG_PINNED_VERSION}`));
-  assert.ok(versions.length > 40);
-  assert.ok(versions.every((line) => /^[A-Za-z0-9._-]+==\S+/.test(line)));
-  assert.ok(versions.some((line) => line.startsWith("pywin32==312 ;")), "markers are kept");
-  assert.deepEqual(parseLockVersions("# c\nfoo==1.0 \\\n    --hash=sha256:ab\nbar==2 ; x \\\n"), ["foo==1.0", "bar==2 ; x"]);
+  const requirements = lock.replace(/^#.*$/gm, "").trim().split(/\n(?=\S)/);
+  const mykg = requirements.find((block) => block.startsWith(`mykg==${MYKG_PINNED_VERSION} `));
+  assert.ok(mykg?.includes(`--hash=sha256:${MYKG_PINNED_WHEEL_SHA256}`), "the pinned wheel is hashed in its requirement");
+  for (const block of requirements) {
+    assert.match(block.split("\n")[0]!, /^[A-Za-z0-9._-]+==[^\s;]+(?:\s*;.*)?\s*\\?$/, "every requirement is pinned");
+    assert.match(block, /--hash=sha256:[0-9a-f]{64}\b/, "every requirement has an integrity hash");
+  }
 });

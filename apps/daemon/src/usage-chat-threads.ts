@@ -19,7 +19,7 @@ import type { ChatThreadUsageResponse, ChatThreadUsageRow } from "@orquester/api
 
 const CHUNK_BYTES = 4 * 1024 * 1024;
 /** A line longer than this is skipped (counted in `skippedLines`), never buffered whole. */
-export const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
 /** How much of a log's head is read to find `thread.created` (its first line). */
 const HEAD_BYTES = 64 * 1024;
 

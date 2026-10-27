@@ -1,0 +1,145 @@
+{
+  "scope": "Docs-only final title aliases for5 existing audited agent-host owners.",
+  "countTreatment": "Identity aliases only. No new baseline or final declaration; do not change baseline disposition counts or append these as newly audited tests. Consolidated source identities retain their original ledger outcomes.",
+  "tests": [
+    {
+      "path": "apps/daemon/src/agent-host/adapters/codex/mcp-apps.test.ts",
+      "finalLine": 332,
+      "finalName": "an app's model context updates between turns as untrusted context beside the session tools",
+      "disposition": "CONSOLIDATE",
+      "sourceLedger": "docs/testing-audit/host-adapters.json",
+      "originalOwner": {
+        "path": "apps/daemon/src/agent-host/adapters/codex/mcp-apps.test.ts",
+        "line": 332,
+        "name": "an app's model context rides every turn as untrusted additional context"
+      },
+      "absorbedOwners": [
+        {
+          "line": 349,
+          "name": "an app's context rides beside the session tools' instruction block, never in place of it",
+          "path": "apps/daemon/src/agent-host/adapters/codex/mcp-apps.test.ts"
+        }
+      ],
+      "sixBar": {
+        "independentContract": "Agent visuals/session tools design2026-10-14 section3 and committed Codex fixture16: app context is untrusted additionalContext, refreshed each turn, beside toolkit application context.",
+        "realRegressionDetection": "App context becomes application/system instructions, a subsequent turn carries stale app state, or toolkit instructions are overwritten.",
+        "independentOracle": "Two separately authored app values and literal untrusted/application context kinds in captured actual turn/start requests.",
+        "stableSeam": "Codex session sendTurn and real spawned app-server turn/start wire frames.",
+        "refactorResistance": "Assertions observe documented wire data, canonical events, public read/results, real process readiness, or persisted bytes and permissions. Identifier/helper refactors preserving those behaviors preserve the test.",
+        "uniqueProtection": "Shared MCP capture tests cannot test Codex-specific additionalContext merge or trust classification. Both old scenarios now share one actual two-turn session."
+      }
+    },
+    {
+      "path": "apps/daemon/src/agent-host/adapters/mcp-app-capture.test.ts",
+      "finalLine": 314,
+      "finalName": "reuses the tool listing for 30 s, then expires it; clear invalidates it immediately",
+      "disposition": "REWRITE",
+      "sourceLedger": "docs/testing-audit/host-adapters.json",
+      "originalOwner": {
+        "path": "apps/daemon/src/agent-host/adapters/mcp-app-capture.test.ts",
+        "line": 305,
+        "name": "answers within its time-to-live, forgets after it or on clear, and stays bounded"
+      },
+      "absorbedOwners": [],
+      "sixBar": {
+        "independentContract": "Agent visuals/session tools design2026-10-14 section3/appendix: per-session MCP tool listing lasts30seconds and clear invalidates it.",
+        "realRegressionDetection": "Listing expires before30s, remains stale at30s, or survives explicit session invalidation.",
+        "independentOracle": "Native virtual Date at29999ms retains literal stored value; tick1 returns undefined; explicit clear removes a newly stored value. No injected clock/capacity determines expected results.",
+        "stableSeam": "McpAppSessionCache set/get/clear public cache behavior.",
+        "refactorResistance": "Assertions observe documented wire data, canonical events, public read/results, real process readiness, or persisted bytes and permissions. Identifier/helper refactors preserving those behaviors preserve the test.",
+        "uniqueProtection": "Provider adapter request tests do not establish the actual30s boundary or immediate invalidation. Unsupported capacity-two private configuration expectation was removed, not preserved under the new title."
+      }
+    },
+    {
+      "path": "apps/daemon/src/agent-host/adapters/opencode/history.test.ts",
+      "finalLine": 136,
+      "finalName": "fixture 10: history preserves messages, settled turns, unavailable usage and historical attribution",
+      "disposition": "CONSOLIDATE",
+      "sourceLedger": "docs/testing-audit/adapters-claude-opencode.json",
+      "originalOwner": {
+        "path": "apps/daemon/src/agent-host/adapters/opencode/history.test.ts",
+        "line": 136,
+        "name": "fixture 10: the captured history replays as turn markers around completed items"
+      },
+      "absorbedOwners": [
+        {
+          "line": 167,
+          "name": "fixture 10: every replayed turn reports usage as unavailable, never a guess",
+          "path": "apps/daemon/src/agent-host/adapters/opencode/history.test.ts"
+        },
+        {
+          "line": 188,
+          "name": "fixture 10: every projected event is stamped historical and carries the turn id",
+          "path": "apps/daemon/src/agent-host/adapters/opencode/history.test.ts"
+        }
+      ],
+      "sixBar": {
+        "independentContract": "Agent-chat GUI sections4.1/9 and committed OpenCode fixture10 GET/session/:id/message: historical messages retain prompts/replies/settled turns, unavailable usage and historical/thread/turn attribution.",
+        "realRegressionDetection": "Resume loses the trailing unanswered prompt, marks settled history interrupted, invents historical usage, or assigns live/wrong-thread/wrong-turn provenance.",
+        "independentOracle": "Literal captured alpha/bravo messages, ordered canonical event types, completed/unavailable states and historical source/provenance from the recorded provider conversation.",
+        "stableSeam": "OpenCodeThreadSession.readThread followed by public projectOpenCodeHistory runtime events.",
+        "refactorResistance": "Assertions observe documented wire data, canonical events, public read/results, real process readiness, or persisted bytes and permissions. Identifier/helper refactors preserving those behaviors preserve the test.",
+        "uniqueProtection": "Live SSE tests do not read persisted provider history. The three old identical read/project executions now assert all their distinct contracts on one result."
+      }
+    },
+    {
+      "path": "apps/daemon/src/agent-host/adapters/opencode/snapshot-budget.test.ts",
+      "finalLine": 107,
+      "finalName": "E9: a cold probe waits for readiness and reads the catalogue; the next probe reuses its project server",
+      "disposition": "CONSOLIDATE",
+      "sourceLedger": "docs/testing-audit/adapters-claude-opencode.json",
+      "originalOwner": {
+        "path": "apps/daemon/src/agent-host/adapters/opencode/snapshot-budget.test.ts",
+        "line": 107,
+        "name": "E9: a COLD probe waits for the server to report ready, then reads the catalogue"
+      },
+      "absorbedOwners": [
+        {
+          "line": 137,
+          "name": "E9: the second probe is warm \u2014 the start cost is paid once per project",
+          "path": "apps/daemon/src/agent-host/adapters/opencode/snapshot-budget.test.ts"
+        }
+      ],
+      "sixBar": {
+        "independentContract": "Historical E9 cold-refresh regression, Agent-chat GUI sections4.5/4.6.4, and observed per-project warm server reuse: await real readiness, read catalogue, reuse a canonical project server.",
+        "realRegressionDetection": "Snapshot returns before readiness/catalogue, loses authenticated/model/skill results, or starts another server for equivalent cwd spelling.",
+        "independentOracle": "Externally controlled readiness signal, literal captured model/skill/auth results, and a warm probe racing a verifiable second real process startup.",
+        "stableSeam": "AgentAdapter.refreshSnapshot with a real spawned provider peer and actual ready/catalogue responses.",
+        "refactorResistance": "Assertions observe documented wire data, canonical events, public read/results, real process readiness, or persisted bytes and permissions. Identifier/helper refactors preserving those behaviors preserve the test.",
+        "uniqueProtection": "Pool units cannot detect an adapter returning early or failing to use the canonical warm pool. Cold and warm assertions now share one actual project-server startup."
+      }
+    },
+    {
+      "path": "apps/daemon/src/agent-host/orchestration/launch-config.test.ts",
+      "finalLine": 39,
+      "finalName": "round-trips launcher credentials, keyed server and profile through a private file and a fresh store",
+      "disposition": "CONSOLIDATE",
+      "sourceLedger": "docs/testing-audit/host-orchestration.json",
+      "originalOwner": {
+        "path": "apps/daemon/src/agent-host/orchestration/launch-config.test.ts",
+        "line": 39,
+        "name": "round-trips through a 0600 file and survives a reread"
+      },
+      "absorbedOwners": [
+        {
+          "line": 79,
+          "name": "round-trips serverPool through a reread, so a restarted host restores the thread's key and env",
+          "path": "apps/daemon/src/agent-host/orchestration/launch-config.test.ts"
+        },
+        {
+          "line": 113,
+          "name": "round-trips profile beside launchEnv, homePath and serverPool, so a restarted host launches with it",
+          "path": "apps/daemon/src/agent-host/orchestration/launch-config.test.ts"
+        }
+      ],
+      "sixBar": {
+        "independentContract": "Agent-chat GUI sections3.1/6.1 launch environment, Agent Profiles sections2/6.5 and credential file privacy: persist launcher credentials, provider server key/env and profile together across host reconstruction with owner-only permissions.",
+        "realRegressionDetection": "Restart loses launcher env, account home, server-pool identity/env or profile, or saved credentials are readable outside the owner.",
+        "independentOracle": "An independently authored combined launch config must survive actual disk save and a fresh store read; literal0600 filesystem mode and absent-file null are independently asserted.",
+        "stableSeam": "File-backed LaunchConfigStore.save/load through a fresh store plus native stat mode.",
+        "refactorResistance": "Assertions observe documented wire data, canonical events, public read/results, real process readiness, or persisted bytes and permissions. Identifier/helper refactors preserving those behaviors preserve the test.",
+        "uniqueProtection": "Orchestrator fakes cannot prove durable bytes or credential permissions. Two redundant field-specific file roundtrips were absorbed into this one real combined-file owner."
+      }
+    }
+  ]
+}

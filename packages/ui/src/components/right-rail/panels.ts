@@ -6,7 +6,7 @@
  */
 
 import React from "react";
-import { Bookmark, History, Layers, Workflow, type LucideIcon } from "lucide-react";
+import { Bookmark, History, Layers, Smartphone, Workflow, type LucideIcon } from "lucide-react";
 
 import { LazyBoundary, lazyNamed } from "../ui/lazy";
 import type { DockPanelId, RightRailPanelId, RightRailPanelProps } from "./types";
@@ -34,9 +34,9 @@ const WorkflowsPanel = lazyPanel(lazyNamed(() => import("./workflows/WorkflowsPa
 const SessionProfilesPanel = lazyPanel(
   lazyNamed(() => import("./session-profiles/SessionProfilesPanel"), "SessionProfilesPanel")
 );
+const DevicePanel = lazyPanel(lazyNamed(() => import("../device/DevicePanel"), "DevicePanel"));
 
 export interface RightRailPanelSpec {
-  id: RightRailPanelId;
   /** The rail button's label and tooltip, and the dock's title. */
   title: string;
   /** A phone's section bar label. */
@@ -47,34 +47,24 @@ export interface RightRailPanelSpec {
 
 export type RightRailPanelRegistry = Readonly<Record<RightRailPanelId, RightRailPanelSpec>>;
 
-/* `Component` is a getter: it is read at render, never while this module evaluates. */
 export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
   prompts: {
-    id: "prompts",
     title: "Saved prompts",
     shortTitle: "Prompts",
     Icon: Bookmark,
-    get Component() {
-      return SavedPromptsPanel;
-    }
+    Component: SavedPromptsPanel
   },
   history: {
-    id: "history",
     title: "History & checkpoints",
     shortTitle: "History",
     Icon: History,
-    get Component() {
-      return PromptHistoryPanel;
-    }
+    Component: PromptHistoryPanel
   },
   workflows: {
-    id: "workflows",
     title: "Automated workflows",
     shortTitle: "Workflows",
     Icon: Workflow,
-    get Component() {
-      return WorkflowsPanel;
-    }
+    Component: WorkflowsPanel
   },
   /*
    * The Agent Profiles library and editor (agent profiles spec §5.1), in the
@@ -83,24 +73,36 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
    * sidebar (`sidebar/sidebar-view.ts`, `sidebar/ActivityBar.tsx`).
    */
   profile: {
-    id: "profile",
     title: "Agent Profiles",
     shortTitle: "Profiles",
     Icon: Layers,
-    get Component() {
-      return SessionProfilesPanel;
-    }
+    Component: SessionProfilesPanel
+  },
+  /*
+   * The visible chat's devices (Device simulators plugin, devices spec §10.1):
+   * listed only while the plugin is on (`visibleRailPanels`).
+   */
+  device: {
+    title: "Devices",
+    shortTitle: "Device",
+    Icon: Smartphone,
+    Component: DevicePanel
   }
 };
 
 /** The desktop rail's order, top to bottom. */
-export const RIGHT_RAIL_PANEL_ORDER: readonly DockPanelId[] = ["prompts", "history"];
+export const RIGHT_RAIL_PANEL_ORDER: readonly DockPanelId[] = ["prompts", "history", "device"];
 
 /**
  * A phone's section bar, left to right: every panel, since a phone has no left
  * sidebar panels to host workflows and Agent Profiles.
  */
-export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows", "profile"];
+export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "device", "workflows", "profile"];
+
+/** `order` without the panels whose plugin is off (the Device panel without Device simulators). */
+export function visibleRailPanels<T extends RightRailPanelId>(order: readonly T[], devicesEnabled: boolean): readonly T[] {
+  return devicesEnabled ? order : order.filter((id) => id !== "device");
+}
 
 /** The dock's element id — what the active rail button `aria-controls`. */
 export const RIGHT_RAIL_DOCK_ID = "right-rail-dock";

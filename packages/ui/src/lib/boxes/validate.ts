@@ -14,11 +14,14 @@ import {
   BOX_STATES,
   isBoxKind,
   isBoxProviderId,
+  isBoxPurpose,
   type BlacksmithSetupResponse,
   type BlacksmithSetupStep,
   type BlacksmithSetupStepId,
   type BlacksmithSetupStepState,
   type BoxArch,
+  type BoxByoInfo,
+  type ByoPairingResponse,
   type BoxConfigChangeFile,
   type BoxConfigChangeSet,
   type BoxConfigChangeState,
@@ -100,7 +103,6 @@ function listOf<T>(value: unknown, sanitize: (raw: unknown) => T | null, key: (i
 // Boxes
 // ---------------------------------------------------------------------------
 
-const PURPOSES = ["project", "temporary"] as const;
 const OSES: readonly BoxOs[] = ["linux", "win32", "darwin"];
 const ARCHES: readonly BoxArch[] = ["x64", "arm64"];
 const SETUP_STATES: readonly BoxSetupStepState[] = ["pending", "running", "done", "failed", "skipped"];
@@ -144,7 +146,7 @@ function sanitizeProjectRef(value: unknown): BoxProjectRef | null {
 export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
   if (!isRecord(value) || !nonEmpty(value.id)) return null;
   const { purpose, kind, provider, state } = value;
-  if (!oneOf(PURPOSES, purpose) || !isBoxKind(kind) || !isBoxProviderId(provider) || !oneOf<BoxState>(BOX_STATES, state)) {
+  if (!isBoxPurpose(purpose) || !isBoxKind(kind) || !isBoxProviderId(provider) || !oneOf<BoxState>(BOX_STATES, state)) {
     return null;
   }
   const region = stringOr(value.region, "");
@@ -176,8 +178,27 @@ export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
     project: sanitizeProjectRef(value.project),
     threadId: stringOrNull(value.threadId),
     purposeNote: stringOrNull(value.purposeNote),
-    setup: listOf(value.setup, sanitizeSetupStep, (step) => step.id)
+    setup: listOf(value.setup, sanitizeSetupStep, (step) => step.id),
+    ...(typeof value.kvm === "boolean" ? { kvm: value.kvm } : {}),
+    ...(typeof value.deviceHost === "boolean" ? { deviceHost: value.deviceHost } : {}),
+    ...(provider === "byo" ? { byo: sanitizeByoInfo(value.byo, stringOr(value.sizeLabel, value.id)) } : {})
   };
+}
+
+/** A bring-your-own machine's own fields; its name falls back to the size label (the daemon keeps them equal). */
+function sanitizeByoInfo(value: unknown, fallbackName: string): BoxByoInfo {
+  const raw = isRecord(value) ? value : {};
+  return { name: nonEmpty(raw.name) ? raw.name : fallbackName, pairingExpiresAt: stringOrNull(raw.pairingExpiresAt) };
+}
+
+/** `POST boxRoutes.byoMachines` / `byoPairing(id)`; null when anything needed is missing. */
+export function sanitizeByoPairingResponse(value: unknown): ByoPairingResponse | null {
+  if (!isRecord(value) || !nonEmpty(value.command) || !nonEmpty(value.expiresAt)) return null;
+  const box = sanitizeBoxSummary(value.box);
+  // The URL is unquoted: shell operators and substitutions must never be offered for pasting.
+  const command = /^curl -fsSL (https?:\/\/\S+\/api\/boxes\/pair\/[A-Za-z0-9_-]+) \| sh$/.exec(value.command);
+  if (!box || !command || /[\s'"`\\$;&|<>()]/.test(command[1]!)) return null;
+  return { box, command: value.command, expiresAt: value.expiresAt };
 }
 
 /** The totals the daemon computed, each recomputed from `boxes` when missing or malformed. */

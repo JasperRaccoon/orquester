@@ -160,7 +160,8 @@
           ],
           "agentPath": "/usr/local/bin/orq-agent",
           "dataDir": "/var/lib/orq-agent",
-          "container": false
+          "container": false,
+          "kvm": true
         }
       }
     ],
@@ -263,6 +264,12 @@
       {
         "params": {
           "reason": "destroyed"
+        }
+      },
+      {
+        "params": {
+          "reason": "removed",
+          "uninstall": true
         }
       }
     ]

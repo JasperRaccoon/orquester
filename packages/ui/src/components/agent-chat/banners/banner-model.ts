@@ -48,13 +48,7 @@ function bannerPriority(entry: BannerStackEntry): number {
 
 /** Stable sort: equal priorities keep the caller's order. */
 export function sortBannerStack<T extends BannerStackEntry>(entries: readonly T[]): T[] {
-  return [...entries]
-    .map((entry, index) => ({ entry, index }))
-    .sort(
-      (left, right) =>
-        bannerPriority(left.entry) - bannerPriority(right.entry) || left.index - right.index
-    )
-    .map(({ entry }) => entry);
+  return [...entries].sort((left, right) => bannerPriority(left) - bannerPriority(right));
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +258,9 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
     // boxes: a temporary box (Ephemeral AI VMs §13.2).
     case "boxes":
       return "Approving rents this machine from the provider shown, billed to your account at about the price shown until it is destroyed: by the agent, at its time limit, or when this chat closes.";
+    // devices: a device host for the device an agent opens (devices spec §6.3).
+    case "devices":
+      return "Approving rents this device host from the provider shown, billed to your account at about the price shown. Every chat's devices share it; it is destroyed once idle, at its time limit, or from Settings → Devices.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }
@@ -466,20 +463,4 @@ export function toolApprovalAnswerFailure(status: number | null): { text: string
   if (status === 404) return { text: "This approval has already ended.", closed: true };
   if (status === 400) return { text: "The answer was refused: check the card and try again.", closed: false };
   return { text: "Could not send the answer. Try again.", closed: false };
-}
-
-/**
- * A card is ready to approve: not expired, nothing in flight, every asked secret typed, the whole
- * preview loaded when the summary was cut (`previewComplete`) — and of a kind this client knows: a
- * newer daemon's card can only be denied here (fail closed; its caution says to use an updated
- * client). Grant rows follow the same rule.
- */
-export function toolApprovalCanApprove(input: {
-  card: Pick<ParsedToolApprovalSummary, "secretFields" | "kind" | "family">;
-  secrets: Readonly<Record<string, string>>;
-  submitting: boolean;
-  expired: boolean;
-  previewComplete: boolean;
-}): boolean {
-  return toolApprovalApproveBlockedReason(input) === null;
 }

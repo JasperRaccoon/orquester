@@ -87,6 +87,28 @@ test("a temporary box: the record is written before the provider call, then crea
   assert.ok(!log.includes(hub.tokens.get(box.id)!), "the bootstrap token never reaches the setup log");
 });
 
+test("the connect step keeps orq-agent's KVM report on the record and the summary (unknown from older agents)", async (t) => {
+  const base = await tempDir(t, "orq-box-kvm-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId, sys: { kvm: true } });
+  const withKvm = await service.createTemporaryBox({ threadId: "thread-1", kind: "linux", lifetimeMinutes: 60, purposeNote: "emulators" });
+  assert.equal(withKvm.kvm, true);
+  assert.equal(JSON.parse(await readFile(boxesStorePath(base), "utf8")).boxes[withKvm.id].kvm, true);
+  assert.equal(adapter.creates[0]!.prepare, undefined, "only device hosts prepare devices");
+
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId, sys: { kvm: false } });
+  assert.equal((await service.createTemporaryBox({ threadId: "thread-2", kind: "linux", lifetimeMinutes: 60, purposeNote: "x" })).kvm, false);
+
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const older = await service.createTemporaryBox({ threadId: "thread-3", kind: "linux", lifetimeMinutes: 60, purposeNote: "x" });
+  assert.ok(!("kvm" in older), "an orq-agent without the probe leaves it unknown");
+});
+
 test("a failed create tears the box down (provisioning-failed) and the caller sees why", async (t) => {
   const base = await tempDir(t, "orq-box-life-");
   const adapter = new FakeAdapter();
@@ -638,4 +660,85 @@ test("new credentials must see the live boxes: another account's key is refused,
   assert.equal(service.registry.get(box.id)!.state, "ready", "not taken for gone");
   const rotated = await service.settings.setCredentials(adapter.id, { credentials: { apiKey: adapter.rotatedKey } });
   assert.equal(rotated.keyHint, "5678");
+});
+
+test("a kind caps lifetimes only when every provider does (Blacksmith Linux next to an uncapped cloud)", async (t) => {
+  const base = await tempDir(t, "orq-box-kind-cap-");
+  const uncapped = new FakeAdapter({ id: "hetzner" });
+  const capped = new FakeAdapter({ id: "vultr", maxLifetimeMinutes: 7200 });
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [uncapped, capped] });
+  t.after(() => service.stop());
+  await service.start();
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+
+  await connectProvider(service, capped);
+  assert.equal((await service.settings.kinds()).find((entry) => entry.kind === "linux")!.maxLifetimeMinutes, 7200);
+  await connectProvider(service, uncapped);
+  service.settings.invalidateOffers("hetzner");
+  assert.equal((await service.settings.kinds()).find((entry) => entry.kind === "linux")!.maxLifetimeMinutes, null);
+
+  // The capped provider's own boxes keep their deadline.
+  const box = await service.createTemporaryBox({ threadId: "thread-1", kind: "linux", provider: "vultr", lifetimeMinutes: 7200, purposeNote: "x" });
+  assert.equal(box.provider, "vultr");
+  assert.ok(box.deadlineAt);
+});
+
+test("a device-host box runs create, connect, the device service's `devices` step and ready", async (t) => {
+  const base = await tempDir(t, "orq-box-devhost-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+
+  const prepared: string[] = [];
+  service.setDeviceHostPreparer(async ({ boxId, connection, log }) => {
+    assert.equal(connection.boxId, boxId);
+    log("Installing the device tools…");
+    prepared.push(boxId);
+  });
+  const box = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "  iPhone   simulators " });
+  assert.equal(box.purpose, "device-host");
+  assert.equal(box.threadId, null);
+  assert.equal(box.purposeNote, "iPhone simulators");
+  await service.settled();
+  const ready = service.registry.summary(box.id)!;
+  assert.equal(ready.state, "ready");
+  assert.equal(ready.setup.find((step) => step.id === "devices")?.state, "done");
+  assert.deepEqual(prepared, [box.id]);
+  assert.equal(adapter.creates[0]!.prepare, "devices");
+  assert.match(await service.setupLog(box.id), /\[devices\] Installing the device tools…/);
+
+  // Destroyed with the device service's own reason line.
+  const destroyed = await service.destroyBox(box.id, "deleted", "Idle: no device for 20 min (Settings → Devices).");
+  assert.equal(destroyed.stateReason, "Idle: no device for 20 min (Settings → Devices).");
+});
+
+test("a device-host box whose `devices` step fails is torn down; without a preparer the step is skipped", async (t) => {
+  const base = await tempDir(t, "orq-box-devhost-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+
+  service.setDeviceHostPreparer(async () => {
+    throw new Error("Node.js 22 or newer is missing");
+  });
+  const failed = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "x" });
+  await service.settled();
+  const record = service.registry.get(failed.id)!;
+  assert.equal(record.state, "destroyed");
+  assert.equal(record.destroyedReason, "provisioning-failed");
+  assert.match(String(record.stateReason), /Node\.js 22 or newer is missing/);
+
+  service.setDeviceHostPreparer(null);
+  const skipped = await service.startDeviceHostBox({ kind: "linux", provider: adapter.id, size: "small", lifetimeMinutes: 60, purposeNote: "x" });
+  await service.settled();
+  const summary = service.registry.summary(skipped.id)!;
+  assert.equal(summary.state, "ready");
+  assert.equal(summary.setup.find((step) => step.id === "devices")?.state, "skipped");
+  await assert.rejects(service.startDeviceHostBox({ kind: "linux", provider: "byo", size: "small", lifetimeMinutes: 60, purposeNote: "x" }), /own machines/);
 });

@@ -1,0 +1,9 @@
+{
+ "success": true,
+ "data": {
+  "path": "/tmp/orq-smoke/out/shot.png",
+  "width": 720,
+  "height": 1280,
+  "displayRotation": "portrait"
+ }
+}

@@ -29,19 +29,16 @@
  *
  * Per connection: `resetBoxes()` runs on a connection switch (the app store),
  * and a call through a client of another connection resets first.
- *
- * Exported API for other UI modules: the vanilla `boxesStore`,
- * `setBoxesPluginOn(on)`, `hasActiveBoxes(boxes)`, the hooks `useBoxes()`,
- * `useActiveBoxes()`, `useBoxesTotals()`, `useBox(id)`, `useProjectBox(path)`,
- * `useBoxProviders()`, `useBoxKinds()`, `useBoxConfigChanges()`,
- * `useBoxConnection()`, `useBlacksmithSetup()`, and the load / mutation
- * functions below (each takes the `ApiClient`).
  */
 
 import { useMemo, useSyncExternalStore } from "react";
 import { createStore } from "zustand/vanilla";
 
 import {
+  type AddByoMachineRequest,
+  type ByoPairingResponse,
+  type RemoveByoMachineResponse,
+  type UpdateByoMachineRequest,
   BOXES_CHANGED_EVENT,
   BOX_CONFIG_CHANGES_EVENT,
   BOX_PROVIDERS_CHANGED_EVENT,
@@ -78,7 +75,8 @@ import {
   sanitizeBoxOffersResponse,
   sanitizeBoxProviderInfo,
   sanitizeBoxProvidersResponse,
-  sanitizeBoxResponse
+  sanitizeBoxResponse,
+  sanitizeByoPairingResponse
 } from "./validate";
 
 /** The routes this store calls — `ApiClient` satisfies it; tests pass a fake. */
@@ -86,7 +84,6 @@ export interface BoxesApi {
   /** The connection the client talks to; a different id resets the store. */
   readonly connection?: { readonly id: string };
   listBoxes(signal?: AbortSignal): Promise<BoxesResponse>;
-  getBox(id: string, signal?: AbortSignal): Promise<BoxResponse>;
   destroyBox(id: string): Promise<BoxResponse | undefined>;
   listBoxKinds(signal?: AbortSignal): Promise<BoxKindsResponse>;
   listBoxProviders(signal?: AbortSignal): Promise<BoxProvidersResponse>;
@@ -103,6 +100,10 @@ export interface BoxesApi {
   startBlacksmithTest(): Promise<unknown>;
   listBoxConfigChanges(signal?: AbortSignal): Promise<BoxConfigChangesResponse>;
   decideBoxConfigChange(id: string, req: DecideBoxConfigChangeRequest): Promise<{ change: BoxConfigChangeSet }>;
+  addByoMachine(req: AddByoMachineRequest): Promise<ByoPairingResponse>;
+  updateByoMachine(id: string, req: UpdateByoMachineRequest): Promise<BoxResponse>;
+  removeByoMachine(id: string): Promise<RemoveByoMachineResponse>;
+  newByoPairing(id: string): Promise<ByoPairingResponse>;
 }
 
 /** Each slot is `null` until it first loads on this connection. */
@@ -186,7 +187,12 @@ function write(slot: Slot, patch: Partial<BoxesState>): void {
 
 /** Whether any box in a list is not destroyed yet (it may still bill at its provider). */
 export function hasActiveBoxes(boxes: readonly BoxSummary[] | null): boolean {
-  return boxes?.some((box) => box.state !== "destroyed") ?? false;
+  return boxes?.some(isRunningBox) ?? false;
+}
+
+/** Not destroyed, and not one of the owner's own machines sitting idle (those run for nobody and bill nothing). */
+function isRunningBox(box: BoxSummary): boolean {
+  return box.state !== "destroyed" && box.purpose !== "machine";
 }
 
 /** Plugin off: a boxes list with nothing left running is forgotten (one not read yet is waited for). */
@@ -510,14 +516,52 @@ export async function destroyBox(api: BoxesApi, id: string): Promise<void> {
   else reloadQuietly(() => loadBoxesList(api));
 }
 
-/** One box from the daemon, applied — unless an event or mutation wrote the list meanwhile (that is newer). */
-export async function fetchBox(api: BoxesApi, id: string, signal?: AbortSignal): Promise<BoxSummary | null> {
-  const { answer, current } = await mutate(api, "boxes", () => api.getBox(id, signal));
-  const box = sanitizeBoxResponse(answer);
-  if (!box || box.id !== id) throw new Error("The daemon answered the box in an unexpected shape.");
-  if (current) upsertBox(box);
-  return box;
+// ---------------------------------------------------------------------------
+// Bring-your-own machines
+// ---------------------------------------------------------------------------
+
+function applyPairing(
+  api: BoxesApi,
+  { answer, reset, current }: { answer: unknown; reset: boolean; current: boolean }
+): ByoPairingResponse {
+  const pairing = sanitizeByoPairingResponse(answer);
+  if (pairing === null) throw new Error("The daemon answered the pairing command in an unexpected shape.");
+  if (!reset) {
+    if (current) upsertBox(pairing.box);
+    else reloadQuietly(() => loadBoxesList(api));
+  }
+  return pairing;
 }
+
+/** "Add your machine": resolves with its one-time pairing command (shown once; only its hash is kept). */
+export async function addByoMachine(api: BoxesApi, req: AddByoMachineRequest): Promise<ByoPairingResponse> {
+  return applyPairing(api, await mutate(api, "boxes", () => api.addByoMachine(req)));
+}
+
+/** A new pairing command for a machine still pairing (the previous one stops working). */
+export async function newByoPairing(api: BoxesApi, id: string): Promise<ByoPairingResponse> {
+  return applyPairing(api, await mutate(api, "boxes", () => api.newByoPairing(id)));
+}
+
+/** Rename a machine, or switch "Use for device simulators". */
+export async function updateByoMachine(api: BoxesApi, id: string, req: UpdateByoMachineRequest): Promise<void> {
+  const { answer, reset, current } = await mutate(api, "boxes", () => api.updateByoMachine(id, req));
+  if (reset) return;
+  const box = sanitizeBoxResponse(answer);
+  if (box && box.id === id && current) upsertBox(box);
+  else reloadQuietly(() => loadBoxesList(api));
+}
+
+/**
+ * Remove a machine (cancels its pairing). Resolves whether it uninstalled its service itself — false
+ * when it was not connected (its owner runs `orq-agent uninstall-service` there).
+ */
+export async function removeByoMachine(api: BoxesApi, id: string): Promise<{ uninstalled: boolean }> {
+  const { answer, reset } = await mutate(api, "boxes", () => api.removeByoMachine(id));
+  if (!reset) reloadQuietly(() => loadBoxesList(api));
+  return { uninstalled: isRecord(answer) && answer.uninstalled === true };
+}
+
 
 function applyConnectionAnswer(
   api: BoxesApi,
@@ -626,7 +670,7 @@ export function useBoxes(): readonly BoxSummary[] {
 /** The boxes not destroyed yet (they may still bill); empty until loaded. */
 export function useActiveBoxes(): readonly BoxSummary[] {
   const boxes = useBoxes();
-  return useMemo(() => boxes.filter((box) => box.state !== "destroyed"), [boxes]);
+  return useMemo(() => boxes.filter(isRunningBox), [boxes]);
 }
 
 /** Whether the boxes list has loaded on this connection. */
@@ -636,15 +680,6 @@ export function useBoxesLoaded(): boolean {
 
 export function useBoxesTotals(): BoxesTotals | null {
   return useBoxesState((state) => state.totals);
-}
-
-export function useBox(id: string | null | undefined): BoxSummary | undefined {
-  return useBoxesState((state) => (id ? state.boxes?.find((box) => box.id === id) : undefined));
-}
-
-/** The box a project runs in (see {@link projectBoxIn}); undefined for a host project. */
-export function useProjectBox(projectPath: string | null | undefined): BoxSummary | undefined {
-  return useBoxesState((state) => projectBoxIn(state.boxes, projectPath));
 }
 
 /** The providers; null until loaded. */

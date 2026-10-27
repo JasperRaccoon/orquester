@@ -216,7 +216,7 @@ const CODEX_AUTH_FRAME_FIELDS = ["accessToken", "apiKey", "idToken", "refreshTok
  * BEFORE the frame leaves the session, so no later stage can write them out — the raw log's own
  * scrub (`store/raw-log.ts`) is the second line, not the only one. Anything else passes as is.
  */
-export function redactCodexAuthFrame(frame: unknown): unknown {
+function redactCodexAuthFrame(frame: unknown): unknown {
   if (typeof frame !== "object" || frame === null) return frame;
   const record = frame as Record<string, unknown>;
   let out: Record<string, unknown> | null = null;

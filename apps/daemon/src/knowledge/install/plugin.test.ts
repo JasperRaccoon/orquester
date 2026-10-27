@@ -118,7 +118,7 @@ async function info(h: Harness): Promise<PluginInfo> {
 
 async function settle(h: Harness): Promise<void> {
   await h.service.settled();
-  await h.tracker.settled();
+  await h.tracker.start();
 }
 
 async function onDisk(h: Harness): Promise<any> {

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   resolveDockCard,
   showBackgroundLivenessBanner,
+  sortBannerStack,
   splitApprovalOptions,
   toolApprovalAnswerFailure,
   toolApprovalChangeSentence,
@@ -14,6 +15,21 @@ import {
   isBoxApprovalCard
 } from "./banner-model.ts";
 import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
+
+test("live activity precedes urgent notices, preserving equal-priority order and the input", () => {
+  const entries = [
+    { id: "notice", variant: "info" },
+    { id: "warning", variant: "warning" },
+    { id: "activity", variant: "default", priority: "activity" },
+    { id: "urgent", variant: "default", priority: "urgent" },
+    { id: "error", variant: "error" },
+    { id: "other-notice", variant: "default" }
+  ] as const;
+  const original = [...entries];
+
+  assert.deepEqual(sortBannerStack(entries), [entries[2], entries[1], entries[3], entries[4], entries[0], entries[5]]);
+  assert.deepEqual(entries, original);
+});
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();

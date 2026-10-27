@@ -99,16 +99,6 @@ export function currentOptionValue(
   return descriptor.currentValue;
 }
 
-/** Every option's value a launch naming no options gets: `currentOptionValue` with no selection. */
-export function defaultOptionValues(model: ProviderModel | null): Record<string, ProviderOptionSelectionValue> {
-  const out: Record<string, ProviderOptionSelectionValue> = {};
-  for (const descriptor of optionDescriptors(model)) {
-    const value = currentOptionValue(null, descriptor);
-    if (value !== undefined) out[descriptor.id] = value;
-  }
-  return out;
-}
-
 export function optionChoiceLabel(
   descriptor: SelectProviderOptionDescriptor,
   value: ProviderOptionSelectionValue | undefined

@@ -5,7 +5,7 @@
  * - **The manifest route** (`daemonRoutesForHost.sessionToolsManifest`, socket-only, the agent
  *   host's bearer): `{tools, instructions, deny}` for one provider session of a thread, built from
  *   the thread's tab, the workflow-owned trait (owner + lineage walk) and the daemon-pointing MCP
- *   servers (`GET /api/agent-profile/daemon-mcp-servers`, Task 11's read; none until it answers).
+ *   servers (`GET /api/agent-profile/daemon-mcp-servers`; none until it answers).
  *   Every chat tool is advertised to every chat (no always-Admin one to a workflow-owned chat).
  * - **Push** (`agentHostRoutes.sessionToolsRefresh`): a chat whose launch manifest was refused
  *   (503, its denials unknown) gets its manifest pushed once a daemon-pointing read succeeds — the
@@ -99,6 +99,8 @@ export interface SessionToolsRefreshDeps {
   catalog(): readonly AnyOrquesterTool[];
   /** boxes: whether temporary boxes can be rented now (their tools are advertised only then). Absent: never. */
   boxesAvailable?(): boolean;
+  /** Devices: whether the device tools are usable now (plugin on, agents allowed, a platform enabled). Absent: never. */
+  devicesAvailable?(): boolean;
   /**
    * Knowledge Graph plugin: its view of one chat (thread id = session id) — on or off, worker or
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
@@ -180,7 +182,7 @@ export class SessionToolsRefresher {
   }
 
   /**
-   * The daemon-pointing servers (Task 11's read) — of every project, or with `scope`, of a chat's
+   * The daemon-pointing servers — of every project, or with `scope`, of a chat's
    * project down to its cwd — reused for {@link DAEMON_POINTING_CACHE_MS}. Concurrent callers share
    * ONE read per scope, which outlives a caller's bound ({@link DAEMON_POINTING_READ_TIMEOUT_MS}):
    * when it lands it is cached, and the chats refused meanwhile get their manifest pushed.
@@ -374,6 +376,8 @@ export class SessionToolsRefresher {
       daemonPointing,
       // boxes: the box tools only while a box can be rented.
       boxesAvailable: this.deps.boxesAvailable?.() === true,
+      // Devices: the device tools only while devices can be used.
+      devicesAvailable: this.deps.devicesAvailable?.() === true,
       ...(knowledge ? { knowledge } : {})
     });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };

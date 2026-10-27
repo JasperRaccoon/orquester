@@ -39,7 +39,7 @@ export const HELD_REFRESH_FLOOR_MS = 10 * 60_000;
  * tick always lands in it and a held account's token never runs down to where only its CLI may
  * renew it.
  */
-export const HELD_REFRESH_MARGIN_MS = REFRESH_INTERVAL_MS + HELD_REFRESH_FLOOR_MS + REFRESH_MARGIN_MS;
+const HELD_REFRESH_MARGIN_MS = REFRESH_INTERVAL_MS + HELD_REFRESH_FLOOR_MS + REFRESH_MARGIN_MS;
 
 /**
  * The locks a Claude CLI holds while it spends its refresh token (Claude Code 2.1.285, proper-lockfile

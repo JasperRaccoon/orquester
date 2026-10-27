@@ -10,7 +10,7 @@ export type NotificationTarget =
   | { kind: "session"; sessionId: string }
   | { kind: "workflow"; workflowId: string; runId: string | null };
 
-export interface NotificationRequest {
+interface NotificationRequest {
   title: string;
   body: string;
   tag: string;

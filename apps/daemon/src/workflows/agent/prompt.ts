@@ -131,20 +131,16 @@ export function promptSource(config: AgentBlockConfig, prompts: Pick<PromptRende
   return { ok: true, template: `${saved.body}${append}` };
 }
 
-/** A fresh frame ID per render, so untrusted text cannot guess and close its own frame. */
-export function newPromptFrameId(): string {
-  return randomBytes(6).toString("hex");
-}
-
 /**
  * Pass 1: `{{…}}` against the run context, every inserted value escaped for the `{variables}`
  * pass and every untrusted one framed. Rendered with the shared renderer rather than `ctx.render`
- * because only the renderer takes the insertion hook.
+ * because only the renderer takes the insertion hook. A fresh frame ID prevents inserted text
+ * from guessing its delimiter.
  */
 export function renderExpressions(
   template: string,
   ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets" | "workflow" | "node" | "liveInputs">,
-  frameId: string = newPromptFrameId()
+  frameId: string = randomBytes(6).toString("hex")
 ): { text: string; warnings: string[] } {
   const context = ctx.expressionContext();
   const trust = createPromptTrust({

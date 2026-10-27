@@ -27,10 +27,6 @@ export class KnowledgeError extends Error {
   }
 }
 
-export function isKnowledgeError(error: unknown): error is KnowledgeError {
-  return error instanceof KnowledgeError;
-}
-
 /**
  * A Fastify-level refusal (a body over the route's limit, a body that is not JSON, a media type
  * with no parser) as the contract's {@link KnowledgeError}; null for anything else. Fastify's own

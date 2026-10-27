@@ -259,7 +259,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 - `attach(service.events)` (`changed` → re-prepare known keys and seed the default ones;
   `deleted` → once its jobs settle, drop its pointers and collect its versions), `start()` (boot:
   empty `staging/`, drop pointers of deleted profiles, re-check the rest in the background, then
-  GC), `gc()`, `stop()`, `idle()` (drain for tests).
+  GC), `gc()`, `stop()`.
 - Staleness fingerprint (in `manifest.json` `fingerprint`): revision + preparer `version` + CLI
   version (registry) + content hashes of `inputs`. Per-key serialization, at most 2 preparations
   at once. Failure reasons have the profile's MCP secret values redacted.

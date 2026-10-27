@@ -11,7 +11,8 @@ import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
-import { useAppStore, useCurrentContext } from "../../store/app";
+import { serverViewOpen, useAppStore, useCurrentContext } from "../../store/app";
+import { DevicesFleetHeader } from "../devices-fleet/DevicesFleetEntry";
 
 /**
  * Mobile-only opener for the command palette: a phone has no Ctrl+K, and the
@@ -62,8 +63,8 @@ const KnowledgeHeader: React.FC = () => {
  * window controls); settings sit at the bottom of the sidebar's activity bar.
  * Mobile: a two-row header (menu · project · usage · settings) then a tab row
  * (current tab switcher · new tab); the right rail's panels are the bottom
- * section bar's (`MobileSections.tsx`). While the Knowledge view shows, its
- * header takes the project's place and the tab row goes.
+ * section bar's (`MobileSections.tsx`). While a server-level view (Knowledge,
+ * Devices) shows, its header takes the project's place and the tab row goes.
  */
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
@@ -71,6 +72,9 @@ export const TopBar: React.FC = () => {
   const ctx = useCurrentContext();
   const setSidebarDrawer = useAppStore((s) => s.setSidebarDrawer);
   const knowledgeOpen = useAppStore((s) => s.knowledgeView.open);
+  const devicesOpen = useAppStore((s) => s.devicesFleetOpen);
+  const serverView = useAppStore(serverViewOpen);
+  const serverHeader = knowledgeOpen ? <KnowledgeHeader /> : devicesOpen ? <DevicesFleetHeader /> : null;
 
   if (!isDesktop) {
     return (
@@ -79,8 +83,8 @@ export const TopBar: React.FC = () => {
           <IconButton label="Open menu" onClick={() => setSidebarDrawer(true)}>
             <Menu size={18} />
           </IconButton>
-          {knowledgeOpen ? (
-            <KnowledgeHeader />
+          {serverHeader ? (
+            serverHeader
           ) : ctx?.kind === "project" ? (
             <ProjectSwitcher />
           ) : (
@@ -93,7 +97,7 @@ export const TopBar: React.FC = () => {
           </div>
           <SettingsButton />
         </div>
-        {ctx && !knowledgeOpen && (
+        {ctx && !serverView && (
           <div className="flex h-11 items-center gap-1 border-t border-neutral-800 px-2">
             <TabSwitcher />
             <div className="flex-1" />
@@ -107,8 +111,8 @@ export const TopBar: React.FC = () => {
   return (
     <header className="app-drag flex h-11 shrink-0 items-stretch border-b border-neutral-800 bg-neutral-900/60">
       <div className="flex flex-1 items-center gap-2 overflow-hidden pl-2">
-        {knowledgeOpen ? (
-          <KnowledgeHeader />
+        {serverHeader ? (
+          serverHeader
         ) : ctx ? (
           <>
             {ctx.kind === "project" && (
@@ -128,7 +132,7 @@ export const TopBar: React.FC = () => {
       </div>
 
       <div className="flex items-center gap-1 pr-1">
-        {ctx?.kind === "project" && !knowledgeOpen && (
+        {ctx?.kind === "project" && !serverView && (
           <div className="app-no-drag">
             <ViewModeToggle />
           </div>

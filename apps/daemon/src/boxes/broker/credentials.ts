@@ -98,7 +98,7 @@ export function grantFromCredentials(agent: BoxAgentId, text: string): AgentToke
   return { accessToken, expiresAt: Number.isFinite(at) ? at : null };
 }
 
-/** The file operations the broker needs, injectable for tests. */
+/** Owned account-home file operations used by the broker and host credential watch. */
 export interface CredentialFiles {
   /** `assertOwnedAccountHome`: the home is the account's own, not a symlink, marker matches. Throws otherwise. */
   assertOwnedHome(agent: BoxAgentId, accountId: string, home: string): Promise<void>;
@@ -113,7 +113,7 @@ export interface CredentialFiles {
   watch(path: string, onChange: () => void): () => void;
 }
 
-export function nodeCredentialFiles(accountsDir: string, now: () => number = Date.now): CredentialFiles {
+export function nodeCredentialFiles(accountsDir: string): CredentialFiles {
   return {
     assertOwnedHome: (agent, accountId, home) => assertOwnedAccountHome(accountsDir, agent, accountId, home),
     async read(path) {
@@ -130,7 +130,7 @@ export function nodeCredentialFiles(accountsDir: string, now: () => number = Dat
         const stats = await lstat(path).catch(() => null);
         if (stats && (newest === null || stats.mtimeMs > newest)) newest = stats.mtimeMs;
       }
-      return newest === null ? null : Math.max(0, now() - newest);
+      return newest === null ? null : Math.max(0, Date.now() - newest);
     },
     watch(path, onChange) {
       // The directory, not the file: a rename-replace gives the file a new inode, which a watch on

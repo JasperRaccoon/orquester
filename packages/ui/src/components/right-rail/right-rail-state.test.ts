@@ -47,31 +47,31 @@ async function persistRail(open: "prompts" | "history", width: number) {
 }
 
 test("a well-formed payload round-trips", async () => {
-  assert.deepEqual(await persistRail("history", 412), {
+  assert.partialDeepStrictEqual(await persistRail("history", 412), {
     v: 1, open: "history", width: 412
   });
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":412}'), {
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"history","width":412}'), {
     open: "history", width: 412
   });
 });
 
 test("each field is validated on its own: one bad field never costs the others", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
   const badWidth = await loadStoredRail('{"v":1,"open":"prompts","width":"wide"}');
   assert.equal(badWidth.open, "prompts");
   assert.ok(Number.isFinite(badWidth.width) && badWidth.width > 0);
-  assert.deepEqual(await loadStoredRail('{"width":300}'), { open: null, width: 300 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"width":300}'), { open: null, width: 300 });
   assert.equal((await loadStoredRail('{"open":null}')).open, null);
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400 });
   for (const open of ["true", "1", '"History"', '"Workflows"', '{"id":"prompts"}', '["prompts"]']) {
     assert.equal((await loadStoredRail(`{"open":${open}}`)).open, null);
   }
 });
 
 test("workflows (now in the left sidebar) and the agent profile (now Settings → Agent config) no longer open the dock", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: null, width: 360 });
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: null, width: 420 });
-  assert.deepEqual(await persistRail("prompts", 360), { v: 1, open: "prompts", width: 360 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: null, width: 360 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: null, width: 420 });
+  assert.partialDeepStrictEqual(await persistRail("prompts", 360), { v: 1, open: "prompts", width: 360 });
 });
 
 test("malformed stored widths fall back without losing the panel", async () => {
@@ -83,16 +83,18 @@ test("malformed stored widths fall back without losing the panel", async () => {
 });
 
 test("a payload written by another version is still read field by field", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480 });
   assert.equal((await loadStoredRail('{"v":"one","open":"prompts"}')).open, "prompts");
 });
 
 test("load and save swallow storage errors and missing storage", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"prompts","width":350}'), { open: "prompts", width: 350 });
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"prompts","width":350}'), { open: "prompts", width: 350 });
   denyStorage();
   const denied = await freshRail();
   assert.doesNotThrow(() => denied.rightRailState());
   assert.doesNotThrow(() => denied.setRightRailOpen("history"));
+  denied.setRightRailWidth(480, { persist: true });
+  assert.partialDeepStrictEqual(denied.rightRailState(), { open: "history", width: 480 });
   Reflect.deleteProperty(globalThis, "localStorage");
   const missing = await freshRail();
   assert.doesNotThrow(() => missing.rightRailState());
@@ -134,9 +136,25 @@ test("subscribers hear real changes only, and can unsubscribe", () => {
   assert.equal(seen.length, 1);
 });
 
-test("a storage that throws never breaks the store", () => {
-  denyStorage();
-  toggleRightRailPanel("history");
-  setRightRailWidth(480, { persist: true });
-  assert.deepEqual(rightRailState(), { open: "history", width: 480 });
+test("the Device panel persists, validates and resets its preference separately", async () => {
+  const rail = await freshRail();
+  rail.setRightRailWidth(300, { persist: true });
+  rail.setRightRailOpen("device");
+  rail.setRightRailWidth(700, { persist: true, panel: "device" });
+  assert.equal(rail.rightRailWidthOf(rail.rightRailState(), "device"), 700);
+  assert.equal(rail.rightRailWidthOf(rail.rightRailState(), "history"), 300);
+  assert.deepEqual(JSON.parse(stored.get(key)!), { v: 1, open: "device", width: 300, deviceWidth: 700 });
+  // The Device panel's documented configuration range (devices spec §10.1).
+  assert.equal(rail.clampRightRailWidth(2000, null, "device"), 900);
+  assert.equal(rail.clampRightRailWidth(100, null, "device"), 320);
+  assert.partialDeepStrictEqual(await loadStoredRail('{"v":1,"open":"device","width":300,"deviceWidth":5000}'), {
+    open: "device", width: 300, deviceWidth: 900
+  });
+  const malformed = await loadStoredRail('{"open":"device","width":300,"deviceWidth":"wide"}');
+  assert.equal(malformed.open, "device");
+  assert.equal(malformed.width, 300);
+  assert.ok(Number.isFinite(malformed.deviceWidth) && malformed.deviceWidth > 0);
+  rail.resetRightRailWidth("device");
+  assert.notEqual(rail.rightRailState().deviceWidth, 700, "reset forgets the custom preference");
+  assert.equal(rail.rightRailState().width, 300, "reset leaves the other panels alone");
 });

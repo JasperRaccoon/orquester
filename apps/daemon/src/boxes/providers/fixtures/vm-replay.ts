@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import type { Mock, TestContext } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -94,8 +95,13 @@ export function replayFetch(routes: ReplayRoute[]): Replay {
 }
 
 /** Call options for a replayed adapter call. */
-export function replayOptions(replay: Replay): ProviderCallOptions {
-  return { signal: AbortSignal.timeout(10_000), fetch: replay.fetch };
+const fetchMocks = new WeakMap<TestContext, Mock<typeof fetch>>();
+
+export function replayOptions(t: TestContext, replay: Replay): ProviderCallOptions {
+  const mocked = fetchMocks.get(t);
+  if (mocked) mocked.mock.mockImplementation(replay.fetch);
+  else fetchMocks.set(t, t.mock.method(globalThis, "fetch", replay.fetch));
+  return { signal: AbortSignal.timeout(10_000) };
 }
 
 /** A bootstrap with recognizable bodies, so tests can find it in request payloads. */

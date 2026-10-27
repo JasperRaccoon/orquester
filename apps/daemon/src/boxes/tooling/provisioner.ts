@@ -11,7 +11,7 @@
  *     against its sha512 integrity (`cache.ts`), then installs it in the box
  *     unless already there (`install.ts`: upload, extract, smoke test, rename);
  *  3. writes the plugin's files (its preload, then its state file) and only
- *     then hands new sessions the contribution (`session-env.ts`, per box).
+ *     then stores the contribution for new sessions in that box.
  *
  * A failure leaves the box with what it had — files, versions and the
  * contribution new sessions get — and is reported as the box's status for
@@ -37,21 +37,18 @@ import {
   hostToBoxPath
 } from "@orquester/api";
 import {
-  applyToolingContributions,
   boxToolVersionDir,
   boxToolingPluginDir,
   boxToolDir,
   toolingJoinPath
 } from "@orquester/config";
 
-import { setSessionToolingContribution } from "../../plugins/session-env.ts";
 import type {
   BoxConnection,
   BoxHub,
   BoxRegistry,
   BoxToolingProvisioner,
-  SessionToolingContribution,
-  ToolTarget
+  SessionToolingContribution
 } from "../contracts.ts";
 import { ToolingArchiveCache } from "./cache.ts";
 import { installArtifactInBox, pruneBoxVersions } from "./install.ts";
@@ -66,12 +63,8 @@ export interface BoxToolingProvisionerDeps {
   plugins: readonly ToolingPlugin[];
   /** A getter: the daemon's workspaces root can move at runtime. */
   workspacesDir: () => string;
-  /** Archive downloads; the global `fetch` by default. */
-  fetch?: typeof fetch;
   now?: () => Date;
   logger?: Pick<Console, "warn" | "error">;
-  /** Where a box's contributions go for session launches; `session-env.ts` by default. */
-  setContribution?: (boxId: string, pluginId: string, contribution: SessionToolingContribution | null) => void;
   /** A box's status changed (the plugins service broadcasts `plugins.changed`). */
   onStatusChange?: (boxId: string) => void;
 }
@@ -89,8 +82,6 @@ export interface BoxToolingProvisionerHandle extends BoxToolingProvisioner {
   toolingStatus(boxId: string): BoxToolingStatusEntry[];
   /** One plugin's status in every box, for `PluginInfo.boxes`. */
   pluginStatuses(pluginId: string): PluginBoxToolingStatus[];
-  /** `env` with the box's contributions applied with the box's rules (PATH delimiter, Path/PATH, quoting). */
-  sessionEnv(boxId: string, env: Readonly<Record<string, string>>): Record<string, string>;
   /** Provision in the background (logged, never rejects); joins a provision already waiting. */
   requestProvision(boxId: string): Promise<void>;
   /** The daemon's workspaces root moved: boxes get preloads that bake in the new one. */
@@ -147,7 +138,6 @@ interface BoxEntry {
   known: boolean;
   /** A plugin changed while the box was away: provision when it connects. */
   stale: boolean;
-  target: ToolTarget | null;
   statuses: Map<string, BoxToolingStatusEntry>;
   contributions: Map<string, SessionToolingContribution>;
   /** Archives the last good plan of each plugin uses (kept in the host cache). */
@@ -157,13 +147,9 @@ interface BoxEntry {
 }
 
 export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): BoxToolingProvisionerHandle {
-  const cache = new ToolingArchiveCache({ baseDir: deps.baseDir, fetch: deps.fetch });
+  const cache = new ToolingArchiveCache({ baseDir: deps.baseDir });
   const now = deps.now ?? (() => new Date());
   const logger = deps.logger ?? console;
-  const setContribution =
-    deps.setContribution ??
-    ((boxId: string, pluginId: string, contribution: SessionToolingContribution | null) =>
-      setSessionToolingContribution({ boxId }, pluginId, contribution));
   const boxes = new Map<string, BoxEntry>();
   const lifetime = new AbortController();
   const inflight = new Set<Promise<void>>();
@@ -177,7 +163,6 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
         waiting: null,
         known: false,
         stale: false,
-        target: null,
         statuses: new Map(),
         contributions: new Map(),
         artifacts: new Map(),
@@ -198,11 +183,10 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
     }
   };
 
-  const contribute = (boxId: string, entry: BoxEntry, pluginId: string, contribution: SessionToolingContribution | null) => {
+  const contribute = (entry: BoxEntry, pluginId: string, contribution: SessionToolingContribution | null) => {
     if (entry.forgotten) return;
     if (contribution === null) entry.contributions.delete(pluginId);
     else entry.contributions.set(pluginId, contribution);
-    setContribution(boxId, pluginId, contribution);
   };
 
   /** Box paths for `plugin` in `connection`'s box: the workspaces root as it is now, real and configured. */
@@ -233,7 +217,7 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
       const plan = await plugin.plan(context, signal);
       if (plan.kind === "unsupported") {
         entry.artifacts.delete(plugin.id);
-        contribute(boxId, entry, plugin.id, null);
+        contribute(entry, plugin.id, null);
         setStatus(boxId, entry, plugin.id, "unsupported", plan.message);
         return null;
       }
@@ -250,12 +234,12 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
         await connection.writeFile(file.path, file.content, { mode: file.mode ?? 0o644, mkdirs: true });
       }
       if (plan.kind === "off") {
-        contribute(boxId, entry, plugin.id, null);
+        contribute(entry, plugin.id, null);
         setStatus(boxId, entry, plugin.id, "off", null);
         return null;
       }
       entry.artifacts.set(plugin.id, plan.artifacts);
-      contribute(boxId, entry, plugin.id, plan.contribution);
+      contribute(entry, plugin.id, plan.contribution);
       setStatus(boxId, entry, plugin.id, "ready", plan.summary);
       for (const artifact of plan.artifacts) {
         await pruneBoxVersions(connection, context, artifact.tool, artifact.version);
@@ -293,7 +277,6 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
     }
     entry.known = true;
     entry.stale = false;
-    entry.target = { os: connection.sys.os, arch: connection.sys.arch, libc: connection.sys.libc };
     const failures: string[] = [];
     for (const plugin of deps.plugins) {
       if (signal.aborted) break;
@@ -365,12 +348,6 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
     contribution: mergedContribution,
     requestProvision,
     workspacesChanged: onPluginChange,
-    sessionEnv(boxId, env) {
-      const entry = boxes.get(boxId);
-      const os = entry?.target?.os ?? deps.hub.get(boxId)?.sys.os;
-      if (!os) return { ...env };
-      return applyToolingContributions(env, [...(entry?.contributions.values() ?? [])], os);
-    },
     toolingStatus(boxId) {
       return [...(boxes.get(boxId)?.statuses.values() ?? [])].map((status) => ({ ...status }));
     },
@@ -387,7 +364,6 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
       if (!entry) return;
       entry.forgotten = true;
       boxes.delete(boxId);
-      for (const pluginId of entry.contributions.keys()) setContribution(boxId, pluginId, null);
       try {
         deps.onStatusChange?.(boxId);
       } catch (error) {

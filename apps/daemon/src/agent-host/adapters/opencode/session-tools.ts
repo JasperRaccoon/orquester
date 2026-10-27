@@ -54,8 +54,6 @@
 
 import { createHash } from "node:crypto";
 
-import { OPENCODE_SESSION_TOOLS_SERVER_PATTERN } from "@orquester/api/agent-chat";
-
 import { SESSION_TOOL_CALL_TIMEOUT_MS } from "../../../session-tools/contract.ts";
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { OpenCodeClient } from "./http.ts";
@@ -89,11 +87,7 @@ export function openCodeServerRuleName(server: string): string {
 
 /** The thread's own server name on a shared OpenCode server. */
 export function openCodeSessionToolsServerName(threadId: string): string {
-  const name = `orquester-${createHash("sha256").update(threadId, "utf8").digest("hex").slice(0, 16)}`;
-  if (!OPENCODE_SESSION_TOOLS_SERVER_PATTERN.test(name)) {
-    throw new Error("unreachable: a sha256 prefix is 16 hex digits");
-  }
-  return name;
+  return `orquester-${createHash("sha256").update(threadId, "utf8").digest("hex").slice(0, 16)}`;
 }
 
 /**
@@ -105,7 +99,7 @@ export function openCodeSessionToolsServerName(threadId: string): string {
  * `docs/orquester-mcp.md` suggests `orquester_remote` for the external `/mcp`,
  * a name the literal `orquester-` prefix can never match.
  */
-export const OPENCODE_SESSION_TOOLS_DENY = `orquester-${"?".repeat(16)}_*`;
+const OPENCODE_SESSION_TOOLS_DENY = `orquester-${"?".repeat(16)}_*`;
 
 /**
  * `ruleset` with the isolation rules appended (last, so they win): the deny
@@ -139,7 +133,7 @@ export function withSessionToolRules(
 }
 
 /** Of `deny`, the names whose `<name>_*` rule would also hide ANOTHER configured server's tools. */
-export function overlappingDenials(deny: readonly string[], configured: readonly string[]): Set<string> {
+function overlappingDenials(deny: readonly string[], configured: readonly string[]): Set<string> {
   const overlapping = new Set<string>();
   for (const name of deny) {
     const prefix = `${openCodeServerRuleName(name)}_`;

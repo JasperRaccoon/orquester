@@ -137,11 +137,6 @@ export function claudeBoxCredentials(grant: AgentTokenGrant, now: number): { cla
   };
 }
 
-/** A bridged server as a Claude stdio entry. */
-function bridgedEntry(command: string, args: string[]): Doc {
-  return { type: "stdio", command, args };
-}
-
 /**
  * A "Run in box" server's secrets out of the file and into the CLI's env: each env value and
  * header becomes `${ORQ_MCP_<n>_<KEY>}`, which the CLI expands when it loads `--mcp-config`.
@@ -172,7 +167,7 @@ function rewriteServers(servers: Record<string, Doc>, plan: McpBridgePlan, cliEn
   for (const [name, def] of Object.entries(servers)) {
     const bridge = bridged.get(name);
     if (bridge !== undefined) {
-      out[name] = bridgedEntry(bridge.command, bridge.args);
+      out[name] = { type: "stdio", command: bridge.command, args: bridge.args };
     } else if (inBox.has(name)) {
       out[name] = inBoxEntry(def, index++, cliEnv);
     } else {

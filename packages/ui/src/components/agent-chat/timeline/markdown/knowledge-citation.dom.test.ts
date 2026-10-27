@@ -148,6 +148,32 @@ describe("the chat's URL filter", () => {
     const image = JSDOM.fragment(html).querySelector("img");
     assert.equal(image?.getAttribute("src"), "https://example.com/chart.png");
   });
+
+  it("requires another click when a loaded remote image's source changes", async () => {
+    const mount = dom.window.document.createElement("div");
+    dom.window.document.body.appendChild(mount);
+    const root = createRoot(mount);
+    const render = async (src: string) => {
+      await act(async () => root.render(createElement(markdown.ChatMarkdown, {
+        text: `![chart](${src})`, remoteImages: "click"
+      })));
+    };
+    try {
+      await render("https://example.com/first.png");
+      assert.equal(mount.querySelector("img"), null);
+      await act(async () => mount.querySelector("button")!.click());
+      assert.equal(mount.querySelector("img")?.getAttribute("src"), "https://example.com/first.png");
+
+      await render("https://tracker.example/second.gif");
+      assert.equal(mount.querySelector("img") === null, true, "the first image's approval cannot load a different source");
+      assert.ok(mount.querySelector("button"), "the changed source requires another explicit action");
+      await act(async () => mount.querySelector("button")!.click());
+      assert.equal(mount.querySelector("img")?.getAttribute("src"), "https://tracker.example/second.gif");
+    } finally {
+      await act(async () => root.unmount());
+      mount.remove();
+    }
+  });
 });
 
 describe("knowledge citations in a message", () => {

@@ -7,10 +7,9 @@
 
 import { watch } from "node:fs";
 import type { TestContext } from "node:test";
-import { dirname } from "node:path";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import Fastify, { type FastifyInstance, type InjectOptions, type LightMyRequestResponse } from "fastify";
 import type { AgentAccountsResponse, EventMessage, UsageResponse } from "@orquester/api";
@@ -76,7 +75,6 @@ export interface BootOptions {
   gitRemote?: GitRemoteReader;
   usage?: UsageReader;
   accounts?: AccountsReader;
-  workspaceAccounts?: Record<string, string>;
 }
 
 export interface Booted {
@@ -162,10 +160,7 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     accounts,
     git: new GitService(),
     gitRemote: opts.gitRemote ?? new FakeGitRemote(),
-    readWorkspaceMeta: async (workspace) => {
-      const id = opts.workspaceAccounts?.[workspace];
-      return id ? { gitAccountId: id } : null;
-    },
+    readWorkspaceMeta: async () => null,
     savedPrompts: { get: () => undefined },
     workspacesDir: () => workspacesDir,
     fsRoot: () => workspacesDir,

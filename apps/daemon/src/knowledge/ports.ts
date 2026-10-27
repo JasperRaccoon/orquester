@@ -115,7 +115,7 @@ export interface KnowledgeGraphPort {
   conceptTypes(): ReadonlyMap<string, number>;
 }
 
-/** Cosine cut-offs of the model behind a {@link KnowledgeVectorIndex} (`search/embedder.ts` restates it). */
+/** Model-specific cosine cut-offs shared by embedders and vector indexes; e5 and MiniLM have different score distributions. */
 export interface KnowledgeVectorThresholds {
   minimum: number;
   good: number;

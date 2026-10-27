@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  detectRepoId,
   detectRepoInfo,
   normalizeGitUrl,
   parseOriginUrl,
@@ -105,7 +104,6 @@ test("detectRepoInfo: a checkout with an origin yields the normalized id and the
     repoId: "github.com/Me/Repo",
     originUrl: "https://ghp_token@github.com/Me/Repo.git"
   });
-  assert.equal(await detectRepoId(dir), "github.com/Me/Repo");
 });
 
 test("detectRepoInfo: a local-only repo is identified by its realpathed root", async (t) => {
@@ -117,7 +115,6 @@ test("detectRepoInfo: a local-only repo is identified by its realpathed root", a
   await symlink(real, link);
   const expected = await realpath(real);
   assert.deepEqual(await detectRepoInfo(link), { repoId: expected, originUrl: null });
-  assert.equal(await detectRepoId(link), expected);
 });
 
 test("detectRepoInfo: a linked worktree resolves to its main repo's config and root", async (t) => {
@@ -135,14 +132,13 @@ test("detectRepoInfo: a linked worktree resolves to its main repo's config and r
 
   // Without an origin the worktree shares the main checkout's realpath, like a sibling clone would share a URL.
   await writeFile(join(main, ".git", "config"), "[core]\n", "utf8");
-  assert.equal(await detectRepoId(worktree), await realpath(main));
+  assert.deepEqual(await detectRepoInfo(worktree), { repoId: await realpath(main), originUrl: null });
 });
 
 test("detectRepoInfo: not a git checkout (or a broken gitfile) is null", async (t) => {
   const dir = await tempDir(t);
   assert.equal(await detectRepoInfo(dir), null);
-  assert.equal(await detectRepoId(dir), null);
-  assert.equal(await detectRepoId(join(dir, "missing")), null);
+  assert.equal(await detectRepoInfo(join(dir, "missing")), null);
   await writeFile(join(dir, ".git"), "not a gitfile\n", "utf8");
   assert.equal(await detectRepoInfo(dir), null);
 });

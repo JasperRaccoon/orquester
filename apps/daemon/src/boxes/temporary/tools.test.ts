@@ -8,10 +8,11 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createServer, connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
@@ -407,17 +408,7 @@ test("files: a box project's chat cannot move files through the host stub", asyn
 });
 
 test("download: a file replaces a file atomically (exec bit kept); a directory lands at local_path; an existing directory is refused", async () => {
-  const { tools, connection } = world();
-  const readTar = connection.readTar.bind(connection);
-  connection.readTar = async (path) => {
-    const archive = await readTar(path);
-    return Readable.from((async function* () {
-      yield* archive;
-      // Legal archive padding larger than a pipe buffer: extraction must consume it through EOF.
-      const padding = Buffer.alloc(64 * 1024);
-      for (let i = 0; i < 16; i++) yield padding;
-    })());
-  };
+  const { tools } = world();
   mkdirSync(join(BOX, "out", "logs", "nested"), { recursive: true });
   writeFileSync(join(BOX, "out", "app"), "BINARY", { mode: 0o755 });
   writeFileSync(join(BOX, "out", "logs", "build.log"), "ok\n");
@@ -458,6 +449,80 @@ test("download: a file is read with a length (the stat's size), never until the 
   assert.ok(file.ok, file.ok ? "" : file.message);
   assert.deepEqual(reads, [{ length: 10 }]);
   assert.equal(readFileSync(join(PROJECT, "sized.bin"), "utf8"), "0123456789");
+});
+
+test("download: tar can close its input before the box finishes; the entire source still decides success", async (t) => {
+  const lookup = spawnSync("/bin/sh", ["-c", "command -v tar"], { encoding: "utf8" });
+  assert.equal(lookup.status, 0, lookup.stderr);
+  const realTar = realpathSync(lookup.stdout.trim());
+  const remote = join(BOX, "early-tar");
+  mkdirSync(remote);
+  writeFileSync(join(remote, "payload.txt"), "payload");
+  const packed = spawnSync(realTar, ["-cf", "-", "-C", remote, "."]);
+  assert.equal(packed.status, 0, packed.stderr.toString());
+
+  for (const scenario of ["success", "source-error", "cancel", "too-large", "tar-error"] as const) {
+    await t.test(scenario, async (t) => {
+      const bin = mkdtempSync(join(ROOT, `early-tar-${scenario}-`));
+      const tar = join(bin, "tar");
+      const receipt = join(ROOT, `early-tar-${scenario}.closed`);
+      // Real tar reads the archive's end markers, then the wrapper closes fd 0 BEFORE the
+      // source releases its tail. The watched receipt makes the ordering deterministic.
+      writeFileSync(tar, `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const { closeSync, writeFileSync } = require("node:fs");
+const child = spawnSync(${JSON.stringify(realTar)}, process.argv.slice(2), { stdio: ["inherit", "ignore", "inherit"] });
+closeSync(0);
+writeFileSync(${JSON.stringify(receipt)}, "closed");
+process.exit(child.status ?? 1);
+`, { mode: 0o755 });
+      let closed!: () => void;
+      const inputClosed = new Promise<void>((resolve) => { closed = resolve; });
+      const watcher = watch(ROOT, (_event, name) => {
+        if (name?.toString() === basename(receipt)) closed();
+      });
+      t.after(() => { closed(); watcher.close(); });
+      const previousPath = process.env.PATH;
+      t.after(() => {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+      });
+      process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+      const controller = new AbortController();
+      const { tools, connection } = world();
+      const padding = Buffer.alloc(1024);
+      const invalidArchive = Buffer.alloc(10240);
+      invalidArchive.fill(1, 0, 512);
+      connection.readTar = async () => Readable.from((async function* () {
+        yield scenario === "tar-error" ? invalidArchive : packed.stdout;
+        await inputClosed;
+        if (scenario === "source-error") throw new Error("the box failed after the archive");
+        if (scenario === "cancel") controller.abort();
+        if (scenario === "too-large") {
+          // Reuse one chunk: exercise the byte cap after tar exits without allocating 4 GiB.
+          const chunk = Buffer.alloc(1024 * 1024);
+          for (let bytes = 0; bytes <= 4 * 1024 ** 3; bytes += chunk.length) yield chunk;
+        } else {
+          yield padding;
+        }
+      })());
+      const target = join(PROJECT, `early-tar-${scenario}`);
+      const result = await tools.download("box-a", { remotePath: remote, localPath: target }, { principal: agent(), signal: controller.signal });
+      if (scenario === "success") {
+        assert.ok(result.ok, result.ok ? "" : result.message);
+        assert.equal(result.value.bytes, packed.stdout.length + padding.length);
+        assert.equal(readFileSync(join(target, "payload.txt"), "utf8"), "payload");
+      } else {
+        assert.ok(!result.ok);
+        const code = scenario === "cancel" ? "CANCELLED" : scenario === "too-large" ? "TOO_LARGE" : "BOX_TRANSFER_FAILED";
+        assert.equal(result.code, code, result.message);
+        if (scenario === "source-error") assert.match(result.message, /the box failed after the archive/);
+        if (scenario === "tar-error") assert.match(result.message, /tar could not unpack the directory/);
+        assert.throws(() => statSync(target), { code: "ENOENT" });
+      }
+      assert.deepEqual(readdirSync(PROJECT).filter((name) => name.startsWith(".orq-download-")), []);
+    });
+  }
 });
 
 test("download: a directory whose only entry has its own name keeps its shape", async () => {

@@ -64,3 +64,26 @@ describe("session tool labels (unified MCP §4)", () => {
     assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_projects" })), "Listed projects");
   });
 });
+
+describe("device tool rows (devices §10.3)", () => {
+  const device = { device: "local/emulator-5554", leaseId: "l1" };
+
+  it("preserves device names and action targets, resolving a missing name from the store", () => {
+    const named = entry({ sessionTool: "open_device", deviceLink: { ...device, name: "Pixel 9" } });
+    const label = workEntryDisplayLabel(named, undefined, () => "Pixel Fold");
+    assert.match(label, /Pixel 9/);
+    assert.doesNotMatch(label, /Pixel Fold/);
+    assert.match(workEntryDisplayLabel(entry({ sessionTool: "open_device", deviceLink: device }), undefined, () => "Pixel Fold"), /Pixel Fold/);
+    assert.match(workEntryDisplayLabel(entry({ sessionTool: "device_action", deviceLink: { ...device, action: "tap", summary: "Tapped @e7 “Search”" } })), /Search/);
+  });
+
+  it("keeps the approval outcome alongside the device name", () => {
+    const label = workEntryDisplayLabel(entry({
+      sessionTool: "open_device",
+      deviceLink: { ...device, name: "iPhone 17 Pro" },
+      toolApproval: { kind: "spend", family: "devices", title: "t", outcome: "approved", approvalId: "a" }
+    }));
+    assert.match(label, /iPhone 17 Pro/);
+    assert.match(label, /Approved/);
+  });
+});

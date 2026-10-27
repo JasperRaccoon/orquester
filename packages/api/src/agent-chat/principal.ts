@@ -44,7 +44,9 @@
  *   403 `AGENT_PROMPT_PIN_REFUSED`);
  * - push-notify rate-limit keys (agent → its chat; external → its credential; user → none);
  * - refusals of `agent` principals on card answers and grant revocation (403): only a person
- *   answers cards or revokes grants.
+ *   answers cards or revokes grants;
+ * - the Device panel's `/api/devices/leases/:leaseId/user-action` buttons: only `user` may act
+ *   (403 for `agent` or `external`); agents use `device_action` under the controller rules.
  *
  * **Socket-trusted** — honoured from ANY unix-socket / in-process caller (trusted local control,
  * AGENTS.md; the daemon's own workers post through the internal `DaemonApi` with no principal) and

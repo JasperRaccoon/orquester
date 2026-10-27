@@ -6,6 +6,8 @@
  * a cancel that does not land).
  */
 
+import { parse } from "yaml";
+
 export interface FakeRun {
   id: number;
   workflowFile: string;
@@ -201,10 +203,16 @@ export class FakeGithub {
         return this.json(422, { message: "Workflow does not have 'workflow_dispatch' trigger" });
       }
       const inputs = (body?.inputs ?? {}) as Record<string, string>;
-      if (inputs.runner !== undefined && !/^blacksmith-(6|12)vcpu-macos-(15|26|27)$/.test(inputs.runner)) {
+      if (inputs.runner !== undefined && !/^blacksmith-((6|12)vcpu-macos-(15|26|27)|(2|4|8|16|32)vcpu-ubuntu-2404)$/.test(inputs.runner)) {
         return this.json(422, { message: `Provided value '${inputs.runner}' for input 'runner' not in the list of allowed values` });
       }
-      const run = this.addRun({ workflowFile: match[1]!, displayTitle: `orq-${inputs.box_id}`, status: "queued", jobStatus: "queued", inputs });
+      // GitHub validates inputs against the committed workflow: unknown inputs are refused.
+      const committed = repo.files.get(`.github/workflows/${match[1]}`)?.content;
+      const declared = committed === undefined ? null : (parse(committed) as { on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } } })?.on?.workflow_dispatch?.inputs;
+      const unexpected = declared === null ? [] : Object.keys(inputs).filter((name) => !Object.hasOwn(declared ?? {}, name));
+      if (unexpected.length > 0) return this.json(422, { message: `Unexpected inputs provided: ${JSON.stringify(unexpected)}` });
+      const displayTitle = inputs.request_id !== undefined ? `orq-cache-${inputs.os}-${inputs.request_id}` : `orq-${inputs.box_id}`;
+      const run = this.addRun({ workflowFile: match[1]!, displayTitle, status: "queued", jobStatus: "queued", inputs });
       if (this.dispatchNoDetails || body?.return_run_details !== true) return this.json(204, null);
       return this.json(200, { workflow_run_id: run.id, run_url: `https://api.github.com/x/${run.id}`, html_url: `https://github.com/x/actions/runs/${run.id}` });
     }

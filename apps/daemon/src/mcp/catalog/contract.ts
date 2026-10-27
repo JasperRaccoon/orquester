@@ -9,7 +9,7 @@
 
 import type { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, SpendFamily, TOOL_APPROVAL_LIMIT, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
+import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, SpendFamily, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
 import type { AgentAdapterId, CausedBy, InteractionMode, RuntimeMode, ThreadMessageOrigin, ThreadReplyMode } from "@orquester/api/agent-chat";
 import type { AgentToolGrantQuery, AgentToolGrantRecord } from "@orquester/config";
 
@@ -24,38 +24,9 @@ export type { AdminFamily, ApprovalFamily, ApprovalKind, SpendFamily, ToolsetId 
 
 /** Who a tool is advertised to: external MCP clients, in-chat agents, or both. */
 export type Audience = "external" | "chat";
-export const AUDIENCES: readonly Audience[] = ["external", "chat"];
 
 /** A tool's chat tier (§6). External callers are full trust. */
 export type Tier = ToolTier;
-
-/**
- * The error codes the unified catalog adds (spec §4.3) to the existing ones (`INVALID_ARGUMENT`,
- * `THREAD_NOT_FOUND`, `PERMISSION_DENIED`, `CANCELLED`, and the wire's `WAIT_CYCLE`,
- * `TARGET_BUSY`, `REPLY_SUBSCRIPTION_LIMIT` from `@orquester/api/agent-chat`). Thrown as
- * `ToolError(code, message)`.
- */
-export const ORQUESTER_TOOL_ERROR_CODES = {
-  /** No tool of that name for this audience. */
-  TOOL_NOT_FOUND: "TOOL_NOT_FOUND",
-  /** The user denied the card; the message quotes their reason. */
-  APPROVAL_DENIED: "APPROVAL_DENIED",
-  /** The card expired (`ADMIN_APPROVAL_TIMEOUT_MS`). */
-  APPROVAL_TIMEOUT: "APPROVAL_TIMEOUT",
-  /** The whole preview would exceed `TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES`: "split the change into smaller calls". */
-  PREVIEW_TOO_LARGE: "PREVIEW_TOO_LARGE",
-  /** A pinned revision, content hash or commit changed between the card and the write; nothing was written. */
-  PREVIEW_STALE: "PREVIEW_STALE",
-  /** The exchange reached `MAX_EXCHANGE_HOPS`: "summarise for your user instead". */
-  EXCHANGE_LIMIT: "EXCHANGE_LIMIT",
-  /** A project outside the sandbox or not found — never confirmed to exist. */
-  PROJECT_NOT_FOUND: "PROJECT_NOT_FOUND",
-  /** An Admin call from a workflow-owned chat (§5.4): never a card. */
-  ADMIN_NOT_AVAILABLE: "ADMIN_NOT_AVAILABLE",
-  /** `MAX_PENDING_TOOL_APPROVALS_PER_THREAD` cards already wait in this chat: wait for answers, batch changes. */
-  APPROVAL_LIMIT: "APPROVAL_LIMIT"
-} as const satisfies Record<string, string> & { APPROVAL_LIMIT: typeof TOOL_APPROVAL_LIMIT };
-export type OrquesterToolErrorCode = (typeof ORQUESTER_TOOL_ERROR_CODES)[keyof typeof ORQUESTER_TOOL_ERROR_CODES];
 
 // ---------------------------------------------------------------------------
 // The caller
@@ -142,7 +113,7 @@ export interface ScopeClaim {
    * saved prompt is agent-made or used by a workflow): read by the tool's `tier(args, scope)` /
    * `adminFamily(args, scope)`. Ignored for a tool whose tier is fixed.
    */
-  resolved?: { tier: Tier; adminFamily?: AdminFamily };
+  resolved?: { tier: Tier; adminFamily?: AdminFamily; spendFamily?: SpendFamily };
 }
 
 /** What `scope` and `approval` may use: the call context before any approval exists. */
@@ -379,8 +350,11 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
    * `spend` card of this family in EVERY permission mode — workflow-owned and agent-to-agent chats
    * included (nobody may be watching: the card waits, a push goes out, and it expires as
    * `APPROVAL_TIMEOUT`) — never covered or offered a grant, refused while planning. Requires `approval`.
+   * Per call (devices: `open_device` spends only when it must rent a host the owner did not
+   * pre-approve, which its `scope` looks up into `ScopeClaim.resolved.spendFamily`): undefined = no
+   * spend card for this call.
    */
-  spendFamily?: SpendFamily;
+  spendFamily?: SpendFamily | ((args: z.infer<z.ZodObject<Shape>>, scope: ScopeClaim) => SpendFamily | undefined);
   scope(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ScopeClaim>;
   /** The card's content; required when the tier can be `admin`, and with `spendFamily`. */
   approval?(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ApprovalPreview>;

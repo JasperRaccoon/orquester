@@ -133,8 +133,3 @@ export function isWorkflowOwned(sessions: readonly SessionSummary[], threadId: s
   // A chain this deep is no lineage the daemon writes: fail closed.
   return true;
 }
-
-/** {@link isWorkflowOwned}, reading the tabs now. */
-export async function readWorkflowOwned(api: DaemonApi, threadId: string): Promise<boolean> {
-  return isWorkflowOwned(await listSessions(api), threadId);
-}

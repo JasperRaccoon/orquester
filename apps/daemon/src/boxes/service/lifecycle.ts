@@ -7,7 +7,8 @@
  *   tags; the installation id keeps another appdir's reconciler (same provider account) off it.
  * - Setup runs in the background, one step at a time; every step's state is persisted (and so
  *   broadcast) as it changes, and its progress goes to the box's setup log. A temporary box runs
- *   create, connect and ready only.
+ *   create, connect and ready only; a device host create, connect, `devices` (the device service's
+ *   {@link DeviceHostPreparer}) and ready.
  * - Failing to create, connect or make the host paths tears the box down (`provisioning-failed`);
  *   any later step fails on its own and the box still becomes ready, its `stateReason` naming the
  *   step. A pipeline resumed after a restart skips the steps already finished.
@@ -16,6 +17,11 @@
  *   provider create call already sent is never aborted: destroy waits for it and destroys what it
  *   returned. A record without an instance ref whose create was sent (it threw, or a restart cut it
  *   off) is looked up by its name and tags first; a lookup that fails leaves `destroy-failed`.
+ * - Bring-your-own machines (`provider: "byo"`, `service/byo.ts`) are never created or destroyed
+ *   here: a project or chat using one runs setup from `connect` on, and "destroying" it releases
+ *   it back to the owner (`purpose: "machine"`, {@link BoxLifecycle.release}). A machine is `ready`
+ *   while `orq-agent` is connected and `offline` otherwise; a failed setup on one never tears it
+ *   down.
  */
 
 import { generateKeyPairSync, randomBytes, randomInt } from "node:crypto";
@@ -31,7 +37,8 @@ import {
   type BoxPurpose,
   type BoxSetupStep,
   type BoxSetupStepId,
-  type BoxSetupStepState
+  type BoxSetupStepState,
+  type BoxSysInfo
 } from "@orquester/api";
 import { agentAccountsDir, agentChatThreadsDir, sessionProfilePreparedRootDir, type StoredBox } from "@orquester/config";
 
@@ -129,7 +136,6 @@ export interface BoxLifecycleDeps {
   agentClis?: BoxAgentClis;
   setupLog: BoxSetupLog;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error" | "log">;
   /** A provider call failed: the reconciler takes a look at that provider soon. */
   onProviderError(provider: string): void;
@@ -138,11 +144,20 @@ export interface BoxLifecycleDeps {
    * (no Go toolchain to build them), and nothing billable is created. Absent: not checked.
    */
   agentBuilds?: { current(): Promise<{ version: string } | null> };
+  /** Who prepares device-host boxes (the device service while it runs); null or absent: the `devices` step is skipped. */
+  deviceHostPreparer?: () => DeviceHostPreparer | null;
 }
 
 export interface BoxAgentClis {
   ensure(connection: BoxConnection, agent: BoxAgentId, onProgress: (line: string) => void): Promise<{ installed: boolean }>;
 }
+
+/**
+ * The `devices` setup step of a device-host box (devices spec §6.3): the device service installs
+ * the device tools and starts its helpers over the box link. Resolves once the box can run devices;
+ * rejects with a message for the owner (the box is then torn down).
+ */
+export type DeviceHostPreparer = (input: { boxId: string; connection: BoxConnection; signal: AbortSignal; log: (line: string) => void }) => Promise<void>;
 
 export interface CreateBoxSpec {
   purpose: BoxPurpose;
@@ -272,6 +287,38 @@ export function newBoxId(): string {
   return randomBytes(6).toString("hex");
 }
 
+const BYO_OFFLINE_REASON = "Offline: orq-agent on this machine is not connected.";
+
+/**
+ * A bring-your-own machine's record after `orq-agent` connected or dropped: the first connect ends
+ * `pairing` (the pairing code is spent by then; any left is dropped); later ones toggle `ready` ⇄
+ * `offline`. A setup in progress keeps `provisioning`.
+ */
+function byoConnectionChanged(record: StoredBox, connected: boolean, at: string, sys?: Pick<BoxSysInfo, "os" | "arch" | "libc" | "kvm">): void {
+  if (connected) {
+    if (sys) {
+      record.os = sys.os;
+      record.arch = sys.arch;
+      record.libc = sys.libc;
+      if (typeof sys.kvm === "boolean") record.kvm = sys.kvm;
+    }
+    if (record.state === "pairing") {
+      record.readyAt = at;
+      delete record.pairingCodeHash;
+      delete record.pairingExpiresAt;
+    }
+    if (record.state === "pairing" || record.state === "offline" || record.state === "unreachable") {
+      record.state = "ready";
+      record.stateReason = null;
+    }
+    return;
+  }
+  if (record.state === "ready" || record.state === "unreachable") {
+    record.state = "offline";
+    record.stateReason = BYO_OFFLINE_REASON;
+  }
+}
+
 class SetupStepError extends Error {}
 
 type StepOutcome = { state: "done" | "skipped"; message?: string | null };
@@ -375,6 +422,15 @@ export class BoxLifecycle {
     this.startProvisioning(boxId);
   }
 
+  /**
+   * Start setup of a bring-your-own machine a project was just placed on (its record already says
+   * so: `purpose: "project"`, state `provisioning`, the `create` step done).
+   */
+  provisionLeased(boxId: string): void {
+    if (this.busy(boxId) || this.stopped) return;
+    this.startProvisioning(boxId);
+  }
+
   /** Resolves once the box's setup (and a teardown after a failure) has finished. */
   async whenProvisioned(boxId: string): Promise<void> {
     await this.runs.get(boxId)?.done;
@@ -401,7 +457,8 @@ export class BoxLifecycle {
   destroy(boxId: string, reason: BoxDestroyedReason, message?: string | null): Promise<StoredBox> {
     const existing = this.destroys.get(boxId);
     if (existing) return existing;
-    const run = this.runDestroy(boxId, reason, message ?? null).finally(() => this.destroys.delete(boxId));
+    const byo = this.deps.store.get(boxId)?.provider === "byo";
+    const run = (byo ? this.release(boxId, reason) : this.runDestroy(boxId, reason, message ?? null)).finally(() => this.destroys.delete(boxId));
     this.destroys.set(boxId, run);
     this.track(run);
     return run;
@@ -412,13 +469,49 @@ export class BoxLifecycle {
     const record = this.deps.store.get(boxId);
     if (!record || record.state === "destroyed") return;
     const at = new Date(this.deps.clock.now()).toISOString();
+    const sys = connected && record.provider === "byo" ? this.deps.hub.get(boxId)?.sys : undefined;
     await this.deps.store.update(boxId, (next) => {
       next.lastSeenAt = at;
+      if (next.provider === "byo") {
+        byoConnectionChanged(next, connected, at, sys);
+        return;
+      }
       if (connected && next.state === "unreachable") {
         next.state = "ready";
         next.stateReason = null;
       }
     });
+  }
+
+  /**
+   * Give a bring-your-own machine back to its owner (what "destroy" means for one): the chat's
+   * background jobs stop, and the record becomes an idle `machine` again — `ready` while connected,
+   * else `offline`. The machine itself, its files and its `orq-agent` are left alone.
+   */
+  async release(boxId: string, reason: BoxDestroyedReason): Promise<StoredBox> {
+    const before = this.require(boxId);
+    if (before.purpose === "machine") return before;
+    const run = this.runs.get(boxId);
+    if (run) {
+      run.abort.abort();
+      await run.pipeline.catch(() => undefined);
+    }
+    const connection = this.deps.hub.get(boxId);
+    if (before.purpose === "temporary" && connection?.connected) await this.stopChatJobs(connection);
+    const label = this.deps.providers.get("byo")?.label ?? "byo";
+    void this.deps.setupLog.append(boxId, `Released (${destroyedReasonText(reason, label)}); the machine is free again.`);
+    const released = await this.deps.store.update(boxId, (record) => {
+      record.purpose = "machine";
+      record.threadId = null;
+      record.purposeNote = null;
+      record.project = null;
+      record.deadlineAt = null;
+      record.setup = [];
+      delete record.lifetimeMinutes;
+      record.state = connection?.connected ? "ready" : "offline";
+      record.stateReason = connection?.connected ? null : BYO_OFFLINE_REASON;
+    });
+    return released ?? this.require(boxId);
   }
 
   /** `ready` → `unreachable` (the reconciler saw it disconnected for long while the provider says it runs). */
@@ -449,6 +542,8 @@ export class BoxLifecycle {
     const done = pipeline
       .then(async (fatal) => {
         if (fatal === null || abort.signal.aborted) return;
+        // The owner's machine stays with its project: deleting the project releases it.
+        if (this.deps.store.get(boxId)?.provider === "byo") return this.leasedSetupFailed(boxId, fatal);
         await this.destroy(boxId, "provisioning-failed", fatal).catch(() => undefined);
       })
       .finally(() => {
@@ -488,15 +583,32 @@ export class BoxLifecycle {
           next.os = sys.os;
           next.arch = sys.arch;
           next.libc = sys.libc;
+          // Older orq-agents do not report KVM: leave it unknown.
+          if (typeof sys.kvm === "boolean") next.kvm = sys.kvm;
           next.lastSeenAt = new Date(this.deps.clock.now()).toISOString();
         });
         linked.connection = connection;
         return { state: "done", message: `${sys.osRelease}, ${sys.arch}, orq-agent ${connection.agentVersion}` };
       });
-      const link = linked.connection;
+      // A setup resumed after its connect step finished (a restart) has no link yet: wait for it.
+      const link =
+        linked.connection ??
+        (connected
+          ? await this.deps.hub
+              .waitConnected(boxId, { signal, timeoutMs: CONNECT_DEADLINE_MS[this.require(boxId).kind as BoxKind] ?? CONNECT_DEADLINE_MS.linux })
+              .catch((error: unknown) => {
+                if (signal.aborted) throw error;
+                return undefined;
+              })
+          : undefined);
       if (!connected || !link) return this.stepMessage(boxId, "connect");
 
-      if (!temporary) {
+      if (initial.purpose === "device-host") {
+        // A device host that cannot run devices is of no use: a failed `devices` step tears it down.
+        if (!(await this.runStep(boxId, "devices", signal, (log) => this.prepareDevices(boxId, link, signal, log)))) {
+          return this.stepMessage(boxId, "devices");
+        }
+      } else if (!temporary) {
         if (!(await this.runStep(boxId, "paths", signal, () => this.ensurePaths(boxId, link, signal)))) {
           return this.stepMessage(boxId, "paths");
         }
@@ -573,10 +685,12 @@ export class BoxLifecycle {
           bootstrap,
           sshPublicKey: throwawaySshPublicKey(),
           windowsPassword,
-          lifetimeMinutes
+          lifetimeMinutes,
+          // Device hosts start from the device caches (Devices phase 2 §5).
+          ...(record.purpose === "device-host" ? { prepare: "devices" as const } : {})
         },
         // Not `signal`: aborting a create the provider may already have accepted leaves an instance without a ref.
-        { signal: this.shutdown.signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
+        { signal: this.shutdown.signal }
       );
       await this.deps.store.update(boxId, (next) => {
         next.providerRef = result.ref;
@@ -587,6 +701,27 @@ export class BoxLifecycle {
     } catch (error) {
       if (!this.shutdown.signal.aborted) this.deps.onProviderError(adapter.id);
       throw error;
+    }
+    return { state: "done" };
+  }
+
+  /** The `devices` step: the device service's preparer, its progress lines shown on the step. */
+  private async prepareDevices(boxId: string, connection: BoxConnection, signal: AbortSignal, log: (line: string) => void): Promise<StepOutcome> {
+    const preparer = this.deps.deviceHostPreparer?.() ?? null;
+    if (!preparer) return { state: "skipped", message: "Device simulators is off: the device service prepares the box when it starts." };
+    const progress = this.stepProgress(boxId, "devices");
+    try {
+      await preparer({
+        boxId,
+        connection,
+        signal,
+        log: (line) => {
+          log(line);
+          progress.set(line);
+        }
+      });
+    } finally {
+      await progress.close();
     }
     return { state: "done" };
   }
@@ -759,7 +894,9 @@ export class BoxLifecycle {
     const { sys } = connection;
     if (sys.os === "win32") return { state: "skipped", message: "Automatic toolchain setup is not available on Windows boxes." };
     const boxDir = hostToBoxPath(connection.paths, project.path);
-    if (sys.os === "linux" && !(sys.isRoot || sys.canElevate)) {
+    if (this.require(boxId).provider === "byo") {
+      log("Your own machine: system packages and swap are left as they are.");
+    } else if (sys.os === "linux" && !(sys.isRoot || sys.canElevate)) {
       log("No root access in the box: skipped installing bubblewrap (Codex's sandbox).");
     } else if (sys.os === "linux") {
       // Codex's sandbox needs bubblewrap; best effort, never the step's failure.
@@ -1036,7 +1173,7 @@ export class BoxLifecycle {
    */
   private async destroyAndConfirm(adapter: BoxProviderAdapter, credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<void> {
     const signal = AbortSignal.timeout(DESTROY_CONFIRM_MS);
-    const options = { signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    const options = { signal };
     await adapter.destroy(credentials, ref, options);
     let lastError: unknown = null;
     for (let attempt = 0; ; attempt++) {
@@ -1067,7 +1204,6 @@ export class BoxLifecycle {
     try {
       instances = await adapter.listManaged(credentials, {
         signal: AbortSignal.timeout(DESTROY_CONFIRM_MS),
-        ...(this.deps.fetch ? { fetch: this.deps.fetch } : {})
       });
     } catch (error) {
       throw new Error(`Could not check whether ${adapter.label} created the machine (${errorLine(error)}).`);
@@ -1087,6 +1223,32 @@ export class BoxLifecycle {
     const connection = this.deps.hub.get(boxId);
     if (!connection?.connected) return;
     await connection.request("agent.shutdown", { reason: "destroyed" }, { timeoutMs: 10_000 }).catch(() => undefined);
+  }
+
+  /** A project's setup on a bring-your-own machine failed: the machine stays with the project, saying why. */
+  private async leasedSetupFailed(boxId: string, fatal: string): Promise<void> {
+    const connected = this.deps.hub.get(boxId)?.connected === true;
+    await this.deps.store
+      .update(boxId, (record) => {
+        if (record.state !== "provisioning") return;
+        record.state = connected ? "ready" : "offline";
+        record.stateReason = `${fatal} Delete the project to free the machine.`;
+      })
+      .catch((error) => this.deps.logger.warn(`Box ${boxId}: could not record the failed setup`, errorLine(error)));
+  }
+
+  /** The background jobs a chat started on a lent machine (`box_exec` with background: true). */
+  private async stopChatJobs(connection: BoxConnection): Promise<void> {
+    try {
+      const procs = await connection.request("proc.list", {}, { timeoutMs: 10_000 });
+      await Promise.all(
+        procs
+          .filter((proc) => proc.procId.startsWith("job-") && proc.running)
+          .map((proc) => connection.request("proc.signal", { procId: proc.procId, signal: "SIGKILL" }, { timeoutMs: 10_000 }).catch(() => undefined))
+      );
+    } catch (error) {
+      this.deps.logger.warn(`Box ${connection.boxId}: could not stop the chat's jobs`, errorLine(error));
+    }
   }
 
   // ---- helpers ---------------------------------------------------------------------------------

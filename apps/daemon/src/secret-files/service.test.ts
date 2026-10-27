@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SECRET_FILES_MAX_PER_VAULT, type SecretFilesErrorCode, type SecretVaultDetail } from "@orquester/api";
+import { parseEnv } from "./files.ts";
 import { SecretFilesError, TRACKED_RETRY_MS, cloneFileState } from "./service.ts";
 import { REPO, WS, bytes, makeHarness, root, sha, text, type Harness } from "./test-fakes.ts";
 import type { VaultFileRecord } from "./vault-store.ts";
@@ -286,7 +287,7 @@ test("setup: merge takes the union of keys, the primary's values winning; bad so
   });
   const vault = h.store.get(WS, REPO)!;
   const merged = text(await h.store.readContent(vault.files[0]!.versions[0]!.sha256));
-  const parsed = h.fs.ops.parseEnv(bytes(merged))!;
+  const parsed = parseEnv(bytes(merged))!;
   assert.deepEqual([...parsed.entries()], [["A", "1"], ["B", "2"], ["C", "3"]]);
   assert.deepEqual(states(detail, ".env"), { a: "modified", b: "modified", c: "refused:tracked" });
   assert.deepEqual(detail.excluded, [".env.local"]);
@@ -791,7 +792,7 @@ test("unmanage and exclude retire a file with its history; adding it again start
 test("content tokens: per clone copy, stable for the same content, changing with it, absent without a copy", async () => {
   const h = await makeHarness();
   const a = h.clone("a");
-  const b = h.clone("b");
+  h.clone("b");
   const c = h.clone("c");
   h.fs.put(`${a}/.env`, "KEY=one\n");
   h.fs.mkdir(`${c}/api`);

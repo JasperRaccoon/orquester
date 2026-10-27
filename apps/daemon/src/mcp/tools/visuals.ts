@@ -11,7 +11,6 @@
  */
 
 import { z } from "zod";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   HTML_PREVIEW_MAX_WIDTH,
   HTML_PREVIEW_MIN_WIDTH,
@@ -26,7 +25,7 @@ import {
 
 import { defineTool, type AnyOrquesterTool, type ScopeClaim, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
-import { ok } from "../result.ts";
+import { imageResult } from "../../session-tools/results.ts";
 
 export const HTML_PREVIEW_TOOL_NAME = "html_preview";
 
@@ -68,18 +67,6 @@ const ownThread = (caller: ToolCaller, writes: boolean): ScopeClaim => ({
 function chatCaller(caller: ToolCaller, tool: string): ThreadCaller {
   if (caller.kind !== "thread") throw new ToolError("TOOL_NOT_FOUND", `${tool} is a chat tool.`);
   return caller;
-}
-
-/**
- * An image result (MCP image content) followed by `value` as JSON text and `structuredContent` —
- * the image first, as providers render content in order.
- */
-function imageResult(image: { data: string; mimeType: string }, value: Record<string, unknown>): CallToolResult {
-  const json = ok(value);
-  return {
-    content: [{ type: "image", data: image.data, mimeType: image.mimeType }, ...json.content],
-    structuredContent: json.structuredContent
-  };
 }
 
 export const visualsFamily: readonly AnyOrquesterTool[] = [

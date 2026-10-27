@@ -64,7 +64,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonMethod } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
-import { capText, clipText } from "../result.ts";
+import { clipText } from "../result.ts";
 
 // ---------------------------------------------------------------------------
 // Limits of what the tools render
@@ -185,22 +185,6 @@ function entryBlock(entry: KnowledgeEntrySummary, names: ReadonlyMap<string, str
   if (snippet) lines.push(`${indent}${snippet}`);
   lines.push(`${indent}cite: ${entry.citation}`);
   return lines;
-}
-
-/** At most `max` UTF-8 bytes of `body`, never splitting a character. */
-function clipBytes(body: string, max: number): { text: string; omitted: number } {
-  const total = Buffer.byteLength(body, "utf8");
-  if (total <= max) return { text: body, omitted: 0 };
-  // Every character is at most 4 bytes: start from a safe length and grow.
-  let lo = 0;
-  let hi = Math.min(body.length, max);
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(capText(body, mid).text, "utf8") <= max) lo = mid;
-    else hi = mid - 1;
-  }
-  const kept = capText(body, lo).text;
-  return { text: kept, omitted: total - Buffer.byteLength(kept, "utf8") };
 }
 
 /** A title quoted on one line, clipped. */
@@ -449,7 +433,7 @@ function renderItems(outcomes: readonly KnowledgeGetOutcome[], names: ReadonlyMa
     .join(several ? "\n\n" : "\n");
   // Only the text around the bodies can still be too long (several large concepts): cut it, and say so.
   if (Buffer.byteLength(out, "utf8") <= KNOWLEDGE_GET_OUTPUT_MAX_BYTES) return out;
-  return `${clipBytes(out, KNOWLEDGE_GET_OUTPUT_MAX_BYTES - 100).text}\n[… the rest is cut at the result limit: read fewer ids at once]`;
+  return `${bodyWindow(out, 0, KNOWLEDGE_GET_OUTPUT_MAX_BYTES - 100).text}\n[… the rest is cut at the result limit: read fewer ids at once]`;
 }
 
 /** The save answer: what was saved, what was already there (or may be: close in meaning), what was created. */

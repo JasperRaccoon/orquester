@@ -20,27 +20,27 @@ function createRoutes(createStatus = 200, createBody: unknown = fixture("civo", 
 }
 
 // Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
-test("validate: ok with a working key, Civo's reason for a bad or missing one", async () => {
+test("validate: ok with a working key, Civo's reason for a bad or missing one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/instances?page=1&per_page=1`, body: fixture("civo", "instances-empty") },
     { method: "GET", url: `${API}/instances?page=1&per_page=1`, status: 401, body: fixture("civo", "error-unauthorized") }
   ]);
-  assert.deepEqual(await civoAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await civoAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer civo-test-key");
-  const bad = await civoAdapter.validate({ apiKey: "nope" }, replayOptions(replay));
+  const bad = await civoAdapter.validate({ apiKey: "nope" }, replayOptions(t, replay));
   assert.deepEqual(bad, { ok: false, message: "Civo: Authentication failed, please check your API key (check the key and its permissions)" });
-  assert.deepEqual(await civoAdapter.validate({}, replayOptions(replay)), { ok: false, message: "Civo: API key is missing" });
+  assert.deepEqual(await civoAdapter.validate({}, replayOptions(t, replay)), { ok: false, message: "Civo: API key is missing" });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: instance sizes with table prices, open regions, Ubuntu 24.04 first", async () => {
+test("offers: instance sizes with table prices, open regions, Ubuntu 24.04 first", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/regions`, body: fixture("civo", "regions") },
     { method: "GET", url: `${API}/sizes`, body: fixture("civo", "sizes") },
     // Image names are read from the account's default region.
     { method: "GET", url: `${API}/disk_images?region=FRA1`, body: fixture("civo", "disk-images") }
   ]);
-  const offers = await civoAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await civoAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
   // No Kubernetes, database, GPU or non-selectable sizes; an unknown family has no price.
   assert.deepEqual(
@@ -77,13 +77,13 @@ test("offers: instance sizes with table prices, open regions, Ubuntu 24.04 first
     { id: "ubuntu-jammy", label: "Ubuntu 22.04 LTS" },
     { id: "debian-12", label: "Debian 12" }
   ]);
-  await assert.rejects(civoAdapter.offers(credentials, "linux-gpu", replayOptions(replayFetch([]))), /does not rent linux-gpu/);
+  await assert.rejects(civoAdapter.offers(credentials, "linux-gpu", replayOptions(t, replayFetch([]))), /does not rent linux-gpu/);
 });
 
-test("create: resolves image and network in the region, one POST with hostname, tags and the shell script", async () => {
+test("create: resolves image and network in the region, one POST with hostname, tags and the shell script", async (t) => {
   const replay = replayFetch(createRoutes());
   const request = testCreateRequest({ size: "g3.small", region: "LON1" });
-  const result = await civoAdapter.create(credentials, request, replayOptions(replay));
+  const result = await civoAdapter.create(credentials, request, replayOptions(t, replay));
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   assert.deepEqual(post.body, {
     hostname: `orq-${TEST_BOX_ID}`,
@@ -102,22 +102,22 @@ test("create: resolves image and network in the region, one POST with hostname, 
   assert.equal(JSON.stringify(result).includes("redacted-password"), false);
 });
 
-test("create: a chosen image is looked up by name; an unknown one fails before anything is created", async () => {
+test("create: a chosen image is looked up by name; an unknown one fails before anything is created", async (t) => {
   const replay = replayFetch(createRoutes());
-  await civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1", image: "debian-12" }), replayOptions(replay));
+  await civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1", image: "debian-12" }), replayOptions(t, replay));
   assert.equal((replay.requests.find((entry) => entry.method === "POST")!.body as Record<string, unknown>).template_id, "11111111-1111-4111-8111-000000000003");
 
   const missing = replayFetch(createRoutes());
   await assert.rejects(
-    civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1", image: "ubuntu-focal" }), replayOptions(missing)),
+    civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1", image: "ubuntu-focal" }), replayOptions(t, missing)),
     /Civo: no disk image ubuntu-focal in LON1/
   );
   assert.equal(missing.requests.some((entry) => entry.method === "POST"), false);
 });
 
-test("create: a failed create is never retried and surfaces Civo's reason", async () => {
+test("create: a failed create is never retried and surfaces Civo's reason", async (t) => {
   const replay = replayFetch(createRoutes(500, fixture("civo", "error-server")));
-  await assert.rejects(civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1" }), replayOptions(replay)), (error) => {
+  await assert.rejects(civoAdapter.create(credentials, testCreateRequest({ size: "g3.small", region: "LON1" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.equal(error.message, "Civo: An unexpected error occurred, please try again later");
@@ -126,7 +126,7 @@ test("create: a failed create is never retried and surfaces Civo's reason", asyn
   assert.equal(replay.requests.filter((entry) => entry.method === "POST").length, 1);
 });
 
-test("status: maps instance states, not found is gone, 429 is retried", async () => {
+test("status: maps instance states, not found is gone, 429 is retried", async (t) => {
   const active = fixture<Record<string, unknown>>("civo", "instance-active");
   const replay = replayFetch([
     { method: "GET", url: instanceUrl, status: 429, headers: { "retry-after": "0" }, body: fixture("civo", "error-rate-limit") },
@@ -140,30 +140,30 @@ test("status: maps instance states, not found is gone, 429 is retried", async ()
     { method: "GET", url: instanceUrl, status: 400, body: fixture("civo", "error-not-found") }
   ]);
   const ref = { instanceId: INSTANCE_ID, region: "LON1" };
-  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.10",
     hourlyUsd: null
   });
-  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "pending",
     detail: "Civo reports the instance BUILDING",
     publicIp: null,
     hourlyUsd: null
   });
-  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
-  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(t, replay))).state, "stopped");
+  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
+  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
   const gone = { state: "gone", detail: "The instance no longer exists in Civo", publicIp: null, hourlyUsd: null };
-  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), gone);
-  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), gone);
+  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(t, replay)), gone);
+  assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(t, replay)), gone);
   assert.equal(replay.pending().length, 0);
-  await assert.rejects(civoAdapter.status(credentials, { instanceId: INSTANCE_ID }, replayOptions(replay)), /instance reference has no region/);
+  await assert.rejects(civoAdapter.status(credentials, { instanceId: INSTANCE_ID }, replayOptions(t, replay)), /instance reference has no region/);
 });
 
-test("destroy: deletes the instance in its region and is idempotent", async () => {
+test("destroy: deletes the instance in its region and is idempotent", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: instanceUrl, body: fixture("civo", "delete-instance") },
     { method: "DELETE", url: instanceUrl, status: 404, body: fixture("civo", "error-not-found") },
@@ -171,14 +171,14 @@ test("destroy: deletes the instance in its region and is idempotent", async () =
     { method: "DELETE", url: instanceUrl, status: 403, body: fixture("civo", "error-unauthorized") }
   ]);
   const ref = { instanceId: INSTANCE_ID, region: "LON1" };
-  await civoAdapter.destroy(credentials, ref, replayOptions(replay));
-  await civoAdapter.destroy(credentials, ref, replayOptions(replay));
-  await civoAdapter.destroy(credentials, ref, replayOptions(replay));
-  await assert.rejects(civoAdapter.destroy(credentials, ref, replayOptions(replay)), /^ProviderHttpError: Civo: Authentication failed/);
+  await civoAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await civoAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await civoAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await assert.rejects(civoAdapter.destroy(credentials, ref, replayOptions(t, replay)), /^ProviderHttpError: Civo: Authentication failed/);
   assert.equal(replay.pending().length, 0);
 });
 
-test("listManaged: every compute region, pages followed, marked instances only", async () => {
+test("listManaged: every compute region, pages followed, marked instances only", async (t) => {
   const lon1 = fixture<{ items: unknown[] }>("civo", "instances-lon1");
   const replay = replayFetch([
     { method: "GET", url: `${API}/regions`, body: fixture("civo", "regions") },
@@ -189,7 +189,7 @@ test("listManaged: every compute region, pages followed, marked instances only",
     { method: "GET", url: `${API}/instances?region=NYC1&page=1&per_page=100`, body: fixture("civo", "instances-nyc1") },
     { method: "GET", url: `${API}/instances?region=PHX1&page=1&per_page=100`, body: fixture("civo", "instances-empty") }
   ]);
-  assert.deepEqual(await civoAdapter.listManaged(credentials, replayOptions(replay)), [
+  assert.deepEqual(await civoAdapter.listManaged(credentials, replayOptions(t, replay)), [
     {
       ref: { instanceId: INSTANCE_ID, region: "LON1" },
       name: `orq-${TEST_BOX_ID}`,

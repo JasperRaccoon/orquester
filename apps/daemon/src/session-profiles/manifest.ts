@@ -24,7 +24,7 @@ import { grokPreparedSectionSchema, type GrokPreparedSection } from "./manifest/
 import { opencodePreparedSectionSchema, type OpenCodePreparedSection } from "./manifest/opencode.ts";
 
 export const PREPARED_MANIFEST_FILE = "manifest.json";
-export const PREPARED_MANIFEST_SCHEMA = 1;
+const PREPARED_MANIFEST_SCHEMA = 1;
 
 const envelope = {
   schema: z.literal(PREPARED_MANIFEST_SCHEMA),
@@ -43,7 +43,7 @@ const envelope = {
   fingerprint: z.string().optional()
 };
 
-export const preparedManifestSchema = z.discriminatedUnion("agent", [
+const preparedManifestSchema = z.discriminatedUnion("agent", [
   z.object({ ...envelope, agent: z.literal("claude"), agentSection: claudePreparedSectionSchema }).passthrough(),
   z.object({ ...envelope, agent: z.literal("codex"), agentSection: codexPreparedSectionSchema }).passthrough(),
   z.object({ ...envelope, agent: z.literal("grok"), agentSection: grokPreparedSectionSchema }).passthrough(),

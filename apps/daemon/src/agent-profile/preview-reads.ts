@@ -16,9 +16,9 @@ import { lstat, open, readdir, readFile, readlink, realpath } from "node:fs/prom
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ProfilePluginHook, ProfilePluginMcpServer, ProfilePluginPreviewResponse, ProfilePreviewFile, ProfilePreviewTree } from "@orquester/api";
 
-export const PREVIEW_TREE_MAX_FILES = 2_000;
+const PREVIEW_TREE_MAX_FILES = 2_000;
 /** Above the card's 1 MiB full-preview cap: a tree this large could never be shown anyway. */
-export const PREVIEW_TREE_MAX_BYTES = 2 * 1024 * 1024;
+const PREVIEW_TREE_MAX_BYTES = 2 * 1024 * 1024;
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -37,7 +37,7 @@ function hasExecutableMagic(bytes: Buffer): boolean {
 }
 
 /** One regular file as a preview shows it. */
-export async function previewFile(path: string, rel: string, mode: number, budget: { bytes: number }): Promise<ProfilePreviewFile | null> {
+async function previewFile(path: string, rel: string, mode: number, budget: { bytes: number }): Promise<ProfilePreviewFile | null> {
   const handle = await open(path, "r");
   let bytes: Buffer;
   try {
@@ -147,12 +147,6 @@ export async function readGitCommit(dir: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-/** `path` resolved inside `root` (no `..` escape), else null. */
-export function insideOrNull(root: string, path: string): string | null {
-  const full = resolve(root, path);
-  return full === root || full.startsWith(root.endsWith(sep) ? root : `${root}${sep}`) ? full : null;
 }
 
 /** `./hooks/x.json` / `${CLAUDE_PLUGIN_ROOT}/hooks/x.json` → `hooks/x.json` (the tree's paths). */

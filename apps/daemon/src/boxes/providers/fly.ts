@@ -275,7 +275,6 @@ export const flyAdapter: BoxProviderAdapter = {
   ],
   accountNote: "Fly.io asks for a credit card before an organization can run Machines. Each box is its own Fly app, named orq-<box id>.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () =>

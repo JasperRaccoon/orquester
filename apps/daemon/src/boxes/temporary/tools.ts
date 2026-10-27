@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import { Transform } from "node:stream";
+import { PassThrough, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import {
@@ -72,7 +72,7 @@ export const MAX_RUNNING_JOBS_PER_BOX = 16;
 /** Open port forwards per box. */
 export const MAX_FORWARDS_PER_BOX = 16;
 /** One download's size cap (a file's bytes or a directory's tar stream). */
-export const BOX_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+const BOX_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 /** After SIGTERM (timeout, cancel), how long before SIGKILL. */
 export const KILL_GRACE_MS = 5_000;
 /** After the process exited, how long its output streams may take to end. */
@@ -105,7 +105,8 @@ const BOX_ERROR_STATUS: Readonly<Record<BoxErrorCode, number>> = {
   BOX_TAILSCALE_NEEDS_PERMISSION: 409,
   BOX_CONFIG_CHANGE_NOT_FOUND: 404,
   BOX_CONFIG_CHANGE_DECIDED: 409,
-  BOX_DESTROYED: 410
+  BOX_DESTROYED: 410,
+  BOX_IN_USE: 409
 };
 
 const DISABLED = refuse(503, "BOXES_DISABLED", "Temporary boxes are not available: the Ephemeral AI VMs plugin is off or still starting.");
@@ -153,8 +154,6 @@ export interface TemporaryBoxToolsDeps {
   isChatOpen?(threadId: string): boolean;
   clock?: TemporaryBoxClock;
   newId?: () => string;
-  /** The host's tar for directory transfers (default `tar`). */
-  tar?: string;
   logger?: { warn?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
 }
 
@@ -604,7 +603,7 @@ export class TemporaryBoxTools {
       }
       if (stats.isDirectory()) {
         // The directory's CONTENTS: unpacked into `remote`, which becomes the copy.
-        const tar = spawn(this.deps.tar ?? "tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"] });
+        const tar = spawn("tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"] });
         const exited = processExit(tar);
         abortWith(options.signal, () => tar.kill("SIGTERM"));
         try {
@@ -680,18 +679,39 @@ export class TemporaryBoxTools {
       abortWith(options.signal, () => source.destroy(new Error("cancelled")));
       // Unpacked by the host's tar into a fresh, private directory (tar refuses members that climb
       // out with `..` or absolute names, and links cannot redirect writes into existing paths there).
-      // Read the whole stream, including zero padding: exiting at the archive's first EOF block
-      // races the stdin pipeline and can reject a complete download as a premature close.
-      const tar = spawn(this.deps.tar ?? "tar", ["-xf", "-", "-C", staging, "--no-same-owner", "--ignore-zeros"], { stdio: ["pipe", "ignore", "pipe"] });
+      const tar = spawn("tar", ["-xf", "-", "-C", staging, "--no-same-owner"], { stdio: ["pipe", "ignore", "pipe"] });
       const exited = processExit(tar);
+      // Tar may stop at its end markers before the box finishes the stream. Keep reading and
+      // counting that tail: a later box error or an oversized stream must still fail the download.
+      const input = new PassThrough();
+      let inputError: Error | null = null;
+      tar.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "EPIPE") return;
+        inputError = error;
+        if (!input.writableFinished) input.destroy(error);
+      });
+      tar.stdin.once("close", () => {
+        input.unpipe(tar.stdin);
+        input.resume();
+      });
+      input.pipe(tar.stdin);
+      void exited.then(
+        ({ code, stderr }) => {
+          if (code !== 0 && !input.writableFinished) input.destroy(new Error(`tar could not unpack the directory${stderr ? `: ${stderr}` : ""}`));
+        },
+        (error: Error) => {
+          if (!input.writableFinished) input.destroy(error);
+        }
+      );
       try {
-        await pipeline(source, counter.stream, tar.stdin);
+        await pipeline(source, counter.stream, input);
       } catch (error) {
         tar.kill("SIGTERM");
         await exited.catch(() => undefined);
         throw error;
       }
       const { code, stderr } = await exited;
+      if (inputError !== null) throw inputError;
       if (code !== 0) throw new Error(`tar could not unpack the directory${stderr ? `: ${stderr}` : ""}`);
       const item = await this.unpackedItem(connection, remote, staging, options.signal);
       // A directory that carries git metadata (a `.git`, or is itself a git directory) would bring
@@ -1075,7 +1095,8 @@ export class TemporaryBoxTools {
 
   private boxChanged(boxId: string): void {
     const box = this.connection?.boxes.get(boxId);
-    if (!box || box.state === "destroying" || box.state === "destroyed") void this.boxGone(boxId);
+    // A machine of the owner's lent to a chat and given back is no longer the chat's either.
+    if (!box || box.state === "destroying" || box.state === "destroyed" || box.purpose !== "temporary") void this.boxGone(boxId);
   }
 
   /** A box went: its forwards close and its jobs are forgotten. Concurrent calls share one cleanup. */

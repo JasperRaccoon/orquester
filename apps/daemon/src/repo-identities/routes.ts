@@ -13,13 +13,11 @@ import {
   repoKeyProblem
 } from "@orquester/api";
 import { acceptRawBody, refuseUpload } from "../upload-stream.ts";
-import { FaviconError, type FetchFaviconOptions, type FetchedFavicon, fetchFavicon as defaultFetchFavicon } from "./favicon.ts";
+import { FaviconError, fetchFavicon, type FetchedFavicon } from "./favicon.ts";
 import { RepoIdentitiesService, RepoIdentityError, iconTooLarge } from "./service.ts";
 
-export interface RepoIdentityRoutesDeps {
+interface RepoIdentityRoutesDeps {
   service: RepoIdentitiesService;
-  /** Injectable for tests; defaults to the guarded fetch in `./favicon.ts`. */
-  fetchFavicon?: (domain: string, options: FetchFaviconOptions) => Promise<FetchedFavicon>;
 }
 
 /** Served with every icon: the stored type, never sniffed, and an SVG that can run nothing. */
@@ -41,7 +39,6 @@ const ICON_CACHE_NONE = "no-store";
  */
 export function registerRepoIdentityRoutes(app: FastifyInstance, deps: RepoIdentityRoutesDeps): void {
   const { service } = deps;
-  const fetchFavicon = deps.fetchFavicon ?? defaultFetchFavicon;
 
   app.get(repoIdentityRoutes.list, async (): Promise<RepoIdentitiesResponse> => ({ identities: service.list() }));
 

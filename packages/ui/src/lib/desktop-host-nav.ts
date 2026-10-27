@@ -5,15 +5,15 @@
  * the app is connected, even when the click relaunched the window.
  */
 
-import { useAppStore } from "../store/app";
+import { serverViewOpen, useAppStore } from "../store/app";
 import type { DesktopNotificationTarget } from "./desktop-host";
 import { requestSessionDeepLink } from "./session-deep-link";
 import { requestWorkflowDeepLink } from "./workflows/deep-link";
 
-/** The session tab on screen (the open project's, else the workspace's), or null — none while the Knowledge view covers it. */
+/** The session tab on screen (the open project's, else the workspace's), or null — none while a server-level view covers it. */
 export function viewingSessionId(): string | null {
   const state = useAppStore.getState();
-  if (state.knowledgeView.open) return null;
+  if (serverViewOpen(state)) return null;
   const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
   return key === null ? null : (state.activeTabByProject[key] ?? null);
 }

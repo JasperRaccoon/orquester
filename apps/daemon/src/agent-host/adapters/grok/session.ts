@@ -234,7 +234,7 @@ interface GrokSessionOptions {
 const MCP_APP_REQUEST_MS = 120_000;
 
 /** boxes: the ACP auth method that runs the auth provider command (spikes doc (c), grok 1.0.46). */
-export const GROK_BOX_AUTH_METHOD_ID = "grok.com";
+const GROK_BOX_AUTH_METHOD_ID = "grok.com";
 /** boxes: the sign-in asks the broker, which may refresh the account first. */
 const GROK_BOX_AUTH_TIMEOUT_MS = 90_000;
 

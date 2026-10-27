@@ -104,7 +104,7 @@ export async function providerRequest<T = unknown>(
   request: ProviderRequest,
   options: ProviderCallOptions
 ): Promise<ProviderResponse<T>> {
-  const doFetch = options.fetch ?? fetch;
+  const doFetch = fetch;
   const attempts = Math.max(1, request.attempts ?? DEFAULT_ATTEMPTS);
   const headers: Record<string, string> = { Accept: "application/json", ...request.headers };
   let body: string | undefined;
@@ -169,11 +169,6 @@ export async function providerRequest<T = unknown>(
 /** `ProviderHttpError` with a 401/403: the credentials are wrong or lack permission. */
 export function isAuthError(error: unknown): boolean {
   return error instanceof ProviderHttpError && (error.status === 401 || error.status === 403);
-}
-
-/** The standard tags every provider applies (where it supports tags/labels). */
-export function boxTags(boxId: string, extra: Record<string, string> = {}): Record<string, string> {
-  return { "orquester-box": boxId, ...extra };
 }
 
 /** `orq-<boxId>` → boxId; null for names Orquester did not create. */

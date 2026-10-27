@@ -29,7 +29,6 @@ import type { ApprovalFamily, ToolApprovalGrantScope } from "./agent-chat/tool-a
  * runs code outside the agent's sandbox, and always raises a card.
  */
 export type ToolTier = "read" | "act" | "admin";
-export const TOOL_TIERS: readonly ToolTier[] = ["read", "act", "admin"];
 
 /** The groups chat tools are filed under (a label and the `orquester/toolset` tag; never a switch). */
 export const TOOLSET_IDS = [
@@ -45,7 +44,9 @@ export const TOOLSET_IDS = [
   // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
   "boxes",
   // Knowledge Graph plugin: the shared knowledge base (its spec, "Agent tools").
-  "knowledge"
+  "knowledge",
+  // Device simulators plugin: iOS simulators and Android emulators (devices spec §9).
+  "devices"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -72,9 +73,9 @@ const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
 /**
- * Every toolset, with its tools in catalog order (spec §9.1): 60 chat tools, all advertised to every
- * chat (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
- * plugin is on).
+ * Every toolset, with its tools in catalog order (spec §9.1), advertised to every chat
+ * (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
+ * plugin is on, the `devices` ones while a device platform is on).
  */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
@@ -190,6 +191,14 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       act("knowledge_worker_next_task"),
       act("knowledge_worker_submit")
     ]
+  },
+  // Devices: advertised only while the Device simulators plugin is on, agents may use devices and a
+  // platform is enabled (`session-tools/manifest.ts`). `open_device` raises a `spend` card only when
+  // it must rent a Mac host the owner did not pre-approve; read-only `device_action` kinds are Read.
+  {
+    id: "devices",
+    label: "Devices",
+    tools: [read("list_devices"), act("open_device"), act("device_action"), act("device_install"), act("close_device")]
   }
 ];
 

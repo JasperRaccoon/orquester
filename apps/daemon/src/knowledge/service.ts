@@ -110,7 +110,6 @@ export interface KnowledgeServiceOptions {
   /** Overrides the ONNX embedder over the runtime (tests pass a fake). */
   embedders?: KnowledgeEmbedderSourceFactory;
   logger?: Logger;
-  now?: () => Date;
 }
 
 /** The knowledge base, open from the first switch-on until the daemon stops. */
@@ -315,7 +314,7 @@ export class KnowledgeService {
     const { appdir } = this.options;
     let store: KnowledgeStore;
     try {
-      store = await KnowledgeStore.open({ appdir, logger: this.logger, ...(this.options.now ? { now: this.options.now } : {}) });
+      store = await KnowledgeStore.open({ appdir, logger: this.logger });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (this.openError?.message !== message) this.logger.error(`knowledge: the knowledge base could not be opened (${message})`);

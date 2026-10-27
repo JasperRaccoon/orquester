@@ -9,7 +9,7 @@ import test from "node:test";
 import { parse } from "yaml";
 
 import type { BootstrapInput } from "../contracts.ts";
-import { bootstrapSecondStage, buildBootstrap, normalizeDaemonUrl } from "./bootstrap.ts";
+import { bootstrapSecondStage, buildBootstrap, byoPairingScript, normalizeDaemonUrl } from "./bootstrap.ts";
 
 const TOKEN = "obt_test-TOKEN.value_0123456789abcdef";
 // Split so secret scanners do not read the fake key as a real one.
@@ -50,6 +50,11 @@ test("validates its input before anything reaches a script", () => {
   assert.throws(() => normalizeDaemonUrl("http://orq.example.com"), /https/);
   assert.throws(() => normalizeDaemonUrl("https://user:pw@orq.example.com"), /credentials/);
   assert.throws(() => normalizeDaemonUrl("https://orq.example.com/?a=1"), /query/);
+  for (const path of ["/;id;/path", "/&id/path", "/|id/path", "/(id)/path"]) {
+    assert.throws(() => normalizeDaemonUrl(`https://orq.example.com${path}`), /characters/);
+  }
+  assert.equal(normalizeDaemonUrl("https://orq.example.com/base%3Bdata%26part%7Cname/"), "https://orq.example.com/base%3Bdata%26part%7Cname");
+  assert.equal(normalizeDaemonUrl("https://orq.example.com/`name`"), "https://orq.example.com/%60name%60");
   assert.equal(normalizeDaemonUrl("https://orq.example.com:8443/base/"), "https://orq.example.com:8443/base");
   assert.equal(normalizeDaemonUrl("http://127.0.0.1:4000"), "http://127.0.0.1:4000");
 });
@@ -94,6 +99,9 @@ test("the POSIX scripts parse under dash, bash and busybox sh", () => {
   for (const variant of variants) {
     const boot = buildBootstrap(variant);
     scripts.push(boot.posixScript, boot.containerCommand[2]!, cloudInitScript(boot.cloudInit), boot.stagedPosixScript!);
+  }
+  for (const kind of ["linux", "macos"] as const) {
+    scripts.push(byoPairingScript({ boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: TOKEN, kind, name: "Mac 'mini' $(x)" }));
   }
   const shells = [["dash", "-n"], ["bash", "-n"], ["busybox", "sh", "-n"]].filter(([shell]) => has(shell!));
   assert.ok(shells.length > 0, "at least one POSIX shell to check with");
@@ -450,4 +458,51 @@ test("the container second stage runs from the first stage's environment and ref
   });
   assert.equal(code, 0, output);
   await assertAgentStarted(box, daemon, output);
+});
+
+test("the pairing script installs orq-agent for the user and runs install-service with the token in a 0600 file", async (t) => {
+  const daemon = await startFakeDaemon(t);
+  const box = await sandbox(t);
+  // sudo would try to link into /usr/local/bin: here it is refused (and recorded), like a user without sudo.
+  await writeFile(join(box.bin, "sudo"), `#!/bin/sh\necho "sudo $*" >>"${box.log}"\nexit 1\n`);
+  await chmod(join(box.bin, "sudo"), 0o755);
+  const scriptPath = join(box.dir, "pair.sh");
+  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "linux", name: 'Build server $(touch "$HOME/pairing-injected")' }));
+
+  const { code, output } = await runScript(box, ["sh", scriptPath]);
+  assert.equal(code, 0, output);
+  const result = await readResult(box);
+  assert.equal(result.cmd, "install-service");
+  await assert.rejects(stat(join(box.home, "pairing-injected")), { code: "ENOENT" });
+  assert.equal(result.url, daemon.url);
+  assert.equal(result.box, BOX_ID);
+  assert.equal(result.token, TOKEN);
+  assert.equal(result.mode, "600");
+  assert.equal(result.file, join(box.home, ".orq-agent", "bootstrap-token"));
+  assert.ok(!output.includes(TOKEN), "the token is not in the output");
+  assert.ok(!(await readFile(`${box.result}.env`, "utf8")).includes(TOKEN), "nor in orq-agent's environment");
+  // A user without root: ~/.local/bin, the real file (the service runs it, and updates replace it).
+  assert.equal((await stat(join(box.home, ".local", "bin", "orq-agent"))).mode & 0o777, 0o755);
+  await assert.rejects(stat(join(box.home, ".orq-agent", "bin", "orq-agent")), { code: "ENOENT" });
+});
+
+test("a pairing script made for macOS refuses to run on Linux and leaves no token behind", async (t) => {
+  const daemon = await startFakeDaemon(t);
+  const box = await sandbox(t);
+  const scriptPath = join(box.dir, "pair.sh");
+  await writeFile(scriptPath, byoPairingScript({ boxId: BOX_ID, daemonUrl: daemon.url, bootstrapToken: TOKEN, kind: "macos", name: "Mac" }));
+  const { code, output } = await runScript(box, ["sh", scriptPath]);
+  assert.notEqual(code, 0);
+  assert.match(output, /for a macOS machine, but this one runs linux/);
+  assert.equal(daemon.requests.length, 0, "nothing was downloaded");
+  await assert.rejects(stat(join(box.home, ".orq-agent", "bootstrap-token")), { code: "ENOENT" });
+});
+
+test("the pairing script refuses bad input and puts the macOS agent under Application Support", () => {
+  const ok = { boxId: BOX_ID, daemonUrl: "https://orq.example.com", bootstrapToken: TOKEN, kind: "macos" as const, name: "Mac" };
+  assert.throws(() => byoPairingScript({ ...ok, daemonUrl: "http://orq.example.com" }), /https/);
+  assert.throws(() => byoPairingScript({ ...ok, bootstrapToken: "short" }), /token/);
+  assert.throws(() => byoPairingScript({ ...ok, boxId: "x;rm" }), /box id/);
+  const script = byoPairingScript({ ...ok, name: "Mac 'mini' $(reboot)" });
+  assert.ok(script.includes('T="$HOME/Library/Application Support/Orquester/orq-agent"'));
 });

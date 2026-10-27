@@ -24,25 +24,25 @@ function createRoutes(): ReplayRoute[] {
 }
 
 // Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
-test("validate: ok with a working token, IONOS's message for a bad or missing one", async () => {
+test("validate: ok with a working token, IONOS's message for a bad or missing one", async (t) => {
   const url = `${API}/datacenters?depth=0&limit=1`;
   const replay = replayFetch([
     { method: "GET", url, body: { id: "datacenters", type: "collection", items: [] } },
     { method: "GET", url, status: 401, body: fixture("ionos", "error-unauthorized") }
   ]);
-  assert.deepEqual(await ionosAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await ionosAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer ionos-test-token");
 
-  const bad = await ionosAdapter.validate({ token: "wrong-token" }, replayOptions(replay));
+  const bad = await ionosAdapter.validate({ token: "wrong-token" }, replayOptions(t, replay));
   assert.deepEqual(bad, { ok: false, message: "IONOS Cloud: Unauthorized (check the key and its permissions)" });
 
-  assert.deepEqual(await ionosAdapter.validate({}, replayOptions(replay)), { ok: false, message: "IONOS Cloud: API token is missing" });
+  assert.deepEqual(await ionosAdapter.validate({}, replayOptions(t, replay)), { ok: false, message: "IONOS Cloud: API token is missing" });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: curated vCPU sizes at table prices in the vCPU locations the account lists", async () => {
+test("offers: curated vCPU sizes at table prices in the vCPU locations the account lists", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${API}/locations?depth=1`, body: fixture("ionos", "locations") }]);
-  const offers = await ionosAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await ionosAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
 
   // Karlsruhe and Las Vegas have no vCPU Servers; Frankfurt 2 and the rest are not in this account's list.
@@ -74,16 +74,16 @@ test("offers: curated vCPU sizes at table prices in the vCPU locations the accou
   );
   assert.deepEqual(offers.images[1], { id: "ubuntu:latest", label: "Ubuntu (latest)" });
 
-  await assert.rejects(ionosAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
+  await assert.rejects(ionosAdapter.offers(credentials, "windows", replayOptions(t, replayFetch([]))), /does not rent windows/);
 });
 
-test("create: a VDC named after the box, labels, a public LAN, then one server with its boot volume and NIC", async () => {
+test("create: a VDC named after the box, labels, a public LAN, then one server with its boot volume and NIC", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${API}/datacenters/${DC}/servers`, status: 202, headers: { location: REQUEST_URL }, body: fixture("ionos", "server-created") }
   ]);
   const request = testCreateRequest({ size: "vcpu-2-4", region: "de/fra" });
-  const result = await ionosAdapter.create(credentials, request, replayOptions(replay));
+  const result = await ionosAdapter.create(credentials, request, replayOptions(t, replay));
 
   const posts = replay.requests.filter((entry) => entry.method === "POST");
   assert.deepEqual(
@@ -125,31 +125,31 @@ test("create: a VDC named after the box, labels, a public LAN, then one server w
   assert.equal(result.hourlyUsd, 0.0405);
 });
 
-test("create: an image or size the location cannot serve is refused before anything is created", async () => {
+test("create: an image or size the location cannot serve is refused before anything is created", async (t) => {
   const replay = replayFetch([{ method: "GET", url: `${API}/locations?depth=1`, body: fixture("ionos", "locations"), times: Infinity }]);
   // Newark lists no ubuntu:24.04: the default falls back to ubuntu:latest, an explicit 24.04 is refused.
   await assert.rejects(
-    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "us/ewr", image: "ubuntu:24.04" }), replayOptions(replay)),
+    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "us/ewr", image: "ubuntu:24.04" }), replayOptions(t, replay)),
     /image ubuntu:24.04 is not available in us\/ewr/
   );
   await assert.rejects(
-    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-3-5", region: "de/fra" }), replayOptions(replay)),
+    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-3-5", region: "de/fra" }), replayOptions(t, replay)),
     /unknown size vcpu-3-5/
   );
   await assert.rejects(
-    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "us/las" }), replayOptions(replay)),
+    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "us/las" }), replayOptions(t, replay)),
     /location us\/las offers no vCPU Servers/
   );
   assert.equal(replay.requests.some((entry) => entry.method !== "GET"), false);
 });
 
-test("create: the server POST is never retried; a failure deletes the VDC and surfaces IONOS's message", async () => {
+test("create: the server POST is never retried; a failure deletes the VDC and surfaces IONOS's message", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${API}/datacenters/${DC}/servers`, status: 500, body: fixture("ionos", "error-internal"), times: 2 },
     { method: "DELETE", url: `${API}/datacenters/${DC}`, status: 202 }
   ]);
-  await assert.rejects(ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "de/fra" }), replayOptions(replay)), (error) => {
+  await assert.rejects(ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "de/fra" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.equal(error.message, "IONOS Cloud: An internal error occurred. Please try again later.");
@@ -160,7 +160,7 @@ test("create: the server POST is never retried; a failure deletes the VDC and su
   assert.equal(replay.requests.at(-1)?.url, `${API}/datacenters/${DC}`);
 });
 
-test("create: a failed VDC request deletes the VDC with the request's reason", async () => {
+test("create: a failed VDC request deletes the VDC with the request's reason", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/locations?depth=1`, body: fixture("ionos", "locations") },
     { method: "POST", url: `${API}/datacenters`, status: 202, headers: { location: REQUEST_URL }, body: fixture("ionos", "datacenter-created") },
@@ -168,13 +168,13 @@ test("create: a failed VDC request deletes the VDC with the request's reason", a
     { method: "DELETE", url: `${API}/datacenters/${DC}`, status: 202 }
   ]);
   await assert.rejects(
-    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "de/fra" }), replayOptions(replay)),
+    ionosAdapter.create(credentials, testCreateRequest({ size: "vcpu-2-4", region: "de/fra" }), replayOptions(t, replay)),
     /IONOS Cloud: creating the data center failed: \[VDC-1-1213\] Resource limit exceeded: cores/
   );
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", async () => {
+test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", async (t) => {
   const url = `${API}/datacenters/${DC}/servers/${SERVER}?depth=2`;
   const running = fixture<{ properties: Record<string, unknown>; metadata: Record<string, unknown> }>("ionos", "server-running");
   const replay = replayFetch([
@@ -186,18 +186,18 @@ test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", asy
     { method: "GET", url, status: 404, body: fixture("ionos", "error-not-found") },
     { method: "GET", url: `${API}/datacenters/${DC}?depth=0`, status: 404, body: fixture("ionos", "error-not-found") }
   ]);
-  assert.deepEqual(await ionosAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await ionosAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.30",
     hourlyUsd: null
   });
-  const deploying = await ionosAdapter.status(credentials, ref, replayOptions(replay));
+  const deploying = await ionosAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([deploying.state, deploying.detail, deploying.publicIp], ["pending", "IONOS Cloud reports the server BUSY", null]);
-  const off = await ionosAdapter.status(credentials, ref, replayOptions(replay));
+  const off = await ionosAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([off.state, off.detail], ["stopped", "IONOS Cloud reports the server SHUTOFF"]);
-  assert.equal((await ionosAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
-  assert.deepEqual(await ionosAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await ionosAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
+  assert.deepEqual(await ionosAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The server no longer exists in IONOS Cloud",
     publicIp: null,
@@ -206,7 +206,7 @@ test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", asy
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: a data-center-only ref (from listManaged) is read through the data center; gone only with it", async () => {
+test("status: a data-center-only ref (from listManaged) is read through the data center; gone only with it", async (t) => {
   const servers = `${API}/datacenters/${DC}/servers?depth=1&offset=0&limit=100`;
   const server = `${API}/datacenters/${DC}/servers/${SERVER}?depth=2`;
   const datacenter = `${API}/datacenters/${DC}?depth=0`;
@@ -220,36 +220,36 @@ test("status: a data-center-only ref (from listManaged) is read through the data
     { method: "GET", url: datacenter, body: fixture("ionos", "datacenter-created") }
   ]);
   const dcOnly = { datacenterId: DC, location: "de/fra" };
-  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(replay))).state, "running");
-  assert.deepEqual(await ionosAdapter.status(credentials, dcOnly, replayOptions(replay)), {
+  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(t, replay))).state, "running");
+  assert.deepEqual(await ionosAdapter.status(credentials, dcOnly, replayOptions(t, replay)), {
     state: "error",
     detail: "The IONOS Cloud data center has no server",
     publicIp: null,
     hourlyUsd: null
   });
-  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(replay))).state, "gone");
-  assert.equal((await ionosAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(t, replay))).state, "gone");
+  assert.equal((await ionosAdapter.status(credentials, ref, replayOptions(t, replay))).state, "error");
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: deletes the VDC with everything in it, idempotent on 404", async () => {
+test("destroy: deletes the VDC with everything in it, idempotent on 404", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: `${API}/datacenters/${DC}`, status: 202, headers: { location: REQUEST_URL } },
     { method: "DELETE", url: `${API}/datacenters/${DC}`, status: 404, body: fixture("ionos", "error-not-found") }
   ]);
-  await ionosAdapter.destroy(credentials, ref, replayOptions(replay));
-  await ionosAdapter.destroy(credentials, { datacenterId: DC }, replayOptions(replay));
+  await ionosAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await ionosAdapter.destroy(credentials, { datacenterId: DC }, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
-  await assert.rejects(ionosAdapter.destroy(credentials, {}, replayOptions(replay)), /instance reference has no datacenterId/);
+  await assert.rejects(ionosAdapter.destroy(credentials, {}, replayOptions(t, replay)), /instance reference has no datacenterId/);
 });
 
-test("listManaged: VDCs named orq-<boxId>, with their server's state; one without a server is still listed", async () => {
+test("listManaged: VDCs named orq-<boxId>, with their server's state; one without a server is still listed", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/datacenters?depth=1&offset=0&limit=100`, body: fixture("ionos", "datacenters") },
     { method: "GET", url: `${API}/datacenters/${DC}/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-in-datacenter") },
     { method: "GET", url: `${API}/datacenters/${DC2}/servers?depth=1&offset=0&limit=100`, body: fixture("ionos", "servers-empty") }
   ]);
-  const managed = await ionosAdapter.listManaged(credentials, replayOptions(replay));
+  const managed = await ionosAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(managed, [
     {
       ref: { datacenterId: DC, serverId: SERVER, location: "de/fra" },

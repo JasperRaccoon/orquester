@@ -58,19 +58,8 @@ export function canOpenChat(agentRefId: string): boolean {
 }
 
 /**
- * Whether a conversation row from `GET /api/agents/conversations` can seed a
- * chat thread's resume cursor: the adapter resumes under the conversation's
- * own HOME instead of going through the launcher's `resumeArgs` (§5.3), so a
- * row is offered wherever the agent that wrote it has an adapter.
- */
-function isChatResumableConversation(conversation: AgentConversationSummary): boolean {
-  return canOpenChat(conversation.agentRefId);
-}
-
-/**
  * Whether a project's resume lists offer a conversation: the registry entry it
- * launches under is installed, and chat can resume it
- * ({@link isChatResumableConversation}). This is the filter behind both of
+ * launches under is installed and has a chat adapter. This filters both of
  * `ProjectOverview`'s lists: the overview's own and the empty chat tab's.
  *
  * `agentsById` is the runtime registry keyed by id. An entry is `enabled` only
@@ -82,7 +71,7 @@ export function isResumableByInstalledAgent(
 ): boolean {
   return (
     Boolean(agentsById.get(conversation.agentRefId)?.enabled) &&
-    isChatResumableConversation(conversation)
+    canOpenChat(conversation.agentRefId)
   );
 }
 
@@ -92,7 +81,7 @@ export function isResumableByInstalledAgent(
  * it.
  */
 export function isResumableByAgent(conversation: AgentConversationSummary, agentId: string): boolean {
-  return conversation.agentRefId === agentId && isChatResumableConversation(conversation);
+  return conversation.agentRefId === agentId && canOpenChat(conversation.agentRefId);
 }
 
 /**

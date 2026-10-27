@@ -2,13 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
 import type { FsParquetResponse } from "@orquester/api";
 import { useApi } from "../../../context/orquester-context";
+import { DOWNLOAD_MAX_BYTES } from "../../../lib/file-kind";
 import { BinaryCard } from "./BinaryCard";
 
 const CHUNK = 200; // rows per fetch — matches the server's default window
 const ROW_H = 28; // px, fixed row height for virtualization
 const OVERSCAN = 20; // extra rows rendered above/below the viewport
 const GUTTER_W = 56; // px, sticky row-number gutter
-const DOWNLOAD_MAX = 50 * 1024 * 1024;
 
 const NUMERIC = /^(INT|DOUBLE|FLOAT|DECIMAL)/;
 
@@ -160,7 +160,7 @@ export const ParquetViewer: React.FC<{
             name={name}
             size={size}
             mime={mime}
-            downloadable={size <= DOWNLOAD_MAX}
+            downloadable={size <= DOWNLOAD_MAX_BYTES}
             title="Parquet (no preview)"
             fetchBytes={fetchBytes}
           />

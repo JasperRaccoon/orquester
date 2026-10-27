@@ -14,6 +14,8 @@ import { agentProfileFamily } from "../tools/agent-profile.ts";
 import { boxesFamily } from "../tools/boxes.ts";
 import { catalogFamily } from "../tools/catalog.ts";
 import { desktopsFamily } from "../tools/desktops.ts";
+// Device simulators plugin: iOS simulators and Android emulators for agent chats (devices spec §9).
+import { devicesFamily } from "../tools/devices.ts";
 import { filesFamily } from "../tools/files.ts";
 import { gitFamily } from "../tools/git.ts";
 // Knowledge Graph plugin: the shared knowledge base for agent chats (its spec, "Agent tools").
@@ -81,7 +83,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   // boxes: chat-only, advertised while a box can be rented.
   boxesFamily,
   // Knowledge Graph: chat-only, advertised while the plugin is on.
-  knowledgeFamily
+  knowledgeFamily,
+  // Devices: chat-only, advertised while the plugin is on and a platform is enabled.
+  devicesFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

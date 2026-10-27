@@ -32,8 +32,6 @@ export interface TailscaleKeysDeps {
   credentials: () => TailscaleCredentials | null;
   /** Default `-` (the credentials' own tailnet). */
   tailnet?: string;
-  fetch?: typeof fetch;
-  now?: () => number;
   /** Default https://api.tailscale.com. */
   apiUrl?: string;
 }
@@ -73,8 +71,8 @@ function everywhere(destinations: string[]): boolean {
   return destinations.some((destination) => destination === "*" || destination === "*:*");
 }
 
-/** Evaluate a policy (JSON form of the HuJSON file). Exported for tests. */
-export function evaluateTailnetPolicy(policy: Record<string, unknown>): TailnetPolicyCheck {
+/** Evaluate a policy (JSON form of the HuJSON file). */
+function evaluateTailnetPolicy(policy: Record<string, unknown>): TailnetPolicyCheck {
   const tagOwners = (policy.tagOwners ?? {}) as Record<string, unknown>;
   const tagOwner = Object.prototype.hasOwnProperty.call(tagOwners, TAILSCALE_BOX_TAG);
   let boxGrant = false;
@@ -128,7 +126,6 @@ export function policySnippet(daemonHostAlias: string, ports: readonly number[],
 export function createTailscaleKeys(deps: TailscaleKeysDeps): TailscaleKeysService {
   const apiUrl = (deps.apiUrl ?? DEFAULT_API).replace(/\/+$/, "");
   const tailnet = encodeURIComponent(deps.tailnet ?? "-");
-  const now = deps.now ?? Date.now;
   let oauthCache: { clientId: string; token: string; expiresAt: number } | null = null;
 
   const credentials = (): TailscaleCredentials => {
@@ -140,7 +137,7 @@ export function createTailscaleKeys(deps: TailscaleKeysDeps): TailscaleKeysServi
   const accessToken = async (signal: AbortSignal): Promise<string> => {
     const creds = credentials();
     if ("apiToken" in creds) return creds.apiToken;
-    if (oauthCache !== null && oauthCache.clientId === creds.oauthClientId && oauthCache.expiresAt - OAUTH_EXPIRY_MARGIN_MS > now()) {
+    if (oauthCache !== null && oauthCache.clientId === creds.oauthClientId && oauthCache.expiresAt - OAUTH_EXPIRY_MARGIN_MS > Date.now()) {
       return oauthCache.token;
     }
     const body = new URLSearchParams({
@@ -156,12 +153,12 @@ export function createTailscaleKeys(deps: TailscaleKeysDeps): TailscaleKeysServi
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body
       },
-      { signal, fetch: deps.fetch }
+      { signal }
     );
     const token = response.data?.access_token;
     if (typeof token !== "string" || token.length === 0) throw new Error("Tailscale: the OAuth token response had no access token");
     const expiresIn = typeof response.data.expires_in === "number" ? response.data.expires_in : 3600;
-    oauthCache = { clientId: creds.oauthClientId, token, expiresAt: now() + expiresIn * 1000 };
+    oauthCache = { clientId: creds.oauthClientId, token, expiresAt: Date.now() + expiresIn * 1000 };
     return token;
   };
 
@@ -181,7 +178,7 @@ export function createTailscaleKeys(deps: TailscaleKeysDeps): TailscaleKeysServi
           okStatuses: request.okStatuses,
           attempts: request.attempts
         },
-        { signal, fetch: deps.fetch }
+        { signal }
       );
     try {
       return await call();

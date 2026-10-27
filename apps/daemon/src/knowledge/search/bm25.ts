@@ -23,14 +23,6 @@ export class Bm25Index {
   private readonly terms = new Map<string, string[]>();
   private totalLength = 0;
 
-  get size(): number {
-    return this.lengths.size;
-  }
-
-  has(key: string): boolean {
-    return this.lengths.has(key);
-  }
-
   /** Whether the document `key` has the (tokenized) term in any field. */
   contains(key: string, term: string): boolean {
     return this.postings.get(term)?.has(key) ?? false;

@@ -101,18 +101,19 @@ const MIN_TMUX_MINOR = 2;
  */
 export function tmuxVersionOk(): boolean {
   try {
-    const out = execFileSync("tmux", ["-V"], { encoding: "utf8" });
-    // `tmux -V` prints e.g. "tmux 3.4", "tmux 3.2a", "tmux next-3.4".
-    const match = /(\d+)\.(\d+)/.exec(out);
-    if (!match) {
-      return false;
-    }
-    const major = Number(match[1]);
-    const minor = Number(match[2]);
-    return major > MIN_TMUX_MAJOR || (major === MIN_TMUX_MAJOR && minor >= MIN_TMUX_MINOR);
+    return tmuxVersionOutputOk(execFileSync("tmux", ["-V"], { encoding: "utf8" }));
   } catch {
     return false;
   }
+}
+
+/** Whether local or remote `tmux -V` output reports the backend's minimum version. */
+export function tmuxVersionOutputOk(output: string): boolean {
+  const match = /(\d+)\.(\d+)/.exec(output);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > MIN_TMUX_MAJOR || (major === MIN_TMUX_MAJOR && minor >= MIN_TMUX_MINOR);
 }
 
 /**

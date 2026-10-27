@@ -60,36 +60,36 @@ function createRoutes(): ReplayRoute[] {
 }
 
 // Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
-test("validate: ok with a working key, a message for a bad key or missing fields", async () => {
+test("validate: ok with a working key, a message for a bad key or missing fields", async (t) => {
   const url = `${zoneApi("fr-par-1")}/servers?project=${PROJECT}&per_page=1`;
   const replay = replayFetch([
     { method: "GET", url, body: fixture("scaleway", "servers-empty") },
     { method: "GET", url, status: 401, body: fixture("scaleway", "error-unauthorized") }
   ]);
-  assert.deepEqual(await scalewayAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await scalewayAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers["x-auth-token"], "scw-test-secret-key");
 
-  const bad = await scalewayAdapter.validate({ ...credentials, secretKey: "wrong-secret" }, replayOptions(replay));
+  const bad = await scalewayAdapter.validate({ ...credentials, secretKey: "wrong-secret" }, replayOptions(t, replay));
   assert.equal(bad.ok, false);
   assert.match(!bad.ok ? bad.message : "", /^Scaleway: authentication is denied/);
   assert.doesNotMatch(!bad.ok ? bad.message : "", /wrong-secret/);
 
-  assert.deepEqual(await scalewayAdapter.validate({ projectId: PROJECT }, replayOptions(replay)), {
+  assert.deepEqual(await scalewayAdapter.validate({ projectId: PROJECT }, replayOptions(t, replay)), {
     ok: false,
     message: "Scaleway: Secret key is missing"
   });
-  assert.deepEqual(await scalewayAdapter.validate({ secretKey: "k" }, replayOptions(replay)), {
+  assert.deepEqual(await scalewayAdapter.validate({ secretKey: "k" }, replayOptions(t, replay)), {
     ok: false,
     message: "Scaleway: Project ID is missing"
   });
-  const notUuid = await scalewayAdapter.validate({ secretKey: "k", projectId: "my-project" }, replayOptions(replay));
+  const notUuid = await scalewayAdapter.validate({ secretKey: "k", projectId: "my-project" }, replayOptions(t, replay));
   assert.match(!notUuid.ok ? notUuid.message : "", /Project ID must be a UUID/);
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers: live per-zone prices plus block volume and IPv4, no Windows, GPU or end-of-service types for linux", async () => {
+test("offers: live per-zone prices plus block volume and IPv4, no Windows, GPU or end-of-service types for linux", async (t) => {
   const replay = replayFetch(catalogRoutes());
-  const offers = await scalewayAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await scalewayAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
 
   const ids = offers.sizes.map((size) => size.id);
@@ -132,9 +132,9 @@ test("offers: live per-zone prices plus block volume and IPv4, no Windows, GPU o
   assert.deepEqual(offers.images[0], { id: "ubuntu_noble", label: "Ubuntu 24.04 Noble Numbat" });
 });
 
-test("offers: linux-gpu lists only GPU types with their GPU, a larger root volume and the GPU OS image first", async () => {
+test("offers: linux-gpu lists only GPU types with their GPU, a larger root volume and the GPU OS image first", async (t) => {
   const replay = replayFetch(catalogRoutes());
-  const offers = await scalewayAdapter.offers(credentials, "linux-gpu", replayOptions(replay));
+  const offers = await scalewayAdapter.offers(credentials, "linux-gpu", replayOptions(t, replay));
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.regions]),
     [
@@ -150,10 +150,10 @@ test("offers: linux-gpu lists only GPU types with their GPU, a larger root volum
     offers.images.map((image) => image.id),
     ["ubuntu_noble_gpu_os_13_nvidia", "ubuntu_noble"]
   );
-  await assert.rejects(scalewayAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
+  await assert.rejects(scalewayAdapter.offers(credentials, "windows", replayOptions(t, replayFetch([]))), /does not rent windows/);
 });
 
-test("offers: follows X-Total-Count pages of a zone's catalog", async () => {
+test("offers: follows X-Total-Count pages of a zone's catalog", async (t) => {
   const all = fixture<{ servers: Record<string, unknown> }>("scaleway", "products-servers-fr-par-1").servers;
   const names = Object.keys(all);
   const first = Object.fromEntries(names.slice(0, 3).map((name) => [name, all[name]]));
@@ -164,12 +164,12 @@ test("offers: follows X-Total-Count pages of a zone's catalog", async () => {
     { method: "GET", url: `${zoneApi("fr-par-1")}/products/servers?page=2&per_page=100`, body: { servers: rest }, headers: { "x-total-count": String(names.length) } }
   );
   const replay = replayFetch(routes);
-  const offers = await scalewayAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await scalewayAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.ok(offers.sizes.some((size) => size.id === "BASIC2-A2C-4G"), "a type from page 2 is offered");
   assert.equal(replay.pending().length, 0);
 });
 
-test("create: tagged server on a block root volume, cloud-init as raw user data, then poweron", async () => {
+test("create: tagged server on a block root volume, cloud-init as raw user data, then poweron", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 201, body: fixture("scaleway", "create-server") },
@@ -178,7 +178,7 @@ test("create: tagged server on a block root volume, cloud-init as raw user data,
     { method: "POST", url: `${serverUrl}/action`, status: 202, body: fixture("scaleway", "action-poweron") }
   ]);
   const request = testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" });
-  const result = await scalewayAdapter.create(credentials, request, replayOptions(replay));
+  const result = await scalewayAdapter.create(credentials, request, replayOptions(t, replay));
 
   const create = replay.requests.find((entry) => entry.method === "POST" && entry.url.endsWith("/servers"));
   assert.deepEqual(create?.body, {
@@ -208,7 +208,7 @@ test("create: tagged server on a block root volume, cloud-init as raw user data,
   assert.equal(result.windowsPassword, undefined);
 });
 
-test("create: Arm types get the zone's arm64 image; a regional size id is sent as the plain type", async () => {
+test("create: Arm types get the zone's arm64 image; a regional size id is sent as the plain type", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 201, body: fixture("scaleway", "create-server") },
@@ -216,31 +216,31 @@ test("create: Arm types get the zone's arm64 image; a regional size id is sent a
     { method: "PATCH", url: volumeUrl, body: { id: VOLUME_ID } },
     { method: "POST", url: `${serverUrl}/action`, status: 202, body: fixture("scaleway", "action-poweron") }
   ]);
-  await scalewayAdapter.create(credentials, testCreateRequest({ size: "BASIC2-A2C-4G@fr-par-1", region: "fr-par-1" }), replayOptions(replay));
+  await scalewayAdapter.create(credentials, testCreateRequest({ size: "BASIC2-A2C-4G@fr-par-1", region: "fr-par-1" }), replayOptions(t, replay));
   const body = replay.requests.find((entry) => entry.method === "POST" && entry.url.endsWith("/servers"))?.body as Record<string, unknown>;
   assert.equal(body.commercial_type, "BASIC2-A2C-4G");
   assert.equal(body.image, "037f7fe4-f7c8-40b1-92ba-da0092d62f29");
 });
 
-test("create: an image the type cannot boot is refused before anything is created", async () => {
+test("create: an image the type cannot boot is refused before anything is created", async (t) => {
   const replay = replayFetch(createRoutes());
   await assert.rejects(
-    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-HC-64C-128G", region: "fr-par-1" }), replayOptions(replay)),
+    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-HC-64C-128G", region: "fr-par-1" }), replayOptions(t, replay)),
     /image ubuntu_noble is not available for POP2-HC-64C-128G in fr-par-1/
   );
   assert.equal(replay.requests.some((entry) => entry.method !== "GET"), false);
   await assert.rejects(
-    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "us-east-1" }), replayOptions(replay)),
+    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "us-east-1" }), replayOptions(t, replay)),
     /unknown zone us-east-1/
   );
 });
 
-test("create: a failed create is never retried and surfaces Scaleway's message", async () => {
+test("create: a failed create is never retried and surfaces Scaleway's message", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 500, body: fixture("scaleway", "error-internal"), times: 2 }
   ]);
-  await assert.rejects(scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(replay)), (error) => {
+  await assert.rejects(scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.equal(error.message, "Scaleway: internal error");
@@ -253,12 +253,12 @@ test("create: a failed create is never retried and surfaces Scaleway's message",
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 403, body: fixture("scaleway", "error-quota") }
   ]);
   await assert.rejects(
-    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(quota)),
+    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(t, quota)),
     /^ProviderHttpError: Scaleway: Quotas exceeded for this resource$/
   );
 });
 
-test("create: a failure after the server exists deletes the stopped server and its volume", async () => {
+test("create: a failure after the server exists deletes the stopped server and its volume", async (t) => {
   const replay = replayFetch([
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 201, body: fixture("scaleway", "create-server") },
@@ -269,14 +269,14 @@ test("create: a failure after the server exists deletes the stopped server and i
     { method: "DELETE", url: `${API}/block/v1/zones/fr-par-1/volumes/${VOLUME_ID}`, status: 204 }
   ]);
   await assert.rejects(
-    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(replay)),
+    scalewayAdapter.create(credentials, testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" }), replayOptions(t, replay)),
     /Scaleway: user data is too large/
   );
   assert.equal(replay.pending().length, 0);
   assert.equal(replay.requests.some((entry) => entry.method === "POST" && entry.url.endsWith("/action")), false);
 });
 
-test("status: maps server states, 404 is gone, 429 is retried", async () => {
+test("status: maps server states, 404 is gone, 429 is retried", async (t) => {
   const running = fixture<{ server: Record<string, unknown> }>("scaleway", "server-running");
   const withState = (state: string, detail = "") => ({ server: { ...running.server, state, state_detail: detail, public_ips: [], public_ip: null } });
   const replay = replayFetch([
@@ -288,18 +288,18 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") },
     volumeGone
   ]);
-  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.20",
     hourlyUsd: null
   });
-  const starting = await scalewayAdapter.status(credentials, ref, replayOptions(replay));
+  const starting = await scalewayAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([starting.state, starting.detail, starting.publicIp], ["pending", "Scaleway reports the server starting (provisioning node)", null]);
-  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
+  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(t, replay))).state, "stopped");
   // `locked` is a Scaleway hold, not a failure: the box is never destroyed for it.
-  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The server no longer exists in Scaleway",
     publicIp: null,
@@ -308,48 +308,48 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
   assert.equal(replay.pending().length, 0);
 });
 
-test("status: a box is gone only once its block volume is; a loose volume's ref reads the volume alone", async () => {
+test("status: a box is gone only once its block volume is; a loose volume's ref reads the volume alone", async (t) => {
   const notFound = { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") } as const;
   const replay = replayFetch([notFound, { method: "GET", url: volumeUrl, body: { id: VOLUME_ID, status: "available" } }, notFound, volumeGone]);
-  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "error",
     detail: `The server is gone but its block volume ${VOLUME_ID} remains in Scaleway`,
     publicIp: null,
     hourlyUsd: null
   });
-  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
+  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(t, replay))).state, "gone");
   const loose = { zone: "fr-par-1", volumeIds: [VOLUME_ID] };
   const volumeOnly = replayFetch([{ method: "GET", url: volumeUrl, body: { id: VOLUME_ID, status: "available" } }, volumeGone]);
-  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(volumeOnly))).state, "error");
-  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(volumeOnly))).state, "gone");
+  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(t, volumeOnly))).state, "error");
+  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(t, volumeOnly))).state, "gone");
   assert.equal(replay.pending().length + volumeOnly.pending().length, 0);
-  await assert.rejects(scalewayAdapter.status(credentials, { zone: "fr-par-1" }, replayOptions(volumeOnly)), /instance reference has no serverId/);
+  await assert.rejects(scalewayAdapter.status(credentials, { zone: "fr-par-1" }, replayOptions(t, volumeOnly)), /instance reference has no serverId/);
 });
 
-test("destroy: a loose volume's ref deletes the volume only", async () => {
+test("destroy: a loose volume's ref deletes the volume only", async (t) => {
   const replay = replayFetch([{ method: "DELETE", url: volumeUrl, status: 204 }]);
-  await scalewayAdapter.destroy(credentials, { zone: "fr-par-1", volumeIds: [VOLUME_ID] }, replayOptions(replay));
+  await scalewayAdapter.destroy(credentials, { zone: "fr-par-1", volumeIds: [VOLUME_ID] }, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: terminates a running server, then deletes its detached block volume", async () => {
+test("destroy: terminates a running server, then deletes its detached block volume", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: serverUrl, body: fixture("scaleway", "server-running") },
     { method: "POST", url: `${serverUrl}/action`, status: 202, body: { task: { id: "t", description: "server_terminate", status: "pending" } } },
     { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") },
     { method: "DELETE", url: `${API}/block/v1/zones/fr-par-1/volumes/${VOLUME_ID}`, status: 204 }
   ]);
-  await scalewayAdapter.destroy(credentials, ref, replayOptions(replay));
+  await scalewayAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.deepEqual(replay.requests[1]!.body, { action: "terminate" });
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: idempotent when the server and volume are already gone; volumes found on the server are deleted too", async () => {
+test("destroy: idempotent when the server and volume are already gone; volumes found on the server are deleted too", async (t) => {
   const gone = replayFetch([
     { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") },
     { method: "DELETE", url: `${API}/block/v1/zones/fr-par-1/volumes/${VOLUME_ID}`, status: 404, body: { message: "resource is not found", type: "not_found" } }
   ]);
-  await scalewayAdapter.destroy(credentials, ref, replayOptions(gone));
+  await scalewayAdapter.destroy(credentials, ref, replayOptions(t, gone));
   assert.equal(gone.pending().length, 0);
 
   // A ref without volume ids (e.g. from an older record) still cleans the volume the server reports.
@@ -359,13 +359,13 @@ test("destroy: idempotent when the server and volume are already gone; volumes f
     { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") },
     { method: "DELETE", url: `${API}/block/v1/zones/fr-par-1/volumes/${VOLUME_ID}`, status: 204 }
   ]);
-  await scalewayAdapter.destroy(credentials, { serverId: SERVER_ID, zone: "fr-par-1" }, replayOptions(stopped));
+  await scalewayAdapter.destroy(credentials, { serverId: SERVER_ID, zone: "fr-par-1" }, replayOptions(t, stopped));
   assert.equal(stopped.pending().length, 0);
 
-  await assert.rejects(scalewayAdapter.destroy(credentials, { serverId: SERVER_ID }, replayOptions(stopped)), /instance reference has no zone/);
+  await assert.rejects(scalewayAdapter.destroy(credentials, { serverId: SERVER_ID }, replayOptions(t, stopped)), /instance reference has no zone/);
 });
 
-test("listManaged: lists the orquester-box tag in every zone of the project, and tagged volumes no server holds", async () => {
+test("listManaged: lists the orquester-box tag in every zone of the project, and tagged volumes no server holds", async (t) => {
   const loose = {
     id: "44444444-4444-4444-8444-444444444499",
     name: "orq-1a2b3c4d-aabbccddeeff",
@@ -391,7 +391,7 @@ test("listManaged: lists the orquester-box tag in every zone of the project, and
     ];
   });
   const replay = replayFetch(routes);
-  const managed = await scalewayAdapter.listManaged(credentials, replayOptions(replay));
+  const managed = await scalewayAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(managed, [
     {
       ref: { serverId: SERVER_ID, zone: "fr-par-1", volumeIds: [VOLUME_ID] },

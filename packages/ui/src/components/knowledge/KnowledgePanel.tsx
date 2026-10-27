@@ -19,12 +19,12 @@ import { Button, IconButton } from "../ui";
 // Directly, not through `../ui`: that index and confirm-dialog import each other, which a lazy chunk cannot split.
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { cn } from "../../lib/cn";
-import { deleteKnowledgeEntry, knowledgeStore, type KnowledgeApi } from "../../lib/knowledge/store";
+import { deleteKnowledgeEntry, knowledgeStore, mergeKnowledgeEntries, type KnowledgeApi } from "../../lib/knowledge/store";
 import { CollectionChip, ErrorLine, Eyebrow, SectionLabel } from "./parts";
 import { KnowledgeEntryEditor } from "./KnowledgeEntryEditor";
 import { entryByline, entryDate, entryPostUrl, formatKnowledgeDate, knowledgeErrorCode, knowledgeErrorText } from "./knowledge.logic";
 import { DuplicatesBanner, EntryBody, SimilarEntries } from "./KnowledgeEntrySections";
-import { entryPanelIds, runKnowledgeMerge, type KnowledgeMergePlan } from "./panel.logic";
+import { entryPanelIds, type KnowledgeMergePlan } from "./panel.logic";
 
 /** What the panel shows; `edit` opens an entry straight in its editor. */
 export interface KnowledgeSelection {
@@ -152,7 +152,8 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
       const from = selectedId.current;
       setMerging(true);
       try {
-        const kept = await runKnowledgeMerge(api, plan);
+        await mergeKnowledgeEntries(api, { ids: [plan.keep.id, plan.remove.id], keep: plan.keep.id });
+        const kept = plan.keep.id;
         // Unless the user moved on meanwhile. The open entry is gone: Back must not lead to it.
         if (kept !== from && selectedId.current === from) onSelectRef.current({ kind: "entry", id: kept }, { replace: true });
       } finally {

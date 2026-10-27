@@ -270,9 +270,6 @@ function keyBody(publicKey: string): string {
 }
 
 export const githubProvider: GitProvider = {
-  id: "github",
-  scopesHint: SCOPES,
-
   /** login + name from `GET /user`, then the primary verified email (noreply fallback). */
   async getIdentity(creds: ProviderCreds): Promise<ProviderIdentity> {
     const user = await githubJson(creds.token, "GET", "/user");
@@ -432,8 +429,6 @@ export const githubProvider: GitProvider = {
   credentialSpec(ctx): CredentialSpec {
     return { host: "github.com", username: ctx.login };
   },
-
-  supportsReleases: true,
 
   async listPullRequests(
     creds: ProviderCreds | null,

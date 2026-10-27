@@ -158,7 +158,6 @@ export const tensordockAdapter: BoxProviderAdapter = {
   accountNote:
     "Linux + GPU only: TensorDock's Windows 10 image runs no first-boot script, so Orquester cannot start a Windows box unattended (Windows + GPU uses OVHcloud). Deploys need at least $1 of balance.",
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     // `/locations` answers 200 even without a token; `/instances` checks it.

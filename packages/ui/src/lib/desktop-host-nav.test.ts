@@ -20,7 +20,9 @@ beforeEach(() => {
   useAppStore.setState({
     currentWorkspace: "acme",
     currentProject: { path: "/w/acme/app", name: "app", workspace: "acme", isArchived: false } as ProjectSummary,
-    activeTabByProject: { "/w/acme/app": "c1" }
+    activeTabByProject: { "/w/acme/app": "c1" },
+    knowledgeView: { open: false, focus: null },
+    devicesFleetOpen: false
   });
 });
 
@@ -37,6 +39,13 @@ describe("desktop notification navigation", () => {
     useAppStore.setState({ knowledgeView: { open: true, focus: null } });
     assert.equal(viewingSessionId(), null);
     useAppStore.setState({ knowledgeView: { open: false, focus: null } });
+    assert.equal(viewingSessionId(), "c1");
+  });
+
+  it("sees no tab while the Devices fleet view covers it", () => {
+    useAppStore.setState({ devicesFleetOpen: true });
+    assert.equal(viewingSessionId(), null);
+    useAppStore.setState({ devicesFleetOpen: false });
     assert.equal(viewingSessionId(), "c1");
   });
 

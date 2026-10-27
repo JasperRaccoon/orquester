@@ -75,7 +75,6 @@ export function recordingSessionTools(
     abortedThreads,
     instructions,
     nextCall: () => new Promise((resolve) => callWaiters.push(resolve)),
-    enabled: true,
     knownNames,
     prepare: (threadId) => prepare(threadId),
     async launchInProcess(threadId, _launch, listener) {

@@ -249,6 +249,7 @@ async function startDaemon(world: World, records = "{}"): Promise<Daemon> {
   await profiles.init();
   lifecycle.attach(profiles.events);
   await lifecycle.start();
+
   const systemHome: Record<SessionProfileAgentId, string> = {
     claude: world.homes.claudeDir,
     codex: world.homes.codexHome,
@@ -311,10 +312,10 @@ async function startDaemon(world: World, records = "{}"): Promise<Daemon> {
     lifecycle,
     route,
     stop: async () => {
+      await lifecycle.gc();
       await chat.stop();
       await route.close();
       lifecycle.stop();
-      await lifecycle.idle();
     }
   });
   return daemon;
@@ -423,7 +424,8 @@ async function makeProfile(daemon: Daemon, name: string, skill: string, mcp: str
     })
   ).profile);
   await daemon.profiles.writeInstructions(created.id, revision, `${name.toUpperCase()}-INSTRUCTIONS\n`);
-  await daemon.lifecycle.idle();
+  await Promise.all((Object.keys(ACCOUNT) as SessionProfileAgentId[]).map((agent) => daemon.lifecycle.ensureReady(created.id, agent, ACCOUNT[agent] || null)));
+  await daemon.lifecycle.gc();
   return created.id;
 }
 
@@ -735,7 +737,8 @@ describe("Agent Profiles end to end (daemon → host → adapter launch inputs)"
 
         // Edited while the chat runs: the running session keeps its version until its next start.
         await addSkill(m.daemon, editor, `subtitles-${agent}`);
-        await m.daemon.lifecycle.idle();
+        await Promise.all((Object.keys(ACCOUNT) as SessionProfileAgentId[]).map((target) => m.daemon.lifecycle.ensureReady(editor, target, ACCOUNT[target] || null)));
+        await m.daemon.lifecycle.gc();
         await m.restart();
         assert.equal(m.daemon.chat.chat.get(chat.id)?.profileId, editor, "the tab record survived the daemon restart");
 
@@ -797,7 +800,7 @@ describe("Agent Profiles end to end (daemon → host → adapter launch inputs)"
 
       const { revision } = await m.daemon.profiles.get(editor);
       await m.daemon.profiles.remove(editor, revision);
-      await m.daemon.lifecycle.idle();
+      await m.daemon.lifecycle.gc();
       // Their next agent start (here: the host restarting, as after a crash or an upgrade).
       await m.restartHost();
       await Promise.all([turn(m, interactive.id), turn(m, unattended.id)]);
@@ -833,7 +836,7 @@ describe("Agent Profiles end to end (daemon → host → adapter launch inputs)"
       // Codex disappears; the profile is edited, so its Codex home must be prepared again.
       m.world.codexBin = null;
       await addSkill(m.daemon, editor, "subtitles");
-      await m.daemon.lifecycle.idle();
+      await m.daemon.lifecycle.gc();
 
       await assert.rejects(createChat(m, "codex", { profileId: editor }), (error: unknown) => {
         const { code, message } = error as { code?: string; message?: string };

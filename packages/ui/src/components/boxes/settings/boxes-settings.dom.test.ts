@@ -10,11 +10,11 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import type { BoxProviderId, SetBoxConnectionRequest, SetBoxProviderCredentialsRequest } from "@orquester/api";
+import { BOXES_CHANGED_EVENT, type AddByoMachineRequest, type BoxProviderId, type SetBoxConnectionRequest, type SetBoxProviderCredentialsRequest } from "@orquester/api";
 
 import { ApiError } from "../../../lib/api-client";
 import { useAppStore } from "../../../store/app";
-import { resetBoxes, setBoxesPluginOn } from "../../../lib/boxes/store";
+import { applyBoxesEvent, resetBoxes, setBoxesPluginOn } from "../../../lib/boxes/store";
 import { box, kind, provider } from "../../../lib/boxes/fixtures.test-helpers";
 
 let act: typeof import("react-dom/test-utils").act;
@@ -60,6 +60,26 @@ const VULTR = provider({
   credentialsUrl: "https://my.vultr.com/settings/#settingsapi",
   credentialFields: [{ id: "key", label: "API key", secret: true }],
   windowsImage: { state: "none", message: null, updatedAt: null }
+});
+
+const PAIR_COMMAND = "curl -fsSL https://orquester.example.com/api/boxes/pair/AbCdEfGhIjKlMnOpQrStUvWx | sh";
+const PAIRING_MACHINE = box({
+  id: "m1",
+  purpose: "machine",
+  kind: "macos",
+  provider: "byo",
+  providerLabel: "Your machines",
+  region: "own",
+  size: "machine",
+  sizeLabel: "Mac mini",
+  os: null,
+  arch: null,
+  state: "pairing",
+  connected: false,
+  hourlyUsd: 0,
+  project: null,
+  setup: [],
+  byo: { name: "Mac mini", pairingExpiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }
 });
 
 describe("the Ephemeral AI VMs settings section", () => {
@@ -119,10 +139,22 @@ describe("the Ephemeral AI VMs settings section", () => {
     destroyBox: async (id: string) => {
       deletes.push(`box:${id}`);
       return { box: box({ id, purpose: "temporary", project: null, state: "destroying" }) };
-    }
+    },
+    addByoMachine: async (req: AddByoMachineRequest) => {
+      byoAdds.push(req);
+      return { box: PAIRING_MACHINE, command: PAIR_COMMAND, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() };
+    },
+    removeByoMachine: async (id: string) => {
+      deletes.push(`machine:${id}`);
+      return { uninstalled: false };
+    },
+    updateByoMachine: async (id: string) => ({ box: { ...PAIRING_MACHINE, id } }),
+    newByoPairing: async () => ({ box: PAIRING_MACHINE, command: PAIR_COMMAND, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() })
   };
+  let byoAdds: AddByoMachineRequest[] = [];
 
   beforeEach(async () => {
+    byoAdds = [];
     puts = [];
     deletes = [];
     connectionPuts = [];
@@ -414,6 +446,38 @@ describe("the Ephemeral AI VMs settings section", () => {
     await click(confirm);
     assert.deepEqual(deletes, ["box:t1"]);
     assert.ok(text().includes("Destroying…"));
+  });
+
+  it("Add your machine shows the one-line command and follows the pairing live, then lists the machine", async () => {
+    await click(buttonNamed("Add your machine"));
+    await click(buttonNamed("Create pairing command"));
+    assert.equal(document.querySelector<HTMLInputElement>("#byo-machine-name")?.getAttribute("aria-invalid"), "true");
+    assert.deepEqual(byoAdds, []);
+    await type(document.querySelector<HTMLInputElement>("#byo-machine-name")!, "  Mac mini ");
+    await click(buttonNamed("Create pairing command"));
+    assert.deepEqual(byoAdds, [{ kind: "macos", name: "Mac mini" }]);
+    assert.ok(text().includes(PAIR_COMMAND));
+    assert.ok(document.querySelector('[aria-label="Copy the pairing command"]'));
+    assert.ok(text().includes("not with sudo"));
+    assert.ok(document.querySelector('[role="dialog"] [role="status"]'), "the pairing awaits the machine");
+
+    // The machine connects: the dialog says so, and the card lists it online.
+    const paired = { ...PAIRING_MACHINE, state: "ready", connected: true, os: "darwin", arch: "arm64", byo: { name: "Mac mini", pairingExpiresAt: null } };
+    await act(async () => applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: { boxes: [paired], totals: { activeCount: 0, hourlyUsd: 0, monthEstimatedUsd: 0 } } }));
+    await settle();
+    assert.ok(buttonNamed("Done"), "the live pairing completed");
+    await click(buttonNamed("Done"));
+    assert.ok(text().includes("Online"));
+    assert.ok(document.querySelector('[role="switch"][aria-label="Use Mac mini for device simulators"]'));
+  });
+
+  it("a pairing can be cancelled from the dialog", async () => {
+    await click(buttonNamed("Add your machine"));
+    await type(document.querySelector<HTMLInputElement>("#byo-machine-name")!, "Mac mini");
+    await click(buttonNamed("Create pairing command"));
+    await click(buttonNamed("Cancel pairing"));
+    assert.deepEqual(deletes, ["machine:m1"]);
+    assert.equal(text().includes(PAIR_COMMAND), false);
   });
 
   describe("with the plugin off", () => {

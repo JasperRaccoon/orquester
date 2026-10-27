@@ -286,7 +286,6 @@ export const civoAdapter: BoxProviderAdapter = {
   ],
   accountNote: null,
   maxLifetimeMinutes: null,
-  needsWindowsImage: false,
 
   validate(credentials, options) {
     return validateWith(options, () => get(credentials, "/instances?page=1&per_page=1", options));

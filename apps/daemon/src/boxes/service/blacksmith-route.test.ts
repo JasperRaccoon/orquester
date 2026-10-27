@@ -17,8 +17,9 @@ interface DriverCall {
   tailscale: BlacksmithTailnetJoin | null;
 }
 
-function fakeDriver(): { driver: BlacksmithSetupDriver; calls: DriverCall[] } {
+function fakeDriver(): { driver: BlacksmithSetupDriver; calls: DriverCall[]; warms: Array<{ credentials: Record<string, string>; os: string }> } {
   const calls: DriverCall[] = [];
+  const warms: Array<{ credentials: Record<string, string>; os: string }> = [];
   const driver: BlacksmithSetupDriver = {
     checkAccount: async () => ({ ok: true }),
     checkOrg: async () => ({ ok: true }),
@@ -27,21 +28,31 @@ function fakeDriver(): { driver: BlacksmithSetupDriver; calls: DriverCall[] } {
       calls.push({ daemonUrl: options.daemonUrl, tailscale: options.tailscale ?? null });
       return { repo: `${org}/orquester-macos-boxes`, workflowFile: "orquester-box.yml" };
     },
-    adapterCredentials: () => ({})
+    adapterCredentials: ({ token, tailscale }) => ({ githubToken: token, ...(tailscale ? { tailscaleClientId: tailscale.oauthClientId } : {}) }),
+    dispatchDeviceCacheWarm: async (credentials, request) => {
+      warms.push({ credentials, os: request.os });
+      return { runId: "9000000001", htmlUrl: null, runner: "blacksmith-8vcpu-ubuntu-2404" };
+    },
+    deviceCacheWarmStatus: async (_credentials, runId) => ({ runId, state: "queued", conclusion: null, htmlUrl: null })
   };
-  return { driver, calls };
+  return { driver, calls, warms };
 }
 
-async function harness(t: test.TestContext, publicOrigin: string | null, fetch?: typeof globalThis.fetch): Promise<TestService & { calls: DriverCall[] }> {
+async function harness(
+  t: test.TestContext,
+  publicOrigin: string | null,
+  fetch?: typeof globalThis.fetch
+): Promise<TestService & { calls: DriverCall[]; warms: ReturnType<typeof fakeDriver>["warms"] }> {
+  if (fetch) t.mock.method(globalThis, "fetch", fetch);
   const root = await mkdtemp(join(tmpdir(), "orq-box-blacksmith-route-"));
-  const { driver, calls } = fakeDriver();
-  const service = testBoxService({ baseDir: root, overrides: { publicOrigin: () => publicOrigin, blacksmith: driver, ...(fetch ? { fetch } : {}) } });
+  const { driver, calls, warms } = fakeDriver();
+  const service = testBoxService({ baseDir: root, overrides: { publicOrigin: () => publicOrigin, blacksmith: driver } });
   await service.service.start();
   t.after(async () => {
     await service.service.stop();
     await rm(root, { recursive: true, force: true });
   });
-  return { ...service, calls };
+  return { ...service, calls, warms };
 }
 
 const repoStep = (h: TestService) => h.service.settings.blacksmithSteps().find((step) => step.id === "repo")!;
@@ -125,4 +136,21 @@ test("nothing is re-run before an account is picked; the identity is validated",
   assert.deepEqual(settings.connectionSettings().tailscale.workloadIdentity, { clientId: "id", audience: "aud" });
   await settings.setConnection({ tailscaleWorkloadClientId: null, tailscaleWorkloadAudience: "" });
   assert.equal(settings.connectionSettings().tailscale.workloadIdentity, null);
+});
+
+test("device-cache runs go through the Blacksmith setup's credentials, with the current tailnet join", async (t) => {
+  const h = await harness(t, null);
+  const settings = h.service.settings;
+  await assert.rejects(h.service.dispatchDeviceCacheWarm({ os: "linux" }), (error: BoxError) => error.code === "BOX_PROVIDER_NOT_CONFIGURED");
+  await settings.setConnection({ mode: "tailscale", tailscaleDaemonUrl: "https://pc.tail1234.ts.net:10000", tailscaleApiToken: "tskey-api-secretvalue" });
+  await settings.setConnection({ tailscaleWorkloadClientId: "kJ2x7CNTRL", tailscaleWorkloadAudience: "api.tailscale.com/kJ2x7CNTRL" });
+  await settings.setBlacksmith({ gitAccountId: "acct", org: "Org" });
+  assert.equal(repoStep(h).state, "ok");
+
+  await assert.rejects(h.service.dispatchDeviceCacheWarm({ os: "windows" as "linux" }), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
+  assert.deepEqual(await h.service.dispatchDeviceCacheWarm({ os: "linux" }), { runId: "9000000001", htmlUrl: null, runner: "blacksmith-8vcpu-ubuntu-2404" });
+  assert.equal(h.warms.length, 1);
+  assert.equal(h.warms[0]!.credentials.tailscaleClientId, "kJ2x7CNTRL", "the adapter re-commits the workflow with the join");
+  assert.equal((await h.service.deviceCacheWarmStatus("9000000001")).state, "queued");
+  await assert.rejects(h.service.deviceCacheWarmStatus("../x"), (error: BoxError) => error.code === "BOX_INVALID_REQUEST");
 });

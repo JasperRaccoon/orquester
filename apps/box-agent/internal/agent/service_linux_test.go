@@ -56,3 +56,48 @@ func TestOOMPolicyDropInIsWrittenOnce(t *testing.T) {
 		t.Fatalf("second write: changed=%v err=%v", changed, err)
 	}
 }
+
+func TestServiceDryRunsWriteNothing(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "data dir")
+	t.Setenv("HOME", home)
+	for _, key := range serviceEnvKeys {
+		t.Setenv(key, "")
+	}
+	tokenFile := filepath.Join(t.TempDir(), "one-time-token")
+	const secret = "private-bootstrap-for-dry-run"
+	if err := os.WriteFile(tokenFile, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORQ_BOOTSTRAP_TOKEN_FILE", tokenFile)
+
+	var out strings.Builder
+	if err := InstallServiceCommand("test", ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		"ORQ_DAEMON_URL=<ORQ_DAEMON_URL>",
+		"ORQ_BOOTSTRAP_TOKEN_FILE=" + filepath.Join(dataDir, "bootstrap-token"),
+		filepath.Join(dataDir, "agent.env"),
+	} {
+		if !strings.Contains(out.String(), value) {
+			t.Errorf("dry run omitted planned configuration %q", value)
+		}
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Fatal("dry run revealed the bootstrap credential")
+	}
+	out.Reset()
+	if err := UninstallServiceCommand(ServiceOptions{DataDir: dataDir, DryRun: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(dataDir) {
+		t.Error("a dry run created the data dir")
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Errorf("dry run wrote into HOME: %v %v", entries, err)
+	}
+	if data, err := os.ReadFile(tokenFile); err != nil || string(data) != secret+"\n" {
+		t.Fatalf("dry run consumed or changed the source token: %q %v", data, err)
+	}
+}

@@ -35,7 +35,7 @@ import { claudeConfigDir } from "./config-dir.ts";
 type Doc = Record<string, unknown>;
 
 /** Which settings files a launch loads (`launch.ts` `settingSources`). */
-export type ClaudeSettingsSources = "global" | "profile" | "isolated";
+type ClaudeSettingsSources = "global" | "profile" | "isolated";
 
 const HOST_FS: ClaudeNamesFs = new HostProjectFs();
 
