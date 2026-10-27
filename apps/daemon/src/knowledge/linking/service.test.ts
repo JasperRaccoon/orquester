@@ -9,7 +9,7 @@ import { PassThrough } from "node:stream";
 import { after, describe, it } from "node:test";
 import type { KnowledgeConceptRef, KnowledgeEntry, KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
-import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgePairChecksPath, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
+import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgePairChecksPath, knowledgeStatePath, parseKnowledgeLinkingState, type KnowledgeConceptMergeCheck } from "@orquester/config";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type {
   KnowledgeEntryChange,
@@ -21,7 +21,9 @@ import type {
   KnowledgeSettingsPort,
   KnowledgeStorePort
 } from "../ports.ts";
+import { ConceptMergeCheckSource } from "../search/concept-merge-checks.ts";
 import { FAKE_THRESHOLDS, FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
+import type { GraphConcept } from "../search/graph.ts";
 import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } from "./context.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
@@ -1553,6 +1555,53 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     assert.ok(round.calls.every((state) => state === "idle"), JSON.stringify(round.calls));
     assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").length, 5, "each item once");
+    await h.service.stop();
+  });
+
+  it("concept checks: more candidate pairs than a round takes are asked round after round until none is left", async () => {
+    const graph = fakeGraphView();
+    // Three same-type pairs a name guard refused, close enough to ask about; one a round.
+    const unit = (axisAt: number, cos = 1): Float32Array => {
+      const v = new Float32Array(16);
+      v[axisAt] = cos;
+      v[axisAt + 1] = Math.sqrt(1 - cos * cos);
+      return v;
+    };
+    const concepts: GraphConcept[] = [];
+    const vectors = new Map<string, Float32Array>();
+    for (const [i, [x, y]] of [
+      ["48-hour account warm-up", "Warm up the account for 48 hours before posting"],
+      ["Proxy risk check", "Check proxy fraud score on IPQualityScore and Scamalytics"],
+      ["US App Store download and warm-up", "US App Store download plus warm-up"]
+    ].entries()) {
+      for (const [j, name] of [x!, y!].entries()) {
+        const id = `tactic-${i}${j}`;
+        concepts.push({ id, type: "Tactic", name, confidence: 0.9, description: null, aliases: [], attributes: {}, entryIds: [`ke_${i}`] });
+        vectors.set(id, unit(i * 3, j === 0 ? 1 : 0.99));
+      }
+    }
+    const checks: KnowledgeConceptMergeCheck[] = [];
+    const conceptChecks = new ConceptMergeCheckSource({
+      merges: {
+        checkState: () => ({ concepts, set: { modelId: "fake/model", vectors }, thresholds: { merge: 0.91, similar: 0.93 }, rejected: [], checks, canonical: (id) => id }),
+        recordCheck: async (check) => void checks.push(check),
+        onPlanned: () => () => undefined
+      },
+      entry: async () => null,
+      bars: () => ({ sharedEntry: 0.96, alone: 0.975 }),
+      limit: 1,
+      pause: async () => undefined
+    });
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [conceptChecks] } });
+    graph.ready([ID(1), ID(2)]);
+    await h.service.start();
+    for (const id of [ID(1), ID(2)]) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await h.until(() => checks.length >= 3);
+    await h.service.pairChecksIdle();
+    assert.deepEqual(checks.map((c) => c.nameA).sort(), ["48-hour account warm-up", "Proxy risk check", "US App Store download and warm-up"]);
+    assert.equal(h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "concept-check").length, 3, "each pair once");
     await h.service.stop();
   });
 
