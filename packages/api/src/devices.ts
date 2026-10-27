@@ -81,6 +81,13 @@ export const DEVICE_PROFILES: readonly DeviceProfile[] = [
   { id: "pixel-9", platform: "android", label: "Pixel 9", formFactor: "phone", os: "Android 15", avdDevice: "pixel_9", systemImage: ANDROID_SYSTEM_IMAGE },
   { id: "pixel-tablet", platform: "android", label: "Pixel Tablet", formFactor: "tablet", os: "Android 15", avdDevice: "pixel_tablet", systemImage: ANDROID_SYSTEM_IMAGE },
   { id: "pixel-fold", platform: "android", label: "Pixel Fold", formFactor: "foldable", os: "Android 15", avdDevice: "pixel_fold", systemImage: ANDROID_SYSTEM_IMAGE },
+  // Samsung Galaxy: generic hardware profiles (avdmanager ships none of Samsung's) with the real
+  // screens' aspect; the panel matches their `orq-galaxy-…` AVD names to the Samsung 3D models.
+  { id: "galaxy-s26", platform: "android", label: "Galaxy S26", formFactor: "phone", os: "Android 15", avdDevice: "pixel_9", systemImage: ANDROID_SYSTEM_IMAGE, modelId: "galaxy-s26" },
+  { id: "galaxy-s26-plus", platform: "android", label: "Galaxy S26+", formFactor: "phone", os: "Android 15", avdDevice: "pixel_9", systemImage: ANDROID_SYSTEM_IMAGE, modelId: "galaxy-s26-plus" },
+  { id: "galaxy-s26-ultra", platform: "android", label: "Galaxy S26 Ultra", formFactor: "phone", os: "Android 15", avdDevice: "pixel_9", systemImage: ANDROID_SYSTEM_IMAGE, modelId: "galaxy-s26-ultra" },
+  { id: "galaxy-z-fold8", platform: "android", label: "Galaxy Z Fold8", formFactor: "foldable", os: "Android 15", avdDevice: "7.6in Foldable", systemImage: ANDROID_SYSTEM_IMAGE, modelId: "galaxy-z-fold8" },
+  { id: "galaxy-z-flip8", platform: "android", label: "Galaxy Z Flip8", formFactor: "foldable", os: "Android 15", avdDevice: "6.7in Foldable", systemImage: ANDROID_SYSTEM_IMAGE, modelId: "galaxy-z-flip8" },
   { id: "iphone-17-pro", platform: "ios", label: "iPhone 17 Pro", formFactor: "phone", os: "iOS 26", simDeviceTypes: ["iPhone 17 Pro"] },
   { id: "iphone-17-pro-max", platform: "ios", label: "iPhone 17 Pro Max", formFactor: "phone", os: "iOS 26", simDeviceTypes: ["iPhone 17 Pro Max"] },
   {
