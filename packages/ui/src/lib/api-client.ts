@@ -156,6 +156,8 @@ import {
   parseKnowledgeStatus,
   type KnowledgeSettingsAnswer
 } from "./knowledge/validate";
+import type { KnowledgeSimilarityGraphQuery, KnowledgeSimilarityGraphResponse } from "@orquester/api";
+import { parseKnowledgeSimilarityGraphResponse } from "./knowledge/validate";
 import {
   authRoutes,
   authSessionPath,
@@ -1103,6 +1105,15 @@ export class ApiClient {
       signal
     });
     return readKnowledge(parseKnowledgeGraphResponse(data), "graph");
+  }
+
+  /** Embedded entries joined by meaning (nearest neighbours and a spanning forest), with their clusters. A daemon that predates it answers 404. */
+  async getKnowledgeSimilarityGraph(query: KnowledgeSimilarityGraphQuery = {}, signal?: AbortSignal): Promise<KnowledgeSimilarityGraphResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.similarityGraph, {
+      query: { collections: query.collections, k: query.k, limit: query.limit },
+      signal
+    });
+    return readKnowledge(parseKnowledgeSimilarityGraphResponse(data), "similarity graph");
   }
 
   /**
