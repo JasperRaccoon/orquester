@@ -21,6 +21,7 @@ import {
   KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES,
   knowledgeCitation,
   type KnowledgeConceptRef,
+  type KnowledgeDisagreement,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
   type KnowledgeNovelty,
@@ -107,6 +108,8 @@ const DISTINCTIVE_BONUS = 0.25;
 const DISTINCTIVE_BONUS_CONCEPTS = 3;
 /** Entries listed in `similar` because they contradict this one (even below the meaning bar). */
 const CONTRADICTIONS_SIMILAR_MAX = 3;
+/** Entries listed in an entry's `disagreements` (every one counted in `disagreementsTotal`). */
+const DISAGREEMENTS_MAX = 20;
 /** Concepts named per cluster (`KnowledgeSimilarityCluster.concepts`). */
 const CLUSTER_CONCEPTS_MAX = 5;
 /** Concepts named in an entry's `novelty`. */
@@ -350,10 +353,17 @@ export class KnowledgeSimilarity {
    * `concepts` reason whichever way it was found. Duplicates: up to 3 at cosine ≥ `duplicate` whose
    * text is a near-copy of its own ({@link nearCopy}). Only entries `scope` lets through; never the
    * entry itself.
+   *
+   * `disagreements`: every entry that contradicts it, in the same order (checked first, then the
+   * closest), up to {@link DISAGREEMENTS_MAX}, whatever the `similar` cap; `disagreementsTotal`
+   * counts them all. {@link findContradictions} is symmetric, so B is on A's list whenever A is on B's.
    */
-  forEntry(id: string, scope: KnowledgeScope): { similar: KnowledgeSimilarEntry[]; possibleDuplicates: KnowledgeSimilarEntry[] } {
+  forEntry(
+    id: string,
+    scope: KnowledgeScope
+  ): { similar: KnowledgeSimilarEntry[]; possibleDuplicates: KnowledgeSimilarEntry[]; disagreements: KnowledgeDisagreement[]; disagreementsTotal: number } {
     const meta = this.store.getMeta(id);
-    if (!meta) return { similar: [], possibleDuplicates: [] };
+    if (!meta) return { similar: [], possibleDuplicates: [], disagreements: [], disagreementsTotal: 0 };
     const vectors = this.vectors();
     const own = vectors ? vectors.index.entryVector(id) : null;
     const candidates = new Map<string, Candidate>();
@@ -413,16 +423,14 @@ export class KnowledgeSimilarity {
         entryMeta: (other) => this.store.getMeta(other)
       }).values()
     ];
-    if (contradicting.length > 0) {
-      const ranked = contradicting
-        .map((found) => {
-          const otherMeta = this.store.getMeta(found.a === id ? found.b : found.a)!;
-          const similarity = vectors && own ? (this.cosine(vectors.index, own, otherMeta.id) ?? -Infinity) : -Infinity;
-          return { found, meta: otherMeta, similarity, checked: Number(found.source === "checked") };
-        })
-        .sort((x, y) => y.checked - x.checked || y.similarity - x.similarity || newestFirst(x.meta, y.meta));
-      for (const item of ranked.slice(0, CONTRADICTIONS_SIMILAR_MAX)) candidate(item.meta).contradiction = item.found;
-    }
+    const disagreeing = contradicting
+      .map((found) => {
+        const otherMeta = this.store.getMeta(found.a === id ? found.b : found.a)!;
+        const similarity = vectors && own ? (this.cosine(vectors.index, own, otherMeta.id) ?? -Infinity) : -Infinity;
+        return { found, meta: otherMeta, similarity, checked: Number(found.source === "checked") };
+      })
+      .sort((x, y) => y.checked - x.checked || y.similarity - x.similarity || newestFirst(x.meta, y.meta));
+    for (const item of disagreeing.slice(0, CONTRADICTIONS_SIMILAR_MAX)) candidate(item.meta).contradiction = item.found;
 
     // The concepts every candidate shares with it, however it was found (the distinctive ones named first).
     if (ownConcepts.length > 0) {
@@ -484,7 +492,15 @@ export class KnowledgeSimilarity {
       possibleDuplicates: neighbours
         .filter((n) => n.similarity >= duplicate && this.nearCopy(id, n.meta.id))
         .slice(0, KNOWLEDGE_DUPLICATES_MAX)
-        .map((n) => toWire(candidates.get(n.meta.id)!))
+        .map((n) => toWire(candidates.get(n.meta.id)!)),
+      disagreements: disagreeing.slice(0, DISAGREEMENTS_MAX).map(({ found, meta: other, similarity }) => ({
+        entry: this.summary(other, scope),
+        similarity: Number.isFinite(similarity) ? round(similarity) : null,
+        source: found.source,
+        pairs: found.pairs.map((pair) => ({ from: { ...pair.from }, to: { ...pair.to } })),
+        note: found.note
+      })),
+      disagreementsTotal: disagreeing.length
     };
   }
 

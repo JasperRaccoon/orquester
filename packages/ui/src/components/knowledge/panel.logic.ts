@@ -121,12 +121,21 @@ export interface Disagreement {
 }
 
 /**
- * The "Disagrees with" section (phase 2 spec, "Contradictions"): the similar entries carrying a
- * `contradicts` reason, each once and never the entry itself, in the daemon's order.
+ * The "Disagrees with" section (phase 2 spec, "Contradictions"): the entry's `disagreements` (every
+ * entry it disagrees with, beyond the similar list's cap), or from an older daemon the similar
+ * entries carrying a `contradicts` reason; each once and never the entry itself, in the daemon's order.
  */
-export function disagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "similar">): Disagreement[] {
+export function disagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "similar" | "disagreements">): Disagreement[] {
   const seen = new Set<string>([detail.entry.id]);
   const out: Disagreement[] = [];
+  if (detail.disagreements) {
+    for (const item of detail.disagreements) {
+      if (seen.has(item.entry.id)) continue;
+      seen.add(item.entry.id);
+      out.push({ entry: item.entry, source: item.source, pairs: item.pairs, note: item.note });
+    }
+    return out;
+  }
   for (const item of detail.similar ?? []) {
     const reason = item.reasons.find((r) => r.kind === "contradicts");
     if (reason?.kind !== "contradicts" || seen.has(item.entry.id)) continue;
@@ -134,6 +143,11 @@ export function disagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "simi
     out.push({ entry: item.entry, source: reason.source, pairs: reason.pairs, note: reason.note });
   }
   return out;
+}
+
+/** How many disagreements the daemon counted beyond the ones it listed (0 when it lists them all). */
+export function moreDisagreements(detail: Pick<KnowledgeEntryDetail, "entry" | "similar" | "disagreements" | "disagreementsTotal">): number {
+  return detail.disagreements ? Math.max(0, (detail.disagreementsTotal ?? 0) - disagreements(detail).length) : 0;
 }
 
 /** Where a contradiction was found, in words. */

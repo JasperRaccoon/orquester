@@ -228,7 +228,7 @@ test("without an index or a model: concepts and author only, similarity null, no
   assert.deepEqual(noModel.possibleDuplicates, []);
   s.noIndex();
   assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).similar), [ke("e"), ke("f"), ke("g")]);
-  assert.deepEqual(s.similarity.forEntry(ke("zzz"), s.all), { similar: [], possibleDuplicates: [] }, "unknown entry");
+  assert.deepEqual(s.similarity.forEntry(ke("zzz"), s.all), { similar: [], possibleDuplicates: [], disagreements: [], disagreementsTotal: 0 }, "unknown entry");
 });
 
 test("similarForSaved: visible near-duplicates outside the save, closest first, at most 3", () => {
@@ -677,6 +677,45 @@ test("similar: entries that contradict it (graph, either direction) are listed e
   assert.deepEqual(h.reasons, [
     { kind: "contradicts", source: "graph", pairs: [{ from: { id: "tactic-secret", name: "Hidden pricing claim", type: "tactic" }, to: shortRef }], note: null }
   ]);
+});
+
+test("disagreements: every contradicting entry, checked first then closest, past the 3 `similar` keeps; each side lists the other", async () => {
+  const s = await contradictionFixture();
+  for (const name of ["n1", "n4", "n7", "n9"]) s.pairChecks.push(pairCheck(ke("a"), ke(name), "contradicts", `${name} disagrees`));
+  const { similar, disagreements, disagreementsTotal } = s.similarity.forEntry(ke("a"), s.all);
+  assert.deepEqual(
+    disagreements.map((item) => item.entry.id),
+    ["n1", "n4", "n7", "n9", "h", "z"].map(ke)
+  );
+  assert.equal(disagreementsTotal, 6);
+  assert.deepEqual(disagreements[0], { entry: disagreements[0]!.entry, similarity: 0.98, source: "checked", pairs: [], note: "n1 disagrees" });
+  assert.deepEqual(disagreements[5], { entry: disagreements[5]!.entry, similarity: 0.1, source: "graph", pairs: [{ from: shortRef, to: longRef }], note: null });
+  assert.equal(similar.filter((item) => item.reasons.some((r) => r.kind === "contradicts")).length, 3, "similar keeps its 3, as older clients read them");
+  for (const other of disagreements) {
+    assert.ok(
+      s.similarity.forEntry(other.entry.id, s.all).disagreements.some((item) => item.entry.id === ke("a")),
+      `${other.entry.id} lists a back`
+    );
+  }
+  // Only the hidden-aware view: H (Ads) is neither listed nor counted.
+  const seo = s.similarity.forEntry(ke("a"), s.seoOnly);
+  assert.ok(!seo.disagreements.some((item) => item.entry.id === ke("h")));
+  assert.equal(seo.disagreementsTotal, 5);
+});
+
+test("disagreements: at most 20 listed, every one counted", async () => {
+  const s = await contradictionFixture();
+  for (let i = 1; i <= 21; i += 1) {
+    if (i > 10) {
+      s.put(`m${i}`, ["kc_seo"]);
+      s.index.set(ke(`m${i}`), around(DIMS, 0, 1, 0.3));
+    }
+    s.pairChecks.push(pairCheck(ke("a"), ke(i > 10 ? `m${i}` : `n${i}`), "contradicts"));
+  }
+  const { disagreements, disagreementsTotal } = s.similarity.forEntry(ke("a"), s.all);
+  assert.equal(disagreements.length, 20);
+  assert.equal(disagreementsTotal, 23);
+  assert.ok(disagreements.every((item) => item.source === "checked"), "checked ones first");
 });
 
 test("similar: a hidden entry or its concepts never show through a contradiction", async () => {

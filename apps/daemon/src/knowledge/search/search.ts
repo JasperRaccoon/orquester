@@ -641,7 +641,7 @@ export class KnowledgeSearch {
       .map((r) => this.store.getMeta(r.id))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .map((m) => this.summary(m, scope));
-    const { similar, possibleDuplicates } = this.similarity.forEntry(id, scope);
+    const { similar, possibleDuplicates, disagreements, disagreementsTotal } = this.similarity.forEntry(id, scope);
     const novelty = this.similarity.novelty(id, scope);
     return {
       entry: { ...entry, savedFrom: { ...entry.savedFrom }, collections: visibleCollections(entry, scope) },
@@ -650,6 +650,8 @@ export class KnowledgeSearch {
       similar,
       possibleDuplicates,
       ...(novelty ? { novelty } : {}),
+      disagreements,
+      ...(disagreementsTotal > disagreements.length ? { disagreementsTotal } : {}),
       citation: knowledgeCitation(meta)
     };
   }

@@ -23,6 +23,7 @@ import {
   keepDuplicatePair,
   knowledgeMergePlan,
   markdownBodyPreview,
+  moreDisagreements,
   mergeConfirmMessage,
   mergeErrorText,
   panelSessionVersion,
@@ -210,11 +211,12 @@ const ConceptChip: React.FC<{ concept: KnowledgeConceptRef; onOpen: (id: string)
 
 /** "Disagrees with": entries that contradict this one, each with the note and the concepts that clash. */
 export const Disagreements: React.FC<{
-  detail: Pick<KnowledgeEntryDetail, "entry" | "similar">;
+  detail: Pick<KnowledgeEntryDetail, "entry" | "similar" | "disagreements" | "disagreementsTotal">;
   onOpen: (id: string) => void;
   onOpenConcept: (id: string) => void;
 }> = ({ detail, onOpen, onOpenConcept }) => {
   const items = disagreements(detail);
+  const more = moreDisagreements(detail);
   if (items.length === 0) return null;
   return (
     <section aria-label="Disagrees with">
@@ -247,6 +249,7 @@ export const Disagreements: React.FC<{
           </li>
         ))}
       </ul>
+      {more > 0 && <p className="mt-1 text-[11px] text-neutral-500">+{more.toLocaleString("en-US")} more (Insights lists every contradiction)</p>}
     </section>
   );
 };
