@@ -46,6 +46,8 @@ export interface AgentDeviceRunOptions {
   timeoutMs?: number;
   /** Written to the CLI's stdin (`fill --text-stdin`: text stays out of argv). */
   stdin?: string;
+  /** Another session than the lease's (only to close a stale Orquester session holding the device). */
+  session?: string;
 }
 
 export interface AgentDeviceClient {
@@ -138,7 +140,9 @@ export class AgentDeviceError extends DeviceError {
     code: DeviceErrorCodeOrGeneric,
     message: string,
     readonly cliCode: string | null,
-    readonly reason: string | null
+    readonly reason: string | null,
+    /** agent-device's `details` (`DEVICE_IN_USE` names the holding `session`). */
+    readonly details: Record<string, unknown> | null = null
   ) {
     super(code, message);
   }
@@ -155,7 +159,9 @@ export function agentDeviceData(result: AgentDeviceResult, command: string): Rec
     const reason = typeof json.error.details?.reason === "string" ? json.error.details.reason : null;
     const message = clip(redactPaths(typeof json.error.message === "string" ? json.error.message : `${command} failed`));
     const hint = typeof json.error.hint === "string" ? clip(redactPaths(json.error.hint)) : null;
-    throw classify(cliCode, reason, message, hint);
+    const details = json.error.details && typeof json.error.details === "object" ? (json.error.details as Record<string, unknown>) : null;
+    const error = classify(cliCode, reason, message, hint);
+    throw new AgentDeviceError(error.code, error.message, cliCode, reason, details);
   }
   if (result.exitCode === 0) return {};
   const line = result.stderr.trim().split("\n").filter(Boolean).pop() ?? `exit code ${result.exitCode}`;
@@ -221,7 +227,7 @@ export function createAgentDeviceClient(deps: AgentDeviceDeps): AgentDeviceClien
       const argv = agentDeviceArgv({
         prefix: cli.args,
         configPath,
-        session: agentDeviceSession(lease.threadId, lease.hostId, lease.deviceId),
+        session: options.session ?? agentDeviceSession(lease.threadId, lease.hostId, lease.deviceId),
         platform: lease.platform,
         deviceId: lease.deviceId,
         command,

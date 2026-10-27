@@ -185,7 +185,6 @@ test("execute: a lost session is reopened on the foreground app and the action r
   let homes = 0;
   const agent = new ScriptedAgentDevice((command) => {
     if (command === "home") return homes++ === 0 ? result("home3") : ok({ action: "home", message: "Home" });
-    if (command === "appstate") return result("appstate");
     return ok({ message: "Opened" });
   });
   const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
@@ -193,7 +192,7 @@ test("execute: a lost session is reopened on the foreground app and the action r
   assert.equal(pressed.log.summary, "Pressed home");
   assert.deepEqual(
     agent.calls.map((call) => [call.command, ...call.args].join(" ")),
-    ["home", "appstate", "open com.google.android.apps.nexuslauncher", "home"]
+    ["home", "open", "home"]
   );
 
   const iosAgent = new ScriptedAgentDevice((command, args) => (command === "open" && args[0] === "--foreground" ? result("err-cmd") : ok({ nodes: [] })));
@@ -303,4 +302,32 @@ test("end: the agent-device session of a used lease is closed once; an unused on
   await executor.end!(ctx);
   await executor.end!(ctx);
   assert.deepEqual(agent.calls.map((call) => call.command), ["snapshot", "close"]);
+});
+
+test("a stale Orquester session holding the device is closed and the call retried; anyone else's is left alone", async () => {
+  const inUse = (session: string): AgentDeviceResult => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: "",
+    json: { success: false, error: { code: "DEVICE_IN_USE", message: `Device is already in use by session "${session}".`, details: { session, deviceId: "emulator-5554" } } }
+  });
+  const sessions: (string | undefined)[] = [];
+  let first = true;
+  const agent: AgentDeviceClient = {
+    async run(_target, command, _args, options) {
+      sessions.push(options.session);
+      if (command === "snapshot" && first) {
+        first = false;
+        return inUse("orq-00000000000000aa");
+      }
+      return ok({ nodes: [] });
+    }
+  };
+  const executor = createDeviceActionExecutor({ agentDevice: agent, logger: quiet });
+  await executor.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "snapshot" }, signal);
+  assert.deepEqual(sessions, [undefined, "orq-00000000000000aa", undefined]);
+
+  const foreign = createDeviceActionExecutor({ agentDevice: { run: async () => inUse("someone-else") }, logger: quiet });
+  const refused = await foreign.execute({ host: new FakeDeviceHost(), lease: lease() }, { action: "snapshot" }, signal).catch((error: unknown) => error);
+  assert.ok(isDeviceError(refused) && refused.code === "DEVICE_BUSY");
 });

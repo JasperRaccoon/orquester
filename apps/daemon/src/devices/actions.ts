@@ -11,9 +11,10 @@
  *   speaks pixels on Android (× the lease's `screen.scale`) and points on iOS.
  * - The action log's point for a ref tap is where agent-device says it tapped, else the ref's frame
  *   centre from the lease's last snapshot (kept per lease, cleared when refs expire).
- * - agent-device needs an app session: iOS opens the foreground app (or Springboard) before its
- *   first action; a lost session (`SESSION_NOT_FOUND`) is reopened on the foreground app and the
- *   action retried once.
+ * - agent-device needs a session: iOS opens the foreground app (or Springboard) before its first
+ *   action; a lost session (`SESSION_NOT_FOUND`) is reopened (Android: a bare `open`) and the
+ *   action retried once. Another Orquester session still holding the device is stale (the service
+ *   leases a device to one chat): it is closed and the call retried.
  * - `screenshot` returns the PNG, or a JPEG scaled to fit `DEVICE_SCREENSHOT_MAX_BASE64_CHARS`.
  * - Builds are streamed to the host (`uploadFile`; an `.app` directory as `<name>.app.tar`, which a
  *   host extracts and answers the `.app` path of), then installed by `DeviceHost.installApp` or
@@ -30,7 +31,7 @@ import type { Readable } from "node:stream";
 import type { DeviceActionInput, DevicePoint, DevicePressKey } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
-import { agentDeviceData, AgentDeviceError, type AgentDeviceClient } from "./agent-device.ts";
+import { agentDeviceData, AgentDeviceError, agentDeviceSession, type AgentDeviceClient } from "./agent-device.ts";
 import { DeviceError, isDeviceError } from "./errors.ts";
 import type { DeviceActionOutcome, DeviceHost, DeviceRect } from "./host.ts";
 import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS, fitScreenshot } from "./screenshot-image.ts";
@@ -446,6 +447,17 @@ function lastLines(text: string): string {
   return tail.length > LOG_CHARS ? tail.slice(tail.length - LOG_CHARS) : tail;
 }
 
+/** An Orquester session name (`agentDeviceSession`). */
+const ORQUESTER_SESSION = /^orq-[0-9a-f]{16}$/;
+
+/** The stale Orquester session a `DEVICE_IN_USE` names, when it is not the lease's own. */
+export function staleHolder(error: unknown, lease: StoredDeviceLease): string | null {
+  if (!(error instanceof AgentDeviceError) || error.cliCode !== "DEVICE_IN_USE" || lease.deviceId === null) return null;
+  const holder = error.details?.session;
+  if (typeof holder !== "string" || !ORQUESTER_SESSION.test(holder)) return null;
+  return holder === agentDeviceSession(lease.threadId, lease.hostId, lease.deviceId) ? null : holder;
+}
+
 function appIdOf(data: Record<string, unknown>): string | null {
   for (const key of ["appId", "bundleId", "appBundleId", "package", "packageName"]) {
     const value = data[key];
@@ -468,12 +480,29 @@ export function createDeviceActionExecutor(deps: DeviceActionExecutorDeps): Devi
   const unitsPerPoint = (lease: StoredDeviceLease, state: LeaseState): number =>
     platformOf(lease) === "ios" ? 1 : (lease.screen?.scale ?? state.density ?? 1);
 
-  const raw = (ctx: DeviceActionContext, command: string, args: string[], signal: AbortSignal, options: { timeoutMs?: number; stdin?: string } = {}) =>
+  const once = (ctx: DeviceActionContext, command: string, args: string[], signal: AbortSignal, options: { timeoutMs?: number; stdin?: string } = {}) =>
     deps.agentDevice
       .run(ctx, command, args, { signal, ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}), ...(options.stdin !== undefined ? { stdin: options.stdin } : {}) })
       .then((result) => agentDeviceData(result, command));
 
-  /** Open an app session on the device's foreground app (iOS: Springboard when none). */
+  /**
+   * One call; when another Orquester session still holds the device (an earlier lease whose session
+   * was never closed: a crash, a restart), it is stale — the service leases a device to one chat
+   * only — so it is closed and the call retried once. Anyone else's session is left alone.
+   */
+  const raw = async (ctx: DeviceActionContext, command: string, args: string[], signal: AbortSignal, options: { timeoutMs?: number; stdin?: string } = {}) => {
+    try {
+      return await once(ctx, command, args, signal, options);
+    } catch (error) {
+      const holder = staleHolder(error, ctx.lease);
+      if (!holder) throw error;
+      deps.logger.info(`[devices] closing a stale agent-device session on ${ctx.lease.hostId}/${ctx.lease.deviceId}`);
+      await deps.agentDevice.run(ctx, "close", [], { signal, timeoutMs: END_TIMEOUT_MS, session: holder }).catch(() => undefined);
+      return once(ctx, command, args, signal, options);
+    }
+  };
+
+  /** Open an app session on what the device shows (iOS: its foreground app, else Springboard). */
   const openSession = async (ctx: DeviceActionContext, signal: AbortSignal): Promise<void> => {
     const state = stateOf(ctx.lease);
     if (platformOf(ctx.lease) === "ios") {
@@ -484,10 +513,8 @@ export function createDeviceActionExecutor(deps: DeviceActionExecutorDeps): Devi
         await raw(ctx, "open", ["com.apple.springboard"], signal, { timeoutMs: OPEN_TIMEOUT_MS });
       }
     } else {
-      const app = await raw(ctx, "appstate", [], signal);
-      const pkg = typeof app.package === "string" ? app.package : null;
-      if (!pkg) throw new DeviceError("UNAVAILABLE", "No app is in the foreground. Open one with device_action {action:\"open_app\"}.");
-      await raw(ctx, "open", [pkg], signal, { timeoutMs: OPEN_TIMEOUT_MS });
+      // A bare `open` starts a session on whatever is in front (opening the launcher's package fails).
+      await raw(ctx, "open", [], signal, { timeoutMs: OPEN_TIMEOUT_MS });
     }
     state.sessionOpen = true;
     state.refs = {};
