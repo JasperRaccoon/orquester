@@ -89,3 +89,71 @@ export const LONG_GUIDE_CONCEPTS: KnowledgeConceptRef[] = [
   { id: "tactic-static-ip", type: "Tactic", name: "Install and configure a paid dedicated/static IP VPN/proxy" },
   { id: "tactic-48h-warm-up", type: "Tactic", name: "Warm up the account for 48 hours before posting" }
 ];
+
+/**
+ * Three saved posts shaped like a live conflict the pair checks never reached (2026-10-27): a
+ * 7-step guide that says "install a VPN (I use NordVPN…)", a post that says "do not use NordVPN…
+ * you get shadow banned" and to self-host a VPN instead, and a post that says TikTok detects VPNs
+ * and even ISP proxies. Shortened from the saved entries; their concepts are the live ones.
+ */
+export const NORDVPN_GUIDE = {
+  id: "ke_cqdqkean26qc",
+  title: "How to create a US TikTok account and target only the US (7 steps)",
+  author: "Emanuele Totaro",
+  body: [
+    "Ok, so after several of my videos went viral on different TikTok accounts, many of you asked how I create a US account and target only the US.",
+    "1. Buy a second phone (preferably an iPhone, as it's harder to track)",
+    "2. Fully reset it to factory settings",
+    "3. Set the language and region to United States",
+    "4. Create a US iCloud account using a virtual number via TextMe",
+    "5. Before downloading TikTok, install a VPN (I use NordVPN, connect to Los Angeles or San Francisco)",
+    "6. Download TikTok, create an account, and always connect with the VPN from now on",
+    "7. Warm up your account for 5-7 days and you're done"
+  ].join("\n\n"),
+  concepts: [
+    { id: "channel-tiktok", type: "Channel", name: "TikTok" },
+    { id: "tool-nordvpn", type: "Tool", name: "NordVPN" },
+    { id: "tool-vpn", type: "Tool", name: "VPN" },
+    { id: "tool-iphone", type: "Tool", name: "iPhone" },
+    { id: "tactic-install-vpn", type: "Tactic", name: "Install a VPN before downloading TikTok" }
+  ] satisfies KnowledgeConceptRef[]
+};
+
+export const NORDVPN_WARNING = {
+  id: "ke_njlwow7jldha",
+  title: "Don't use NordVPN for US TikTok — self-host Outline VPN on Hetzner ($5/mo)",
+  author: "daniel",
+  body: [
+    "do not use NordVPN for tiktok to target US Audience.",
+    "you get shadow banned instantly.",
+    "most people using cheap VPNs or residential proxies get flagged by tiktok because hundreds of others share the same ip.",
+    "solution: host your own VPN on hetzner using Outline VPN for $5/month and takes 10 minutes.",
+    "rotate ip monthly by redeploying your server",
+    "this makes tiktok think your connection is a normal us home user, not a clipper using shared vpn/proxy."
+  ].join("\n\n"),
+  concepts: [
+    { id: "channel-tiktok", type: "Channel", name: "TikTok" },
+    { id: "tool-nordvpn", type: "Tool", name: "NordVPN" },
+    { id: "tool-outline-vpn", type: "Tool", name: "Outline VPN" },
+    { id: "tool-residential-proxies", type: "Tool", name: "Residential proxies" },
+    { id: "tactic-no-nordvpn", type: "Tactic", name: "Don't use NordVPN or shared VPNs/residential proxies for US TikTok" }
+  ] satisfies KnowledgeConceptRef[]
+};
+
+export const VPN_DETECTION = {
+  id: "ke_5trfwm5kbe2a",
+  title: "TikTok detects VPNs and proxies on the device (Use-Vpn and Is-Mockip flags), even residential/mobile/ISP ones",
+  author: "yanme",
+  body: [
+    "fyi, tiktok knows you're using a vpn (yes, even if you use a residential or mobile or isp proxy). the app has:",
+    '- a flag "Use-Vpn" that checks for tunnel-like names containing tun, tap, ipsec, ppp, etc.',
+    '- a flag "Is-Mockip" checks the proxy configuration returned for a reference url',
+    "a proxy that is transparent & upstream (eg. on your router) would be invisible to these checks, but i don't bother with that"
+  ].join("\n"),
+  concepts: [
+    { id: "channel-tiktok", type: "Channel", name: "TikTok" },
+    { id: "tool-vpn", type: "Tool", name: "VPN" },
+    { id: "tool-isp-proxy", type: "Tool", name: "ISP proxy" },
+    { id: "tactic-device-detection", type: "Tactic", name: "On-device VPN and proxy detection" }
+  ] satisfies KnowledgeConceptRef[]
+};

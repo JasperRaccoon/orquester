@@ -14,8 +14,13 @@
  * guard that an LLM can overrule — `lexical`, `list`, `numbers` only when one name has no number,
  * `negation` only when both names negate (one negated name is never the same as a plain one); at
  * least one name word in common; not merged together already, not in an undone merge, not checked
- * at these names. Sharing an entry first (myKG often extracts one thing twice from one entry), then
- * closest first; at most {@link CONCEPT_CHECK_MAX_PER_ROUND} a round.
+ * at these names. Names that nearly coincide ({@link CONCEPT_CHECK_ALIKE_WORDS}+ words in common, at
+ * least half of their words) are asked about at a lower bar (`alikeNames`), with or without a shared
+ * entry: two entries often name one thing in two wordings ("US App Store download and warm-up" /
+ * "… plus warm-up"). Sharing an entry first (myKG often extracts one thing twice from one entry),
+ * then closest first; at most {@link CONCEPT_CHECK_MAX_PER_ROUND} a round. Linking's rounds follow
+ * one another while a round answered something (`linking/service.ts`), so the candidates are asked
+ * about round after round until none is left.
  *
  * Each concept is shown with an excerpt of one of its entries: the passage naming it best among its
  * first entries ({@link conceptExcerptFor}), not an entry's opening. A check records its input
@@ -63,6 +68,21 @@ export interface ConceptCheckBars {
   sharedEntry: number;
   /** They share no entry. */
   alone: number;
+  /**
+   * Their names nearly coincide ({@link CONCEPT_CHECK_ALIKE_WORDS}+ name words in common, at least
+   * half of their words), whether or not they share an entry. Absent: no lower bar for them.
+   */
+  alikeNames?: number;
+}
+
+/** Name words two concepts must have in common for the `alikeNames` bar; and at least half of their words (Jaccard). */
+export const CONCEPT_CHECK_ALIKE_WORDS = 3;
+const ALIKE_MIN_JACCARD = 0.5;
+
+function alikeNames(x: ReadonlySet<string>, y: ReadonlySet<string>): boolean {
+  let shared = 0;
+  for (const token of x) if (y.has(token)) shared += 1;
+  return shared >= CONCEPT_CHECK_ALIKE_WORDS && shared / (x.size + y.size - shared) >= ALIKE_MIN_JACCARD;
 }
 
 /**
@@ -77,8 +97,17 @@ export interface ConceptCheckBars {
  * TikTok" ~ "… (used iPhone, ISP proxy, Shadowrocket)" 0.972. With the filters of the module
  * header, ≥ 0.96 sharing an entry or ≥ 0.975 alone leaves ~430 pairs (418 sharing an entry): about
  * eleven rounds once, then only what new entries bring.
+ *
+ * Once those were asked (the live graph of the evening: 2,918 concepts, 122 candidates, all
+ * checked, 5 the same), the duplicates still visible were mostly two entries naming one thing in two
+ * wordings, at 0.94–0.975 with no shared entry: "US App Store download and warm-up" ~ "… plus
+ * warm-up" 0.964, "ISP proxy with IPQS/Scamalytics risk check" ~ "ISP proxy that passes IPQS and
+ * Scamalytics" 0.947, "Buying press releases that point at your site" ~ "… pointing to your site"
+ * 0.974. Names sharing 3+ words and half of their words, at ≥ 0.94, add 101 pairs (82 sharing no
+ * entry; siblings among them, "… health data …" ~ "… financial data …", which the check tells
+ * apart): three rounds.
  */
-export const E5_SMALL_CONCEPT_CHECK_BARS: ConceptCheckBars = { sharedEntry: 0.96, alone: 0.975 };
+export const E5_SMALL_CONCEPT_CHECK_BARS: ConceptCheckBars = { sharedEntry: 0.96, alone: 0.975, alikeNames: 0.94 };
 
 const BARS_BY_MODEL: Readonly<Record<string, ConceptCheckBars>> = { [EMBEDDING_MODEL_ID]: E5_SMALL_CONCEPT_CHECK_BARS };
 
@@ -121,7 +150,7 @@ function dot(a: Float32Array, b: Float32Array): number {
 /** Pairs worth asking about, best first (see the module header). */
 export async function conceptCheckCandidates(input: ConceptCheckCandidatesInput): Promise<ConceptCheckCandidate[]> {
   const pause = input.pause ?? nextTurn;
-  const low = Math.min(input.bars.sharedEntry, input.bars.alone);
+  const low = Math.min(input.bars.sharedEntry, input.bars.alone, input.bars.alikeNames ?? Number.POSITIVE_INFINITY);
   const forbidden = new Set<string>();
   const pairKey = (x: string, y: string): string => (x < y ? `${x}\u0000${y}` : `${y}\u0000${x}`);
   for (const rejection of input.rejected) {
@@ -149,7 +178,10 @@ export async function conceptCheckCandidates(input: ConceptCheckCandidatesInput)
         const similarity = dot(x.vector, y.vector);
         if (similarity < low) continue;
         const sharesEntry = x.concept.entryIds.some((id) => y.concept.entryIds.includes(id));
-        if (similarity < (sharesEntry ? input.bars.sharedEntry : input.bars.alone)) continue;
+        if (similarity < (sharesEntry ? input.bars.sharedEntry : input.bars.alone)) {
+          const alike = input.bars.alikeNames;
+          if (alike === undefined || similarity < alike || !alikeNames(x.tokens, y.tokens)) continue;
+        }
         const refusal = conceptMergeRefusal(x.concept, y.concept, similarity, input.thresholds);
         if (refusal === null || !CHECKABLE.has(refusal)) continue;
         if (refusal === "numbers" && conceptNameNumbers(x.concept.name).size > 0 && conceptNameNumbers(y.concept.name).size > 0) continue;

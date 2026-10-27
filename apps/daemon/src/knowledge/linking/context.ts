@@ -5,8 +5,9 @@
  * sees what similar entries already said and names the same thing in slightly different ways. A
  * worker is therefore shown, after myKG's prompt, a block naming up to {@link CONTEXT_CONCEPTS_MAX}
  * concepts of the entry's {@link CONTEXT_NEIGHBOURS} nearest neighbours, with the instruction to reuse
- * a listed name for the same thing and never to extract a listed concept the document does not
- * mention. It is added by `InboxBroker`'s view only: the task file, its id and myKG's answer cache
+ * a listed name only for the same thing at the same specificity (a different number, duration,
+ * quantity, tool or condition keeps a concept of its own) and never to extract a listed concept the
+ * document does not mention. It is added by `InboxBroker`'s view only: the task file, its id and myKG's answer cache
  * are untouched (the prompt overlay, whose digest forces a reinstall, is not changed).
  *
  * Neighbours: entries with vectors from the current model AND at least one concept (one without
@@ -33,8 +34,14 @@ import type { KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
 import type { InboxTaskEnvelope } from "./inbox.ts";
 import { MYKG_CHUNK_TOKENS } from "./mykg-config.ts";
 
-/** The linking-context version recorded per entry (`KnowledgeStorePort.setLinkContext`); bump it when the context changes. */
-export const LINK_CONTEXT_VERSION = 1;
+/**
+ * The linking-context version recorded per entry (`KnowledgeStorePort.setLinkContext`); bump it when
+ * the context changes: every entry linked at an older one is re-linked once (`relink.ts`). 2: a
+ * listed name is reused only at the same specificity; a different number, duration, quantity, tool
+ * or condition keeps a concept of its own (version 1 folded "warm it up for 48 hours" into a listed
+ * generic warm-up whose description said 1-2 days).
+ */
+export const LINK_CONTEXT_VERSION = 2;
 export const CONTEXT_NEIGHBOURS = 5;
 export const CONTEXT_CONCEPTS_MAX = 40;
 export const CONTEXT_HEADING = "KNOWN CONCEPTS FROM SIMILAR ENTRIES";
@@ -126,8 +133,9 @@ export function neighbourContextBlock(entryId: string, view: KnowledgeLinkGraphV
     CONTEXT_HEADING,
     "=".repeat(CONTEXT_HEADING.length),
     "These concepts are already in the knowledge graph, taken from the entries most similar to the document above.",
-    "When the document mentions one of them, extract it under exactly this type and name instead of a variant of the name.",
-    "Never extract a listed concept the document does not mention.",
+    "Reuse a listed type and name only when the document states the same thing at the same specificity: then extract it under exactly that type and name instead of a variant of the name.",
+    'Keep a concept of its own, named for what the document says, when the document states a different number, duration, quantity, tool or condition, or a more specific or more general version ("Warm up the account for 48 hours" is not "Post the first video after 1-2 days").',
+    "Never reuse a listed name whose claim differs from the document's, and never extract a listed concept the document does not mention.",
     ...lines
   ].join("\n");
 }

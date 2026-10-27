@@ -62,8 +62,12 @@
  *   ends the round first, and a pool that finds no account ends it. Its tokens count.
  * - Round task sources (`roundTasks`: concept merge checks, cluster names): each round also takes
  *   every source's own capped tasks; a source with new work (`onWork`) makes a round due, started
- *   once linking is idle (after the round in progress, if any). Nothing else starts a round, so
- *   rounds follow graph loads and new work, never loop on their own.
+ *   once linking is idle (after the round in progress, if any).
+ * - Rounds continue while work remains: a round that ran to its end (every task answered or handed
+ *   out no more; not ended by a run, a pause, an error or a stop) and recorded an answer makes the
+ *   next round due, which starts only while linking is idle and finds nothing to do once the
+ *   candidates and the sources' tasks are used up. An item answered is not asked again before the
+ *   next graph load, so the chain is bounded by the items there are.
  * - A round task no chat answers acceptably is handed out no more once two chats gave up on it
  *   (the round goes on without it), and counts a failed attempt; after three such rounds the item
  *   (the same pair at the same hashes, or the same source task) is given up on and never asked
@@ -107,6 +111,7 @@ import type {
   KnowledgeEntryChange,
   KnowledgeGraphPort,
   KnowledgeLinkingPort,
+  KnowledgeRoundTask,
   KnowledgeRoundTaskSource,
   KnowledgeRuntimePort,
   KnowledgeSettingsPort,
@@ -237,6 +242,8 @@ interface PairRound {
   /** Tasks whose answer was recorded: the harvest never records them again. */
   recorded: Set<string>;
   ending: boolean;
+  /** Every task was answered or handed out no more (not ended by linking, a pause, an error or a stop): the next round may follow. */
+  drained: boolean;
   /** Resolves once the round's chats ended and its inbox was cleaned. */
   ended: Promise<void>;
 }
@@ -289,8 +296,13 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private pairStarting = false;
   /** Pair-check chats a previous daemon left behind (it stopped without ending its round) being closed. */
   private orphansClosing: Promise<void> = Promise.resolve();
-  /** A graph load since the last pair-check round. */
+  /** A graph load, a source's new work, or a drained round with answers since the last pair-check round. */
   private pairRoundDue = false;
+  /**
+   * Round items answered since the last graph load (their attempt keys): not asked again until the
+   * next one, so an answer that changed nothing (a read-only file) cannot keep the rounds going.
+   */
+  private readonly roundAnswered = new Set<string>();
   /** {@link lookAgainOnceVectorsSettle} in flight. */
   private vectorsWait: Promise<void> | null = null;
   /** What the last link-gap scan read (the vectors' generation and model, the graph's content): an unchanged one is not scanned again. */
@@ -1139,6 +1151,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private async afterGraphLoad(): Promise<void> {
     if (!this.opts.graphView) return;
     this.pairRoundDue = true;
+    this.roundAnswered.clear();
     try {
       await this.scanLinkGaps();
     } catch (error) {
@@ -1262,8 +1275,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           const meta = store.getMeta(id);
           return meta ? { kind: meta.kind, title: meta.title, author: meta.author, handle: meta.handle } : null;
         },
-        // A pair rounds gave up on (no acceptable answer in several rounds) is not asked again.
-        isChecked: (pair) => this.pairChecks.isChecked(pair, (id) => longBodies.has(id)) || this.pairChecks.gaveUp(pairCheckItemKey(pair)),
+        bodyOf: async (id) => (await store.getEntry(id))?.body ?? null,
+        // A pair rounds gave up on (no acceptable answer in several rounds) is not asked again, nor one answered since the graph loaded.
+        isChecked: (pair) => {
+          const key = pairCheckItemKey(pair);
+          return this.pairChecks.isChecked(pair, (id) => longBodies.has(id)) || this.pairChecks.gaveUp(key) || this.roundAnswered.has(key);
+        },
         limit: PAIR_CHECK_MAX_PER_RUN
       });
       if (!this.idleForPairChecks()) return;
@@ -1281,7 +1298,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       }
       for (const source of this.opts.roundTasks ?? []) {
         if (!this.idleForPairChecks()) break;
-        const items = await source.tasks({ skip: (task) => this.pairChecks.gaveUp(roundTaskId(task)) }).catch((error: unknown) => {
+        const skip = (task: KnowledgeRoundTask): boolean => {
+          const key = roundTaskId(task);
+          return this.pairChecks.gaveUp(key) || this.roundAnswered.has(key);
+        };
+        const items = await source.tasks({ skip }).catch((error: unknown) => {
           this.opts.logger?.warn("knowledge linking: a round task source failed", { step: source.step, error: String(error) });
           return [];
         });
@@ -1334,8 +1355,15 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       onEvent: (event) => this.onPairPoolEvent(round, event),
       ...(this.opts.logger ? { logger: this.opts.logger } : {})
     });
-    round = { id, broker, pool, tasks, recordings: new Set(), recorded: new Set(), ending: false, ended: Promise.resolve() };
+    round = { id, broker, pool, tasks, recordings: new Set(), recorded: new Set(), ending: false, drained: false, ended: Promise.resolve() };
     this.pairRound = round;
+    // The last task answered or handed out no more: the round ends drained (unless it was ending already).
+    const endIfDrained = (): void => {
+      const counts = broker.counts();
+      if (counts.pending + counts.leased > 0) return;
+      if (!round.ending) round.drained = true;
+      this.endPairRound(round, { interrupt: false });
+    };
     broker.events.on("answered", ({ taskId, answer }) => {
       const item = tasks.get(taskId);
       let recording: Promise<void> | null = null;
@@ -1356,14 +1384,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           .finally(() => round.recordings.delete(done));
         round.recordings.add(done);
       }
-      const counts = broker.counts();
-      if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
+      endIfDrained();
     });
     // A task the chats kept giving up on is out of the round: the rest go on, and it may have been the last.
-    broker.events.on("abandoned", () => {
-      const counts = broker.counts();
-      if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
-    });
+    broker.events.on("abandoned", endIfDrained);
     try {
       await broker.attach(this.pairInboxDir);
     } catch (error) {
@@ -1413,6 +1437,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           this.persist();
         }
         this.emitStatus();
+        // A round that ran to its end with answers: the next one takes what is left (none left: it
+        // does not start). Bounded: an answered item is not asked again before the next graph load,
+        // and one without an acceptable answer is given up on after a few rounds.
+        if (round.drained && round.recorded.size > 0) this.pairRoundDue = true;
         // Work that arrived during the round (it was due again): the next round, once linking is idle.
         if (this.pairRoundDue && !this.stopped) {
           void this.maybeStartPairRound().catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair-check round could not start", { error: String(error) }));
@@ -1428,8 +1456,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
    */
   private async countRoundAttempts(round: PairRound): Promise<void> {
     for (const [taskId, item] of round.tasks) {
-      if (round.recorded.has(taskId)) await this.pairChecks.answered(item.key);
-      else if (round.broker.giveUpsOf(taskId) > 0) {
+      if (round.recorded.has(taskId)) {
+        this.roundAnswered.add(item.key);
+        await this.pairChecks.answered(item.key);
+      } else if (round.broker.giveUpsOf(taskId) > 0) {
         const step = item.kind === "pair" ? PAIR_CHECK_STEP : item.source.step;
         await this.pairChecks.failedAttempt({ key: item.key, step, label: item.label });
       }
