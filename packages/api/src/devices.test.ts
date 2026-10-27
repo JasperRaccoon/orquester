@@ -21,6 +21,7 @@ import {
   parseDeviceKey,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
+  parseDeviceWarmCachesRequest,
   parseDevicesSettingsPatch,
   readDeviceToolReference,
   validateDeviceActionInput
@@ -63,6 +64,18 @@ test("routes encode their parameters", () => {
   assert.equal(deviceRoutes.hub("box:x1", "/vendor/serve-emu/ws"), "/api/devices/hosts/box%3Ax1/hub/vendor/serve-emu/ws");
   assert.equal(deviceRoutes.socket("local", "vendor/serve-sim/helper/ws"), "/ws-device/local/vendor/serve-sim/helper/ws");
   assert.equal(deviceRoutes.setup("android"), "/api/devices/setup/android");
+  assert.equal(deviceRoutes.drain("box:x1"), "/api/devices/hosts/box%3Ax1/drain");
+  assert.equal(deviceRoutes.pool, "/api/devices/pool");
+  assert.equal(deviceRoutes.warmCaches, "/api/devices/pool/warm-caches");
+});
+
+test("warm-caches request: an optional platform, nothing else", () => {
+  assert.deepEqual(parseDeviceWarmCachesRequest(undefined), { ok: true, value: {} });
+  assert.deepEqual(parseDeviceWarmCachesRequest({}), { ok: true, value: {} });
+  assert.deepEqual(parseDeviceWarmCachesRequest({ platform: "android" }), { ok: true, value: { platform: "android" } });
+  assert.equal(parseDeviceWarmCachesRequest({ platform: "windows" }).ok, false);
+  assert.equal(parseDeviceWarmCachesRequest({ os: "linux" }).ok, false);
+  assert.equal(parseDeviceWarmCachesRequest([]).ok, false);
 });
 
 test("open request: platform-matched profile, deviceId needs hostId, junk refused", () => {
@@ -94,7 +107,7 @@ test("settings patch: each field checked against its range; unknown fields refus
   const good = parseDevicesSettingsPatch({
     android: { enabled: true, maxLocalDevices: 4, profiles: ["pixel-9", "pixel-9"] },
     ios: { rentWithoutAsking: true, monthlyCapUsd: 12.5 },
-    pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 } },
+    pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 }, monthlyCapUsd: 50 },
     leaseIdleMinutes: 30
   });
   assert.deepEqual(good, {
@@ -102,7 +115,7 @@ test("settings patch: each field checked against its range; unknown fields refus
     value: {
       android: { enabled: true, maxLocalDevices: 4, profiles: ["pixel-9"] },
       ios: { rentWithoutAsking: true, monthlyCapUsd: 12.5 },
-      pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 } },
+      pool: { placement: "pool-only", provider: null, minWarmHosts: { android: 1 }, monthlyCapUsd: 50 },
       leaseIdleMinutes: 30
     }
   });
@@ -114,6 +127,7 @@ test("settings patch: each field checked against its range; unknown fields refus
     { ios: { size: "" } },
     { pool: { placement: "anywhere" } },
     { pool: { minWarmHosts: { windows: 1 } } },
+    { pool: { monthlyCapUsd: -1 } },
     { agents: { unknown: true } },
     { surprise: 1 },
     { maxLeasesPerChat: 99 },

@@ -492,6 +492,7 @@ export const DEVICE_ACTION_LOG_LIMIT = 200;
 // ---------------------------------------------------------------------------
 
 export type DeviceSetupJobState = "running" | "done" | "failed" | "cancelled";
+export type DeviceSetupJobKind = "setup" | "cache-warm";
 export type DeviceSetupStepState = "pending" | "running" | "done" | "failed" | "skipped";
 
 export interface DeviceSetupStep {
@@ -502,9 +503,17 @@ export interface DeviceSetupStep {
   detail: string | null;
 }
 
-/** An install or repair (Settings → Devices "Install all", or an agent's first request). */
+/**
+ * An install or repair (Settings → Devices "Install all", or an agent's first request), or —
+ * `kind: "cache-warm"` — a device-cache warm run on the box provider (Settings → Devices → Fleet
+ * "Warm caches"; listed in {@link DevicePoolSummary.cacheJobs}, never in `setupJobs`).
+ */
 export interface DeviceSetupJob {
   id: string;
+  /** Absent: `setup`. */
+  kind?: DeviceSetupJobKind;
+  /** A cache-warm run's page on the provider (GitHub Actions), when known. */
+  url?: string | null;
   platform: DevicePlatform;
   hostId: string;
   state: DeviceSetupJobState;
@@ -522,6 +531,72 @@ export interface DeviceSetupJob {
 // Phase 2: the pool
 // ---------------------------------------------------------------------------
 
+/** Why a queued lease request waits. */
+export type DevicePoolWaitReason =
+  /** A host that is starting (or being rented for it) will have a slot. */
+  | "host-starting"
+  /** Every host is full and no more may be rented (`maxHosts`, or none can be rented). */
+  | "capacity"
+  /** Renting another host would exceed `maxHourlyUsd`. */
+  | "budget";
+
+/** One lease request waiting for room (the fleet view's queue). */
+export interface DevicePoolWaiter {
+  id: string;
+  threadId: string;
+  platform: DevicePlatform;
+  profile: string;
+  requestedAt: string;
+  /** When it fails `DEVICE_CAPACITY` if still without room (`capacityWaitSeconds`); waits on a starting host are not cut short. */
+  deadlineAt: string;
+  reason: DevicePoolWaitReason;
+  /** The host it waits for, when one is starting for it. */
+  hostId: string | null;
+  /** Estimated seconds until it gets a device; null when unknown (it waits for a release). */
+  etaSeconds: number | null;
+}
+
+/** One platform's slice of the pool. */
+export interface DevicePoolPlatformSummary {
+  platform: DevicePlatform;
+  /** Rented pool hosts of the platform (starting, ready, draining). */
+  hosts: number;
+  /** Of those, still starting (being rented or prepared). */
+  starting: number;
+  /** Ready pool hosts' slots (draining hosts count their leases only). */
+  capacity: DeviceCapacity;
+  /** This host's slots for the platform; null when it runs none. */
+  local: DeviceCapacity | null;
+  queue: number;
+  /** `pool.minWarmHosts` of the platform. */
+  minWarmHosts: number;
+  /** Devices a newly rented host is planned with (learned, else the default for the size). */
+  perHostCapacity: number;
+}
+
+/** Spend on rented device hosts, accrued from their $/h while they run (UTC days and months). */
+export interface DevicePoolSpend {
+  /** `YYYY-MM-DD` (UTC). */
+  day: string;
+  todayUsd: number;
+  /** `YYYY-MM` (UTC). */
+  month: string;
+  monthUsd: number;
+  /** `pool.monthlyCapUsd`: renting without asking stops at it. */
+  monthlyCapUsd: number;
+  /** `pool.maxHourlyUsd`: the hard cap on the pool's summed $/h. */
+  maxHourlyUsd: number;
+}
+
+/** A capacity measured on a ready pool host (devices per host for a provider and size). */
+export interface DevicePoolLearnedCapacity {
+  platform: DevicePlatform;
+  provider: string;
+  size: string;
+  capacity: number;
+  measuredAt: string;
+}
+
 export interface DevicePoolSummary {
   /** Pool hosts (rented), not counting this host. */
   hosts: number;
@@ -530,6 +605,23 @@ export interface DevicePoolSummary {
   hourlyUsd: number;
   /** Lease requests waiting for room. */
   queue: number;
+  // Phase 2 additions (absent from an older daemon):
+  /** Leased share of the ready pool slots, 0–1 (0 with no slots). */
+  utilization?: number;
+  /** Rented pool host ids (see `DeviceHostSummary.pool` for each one's role). */
+  hostIds?: string[];
+  /** Pool hosts being drained (no new leases; destroyed once empty). */
+  drainingHostIds?: string[];
+  platforms?: DevicePoolPlatformSummary[];
+  spend?: DevicePoolSpend;
+  /** The queued requests, oldest first. */
+  waiting?: DevicePoolWaiter[];
+  learnedCapacity?: DevicePoolLearnedCapacity[];
+  /** Cache-warm runs (`kind: "cache-warm"`), one per platform at most: running or last finished. */
+  cacheJobs?: DeviceSetupJob[];
+  /** When each platform's caches were last warmed (ISO); null: never from this daemon. */
+  cacheWarmedAt?: Partial<Record<DevicePlatform, string | null>>;
+  updatedAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +696,12 @@ export const deviceRoutes = {
   settings: "/api/devices/settings",
   /** POST {@link DeviceSetupRequest} starts (or joins) the platform's setup job; GET → {@link DeviceSetupResponse}. */
   setup: (platform: DevicePlatform): string => `/api/devices/setup/${platform}`,
+  /** POST drains the host (no new leases; a rented one is destroyed once empty); DELETE undrains it. Both → {@link DeviceHostResponse}. */
+  drain: (hostId: string): string => `${HOSTS}/${enc(hostId)}/drain`,
+  /** GET → {@link DevicePoolResponse}. */
+  pool: "/api/devices/pool",
+  /** POST {@link DeviceWarmCachesRequest} → {@link DeviceWarmCachesResponse} (202): Settings → Devices → Fleet "Warm caches". */
+  warmCaches: "/api/devices/pool/warm-caches",
   /** The hub proxy: `path` is the hub's own path (`api/devices`, `vendor/serve-emu/ws`, …). */
   hub: (hostId: string, path: string): string => `${HOSTS}/${enc(hostId)}/hub/${path.replace(/^\/+/, "")}`,
   /** The WebSocket relay to a hub path (append `?token=` on HTTP; see `ApiClient.deviceSocketUrl`). */
@@ -658,6 +756,26 @@ export interface DeviceHostsResponse {
   hosts: DeviceHostSummary[];
 }
 
+/** GET {@link deviceRoutes.host}; POST / DELETE {@link deviceRoutes.drain}. */
+export interface DeviceHostResponse {
+  host: DeviceHostSummary;
+}
+
+/** GET {@link deviceRoutes.pool}. */
+export interface DevicePoolResponse {
+  pool: DevicePoolSummary;
+}
+
+/** POST {@link deviceRoutes.warmCaches}: one platform's caches; absent: every platform the pool can rent hosts for. */
+export interface DeviceWarmCachesRequest {
+  platform?: DevicePlatform;
+}
+
+export interface DeviceWarmCachesResponse {
+  /** The started (or already running) cache-warm jobs. */
+  jobs: DeviceSetupJob[];
+}
+
 export interface DevicesListResponse {
   devices: DeviceSummary[];
 }
@@ -701,7 +819,7 @@ export const DEVICES_ACTION_EVENT = "devices.action";
 export const DEVICES_SETUP_EVENT = "devices.setup";
 /** {@link DevicesSettingsResponse}: the settings changed. */
 export const DEVICES_SETTINGS_EVENT = "devices.settings";
-/** {@link DevicePoolSummary}: the pool changed (phase 2). */
+/** {@link DevicePoolSummary} (the payload IS the summary): the pool changed (phase 2). */
 export const DEVICES_POOL_EVENT = "devices.pool";
 
 export type DevicesEventType =
@@ -790,6 +908,16 @@ export function parseDeviceOpenRequest(value: unknown): DeviceParseResult<Device
   return { ok: true, value: out };
 }
 
+/** The body of POST {@link deviceRoutes.warmCaches} (an empty body warms every platform). */
+export function parseDeviceWarmCachesRequest(value: unknown): DeviceParseResult<DeviceWarmCachesRequest> {
+  if (value === undefined || value === null) return { ok: true, value: {} };
+  if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
+  for (const key of Object.keys(value)) if (key !== "platform") return { ok: false, message: `Unknown field \`${key}\`.` };
+  if (value.platform === undefined) return { ok: true, value: {} };
+  if (!isDevicePlatform(value.platform)) return { ok: false, message: "`platform` must be ios or android." };
+  return { ok: true, value: { platform: value.platform } };
+}
+
 /** The body of PUT {@link deviceRoutes.controller}. */
 export function parseDeviceControllerRequest(value: unknown): DeviceParseResult<DeviceControllerRequest> {
   if (!isRecord(value) || !isDeviceController(value.controller)) return { ok: false, message: "`controller` must be agent or user." };
@@ -847,7 +975,8 @@ const SETTINGS_RULES: Readonly<Record<string, Readonly<Record<string, FieldRule>
     maxHourlyUsd: { kind: "number", ...L.maxHourlyUsd },
     idleTeardownMinutes: { kind: "int", ...L.idleTeardownMinutes },
     capacityWaitSeconds: { kind: "int", ...L.capacityWaitSeconds },
-    rentWithoutAsking: { kind: "boolean" }
+    rentWithoutAsking: { kind: "boolean" },
+    monthlyCapUsd: { kind: "number", ...L.monthlyCapUsd }
   }
 };
 const TOP_RULES: Readonly<Record<string, FieldRule>> = {

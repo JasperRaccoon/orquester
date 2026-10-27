@@ -88,6 +88,8 @@ export interface DevicePoolSettings {
   capacityWaitSeconds: number;
   /** "Rent device hosts without asking": within the caps, no spend card. */
   rentWithoutAsking: boolean;
+  /** The month's cap for renting pool hosts without asking, in USD (above it each rental needs a card). */
+  monthlyCapUsd: number;
 }
 
 export interface DevicesSettings {
@@ -142,7 +144,8 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
     minWarmHosts: { android: 0, ios: 0 },
     idleTeardownMinutes: 20,
     capacityWaitSeconds: 120,
-    rentWithoutAsking: false
+    rentWithoutAsking: false,
+    monthlyCapUsd: 100
   }
 }) as DevicesSettings;
 
@@ -228,7 +231,8 @@ const poolSchema = z
       .catch({ ...D.pool.minWarmHosts }),
     idleTeardownMinutes: intIn(L.idleTeardownMinutes, D.pool.idleTeardownMinutes),
     capacityWaitSeconds: intIn(L.capacityWaitSeconds, D.pool.capacityWaitSeconds),
-    rentWithoutAsking: bool(D.pool.rentWithoutAsking)
+    rentWithoutAsking: bool(D.pool.rentWithoutAsking),
+    monthlyCapUsd: numberIn(L.monthlyCapUsd, D.pool.monthlyCapUsd)
   })
   .passthrough();
 
@@ -414,4 +418,151 @@ export function parseDeviceLeasesFile(raw: unknown): DeviceLeasesFile {
 /** The on-disk JSON: live records first, then the rejected ones as found. */
 export function serializeDeviceLeasesFile(file: DeviceLeasesFile): Record<string, unknown> {
   return { ...file.extra, version: DEVICE_LEASES_VERSION, leases: [...file.leases, ...file.rejected] };
+}
+
+// ---------------------------------------------------------------------------
+// The device pool's own record (`device-pool.json`, phase 2 §4)
+// ---------------------------------------------------------------------------
+
+export const DEVICE_POOL_STATE_VERSION = 1;
+
+/** The capacity measured on a ready pool host, per platform + provider + size (the scheduler plans new hosts with it). */
+export const deviceLearnedCapacitySchema = z
+  .object({
+    platform: z.string().min(1),
+    provider: z.string().min(1),
+    size: z.string().min(1),
+    capacity: z.number().int().min(1).max(64),
+    measuredAt: z.string(),
+    samples: z.number().int().min(1).default(1)
+  })
+  .passthrough();
+export type DeviceLearnedCapacity = z.infer<typeof deviceLearnedCapacitySchema>;
+
+/** A host the pool rented: what it was rented as (provider, size, price) and how far its spend is counted. */
+export const devicePoolRentalSchema = z
+  .object({
+    hostId: z.string().min(1),
+    platform: z.string().min(1),
+    provider: z.string().min(1),
+    size: z.string().min(1),
+    hourlyUsd: z.number().finite().min(0).nullable().default(null),
+    rentedAt: z.string(),
+    /** Spend is counted up to here (ISO). */
+    accruedUntil: z.string().nullable().default(null),
+    /** Its capacity was learned already. */
+    measured: z.boolean().default(false)
+  })
+  .passthrough();
+export type DevicePoolRental = z.infer<typeof devicePoolRentalSchema>;
+
+/** One OS's device caches (`orquester-device-cache.yml` runs). */
+export const devicePoolCacheSchema = z
+  .object({
+    /** The last dispatched warm run (any trigger). */
+    lastWarmAt: z.string().nullable().default(null),
+    /** The last warm a cache miss dispatched (at most one a day). */
+    lastAutoWarmAt: z.string().nullable().default(null),
+    lastRunId: z.string().nullable().default(null),
+    /** `success`, `failure`, … once the last run completed; null while unknown. */
+    lastConclusion: z.string().nullable().default(null)
+  })
+  .passthrough();
+export type DevicePoolCacheState = z.infer<typeof devicePoolCacheSchema>;
+
+const usdBuckets = z
+  .record(z.string(), z.unknown())
+  .transform((record) => {
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(record)) if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[key] = value;
+    return out;
+  })
+  .catch({});
+
+/**
+ * `device-pool.json`: spend so far (USD per UTC day `YYYY-MM-DD` and month `YYYY-MM`), the hosts
+ * the pool rented, learned capacities, drained host ids and cache-warm state. Tolerant like
+ * `devices.json`: each section falls back alone, unknown keys and entries are kept on rewrite.
+ */
+export interface DevicePoolState {
+  spend: { days: Record<string, number>; months: Record<string, number> };
+  rentals: DevicePoolRental[];
+  learnedCapacity: DeviceLearnedCapacity[];
+  drainingHostIds: string[];
+  cache: { linux?: DevicePoolCacheState; macos?: DevicePoolCacheState } & Record<string, unknown>;
+}
+
+export interface DevicePoolStateFile {
+  version: typeof DEVICE_POOL_STATE_VERSION;
+  state: DevicePoolState;
+  /** Entries of `rentals` / `learnedCapacity` this build cannot read, kept verbatim. */
+  rejected: { rentals: unknown[]; learnedCapacity: unknown[] };
+  /** Every top-level key this build does not use, as found. */
+  extra: Record<string, unknown>;
+}
+
+export function createDefaultDevicePoolState(): DevicePoolState {
+  return { spend: { days: {}, months: {} }, rentals: [], learnedCapacity: [], drainingHostIds: [], cache: {} };
+}
+
+export function createDefaultDevicePoolStateFile(): DevicePoolStateFile {
+  return { version: DEVICE_POOL_STATE_VERSION, state: createDefaultDevicePoolState(), rejected: { rentals: [], learnedCapacity: [] }, extra: {} };
+}
+
+function entries<T>(value: unknown, schema: z.ZodType<T, z.ZodTypeDef, unknown>): { ok: T[]; rejected: unknown[] } {
+  const ok: T[] = [];
+  const rejected: unknown[] = [];
+  for (const entry of Array.isArray(value) ? value : []) {
+    const parsed = schema.safeParse(entry);
+    if (parsed.success) ok.push(parsed.data);
+    else rejected.push(entry);
+  }
+  return { ok, rejected };
+}
+
+const POOL_KEYS = ["version", "spend", "rentals", "learnedCapacity", "drainingHostIds", "cache"];
+
+/** Tolerant read of `device-pool.json`; the OUTER shape throws (not an object, another version), like the other device stores. */
+export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Not a device pool file (the file is not a JSON object)");
+  const record = raw as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== DEVICE_POOL_STATE_VERSION) {
+    throw new Error(`Not a version-${DEVICE_POOL_STATE_VERSION} device pool file (version ${JSON.stringify(record.version)})`);
+  }
+  const spendRaw = record.spend !== null && typeof record.spend === "object" && !Array.isArray(record.spend) ? (record.spend as Record<string, unknown>) : {};
+  const rentals = entries(record.rentals, devicePoolRentalSchema);
+  const learned = entries(record.learnedCapacity, deviceLearnedCapacitySchema);
+  const cacheRaw = record.cache !== null && typeof record.cache === "object" && !Array.isArray(record.cache) ? (record.cache as Record<string, unknown>) : {};
+  const cache: DevicePoolState["cache"] = { ...cacheRaw };
+  for (const os of ["linux", "macos"] as const) {
+    if (cacheRaw[os] === undefined) continue;
+    const parsed = devicePoolCacheSchema.safeParse(cacheRaw[os]);
+    if (parsed.success) cache[os] = parsed.data;
+    else delete cache[os];
+  }
+  const draining = Array.isArray(record.drainingHostIds) ? record.drainingHostIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  return {
+    version: DEVICE_POOL_STATE_VERSION,
+    state: {
+      spend: { ...spendRaw, days: usdBuckets.parse(spendRaw.days ?? {}), months: usdBuckets.parse(spendRaw.months ?? {}) },
+      rentals: rentals.ok,
+      learnedCapacity: learned.ok,
+      drainingHostIds: [...new Set(draining)],
+      cache
+    },
+    rejected: { rentals: rentals.rejected, learnedCapacity: learned.rejected },
+    extra: Object.fromEntries(Object.entries(record).filter(([key]) => !POOL_KEYS.includes(key)))
+  };
+}
+
+export function serializeDevicePoolStateFile(file: DevicePoolStateFile): Record<string, unknown> {
+  return {
+    ...file.extra,
+    version: DEVICE_POOL_STATE_VERSION,
+    spend: file.state.spend,
+    rentals: [...file.state.rentals, ...file.rejected.rentals],
+    learnedCapacity: [...file.state.learnedCapacity, ...file.rejected.learnedCapacity],
+    drainingHostIds: file.state.drainingHostIds,
+    cache: file.state.cache
+  };
 }
