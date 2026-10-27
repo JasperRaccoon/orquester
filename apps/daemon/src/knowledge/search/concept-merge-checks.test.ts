@@ -394,6 +394,10 @@ test("the source: tasks once planning is done, a 'same' answer merges (checked),
   );
   assert.match(tasks[0]!.user, /Name: 48-hour account warm-up\nExcerpt from "US TikTok phone": Warm up the account for 48 hours before posting, scroll a few times a day\./);
   assert.equal(tasks[0]!.system, CONCEPT_CHECK_SYSTEM);
+  // A pair rounds gave up on is skipped, and the next one takes its place under the cap.
+  const one = new ConceptMergeCheckSource({ merges: h.merges, entry: async () => null, bars: () => CHECK_BARS, limit: 1, pause: noPause });
+  assert.deepEqual((await one.tasks()).map((task) => task.label), [tasks[0]!.label]);
+  assert.deepEqual((await one.tasks({ skip: (task) => task.label === tasks[0]!.label })).map((task) => task.label), [tasks[1]!.label]);
 
   assert.equal(h.source.validate({ same: true, keep: "b", reason: "Same." }), null);
   assert.equal(typeof h.source.validate({ same: "yes" }), "string");

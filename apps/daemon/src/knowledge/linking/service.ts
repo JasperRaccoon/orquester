@@ -64,6 +64,10 @@
  *   every source's own capped tasks; a source with new work (`onWork`) makes a round due, started
  *   once linking is idle (after the round in progress, if any). Nothing else starts a round, so
  *   rounds follow graph loads and new work, never loop on their own.
+ * - A round task no chat answers acceptably is handed out no more once two chats gave up on it
+ *   (the round goes on without it), and counts a failed attempt; after three such rounds the item
+ *   (the same pair at the same hashes, or the same source task) is given up on and never asked
+ *   again (`pair-checks.json` `attempts`).
  */
 
 import { randomBytes } from "node:crypto";
@@ -128,8 +132,12 @@ import {
   PAIR_CHECK_MAX_PER_RUN,
   PAIR_CHECK_STEP,
   pairCheckCandidates,
+  pairCheckItemKey,
   parsePairCheckAnswer,
   removePairCheckTask,
+  ROUND_TASK_MAX_ATTEMPTS,
+  ROUND_TASK_MAX_GIVE_UPS,
+  roundTaskId,
   validatePairCheckAnswer,
   writePairCheckTask,
   writeRoundTask,
@@ -210,8 +218,11 @@ interface ActiveRun {
   finished: Promise<void>;
 }
 
-/** One task of a pair-check round: a pair check, or a round task source's item. */
-type RoundItem = { kind: "pair"; pair: PairKey } | { kind: "source"; source: KnowledgeRoundTaskSource; payload: unknown };
+/**
+ * One task of a pair-check round: a pair check, or a round task source's item; `key` names the item
+ * (the same input) for the attempt records (`KnowledgePairChecks.failedAttempt`).
+ */
+type RoundItem = { key: string; label: string } & ({ kind: "pair"; pair: PairKey } | { kind: "source"; source: KnowledgeRoundTaskSource; payload: unknown });
 
 /** A round of pair checks between linking runs (see the module header). */
 interface PairRound {
@@ -1220,7 +1231,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           const meta = store.getMeta(id);
           return meta ? { kind: meta.kind, title: meta.title, author: meta.author, handle: meta.handle } : null;
         },
-        isChecked: (pair) => this.pairChecks.isChecked(pair),
+        // A pair rounds gave up on (no acceptable answer in several rounds) is not asked again.
+        isChecked: (pair) => this.pairChecks.isChecked(pair) || this.pairChecks.gaveUp(pairCheckItemKey(pair)),
         limit: PAIR_CHECK_MAX_PER_RUN
       });
       if (!this.idleForPairChecks()) return;
@@ -1228,16 +1240,27 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         const [a, b] = await Promise.all([store.getEntry(candidate.a), store.getEntry(candidate.b)]);
         if (!a || !b || a.contentHash !== candidate.hashA || b.contentHash !== candidate.hashB) continue;
         const pair: PairKey = { a: candidate.a, b: candidate.b, hashA: candidate.hashA, hashB: candidate.hashB };
-        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, { a, b }, this.opts.clock.now()), { kind: "pair", pair });
+        tasks.set(await writePairCheckTask(this.pairInboxDir, pair, { a, b }, this.opts.clock.now()), {
+          kind: "pair",
+          pair,
+          key: pairCheckItemKey(pair),
+          label: `${PAIR_CHECK_STEP} ${pair.a} ${pair.b}`
+        });
       }
       for (const source of this.opts.roundTasks ?? []) {
         if (!this.idleForPairChecks()) break;
-        const items = await source.tasks().catch((error: unknown) => {
+        const items = await source.tasks({ skip: (task) => this.pairChecks.gaveUp(roundTaskId(task)) }).catch((error: unknown) => {
           this.opts.logger?.warn("knowledge linking: a round task source failed", { step: source.step, error: String(error) });
           return [];
         });
         for (const item of items) {
-          tasks.set(await writeRoundTask(this.pairInboxDir, source.step, item, this.opts.clock.now()), { kind: "source", source, payload: item.payload });
+          tasks.set(await writeRoundTask(this.pairInboxDir, source.step, item, this.opts.clock.now()), {
+            kind: "source",
+            source,
+            payload: item.payload,
+            key: roundTaskId(item),
+            label: item.label
+          });
         }
       }
       if (tasks.size === 0 || !this.idleForPairChecks()) {
@@ -1260,6 +1283,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const broker = new InboxBroker({
       clock: this.opts.clock,
       ...(this.opts.logger ? { logger: this.opts.logger } : {}),
+      // One task no chat can answer is handed out no more before it ends the pool (3 failures in a row).
+      maxGiveUpsPerTask: ROUND_TASK_MAX_GIVE_UPS,
       validate: (step, value, taskId) => {
         const item = tasks.get(taskId);
         if (item?.kind === "source") return item.source.validate(value, item.payload);
@@ -1302,6 +1327,11 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       const counts = broker.counts();
       if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
     });
+    // A task the chats kept giving up on is out of the round: the rest go on, and it may have been the last.
+    broker.events.on("abandoned", () => {
+      const counts = broker.counts();
+      if (counts.pending + counts.leased === 0) this.endPairRound(round, { interrupt: false });
+    });
     try {
       await broker.attach(this.pairInboxDir);
     } catch (error) {
@@ -1339,6 +1369,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         while (round.recordings.size > 0) await Promise.allSettled([...round.recordings]);
         await this.pairChecks.flush();
         await harvestPairCheckInbox(this.pairInboxDir, this.pairChecks, this.roundSources(), round.recorded);
+        await this.countRoundAttempts(round);
       })
       .catch((error: unknown) => this.opts.logger?.warn("knowledge linking: ending a pair-check round failed", { error: String(error) }))
       .finally(() => {
@@ -1355,6 +1386,22 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
           void this.maybeStartPairRound().catch((error: unknown) => this.opts.logger?.warn("knowledge linking: a pair-check round could not start", { error: String(error) }));
         }
       });
+  }
+
+  /**
+   * After a round: an item chats gave up on (refused answers, or ended holding it) and nobody
+   * answered counts one failed attempt (`KnowledgePairChecks.failedAttempt`; given up on after
+   * {@link ROUND_TASK_MAX_ATTEMPTS}); an answered one is forgotten. An item never handed out, or
+   * one a usage limit or the round's end took from its chat, does not count.
+   */
+  private async countRoundAttempts(round: PairRound): Promise<void> {
+    for (const [taskId, item] of round.tasks) {
+      if (round.recorded.has(taskId)) await this.pairChecks.answered(item.key);
+      else if (round.broker.giveUpsOf(taskId) > 0) {
+        const step = item.kind === "pair" ? PAIR_CHECK_STEP : item.source.step;
+        await this.pairChecks.failedAttempt({ key: item.key, step, label: item.label });
+      }
+    }
   }
 
   private onPairPoolEvent(round: PairRound, event: WorkerPoolEvent): void {

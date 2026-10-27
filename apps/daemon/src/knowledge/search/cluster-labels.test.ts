@@ -50,6 +50,10 @@ test("answers: exactly {label}, 2–5 words, ≤ 40 characters, no quotes, never
   const forbidden = ["Candy Crush", "@jasonugc", "App Store Preflight"];
   assert.equal(validateClusterLabelAnswer({ label: "Paywall pricing" }, forbidden), null);
   assert.equal(validateClusterLabelAnswer({ label: "App Store review rules" }, forbidden), null);
+  // An apostrophe is no quote.
+  for (const label of ["Apple's review rules", "Founders' pricing", "App Store’s review", "Don't-miss growth tactics"]) {
+    assert.equal(validateClusterLabelAnswer({ label }, forbidden), null, label);
+  }
   for (const bad of [
     null,
     [],
@@ -59,8 +63,10 @@ test("answers: exactly {label}, 2–5 words, ≤ 40 characters, no quotes, never
     { label: "One two three four five six" },
     { label: "A label that is far too long for a cluster name" },
     { label: '"Paywall pricing"' },
-    { label: "Apple's review" },
+    { label: "'Paywall pricing'" },
+    { label: "‘Paywall pricing’" },
     { label: "Candy  crush" },
+    { label: "Candy Crush's" },
     { label: "@JasonUGC" },
     { label: "App Store Preflight" },
     { label: "Paywall pricing", extra: 1 }
@@ -97,6 +103,10 @@ test("clusters of 3+ are queued once, asked largest first up to the cap, named o
   assert.deepEqual(tasks.map((task) => task.label), [`${CLUSTER_NAME_STEP} ${clusterKey(big)}`, `${CLUSTER_NAME_STEP} ${clusterKey(mid)}`]);
   assert.match(tasks[0]!.user, /ENTRY TITLES \(5\)\n- Title of ke_a0/);
   assert.equal(tasks[0]!.system, CLUSTER_NAME_SYSTEM);
+  // A cluster rounds gave up on naming is skipped; the next one takes its place under the cap, and it stays queued.
+  const skipping = await h.port.tasks({ skip: (task) => task.label === tasks[0]!.label });
+  assert.deepEqual(skipping.map((task) => task.label), [`${CLUSTER_NAME_STEP} ${clusterKey(mid)}`, `${CLUSTER_NAME_STEP} ${clusterKey(small)}`]);
+  assert.equal(h.port.waiting().length, 3);
   assert.equal(h.port.validate({ label: "Candy Crush" }, tasks[0]!.payload) !== null, true, "the cluster's forbidden names");
   assert.equal(h.port.validate({ label: "Paywall pricing" }, tasks[0]!.payload), null);
 

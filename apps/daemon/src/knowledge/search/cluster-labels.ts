@@ -28,7 +28,7 @@ import {
   type KnowledgeClusterLabelRecord,
   type KnowledgeClusterLabelsFile
 } from "@orquester/config";
-import type { KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
+import type { KnowledgeRoundTask, KnowledgeRoundTaskOptions, KnowledgeRoundTaskSource } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { writeFileAtomic } from "../store/fs.ts";
 
@@ -75,15 +75,18 @@ export const CLUSTER_NAME_SYSTEM = [
   `- The label is a topic name of 2 to 5 words and at most ${CLUSTER_LABEL_MAX_CHARS} characters, in Title case or sentence case, e.g. "App Store review rules", "Paywall pricing", "User retention".`,
   "- Name what the entries are about (the shared subject), not who wrote them or where they come from.",
   "- Never only an author's name, a product, tool, app or brand name, or a source's name (a product name may appear inside a topic, e.g. \"ChatGPT search visibility\").",
-  "- No quotes, no punctuation at the ends, no emoji."
+  "- No quotes (an apostrophe is fine), no punctuation at the ends, no emoji."
 ].join("\n");
 
+/** A name as compared: no case, accents, "@", possessive ("Candy Crush's" is "Candy Crush") or apostrophes. */
 const fold = (text: string): string =>
   text
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/^@+/, "")
+    .replace(/['‘’]s\b/g, "")
+    .replace(/['‘’]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
@@ -97,7 +100,10 @@ export function validateClusterLabelAnswer(value: unknown, forbidden: readonly s
   const label = record.label.trim();
   if (label.length === 0) return '"label" must not be empty.';
   if (label.length > CLUSTER_LABEL_MAX_CHARS) return `"label" must be at most ${CLUSTER_LABEL_MAX_CHARS} characters.`;
-  if (/["'`“”‘’«»]/.test(label) || /[\r\n\t]/.test(label)) return '"label" must have no quotes and be one line.';
+  // Quotes, but not an apostrophe inside or closing a word ("Founders' pricing", "App Store's rules").
+  if (/["`“”«»]/.test(label) || /^['‘’]|(^|\s)['‘’]|['‘’](?=\s*$)(?<![sS]['‘’])/.test(label) || /[\r\n\t]/.test(label)) {
+    return '"label" must have no quotes and be one line.';
+  }
   const words = label.split(/\s+/).filter((w) => w.length > 0);
   if (words.length < 2 || words.length > 5) return '"label" must be a topic name of 2 to 5 words.';
   const key = fold(label);
@@ -250,7 +256,7 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
     if (added) for (const listener of [...this.workListeners]) listener();
   }
 
-  async tasks(): Promise<KnowledgeRoundTask[]> {
+  async tasks(options: KnowledgeRoundTaskOptions = {}): Promise<KnowledgeRoundTask[]> {
     if (this.file.readOnly) return [];
     await this.options.refresh?.().catch((error: unknown) => this.logger.warn(`knowledge: drawing the clusters to name failed (${String(error)})`));
     const limit = this.options.limit ?? CLUSTER_NAME_MAX_PER_ROUND;
@@ -269,7 +275,10 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
       }
       const shown: ClusterDescription = { ...description, titles: description.titles.slice(0, TITLES_MAX), concepts: description.concepts.slice(0, CONCEPTS_MAX) };
       const payload: ClusterPayload = { key, members: [...item.members].sort(), forbidden: description.forbidden };
-      tasks.push({ label: `${CLUSTER_NAME_STEP} ${key}`, system: CLUSTER_NAME_SYSTEM, user: clusterNameInput(shown), payload });
+      const task: KnowledgeRoundTask = { label: `${CLUSTER_NAME_STEP} ${key}`, system: CLUSTER_NAME_SYSTEM, user: clusterNameInput(shown), payload };
+      // Rounds gave up on naming it as it is: it keeps its concept label (it stays queued, so a draw
+      // does not count it as new work; a changed member set is a new item).
+      if (!options.skip?.(task)) tasks.push(task);
     }
     return tasks;
   }

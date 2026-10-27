@@ -42,7 +42,8 @@ import {
   readKnowledgePairChecksFile,
   serializeKnowledgePairChecksFile,
   type KnowledgePairCheckRecord,
-  type KnowledgePairChecksFile
+  type KnowledgePairChecksFile,
+  type KnowledgeRoundAttemptRecord
 } from "@orquester/config";
 import type { KnowledgeConceptRef, KnowledgeEntry } from "@orquester/api";
 import type { KnowledgePairCheck, KnowledgePairChecksPort, KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
@@ -60,6 +61,22 @@ export const PAIR_CHECK_BODY_CHARS = 2_000;
 export const PAIR_CHECK_TYPES: ReadonlySet<string> = new Set(["Tactic", "Rule", "Guideline", "Metric", "Result"]);
 const NOTE_MAX = 500;
 const YIELD_EVERY_MS = 40;
+/**
+ * Rounds that may hand out one item (the same input) and end without an acceptable answer before
+ * it is given up on: no round asks it again (`KnowledgePairChecks.gaveUp`).
+ */
+export const ROUND_TASK_MAX_ATTEMPTS = 3;
+/** Chats that may give up on one task within a round before the round hands it out no more (below the pool's 3 failures in a row). */
+export const ROUND_TASK_MAX_GIVE_UPS = 2;
+/** Attempt records kept at most (the least recent go first). */
+const ROUND_ATTEMPTS_MAX = 2_000;
+
+/** A pair check's item key for the attempt records: the pair at its content hashes (the same input). */
+export function pairCheckItemKey(pair: PairKey): string {
+  const [a, b] = sorted(pair.a, pair.b);
+  const swapped = a !== pair.a;
+  return `pair ${a} ${b} ${swapped ? pair.hashB : pair.hashA} ${swapped ? pair.hashA : pair.hashB}`;
+}
 
 export const PAIR_CHECK_SYSTEM = [
   "You compare two saved knowledge entries and decide whether they contradict each other.",
@@ -129,6 +146,8 @@ export interface KnowledgePairChecksOptions {
 export class KnowledgePairChecks implements KnowledgePairChecksPort {
   private file: KnowledgePairChecksFile = emptyKnowledgePairChecksFile();
   private readonly byKey = new Map<string, KnowledgePairCheckRecord>();
+  /** Round task items without an acceptable answer yet, by item key. */
+  private readonly attempts = new Map<string, KnowledgeRoundAttemptRecord>();
   private readonly listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
 
@@ -155,7 +174,60 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
     this.file = file;
     this.byKey.clear();
     for (const record of file.checks) this.byKey.set(pairKey(record.a, record.b), record);
+    this.attempts.clear();
+    for (const record of file.attempts) this.attempts.set(record.key, record);
     this.emit();
+  }
+
+  /** Whether rounds gave up on this item ({@link ROUND_TASK_MAX_ATTEMPTS}): no round asks it again. */
+  gaveUp(itemKey: string): boolean {
+    return this.attempts.get(itemKey)?.gaveUpAt != null;
+  }
+
+  /** Items rounds gave up on, most recent first (status, tests). */
+  givenUp(): readonly KnowledgeRoundAttemptRecord[] {
+    return [...this.attempts.values()].filter((record) => record.gaveUpAt != null).sort((x, y) => (y.gaveUpAt! < x.gaveUpAt! ? -1 : 1));
+  }
+
+  /**
+   * A round handed this item out and ended without an acceptable answer: counted, persisted, and
+   * after {@link ROUND_TASK_MAX_ATTEMPTS} such rounds it is given up on. Answers whether it is now.
+   */
+  async failedAttempt(item: { key: string; step: string; label: string }): Promise<boolean> {
+    const previous = this.attempts.get(item.key);
+    if (previous?.gaveUpAt != null) return true;
+    const at = this.options.now().toISOString();
+    const failures = (previous?.failures ?? 0) + 1;
+    const record: KnowledgeRoundAttemptRecord = {
+      ...(previous ?? {}),
+      key: item.key,
+      step: item.step,
+      label: item.label,
+      failures,
+      lastAt: at,
+      gaveUpAt: failures >= ROUND_TASK_MAX_ATTEMPTS ? at : null
+    };
+    this.attempts.delete(item.key);
+    this.attempts.set(item.key, record);
+    // The least recent go first (Map order is the order of their last attempt).
+    while (this.attempts.size > ROUND_ATTEMPTS_MAX) this.attempts.delete(this.attempts.keys().next().value!);
+    this.file = { ...this.file, attempts: [...this.attempts.values()] };
+    await this.save();
+    if (record.gaveUpAt !== null) {
+      this.options.logger?.warn("knowledge pair checks: a round task got no acceptable answer in several rounds; it is not asked again", {
+        step: item.step,
+        label: item.label,
+        failures
+      });
+    }
+    return record.gaveUpAt !== null;
+  }
+
+  /** The item was answered: its failed attempts are forgotten. */
+  async answered(itemKey: string): Promise<void> {
+    if (!this.attempts.delete(itemKey)) return;
+    this.file = { ...this.file, attempts: [...this.attempts.values()] };
+    await this.save();
   }
 
   all(): readonly KnowledgePairCheck[] {
@@ -610,6 +682,11 @@ export function writeRoundTask(inboxDir: string, step: string, task: KnowledgeRo
   return writeInboxTask(inboxDir, step, task, { payload: task.payload }, now);
 }
 
+/** The id a task is written under (myKG's `_make_task_id`: its prompt and label), so the same input has the same id. */
+export function roundTaskId(task: { label: string; system: string; user: string }): string {
+  return createHash("sha256").update(`${task.system}\n--user--\n${task.user}\n--ctx--\n${task.label}`).digest("hex");
+}
+
 async function writeInboxTask(
   inboxDir: string,
   step: string,
@@ -617,7 +694,7 @@ async function writeInboxTask(
   extra: Record<string, unknown>,
   now: Date
 ): Promise<string> {
-  const id = createHash("sha256").update(`${task.system}\n--user--\n${task.user}\n--ctx--\n${task.label}`).digest("hex");
+  const id = roundTaskId(task);
   const envelope = {
     task_id: id,
     step,

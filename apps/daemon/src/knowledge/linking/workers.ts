@@ -216,7 +216,8 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     this.quiesce();
     const ending = [...this.workers.values()].map(async (worker) => {
       worker.abort.abort();
-      this.options.broker.release(worker.record.sessionId);
+      // Stopped under it: the chat did not give up on its task.
+      this.options.broker.release(worker.record.sessionId, { blame: false });
       const tokens = await this.endChat(worker.record.sessionId, { interrupt: true });
       await this.finishWorker(worker, "done", tokens);
     });
@@ -318,7 +319,8 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
       outcome = { kind: "failed", message: error instanceof Error ? error.message : String(error) };
     }
     if (outcome.kind === "cancelled" || !this.workers.has(sessionId)) return; // `stop` ends it
-    broker.release(sessionId);
+    // A usage limit is the account's doing, not the task's.
+    broker.release(sessionId, { blame: outcome.kind !== "limit" });
     const answered = broker.tasksOf(sessionId) > 0;
     // A usage limit is the account's doing (failover handles it), not the task's.
     const gaveUp = outcome.kind !== "limit" && broker.gaveUp(sessionId);
