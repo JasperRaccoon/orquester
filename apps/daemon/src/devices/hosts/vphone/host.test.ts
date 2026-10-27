@@ -290,6 +290,26 @@ test("the template setup job runs vphone-cli through sudo -n and turns stage ban
   assert.equal(host.readiness().ready, true);
 });
 
+test("the template job refuses an IPSW source vphone-cli could read as an option, before anything runs", async () => {
+  const { host, mac } = await setup(
+    {
+      sys: { canElevate: true },
+      answer: (command, args) => {
+        if (command === VPHONE_CLI_PATH && args.join(" ") === "vm template list --json") return { stdout: JSON.stringify({ templates: [] }) };
+        if (command === VPHONE_CLI_PATH && args.join(" ") === "vm list --json") return { stdout: "[]" };
+        return undefined;
+      }
+    },
+    { iphoneSource: "--help", cloudosSource: "https://example.test/cloudOS.ipsw" }
+  );
+  assert.equal(host.readiness().checks.find((check) => check.id === "template")?.fixActionId, "vphone-template");
+  await assert.rejects(
+    host.ensureReady(new AbortController().signal, () => undefined, ["vphone-template"]),
+    (error) => isDeviceError(error) && /absolute path on the Mac or an https:\/\/ URL/.test(error.message)
+  );
+  assert.ok(!mac.execs.some((exec) => exec.command === "/usr/bin/sudo"));
+});
+
 test("after a restart the host reattaches to a running VM from its record", async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-vphone-"));
   const token = "a".repeat(64);

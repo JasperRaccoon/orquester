@@ -187,6 +187,10 @@ test("settings patch: research.vphoneHosts takes per-machine entries field by fi
     { research: { vphoneHosts: { box1: { enabled: "yes" } } } },
     { research: { vphoneHosts: { box1: { iphoneSource: "" } } } },
     { research: { vphoneHosts: { box1: { iphoneSource: "a\nb" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "-rf" } } } },
+    { research: { vphoneHosts: { box1: { cloudosSource: "--help" } } } },
+    { research: { vphoneHosts: { box1: { cloudosSource: "http://example.test/cloudOS.ipsw" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "iPhone.ipsw" } } } },
     { research: { vphoneHosts: { box1: { force: true } } } },
     { research: { vphoneHosts: { box1: 1 } } }
   ]) {

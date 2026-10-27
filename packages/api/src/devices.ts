@@ -18,7 +18,7 @@ import {
   DEVICES_SETTINGS_LIMITS,
   DEVICES_VPHONE_HOST_KEY,
   DEVICES_VPHONE_HOSTS_MAX,
-  DEVICES_VPHONE_SOURCE_MAX,
+  isVphoneSource,
   type DevicesSettings,
   type DevicesSettingsPatch,
   type DevicesVphoneHostSettings
@@ -1144,8 +1144,8 @@ function parseResearchPatch(value: unknown): DeviceParseResult<NonNullable<Devic
           if (typeof fieldValue !== "boolean") return { ok: false, message: `\`${path}.enabled\` must be true or false.` };
           parsed.enabled = fieldValue;
         } else if (name === "iphoneSource" || name === "cloudosSource") {
-          const ok = fieldValue === null || (typeof fieldValue === "string" && fieldValue.trim().length > 0 && fieldValue.length <= DEVICES_VPHONE_SOURCE_MAX && !/[\u0000-\u001f]/.test(fieldValue));
-          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be a path or URL, or null.` };
+          const ok = fieldValue === null || (typeof fieldValue === "string" && isVphoneSource(fieldValue.trim()));
+          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be an absolute path on the Mac or an https:// URL, or null.` };
           parsed[name] = fieldValue === null ? null : (fieldValue as string).trim();
         } else {
           return { ok: false, message: `Unknown setting \`${path}.${name}\`.` };

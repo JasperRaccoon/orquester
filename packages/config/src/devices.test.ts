@@ -8,12 +8,14 @@ import {
   createDefaultDevicePoolStateFile,
   createDefaultDevicesSettingsFile,
   defaultDevicesSettings,
+  isVphoneSource,
   mergeDevicesSettings,
   parseDeviceLeasesFile,
   parseDevicePoolStateFile,
   parseDevicesSettingsFile,
   readDevicesSettings,
   serializeDeviceLeasesFile,
+  serializeDevicesSettingsFile,
   serializeDevicePoolStateFile,
   serializeDevicesSettingsFile
 } from "./devices.ts";
@@ -128,6 +130,32 @@ test("settings: research vphone hosts are keyed by box id, merge field-wise, and
   const forgotten = mergeDevicesSettings(next, { research: { vphoneHosts: { box1: null } } });
   assert.deepEqual(Object.keys(forgotten.research.vphoneHosts), ["box3"]);
   assert.deepEqual(readDevicesSettings({ research: "x" }).research, { vphoneHosts: {} });
+});
+
+test("settings: an IPSW source is an absolute path or an https:// URL; anything else reads as unset", () => {
+  for (const good of ["/Users/me/iPhone17,3.ipsw", "https://updates.cdn-apple.com/x/iPhone.ipsw"]) assert.equal(isVphoneSource(good), true, good);
+  for (const bad of ["-rf", "--iphone-source=/x", "relative/x.ipsw", "http://example.test/x.ipsw", "file:///x.ipsw", "https://", "/a\nb", ""]) {
+    assert.equal(isVphoneSource(bad), false, bad);
+  }
+  const read = readDevicesSettings({ research: { vphoneHosts: { box1: { enabled: true, iphoneSource: "--help", cloudosSource: " /Users/me/cloudOS.ipsw " } } } });
+  assert.deepEqual(read.research.vphoneHosts.box1, { enabled: true, iphoneSource: null, cloudosSource: "/Users/me/cloudOS.ipsw" });
+});
+
+test("settings: vphone host entries this build does not read (bad key, not an object, past the max) are written back verbatim", () => {
+  const hosts: Record<string, unknown> = { "../odd": { enabled: true }, box0: "future-shape" };
+  for (let i = 1; i <= 66; i++) hosts[`box${i}`] = { enabled: i % 2 === 0 };
+  const file = parseDevicesSettingsFile({ version: 1, settings: { research: { vphoneHosts: hosts } } });
+  assert.equal(Object.keys(file.settings.research.vphoneHosts).length, 64);
+  assert.deepEqual(Object.keys(file.droppedVphoneHosts ?? {}).sort(), ["../odd", "box0", "box65", "box66"].sort());
+  const written = serializeDevicesSettingsFile(file) as { settings: { research: { vphoneHosts: Record<string, unknown> } } };
+  assert.deepEqual(written.settings.research.vphoneHosts["../odd"], { enabled: true });
+  assert.equal(written.settings.research.vphoneHosts.box0, "future-shape");
+  assert.deepEqual(written.settings.research.vphoneHosts.box66, { enabled: true });
+  assert.equal(Object.keys(written.settings.research.vphoneHosts).length, 68);
+  // Read again: the same 64 are read and the same 4 kept aside.
+  const again = parseDevicesSettingsFile(JSON.parse(JSON.stringify(written)));
+  assert.deepEqual(Object.keys(again.settings.research.vphoneHosts), Object.keys(file.settings.research.vphoneHosts));
+  assert.deepEqual(again.droppedVphoneHosts, file.droppedVphoneHosts);
 });
 
 const lease = (id: string, extra: Record<string, unknown> = {}) => ({
