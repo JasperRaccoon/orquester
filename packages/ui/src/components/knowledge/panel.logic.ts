@@ -153,16 +153,16 @@ export function clusterText(cluster: { label: string | null; size: number }): st
 // ---------------------------------------------------------------------------
 
 /**
- * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it, else the only
- * one kept into it (a merge list that names its concepts differently); null when none is in effect.
+ * The merge that folded `mergedId` into `intoId`: the one kept into it that lists it; null when none
+ * is in effect. Never another merge into it: a stale panel would undo the wrong one, and the daemon
+ * then keeps that one from merging again for good.
  */
 export function findConceptMerge<M extends Pick<KnowledgeConceptMerge, "id" | "into" | "merged">>(
   merges: readonly M[],
   intoId: string,
   mergedId: string
 ): M | null {
-  const into = merges.filter((m) => m.into.id === intoId);
-  return into.find((m) => m.merged.some((c) => c.id === mergedId)) ?? (into.length === 1 ? into[0]! : null);
+  return merges.find((m) => m.into.id === intoId && m.merged.some((c) => c.id === mergedId)) ?? null;
 }
 
 /** The undo confirmation's text. */

@@ -174,12 +174,14 @@ describe("disagreements, distinctive concepts and concept merges (phase 2)", () 
     assert.equal(clusterText({ label: null, size: 1 }), "a cluster of 1 entry");
   });
 
-  it("finds the merge that folded a concept in: the one listing it, else the only one into the concept", () => {
+  it("finds the merge that folded a concept in: only one into it that lists it", () => {
     const merge = (id: string, into: string, merged: string[]) => ({ id, into: ref(into), merged: merged.map(ref) });
     const merges = [merge("m1", "Pricing", ["Prices"]), merge("m2", "Pricing", ["Price page"]), merge("m3", "Other", ["Prices"])];
     assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Price page").id)?.id, "m2");
     assert.equal(findConceptMerge(merges, ref("Pricing").id, ref("Unknown").id), null, "two merges into it, neither lists it");
-    assert.equal(findConceptMerge([merge("m1", "Pricing", [])], ref("Pricing").id, ref("Renamed").id)?.id, "m1", "the only one into it");
+    // A stale panel's concept: the only merge into it is another one, which must never be undone in its place.
+    assert.equal(findConceptMerge([merge("m1", "Pricing", ["Plans"])], ref("Pricing").id, ref("Prices").id), null, "the only one into it lists another");
+    assert.equal(findConceptMerge([merge("m1", "Pricing", [])], ref("Pricing").id, ref("Renamed").id), null, "the only one into it lists none");
     assert.equal(findConceptMerge(merges, ref("Gone").id, ref("Prices").id), null);
     assert.match(undoMergeMessage({ name: "Pricing" }, { name: "Prices" }), /^“Prices” becomes a concept of its own again.*“Pricing”.*not merged automatically again\.$/);
   });

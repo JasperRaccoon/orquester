@@ -536,6 +536,19 @@ describe("the entry panel", () => {
       assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2);
     });
 
+    it("never undoes another merge into the concept when the clicked one is gone (a stale panel)", async () => {
+      // The panel still lists "Plans page"; meanwhile its merge was undone and the only merge into
+      // the concept is "Prices page"'s: undoing that one would record it as rejected for good.
+      merges = [merge("cm_prices", ["tactic-prices"])];
+      await show(concept());
+      await click(buttonNamed("Undo", mergedRow("tactic-plans")!));
+      await click(buttonNamed("Undo merge", doc().querySelector('[role="dialog"]')!));
+      await settle();
+      assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), ["merges"], "nothing undone");
+      assert.equal(doc().querySelector('section[aria-label="Merged from"] [role="alert"]')?.textContent, "“Plans page” is no longer merged into this concept.");
+      assert.equal(calls.filter((c) => c === `get:${KEPT}`).length, 2, "read again");
+    });
+
     it("lists merges without Undo for a client without the routes, and nothing from an older daemon", async () => {
       const { listKnowledgeConceptMerges: _list, undoKnowledgeConceptMerge: _undo, ...older } = api;
       await show(concept(), { api: older });
