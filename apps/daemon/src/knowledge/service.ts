@@ -422,9 +422,15 @@ export class KnowledgeService {
     const opening = this.opening;
     const graph = opening?.graph.counts() ?? { nodes: 0, edges: 0 };
     const metas = opening?.store.listMeta() ?? [];
+    const runtime = this.runtime.current();
+    // The model's files are in place, and — while the knowledge base is open — its embedder has not
+    // failed to load (the vector index then answers no model).
+    let embeddingModelReady = runtime !== null && runtime.embeddingModelReady !== false;
+    if (embeddingModelReady && opening && this.settings.enabled()) embeddingModelReady = opening.search.vectorIndex().modelId() !== null;
     return {
       enabled: this.settings.enabled(),
-      installed: this.runtime.current() !== null,
+      installed: runtime !== null,
+      embeddingModelReady,
       entries: metas.length,
       failedEntries: metas.filter((meta) => meta.linkState === "failed").length,
       concepts: graph.nodes,

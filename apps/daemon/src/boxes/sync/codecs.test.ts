@@ -69,6 +69,54 @@ test("mcp-toml blanks env and bearer tokens and restores them", () => {
   assert.equal(restored.model_providers.p.experimental_bearer_token, "abc");
 });
 
+test("codex-toml: the project trust Codex adds in a box stays there and never reaches the host", () => {
+  const codec = syncCodec("codex-toml");
+  const host = buf('# mine\nmodel = "x"\n\n[mcp_servers.gh]\ncommand = "gh-mcp"\nenv = { GH_TOKEN = "ghp_secret" }\n\n[projects."/host/trusted"]\ntrust_level = "trusted"\n');
+  const boxCopy = codec.toBox(host, null, identity)!;
+  assert.ok(codec.hostView(host, identity)!.equals(boxCopy));
+  assert.ok(codec.boxView(boxCopy, host, identity).equals(boxCopy));
+
+  // Codex trusts the project it runs in (and flips a host entry): the box is still in sync.
+  const trusted = `${boxCopy.toString("utf8").replace('"/host/trusted"]\ntrust_level = "trusted"', '"/host/trusted"]\ntrust_level = "untrusted"')}\n[projects."/w/box-project"]\ntrust_level = "trusted"\n`;
+  assert.ok(codec.boxView(buf(trusted), host, identity).equals(codec.hostView(host, identity)!), "trust only: in sync");
+
+  // A host push keeps the box's own trust (Codex need not add it again) and stays in sync.
+  const hostLater = buf(host.toString("utf8").replace('model = "x"', 'model = "y"'));
+  const pushed = codec.toBox(hostLater, buf(trusted), identity)!;
+  const pushedDoc = parseToml(pushed.toString("utf8"));
+  assert.equal(pushedDoc.model, "y");
+  assert.equal(pushedDoc.projects["/w/box-project"].trust_level, "trusted");
+  assert.equal(pushedDoc.projects["/host/trusted"].trust_level, "trusted", "the host's own entries are the host's");
+  assert.ok(codec.boxView(pushed, hostLater, identity).equals(codec.hostView(hostLater, identity)!));
+  // A host trust change moves the host view, so it is pushed; the box gets it.
+  const hostUntrusts = buf(host.toString("utf8").replace('trust_level = "trusted"', 'trust_level = "untrusted"'));
+  assert.ok(!codec.hostView(hostUntrusts, identity)!.equals(codec.hostView(host, identity)!));
+  assert.ok(!codec.boxView(buf(trusted), host, identity).equals(codec.hostView(hostUntrusts, identity)!));
+  assert.equal(parseToml(codec.toBox(hostUntrusts, buf(trusted), identity)!.toString("utf8")).projects["/host/trusted"].trust_level, "untrusted");
+
+  // Trust next to a real change: the view (and so the diff) has no trust, and approving it
+  // writes the change with the host's secret and trust only.
+  const edited = trusted.replace('model = "x"', 'model = "z"');
+  const view = codec.boxView(buf(edited), host, identity).toString("utf8");
+  assert.ok(!view.includes("/w/box-project") && view.includes('model = "z"'));
+  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), buf(view), executableConfigKeys("codex", "config.toml")), false);
+  const approvedText = codec.toHost(buf(edited), host, identity).toString("utf8");
+  const approved = parseToml(approvedText);
+  assert.equal(approved.model, "z");
+  assert.equal(approved.mcp_servers.gh.env.GH_TOKEN, "ghp_secret");
+  assert.deepEqual(JSON.parse(JSON.stringify(approved.projects)), { "/host/trusted": { trust_level: "trusted" } });
+  assert.ok(approvedText.includes("# mine"));
+  assert.equal(codec.hostView(buf(approvedText), identity)!.toString("utf8"), view, "approved: both sides agree");
+
+  // A host with no trust at all: the box's projects table goes from the view entirely.
+  const plain = buf('model = "x"\n');
+  const boxOnly = buf('model = "x"\n\n[projects."/w/p"]\ntrust_level = "trusted"\n');
+  assert.ok(codec.boxView(boxOnly, plain, identity).equals(plain));
+  assert.equal(parseToml(codec.toHost(buf(boxOnly.toString("utf8").replace('"x"', '"y"')), plain, identity).toString("utf8")).projects, undefined);
+  // Other keys of a project table are not trust: they still count.
+  assert.ok(codec.boxView(buf('model = "x"\n\n[projects."/w/p"]\ntrust_level = "trusted"\nother = 1\n'), plain, identity).toString("utf8").includes("other = 1"));
+});
+
 test("claude-json syncs only MCP servers and project trust, merging into the box CLI's own state", () => {
   const codec = syncCodec("claude-json");
   const host = buf(
@@ -96,7 +144,7 @@ test("claude-json syncs only MCP servers and project trust, merging into the box
   assert.equal(pushed.numStartups, 9);
   assert.equal(pushed.projects["/w/p"].lastCost, 1);
   const hostLater = buf(JSON.stringify({ ...JSON.parse(host.toString("utf8")), numStartups: 5 }));
-  assert.ok(codec.hostView(hostLater, identity)!.equals(codec.boxView(boxState, identity)));
+  assert.ok(codec.hostView(hostLater, identity)!.equals(codec.boxView(boxState, hostLater, identity)));
 
   // Approving a new server in the box: host keeps its own state and the blanked secret.
   const boxEdited = JSON.parse(boxState.toString("utf8"));
@@ -108,7 +156,7 @@ test("claude-json syncs only MCP servers and project trust, merging into the box
   assert.equal(approved.numStartups, 4);
   assert.equal(approved.projects["/w/p"].lastCost, 3);
   assert.equal(
-    codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), identity), executableConfigKeys("claude", ".claude.json")),
+    codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), host, identity), executableConfigKeys("claude", ".claude.json")),
     true
   );
 });
@@ -182,7 +230,7 @@ test("S4: a blanked secret is never restored next to a target the box changed", 
 test("S6: nested process-starting and credential-routing keys make a change executable", () => {
   const json = syncCodec("mcp-json");
   const changed = (codec: ReturnType<typeof syncCodec>, agent: Parameters<typeof executableConfigKeys>[0], rel: string, host: object, box: object): boolean =>
-    codec.executableKeysChanged(codec.hostView(buf(JSON.stringify(host)), identity), codec.boxView(buf(JSON.stringify(box)), identity), executableConfigKeys(agent, rel));
+    codec.executableKeysChanged(codec.hostView(buf(JSON.stringify(host)), identity), codec.boxView(buf(JSON.stringify(box)), null, identity), executableConfigKeys(agent, rel));
 
   const settings = { env: { MAX_THINKING_TOKENS: "1000" }, permissions: { defaultMode: "default", allow: [] }, theme: "dark" };
   assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, theme: "light" }), false);
@@ -199,7 +247,7 @@ test("S6: nested process-starting and credential-routing keys make a change exec
 
   const toml = syncCodec("mcp-toml");
   const tomlChanged = (rel: string, agent: "codex" | "grok", host: string, box: string): boolean =>
-    toml.executableKeysChanged(toml.hostView(buf(host), identity), toml.boxView(buf(box), identity), executableConfigKeys(agent, rel));
+    toml.executableKeysChanged(toml.hostView(buf(host), identity), toml.boxView(buf(box), null, identity), executableConfigKeys(agent, rel));
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "b"\n'), false);
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[model_providers.p]\nbase_url = "https://x"\n'), true);
   assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[shell_environment_policy]\ninherit = "all"\n'), true);

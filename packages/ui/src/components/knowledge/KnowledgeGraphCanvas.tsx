@@ -1,34 +1,59 @@
 // The Knowledge view's graph canvas: Cytoscape (bundled, canvas renderer), laid
 // out by a force simulation in a worker (`graph-layout.worker.ts`). Loaded with the first
 // graph the Knowledge view shows, so neither library is in the app's main bundle.
+// It draws one layer at a time (concepts, or entries by similarity); each layer
+// keeps its own positions and viewport, so switching back finds it as it was.
 
 import React, { useEffect, useRef, useState } from "react";
 import cytoscape, { type Core, type ElementDefinition, type StylesheetJson } from "cytoscape";
 import { Loader2, Maximize2, Minus, Plus } from "lucide-react";
-import { KNOWLEDGE_COLORS, type KnowledgeColor, type KnowledgeEdge } from "@orquester/api";
+import { KNOWLEDGE_COLORS, type KnowledgeColor } from "@orquester/api";
 
 import { IconButton } from "../ui";
 import { cn } from "../../lib/cn";
-import type { CanvasNode } from "./graph.logic";
+import type { CanvasEdge, CanvasNode } from "./graph.logic";
 import { knowledgeColorProperty } from "./knowledge.logic";
-import { DeferredFit, FIT_PADDING, Layouts, seedPositions, warmStart, type LayoutWorkerLike } from "./graph-layout";
+import { DeferredFit, FIT_PADDING, Layouts, seedPositions, warmStart, type LayoutWorkerLike, type Positions } from "./graph-layout";
 import LayoutWorker from "./graph-layout.worker.ts?worker";
 
 export interface KnowledgeGraphCanvasProps {
   nodes: readonly CanvasNode[];
-  edges: readonly KnowledgeEdge[];
-  /** The selected concept: it, its edges and its neighbours stand out, the rest fades. */
+  /** A concept graph's `KnowledgeEdge`s are canvas edges as they are. */
+  edges: readonly CanvasEdge[];
+  /** The selected node: it, its edges and its neighbours stand out, the rest fades. */
   selectedId: string | null;
-  /** Concepts to mark (search hits, the selected entry's concepts). */
+  /** Nodes to mark (search hits, the selected entry's concepts, a legend line). */
   highlightIds: ReadonlySet<string>;
   onSelect: (id: string | null) => void;
   /** The view is shown (a hidden container has no size: resize when it comes back). */
   active: boolean;
+  /** The layer the nodes belong to; each keeps its own positions and viewport. Default "concepts". */
+  layer?: string;
+  /** What the nodes are, for "Arranging 1,000 concepts…". Default "concepts". */
+  itemNoun?: string;
 }
 
 const PIE_SLICES = 6;
-/** Above this many concepts, panning draws a cached texture and hides edges. */
+/** Above this many nodes, panning draws a cached texture and hides edges. */
 const BIG_GRAPH = 600;
+
+/** What a layer left on the canvas when another took its place. */
+interface LayerMemory {
+  /** The topology last laid out (`topologyKey`). */
+  topology: string | null;
+  /** Where the last finished layout (and any drag since) put each node: the next one starts there. */
+  placed: Map<string, { x: number; y: number }>;
+  viewport: { zoom: number; pan: { x: number; y: number } } | null;
+}
+
+function memoryOf(memories: Map<string, LayerMemory>, layer: string): LayerMemory {
+  let memory = memories.get(layer);
+  if (!memory) {
+    memory = { topology: null, placed: new Map(), viewport: null };
+    memories.set(layer, memory);
+  }
+  return memory;
+}
 
 interface Palette {
   lanes: Record<KnowledgeColor, string>;
@@ -99,6 +124,9 @@ function stylesheet(p: Palette): StylesheetJson {
       selector: "edge",
       style: { width: 1, "line-color": p.edge, opacity: 0.55, "curve-style": "haystack", "haystack-radius": 0 }
     },
+    // Similarity layer: the spanning forest carries the structure; nearest-neighbour edges are hints.
+    { selector: "edge.tree", style: { width: 1.3, opacity: 0.7 } },
+    { selector: "edge.knn", style: { width: 0.7, opacity: 0.4, "line-style": "dashed", "line-dash-pattern": [4, 3] } },
     { selector: "edge.near", style: { width: 1.6, "line-color": p.edgeStrong, opacity: 0.95, "z-index": 9 } },
     { selector: "edge.faded", style: { opacity: 0.06 } }
   ];
@@ -118,28 +146,39 @@ function nodeData(node: CanvasNode, p: Palette): ElementDefinition["data"] {
 
 const nodeClasses = (node: CanvasNode) => [node.labelled ? "labelled" : "", node.colors.length > 1 ? "mixed" : ""].filter(Boolean).join(" ");
 
-function elementsOf(nodes: readonly CanvasNode[], edges: readonly KnowledgeEdge[], p: Palette): ElementDefinition[] {
+function elementsOf(nodes: readonly CanvasNode[], edges: readonly CanvasEdge[], p: Palette): ElementDefinition[] {
   const out: ElementDefinition[] = nodes.map((node) => ({ group: "nodes", data: nodeData(node, p), classes: nodeClasses(node) }));
-  for (const edge of edges) out.push({ group: "edges", data: { id: `e:${edge.id}`, source: edge.from, target: edge.to } });
+  for (const edge of edges) out.push({ group: "edges", data: { id: `e:${edge.id}`, source: edge.from, target: edge.to }, classes: edge.variant ?? "" });
   return out;
 }
 
-const topologyKey = (nodes: readonly CanvasNode[], edges: readonly KnowledgeEdge[]) =>
-  `${nodes.map((n) => n.id).join("\u0000")}\u0001${edges.map((e) => e.id).join("\u0000")}`;
+const topologyKey = (nodes: readonly CanvasNode[], edges: readonly CanvasEdge[]) =>
+  `${nodes.map((n) => n.id).join("\u0000")}\u0001${edges.map((e) => `${e.id}${e.variant ? `\u0002${e.variant}` : ""}`).join("\u0000")}`;
 
 /** The layout worker, where the runtime has workers (every app target does). */
 const createLayoutWorker = typeof Worker === "undefined" ? null : (): LayoutWorkerLike => new LayoutWorker() as unknown as LayoutWorkerLike;
 
-const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edges, selectedId, highlightIds, onSelect, active }) => {
+const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
+  nodes,
+  edges,
+  selectedId,
+  highlightIds,
+  onSelect,
+  active,
+  layer = "concepts",
+  itemNoun = "concepts"
+}) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
   const paletteRef = useRef<Palette | null>(null);
+  /** The topology on the canvas now (null: nothing laid out on this instance yet). */
   const topologyRef = useRef<string | null>(null);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const layoutsRef = useRef<Layouts | null>(null);
-  /** Where the last finished layout (and any drag since) put each concept: the next one starts there. */
-  const placedRef = useRef(new Map<string, { x: number; y: number }>());
+  /** Per layer, what it last showed; `shownRef` names the layer on the canvas now. */
+  const memoryRef = useRef(new Map<string, LayerMemory>());
+  const shownRef = useRef<string | null>(null);
   const fitRef = useRef(new DeferredFit());
   const [arranging, setArranging] = useState(false);
   const [layoutError, setLayoutError] = useState<string | null>(null);
@@ -171,7 +210,9 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
     cy.on("mouseover", "node", (event) => event.target.addClass("hover"));
     cy.on("mouseout", "node", (event) => event.target.removeClass("hover"));
     cy.on("dragfree", "node", (event) => {
-      if (placedRef.current.has(event.target.id())) placedRef.current.set(event.target.id(), { ...event.target.position() });
+      if (shownRef.current === null) return;
+      const placed = memoryOf(memoryRef.current, shownRef.current).placed;
+      if (placed.has(event.target.id())) placed.set(event.target.id(), { ...event.target.position() });
     });
 
     // Theme changes (light/dark, scheme) restyle in place.
@@ -205,6 +246,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       cy.destroy();
       cyRef.current = null;
       topologyRef.current = null;
+      shownRef.current = null;
     };
   }, []);
 
@@ -221,7 +263,14 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       renderer.hideEdgesOnViewport = big;
     }
     const key = topologyKey(nodes, edges);
-    if (key === topologyRef.current) {
+    // Another layer's elements are on the canvas: keep where that layer's viewport was.
+    const switching = shownRef.current !== layer;
+    if (switching && shownRef.current !== null && topologyRef.current !== null) {
+      memoryOf(memoryRef.current, shownRef.current).viewport = { zoom: cy.zoom(), pan: { ...cy.pan() } };
+    }
+    shownRef.current = layer;
+    const memory = memoryOf(memoryRef.current, layer);
+    if (!switching && key === topologyRef.current) {
       cy.batch(() => {
         for (const node of nodes) {
           const element = cy.getElementById(node.id);
@@ -232,12 +281,33 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       });
       return;
     }
+    const sameAsLeft = key === memory.topology;
     topologyRef.current = key;
+    memory.topology = key;
     const request = { nodes: nodes.map((n) => ({ id: n.id, size: n.size })), edges: edges.map((e) => ({ source: e.from, target: e.to })) };
+    const layouts = layoutsRef.current;
+    layouts?.cancel();
+    setLayoutError(null);
+    // Back to a layer whose graph did not change meanwhile: put it back as it was, no layout.
+    if (switching && sameAsLeft && nodes.length > 0 && nodes.every((n) => memory.placed.has(n.id))) {
+      cy.batch(() => {
+        cy.elements().remove();
+        cy.add(elementsOf(nodes, edges, palette));
+        for (const node of nodes) {
+          const element = cy.getElementById(node.id);
+          element.scratch("_kgColors", node.colors);
+          element.position(memory.placed.get(node.id)!);
+        }
+      });
+      if (memory.viewport && cy.width() > 0 && cy.height() > 0) cy.viewport(memory.viewport);
+      else fitRef.current.fit(cy);
+      setArranging(false);
+      return;
+    }
     // The same graph grown (entries being linked): start from where it is, keep the viewport, and
-    // show it meanwhile, new concepts beside their neighbours. Another graph is laid out afresh.
-    const initial = warmStart(request.nodes.map((n) => n.id), placedRef.current);
-    if (!initial) placedRef.current = new Map();
+    // show it meanwhile, new nodes beside their neighbours. Another graph is laid out afresh.
+    const initial: Positions | null = warmStart(request.nodes.map((n) => n.id), memory.placed);
+    if (!initial) memory.placed = new Map();
     const seeds = initial ? seedPositions(request.nodes, request.edges, initial) : null;
     cy.batch(() => {
       cy.elements().remove();
@@ -249,9 +319,8 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
         if (at) element.position(at);
       }
     });
-    const layouts = layoutsRef.current;
-    layouts?.cancel();
-    setLayoutError(null);
+    // A layer shown again over a grown graph starts from its own viewport.
+    if (switching && initial && memory.viewport && cy.width() > 0 && cy.height() > 0) cy.viewport(memory.viewport);
     if (nodes.length === 0 || !layouts) {
       setArranging(false);
       return;
@@ -261,7 +330,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       initial ? { ...request, initial } : request,
       (positions) => {
         if (cyRef.current !== cy) return;
-        placedRef.current = new Map(Object.entries(positions));
+        memory.placed = new Map(Object.entries(positions));
         if (initial && !big) cy.layout({ name: "preset", positions, fit: false, animate: true, animationDuration: 300 }).run();
         else {
           cy.batch(() => {
@@ -285,7 +354,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
         setArranging(false);
       }
     );
-  }, [nodes, edges]);
+  }, [nodes, edges, layer]);
 
   // Selection and highlights.
   useEffect(() => {
@@ -336,7 +405,7 @@ const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({ nodes, edge
       )}
       {arranging && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-xs text-neutral-500">
-          <Loader2 size={14} className="motion-safe:animate-spin" /> Arranging {nodes.length.toLocaleString("en-US")} concepts…
+          <Loader2 size={14} className="motion-safe:animate-spin" /> Arranging {nodes.length.toLocaleString("en-US")} {itemNoun}…
         </div>
       )}
       <div className="absolute bottom-3 left-3 flex flex-col gap-0.5 rounded-md border border-neutral-800 bg-neutral-900/90 p-0.5 shadow-sm">

@@ -6,6 +6,9 @@
  * ships a standalone build and the pinned lock has wheels (Linux x64/arm64 glibc and musl, macOS arm64).
  * A release that failed to install is not retried by the hourly check while a
  * working one is in place (each try is a large download); a manual check is.
+ * A current version holding another embedding model than the pinned one (installed before the
+ * model changed) is repaired by the next check with a download of the model alone; when that
+ * repair fails, the hourly check leaves it to the next start, turning on, or a manual check.
  */
 import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
 import { knowledgeRuntimeDir } from "@orquester/config";
@@ -18,7 +21,10 @@ import {
   KnowledgeInstallError,
   clearKnowledgeStaging,
   defaultKnowledgeInstallerDeps,
+  installKnowledgeModel,
   installKnowledgeRuntime,
+  knowledgeModelRepairable,
+  knowledgeMykgReady,
   knowledgeRuntimeReady,
   pruneKnowledgeVersions,
   removeKnowledgeRuntime,
@@ -82,13 +88,20 @@ export function createKnowledgeGraphUpdater(options: KnowledgeGraphUpdaterOption
     versions: (state) => state,
     versionsIn: (state) => state,
     // An install whose overlay is not the shipped one (an Orquester update changed the
-    // prompts), or that lacks a tiktoken encoding, counts as missing: the next check repairs it.
+    // prompts), that lacks a tiktoken encoding, or that holds another embedding model (one
+    // installed before the model changed) counts as missing: the next check repairs it.
     hasFiles: async (version) =>
       knowledgeRuntimeReady(runtimeDir, version, { overlayDigestNow: await currentDigest(), model, encodings }),
-    // With an older overlay it still runs (as KnowledgeRuntimeTracker serves it): a rollback target.
-    hasInstalled: (version) => knowledgeRuntimeReady(runtimeDir, version, { model }),
+    // With an older overlay or model it still runs (as KnowledgeRuntimeTracker serves it, search on
+    // text until it has the model): a rollback target.
+    hasInstalled: (version) => knowledgeMykgReady(runtimeDir, version),
     resolve: (signal, pinned) => resolveMykgRelease(deps, signal, pinned),
-    install: (release, signal) => {
+    install: async (release, signal) => {
+      // The same version from the same wheel lacking only the model: download just the model
+      // (~113 MiB) into it rather than rebuilding the venv (retrieval spec P0.2).
+      if (await knowledgeModelRepairable(runtimeDir, release, { overlayDigestNow: await currentDigest(), model, encodings })) {
+        return installKnowledgeModel(runtimeDir, release, deps, { signal, model });
+      }
       if (!uv) throw new KnowledgeInstallError("download", `uv has no build for ${platform}/${arch}`);
       return installKnowledgeRuntime(runtimeDir, release, deps, {
         uv,

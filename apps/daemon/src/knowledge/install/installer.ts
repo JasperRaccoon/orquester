@@ -9,7 +9,8 @@
  *
  * Layout under `knowledgeRuntimeDir(appdir)`:
  *   versions/<mykg>/venv/      the relocatable venv with `mykg==<mykg>` and the prompt overlay
- *   versions/<mykg>/models/    the embedding model (`<models>/Xenova/all-MiniLM-L6-v2/…`)
+ *   versions/<mykg>/models/    the embedding model (`<models>/Xenova/multilingual-e5-small/…`); an update check
+ *                              that finds another model here replaces only this dir ({@link installKnowledgeModel})
  *   versions/<mykg>/tiktoken/  tiktoken's cache (`TIKTOKEN_CACHE_DIR`): the encodings myKG loads,
  *                              hash-checked, under tiktoken's own names (sha1 of the URL)
  *   versions/<mykg>/runtime.json  written last, after the smoke test: what was installed
@@ -140,7 +141,8 @@ export interface KnowledgeRuntimeManifest {
   uvVersion: string;
   python: string;
   overlay: { line: string; digest: string; files: string[] };
-  embeddingModel: { id: string; revision: string; dimensions: number };
+  /** The prefixes and token limit are recorded since multilingual-e5-small (absent before). */
+  embeddingModel: { id: string; revision: string; dimensions: number; queryPrefix?: string; passagePrefix?: string; maxTokens?: number };
   /** The tiktoken encodings in `tiktoken/` (absent in a manifest written before they were prefetched). */
   tiktokenEncodings?: string[];
   installedAt: string;
@@ -172,11 +174,15 @@ export function knowledgeHomeDir(runtimeDir: string): string {
   return join(runtimeDir, "home");
 }
 
-/** The runtime an installed version provides (paths only; see {@link knowledgeRuntimeReady}). */
+/**
+ * The runtime an installed version provides (paths, and the model as `model` describes it; see
+ * {@link knowledgeRuntimeReady}). `modelReady: false` when the model's files are not in place.
+ */
 export function knowledgeRuntimeOf(
   runtimeDir: string,
   version: string,
-  model: EmbeddingModelSpec = EMBEDDING_MODEL
+  model: EmbeddingModelSpec = EMBEDDING_MODEL,
+  modelReady = true
 ): KnowledgeRuntime {
   const dir = knowledgeVersionDir(runtimeDir, version);
   return {
@@ -186,52 +192,92 @@ export function knowledgeRuntimeOf(
     embeddingModelDir: join(dir, "models"),
     embeddingModelId: model.id,
     embeddingDimensions: model.dimensions,
+    embeddingModelReady: modelReady,
+    embeddingQueryPrefix: model.queryPrefix,
+    embeddingPassagePrefix: model.passagePrefix,
+    embeddingMaxTokens: model.maxTokens,
+    embeddingThresholds: { ...model.thresholds },
     tiktokenCacheDir: join(dir, "tiktoken")
   };
 }
 
 export async function readKnowledgeManifest(versionDir: string): Promise<KnowledgeRuntimeManifest | null> {
+  const value = (await readManifestObject(versionDir)) as Partial<KnowledgeRuntimeManifest> | null;
+  if (value?.schema !== 1 || typeof value.mykgVersion !== "string" || typeof value.overlay?.digest !== "string") return null;
+  return value as KnowledgeRuntimeManifest;
+}
+
+/** `runtime.json` as written, unknown fields included (a rewrite keeps them); null when unreadable. */
+async function readManifestObject(versionDir: string): Promise<Record<string, unknown> | null> {
   try {
-    const value = JSON.parse(await readFile(join(versionDir, MANIFEST_FILE), "utf8")) as Partial<KnowledgeRuntimeManifest>;
-    if (value?.schema !== 1 || typeof value.mykgVersion !== "string" || typeof value.overlay?.digest !== "string") return null;
-    return value as KnowledgeRuntimeManifest;
+    const value = JSON.parse(await readFile(join(versionDir, MANIFEST_FILE), "utf8")) as unknown;
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
   } catch {
     return null;
   }
 }
 
 /**
- * Whether `version` is installed and usable: its manifest (written after the
- * smoke test) names it, its mykg entry point and python (through the venv's
- * link to the shared interpreter) are there, and every model file has its
- * pinned size. With `overlayDigestNow`, the overlay it was installed with must
- * be that one too (an Orquester update that changes the prompts repairs it);
- * with `encodings`, every one must be in its tiktoken cache at its pinned size
- * (a runtime without them still runs: tiktoken would fetch them).
+ * Whether myKG of `version` is installed and runs, whatever its embedding
+ * model: its manifest (written after the smoke test) names it, and its mykg
+ * entry point and python (through the venv's link to the shared interpreter)
+ * are there. With `overlayDigestNow`, the overlay it was installed with must be
+ * that one too (an Orquester update that changes the prompts repairs it); with
+ * `encodings`, every one must be in its tiktoken cache at its pinned size (a
+ * runtime without them still runs: tiktoken would fetch them).
+ */
+export async function knowledgeMykgReady(
+  runtimeDir: string,
+  version: string,
+  options: { overlayDigestNow?: string; encodings?: readonly TiktokenEncodingSpec[] } = {}
+): Promise<boolean> {
+  const manifest = await readKnowledgeManifest(knowledgeVersionDir(runtimeDir, version));
+  if (!manifest || manifest.mykgVersion !== version) return false;
+  if (options.overlayDigestNow !== undefined && manifest.overlay.digest !== options.overlayDigestNow) return false;
+  const runtime = knowledgeRuntimeOf(runtimeDir, version);
+  if (!(await isFile(runtime.mykgBin)) || !(await isFile(runtime.pythonBin))) return false;
+  for (const encoding of options.encodings ?? []) {
+    const info = await stat(join(runtime.tiktokenCacheDir, tiktokenCacheKey(encoding.url))).catch(() => null);
+    if (!info?.isFile() || info.size !== encoding.size) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether `version` holds `model`: its manifest names that model and revision
+ * (an install from before a model change names another), and every file has
+ * its pinned size (the hashes were checked when they were downloaded).
+ */
+export async function knowledgeModelReady(
+  runtimeDir: string,
+  version: string,
+  model: EmbeddingModelSpec = EMBEDDING_MODEL
+): Promise<boolean> {
+  const manifest = await readKnowledgeManifest(knowledgeVersionDir(runtimeDir, version));
+  if (!manifest || manifest.mykgVersion !== version) return false;
+  if (manifest.embeddingModel?.id !== model.id || manifest.embeddingModel?.revision !== model.revision) return false;
+  const modelDir = join(knowledgeRuntimeOf(runtimeDir, version, model).embeddingModelDir, ...model.id.split("/"));
+  for (const file of model.files) {
+    const info = await stat(join(modelDir, ...file.path.split("/"))).catch(() => null);
+    if (!info?.isFile() || info.size !== file.size) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether `version` is installed and complete: {@link knowledgeMykgReady} (with
+ * the same options) and {@link knowledgeModelReady} for `options.model` (the
+ * pinned model by default).
  */
 export async function knowledgeRuntimeReady(
   runtimeDir: string,
   version: string,
   options: { overlayDigestNow?: string; model?: EmbeddingModelSpec; encodings?: readonly TiktokenEncodingSpec[] } = {}
 ): Promise<boolean> {
-  const model = options.model ?? EMBEDDING_MODEL;
-  const manifest = await readKnowledgeManifest(knowledgeVersionDir(runtimeDir, version));
-  if (!manifest || manifest.mykgVersion !== version) return false;
-  if (options.overlayDigestNow !== undefined && manifest.overlay.digest !== options.overlayDigestNow) return false;
-  if (manifest.embeddingModel?.id !== model.id || manifest.embeddingModel?.revision !== model.revision) return false;
-  const runtime = knowledgeRuntimeOf(runtimeDir, version, model);
-  if (!(await isFile(runtime.mykgBin)) || !(await isFile(runtime.pythonBin))) return false;
-  for (const file of model.files) {
-    const info = await stat(join(runtime.embeddingModelDir, ...model.id.split("/"), ...file.path.split("/"))).catch(
-      () => null
-    );
-    if (!info?.isFile() || info.size !== file.size) return false;
-  }
-  for (const encoding of options.encodings ?? []) {
-    const info = await stat(join(runtime.tiktokenCacheDir, tiktokenCacheKey(encoding.url))).catch(() => null);
-    if (!info?.isFile() || info.size !== encoding.size) return false;
-  }
-  return true;
+  return (
+    (await knowledgeMykgReady(runtimeDir, version, options)) &&
+    (await knowledgeModelReady(runtimeDir, version, options.model ?? EMBEDDING_MODEL))
+  );
 }
 
 // ---- env -----------------------------------------------------------------------------------------
@@ -516,17 +562,7 @@ export async function installKnowledgeRuntime(
       }
     });
 
-    await step("model", DOWNLOAD_TIMEOUT_MS, signal, async (bounded) => {
-      const modelDir = join(built, "models", ...model.id.split("/"));
-      for (const file of model.files) {
-        const dest = join(modelDir, ...file.path.split("/"));
-        await mkdir(dirname(dest), { recursive: true });
-        await deps.download(model.fileUrl(file.path), dest, bounded);
-        if ((await sha256Hex(dest)) !== file.sha256) {
-          throw new Error(`${model.id}/${file.path} does not match its sha256`);
-        }
-      }
-    });
+    await step("model", DOWNLOAD_TIMEOUT_MS, signal, (bounded) => fetchModel(join(built, "models"), model, deps, bounded));
 
     const installedAt = deps.now().toISOString();
     await step("install", 0, signal, async () => {
@@ -537,7 +573,7 @@ export async function installKnowledgeRuntime(
         uvVersion: build.version,
         python: PYTHON_VERSION,
         overlay,
-        embeddingModel: { id: model.id, revision: model.revision, dimensions: model.dimensions },
+        embeddingModel: manifestModel(model),
         tiktokenEncodings: encodings.map((encoding) => encoding.name),
         installedAt
       };
@@ -556,6 +592,108 @@ export async function installKnowledgeRuntime(
         await rename(built, target);
       } catch (error) {
         if (hadTarget) await rename(replaced, target).catch(() => undefined);
+        throw error;
+      }
+    });
+    return { version: release.version, integrity: `sha256:${release.wheelSha256}`, installedAt };
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/** Download every file of `model` into `<modelsDir>/<model id>/`, each checked against its sha256 and size. */
+async function fetchModel(modelsDir: string, model: EmbeddingModelSpec, deps: KnowledgeInstallerDeps, signal: AbortSignal): Promise<void> {
+  const modelDir = join(modelsDir, ...model.id.split("/"));
+  for (const file of model.files) {
+    const dest = join(modelDir, ...file.path.split("/"));
+    await mkdir(dirname(dest), { recursive: true });
+    await deps.download(model.fileUrl(file.path), dest, signal);
+    if ((await stat(dest)).size !== file.size || (await sha256Hex(dest)) !== file.sha256) {
+      throw new Error(`${model.id}/${file.path} does not match its sha256`);
+    }
+  }
+}
+
+function manifestModel(model: EmbeddingModelSpec): KnowledgeRuntimeManifest["embeddingModel"] {
+  return {
+    id: model.id,
+    revision: model.revision,
+    dimensions: model.dimensions,
+    queryPrefix: model.queryPrefix,
+    passagePrefix: model.passagePrefix,
+    maxTokens: model.maxTokens
+  };
+}
+
+/**
+ * Whether an install of `release` can be done by {@link installKnowledgeModel}: that version is
+ * already in `versions/` from the same wheel, its myKG is complete as an install of this
+ * Orquester would leave it (the shipped overlay, every encoding), and only `model` is missing or
+ * another one (retrieval spec P0.2: an install from before the model change).
+ */
+export async function knowledgeModelRepairable(
+  runtimeDir: string,
+  release: MykgRelease,
+  options: { overlayDigestNow: string; model?: EmbeddingModelSpec; encodings?: readonly TiktokenEncodingSpec[] }
+): Promise<boolean> {
+  const manifest = await readKnowledgeManifest(knowledgeVersionDir(runtimeDir, release.version));
+  if (manifest?.wheelSha256 !== release.wheelSha256) return false;
+  if (!(await knowledgeMykgReady(runtimeDir, release.version, options))) return false;
+  return !(await knowledgeModelReady(runtimeDir, release.version, options.model ?? EMBEDDING_MODEL));
+}
+
+/**
+ * Bring `model` into the installed `version` alone (the venv, the managed Python and tiktoken's
+ * cache stay as they are): download it into staging, check every file, swap it in for
+ * `versions/<version>/models/`, then rewrite the manifest (its other fields, unknown ones
+ * included, kept). Until the manifest names the new model the version counts as having no model
+ * (search runs on text); a failure before the swap leaves the version untouched, one after it
+ * puts the old models back. Returns the record to store as `current` (the same wheel's
+ * integrity); throws a {@link KnowledgeInstallError} naming the failed step.
+ */
+export async function installKnowledgeModel(
+  runtimeDir: string,
+  release: MykgRelease,
+  deps: KnowledgeInstallerDeps,
+  options: { signal: AbortSignal; model?: EmbeddingModelSpec }
+): Promise<PluginInstalledVersion> {
+  const model = options.model ?? EMBEDDING_MODEL;
+  const { signal } = options;
+  const versionDir = knowledgeVersionDir(runtimeDir, release.version);
+  const staging = join(knowledgeStagingDir(runtimeDir), `${release.version}-model-${randomUUID()}`);
+  try {
+    await step("model", DOWNLOAD_TIMEOUT_MS, signal, async (bounded) => {
+      await mkdir(staging, { recursive: true, mode: 0o700 });
+      await fetchModel(join(staging, "models"), model, deps, bounded);
+    });
+    const installedAt = deps.now().toISOString();
+    await step("install", 0, signal, async () => {
+      const manifest = await readManifestObject(versionDir);
+      const known = await readKnowledgeManifest(versionDir);
+      if (!manifest || known?.mykgVersion !== release.version || known.wheelSha256 !== release.wheelSha256) {
+        throw new Error(`myKG ${release.version} is not installed from the same wheel any more`);
+      }
+      const models = join(versionDir, "models");
+      const replaced = join(staging, "replaced-models");
+      const hadModels = await rename(models, replaced).then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        }
+      );
+      try {
+        await rename(join(staging, "models"), models);
+        const next = { ...manifest, embeddingModel: manifestModel(model) };
+        const written = join(versionDir, `${MANIFEST_FILE}.${randomUUID()}.tmp`);
+        await writeFile(written, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o644 });
+        await rename(written, join(versionDir, MANIFEST_FILE)).catch(async (error: unknown) => {
+          await rm(written, { force: true });
+          throw error;
+        });
+      } catch (error) {
+        await rm(models, { recursive: true, force: true }).catch(() => undefined);
+        if (hadModels) await rename(replaced, models).catch(() => undefined);
         throw error;
       }
     });

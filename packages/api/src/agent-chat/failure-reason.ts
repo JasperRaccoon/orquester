@@ -19,8 +19,11 @@
 import type { RuntimeFailureReason } from "./runtime-events.ts";
 import type { ThreadActivityItem, ThreadActivityTone } from "./thread.ts";
 
+/** The reasons that are the ACCOUNT's failure; `overloaded` is the provider's ({@link overloadOfActivity}). */
+export type AccountFailureReason = Exclude<RuntimeFailureReason, "overloaded">;
+
 export interface ActivityFailureReason {
-  reason: RuntimeFailureReason;
+  reason: AccountFailureReason;
   /** ISO time the limit resets, when the provider said. */
   resetsAt?: string;
   /** The row's own message (its summary when the payload carries none). */
@@ -33,7 +36,7 @@ export interface ActivityFailureReason {
 /** The activity kinds an adapter's account failure is written as. */
 const FAILURE_ACTIVITY_KINDS: ReadonlySet<string> = new Set(["runtime.error", "runtime.warning"]);
 
-const FAILURE_REASONS: ReadonlySet<string> = new Set<RuntimeFailureReason>(["usage_limit", "auth"]);
+const FAILURE_REASONS: ReadonlySet<string> = new Set<AccountFailureReason>(["usage_limit", "auth"]);
 
 /**
  * The message prefixes hosts from before the `reason` field wrote for an
@@ -50,7 +53,7 @@ const FAILURE_REASONS: ReadonlySet<string> = new Set<RuntimeFailureReason>(["usa
  */
 const LEGACY_FAILURE_PREFIXES: ReadonlyArray<{
   prefix: string;
-  reason: RuntimeFailureReason;
+  reason: AccountFailureReason;
 }> = [
   { prefix: "Claude usage limit reached.", reason: "usage_limit" },
   { prefix: "Grok usage limit reached.", reason: "usage_limit" },
@@ -108,7 +111,7 @@ export function failureReasonOfActivity(
     }
     const resetsAt = isoOrUndefined(payload.resetsAt);
     return {
-      reason: payload.reason as RuntimeFailureReason,
+      reason: payload.reason as AccountFailureReason,
       ...(resetsAt !== undefined ? { resetsAt } : {}),
       message,
       tone: activity.tone,
@@ -128,4 +131,20 @@ export function failureReasonOfActivity(
     tone: activity.tone,
     legacy: true
   };
+}
+
+/**
+ * The provider-capacity failure one activity names (`reason: "overloaded"` on a terminal
+ * `runtime.error`), as its message, or `null`. Not an account failure: {@link failureReasonOfActivity}
+ * never returns it, so no workflow fails over on it.
+ */
+export function overloadOfActivity(activity: ThreadActivityItem): { message: string } | null {
+  if (activity.activityKind !== "runtime.error") {
+    return null;
+  }
+  const payload = asRecord(activity.payload) ?? {};
+  if (payload.reason !== "overloaded") {
+    return null;
+  }
+  return { message: typeof payload.message === "string" && payload.message.length > 0 ? payload.message : activity.summary };
 }

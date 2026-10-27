@@ -2185,6 +2185,9 @@ function failureReasonOf(
       return "usage_limit";
     case "unauthorized":
       return "auth";
+    case "serverOverloaded":
+      // "Selected model is at capacity": the provider's, not the account's.
+      return "overloaded";
     default:
       return undefined;
   }
