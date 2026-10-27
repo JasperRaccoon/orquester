@@ -20,7 +20,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ApprovalPort, ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { devicesFamily } from "./devices.ts";
+import { deviceQuickStart, devicesFamily } from "./devices.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "mcp-devices-")));
 const PROJECT = join(ROOT, "acme", "app");
@@ -113,7 +113,9 @@ test("open → act → screenshot → install → close, acting for the calling 
     assert.ok(opened.ok, JSON.stringify(opened));
     assert.equal(opened.value.device, "local/dev-1");
     assert.equal(opened.value.ready, true);
-    assert.match(String(opened.value.quick_start), /snapshot/);
+    const quickStart = String(opened.value.quick_start);
+    assert.ok(quickStart.split("\n").length <= 6);
+    for (const needle of [/snapshot/, /@eN refs/, /\.apk/, /Device panel/]) assert.match(quickStart, needle);
     assert.deepEqual(readDeviceToolReference(opened.value[DEVICE_TOOL_REFERENCE_KEY]), { device: "local/dev-1", leaseId: opened.value.lease_id });
     assert.ok(principals.every((who) => who === "me"));
 
@@ -142,6 +144,7 @@ test("open → act → screenshot → install → close, acting for the calling 
     t.service.userInput("local", "dev-1");
     const refused = await call(api, "device_action", { action: "tap", x: 1, y: 2 });
     assert.ok(!refused.ok && refused.code === "DEVICE_CONTROLLED_BY_USER");
+    assert.match(refused.message, /give control back/);
     t.actions.result = (input) => ({ log: { summary: `did ${input.action}` }, text: "tree" });
     const read = await call(api, "device_action", { action: "snapshot" });
     assert.ok(read.ok);
@@ -153,6 +156,10 @@ test("open → act → screenshot → install → close, acting for the calling 
     const listed = await call(api, "list_devices", {});
     assert.ok(listed.ok);
     assert.deepEqual(listed.value.my_devices, []);
+    // Errors name the next call.
+    const gone = await call(api, "device_action", { action: "snapshot" });
+    assert.ok(!gone.ok && gone.code === "DEVICE_NOT_LEASED");
+    assert.match(gone.message, /open_device/);
   } finally {
     await t.cleanup();
   }
@@ -202,4 +209,13 @@ test("open_device while planning: no spend card can be raised", async () => {
   } finally {
     await t.cleanup();
   }
+});
+
+test("the quick start is per platform and at most six lines", () => {
+  const ios = deviceQuickStart("ios");
+  assert.ok(ios.split("\n").length <= 6);
+  assert.match(ios, /simulator \.app/);
+  assert.match(ios, /bundle id/);
+  assert.doesNotMatch(ios, /\.apk/);
+  assert.match(deviceQuickStart("android"), /package/);
 });

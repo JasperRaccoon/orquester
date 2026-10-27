@@ -1,0 +1,127 @@
+{
+ "success": true,
+ "data": {
+  "direction": "down",
+  "x1": 360,
+  "y1": 1024,
+  "x2": 360,
+  "y2": 256,
+  "referenceWidth": 720,
+  "referenceHeight": 1280,
+  "pixels": 768,
+  "backend": "android-helper",
+  "helperVersion": "0.21.31",
+  "installReason": "current",
+  "helperKind": "swipe",
+  "helperApiVersion": "2",
+  "injectedEvents": 21,
+  "elapsedMs": 889,
+  "helperTransport": "persistent-session",
+  "message": "Scrolled down",
+  "settle": {
+   "settled": true,
+   "waitedMs": 1581,
+   "captures": 3,
+   "quietMs": 500,
+   "timeoutMs": 10000,
+   "diff": {
+    "summary": {
+     "additions": 12,
+     "removals": 7,
+     "unchanged": 11
+    },
+    "lines": [
+     {
+      "kind": "removed",
+      "text": "@e2 [image] \"Profile picture, double tap to open Google Account\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e9 [text] \"Network & internet\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e10 [text] \"Mobile, Wi‑Fi, hotspot\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e11 [group]"
+     },
+     {
+      "kind": "removed",
+      "text": "@e12 [text] \"Connected devices\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e13 [text] \"Bluetooth, pairing\""
+     },
+     {
+      "kind": "removed",
+      "text": "@e14 [group]"
+     },
+     {
+      "kind": "added",
+      "text": "@e12 [text] \"Notification history, conversations\"",
+      "ref": "e12"
+     },
+     {
+      "kind": "added",
+      "text": "@e13 [group]",
+      "ref": "e13"
+     },
+     {
+      "kind": "added",
+      "text": "@e14 [text] \"Battery\"",
+      "ref": "e14"
+     },
+     {
+      "kind": "added",
+      "text": "@e15 [text] \"100%\"",
+      "ref": "e15"
+     },
+     {
+      "kind": "added",
+      "text": "@e16 [group]",
+      "ref": "e16"
+     },
+     {
+      "kind": "added",
+      "text": "@e17 [text] \"Storage\"",
+      "ref": "e17"
+     },
+     {
+      "kind": "added",
+      "text": "@e18 [text] \"37% used - 5.04 GB free\"",
+      "ref": "e18"
+     },
+     {
+      "kind": "added",
+      "text": "@e19 [group]",
+      "ref": "e19"
+     },
+     {
+      "kind": "added",
+      "text": "@e20 [text] \"Sound & vibration\"",
+      "ref": "e20"
+     },
+     {
+      "kind": "added",
+      "text": "@e21 [text] \"Volume, haptics, Do Not Disturb\"",
+      "ref": "e21"
+     },
+     {
+      "kind": "added",
+      "text": "@e22 [group]",
+      "ref": "e22"
+     },
+     {
+      "kind": "added",
+      "text": "@e23 [text] \"Display & touch\"",
+      "ref": "e23"
+     }
+    ]
+   },
+   "refsGeneration": 604581
+  }
+ }
+}

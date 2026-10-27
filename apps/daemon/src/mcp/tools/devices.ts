@@ -90,15 +90,22 @@ function deviceRef(lease: DeviceLeaseSummary, screenshotId?: string): DeviceTool
   return { device: lease.key ?? lease.id, leaseId: lease.id, ...(screenshotId ? { screenshotId } : {}) };
 }
 
-/** Sent back with every opened device: the rest of the guidance the instruction line leaves out. */
-export const DEVICE_QUICK_START = [
-  'device_action {action:"snapshot"}: the screen as an accessibility tree with @eN refs.',
-  'Act by ref: {action:"tap",ref:"@e3"}, {action:"fill",ref:"@e5",text:"…"}; x/y (points) only when no ref fits.',
-  "Input actions return the snapshot diff; snapshot again only after waits or animations.",
-  '{action:"screenshot"} to see pixels; {action:"logs",seconds:10} for recent logs.',
-  'device_install a build from this project, then {action:"open_app",app:"<bundle id or package>"}.',
-  "The user watches the Device panel and may take control (then wait or ask); close_device when done."
-].join("\n");
+/**
+ * Sent back with every opened device (≤ 6 lines): the rest of the guidance the instruction line
+ * leaves out, per platform.
+ */
+export function deviceQuickStart(platform: "ios" | "android"): string {
+  return [
+    'device_action {action:"snapshot"} first: the screen as an accessibility tree with @eN refs (again after open_app: refs expire).',
+    'Act by ref: {action:"tap",ref:"@e3"}, {action:"fill",ref:"@e5",text:"…"}; x/y in points only when no ref fits. Input returns the snapshot diff.',
+    '{action:"screenshot"} to see pixels; {action:"logs",seconds:10} for recent logs; {action:"wait",text:"…"} for slow screens.',
+    platform === "ios"
+      ? 'device_install a simulator .app from this project, then {action:"open_app",app:"<bundle id>"}; press home for Springboard.'
+      : 'device_install an .apk from this project, then {action:"open_app",app:"<package>"}; press back/home to navigate.',
+    "The user watches the Device panel and may take control: input then fails until they give it back (reads still work).",
+    "close_device when done."
+  ].join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // list_devices
@@ -233,7 +240,7 @@ const openDevice = defineTool({
       ready: opened.ready,
       ...(opened.progress ? { progress: opened.progress, note: "Still starting: check it with list_devices." } : {}),
       ...(opened.note ? { note: opened.note } : {}),
-      ...(opened.ready ? { quick_start: DEVICE_QUICK_START } : {}),
+      ...(opened.ready ? { quick_start: deviceQuickStart(opened.lease.platform) } : {}),
       deviceRef: deviceRef(opened.lease)
     };
   }
