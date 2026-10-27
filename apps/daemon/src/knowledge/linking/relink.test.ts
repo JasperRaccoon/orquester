@@ -20,6 +20,7 @@ import {
   settleRelink,
   type RelinkStore
 } from "./relink.ts";
+import { EntryDocumentLocator } from "./context.ts";
 import { mykgTaskId } from "./testing.ts";
 
 const roots: string[] = [];
@@ -172,7 +173,15 @@ describe("prepareRelinkBatch", () => {
     const manifest = { [`${ID(1)}.md`]: { sha256: "a" }, [`input/${ID(2)}.md`]: { sha256: "b" }, [`${ID(3)}.md`]: { sha256: "c" } };
     await writeFile(join(paths.intermediate, MYKG_MANIFEST_FILE), JSON.stringify(manifest));
     await writeFile(join(paths.root, COMMITTED_MANIFEST_FILE), JSON.stringify(manifest));
-    const mirror = (n: number) => `Author: A\n\n# Entry ${n}\n\nBody ${n}.\n`;
+    // Entry 1 quotes entry 3 whole: entry 3's task is still entry 3's alone.
+    const plain = (n: number) => `Author: A\n\n# Entry ${n}\n\nBody ${n}.\n`;
+    const mirror = (n: number) => (n === 1 ? `Author: A\n\n# Entry 1\n\nBody 1, quoting entry 3:\n\n${plain(3)}` : plain(n));
+    const input = join(root, "input");
+    await mkdir(input, { recursive: true });
+    for (const n of [1, 2, 3]) await writeFile(join(input, `${ID(n)}.md`), mirror(n));
+    const locator = new EntryDocumentLocator({ mykgInputDir: input, listMeta: () => [1, 2, 3].map((n) => ({ id: ID(n) }) as KnowledgeEntryMeta) });
+    await locator.load();
+    const owns = (ids: string[]) => (document: string) => ids.includes(locator.locate(document) ?? "");
     const answer = async (step: string, user: string, label: string): Promise<string> => {
       const id = mykgTaskId("PASS2", user, label);
       await writeFile(join(inbox, `${id}.task.json`), JSON.stringify({ task_id: id, step, context_label: label, system: "PASS2", user }));
@@ -188,16 +197,16 @@ describe("prepareRelinkBatch", () => {
     const pass1 = await answer("pass1", "CORPUS", "pass1 batch 0/1");
 
     // Entry 2 was prepared by an earlier attempt: its answer (given WITH context) is kept.
-    const cleared = await prepareRelinkBatch(paths, [ID(1), ID(2)], new Map([[ID(1), mirror(1)]]));
+    const cleared = await prepareRelinkBatch(paths, [ID(1), ID(2)], owns([ID(1)]));
     assert.deepEqual(cleared.sort(), [one, oneRetry].sort());
     for (const file of [MYKG_MANIFEST_FILE, `../${COMMITTED_MANIFEST_FILE}`]) {
       const left = JSON.parse(await readFile(join(paths.intermediate, file), "utf8")) as Record<string, unknown>;
       assert.deepEqual(Object.keys(left), [`${ID(3)}.md`], `${file}: the batch is new to myKG again`);
     }
     const outs = await readdir(outbox);
-    for (const id of [two, three, pass1]) assert.ok(outs.includes(`${id}.done`), "other answers stay cached");
+    for (const id of [two, three, pass1]) assert.ok(outs.includes(`${id}.done`), "other answers stay cached (entry 3's too, though entry 1 quotes it)");
     for (const id of [one, oneRetry]) assert.ok(!outs.includes(`${id}.done`) && !outs.includes(`${id}.answer.json`));
     // Idempotent.
-    assert.deepEqual(await prepareRelinkBatch(paths, [ID(1), ID(2)], new Map([[ID(1), mirror(1)]])), []);
+    assert.deepEqual(await prepareRelinkBatch(paths, [ID(1), ID(2)], owns([ID(1)])), []);
   });
 });

@@ -18,8 +18,9 @@
  * 1. the entries' keys are dropped from `file_manifest.json` and the committed copy
  *    (`mykg-files.ts` `dropManifestEntries`): myKG's `--update` sees them as new, evicts their shards
  *    (per-file and `pass2_raw_batches`) and extracts them again;
- * 2. their cached Pass 2 answers are removed (`inbox.ts` `clearAnsweredTasks`, matched by document,
- *    `context.ts`): myKG asks again under the same task id, and the worker's view of that task
+ * 2. their cached Pass 2 answers are removed (`inbox.ts` `clearAnsweredTasks`, each task's document
+ *    matched to exactly one entry, `context.ts`): myKG asks again under the same task id, and the
+ *    worker's view of that task
  *    carries the context. myKG's prompt is unchanged, so this is the only way the new prompt is used.
  * Step 2 runs once per entry (`prepared`, persisted before the spawn): a resumed or retried run
  * keeps the answers it already got WITH context. Step 1 runs every time (idempotent). An entry
@@ -34,7 +35,7 @@ import type { KnowledgeEntryMeta } from "@orquester/api";
 import type { KnowledgeRelinkStateRecord } from "@orquester/config";
 import type { KnowledgeVectorIndex } from "../ports.ts";
 import { findLinkGaps } from "../search/gaps.ts";
-import { documentMatches, documentOf, LINK_CONTEXT_VERSION } from "./context.ts";
+import { documentOf, LINK_CONTEXT_VERSION } from "./context.ts";
 import { clearAnsweredTasks } from "./inbox.ts";
 import { dropManifestEntries, type MykgSessionPaths } from "./mykg-files.ts";
 
@@ -159,17 +160,17 @@ export async function queueLinkGaps(relink: KnowledgeRelinkStateRecord, options:
 
 /**
  * Before the child of a run with a re-link batch starts (see the module header): drops the batch's
- * manifest keys (always) and clears the cached Pass 2 answers of the entries not yet `prepared`
- * (matched against `mirrors`, the entries' current mirror text). The caller records them as
- * `prepared` and persists that before spawning. Answers the task ids cleared.
+ * manifest keys (always) and clears the cached Pass 2 answers whose document `fresh` claims (one of
+ * the entries not yet `prepared`: the document located to exactly that entry, `context.ts`
+ * `EntryDocumentLocator.locate`; null: none). The caller records them as `prepared` and persists
+ * that before spawning. Answers the task ids cleared.
  */
-export async function prepareRelinkBatch(paths: MykgSessionPaths, batch: readonly string[], fresh: ReadonlyMap<string, string>): Promise<string[]> {
+export async function prepareRelinkBatch(paths: MykgSessionPaths, batch: readonly string[], fresh: ((document: string) => boolean) | null): Promise<string[]> {
   await dropManifestEntries(paths, batch);
-  if (fresh.size === 0) return [];
-  const mirrors = [...fresh.values()];
+  if (!fresh) return [];
   return clearAnsweredTasks(paths.intermediate, (envelope) => {
     if (envelope.step !== "pass2") return false;
     const document = documentOf(envelope.user);
-    return document !== null && mirrors.some((mirror) => documentMatches(document, mirror));
+    return document !== null && fresh(document);
   });
 }

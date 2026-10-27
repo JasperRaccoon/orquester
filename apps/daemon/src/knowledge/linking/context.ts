@@ -16,9 +16,12 @@
  * neighbour's order, then by name.
  *
  * The entry a task is for: myKG's Pass 2 prompt ends with `DOCUMENT\n========\n<text>` (`pass2.py`
- * `_build_extraction_prompt`; a retry prefixes the same prompt), and the text is the entry's mirror
- * file (or, for an entry longer than one chunk, a window of it). The label (`pass2 chunk <batch>`)
- * does not name the file, so the document is matched against the mirror files.
+ * `_build_extraction_prompt`; a retry prefixes the same prompt). The label (`pass2 chunk <batch>`)
+ * does not name the file, so the document is matched against the mirror files, exactly
+ * (`locateDocument`): the whole mirror, or — for an entry longer than one chunk — its chunk windows
+ * as myKG cuts them (`chunker.py` `chunk_file`: {@link MYKG_CHUNK_TOKENS}-token windows,
+ * overlapping, the first at the mirror's start; `pass2_batch.py` joins a file's windows that fit one
+ * batch with a blank line). Text one entry quotes from another never makes it that entry's.
  *
  * Search is reached only through {@link KnowledgeLinkGraphView}, injected by `knowledge/service.ts`.
  */
@@ -28,6 +31,7 @@ import { join } from "node:path";
 import type { KnowledgeConceptRef } from "@orquester/api";
 import type { KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
 import type { InboxTaskEnvelope } from "./inbox.ts";
+import { MYKG_CHUNK_TOKENS } from "./mykg-config.ts";
 
 /** The linking-context version recorded per entry (`KnowledgeStorePort.setLinkContext`); bump it when the context changes. */
 export const LINK_CONTEXT_VERSION = 1;
@@ -38,8 +42,17 @@ export const CONTEXT_HEADING = "KNOWN CONCEPTS FROM SIMILAR ENTRIES";
 export const CONTEXT_STEPS: ReadonlySet<string> = new Set(["pass2"]);
 
 const DOCUMENT_MARKER = "\n\nDOCUMENT\n========\n";
-/** How much of a document's start identifies it inside a mirror file (a chunk window of a long entry). */
-const MATCH_PREFIX_CHARS = 300;
+/**
+ * The fewest characters (UTF-16 units) a full chunk window holds: {@link MYKG_CHUNK_TOKENS} tokens
+ * of at least one UTF-8 byte each, at most 4 bytes (2 units) or 3 bytes (1 unit) per character. A
+ * mirror shorter than this is never cut into windows, and every window but a file's last is longer.
+ */
+export const WINDOW_MIN_CHARS = Math.floor(MYKG_CHUNK_TOKENS / 4);
+/** How much of a window's start is looked up in a mirror before it is compared in full. */
+const PROBE_CHARS = 64;
+/** What a UTF-8 decode puts where a window cut a character in two. */
+const REPLACEMENT = 0xfffd;
+const SEPARATOR = "\n\n";
 
 /** What linking reads of search and the concept graph (`knowledge/service.ts` builds it). */
 export interface KnowledgeLinkGraphView {
@@ -118,58 +131,135 @@ export function documentOf(user: string): string | null {
   return at < 0 ? null : user.slice(at + DOCUMENT_MARKER.length);
 }
 
-/** Whether `document` is the mirror file `mirror` or a window of it. */
+/** Whether `document` is the mirror file `mirror`, or windows of it as myKG cuts a long entry (see the header). */
 export function documentMatches(document: string, mirror: string): boolean {
   const doc = document.trim();
   if (doc === "") return false;
-  if (doc === mirror.trim()) return true;
-  return mirror.includes(doc.slice(0, MATCH_PREFIX_CHARS));
+  const text = mirror.trim();
+  return doc === text || isWindowsOf(document.trimEnd(), text);
 }
 
 /**
- * Finds the entry a Pass 2 prompt is for among the mirror files (read once, again on a miss: an
- * entry saved or edited since). Null when none or more than one matches.
+ * Whether `doc` is one or more consecutive chunk windows of `text` (a trimmed mirror at least a
+ * window long), joined by a blank line: each window is found in `text` whole, starting inside the
+ * one before (they overlap), and is a full window (at least {@link WINDOW_MIN_CHARS}) unless it is
+ * the mirror's last (it ends where the mirror does). A window cut inside a character carries U+FFFD
+ * at its edges, which is skipped.
+ */
+function isWindowsOf(doc: string, text: string): boolean {
+  if (text.length < WINDOW_MIN_CHARS) return false;
+  let pos = 0;
+  let previous: { start: number; end: number } | null = null;
+  while (pos < doc.length) {
+    while (doc.charCodeAt(pos) === REPLACEMENT) pos += 1;
+    const probe = doc.slice(pos, pos + PROBE_CHARS);
+    if (probe.length === 0) return previous !== null;
+    // The longest run of `doc` from `pos` that `text` holds, starting after the previous window's start.
+    let start = -1;
+    let run = 0;
+    for (let at = text.indexOf(probe, previous ? previous.start + 1 : 0); at >= 0; at = text.indexOf(probe, at + 1)) {
+      let n = probe.length;
+      while (pos + n < doc.length && at + n < text.length && doc.charCodeAt(pos + n) === text.charCodeAt(at + n)) n += 1;
+      if (n > run) {
+        start = at;
+        run = n;
+      }
+      if (pos + n === doc.length) break;
+    }
+    if (start < 0) return false;
+    // Where this window ends: the document's end, or the blank line before the next window (the run
+    // may have gone past it where the mirror has a blank line too).
+    let end = pos + run;
+    let next: number;
+    if (end === doc.length) next = end;
+    else {
+      let cut = end;
+      while (doc.charCodeAt(cut) === REPLACEMENT) cut += 1;
+      const separator = doc.startsWith(SEPARATOR, cut) ? cut : doc.lastIndexOf(SEPARATOR, end);
+      if (separator <= pos) return false;
+      if (separator < end) end = separator;
+      next = separator + SEPARATOR.length;
+    }
+    const length = end - pos;
+    const window = { start, end: start + length };
+    if (previous && (window.start <= previous.start || window.start > previous.end)) return false;
+    const last = next >= doc.length;
+    if (length < WINDOW_MIN_CHARS && !(last && window.end === text.length)) return false;
+    previous = window;
+    pos = next;
+  }
+  return previous !== null;
+}
+
+/** The mirrors as a locator reads them: by whole (trimmed) text, and the ones long enough to have windows. */
+interface MirrorIndex {
+  /** Trimmed mirror text: its entry (null: two entries have that text). */
+  exact: Map<string, string | null>;
+  /** Mirrors at least a window long, trimmed. */
+  long: { id: string; text: string }[];
+}
+
+/**
+ * The entry `document` is from (`undefined`: none; `null`: more than one): an entry whose whole
+ * mirror it is comes first (so another entry quoting it never claims it), else the one entry it is
+ * windows of.
+ */
+function locateDocument(document: string, index: MirrorIndex): string | null | undefined {
+  const exact = document.trim();
+  if (exact === "") return undefined;
+  if (index.exact.has(exact)) return index.exact.get(exact)!;
+  const doc = document.trimEnd();
+  let hit: string | undefined;
+  for (const { id, text } of index.long) {
+    if (!isWindowsOf(doc, text)) continue;
+    if (hit !== undefined) return null;
+    hit = id;
+  }
+  return hit;
+}
+
+/**
+ * Finds the entry a Pass 2 prompt (or its document) is for among the mirror files
+ * (`locateDocument`). The mirrors are read once, and again at most once on a miss (an entry saved
+ * since): one locator serves one run. Null when none or more than one matches.
  */
 export class EntryDocumentLocator {
-  private mirrors: Map<string, string> | null = null;
+  private index: MirrorIndex | null = null;
+  private reloaded = false;
 
   constructor(private readonly store: Pick<KnowledgeStorePort, "listMeta" | "mykgInputDir">) {}
 
   async entryOf(user: string): Promise<string | null> {
     const document = documentOf(user);
     if (document === null) return null;
-    const fresh = this.mirrors === null;
-    const found = this.find(document, this.mirrors ?? (await this.load()));
-    if (found !== undefined || fresh) return found ?? null;
-    return this.find(document, await this.load()) ?? null;
+    const found = locateDocument(document, await this.load());
+    if (found !== undefined || this.reloaded) return found ?? null;
+    this.reloaded = true;
+    this.index = await this.read();
+    return locateDocument(document, this.index) ?? null;
   }
 
-  /** The mirror text of these entries (unreadable ones absent). */
-  async mirrorsOf(ids: readonly string[]): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    for (const id of ids) {
-      const text = await readFile(join(this.store.mykgInputDir, `${id}.md`), "utf8").catch(() => null);
-      if (text !== null) out.set(id, text);
+  /** Reads the mirrors (on first use only). */
+  async load(): Promise<MirrorIndex> {
+    this.index ??= await this.read();
+    return this.index;
+  }
+
+  /** The entry a document is from, over the mirrors {@link load} read; null before that, when none or ambiguous. */
+  locate(document: string): string | null {
+    return this.index ? (locateDocument(document, this.index) ?? null) : null;
+  }
+
+  private async read(): Promise<MirrorIndex> {
+    const index: MirrorIndex = { exact: new Map(), long: [] };
+    for (const { id } of this.store.listMeta()) {
+      const raw = await readFile(join(this.store.mykgInputDir, `${id}.md`), "utf8").catch(() => null);
+      if (raw === null) continue;
+      const text = raw.trim();
+      index.exact.set(text, index.exact.has(text) ? null : id);
+      if (text.length >= WINDOW_MIN_CHARS) index.long.push({ id, text });
     }
-    return out;
-  }
-
-  /** `undefined`: no match; `null`: ambiguous. */
-  private find(document: string, mirrors: ReadonlyMap<string, string>): string | null | undefined {
-    const exact = document.trim();
-    for (const [id, text] of mirrors) if (text.trim() === exact) return id;
-    let hit: string | undefined;
-    for (const [id, text] of mirrors) {
-      if (!documentMatches(document, text)) continue;
-      if (hit !== undefined) return null;
-      hit = id;
-    }
-    return hit;
-  }
-
-  private async load(): Promise<Map<string, string>> {
-    this.mirrors = await this.mirrorsOf(this.store.listMeta().map((meta) => meta.id));
-    return this.mirrors;
+    return index;
   }
 }
 
@@ -179,9 +269,21 @@ export function linkContextProvider(
   view: KnowledgeLinkGraphView
 ): (envelope: InboxTaskEnvelope) => Promise<string | null> {
   const locator = new EntryDocumentLocator(store);
-  return async (envelope) => {
-    if (!CONTEXT_STEPS.has(envelope.step) || !contextReady(view)) return null;
+  // Once per task: a task handed out again (a released lease) gets the same block.
+  const blocks = new Map<string, Promise<string | null>>();
+  const blockFor = async (envelope: InboxTaskEnvelope): Promise<string | null> => {
     const entryId = await locator.entryOf(envelope.user);
     return entryId ? neighbourContextBlock(entryId, view) : null;
+  };
+  return (envelope) => {
+    if (!CONTEXT_STEPS.has(envelope.step) || !contextReady(view)) return Promise.resolve(null);
+    let block = blocks.get(envelope.task_id);
+    if (!block) {
+      block = blockFor(envelope);
+      blocks.set(envelope.task_id, block);
+      // A failure is not remembered: the next lease tries again.
+      block.catch(() => blocks.delete(envelope.task_id));
+    }
+    return block;
   };
 }

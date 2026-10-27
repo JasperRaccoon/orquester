@@ -13,6 +13,7 @@ import {
   linkContextProvider,
   nearestNeighbours,
   neighbourContextBlock,
+  WINDOW_MIN_CHARS,
   type KnowledgeLinkGraphView
 } from "./context.ts";
 import type { InboxTaskEnvelope } from "./inbox.ts";
@@ -104,25 +105,72 @@ describe("EntryDocumentLocator", () => {
 
   const prompt = (document: string) => `SCHEMA\n======\n- Tactic\n\nNODES ALREADY EXTRACTED\n========================\n\nDOCUMENT\n========\n${document}`;
 
-  it("finds the entry by its whole mirror text, or by a window of a long one; null when none or ambiguous", async () => {
+  /** A mirror longer than a chunk: numbered paragraphs, so every slice of it is unique. */
+  const longMirror = (tag: string, paragraphs = 300) =>
+    `Author: A\n\n# Long ${tag}\n\n${Array.from({ length: paragraphs }, (_, i) => `Paragraph ${i} of ${tag} says the warm-up takes ${i} days.`).join("\n\n")}\n`;
+
+  it("finds the entry by its whole mirror text, or by myKG's chunk windows of a long one; null when none or ambiguous", async () => {
     const { put, store } = await setup();
-    const long = `# Long\n\n${"Paragraph about alternatives pages and competitors. ".repeat(80)}\nThe middle part says 48-hour windows matter.\n${"Closing words. ".repeat(80)}`;
+    const long = longMirror("one");
+    assert.ok(long.length > 4 * WINDOW_MIN_CHARS);
     await put("ke_a", "Author: A\n\n# Short\n\nOne line.\n");
     await put("ke_long", long);
-    await put("ke_dup1", "Shared start of text that is the same in two entries. Then one.");
-    await put("ke_dup2", "Shared start of text that is the same in two entries. Then two.");
+    await put("ke_dup1", "Same text in two entries.\n");
+    await put("ke_dup2", "Same text in two entries.\n");
     const locator = new EntryDocumentLocator(store);
     assert.equal(await locator.entryOf(prompt("Author: A\n\n# Short\n\nOne line.")), "ke_a", "myKG strips the trailing newline");
-    const window = long.slice(long.indexOf("The middle part"), long.indexOf("The middle part") + 600);
-    assert.equal(await locator.entryOf(prompt(window)), "ke_long");
     assert.equal(await locator.entryOf("Previous attempt had errors:\n- x\n\n" + prompt("Author: A\n\n# Short\n\nOne line.")), "ke_a", "a retry prompt");
-    assert.equal(await locator.entryOf(prompt("Shared start of text that is the same in two entries.")), null, "ambiguous");
+    const at = (n: number) => long.indexOf(`Paragraph ${n} of`);
+    // The first window starts at the mirror's start; a middle one anywhere; the last ends at its end.
+    assert.equal(await locator.entryOf(prompt(long.slice(0, WINDOW_MIN_CHARS + 500))), "ke_long", "the first window");
+    assert.equal(await locator.entryOf(prompt(long.slice(at(100) + 7, at(100) + 7 + WINDOW_MIN_CHARS + 10))), "ke_long", "a middle window, cut mid-word");
+    assert.equal(await locator.entryOf(prompt(long.slice(at(290)))), "ke_long", "the last window, shorter than a full one");
+    // Two windows of one batch: joined by a blank line, the second starting inside the first.
+    const first = long.slice(0, at(80));
+    const second = long.slice(at(70) + 3, at(150));
+    assert.equal(await locator.entryOf(prompt(`${first}\n\n${second}`)), "ke_long", "two overlapping windows in one batch");
+    assert.equal(await locator.entryOf(prompt(`${first}\n\n${long.slice(at(90), at(170))}`)), null, "windows that do not overlap are not myKG's");
+    // A window cut inside a character carries a replacement character at its edges.
+    assert.equal(await locator.entryOf(prompt(`\ufffd${long.slice(at(120) + 1, at(200))}\ufffd`)), "ke_long");
+    // Not a window: shorter than a full one, neither the mirror's start nor its end.
+    assert.equal(await locator.entryOf(prompt(long.slice(at(150), at(150) + 600))), null, "a quote, not a window");
+    assert.equal(await locator.entryOf(prompt(long.slice(at(10), at(60)).replace("says", "said"))), null, "a window must match whole");
+    assert.equal(await locator.entryOf(prompt("Same text in two entries.")), null, "ambiguous");
     assert.equal(await locator.entryOf(prompt("Nobody wrote this.")), null);
     assert.equal(await locator.entryOf("CORPUS without a document"), null);
-    // Saved after the mirrors were first read: found on the miss.
-    await put("ke_new", "A brand new entry.");
-    assert.equal(await locator.entryOf(prompt("A brand new entry.")), "ke_new");
     assert.equal(documentOf(prompt("x")), "x");
+  });
+
+  it("an entry quoted whole inside a long one is still its own; windows two entries share are ambiguous", async () => {
+    const { put, store } = await setup();
+    const long = longMirror("two");
+    const quoted = long.slice(long.indexOf("Paragraph 40 of"), long.indexOf("Paragraph 42 of")).trim();
+    await put("ke_long", long);
+    await put("ke_quote", `${quoted}\n`);
+    await put("ke_copy", long.slice(0, long.indexOf("Paragraph 200 of")));
+    const locator = new EntryDocumentLocator(store);
+    assert.equal(await locator.entryOf(prompt(quoted)), "ke_quote", "its whole mirror first");
+    assert.equal(await locator.entryOf(prompt(long.slice(0, WINDOW_MIN_CHARS + 100))), null, "the first window of either");
+    assert.equal(await locator.entryOf(prompt(long.slice(long.indexOf("Paragraph 250 of")))), "ke_long", "only the longer one has it");
+  });
+
+  it("reads the mirrors once, and again at most once on a miss", async () => {
+    const { put, store } = await setup();
+    await put("ke_a", "First entry.\n");
+    let reads = 0;
+    const counted = { ...store, listMeta: () => (reads += 1, store.listMeta()) };
+    const locator = new EntryDocumentLocator(counted);
+    assert.equal(await locator.entryOf(prompt("First entry.")), "ke_a");
+    assert.equal(await locator.entryOf(prompt("First entry.")), "ke_a");
+    assert.equal(reads, 1);
+    // Saved after the mirrors were read: found on the first miss, which reads them again.
+    await put("ke_new", "A brand new entry.\n");
+    assert.equal(await locator.entryOf(prompt("A brand new entry.")), "ke_new");
+    assert.equal(reads, 2);
+    await put("ke_newer", "Another one.\n");
+    assert.equal(await locator.entryOf(prompt("Another one.")), null, "no second reload in the run");
+    assert.equal(await locator.entryOf(prompt("Nobody wrote this.")), null);
+    assert.equal(reads, 2);
   });
 
   it("the run's provider gives Pass 2 tasks their entry's block, other steps none", async () => {
@@ -131,10 +179,33 @@ describe("EntryDocumentLocator", () => {
     const index = corpus();
     const v = view(index, { ke_n1: [ref("Tactic", "Alternatives pages")] });
     const provider = linkContextProvider(store, v);
-    const envelope = (step: string, user: string): InboxTaskEnvelope => ({ task_id: "x", step, context_label: `${step} 1`, system: "S", user, max_tokens: 1, timeout_seconds: 0, created_at: "" });
+    const envelope = (step: string, user: string): InboxTaskEnvelope => ({ task_id: `${step} ${user}`, step, context_label: `${step} 1`, system: "S", user, max_tokens: 1, timeout_seconds: 0, created_at: "" });
     assert.match((await provider(envelope("pass2", prompt("Target text.")))) ?? "", /- Tactic: Alternatives pages/);
     assert.equal(await provider(envelope("pass1", prompt("Target text."))), null);
     assert.equal(await provider(envelope("normalize_names", prompt("Target text."))), null);
     assert.equal(await provider(envelope("pass2", prompt("Unknown text."))), null);
+  });
+
+  it("computes a task's block once, whatever how often the task is handed out", async () => {
+    const { put, store } = await setup();
+    await put("ke_t", "Target text.");
+    const index = corpus();
+    let reads = 0;
+    const v: KnowledgeLinkGraphView = {
+      vectors: () => index,
+      conceptsOf: (id) => {
+        reads += 1;
+        return id === "ke_n1" ? [ref("Tactic", "Alternatives pages")] : [];
+      },
+      contradicting: () => []
+    };
+    const provider = linkContextProvider(store, v);
+    const task: InboxTaskEnvelope = { task_id: "t1", step: "pass2", context_label: "pass2 chunk 1", system: "S", user: prompt("Target text."), max_tokens: 1, timeout_seconds: 0, created_at: "" };
+    const first = await provider(task);
+    const once = reads;
+    assert.ok(once > 0);
+    assert.equal(await provider(task), first);
+    assert.equal(await provider({ ...task }), first);
+    assert.equal(reads, once, "the block is not computed again");
   });
 });

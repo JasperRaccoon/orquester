@@ -1007,9 +1007,18 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private async prepareRelink(paths: ReturnType<typeof mykgSessionPaths>, batch: readonly string[], runId: string): Promise<void> {
     const state = this.requireState();
     const prepared = new Set(state.relink.prepared);
-    const fresh = batch.filter((id) => !prepared.has(id));
-    const mirrors = await new EntryDocumentLocator(this.opts.store).mirrorsOf(fresh);
-    const cleared = await prepareRelinkBatch(paths, batch, mirrors);
+    const fresh = new Set(batch.filter((id) => !prepared.has(id)));
+    let owns: ((document: string) => boolean) | null = null;
+    if (fresh.size > 0) {
+      // Every mirror: a task's document belongs to the one entry it is exactly (`context.ts`).
+      const locator = new EntryDocumentLocator(this.opts.store);
+      await locator.load();
+      owns = (document) => {
+        const id = locator.locate(document);
+        return id !== null && fresh.has(id);
+      };
+    }
+    const cleared = await prepareRelinkBatch(paths, batch, owns);
     state.relink.prepared = [...new Set([...state.relink.prepared, ...batch])];
     await this.stateFile.save(state);
     this.opts.logger?.info?.("knowledge linking: re-linking entries with neighbour context", { runId, entries: batch.length, answersCleared: cleared.length });
