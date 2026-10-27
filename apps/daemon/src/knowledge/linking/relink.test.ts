@@ -9,6 +9,7 @@ import { FakeVectorIndex, around, axis } from "../search/fake-vector-index.ts";
 import { COMMITTED_MANIFEST_FILE, MYKG_MANIFEST_FILE, mykgSessionPaths } from "./mykg-files.ts";
 import {
   LINK_CONTEXT_VERSION,
+  LINK_GAPS_MAX,
   pickRelinkBatch,
   prepareRelinkBatch,
   queueLinkGaps,
@@ -128,6 +129,34 @@ describe("link gaps", () => {
     hashes[ID(2)] = "h2b";
     assert.deepEqual(await queueLinkGaps(relink, options), [ID(1), ID(2)]);
     assert.equal(relink.gapPairs[`${ID(1)} ${ID(2)}`], "h1 h2b");
+  });
+
+  it(`keeps growing past the first ${LINK_GAPS_MAX} pairs: recorded pairs never take up the limit`, async () => {
+    // Pairs of entries close to each other only (one axis per pair), none sharing a concept:
+    // LINK_GAPS_MAX + 30 gaps, closer the lower the pair number.
+    const pairs = LINK_GAPS_MAX + 30;
+    const index = new FakeVectorIndex();
+    const dims = pairs + 1;
+    const hashes: Record<string, string> = {};
+    const ids: string[] = [];
+    for (let p = 0; p < pairs; p += 1) {
+      const [x, y] = [ID(2 * p + 1), ID(2 * p + 2)];
+      index.set(x, axis(dims, p));
+      index.set(y, around(dims, p, pairs, 0.99 - p * 0.0005));
+      hashes[x] = `h${x}`;
+      hashes[y] = `h${y}`;
+      ids.push(x, y);
+    }
+    const relink = emptyKnowledgeRelinkState();
+    const options = { ids, index, conceptsOf: (id: string) => [`c-${id}`], hashOf: (id: string) => hashes[id] ?? null, minimum: 0.85 };
+    assert.equal((await queueLinkGaps(relink, options)).length, 2 * LINK_GAPS_MAX);
+    // Re-linked meanwhile (the queue emptied), the gaps still there: the next scan queues the rest.
+    relink.gapQueue = [];
+    const next = await queueLinkGaps(relink, options);
+    assert.equal(next.length, 2 * 30);
+    assert.equal(Object.keys(relink.gapPairs).length, pairs);
+    relink.gapQueue = [];
+    assert.deepEqual(await queueLinkGaps(relink, options), []);
   });
 });
 

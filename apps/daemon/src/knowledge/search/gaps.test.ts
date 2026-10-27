@@ -37,6 +37,29 @@ test("pairs close in meaning that share no concept, closest first; unlinked and 
   assert.ok(gaps.every((g) => g.a < g.b));
 });
 
+test("exclude leaves pairs out before the limit applies", async () => {
+  const { index, conceptsOf } = setup();
+  const ids = ["ke_a", "ke_b", "ke_c", "ke_d", "ke_e"];
+  const seen: string[] = [];
+  const next = await findLinkGaps({
+    ids,
+    index,
+    conceptsOf,
+    minimum: 0.85,
+    limit: 1,
+    exclude: (a, b) => {
+      seen.push(`${a} ${b}`);
+      return a === "ke_a" && b === "ke_b";
+    }
+  });
+  assert.deepEqual(
+    next.map((g) => [g.a, g.b]),
+    [["ke_b", "ke_c"]],
+    "the closest pair is excluded, so the next one fills the limit"
+  );
+  assert.ok(seen.every((key) => key.split(" ")[0]! < key.split(" ")[1]!), "asked with sorted ids");
+});
+
 test("scoped ids, the limit and the threshold are honoured", async () => {
   const { index, conceptsOf } = setup();
   assert.deepEqual(await findLinkGaps({ ids: ["ke_a", "ke_c", "ke_d"], index, conceptsOf, minimum: 0.85, limit: 10 }), []);

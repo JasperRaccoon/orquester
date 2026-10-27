@@ -21,8 +21,10 @@ export interface FindLinkGapsOptions {
   conceptsOf: (entryId: string) => ReadonlySet<string> | readonly string[];
   /** Similarity at or above which a pair must share a concept (the model's `strong` threshold). */
   minimum: number;
-  /** At most this many pairs, closest first. */
+  /** At most this many pairs, closest first (after `exclude`). */
   limit: number;
+  /** Pairs left out before the limit applies (`a` < `b`): e.g. the ones a caller already handled. */
+  exclude?: (a: string, b: string) => boolean;
   /** Each entry's nearest neighbours considered (default 5). */
   neighbours?: number;
 }
@@ -64,7 +66,8 @@ export async function findLinkGaps(options: FindLinkGapsOptions): Promise<Knowle
       if (shared) continue;
       const [a, b] = row.id < other.id ? [row.id, other.id] : [other.id, row.id];
       const key = `${a} ${b}`;
-      if (!pairs.has(key)) pairs.set(key, { a, b, similarity });
+      if (pairs.has(key) || options.exclude?.(a, b)) continue;
+      pairs.set(key, { a, b, similarity });
     }
     if (performance.now() - since >= YIELD_EVERY_MS) {
       await new Promise<void>((resolve) => setImmediate(resolve));

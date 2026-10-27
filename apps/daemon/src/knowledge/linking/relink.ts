@@ -129,7 +129,14 @@ export interface QueueLinkGapsOptions {
  * Answers the entries newly queued.
  */
 export async function queueLinkGaps(relink: KnowledgeRelinkStateRecord, options: QueueLinkGapsOptions): Promise<string[]> {
-  const pairs = await findLinkGaps({ ids: options.ids, index: options.index, conceptsOf: options.conceptsOf, minimum: options.minimum, limit: LINK_GAPS_MAX });
+  // A pair already recorded at both entries' current hashes is left out inside the scan, so the
+  // limit counts new pairs only (else the queue would stop growing after the first LINK_GAPS_MAX).
+  const recorded = (a: string, b: string): boolean => {
+    const hashA = options.hashOf(a);
+    const hashB = options.hashOf(b);
+    return hashA !== null && hashB !== null && relink.gapPairs[`${a} ${b}`] === `${hashA} ${hashB}`;
+  };
+  const pairs = await findLinkGaps({ ids: options.ids, index: options.index, conceptsOf: options.conceptsOf, minimum: options.minimum, limit: LINK_GAPS_MAX, exclude: recorded });
   const queued = new Set(relink.gapQueue);
   const added: string[] = [];
   for (const pair of pairs) {
