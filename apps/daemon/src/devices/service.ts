@@ -80,6 +80,7 @@ import {
   withController
 } from "./leases.ts";
 import { choosePlacement, type PlacementHost } from "./pool.ts";
+import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 import type { DeviceScreenshots } from "./screenshots.ts";
 import type { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
 import type {
@@ -102,8 +103,7 @@ const IDLE_SWEEP_MS = 60_000;
 const HOST_WAIT_MS = 10 * 60_000;
 /** Placement rounds before giving up (wait, setup and provision each take one). */
 const PLACEMENT_ROUNDS = 6;
-/** As `html_preview`'s cap: a larger screenshot is kept but not inlined. */
-export const DEVICE_SCREENSHOT_MAX_BASE64_CHARS = 4 * 1024 * 1024;
+export { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 
 export interface DeviceServiceDeps {
   settingsStore: DeviceSettingsStore;
@@ -556,7 +556,7 @@ export class DeviceService implements DeviceToolsPort {
           const quote = factory!.provisionQuote?.(request.platform) ?? null;
           if ((quote === null || quote.needsApproval) && !request.rentalApproved) {
             const what = quote ? `a ${quote.providerLabel} host (${quote.sizeLabel})` : "a device host";
-            throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Opening this device rents ${what}, which needs the owner's approval.`);
+            throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `Opening this device rents ${what}, which needs the owner's approval. Call open_device again to ask them.`);
           }
           await factory!.provision!({ platform: request.platform, threadId: request.threadId, approved: request.rentalApproved }, signal);
           continue;
@@ -642,6 +642,8 @@ export class DeviceService implements DeviceToolsPort {
     this.publishHosts();
     const host = this.hosts.get(lease.hostId);
     if (host && lease.deviceId !== null) {
+      // Its agent-device session ends first (Android gets its own keyboard back).
+      await this.deps.actions.end?.({ host, lease }).catch(() => undefined);
       await host.release(lease, { shutdown: options.shutdown === true }).catch((error) => this.logger.warn(`[devices] releasing ${describeLease(lease)} failed`, errorText(error)));
     }
     return summary;
@@ -710,6 +712,23 @@ export class DeviceService implements DeviceToolsPort {
   /** The hub origin the proxy targets for a host, or null (unknown host, hub not running). */
   hubOrigin(hostId: string): string | null {
     return this.hosts.get(hostId)?.hubOrigin() ?? null;
+  }
+
+  /** The hub's session token the proxy adds upstream, or null (none, or unknown host). Never sent to clients. */
+  hubToken(hostId: string): string | null {
+    return this.hosts.get(hostId)?.hubToken?.() ?? null;
+  }
+
+  /** How many proxied streams of a leased device are open now: its host may recycle an unwatched capture. */
+  streamViewers(hostId: string, deviceParam: string, count: number): void {
+    const lease = this.leases.find((entry) => entry.hostId === hostId && (entry.deviceId === deviceParam || entry.stream?.deviceParam === deviceParam));
+    const host = this.hosts.get(hostId);
+    if (!host?.viewersChanged) return;
+    try {
+      host.viewersChanged(lease?.deviceId ?? deviceParam, count);
+    } catch (error) {
+      this.logger.warn(`[devices] ${hostId} failed to take a viewer count`, errorText(error));
+    }
   }
 
   /** Release every idle lease (spec §7: `leaseIdleMinutes` with no agent or viewer activity). */

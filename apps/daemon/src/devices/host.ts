@@ -74,6 +74,18 @@ export interface DeviceCommandResult {
   stderr: string;
 }
 
+/**
+ * How to run the agent-device CLI against a host (`DeviceHost.agentDeviceCommand`): `command` and
+ * the `args` before agent-device's own (`node`, `<pinned entry>`), and the environment the host
+ * needs on top of the daemon's (`ANDROID_ADB_SERVER_PORT`, `PATH`, …). Never a secret: those stay
+ * in the `--config` file.
+ */
+export interface AgentDeviceCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
 /** A validated `device_action` input, as a host that drives devices itself receives it. */
 export type DeviceActionRequest = DeviceActionInput;
 
@@ -154,6 +166,13 @@ export interface DeviceHost {
   streamCapabilities?(): { iosH264: boolean };
   /** The agent-device config file pinned to this host's daemon (token inside, never returned); null while not running. */
   agentDeviceConfigPath(): string | null;
+  /** How to run agent-device for this host; absent: the toolchain's pinned CLI with the daemon's environment. */
+  agentDeviceCommand?(): AgentDeviceCommand;
+  /**
+   * How many proxied streams of a device are open changed (`deviceId` is the device's id); 0: the
+   * last viewer left, so the host may recycle the device's capture session.
+   */
+  viewersChanged?(deviceId: string, count: number): void;
   /**
    * Drive a device without agent-device (a host with its own automation): answer the action's
    * outcome, or null to let `actions.ts` run it through agent-device.

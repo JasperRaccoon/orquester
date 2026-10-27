@@ -7,12 +7,13 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 
 import type { DeviceActionInput, DeviceHostKind, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
 import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } from "./actions.ts";
-import type { DeviceBootRequest, DeviceBootResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostState, DeviceRentalQuote } from "./host.ts";
+import type { DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostState, DeviceRentalQuote } from "./host.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService, type DeviceServiceDeps } from "./service.ts";
 import { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
@@ -41,6 +42,21 @@ export class FakeDeviceHost implements DeviceHost {
   };
   destroyed = false;
   destroy?: () => Promise<void>;
+  agentDeviceCommand?: DeviceHost["agentDeviceCommand"];
+  performAction?: DeviceHost["performAction"];
+  installApp?: DeviceHost["installApp"];
+  /** What `hubOrigin` answers while ready, and `hubToken`. */
+  hubOriginValue = "http://127.0.0.1:9";
+  hubTokenValue: string | null = null;
+  /** `viewersChanged` calls. */
+  viewerCounts: { deviceId: string; count: number }[] = [];
+  /** What `run` does; default: refuses. */
+  runImpl: (command: "simctl" | "adb", args: readonly string[]) => Promise<DeviceCommandResult> = async () => {
+    throw new Error("not scripted");
+  };
+  runs: { command: "simctl" | "adb"; args: string[] }[] = [];
+  /** What `uploadFile` does; default: reads the stream and answers `/host/<name>`. */
+  uploads: { name: string; bytes: number }[] = [];
 
   constructor(
     readonly id = "local",
@@ -73,7 +89,15 @@ export class FakeDeviceHost implements DeviceHost {
   }
 
   hubOrigin(): string | null {
-    return this.status.status === "ready" ? "http://127.0.0.1:9" : null;
+    return this.status.status === "ready" ? this.hubOriginValue : null;
+  }
+
+  hubToken(): string | null {
+    return this.hubTokenValue;
+  }
+
+  viewersChanged(deviceId: string, count: number): void {
+    this.viewerCounts.push({ deviceId, count });
   }
 
   agentDeviceConfigPath(): string | null {
@@ -95,12 +119,16 @@ export class FakeDeviceHost implements DeviceHost {
     this.released.push({ lease, shutdown: options.shutdown });
   }
 
-  async run(): Promise<never> {
-    throw new Error("not scripted");
+  async run(command: "simctl" | "adb", args: readonly string[]): Promise<DeviceCommandResult> {
+    this.runs.push({ command, args: [...args] });
+    return this.runImpl(command, args);
   }
 
-  async uploadFile(): Promise<never> {
-    throw new Error("not scripted");
+  async uploadFile(stream: Readable, name: string): Promise<{ path: string }> {
+    let bytes = 0;
+    for await (const chunk of stream) bytes += (chunk as Buffer).length;
+    this.uploads.push({ name, bytes });
+    return { path: `/host/${name}` };
   }
 
   onChange(listener: () => void): () => void {

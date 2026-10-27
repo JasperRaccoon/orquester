@@ -58,7 +58,7 @@ export async function registerDeviceWsRoutes(app: FastifyInstance, deps: DeviceW
         socket.close(1013, "device hub not running");
         return;
       }
-      deps.hubProxy().handleWebSocket(socket, request, { hostId, origin, hubPath: `/${request.params["*"] ?? ""}`, search: hubSearch(request.url) });
+      deps.hubProxy().handleWebSocket(socket, request, { hostId, origin, hubPath: `/${request.params["*"] ?? ""}`, search: hubSearch(request.url), token: service.hubToken(hostId) });
     });
   });
 }
