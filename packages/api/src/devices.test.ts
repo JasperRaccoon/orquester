@@ -123,6 +123,25 @@ test("settings patch: each field checked against its range; unknown fields refus
   }
 });
 
+test("settings patch: research.vphoneHosts takes per-machine entries field by field, null forgets one", () => {
+  assert.deepEqual(
+    parseDevicesSettingsPatch({ research: { vphoneHosts: { box1: { enabled: true, iphoneSource: " /Users/me/iPhone17,3.ipsw " }, box2: null } } }),
+    { ok: true, value: { research: { vphoneHosts: { box1: { enabled: true, iphoneSource: "/Users/me/iPhone17,3.ipsw" }, box2: null } } } }
+  );
+  for (const bad of [
+    { research: [] },
+    { research: { other: {} } },
+    { research: { vphoneHosts: { "../x": { enabled: true } } } },
+    { research: { vphoneHosts: { box1: { enabled: "yes" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "" } } } },
+    { research: { vphoneHosts: { box1: { iphoneSource: "a\nb" } } } },
+    { research: { vphoneHosts: { box1: { force: true } } } },
+    { research: { vphoneHosts: { box1: 1 } } }
+  ]) {
+    assert.equal(parseDevicesSettingsPatch(bad).ok, false, JSON.stringify(bad));
+  }
+});
+
 test("device action input: each kind names what it needs", () => {
   assert.equal(validateDeviceActionInput({ action: "snapshot" }), null);
   assert.equal(validateDeviceActionInput({ action: "tap", ref: "@e7" }), null);

@@ -16,8 +16,12 @@ import {
   DEFAULT_IOS_DEVICE_PROFILE_IDS,
   DEVICE_PLACEMENT_MODES,
   DEVICES_SETTINGS_LIMITS,
+  DEVICES_VPHONE_HOST_KEY,
+  DEVICES_VPHONE_HOSTS_MAX,
+  DEVICES_VPHONE_SOURCE_MAX,
   type DevicesSettings,
-  type DevicesSettingsPatch
+  type DevicesSettingsPatch,
+  type DevicesVphoneHostSettings
 } from "@orquester/config";
 
 import { sessionToolNameOfData, sessionToolReferences } from "./agent-chat/session-tools.ts";
@@ -28,8 +32,10 @@ export type {
   DevicesAgentSettings,
   DevicesAndroidSettings,
   DevicesIosSettings,
+  DevicesResearchSettings,
   DevicesSettings,
-  DevicesSettingsPatch
+  DevicesSettingsPatch,
+  DevicesVphoneHostSettings
 } from "@orquester/config";
 export { DEFAULT_DEVICES_SETTINGS, DEVICES_SETTINGS_LIMITS, DEVICE_PLACEMENT_MODES } from "@orquester/config";
 
@@ -211,7 +217,19 @@ export interface DeviceHostSummary {
   capacity: DeviceCapacity;
   box?: DeviceHostBoxInfo;
   pool?: DeviceHostPoolInfo;
+  /**
+   * Phase 3: a research host (vphone-cli VMs running real iOS). Never chosen for a lease unless
+   * the request names it; the picker and Settings show {@link notice} beside it.
+   */
+  research?: boolean;
+  /** What the owner must know before using it ({@link VPHONE_RESEARCH_NOTICE} on a vphone host). */
+  notice?: string;
 }
+
+/** The per-machine switch's label in Settings (phase 3 §2.3). */
+export const VPHONE_RESEARCH_LABEL = "Virtual iPhones (research)";
+/** Shown with every vphone research host, in Settings and in the device picker. */
+export const VPHONE_RESEARCH_NOTICE = "Research — real iOS in a VM; not for App Store apps; Apple's licence terms may not allow this use";
 
 // ---------------------------------------------------------------------------
 // Devices and leases
@@ -881,11 +899,53 @@ function checkField(rule: FieldRule, value: unknown, path: string): string | nul
   }
 }
 
+/** `research` of a settings patch: `{vphoneHosts: {<boxId>: {enabled?, iphoneSource?, cloudosSource?} | null}}`. */
+function parseResearchPatch(value: unknown): DeviceParseResult<NonNullable<DevicesSettingsPatch["research"]>> {
+  if (!isRecord(value)) return { ok: false, message: "`research` must be an object." };
+  const out: NonNullable<DevicesSettingsPatch["research"]> = {};
+  for (const [field, entry] of Object.entries(value)) {
+    if (field !== "vphoneHosts") return { ok: false, message: `Unknown setting \`research.${field}\`.` };
+    if (!isRecord(entry) || Object.keys(entry).length > DEVICES_VPHONE_HOSTS_MAX) return { ok: false, message: "`research.vphoneHosts` must be an object keyed by machine id." };
+    const hosts: Record<string, Partial<DevicesVphoneHostSettings> | null> = {};
+    for (const [boxId, host] of Object.entries(entry)) {
+      const path = `research.vphoneHosts.${boxId}`;
+      if (!DEVICES_VPHONE_HOST_KEY.test(boxId)) return { ok: false, message: `\`${path}\`: not a machine id.` };
+      if (host === null) {
+        hosts[boxId] = null;
+        continue;
+      }
+      if (!isRecord(host)) return { ok: false, message: `\`${path}\` must be an object or null.` };
+      const parsed: Partial<DevicesVphoneHostSettings> = {};
+      for (const [name, fieldValue] of Object.entries(host)) {
+        if (name === "enabled") {
+          if (typeof fieldValue !== "boolean") return { ok: false, message: `\`${path}.enabled\` must be true or false.` };
+          parsed.enabled = fieldValue;
+        } else if (name === "iphoneSource" || name === "cloudosSource") {
+          const ok = fieldValue === null || (typeof fieldValue === "string" && fieldValue.trim().length > 0 && fieldValue.length <= DEVICES_VPHONE_SOURCE_MAX && !/[\u0000-\u001f]/.test(fieldValue));
+          if (!ok) return { ok: false, message: `\`${path}.${name}\` must be a path or URL, or null.` };
+          parsed[name] = fieldValue === null ? null : (fieldValue as string).trim();
+        } else {
+          return { ok: false, message: `Unknown setting \`${path}.${name}\`.` };
+        }
+      }
+      hosts[boxId] = parsed;
+    }
+    out.vphoneHosts = hosts;
+  }
+  return { ok: true, value: out };
+}
+
 /** The body of PUT {@link deviceRoutes.settings}: every named field checked; unknown fields refused. */
 export function parseDevicesSettingsPatch(value: unknown): DeviceParseResult<DevicesSettingsPatch> {
   if (!isRecord(value)) return { ok: false, message: "The body must be a JSON object." };
   const patch: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
+    if (key === "research") {
+      const research = parseResearchPatch(entry);
+      if (!research.ok) return research;
+      patch.research = research.value;
+      continue;
+    }
     const top = TOP_RULES[key];
     if (top) {
       const error = checkField(top, entry, key);

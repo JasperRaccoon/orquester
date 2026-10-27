@@ -4,7 +4,7 @@
  *
  * Phase 1 rules, in order:
  * 1. the platform is off in Settings → Devices → `disabled`;
- * 2. a named host (`hostId`) is used alone;
+ * 2. a named host (`hostId`) is used alone; research hosts (phase 3 vphone) are used only so;
  * 3. otherwise local first (unless `pool-only`), then the busiest ready box host that still has
  *    room (best fit packs hosts, so idle ones can be torn down);
  * 4. no room, but a host is starting or installing → `wait` for it;
@@ -30,6 +30,8 @@ export interface PlacementHost {
   total: number;
   /** Phase 2: draining hosts take no new lease. */
   draining?: boolean;
+  /** Phase 3: a research host (vphone): only a request naming it lands there. */
+  research?: boolean;
 }
 
 export type Placement =
@@ -68,8 +70,11 @@ export function choosePlacement(input: PlacementInput): Placement {
   const mode = settings.pool.placement;
   let hosts = input.hosts.filter((host) => host.platforms.includes(platform));
   if (input.hostId !== undefined) hosts = hosts.filter((host) => host.id === input.hostId);
-  else if (mode === "pool-only") hosts = hosts.filter((host) => host.kind !== "local");
-  else if (mode === "local-only") hosts = hosts.filter((host) => host.kind === "local");
+  else {
+    hosts = hosts.filter((host) => host.research !== true);
+    if (mode === "pool-only") hosts = hosts.filter((host) => host.kind !== "local");
+    else if (mode === "local-only") hosts = hosts.filter((host) => host.kind === "local");
+  }
 
   const local = hosts.find((host) => host.kind === "local" && hasRoom(host));
   if (local) return { kind: "host", hostId: local.id };

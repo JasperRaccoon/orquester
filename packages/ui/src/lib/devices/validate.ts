@@ -107,6 +107,8 @@ export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   }
   const pool = value.pool;
   if (isRecord(pool)) host.pool = { draining: pool.draining === true, warm: pool.warm === true, idleSince: strOrNull(pool.idleSince) };
+  if (value.research === true) host.research = true;
+  if (str(value.notice)) host.notice = value.notice;
   return host;
 }
 
