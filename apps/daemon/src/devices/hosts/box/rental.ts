@@ -1,11 +1,16 @@
 /**
  * What renting one more Mac device host means, from Settings → Devices: the provider, size, image
  * and lifetime the box service is asked for, its price, and whether the owner's standing approval
- * ("Rent Mac hosts without asking", up to the monthly cap) covers it.
+ * covers it — "Rent device hosts without asking" (`pool.rentWithoutAsking`, the one switch for every
+ * platform) up to `pool.monthlyCapUsd`, counting what device hosts spent this month AND what the
+ * running ones are committed to until their time limit ({@link deviceHostSpend}).
  */
 
 import type { BoxSizeOffer } from "@orquester/api";
 import type { DevicesSettings } from "@orquester/api";
+import type { StoredBox } from "@orquester/config";
+
+import { monthCostUsd } from "../../../boxes/service/summary.ts";
 
 import {
   BLACKSMITH_IMAGES,
@@ -53,14 +58,49 @@ export function iosRentalSpec(settings: DevicesSettings, offers: readonly BoxSiz
   return { provider, size, sizeLabel: offer?.label ?? size, image: null, hourlyUsd: offer?.hourlyUsd ?? null, lifetimeMinutes };
 }
 
+/** Device-host spend (USD): today and this month so far (UTC), and what running hosts are committed to until their time limit. */
+export interface DeviceHostSpend {
+  todayUsd: number;
+  monthUsd: number;
+  committedUsd: number;
+}
+
+const HOUR_MS = 3_600_000;
+
 /**
- * The owner's standing approval covers a rental when "Rent Mac hosts without asking" is on, the
- * price is known, and this month's device-host spending plus the new host's whole lifetime stays
- * within the monthly cap. Otherwise the requesting chat needs a `spend` card.
+ * Spend on device-host boxes from their records — the one source the box factory's approval and
+ * the device pool both read. `committedUsd`: every live device-host box's $/h until its deadline
+ * (a running Mac bills until it is destroyed or its time limit ends).
  */
-export function rentalNeedsApproval(settings: DevicesSettings, spec: Pick<DeviceHostRentalSpec, "hourlyUsd" | "lifetimeMinutes">, monthSpentUsd: number): boolean {
-  if (!settings.ios.rentWithoutAsking) return true;
+export function deviceHostSpend(records: readonly StoredBox[], now: number): DeviceHostSpend {
+  const date = new Date(now);
+  const dayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  let todayUsd = 0;
+  let monthUsd = 0;
+  let committedUsd = 0;
+  for (const record of records) {
+    if (record.purpose !== "device-host") continue;
+    const month = monthCostUsd(record, now);
+    monthUsd += month;
+    // The month's cost up to midnight (midnight is never before the month's start).
+    todayUsd += Math.max(0, month - monthCostUsd(record, dayStart));
+    const live = record.state !== "destroyed" && !record.destroyedAt;
+    const deadline = record.deadlineAt ? Date.parse(record.deadlineAt) : NaN;
+    if (live && typeof record.hourlyUsd === "number" && Number.isFinite(deadline) && deadline > now) committedUsd += (record.hourlyUsd * (deadline - now)) / HOUR_MS;
+  }
+  return { todayUsd, monthUsd, committedUsd };
+}
+
+/**
+ * The owner's standing approval covers a rental when "Rent device hosts without asking"
+ * (`pool.rentWithoutAsking`) is on, the price is known, and this month's device-host spending,
+ * plus what running hosts are committed to, plus the new host's whole lifetime stays within
+ * `pool.monthlyCapUsd`. Otherwise the requesting chat needs a `spend` card.
+ */
+export function rentalNeedsApproval(settings: DevicesSettings, spec: Pick<DeviceHostRentalSpec, "hourlyUsd" | "lifetimeMinutes">, spend: number | Pick<DeviceHostSpend, "monthUsd" | "committedUsd">): boolean {
+  if (!settings.pool.rentWithoutAsking) return true;
   if (spec.hourlyUsd === null) return true;
+  const spent = typeof spend === "number" ? spend : spend.monthUsd + spend.committedUsd;
   const worstCase = (spec.hourlyUsd * spec.lifetimeMinutes) / 60;
-  return monthSpentUsd + worstCase > settings.ios.monthlyCapUsd + 1e-9;
+  return spent + worstCase > settings.pool.monthlyCapUsd + 1e-9;
 }

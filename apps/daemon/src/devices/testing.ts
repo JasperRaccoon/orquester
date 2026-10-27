@@ -8,6 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
+import { deflateSync } from "node:zlib";
 
 import type { DeviceActionInput, DeviceHostKind, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
@@ -16,7 +17,7 @@ import type { DeviceActionContext, DeviceActionExecutor, DeviceActionResult } fr
 import type { DeviceBootRequest, DeviceBootResult, DeviceCommandResult, DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostState, DeviceRentalQuote } from "./host.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
 import { DeviceService, type DeviceServiceDeps } from "./service.ts";
-import { DeviceLeaseStore, DeviceSettingsStore } from "./store.ts";
+import { DeviceLeaseStore, DevicePoolStore, DeviceSettingsStore } from "./store.ts";
 
 /** A host whose state, capacity and boots the test sets. */
 export class FakeDeviceHost implements DeviceHost {
@@ -45,6 +46,7 @@ export class FakeDeviceHost implements DeviceHost {
   agentDeviceCommand?: DeviceHost["agentDeviceCommand"];
   performAction?: DeviceHost["performAction"];
   installApp?: DeviceHost["installApp"];
+  cacheState?: DeviceHost["cacheState"];
   /** What `hubOrigin` answers while ready, and `hubToken`. */
   hubOriginValue = "http://127.0.0.1:9";
   hubTokenValue: string | null = null;
@@ -104,19 +106,39 @@ export class FakeDeviceHost implements DeviceHost {
     return null;
   }
 
+  /** Devices booted and not shut down (what `listDevices` answers), by id. */
+  running = new Map<string, DeviceSummary>();
+  /** What `listDevices` does; default: the running devices. */
+  listImpl: () => Promise<DeviceSummary[]> = async () => [...this.running.values()];
+
   async listDevices(): Promise<DeviceSummary[]> {
-    return [];
+    return this.listImpl();
   }
 
   async boot(request: DeviceBootRequest, signal: AbortSignal): Promise<DeviceBootResult> {
     this.booted.push(request);
-    return this.bootImpl(request, signal);
+    const result = await this.bootImpl(request, signal);
+    this.running.set(result.deviceId, {
+      key: `${this.id}/${result.deviceId}`,
+      hostId: this.id,
+      id: result.deviceId,
+      platform: request.profile.platform,
+      name: result.name,
+      osVersion: result.osVersion,
+      profile: request.profile.id,
+      booted: true,
+      leaseId: request.leaseId
+    });
+    return result;
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(deviceId: string): Promise<void> {
+    this.running.delete(deviceId);
+  }
 
   async release(lease: StoredDeviceLease, options: { shutdown: boolean }): Promise<void> {
     this.released.push({ lease, shutdown: options.shutdown });
+    if (options.shutdown && lease.deviceId) this.running.delete(lease.deviceId);
   }
 
   async run(command: "simctl" | "adb", args: readonly string[]): Promise<DeviceCommandResult> {
@@ -235,6 +257,7 @@ export async function startTestDeviceService(
   const service = new DeviceService({
     settingsStore: new DeviceSettingsStore({ file: join(dir, "devices.json"), logger: quiet }),
     leaseStore: new DeviceLeaseStore({ file: join(dir, "device-leases.json"), logger: quiet }),
+    poolStore: new DevicePoolStore({ file: join(dir, "device-pool.json"), logger: quiet }),
     factories: options.factories,
     actions,
     screenshots: new DeviceScreenshots(join(dir, "screenshots"), quiet),
@@ -266,4 +289,25 @@ export async function startTestDeviceService(
       await rm(dir, { recursive: true, force: true });
     }
   };
+}
+
+/** A solid RGBA PNG (filter 0 rows). */
+export function solidPng(width: number, height: number, rgba: [number, number, number, number] = [200, 40, 40, 255]): Buffer {
+  const raw = Buffer.alloc(height * (width * 4 + 1));
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) Buffer.from(rgba).copy(raw, y * (width * 4 + 1) + 1 + x * 4);
+  }
+  const chunk = (type: string, body: Buffer) => {
+    const out = Buffer.alloc(12 + body.length);
+    out.writeUInt32BE(body.length, 0);
+    out.write(type, 4, "latin1");
+    body.copy(out, 8);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }

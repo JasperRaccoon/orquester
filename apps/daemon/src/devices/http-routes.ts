@@ -1,6 +1,7 @@
 /**
  * The devices HTTP routes (`deviceRoutes`, devices spec §8, §10): state, hosts, leases, the
- * controller, the action log, kept screenshots, settings and setup jobs on both transports (the
+ * controller, the action log, kept screenshots, settings and setup jobs, and (phase 2) host
+ * drain, cache warms, the pool summary and lease thumbnails, on both transports (the
  * bearer hook gates remote HTTP like every other route), and the hub proxy on the remote transport
  * only (streams need HTTP; the desktop app's unix socket lists and drives leases without video).
  *
@@ -18,13 +19,20 @@ import {
   DEVICE_SCREENSHOT_ROUTE_PATTERN,
   deviceRoutes,
   isDevicePlatform,
+  DEVICE_THUMBNAIL_ROUTE_PATTERN,
+  DEVICE_THUMBNAIL_WIDTH,
+  parseDeviceCacheWarmRequest,
   parseDeviceControllerRequest,
+  parseDeviceHostDrainRequest,
   parseDeviceOpenRequest,
   parseDeviceSetupRequest,
   parseDevicesSettingsPatch,
   parseDeviceUserActionRequest,
   type DeviceActionsResponse,
+  type DeviceCacheWarmResponse,
+  type DeviceHostResponse,
   type DeviceHostsResponse,
+  type DevicePoolResponse,
   type DeviceLeaseResponse,
   type DeviceLeasesResponse,
   type DevicesListResponse,
@@ -102,6 +110,27 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
       return reply.code(204).send();
     })
   );
+
+  // Phase 2: the fleet view's Drain / Undrain, "Warm caches", and the pool summary.
+  app.put<Params<"hostId">>(
+    `${deviceRoutes.hosts}/:hostId/drain`,
+    withService((service, request: FastifyRequest<Params<"hostId">>): DeviceHostResponse => {
+      const parsed = parseDeviceHostDrainRequest(request.body);
+      if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
+      return { host: service.setHostDraining(request.params.hostId, parsed.value.draining) };
+    })
+  );
+
+  app.post(
+    deviceRoutes.cacheWarm,
+    withService(async (service, request): Promise<DeviceCacheWarmResponse> => {
+      const parsed = parseDeviceCacheWarmRequest(request.body);
+      if (!parsed.ok) throw new DeviceError("INVALID_ARGUMENT", parsed.message);
+      return service.warmCaches(parsed.value.platform);
+    })
+  );
+
+  app.get(deviceRoutes.pool, withService((service): DevicePoolResponse => ({ pool: service.poolSummary() })));
 
   app.get(deviceRoutes.devices, withService(async (service): Promise<DevicesListResponse> => ({ devices: await service.listDevices() })));
 
@@ -186,6 +215,20 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
       const shot = await service.screenshot(request.params.leaseId, request.params.screenshotId);
       if (!shot) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_NOT_FOUND, "There is no such screenshot.");
       return reply.header("content-type", shot.mimeType).header("cache-control", "private, max-age=86400, immutable").send(shot.data);
+    })
+  );
+
+  // The fleet view's card image (`?token=` accepted: `DEVICE_QUERY_TOKEN_ROUTES`).
+  app.get<Params<"leaseId"> & { Querystring: { w?: string } }>(
+    DEVICE_THUMBNAIL_ROUTE_PATTERN,
+    withService(async (service, request: FastifyRequest<Params<"leaseId"> & { Querystring: { w?: string } }>, reply) => {
+      const raw = request.query.w;
+      const asked = raw === undefined || raw === "" ? DEVICE_THUMBNAIL_WIDTH.default : Number(raw);
+      if (!Number.isInteger(asked) || asked < DEVICE_THUMBNAIL_WIDTH.min || asked > DEVICE_THUMBNAIL_WIDTH.max) {
+        throw new DeviceError("INVALID_ARGUMENT", `\`w\` must be a whole number from ${DEVICE_THUMBNAIL_WIDTH.min} to ${DEVICE_THUMBNAIL_WIDTH.max}.`);
+      }
+      const jpeg = await service.thumbnail(request.params.leaseId, asked);
+      return reply.header("content-type", "image/jpeg").header("cache-control", "no-store").send(jpeg);
     })
   );
 

@@ -197,11 +197,12 @@ describe("time words", () => {
 });
 
 describe("leases", () => {
-  it("poll their thumbnail through the hub proxy's screenshot route of their stream", () => {
-    assert.equal(thumbnailPath(fixtureLease("emulator-5554")), "/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?device=emulator-5554");
+  it("poll their thumbnail through the daemon's downscaled thumbnail route", () => {
+    assert.equal(thumbnailPath(fixtureLease("emulator-5554")), "/api/devices/leases/emulator-5554/thumbnail?w=320");
+    assert.equal(thumbnailPath(fixtureLease("emulator-5554"), 160), "/api/devices/leases/emulator-5554/thumbnail?w=160");
     assert.equal(
       thumbnailPath(fixtureLease("A1B2 C", { hostId: "box:m1", platform: "ios" })),
-      "/api/devices/hosts/box%3Am1/hub/vendor/serve-sim/api/screenshot?device=A1B2%20C"
+      "/api/devices/leases/A1B2%20C/thumbnail?w=320"
     );
     assert.equal(thumbnailPath(fixtureLease("s", { state: "starting" })), null);
     assert.equal(thumbnailPath(fixtureLease("n", { stream: undefined })), null);

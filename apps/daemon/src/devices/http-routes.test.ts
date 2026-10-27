@@ -3,13 +3,20 @@ import test from "node:test";
 
 import Fastify from "fastify";
 
-import { DEFAULT_DEVICES_SETTINGS, deviceRoutes, type DeviceLeaseResponse, type DevicesStateResponse, type DeviceUserActionResponse } from "@orquester/api";
+import {
+  DEFAULT_DEVICES_SETTINGS,
+  DEVICE_QUERY_TOKEN_ROUTES,
+  DEVICE_THUMBNAIL_ROUTE_PATTERN,
+  deviceRoutes,
+  type DeviceHostResponse,
+  type DevicePoolResponse,
+  type DeviceLeaseResponse, type DevicesStateResponse, type DeviceUserActionResponse } from "@orquester/api";
 
 import { DeviceError } from "./errors.ts";
 import { hubSearch, registerDeviceHttpRoutes } from "./http-routes.ts";
 import { createHubProxy } from "./hub-proxy.ts";
 import type { DeviceService } from "./service.ts";
-import { FakeDeviceHost, FakeHostFactory, startTestDeviceService } from "./testing.ts";
+import { FakeDeviceHost, FakeHostFactory, solidPng, startTestDeviceService } from "./testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -189,6 +196,68 @@ test("user actions: the user takes control first (never refused for the agent's)
   } finally {
     await app.close();
     await agentApp.close();
+    await t.cleanup();
+  }
+});
+
+test("pool routes: drain / undrain a host, warm caches, the pool summary (validated bodies)", async () => {
+  const local = new FakeDeviceHost();
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [local])], settings: { android: { enabled: true } } });
+  const app = appWith(t.service, "local");
+  try {
+    const drained = await app.inject({ method: "PUT", url: deviceRoutes.hostDrain("local"), payload: { draining: true } });
+    assert.equal(drained.statusCode, 200);
+    assert.equal((drained.json() as DeviceHostResponse).host.pool?.draining, true);
+    const undrained = await app.inject({ method: "PUT", url: deviceRoutes.hostDrain("local"), payload: { draining: false } });
+    assert.equal((undrained.json() as DeviceHostResponse).host.pool, undefined);
+    assert.equal((await app.inject({ method: "PUT", url: deviceRoutes.hostDrain("local"), payload: { draining: "yes" } })).statusCode, 400);
+    assert.equal((await app.inject({ method: "PUT", url: deviceRoutes.hostDrain("box:none"), payload: { draining: true } })).json().code, "HOST_NOT_FOUND");
+    assert.equal((await app.inject({ method: "POST", url: deviceRoutes.cacheWarm, payload: { platform: "windows" } })).statusCode, 400);
+    // No box service here: refused for the owner to read.
+    const warm = await app.inject({ method: "POST", url: deviceRoutes.cacheWarm, payload: { platform: "android" } });
+    assert.equal(warm.json().code, "UNAVAILABLE");
+    const pool = await app.inject({ method: "GET", url: deviceRoutes.pool });
+    assert.equal(pool.statusCode, 200);
+    assert.equal((pool.json() as DevicePoolResponse).pool.queue, 0);
+  } finally {
+    await app.close();
+    await t.cleanup();
+  }
+});
+
+test("thumbnail: a ready lease's screen as a no-store JPEG; width checked; unknown leases refused", async () => {
+  const host = new FakeDeviceHost();
+  host.hubTokenValue = "hub-token";
+  const fetched: string[] = [];
+  const t = await startTestDeviceService({
+    factories: [new FakeHostFactory("local", ["android"], [host])],
+    settings: { android: { enabled: true } },
+    deps: {
+      // A still clock: the 1 s cache must not expire mid-test.
+      now: () => Date.parse("2026-10-27T12:00:00.000Z"),
+      thumbnailFetch: (async (url: string, init: RequestInit) => {
+        fetched.push(`${init.method} ${url} ${(init.headers as Record<string, string>).authorization}`);
+        return new Response(new Uint8Array(solidPng(72, 128)), { status: 200 });
+      }) as typeof fetch
+    }
+  });
+  const app = appWith(t.service);
+  try {
+    const opened = await t.service.toolOpen("t1", { platform: "android" }, new AbortController().signal);
+    const res = await app.inject({ method: "GET", url: deviceRoutes.thumbnail(opened.lease.id) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "image/jpeg");
+    assert.equal(res.headers["cache-control"], "no-store");
+    assert.equal(res.rawPayload[0], 0xff);
+    assert.deepEqual(fetched, [`POST http://127.0.0.1:9/vendor/serve-emu/api/screenshot?device=${opened.lease.stream!.deviceParam} Bearer hub-token`]);
+    // Within a second: the same frame, no second capture.
+    await app.inject({ method: "GET", url: deviceRoutes.thumbnail(opened.lease.id) });
+    assert.equal(fetched.length, 1);
+    assert.equal((await app.inject({ method: "GET", url: `${deviceRoutes.thumbnail(opened.lease.id).split("?")[0]}?w=5000` })).statusCode, 400);
+    assert.equal((await app.inject({ method: "GET", url: deviceRoutes.thumbnail("nope") })).json().code, "DEVICE_NOT_LEASED");
+    assert.ok(DEVICE_QUERY_TOKEN_ROUTES.includes(DEVICE_THUMBNAIL_ROUTE_PATTERN));
+  } finally {
+    await app.close();
     await t.cleanup();
   }
 });
