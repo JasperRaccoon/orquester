@@ -56,7 +56,7 @@ import {
 } from "../android/emulator.ts";
 import { appdirMarker } from "../android/env.ts";
 import { execFile, type ExecFn, lastLine } from "../android/exec.ts";
-import { ANIMATIONS_OFF_SCRIPT, createGoldenSnapshot } from "../android/golden.ts";
+import { createGoldenSnapshot, LEASE_BOOT_SCRIPT } from "../android/golden.ts";
 import { HUB_LAUNCHER, HubSupervisor } from "../android/hub.ts";
 import { delay, isProcessAlive, listProcStats, processMatches, readMemAvailable, signalGroup, waitForExit } from "../android/procs.ts";
 import { evaluateReadiness, ffmpegHasLibx264, FIX_ACTIONS, groupMembers, type KvmProbe, type ReadinessProbe } from "../android/readiness.ts";
@@ -680,7 +680,7 @@ export class LocalAndroidHost implements DeviceHost {
         signal,
         timeoutMs: BOOT_TIMEOUT_MS
       });
-      await this.exec(join(this.layout.sdk, "platform-tools", "adb"), ["-s", serial, "shell", ANIMATIONS_OFF_SCRIPT], { env: this.env, timeoutMs: 30_000 });
+      await this.exec(join(this.layout.sdk, "platform-tools", "adb"), ["-s", serial, "shell", LEASE_BOOT_SCRIPT], { env: this.env, timeoutMs: 30_000 });
     } catch (error) {
       ports.release();
       if (record) await this.stopRecord(record).catch(() => undefined);
