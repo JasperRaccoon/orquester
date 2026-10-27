@@ -159,16 +159,19 @@ const CLAUDE_ACCOUNT = rule(
     "keybindings.json"
   ],
   {
-    // `plugins/data/` is the plugins' own runtime state (`${CLAUDE_PLUGIN_DATA}`), written as they run.
+    // `plugins/data/` is the plugins' own runtime state (`${CLAUDE_PLUGIN_DATA}`), written as they run;
+    // `plugins/store/` is the CLI's per-machine state for its built-in plugins (a panel left open).
     // `synced/`, `.trash/` and `.staging/` under `skills/` and `plugins/` are the CLI's own copy of
     // what the claude.ai account syncs (each box's CLI fetches it for the same account itself).
     // `plugins/cache/temp_git_*` are the CLI's leftover temporary clones; `.in_use/<pid>` in a
-    // cached plugin are per-process markers of the machine they were made on.
+    // cached plugin are per-process markers of the machine they were made on, and `.orphaned_at`
+    // is when that machine's CLI saw the version replaced.
     exclude: (rel) =>
       startsWithDir(rel, "plugins/data") ||
+      startsWithDir(rel, "plugins/store") ||
       CLAUDE_CLI_MANAGED.some((dir) => startsWithDir(rel, dir)) ||
       /^plugins\/cache\/temp_git_[^/]*(\/|$)/.test(rel) ||
-      (rel.startsWith("plugins/cache/") && rel.split("/").includes(".in_use")),
+      (rel.startsWith("plugins/cache/") && rel.split("/").some((segment) => segment === ".in_use" || segment === ".orphaned_at")),
     codecs: { ".claude.json": "claude-json", "settings.json": "mcp-json", "settings.local.json": "mcp-json" },
     // Marketplaces are the CLI's own: a box CLI refreshes them on start (from a snapshot instead
     // of the host's git clone, say). The box gets the host's; what its CLI makes of them stays there.

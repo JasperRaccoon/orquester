@@ -71,6 +71,8 @@ test("include lists keep transcripts, caches, telemetry and state out", () => {
     "skills/.trash/1792491947496-764074-sQIMC3/old/SKILL.md",
     "plugins/installed_plugins.json.bak",
     "plugins/data/p/state.json",
+    "plugins/store/cc-plugin-agents-md_builtin-b049b47b3618.json",
+    "plugins/cache/claude-plugins-official/hookify/1da406f428c2/.orphaned_at",
     "plugins/marketplaces/m/.git/HEAD",
     "settings.json.bak-20260820",
     ".credentials.json",
