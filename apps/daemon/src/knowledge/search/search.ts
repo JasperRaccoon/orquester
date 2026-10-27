@@ -1,30 +1,41 @@
+import { createHash } from "node:crypto";
 import {
   KNOWLEDGE_GRAPH_MAX_NODES,
   KNOWLEDGE_SEARCH_DEFAULT_LIMIT,
   KNOWLEDGE_SEARCH_MAX_LIMIT,
+  KNOWLEDGE_SEARCH_MAX_RESULTS,
+  KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
   knowledgeCitation,
   type KnowledgeCollection,
   type KnowledgeConceptDetail,
+  type KnowledgeConceptRef,
+  type KnowledgeEntriesQuery,
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
+  type KnowledgeEntryMatch,
   type KnowledgeEntryMeta,
   type KnowledgeEntrySummary,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
+  type KnowledgeMatchBand,
+  type KnowledgeMatchSignal,
   type KnowledgeSearchHit,
+  type KnowledgeSearchRequest,
   type KnowledgeSearchResponse,
+  type KnowledgeSearchSort,
   type KnowledgeVisibility
 } from "@orquester/api";
 import { isKnowledgeEntryId } from "@orquester/config";
-import type { KnowledgeEntryChange, KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
+import type { KnowledgeEntryChange, KnowledgeStorePort, KnowledgeVectorHit, KnowledgeVectorIndex, KnowledgeVectorThresholds } from "../ports.ts";
 import { KnowledgeError, type KnowledgeLogger } from "../store/errors.ts";
-import { knowledgeContentHash } from "../store/normalize.ts";
 import { Bm25Index } from "./bm25.ts";
-import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
+import type { KnowledgeEmbedderSource } from "./embedder.ts";
+import { type KnowledgeEntryFilter, entryMatchesFilter, filterKey, parseKnowledgeFilters, splitFilterList } from "./filters.ts";
 import type { KnowledgeGraph } from "./graph.ts";
+import { computeKnowledgeFacets } from "./facets.ts";
 import { KnowledgeSimilarity } from "./similarity.ts";
-import { CHUNKER_VERSION, type TextSpan, bestSnippet, chunkBody, leadSnippet, tokenize } from "./text.ts";
-import { VectorCache } from "./vector-cache.ts";
+import { type TextSpan, bestSnippet, leadSnippet, tokenize } from "./text.ts";
+import { InProcessVectorIndex } from "./vector-index.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
 
 /** What search needs from the store (the `KnowledgeStore` satisfies it). */
@@ -40,7 +51,7 @@ export interface KnowledgeSearchOptions {
   /** `knowledgeIndexDir(appdir)`: the disposable vector cache. */
   indexDir: string;
   logger?: KnowledgeLogger;
-  /** Cosine similarity a chunk needs to count as a semantic match (default 0.25). */
+  /** Overrides the model's `minimum` cosine for a chunk to count as a semantic match (tests). */
   minSimilarity?: number;
 }
 
@@ -49,82 +60,84 @@ export const KNOWLEDGE_ENTRIES_MAX_LIMIT = 200;
 export const KNOWLEDGE_QUERY_MAX = 1_000;
 const RELATED_LIMIT = 8;
 const CONCEPT_ENTRIES_LIMIT = 50;
-const CANDIDATES = 50;
+/** Candidates each signal list keeps. */
+const CANDIDATES = 100;
 const RRF_K = 60;
-const WEIGHT = { bm25: 1, vector: 1, expansion: 0.5, concept: 1 } as const;
-/** The best possible entry score (first in every list), so scores land in 0..1. */
-const SCORE_SCALE = (WEIGHT.bm25 + WEIGHT.vector + WEIGHT.expansion) / (RRF_K + 1);
-/** Docs embedded per worker step (small, so a query never waits long behind a backfill). */
-const EMBED_BATCH_DOCS = 4;
-/**
- * Chunks per model call. The model runs one call at a time, so a query (or a save) waits for at
- * most one call of this size, however long the entries being embedded are.
- */
-const EMBED_CALL_CHUNKS = 4;
-const FLUSH_EVERY = 64;
-/** Chunks a save waits to embed (~0.1 s each on two CPU threads); the rest are embedded after it returns. */
-const SYNC_EMBED_CHUNKS = 12;
-/**
- * The longest a save waits for those embeddings (spec: a save returns within about 2 s). The
- * first one after a start also loads the model; whatever is not done by then finishes in the
- * background, and the entry is searchable by text meanwhile.
- */
-const SYNC_EMBED_WAIT_MS = 1_200;
+const WEIGHT = { keyword: 1, meaning: 1, similar: 1, expansion: 0.5, concept: 1 } as const;
+/** MMR's trade-off between relevance and novelty. */
+const MMR_LAMBDA = 0.7;
+/** Recency half-life of the `recent` sort, in days. */
+const RECENCY_HALF_LIFE_DAYS = 90;
+/** Body words of an example entry its keyword fallback searches with (beside its title). */
+const EXAMPLE_WORDS = 60;
+/** Expansion seeds named in a hit's `match.concepts`. */
+const MATCH_CONCEPTS = 3;
+const SORTS: readonly KnowledgeSearchSort[] = ["relevance", "recent", "newest"];
+const DAY_MS = 86_400_000;
 
-interface Doc {
+interface TextDoc {
   id: string;
-  hash: string;
   body: string;
-  spans: TextSpan[];
-  /** `spans.length * dimensions` floats, or null until embedded. */
-  vectors: Float32Array | null;
-  vectorModel: string | null;
+}
+
+/** One ranked entry of a search. */
+interface Ranked {
+  id: string;
+  /** The RRF score. */
+  fused: number;
+  /** What it is ranked by: `fused`, boosted by recency for `recent`. */
+  rank: number;
+}
+
+/** The decoded `nextCursor` of a search. */
+interface SearchCursor {
+  v: 1;
+  /** Offset into the ranked entry list. */
+  o: number;
+  /** Fingerprint of the request and the caller's visibility. */
+  h: string;
 }
 
 /**
- * Hybrid search and the read views over the knowledge base (spec "Querying"):
+ * Hybrid search and the read views over the knowledge base (spec "Querying", retrieval spec
+ * "Search"):
  *
- * 1. embedding similarity over entry chunks (when the runtime is installed);
+ * 1. embedding similarity over entry chunks (when the runtime is installed), through the
+ *    {@link KnowledgeVectorIndex};
  * 2. BM25 over entries (title, body, author, handle) and concepts (name, aliases, attributes);
  * 3. a one-hop expansion through visible concepts;
+ * 4. query by example (`similarTo` / `unlike`);
  *
- * fused with reciprocal-rank fusion. Every step is scoped by visibility while it ranks. A new
- * entry is searchable (text, and meaning once embedded) as soon as it is indexed, before linking.
- * Without a runtime — or when the model fails — search runs on BM25 and the graph alone.
+ * fused with reciprocal-rank fusion, then sorted, diversified (MMR) and paged. Every step is
+ * scoped by visibility and the request's filters while it ranks. A new entry is searchable (text,
+ * and meaning once embedded) as soon as it is indexed, before linking. Without a runtime — or when
+ * the model fails — search runs on BM25 and the graph alone.
  */
 export class KnowledgeSearch {
   private readonly store: KnowledgeSearchStore;
   private readonly graph: KnowledgeGraph;
-  private readonly embedders: KnowledgeEmbedderSource;
-  private readonly indexDir: string;
   private readonly logger: KnowledgeLogger;
-  private readonly minSimilarity: number;
-  private readonly docs = new Map<string, Doc>();
+  private readonly docs = new Map<string, TextDoc>();
   private readonly bm25 = new Bm25Index();
+  private readonly vectors: InProcessVectorIndex;
   private ready: Promise<void> | null = null;
   private textChain: Promise<unknown> = Promise.resolve();
   private readonly unsubscribers: (() => void)[] = [];
-  private stopped = false;
-
-  private cache: VectorCache | null = null;
-  private cacheOpening: Promise<VectorCache> | null = null;
-  private failedEmbedder: KnowledgeEmbedder | null = null;
-  private backfilledModel: string | null = null;
-  private readonly embedQueue: string[] = [];
-  private readonly embedWaiters = new Map<string, (() => void)[]>();
-  /** `indexEntries` calls in flight, by their entries and content hashes. */
+  /** `indexEntries` calls in flight, by their entries and versions. */
   private readonly indexing = new Map<string, Promise<void>>();
-  private embedWorker: Promise<void> | null = null;
   /** Similar entries, possible duplicates, near-duplicates on save and the similarity graph. */
   readonly similarity: KnowledgeSimilarity;
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
     this.graph = options.graph;
-    this.embedders = options.embedders;
-    this.indexDir = options.indexDir;
     this.logger = options.logger ?? console;
-    this.minSimilarity = options.minSimilarity ?? 0.25;
+    this.vectors = new InProcessVectorIndex({
+      embedders: options.embedders,
+      indexDir: options.indexDir,
+      logger: this.logger,
+      minSimilarity: options.minSimilarity
+    });
     this.similarity = new KnowledgeSimilarity({
       store: this.store,
       graph: this.graph,
@@ -133,46 +146,48 @@ export class KnowledgeSearch {
     });
   }
 
-  /** The vector index similarity reads (null: none yet). */
+  /** The vector index similarity reads. */
   private similarityIndex(): KnowledgeVectorIndex | null {
-    return null; /* integrator: return this.vectorIndex(); */
+    return this.vectorIndex();
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
   start(): Promise<void> {
     if (this.ready) return this.ready;
     this.unsubscribers.push(this.store.onChange((change) => this.onStoreChange(change)));
-    this.unsubscribers.push(
-      this.embedders.onChange(() => {
-        this.failedEmbedder = null;
-        this.backfilledModel = null;
-      })
-    );
+    this.vectors.start();
     this.ready = this.loadAll();
     return this.ready;
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
-    this.release(this.embedQueue.splice(0));
+    const stopping = this.vectors.stop();
     await this.ready?.catch(() => undefined);
     await this.textChain.catch(() => undefined);
-    while (this.embedWorker) await this.embedWorker.catch(() => undefined);
-    await this.cache?.flush().catch(() => undefined);
+    await stopping;
+  }
+
+  /** The vector index search, similarity and facets share (retrieval spec, "The vector index port"). */
+  vectorIndex(): KnowledgeVectorIndex {
+    return this.vectors;
   }
 
   /**
    * Index these entries now: text at once, embeddings first in the queue. Resolves when they are
-   * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, and for at most
-   * {@link SYNC_EMBED_WAIT_MS}, so a save stays fast — by meaning; the rest is embedded in the
-   * background.
+   * searchable by text and — within the vector index's bounded save wait — by meaning; the rest is
+   * embedded in the background.
    *
-   * A call for the same entries at the same content as one still in flight shares it: a save's
+   * A call for the same entries at the same version as one still in flight shares it: a save's
    * route and the store's change listener both ask for the entries it added.
    */
   indexEntries(ids: readonly string[]): Promise<void> {
-    const key = ids.map((id) => `${id}:${this.store.getMeta(id)?.contentHash ?? ""}`).join(",");
+    const key = ids
+      .map((id) => {
+        const meta = this.store.getMeta(id);
+        return `${id}:${meta?.contentHash ?? ""}:${meta?.updatedAt ?? ""}`;
+      })
+      .join(",");
     const running = this.indexing.get(key);
     if (running) return running;
     const run = this.indexEntriesNow(ids).finally(() => {
@@ -187,121 +202,296 @@ export class KnowledgeSearch {
     await this.serializeText(async () => {
       for (const id of ids) await this.indexText(id);
     });
-    const now: string[] = [];
-    const later: string[] = [];
-    let chunks = 0;
-    for (const id of ids) {
-      const spans = this.docs.get(id)?.spans.length ?? 0;
-      if (chunks + spans <= SYNC_EMBED_CHUNKS) {
-        chunks += spans;
-        now.push(id);
-      } else {
-        later.push(id);
-      }
-    }
-    const waiting = this.requestEmbeddings(now, true);
-    void this.requestEmbeddings(later, false);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, SYNC_EMBED_WAIT_MS);
-      timer.unref?.();
-    });
-    await Promise.race([waiting, deadline]);
-    clearTimeout(timer);
+    await this.vectors.embedForSave(ids);
   }
 
   /** Resolves once queued text indexing and embedding have finished (tests, shutdown). */
   async idle(): Promise<void> {
     await this.whenReady();
     await this.textChain.catch(() => undefined);
-    while (this.embedWorker) await this.embedWorker.catch(() => undefined);
+    await this.vectors.idle();
   }
 
   // -------------------------------------------------------------------------
   // Search
   // -------------------------------------------------------------------------
 
-  async search(
-    request: { query: string; collections?: readonly string[]; limit?: number },
-    visibility: KnowledgeVisibility
-  ): Promise<KnowledgeSearchResponse> {
-    const query = request.query.trim();
-    if (query.length === 0) throw new KnowledgeError("KNOWLEDGE_INVALID", "The query is empty.");
+  async search(request: KnowledgeSearchRequest, visibility: KnowledgeVisibility): Promise<KnowledgeSearchResponse> {
+    // --- Validate ------------------------------------------------------------
+    if (request.query !== undefined && request.query !== null && typeof request.query !== "string") {
+      throw new KnowledgeError("KNOWLEDGE_INVALID", "The query must be text.");
+    }
+    const query = (request.query ?? "").trim();
     if (query.length > KNOWLEDGE_QUERY_MAX) throw new KnowledgeError("KNOWLEDGE_INVALID", `The query is longer than ${KNOWLEDGE_QUERY_MAX} characters.`);
+    const similarTo = exampleIds(request.similarTo, "similarTo");
+    const unlike = exampleIds(request.unlike, "unlike");
+    if (query.length === 0 && similarTo.length === 0) {
+      throw new KnowledgeError("KNOWLEDGE_INVALID", "The query is empty: send a query, or entry ids in similarTo.");
+    }
+    const filter = parseKnowledgeFilters(request.filters);
+    const sort = request.sort ?? "relevance";
+    if (!SORTS.includes(sort)) throw new KnowledgeError("KNOWLEDGE_INVALID", `sort must be one of ${SORTS.join(", ")}.`);
+    const diverse = request.diverse !== false;
     const limit = clampLimit(request.limit, KNOWLEDGE_SEARCH_DEFAULT_LIMIT, KNOWLEDGE_SEARCH_MAX_LIMIT);
-    const narrow = request.collections && request.collections.length > 0 ? this.resolveVisible(request.collections, visibility, false) : null;
+    const cursor = request.cursor !== undefined && request.cursor !== null ? decodeSearchCursor(request.cursor) : null;
+    // "unfiled" narrows to entries with no collection, for callers who see everything (as in the entries and graph routes).
+    const narrow = request.collections && request.collections.length > 0 ? this.resolveVisible(request.collections, visibility, true) : null;
     await this.whenReady();
     const collections = this.store.listCollections();
-    const scope = knowledgeScope(visibility, collections.map((c) => c.id), narrow);
-    const searched = scopeCollectionIds(scope, collections.map((c) => c.id));
-    const visible = (id: string): boolean => {
+    const known = collections.map((c) => c.id);
+    const scope = knowledgeScope(visibility, known, narrow);
+    const searched = scopeCollectionIds(scope, known);
+    // Examples must be visible to the caller (the narrowing does not hide them); a hidden one is refused like an unknown one.
+    const visibleScope = narrow ? knowledgeScope(visibility, known) : scope;
+    for (const id of [...similarTo, ...unlike]) {
       const meta = this.store.getMeta(id);
-      return meta !== null && entryInScope(meta, scope);
-    };
-    const terms = tokenize(query);
-
-    // 1. Meaning.
-    const vectorHits = await this.vectorSearch(query, visible);
-    // 2. Words.
-    const textHits = this.bm25.search(terms, visible, CANDIDATES).map((hit) => hit.key);
-    const conceptHits = this.graph.searchConcepts(terms, scope, CANDIDATES).map((hit) => hit.id);
-    // 3. One hop through visible concepts: the best concepts, and the concepts of the best entries.
-    const preliminary = fuse([
-      [textHits, WEIGHT.bm25],
-      [vectorHits.map((hit) => hit.id), WEIGHT.vector]
-    ]);
-    const seeds = [...conceptHits.slice(0, 5)];
-    for (const [entryId] of [...preliminary].slice(0, 3)) {
-      for (const concept of this.graph.conceptsOfEntry(entryId)) if (!seeds.includes(concept.id)) seeds.push(concept.id);
+      if (!meta || !entryInScope(meta, visibleScope)) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", `No visible entry "${id.slice(0, 80)}".`);
     }
-    const expansionScores = new Map<string, number>();
-    seeds.forEach((conceptId, rank) => {
-      for (const entryId of this.graph.visibleEntriesOf(conceptId, scope)) {
-        expansionScores.set(entryId, (expansionScores.get(entryId) ?? 0) + 1 / (1 + rank));
-      }
-    });
-    const expansion = [...expansionScores]
-      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-      .slice(0, CANDIDATES)
-      .map(([id]) => id);
+    const fingerprint = searchFingerprint({ query, narrow, filter, similarTo, unlike, sort, diverse, visibility });
+    if (cursor && cursor.h !== fingerprint) {
+      throw new KnowledgeError("KNOWLEDGE_INVALID", "The cursor belongs to another search: send the same request with it, or drop the cursor.");
+    }
 
+    // --- One predicate for visibility, filters and the examples -------------
+    const excluded = new Set([...similarTo, ...unlike]);
+    const accepted = new Map<string, boolean>();
+    const accept = (id: string): boolean => {
+      let ok = accepted.get(id);
+      if (ok === undefined) {
+        const meta = excluded.has(id) ? null : this.store.getMeta(id);
+        ok = meta !== null && entryInScope(meta, scope) && entryMatchesFilter(meta, filter);
+        accepted.set(id, ok);
+      }
+      return ok;
+    };
+
+    // --- Signals ------------------------------------------------------------
+    this.vectors.backfill();
+    const thresholds = this.vectors.thresholds();
+    const terms = tokenize(query);
+    const keyword = query ? this.bm25.search(terms, accept, CANDIDATES).map((hit) => hit.key) : [];
+    const meaningHits = query ? await this.meaningSearch(query, accept) : [];
+    const meaningById = new Map(meaningHits.map((hit) => [hit.entryId, hit]));
+    const meaning = meaningHits.map((hit) => hit.entryId);
+    const similarHits = similarTo.length > 0 ? this.exampleSearch(similarTo, unlike, accept) : { ids: [], hits: new Map<string, KnowledgeVectorHit>() };
+    const similar = similarHits.ids;
+
+    // One hop through visible concepts: the best concepts, and the concepts of the best entries.
+    const conceptHits = query ? this.graph.searchConcepts(terms, scope, CANDIDATES).map((hit) => hit.id) : [];
+    const expansionSeeds = new Map<string, string[]>();
+    let expansion: string[] = [];
+    if (query) {
+      const preliminary = fuse([
+        [keyword, WEIGHT.keyword],
+        [meaning, WEIGHT.meaning],
+        [similar, WEIGHT.similar]
+      ]);
+      const seeds = [...conceptHits.slice(0, 5)];
+      for (const [entryId] of [...preliminary].slice(0, 3)) {
+        for (const concept of this.graph.conceptsOfEntry(entryId)) if (!seeds.includes(concept.id)) seeds.push(concept.id);
+      }
+      const expansionScores = new Map<string, number>();
+      seeds.forEach((conceptId, rank) => {
+        for (const entryId of this.graph.visibleEntriesOf(conceptId, scope)) {
+          if (!accept(entryId)) continue;
+          expansionScores.set(entryId, (expansionScores.get(entryId) ?? 0) + 1 / (1 + rank));
+          const via = expansionSeeds.get(entryId) ?? [];
+          if (via.length < MATCH_CONCEPTS) via.push(conceptId);
+          expansionSeeds.set(entryId, via);
+        }
+      });
+      expansion = [...expansionScores]
+        .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+        .slice(0, CANDIDATES)
+        .map(([id]) => id);
+    }
+
+    // --- Fuse, sort, diversify ------------------------------------------------
     const entryScores = fuse([
-      [textHits, WEIGHT.bm25],
-      [vectorHits.map((hit) => hit.id), WEIGHT.vector],
+      [keyword, WEIGHT.keyword],
+      [meaning, WEIGHT.meaning],
+      [similar, WEIGHT.similar],
       [expansion, WEIGHT.expansion]
     ]);
-    const conceptScores = fuse([[conceptHits, WEIGHT.concept]]);
-    const spanOf = new Map(vectorHits.map((hit) => [hit.id, hit.span]));
+    /** The best possible entry score (first in every list that ran), so scores land in 0..1. */
+    const scale = ((query ? WEIGHT.keyword + WEIGHT.meaning + WEIGHT.expansion : 0) + (similarTo.length > 0 ? WEIGHT.similar : 0)) / (RRF_K + 1);
+    const normalized = (score: number) => Math.min(1, Math.round((score / scale) * 1e4) / 1e4);
+    const ranked = this.rank(entryScores, sort, diverse);
 
+    // --- Concept hits (first page only) ---------------------------------------
     const maxConcepts = Math.max(1, Math.floor(limit / 3));
-    const ranked: ({ kind: "entry"; id: string; score: number } | { kind: "concept"; id: string; score: number })[] = [
-      ...[...entryScores].map(([id, score]) => ({ kind: "entry" as const, id, score })),
-      ...[...conceptScores].slice(0, maxConcepts).map(([id, score]) => ({ kind: "concept" as const, id, score }))
-    ].sort((a, b) => b.score - a.score || (a.kind === b.kind ? (a.id < b.id ? -1 : 1) : a.kind === "entry" ? -1 : 1));
-
-    const hits: KnowledgeSearchHit[] = [];
-    for (const item of ranked) {
-      if (hits.length >= limit) break;
-      const score = Math.round((item.score / SCORE_SCALE) * 1e4) / 1e4;
-      if (item.kind === "entry") {
-        const meta = this.store.getMeta(item.id);
-        const doc = this.docs.get(item.id);
-        if (!meta) continue;
-        const snippet = doc ? bestSnippet(doc.body, terms, spanOf.get(item.id)) : "";
-        hits.push({ kind: "entry", score, entry: this.summary(meta, scope, snippet) });
-      } else {
-        const ref = this.graph.conceptRef(item.id);
-        if (!ref) continue;
+    const offset = cursor?.o ?? 0;
+    const conceptItems: { id: string; fused: number; entryIds: string[] }[] = [];
+    if (!cursor) {
+      for (const [id, fused] of fuse([[conceptHits, WEIGHT.concept]])) {
+        if (conceptItems.length >= maxConcepts) break;
         const entryIds = this.graph
-          .visibleEntriesOf(item.id, scope)
-          .map((id) => ({ id, score: entryScores.get(id) ?? 0, savedAt: this.store.getMeta(id)?.savedAt ?? "" }))
+          .visibleEntriesOf(id, scope)
+          .filter(accept)
+          .map((entryId) => ({ id: entryId, score: entryScores.get(entryId) ?? 0, savedAt: this.store.getMeta(entryId)?.savedAt ?? "" }))
           .sort((a, b) => b.score - a.score || b.savedAt.localeCompare(a.savedAt) || (a.id < b.id ? -1 : 1))
           .slice(0, 3)
           .map((e) => e.id);
-        hits.push({ kind: "concept", score, concept: ref, entryIds });
+        // With filters, a concept whose visible entries all fail them is not a hit.
+        if (entryIds.length > 0 && this.graph.conceptRef(id)) conceptItems.push({ id, fused, entryIds });
       }
     }
-    return { hits, searched };
+
+    // --- Page -------------------------------------------------------------------
+    const signals = {
+      terms,
+      words: queryWords(query),
+      keyword: new Set(keyword),
+      meaning: meaningById,
+      similar: similarHits.hits,
+      similarIds: new Set(similar),
+      expansion: new Set(expansion),
+      expansionSeeds,
+      thresholds
+    };
+    const hits: KnowledgeSearchHit[] = [];
+    let next = offset;
+    let c = 0;
+    while (hits.length < limit && (next < ranked.length || c < conceptItems.length)) {
+      const entry = ranked[next];
+      const concept = conceptItems[c];
+      if (concept && (!entry || concept.fused > entry.fused)) {
+        c += 1;
+        const ref = this.graph.conceptRef(concept.id)!;
+        hits.push({
+          kind: "concept",
+          score: normalized(concept.fused),
+          concept: ref,
+          entryIds: concept.entryIds,
+          entries: concept.entryIds.map((id) => ({ id, title: this.store.getMeta(id)?.title ?? id }))
+        });
+        continue;
+      }
+      next += 1;
+      const meta = entry ? this.store.getMeta(entry.id) : null;
+      if (!entry || !meta) continue;
+      hits.push(this.entryHit(meta, scope, normalized(entry.fused), signals));
+    }
+    const response: KnowledgeSearchResponse = {
+      hits,
+      searched,
+      total: ranked.length,
+      nextCursor: next < ranked.length ? encodeSearchCursor({ v: 1, o: next, h: fingerprint }) : null
+    };
+    if (request.facets === true) {
+      const metas = ranked.map((r) => this.store.getMeta(r.id)).filter((m): m is KnowledgeEntryMeta => m !== null);
+      response.facets = computeKnowledgeFacets(metas, scope, collections);
+    }
+    return response;
+  }
+
+  private async meaningSearch(query: string, accept: (id: string) => boolean): Promise<KnowledgeVectorHit[]> {
+    const vector = await this.vectors.embedQuery(query);
+    return vector ? this.vectors.search(vector, accept, CANDIDATES) : [];
+  }
+
+  /**
+   * Query by example: the entries nearest normalize(mean(similarTo) − 0.5 · mean(unlike)) of the
+   * examples' entry vectors; BM25 over the examples' titles and openings when none has vectors.
+   */
+  private exampleSearch(
+    similarTo: readonly string[],
+    unlike: readonly string[],
+    accept: (id: string) => boolean
+  ): { ids: string[]; hits: Map<string, KnowledgeVectorHit> } {
+    const like = similarTo.map((id) => this.vectors.entryVector(id)).filter((v): v is Float32Array => v !== null);
+    if (like.length > 0) {
+      const target = meanOf(like);
+      const away = unlike.map((id) => this.vectors.entryVector(id)).filter((v): v is Float32Array => v !== null);
+      if (away.length > 0) {
+        const less = meanOf(away);
+        for (let d = 0; d < target.length; d += 1) target[d]! -= 0.5 * less[d]!;
+      }
+      if (normalize(target)) {
+        const hits = this.vectors.search(target, accept, CANDIDATES);
+        return { ids: hits.map((hit) => hit.entryId), hits: new Map(hits.map((hit) => [hit.entryId, hit])) };
+      }
+    }
+    const exampleTerms: string[] = [];
+    for (const id of similarTo) {
+      const meta = this.store.getMeta(id);
+      const body = this.docs.get(id)?.body ?? "";
+      exampleTerms.push(...tokenize(meta?.title ?? ""), ...tokenize(firstWords(body, EXAMPLE_WORDS)));
+    }
+    return { ids: this.bm25.search(exampleTerms, accept, CANDIDATES).map((hit) => hit.key), hits: new Map() };
+  }
+
+  /** The ranked entry list (≤ KNOWLEDGE_SEARCH_MAX_RESULTS): sorted, then spread apart by MMR. */
+  private rank(entryScores: ReadonlyMap<string, number>, sort: KnowledgeSearchSort, diverse: boolean): Ranked[] {
+    if (sort === "newest") {
+      const dated: (Ranked & { savedAt: string })[] = [];
+      for (const [id, fused] of entryScores) {
+        const meta = this.store.getMeta(id);
+        if (meta) dated.push({ id, fused, rank: fused, savedAt: meta.savedAt });
+      }
+      return dated
+        .sort(newestFirst)
+        .slice(0, KNOWLEDGE_SEARCH_MAX_RESULTS)
+        .map(({ id, fused, rank }) => ({ id, fused, rank }));
+    }
+    const now = Date.now();
+    const ranked: Ranked[] = [];
+    for (const [id, fused] of entryScores) {
+      if (sort === "recent") {
+        const meta = this.store.getMeta(id);
+        if (!meta) continue;
+        ranked.push({ id, fused, rank: fused * recencyFactor(meta, now) });
+      } else {
+        ranked.push({ id, fused, rank: fused });
+      }
+    }
+    ranked.sort((a, b) => b.rank - a.rank || (a.id < b.id ? -1 : 1));
+    const capped = ranked.slice(0, KNOWLEDGE_SEARCH_MAX_RESULTS);
+    return diverse ? mmr(capped, (id) => this.vectors.entryVector(id)) : capped;
+  }
+
+  private entryHit(
+    meta: KnowledgeEntryMeta,
+    scope: KnowledgeScope,
+    score: number,
+    signals: {
+      terms: string[];
+      words: { word: string; tokens: string[] }[];
+      keyword: ReadonlySet<string>;
+      meaning: ReadonlyMap<string, KnowledgeVectorHit>;
+      similar: ReadonlyMap<string, KnowledgeVectorHit>;
+      similarIds: ReadonlySet<string>;
+      expansion: ReadonlySet<string>;
+      expansionSeeds: ReadonlyMap<string, string[]>;
+      thresholds: KnowledgeVectorThresholds | null;
+    }
+  ): KnowledgeSearchHit {
+    const id = meta.id;
+    const meaningHit = signals.meaning.get(id);
+    const similarHit = signals.similar.get(id);
+    const via: KnowledgeMatchSignal[] = [];
+    if (signals.keyword.has(id)) via.push("keyword");
+    if (meaningHit) via.push("meaning");
+    if (signals.similarIds.has(id)) via.push("similar");
+    if (signals.expansion.has(id)) via.push("concept");
+    const terms = signals.words.filter((w) => w.tokens.every((token) => this.bm25.contains(id, token))).map((w) => w.word);
+    const distinct = [...new Set(signals.terms)];
+    const coverage = distinct.length > 0 ? distinct.filter((token) => this.bm25.contains(id, token)).length / distinct.length : 0;
+    const similarity = Math.max(meaningHit?.score ?? -Infinity, similarHit?.score ?? -Infinity);
+    const match: KnowledgeEntryMatch = {
+      band: matchBand(Number.isFinite(similarity) ? similarity : null, coverage, via, signals.thresholds),
+      via,
+      terms,
+      passage: meaningHit ? { start: meaningHit.span.start, end: meaningHit.span.end, chunk: meaningHit.chunk, chunks: meaningHit.chunks } : null,
+      concepts: (signals.expansionSeeds.get(id) ?? [])
+        .map((conceptId) => this.graph.conceptRef(conceptId))
+        .filter((ref): ref is NonNullable<typeof ref> => ref !== null)
+        .map(({ id: conceptId, name, type }): KnowledgeConceptRef => ({ id: conceptId, name, type }))
+    };
+    const doc = this.docs.get(id);
+    const span: TextSpan | undefined = meaningHit?.span ?? similarHit?.span;
+    const snippet = doc ? bestSnippet(doc.body, signals.terms, span) : "";
+    return { kind: "entry", score, entry: this.summary(meta, scope, snippet), match };
   }
 
   // -------------------------------------------------------------------------
@@ -329,11 +519,20 @@ export class KnowledgeSearch {
     };
   }
 
-  /** Newest first; `collection` is an id, `unfiled`, or absent. */
-  async listEntries(
-    query: { collection?: string; cursor?: string; limit?: number },
-    visibility: KnowledgeVisibility
-  ): Promise<KnowledgeEntriesResponse> {
+  /**
+   * Newest first; `collection` is an id, `unfiled`, or absent. The filter params (comma-separated
+   * lists, ISO bounds) mean what they mean in search.
+   */
+  async listEntries(query: KnowledgeEntriesQuery, visibility: KnowledgeVisibility): Promise<KnowledgeEntriesResponse> {
+    const filter = parseKnowledgeFilters({
+      kinds: splitFilterList(query.kinds),
+      authors: splitFilterList(query.authors),
+      years: splitFilterList(query.years),
+      postedAfter: query.postedAfter,
+      postedBefore: query.postedBefore,
+      savedAfter: query.savedAfter,
+      savedBefore: query.savedBefore
+    });
     await this.whenReady();
     const limit = clampLimit(query.limit, KNOWLEDGE_ENTRIES_DEFAULT_LIMIT, KNOWLEDGE_ENTRIES_MAX_LIMIT);
     const narrow = query.collection ? this.resolveVisible([query.collection], visibility, true) : null;
@@ -341,7 +540,7 @@ export class KnowledgeSearch {
     const after = query.cursor ? decodeCursor(query.cursor) : null;
     const metas = this.store
       .listMeta()
-      .filter((meta) => entryInScope(meta, scope))
+      .filter((meta) => entryInScope(meta, scope) && entryMatchesFilter(meta, filter))
       .sort(newestFirst)
       .filter((meta) => !after || newestFirst(meta, after) > 0);
     const page = metas.slice(0, limit);
@@ -466,12 +665,13 @@ export class KnowledgeSearch {
   }
 
   private onStoreChange(change: KnowledgeEntryChange): void {
-    if (change.kind === "relabelled") return; // visibility reads collections from the store live
+    // Visibility and filters read collections from the store live, and collections are not embedded.
+    if (change.kind === "relabelled") return;
     if (change.kind === "deleted") {
       void this.whenReady().then(() =>
         this.serializeText(async () => {
           for (const id of change.entryIds) this.removeDoc(id);
-          await this.retainCache();
+          await this.vectors.retain();
         })
       );
       return;
@@ -495,25 +695,8 @@ export class KnowledgeSearch {
       }
     });
     await Promise.all(workers);
-    // Attach cached vectors now (reading the cache does not load the model); the rest are
-    // embedded by the backfill the first query or save starts.
-    const embedder = this.usableEmbedder();
-    if (!embedder) return;
-    try {
-      const cache = await this.cacheFor(embedder);
-      for (const doc of this.docs.values()) this.attachCached(doc, cache, embedder);
-    } catch (error) {
-      this.logger.warn(`knowledge: the embedding cache could not be read (${(error as Error).message})`);
-    }
-  }
-
-  private attachCached(doc: Doc, cache: VectorCache, embedder: KnowledgeEmbedder): boolean {
-    if (doc.vectors && doc.vectorModel === embedder.modelId) return true;
-    const cached = cache.get(doc.hash);
-    if (!cached || cached.length !== doc.spans.length * embedder.dimensions) return false;
-    doc.vectors = cached;
-    doc.vectorModel = embedder.modelId;
-    return true;
+    // Attach cached vectors now; the rest are embedded by the backfill the first query or save starts.
+    await this.vectors.loadCached();
   }
 
   private async indexText(id: string): Promise<void> {
@@ -524,13 +707,10 @@ export class KnowledgeSearch {
       return;
     }
     const existing = this.docs.get(id);
-    // The vector cache key is the hash of the text embedded here, never the hash the metadata
-    // claims: a hand-edited file (or a read racing an edit) must not file vectors under another body.
-    const doc: Doc =
-      existing && existing.body === entry.body
-        ? existing
-        : { id, hash: knowledgeContentHash(entry.body), body: entry.body, spans: chunkBody(entry.body), vectors: null, vectorModel: null };
-    this.docs.set(id, doc);
+    this.docs.set(id, existing && existing.body === entry.body ? existing : { id, body: entry.body });
+    // The vector index keys its cache on the text it embeds (header and body), never on the hash
+    // the metadata claims: a hand-edited file must not file vectors under another body.
+    this.vectors.setEntry(id, entry);
     this.bm25.add(id, [
       { tokens: tokenize(entry.title), weight: 3 },
       { tokens: tokenize(entry.body), weight: 1 },
@@ -541,184 +721,13 @@ export class KnowledgeSearch {
   private removeDoc(id: string): void {
     this.docs.delete(id);
     this.bm25.remove(id);
-  }
-
-  private usableEmbedder(): KnowledgeEmbedder | null {
-    const embedder = this.embedders.current();
-    return embedder && embedder !== this.failedEmbedder ? embedder : null;
-  }
-
-  private embedderFailed(embedder: KnowledgeEmbedder, error: unknown): void {
-    if (this.failedEmbedder !== embedder) {
-      this.logger.warn(`knowledge: embeddings are unavailable, searching by text only (${(error as Error).message ?? String(error)})`);
-    }
-    this.failedEmbedder = embedder;
-  }
-
-  private async cacheFor(embedder: KnowledgeEmbedder): Promise<VectorCache> {
-    if (this.cache && this.cache.modelId === embedder.modelId) return this.cache;
-    if (!this.cacheOpening) {
-      this.cacheOpening = (async () => {
-        await this.cache?.flush().catch(() => undefined);
-        const cache = await VectorCache.open({
-          dir: this.indexDir,
-          modelId: embedder.modelId,
-          dimensions: embedder.dimensions,
-          chunker: CHUNKER_VERSION,
-          logger: this.logger
-        });
-        this.cache = cache;
-        return cache;
-      })().finally(() => {
-        this.cacheOpening = null;
-      });
-    }
-    return this.cacheOpening;
-  }
-
-  /** Queue entries for embedding (front of the queue when `priority`); resolves when they are done or skipped. */
-  private requestEmbeddings(ids: readonly string[], priority: boolean): Promise<void> {
-    if (this.stopped || !this.usableEmbedder() || ids.length === 0) return Promise.resolve();
-    const waits = ids.map(
-      (id) =>
-        new Promise<void>((resolve) => {
-          const list = this.embedWaiters.get(id) ?? [];
-          list.push(resolve);
-          this.embedWaiters.set(id, list);
-        })
-    );
-    if (priority) {
-      for (const id of ids) {
-        const at = this.embedQueue.indexOf(id);
-        if (at >= 0) this.embedQueue.splice(at, 1);
-      }
-      this.embedQueue.unshift(...ids);
-    } else {
-      const queued = new Set(this.embedQueue);
-      this.embedQueue.push(...ids.filter((id) => !queued.has(id)));
-    }
-    this.kickEmbedWorker();
-    return Promise.all(waits).then(() => undefined);
-  }
-
-  private kickEmbedWorker(): void {
-    if (this.embedWorker || this.embedQueue.length === 0) return;
-    this.embedWorker = this.runEmbedWorker().finally(() => {
-      this.embedWorker = null;
-      // Entries queued while the worker was finishing get a new run.
-      this.kickEmbedWorker();
-    });
-  }
-
-  private release(ids: readonly string[]): void {
-    for (const id of ids) {
-      const list = this.embedWaiters.get(id);
-      this.embedWaiters.delete(id);
-      for (const resolve of list ?? []) resolve();
-    }
-  }
-
-  private async runEmbedWorker(): Promise<void> {
-    let sinceFlush = 0;
-    while (this.embedQueue.length > 0) {
-      const ids = this.embedQueue.splice(0, EMBED_BATCH_DOCS);
-      const embedder = this.usableEmbedder();
-      if (!embedder) {
-        this.release([...ids, ...this.embedQueue.splice(0)]);
-        break;
-      }
-      try {
-        const cache = await this.cacheFor(embedder);
-        const todo: Doc[] = [];
-        for (const id of ids) {
-          const doc = this.docs.get(id);
-          if (doc && !this.attachCached(doc, cache, embedder)) todo.push(doc);
-        }
-        if (todo.length > 0) {
-          const texts = todo.flatMap((doc) => doc.spans.map((span) => doc.body.slice(span.start, span.end)));
-          const vectors: Float32Array[] = [];
-          for (let start = 0; start < texts.length; start += EMBED_CALL_CHUNKS) {
-            if (this.stopped) return; // `stop()` already released every waiter and flushes the cache
-            vectors.push(...(await embedder.embed(texts.slice(start, start + EMBED_CALL_CHUNKS))));
-          }
-          let at = 0;
-          for (const doc of todo) {
-            const rows = new Float32Array(doc.spans.length * embedder.dimensions);
-            for (let i = 0; i < doc.spans.length; i += 1) {
-              const vector = vectors[at++];
-              if (!vector || vector.length !== embedder.dimensions) throw new Error("the model returned a vector of the wrong size");
-              rows.set(vector, i * embedder.dimensions);
-            }
-            // The entry may have been edited meanwhile; only a still-current doc takes the rows.
-            if (this.docs.get(doc.id) === doc) {
-              doc.vectors = rows;
-              doc.vectorModel = embedder.modelId;
-            }
-            await cache.put(doc.hash, rows);
-          }
-          sinceFlush += todo.length;
-          if (sinceFlush >= FLUSH_EVERY) {
-            await cache.flush();
-            sinceFlush = 0;
-          }
-        }
-      } catch (error) {
-        this.embedderFailed(embedder, error);
-      } finally {
-        this.release(ids);
-      }
-    }
-    if (sinceFlush > 0) await this.cache?.flush().catch(() => undefined);
-  }
-
-  /** Embed every entry still missing vectors (once per model; started by the first query or save). */
-  private backfill(embedder: KnowledgeEmbedder): void {
-    if (this.backfilledModel === embedder.modelId) return;
-    this.backfilledModel = embedder.modelId;
-    const missing = [...this.docs.values()].filter((doc) => !doc.vectors || doc.vectorModel !== embedder.modelId).map((doc) => doc.id);
-    void this.requestEmbeddings(missing, false).then(() => this.retainCache());
-  }
-
-  private async retainCache(): Promise<void> {
-    if (!this.cache || this.stopped) return;
-    await this.cache.retain(new Set([...this.docs.values()].map((doc) => doc.hash))).catch(() => undefined);
-  }
-
-  private async vectorSearch(query: string, visible: (id: string) => boolean): Promise<{ id: string; score: number; span: TextSpan }[]> {
-    const embedder = this.usableEmbedder();
-    if (!embedder) return [];
-    this.backfill(embedder);
-    let q: Float32Array;
-    try {
-      const [vector] = await embedder.embed([query]);
-      if (!vector || vector.length !== embedder.dimensions) throw new Error("the model returned a vector of the wrong size");
-      q = vector;
-    } catch (error) {
-      this.embedderFailed(embedder, error);
-      return [];
-    }
-    const dims = embedder.dimensions;
-    const hits: { id: string; score: number; span: TextSpan }[] = [];
-    for (const doc of this.docs.values()) {
-      const rows = doc.vectors;
-      if (!rows || doc.vectorModel !== embedder.modelId) continue;
-      let best = -1;
-      let bestRow = 0;
-      for (let row = 0; row * dims < rows.length; row += 1) {
-        let dot = 0;
-        const offset = row * dims;
-        for (let d = 0; d < dims; d += 1) dot += q[d]! * rows[offset + d]!;
-        if (dot > best) {
-          best = dot;
-          bestRow = row;
-        }
-      }
-      if (best < this.minSimilarity || !visible(doc.id)) continue;
-      hits.push({ id: doc.id, score: best, span: doc.spans[bestRow] ?? { start: 0, end: doc.body.length } });
-    }
-    return hits.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1)).slice(0, CANDIDATES);
+    this.vectors.removeEntry(id);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Ranking helpers
+// ---------------------------------------------------------------------------
 
 /** Reciprocal-rank fusion: Σ weight / (k + rank), rank from 1. Insertion order is best first. */
 function fuse(lists: readonly (readonly [readonly string[], number])[]): Map<string, number> {
@@ -729,6 +738,122 @@ function fuse(lists: readonly (readonly [readonly string[], number])[]): Map<str
   return new Map([...scores].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)));
 }
 
+/** The `recent` sort's boost: 0.5 + 0.5 · 2^(−ageDays/90), age from `postedAt`, else `savedAt`. */
+export function recencyFactor(meta: Pick<KnowledgeEntryMeta, "postedAt" | "savedAt">, now: number): number {
+  let at = Date.parse(meta.postedAt ?? meta.savedAt);
+  if (Number.isNaN(at)) at = Date.parse(meta.savedAt);
+  if (Number.isNaN(at)) return 0.5;
+  const ageDays = Math.max(0, (now - at) / DAY_MS);
+  return 0.5 + 0.5 * 2 ** (-ageDays / RECENCY_HALF_LIFE_DAYS);
+}
+
+/**
+ * Maximal marginal relevance over a ranked list (best first): greedily pick the entry maximizing
+ * λ·rel − (1−λ)·max cosine to those already picked, rel = rank / best rank. An entry without a
+ * vector has similarity 0 to everything. Deterministic: ties keep the ranked order.
+ */
+export function mmr<T extends { id: string; rank: number }>(ranked: readonly T[], vectorOf: (id: string) => Float32Array | null): T[] {
+  const n = ranked.length;
+  if (n <= 2) return [...ranked];
+  const best = ranked[0]!.rank;
+  const rel = ranked.map((r) => (best > 0 ? r.rank / best : 0));
+  const vectors = ranked.map((r) => vectorOf(r.id));
+  const maxSim = new Float64Array(n).fill(-Infinity);
+  const taken = new Uint8Array(n);
+  const out: T[] = [];
+  let last = -1;
+  for (let step = 0; step < n; step += 1) {
+    if (last >= 0) {
+      const lv = vectors[last];
+      for (let i = 0; i < n; i += 1) {
+        if (taken[i]) continue;
+        const v = vectors[i];
+        let sim = 0;
+        if (lv && v) {
+          for (let d = 0; d < v.length; d += 1) sim += v[d]! * lv[d]!;
+        }
+        if (sim > maxSim[i]!) maxSim[i] = sim;
+      }
+    }
+    let pick = -1;
+    let pickScore = -Infinity;
+    for (let i = 0; i < n; i += 1) {
+      if (taken[i]) continue;
+      const score = MMR_LAMBDA * rel[i]! - (last >= 0 ? (1 - MMR_LAMBDA) * maxSim[i]! : 0);
+      if (score > pickScore) {
+        pickScore = score;
+        pick = i;
+      }
+    }
+    taken[pick] = 1;
+    out.push(ranked[pick]!);
+    last = pick;
+  }
+  return out;
+}
+
+/**
+ * The spec's match bands. s = best-chunk cosine (meaning) or cosine to the example target
+ * (similar), null without embeddings; c = share of the query's distinct tokens in the entry.
+ */
+export function matchBand(
+  s: number | null,
+  c: number,
+  via: readonly KnowledgeMatchSignal[],
+  thresholds: Pick<KnowledgeVectorThresholds, "good" | "strong"> | null
+): KnowledgeMatchBand {
+  const sim = thresholds && s !== null ? s : null;
+  if ((sim !== null && sim >= thresholds!.strong) || (c === 1 && via.length >= 2)) return "strong";
+  if ((sim !== null && sim >= thresholds!.good) || c >= 0.5 || via.includes("concept")) return "good";
+  return "weak";
+}
+
+/** Distinct query words as typed (lowercased) with their tokens; words that tokenize to nothing (stopwords) are left out. */
+function queryWords(query: string): { word: string; tokens: string[] }[] {
+  const out: { word: string; tokens: string[] }[] = [];
+  const seen = new Set<string>();
+  for (const word of query.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? []) {
+    if (seen.has(word)) continue;
+    seen.add(word);
+    const tokens = tokenize(word);
+    if (tokens.length > 0) out.push({ word, tokens });
+  }
+  return out;
+}
+
+function firstWords(text: string, count: number): string {
+  return (text.match(/\S+/g) ?? []).slice(0, count).join(" ");
+}
+
+function meanOf(vectors: readonly Float32Array[]): Float32Array {
+  const out = new Float32Array(vectors[0]!.length);
+  for (const v of vectors) for (let d = 0; d < out.length; d += 1) out[d]! += v[d]! / vectors.length;
+  return out;
+}
+
+/** L2-normalizes in place; false when the vector is zero. */
+function normalize(v: Float32Array): boolean {
+  let norm = 0;
+  for (const x of v) norm += x * x;
+  norm = Math.sqrt(norm);
+  if (!(norm > 1e-9)) return false;
+  for (let d = 0; d < v.length; d += 1) v[d]! /= norm;
+  return true;
+}
+
+function exampleIds(value: readonly string[] | undefined | null, what: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new KnowledgeError("KNOWLEDGE_INVALID", `${what} must be a list of entry ids.`);
+  if (value.length > KNOWLEDGE_SIMILAR_MAX_EXAMPLES) throw new KnowledgeError("KNOWLEDGE_INVALID", `At most ${KNOWLEDGE_SIMILAR_MAX_EXAMPLES} entries in ${what}.`);
+  const out: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") throw new KnowledgeError("KNOWLEDGE_INVALID", `${what} must be a list of entry ids.`);
+    const id = raw.trim();
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
 function clampLimit(value: number | undefined, fallback: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(Math.floor(value), max));
@@ -737,6 +862,10 @@ function clampLimit(value: number | undefined, fallback: number, max: number): n
 function newestFirst(a: Pick<KnowledgeEntryMeta, "savedAt" | "id">, b: Pick<KnowledgeEntryMeta, "savedAt" | "id">): number {
   return b.savedAt.localeCompare(a.savedAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 }
+
+// ---------------------------------------------------------------------------
+// Cursors
+// ---------------------------------------------------------------------------
 
 function encodeCursor(meta: Pick<KnowledgeEntryMeta, "savedAt" | "id">): string {
   return Buffer.from(JSON.stringify([meta.savedAt, meta.id]), "utf8").toString("base64url");
@@ -750,4 +879,55 @@ function decodeCursor(cursor: string): Pick<KnowledgeEntryMeta, "savedAt" | "id"
     // fall through
   }
   throw new KnowledgeError("KNOWLEDGE_INVALID", "The cursor is not one this server issued.");
+}
+
+function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeSearchCursor(cursor: unknown): SearchCursor {
+  if (typeof cursor === "string") {
+    try {
+      const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<SearchCursor> | null;
+      if (
+        value &&
+        typeof value === "object" &&
+        value.v === 1 &&
+        Number.isInteger(value.o) &&
+        value.o! >= 0 &&
+        value.o! <= KNOWLEDGE_SEARCH_MAX_RESULTS &&
+        typeof value.h === "string"
+      ) {
+        return { v: 1, o: value.o!, h: value.h };
+      }
+    } catch {
+      // fall through
+    }
+  }
+  throw new KnowledgeError("KNOWLEDGE_INVALID", "The cursor is not one this server issued.");
+}
+
+/** Hash of the normalized request and the caller's visibility: a cursor only continues the search that issued it. */
+function searchFingerprint(request: {
+  query: string;
+  narrow: readonly string[] | null;
+  filter: KnowledgeEntryFilter;
+  similarTo: readonly string[];
+  unlike: readonly string[];
+  sort: KnowledgeSearchSort;
+  diverse: boolean;
+  visibility: KnowledgeVisibility;
+}): string {
+  const sorted = (values: readonly string[]) => [...values].sort();
+  const key = JSON.stringify([
+    request.query.replace(/\s+/g, " "),
+    request.narrow ? sorted(request.narrow) : null,
+    filterKey(request.filter),
+    sorted(request.similarTo),
+    sorted(request.unlike),
+    request.sort,
+    request.diverse,
+    request.visibility.kind === "all" ? "all" : sorted(request.visibility.ids)
+  ]);
+  return createHash("sha256").update(key, "utf8").digest("base64url").slice(0, 22);
 }

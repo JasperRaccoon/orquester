@@ -13,21 +13,24 @@ const manifestSchema = z.object({
   modelId: z.string(),
   dimensions: z.number().int().positive(),
   chunker: z.string(),
+  /** `EMBEDDING_INPUT_VERSION` of the text the rows were embedded from (absent in a cache written before it existed). */
+  input: z.string().optional(),
   file: z.string().regex(FILE),
   /** Vectors in `file` that the manifest accounts for (later bytes are an interrupted append). */
   vectors: z.number().int().nonnegative(),
-  /** contentHash → [first vector, vector count]. */
+  /** Cache key → [first vector, vector count]. */
   entries: z.record(z.tuple([z.number().int().nonnegative(), z.number().int().positive()]))
 });
 
 type Manifest = z.infer<typeof manifestSchema>;
 
 /**
- * Chunk vectors per `contentHash` under `knowledgeIndexDir` (spec: "a disposable cache"): one
- * append-only `vectors-<generation>.bin` of little-endian float32 rows and a `vectors.json`
- * manifest written atomically after appends. Anything unexpected — an unreadable manifest, another
- * model or chunker, a row past the end of the file — discards the cache, which is then rebuilt
- * from the entries. Compaction writes a new generation and drops the old file.
+ * Chunk vectors per cache key (a sha256 hex: `vectorCacheKey` in `vector-index.ts`) under
+ * `knowledgeIndexDir` (spec: "a disposable cache"): one append-only `vectors-<generation>.bin` of
+ * little-endian float32 rows and a `vectors.json` manifest written atomically after appends.
+ * Anything unexpected — an unreadable manifest, another model, dimensions, chunker or embedding
+ * input version, a row past the end of the file — discards the cache, which is then rebuilt from
+ * the entries. Compaction writes a new generation and drops the old file.
  */
 export class VectorCache {
   private manifest: Manifest;
@@ -43,7 +46,16 @@ export class VectorCache {
     this.manifest = manifest;
   }
 
-  static async open(options: { dir: string; modelId: string; dimensions: number; chunker: string; logger?: KnowledgeLogger }): Promise<VectorCache> {
+  static async open(options: {
+    dir: string;
+    modelId: string;
+    dimensions: number;
+    /** `CHUNKER_VERSION`. */
+    chunker: string;
+    /** `EMBEDDING_INPUT_VERSION`. */
+    input: string;
+    logger?: KnowledgeLogger;
+  }): Promise<VectorCache> {
     const logger = options.logger ?? console;
     await mkdir(options.dir, { recursive: true });
     const fresh = (): Manifest => ({
@@ -51,6 +63,7 @@ export class VectorCache {
       modelId: options.modelId,
       dimensions: options.dimensions,
       chunker: options.chunker,
+      input: options.input,
       file: `vectors-${Date.now()}.bin`,
       vectors: 0,
       entries: {}
@@ -60,9 +73,8 @@ export class VectorCache {
     try {
       const text = await readFile(join(options.dir, MANIFEST), "utf8");
       const parsed = manifestSchema.parse(JSON.parse(text));
-      if (parsed.modelId !== options.modelId || parsed.dimensions !== options.dimensions || parsed.chunker !== options.chunker) {
-        throw new Error("made by another model or chunker");
-      }
+      if (parsed.modelId !== options.modelId || parsed.dimensions !== options.dimensions) throw new Error("made by another model");
+      if (parsed.chunker !== options.chunker || parsed.input !== options.input) throw new Error("made from other chunks or embedding input");
       const bytes = await readFile(join(options.dir, parsed.file));
       const need = parsed.vectors * parsed.dimensions * 4;
       if (bytes.byteLength < need) throw new Error("the vector file is shorter than its manifest");
@@ -93,27 +105,31 @@ export class VectorCache {
     return this.manifest.modelId;
   }
 
+  get dimensions(): number {
+    return this.manifest.dimensions;
+  }
+
   get size(): number {
     return this.rows.size;
   }
 
-  /** The hash's chunk vectors, row after row (`count * dimensions` floats), or null. */
-  get(contentHash: string): Float32Array | null {
-    return this.rows.get(contentHash) ?? null;
+  /** The key's chunk vectors, row after row (`count * dimensions` floats), or null. */
+  get(key: string): Float32Array | null {
+    return this.rows.get(key) ?? null;
   }
 
   /** Appends the rows now; the manifest lands on the next {@link flush}. */
-  put(contentHash: string, vectors: Float32Array): Promise<void> {
+  put(key: string, vectors: Float32Array): Promise<void> {
     return this.serialize(async () => {
       const dims = this.manifest.dimensions;
       if (vectors.length === 0 || vectors.length % dims !== 0) throw new Error("vector rows do not match the dimensions");
-      if (this.rows.has(contentHash)) return;
+      if (this.rows.has(key)) return;
       const copy = new Float32Array(vectors);
       await appendFile(join(this.dir, this.manifest.file), Buffer.from(copy.buffer, copy.byteOffset, copy.byteLength));
       const count = copy.length / dims;
-      this.manifest.entries[contentHash] = [this.manifest.vectors, count];
+      this.manifest.entries[key] = [this.manifest.vectors, count];
       this.manifest.vectors += count;
-      this.rows.set(contentHash, copy);
+      this.rows.set(key, copy);
       this.dirty = true;
     });
   }
