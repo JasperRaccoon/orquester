@@ -7,8 +7,8 @@
  *
  * - the rule: {@link conceptMergeRefusal} (type, similarity, lexical guard, numbers, negation,
  *   lists, Person) and {@link planConceptMerges} (transitive per type, the kept concept), plus the
- *   deterministic Person rule ({@link personHandlePairs}: a handle equal to another Person's name or
- *   handle) and the pairs LLM checks confirmed (`concept-merge-checks.ts`; merges `source: "checked"`,
+ *   deterministic Person rule ({@link personRuleGroups}: the same handle, or a handle written out as
+ *   another Person's name; never two different full names, never chained) and the pairs LLM checks confirmed (`concept-merge-checks.ts`; merges `source: "checked"`,
  *   the answers kept in the file's `checks`);
  * - the file: read tolerant (`@orquester/config` `parseKnowledgeConceptMergesFile`), written atomically;
  * - {@link KnowledgeConceptMerges}: plans after every complete vector computation, applies the
@@ -189,7 +189,7 @@ export interface PlanConcept {
   name: string;
   /** Entries it came from. */
   entryCount: number;
-  /** A Person's `handle` attribute ({@link personHandlePairs}). */
+  /** A Person's `handle` attribute ({@link personRulePair}). */
   handle?: string | null;
 }
 
@@ -202,44 +202,138 @@ export interface CheckedConceptPair {
   keep: string | null;
 }
 
-/** A Person's name or handle as compared: folded, no "@", letters and digits only; null when under 3 characters. */
-export function personKey(value: string | null | undefined): string | null {
+/** One word of letters, digits, "_", "." or "-": the shape of a handle. */
+const HANDLE_SHAPE = /^[\p{L}\p{N}_.-]{3,}$/u;
+/** A plain capitalized word ("Sam", "Alex"): a first name, never taken for a handle. */
+const FIRST_NAME_SHAPE = /^\p{Lu}\p{Ll}+$/u;
+
+/** A handle's text: trimmed, no leading "@"; null unless it has the shape of a handle ({@link HANDLE_SHAPE}). */
+function handleText(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
-  const key = fold(value).replace(/^@+/, "").replace(/[^a-z0-9]/g, "");
-  return key.length >= 3 ? key : null;
+  const bare = value.normalize("NFKC").trim().replace(/^@+/, "");
+  return HANDLE_SHAPE.test(bare) ? bare : null;
 }
 
 /**
- * The Person rule (deterministic, no LLM): a Person whose `handle` (normalized, no "@") equals
- * another Person's name or handle is the same person ("jason", handle jasonugc = "jasonugc").
- * Pairs of concept ids, each once, in a stable order.
+ * A handle as compared: trimmed, no leading "@", lower case (handles are case-insensitive); null
+ * unless it is one word of letters, digits, "_", "." or "-" of 3+ characters. Punctuation stays:
+ * "danielhangan_" and "danielhangan" are different accounts.
  */
+export function personHandle(value: string | null | undefined): string | null {
+  return handleText(value)?.toLowerCase() ?? null;
+}
+
+/** A Person's own name, or null when it has none (the graph then names it by its id). */
+function realName(person: PlanConcept): string | null {
+  const name = person.name.normalize("NFKC").trim();
+  return name.length > 0 && name !== person.id ? name : null;
+}
+
+/**
+ * The handle a Person's name is written as, compared like {@link personHandle}: "@jasonugc", or a
+ * name with the shape of a handle that is not a plain capitalized word ("jasonugc", "KCodes7777";
+ * not "Sam"). Whether it IS a given handle also needs the case to match ({@link nameIsHandle}).
+ */
+function nameAsHandle(name: string | null): string | null {
+  if (name === null) return null;
+  if (name.startsWith("@")) return personHandle(name);
+  return HANDLE_SHAPE.test(name) && !FIRST_NAME_SHAPE.test(name) ? name.toLowerCase() : null;
+}
+
+/** Whether a name is exactly this handle written out: "@JasonUGC" for jasonugc, or "jasonugc" itself (case kept). */
+function nameIsHandle(name: string | null, handle: string | null | undefined): boolean {
+  const text = handleText(handle);
+  if (name === null || text === null) return false;
+  if (name.startsWith("@")) return personHandle(name) === text.toLowerCase();
+  return nameAsHandle(name) !== null && name === text;
+}
+
+/** A name of two words or more ("Alex Nguyen"), as its token set; null for none or one word. */
+function fullName(person: PlanConcept): Set<string> | null {
+  const name = realName(person);
+  return name === null || name.split(/\s+/).length < 2 ? null : conceptNameTokens(name);
+}
+
+/**
+ * The Person rule for two Persons (deterministic, no LLM): the same handle ("@jasonugc" and
+ * "JasonUGC"), or one's handle written out as the other's name ("jason", handle jasonugc, and a
+ * Person named "jasonugc"). Never two Persons whose full names (two words or more) differ: "Alex
+ * Nguyen" (@alex) and "Alex Chen" (handle alex) share a handle on different platforms. A first name
+ * is never a handle: "Sam" is not "Samantha Lee" (handle sam).
+ */
+export function personRulePair(x: PlanConcept, y: PlanConcept): boolean {
+  if (x.type !== "Person" || y.type !== "Person" || x.id === y.id) return false;
+  const fx = fullName(x);
+  const fy = fullName(y);
+  if (fx && fy && !sameSet(fx, fy)) return false;
+  const hx = personHandle(x.handle);
+  if (hx !== null && hx === personHandle(y.handle)) return true;
+  return nameIsHandle(realName(y), x.handle) || nameIsHandle(realName(x), y.handle);
+}
+
+/** Whether two Persons may be in one merge: the same name (the cosine rule's), or the Person rule's pair. */
+function personsJoin(x: PlanConcept, y: PlanConcept): boolean {
+  return sameSet(conceptNameTokens(x.name), conceptNameTokens(y.name)) || personRulePair(x, y);
+}
+
+/** The Person rule's pairs ({@link personRulePair}) as concept ids, each once, in a stable order. */
 export function personHandlePairs(concepts: readonly PlanConcept[]): [string, string][] {
   const persons = concepts.filter((c) => c.type === "Person");
-  const byKey = new Map<string, string[]>();
+  // Only Persons sharing a handle key (their handle, or their name written as a handle) can pair.
+  const byKey = new Map<string, PlanConcept[]>();
   for (const person of persons) {
-    for (const key of new Set([personKey(person.name), personKey(person.handle)])) {
+    for (const key of new Set([personHandle(person.handle), nameAsHandle(realName(person))])) {
       if (key === null) continue;
       const list = byKey.get(key);
-      if (list) list.push(person.id);
-      else byKey.set(key, [person.id]);
+      if (list) list.push(person);
+      else byKey.set(key, [person]);
     }
   }
   const seen = new Set<string>();
   const out: [string, string][] = [];
-  for (const person of persons) {
-    const key = personKey(person.handle);
-    if (key === null) continue;
-    for (const other of byKey.get(key) ?? []) {
-      if (other === person.id) continue;
-      const [a, b] = person.id < other ? [person.id, other] : [other, person.id];
-      const pairKey = `${a}\u0000${b}`;
-      if (seen.has(pairKey)) continue;
-      seen.add(pairKey);
-      out.push([a, b]);
+  for (const list of byKey.values()) {
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        const [x, y] = [list[i]!, list[j]!];
+        const [a, b] = x.id < y.id ? [x.id, y.id] : [y.id, x.id];
+        const pairKey = `${a}\u0000${b}`;
+        if (seen.has(pairKey) || !personRulePair(x, y)) continue;
+        seen.add(pairKey);
+        out.push([a, b]);
+      }
     }
   }
   return out.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0));
+}
+
+/**
+ * The merges the Person rule makes, without chaining: Persons that pair with exactly the same
+ * Persons (each other included) are one group, so every two in a group are a pair of the rule.
+ * Persons its pairs connect form one group when every two of them pair; otherwise only the ones
+ * that cannot be told apart are merged: two unnamed Persons with one handle merge, while "alexdev"
+ * pairing with both "Alex Nguyen" and "Alex Chen" (who do not pair) joins neither. Sorted ids, in a
+ * stable order.
+ */
+export function personRuleGroups(concepts: readonly PlanConcept[]): string[][] {
+  const partners = new Map<string, Set<string>>();
+  for (const [a, b] of personHandlePairs(concepts)) {
+    for (const [x, y] of [[a, b], [b, a]] as const) {
+      let set = partners.get(x);
+      if (!set) partners.set(x, (set = new Set([x])));
+      set.add(y);
+    }
+  }
+  const byNeighbourhood = new Map<string, string[]>();
+  for (const [id, set] of partners) {
+    const key = [...set].sort().join("\u0000");
+    const list = byNeighbourhood.get(key);
+    if (list) list.push(id);
+    else byNeighbourhood.set(key, [id]);
+  }
+  return [...byNeighbourhood.values()]
+    .filter((group) => group.length >= 2)
+    .map((group) => group.sort())
+    .sort((x, y) => (x[0]! < y[0]! ? -1 : x[0]! > y[0]! ? 1 : 0));
 }
 
 export interface ConceptMergePlanInput {
@@ -286,8 +380,10 @@ const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(reso
  * with the kept concept of {@link keptConcept} and the lowest similarity that joined it. Merges
  * whose concepts are gone are kept as they are. `changed`: whether the list differs from `existing`.
  *
- * Beside the cosine pairs: the Person rule's pairs ({@link personHandlePairs}) and the pairs LLM
- * checks confirmed (`checked`) join groups first, never across an undone merge. A new group one of
+ * Beside the cosine pairs: the Person rule's groups ({@link personRuleGroups}) and the pairs LLM
+ * checks confirmed (`checked`) join groups first, never across an undone merge. Persons join a
+ * group only when every two of it are one person (the same name, or a pair of the Person rule), and
+ * an earlier Person merge (not a checked one) that is no longer so is dropped. A new group one of
  * them joined is `source: "checked"` when a checked pair (or a checked merge it absorbed) is in it;
  * a group of exactly one checked pair keeps the concept the checker chose.
  */
@@ -325,6 +421,12 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
       }
     }
   }
+  /** Two Persons join only when every two of the joined group are one person ({@link personsJoin}): no chains. */
+  const personsApart = (ma: readonly string[], mb: readonly string[]): boolean => {
+    const x0 = byId.get(ma[0]!);
+    if (x0?.type !== "Person") return false;
+    return ma.some((x) => mb.some((y) => !personsJoin(byId.get(x)!, byId.get(y)!)));
+  };
   const union = (a: string, b: string, similarity: number, checkForbidden: boolean): boolean => {
     const ra = find(a);
     const rb = find(b);
@@ -332,6 +434,7 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
     const ma = members.get(ra)!;
     const mb = members.get(rb)!;
     if (checkForbidden && ma.some((x) => mb.some((y) => forbidden.get(x)?.has(y)))) return false;
+    if (checkForbidden && personsApart(ma, mb)) return false;
     const [root, child] = ma.length >= mb.length ? [ra, rb] : [rb, ra];
     parent.set(child, root);
     members.set(root, [...members.get(root)!, ...members.get(child)!]);
@@ -346,9 +449,15 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
   // graph applies them).
   const claimed = new Set<string>();
   const presentOf = new Map<KnowledgeConceptMergeRecord, string[]>();
+  /** Person merges an earlier rule made that the Person rule no longer allows (different people): undone. */
+  const dropped = new Set<KnowledgeConceptMergeRecord>();
   for (const record of input.existing) {
     const present = [record.into, ...record.merged].filter((id, i, all) => all.indexOf(id) === i && byId.get(id)?.type === record.type && !claimed.has(id));
     if (!byId.has(record.into) || present[0] !== record.into || present.length < 2) continue;
+    if (record.type === "Person" && record.source !== "checked" && personsApart(present, present)) {
+      dropped.add(record);
+      continue;
+    }
     for (const id of present) claimed.add(id);
     presentOf.set(record, present);
     for (const id of present.slice(1)) union(record.into, id, record.similarity, false);
@@ -361,7 +470,9 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
     const y = input.vectors.get(b);
     return x && y && x.length === y.length ? dot(x, y) : 1;
   };
-  for (const [a, b] of personHandlePairs(input.concepts)) union(a, b, vectorDot(a, b), true);
+  for (const group of personRuleGroups(input.concepts)) {
+    for (const id of group.slice(1)) union(group[0]!, id, vectorDot(group[0]!, id), true);
+  }
   const keepOf = new Map<string, string>();
   for (const pair of input.checked ?? []) {
     const a = byId.get(pair.a);
@@ -433,7 +544,7 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
     });
   }
   // An existing merge stays unless a new group absorbed it; one whose concepts are gone stays too.
-  const merges = input.existing.filter((record) => keptRecords.has(record) || !presentOf.has(record));
+  const merges = input.existing.filter((record) => !dropped.has(record) && (keptRecords.has(record) || !presentOf.has(record)));
   const ids = new Set(merges.map((m) => m.id));
   for (const record of added) if (!ids.has(record.id)) merges.push(record);
   const changed = merges.length !== input.existing.length || merges.some((record, i) => record !== input.existing[i]);
