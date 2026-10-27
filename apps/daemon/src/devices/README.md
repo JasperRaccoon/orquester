@@ -39,6 +39,7 @@ Foundation (shared seams; change them only with the other work packages in mind)
 | `agent-device.ts` | The agent-device runner: pinned `--config`/`--session`/device flags before the command, no shell, scrubbed `AGENT_DEVICE_*`, caps; `--json` refusals → `DeviceError`. Fixtures: `fixtures/agent-device/`. |
 | `actions.ts` | `planAction` (every `device_action` kind → agent-device or `DeviceHost.run`), points ↔ agent-device units, ref → point, session reopen, screenshots, installs; `DeviceHost.performAction` / `installApp` answer first. |
 | `screenshot-image.ts` | PNG decode, downscale and baseline JPEG encode: screenshots fit `DEVICE_SCREENSHOT_MAX_BASE64_CHARS`. |
+| `hosts/vphone/` | Phase 3 research hosts (`vphone:<boxId>`, kind `byo`): `factory.ts` adopts BYO Macs with "Use for device simulators" and `settings.research.vphoneHosts[boxId].enabled`; `readiness.ts` (checks with fix commands; never changes SIP/AMFI), `cli.ts` (vphone-cli over `BoxConnection.exec`), `host.ts` (clone/launch/forward/stop/delete per lease, token in env and a 0600 record), `bridge.ts` (loopback serve-sim endpoints ↔ `/v1/host/screen`, `screen.screenshot`, `/v1/events`), `agent-actions.ts` + `snapshot.ts` (`performAction` → vphoned RPCs), `testing.ts` (fake vphoned, fake Mac link). |
 
 Seams owned by the parallel work packages (each file states its contract; replace the stand-in
 inside it, keep the exported signature `wiring.ts` calls):

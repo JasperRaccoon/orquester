@@ -32,6 +32,7 @@ import { createAgentDeviceClient } from "./agent-device.ts";
 import type { DeviceHostFactory } from "./host.ts";
 import { createBoxHostFactory } from "./hosts/box-host.ts";
 import { createLocalAndroidHostFactory } from "./hosts/local-android.ts";
+import { createVphoneHostFactory } from "./hosts/vphone/factory.ts";
 import { registerDeviceHttpRoutes } from "./http-routes.ts";
 import { createHubProxy, type HubProxy } from "./hub-proxy.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
@@ -108,7 +109,8 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
   const build = (): DeviceService => {
     const factories = deps.factories?.(toolchain) ?? [
       createLocalAndroidHostFactory({ appDir: deps.baseDir, env: deps.env, toolchain, logger }),
-      createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger })
+      createBoxHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, toolchain, logger }),
+      createVphoneHostFactory({ appDir: deps.baseDir, boxes: deps.boxes, logger })
     ];
     const built = new DeviceService({
       settingsStore: new DeviceSettingsStore({ file: devicesSettingsPath(deps.baseDir), logger }),
