@@ -19,7 +19,11 @@ export interface AndroidLayout {
   avd: string;
   /** `XDG_RUNTIME_DIR` (0700): emulator discovery files and gRPC tokens. */
   runtime: string;
-  /** `TMPDIR`: emulator overlays (`android-$USER/`), npm and Java scratch. */
+  /**
+   * `TMPDIR`, npm and Java scratch; and `ANDROID_TMP`: the emulator ignores `TMPDIR` and keeps its
+   * disk overlays and crashpad database (`emu-crash-<version>.db`) in `ANDROID_TMP`, else in
+   * `/tmp/android-$USER`.
+   */
   tmp: string;
   /** `HOME` of the tools: caches that follow `HOME`. */
   home: string;
@@ -112,7 +116,7 @@ export function adbServerPort(appDir: string): number {
 const PASSTHROUGH = ["PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "JAVA_HOME", "SHELL", "TERM"] as const;
 
 export interface AndroidEnvOptions {
-  /** `USER`/`LOGNAME` (the emulator names its overlay dir after it). */
+  /** `USER`/`LOGNAME`. */
   user: string;
   /** The daemon's node binary: its directory goes first on PATH (the tools' `#!/usr/bin/env node`). */
   nodePath: string;
@@ -132,6 +136,7 @@ export function buildAndroidEnv(layout: AndroidLayout, base: NodeJS.ProcessEnv, 
     LOGNAME: options.user,
     HOME: layout.home,
     TMPDIR: layout.tmp,
+    ANDROID_TMP: layout.tmp,
     XDG_RUNTIME_DIR: layout.runtime,
     XDG_CACHE_HOME: join(layout.home, ".cache"),
     XDG_CONFIG_HOME: join(layout.home, ".config"),

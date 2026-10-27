@@ -112,6 +112,8 @@ test("the AVD script is generated from the box host's own modules: hardware, con
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`for gpu in ${BOX_GPU_MODES.box.join(" ")}; do`));
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`adb -s "$SERIAL" emu avd snapshot save ${ANDROID_GOLDEN_SNAPSHOT}`));
   assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(`ANDROID_AVD_HOME=${BOX_ANDROID_AVD_DIR}`));
+  // The emulator's overlays and crashpad database in the box layout, as a box host's env has them (not /tmp/android-$USER).
+  assert.ok(ANDROID_AVD_STEP_SCRIPT.includes(` TMPDIR=${BOX_DEVICES_DIR}/tmp ANDROID_TMP=${BOX_DEVICES_DIR}/tmp `));
 });
 
 /** The script's `cat > "$TUNE/<file>" << 'TAG'` heredocs, written into `dir`. */

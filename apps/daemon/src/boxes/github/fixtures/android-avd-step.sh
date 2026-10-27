@@ -3,7 +3,7 @@ SDK=/var/lib/orquester/devices/android-sdk
 TOOLS=/var/lib/orquester/devices/tools
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_AVD_HOME=/var/lib/orquester/devices/avd
 export ANDROID_USER_HOME=/var/lib/orquester/devices/android-user ANDROID_EMULATOR_HOME=/var/lib/orquester/devices/android-user
-export HOME=/var/lib/orquester/devices/home TMPDIR=/var/lib/orquester/devices/tmp XDG_RUNTIME_DIR=/var/lib/orquester/devices/runtime
+export HOME=/var/lib/orquester/devices/home TMPDIR=/var/lib/orquester/devices/tmp ANDROID_TMP=/var/lib/orquester/devices/tmp XDG_RUNTIME_DIR=/var/lib/orquester/devices/runtime
 export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
 mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME" "$HOME" "$TMPDIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
