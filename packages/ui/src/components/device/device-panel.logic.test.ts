@@ -13,6 +13,7 @@ import {
   deviceKeyOf,
   devicePanelView,
   deviceStreamUrls,
+  deviceToolbarLayout,
   formatElapsed,
   hostStreamCaps,
   inputTakesOver,
@@ -23,6 +24,7 @@ import {
   NO_TRANSPORT_MESSAGE,
   nextRotation,
   pickerGroups,
+  railToolbarHeight,
   rotateControl,
   streamAvailability,
   takeOverToast
@@ -250,6 +252,27 @@ describe("host stream capabilities", () => {
       assert.equal(vm, "serve-sim-mjpeg", hostId);
       assert.equal(effectiveDeviceViewMode({ mode: null }, vm), "flat", hostId);
     }
+  });
+});
+
+describe("the toolbar's place", () => {
+  it("the rail's height follows DeviceToolbar's buttons: 7 on iOS, 8 on Android, Fold/Unfold beside on foldables", () => {
+    assert.equal(railToolbarHeight({ platform: "ios", foldable: false, foldError: false }), 16 + 10 + 7 * 34 + 5);
+    assert.equal(railToolbarHeight({ platform: "android", foldable: false, foldError: false }), 303);
+    // As measured in the harness: a Pixel Fold's rail is 371 px tall, plus the rail's 16 px padding.
+    assert.equal(railToolbarHeight({ platform: "android", foldable: true, foldError: false }), 387);
+    assert.ok(railToolbarHeight({ platform: "android", foldable: true, foldError: true }) > 387);
+  });
+  it("a rail taller than the room beside the device becomes the bar below it (never over the activity drawer)", () => {
+    const fold = railToolbarHeight({ platform: "android", foldable: true, foldError: false });
+    // A narrow rail at 577 px tall leaves 362 px beside the device: the bar.
+    assert.equal(deviceToolbarLayout("rail", 362, fold), "bar");
+    assert.equal(deviceToolbarLayout("rail", 362, railToolbarHeight({ platform: "android", foldable: false, foldError: false })), "rail");
+    assert.equal(deviceToolbarLayout("rail", fold, fold), "rail");
+    // Unmeasured (no layout yet, or a DOM without one): the panel's choice; a phone keeps its bar.
+    assert.equal(deviceToolbarLayout("rail", null, fold), "rail");
+    assert.equal(deviceToolbarLayout("rail", 0, fold), "rail");
+    assert.equal(deviceToolbarLayout("bar", 2000, fold), "bar");
   });
 });
 

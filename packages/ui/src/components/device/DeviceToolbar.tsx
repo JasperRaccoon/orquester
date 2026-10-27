@@ -126,7 +126,8 @@ export function DeviceToolbar(props: DeviceToolbarProps): React.ReactElement {
       role="toolbar"
       aria-label="Device controls"
       aria-orientation={layout === "rail" ? "vertical" : "horizontal"}
-      className={cn("flex items-center gap-2", layout === "rail" ? "flex-col" : "flex-row justify-center")}
+      // A narrow bar wraps the fold controls onto a second line rather than spilling sideways.
+      className={cn("flex items-center gap-2", layout === "rail" ? "flex-col" : "flex-row flex-wrap justify-center")}
       data-device-toolbar={layout}
     >
       <div className={group}>

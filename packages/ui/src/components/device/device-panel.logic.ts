@@ -323,6 +323,34 @@ export function deviceFoldRequest(api: DeviceUrlApi, lease: Pick<DeviceLeaseSumm
 }
 
 // ---------------------------------------------------------------------------
+// The toolbar's place
+// ---------------------------------------------------------------------------
+
+/** The device toolbar's sizes as `DeviceToolbar` draws them (px): `h-8` buttons, `gap-0.5`, a divider with its margins, `p-1` and a border per group, `gap-2` between groups; the rail's `py-2`; a fold error's two lines. */
+const TOOLBAR_PX = { button: 32, gap: 2, divider: 5, groupChrome: 10, groupGap: 8, railPadding: 16, foldError: 32 } as const;
+
+/** How tall the vertical rail is for a device: Home, (Back,) Recents, Rotate | Screenshot, Keyboard, 3D, More, then Fold/Unfold for foldables. */
+export function railToolbarHeight(device: { platform: DevicePlatform; foldable: boolean; foldError: boolean }): number {
+  const px = TOOLBAR_PX;
+  const buttons = device.platform === "android" ? 8 : 7;
+  let height = px.railPadding + px.groupChrome + buttons * px.button + buttons * px.gap + px.divider;
+  if (device.foldable) height += px.groupGap + px.groupChrome + 2 * px.button + px.gap;
+  if (device.foldable && device.foldError) height += px.groupGap + px.foldError;
+  return height;
+}
+
+/**
+ * Where the toolbar goes: the panel's choice, except that a rail taller than the room beside the
+ * device (`areaHeight`: the stage and the toolbar's row together, above the activity drawer) becomes
+ * the bar below the device, so it never spills over the controller pill or the activity drawer.
+ * Unmeasured (`null` or 0): the panel's choice.
+ */
+export function deviceToolbarLayout(preferred: "rail" | "bar", areaHeight: number | null, railHeight: number): "rail" | "bar" {
+  if (preferred === "bar" || !areaHeight) return preferred;
+  return areaHeight >= railHeight ? "rail" : "bar";
+}
+
+// ---------------------------------------------------------------------------
 // The picker
 // ---------------------------------------------------------------------------
 

@@ -33,9 +33,11 @@ import {
   deviceFoldRequest,
   deviceKeyOf,
   deviceStreamUrls,
+  deviceToolbarLayout,
   hostStreamCaps,
   inputTakesOver,
   nextRotation,
+  railToolbarHeight,
   rotateControl,
   takeOverToast
 } from "./device-panel.logic";
@@ -410,9 +412,23 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
   const screenSize = stream.screenConfig ? { width: stream.screenConfig.width, height: stream.screenConfig.height } : null;
   const inputBlocked = stream.screenConfig?.inputUnavailable === true;
 
+  // The room for the device and its toolbar (above the activity drawer): a rail taller than it becomes the bar.
+  const areaRef = React.useRef<HTMLDivElement | null>(null);
+  const [areaHeight, setAreaHeight] = React.useState<number | null>(null);
+  React.useLayoutEffect(() => {
+    const node = areaRef.current;
+    if (!node) return;
+    setAreaHeight(node.clientHeight);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setAreaHeight(node.clientHeight));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const layout = deviceToolbarLayout(props.layout, areaHeight, railToolbarHeight({ platform: lease.platform, foldable, foldError: foldError !== null }));
+
   const toolbar = (
     <DeviceToolbar
-      layout={props.layout}
+      layout={layout}
       platform={lease.platform}
       input={inputControl}
       onButton={pressButton}
@@ -472,88 +488,90 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
       <div className="flex shrink-0 justify-center px-3 pt-2.5">
         <ControllerPill lease={lease} agentName={props.agentName} busy={controllerBusy} onChange={(controller) => changeController(controller, "button")} />
       </div>
-      <div className="relative flex min-h-0 flex-1">
-        <div
-          className={cn(
-            "relative m-2 min-h-0 min-w-0 flex-1 rounded-2xl transition-shadow motion-reduce:transition-none",
-            focused && "ring-1 ring-info/50"
-          )}
-        >
-          <DeviceViewport
-            ref={viewport}
-            source={stream.canvas}
-            platform={lease.platform}
-            deviceName={lease.name}
-            profileName={lease.profile}
-            screen={screenSize}
-            orientation={orientation}
-            mode={mode}
-            onTouch={onTouch}
-            onModeUnavailable={setUnavailable}
-            foldAngle={foldable ? androidFoldAngle(fold?.posture ?? null, fold?.hingeAngle ?? null) : null}
-          />
-          <DeviceAgentOverlay
-            entries={props.actions}
-            screen={lease.screen}
-            orientation={orientation}
-            project={(x, y) => viewport.current?.projectPoint(x, y) ?? null}
-            active={live}
-          />
-          {!live ? (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 text-center" aria-live="polite">
-              {stream.state === "error" ? (
-                <div className="mx-6 flex max-w-xs flex-col items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
-                  <VideoOff size={18} aria-hidden className="text-danger" />
-                  <p className="text-[12px] leading-relaxed text-neutral-300">{stream.error?.message ?? "The video stopped."}</p>
-                  <button
-                    type="button"
-                    onClick={() => setRestarting(true)}
-                    className="inline-flex items-center gap-1.5 rounded-md bg-neutral-100 px-2.5 py-1 text-[12px] font-medium text-neutral-900 hover:bg-white"
-                  >
-                    <RefreshCw size={12} aria-hidden />
-                    Retry
-                  </button>
-                </div>
-              ) : (
-                <div className="inline-flex items-center gap-2 rounded-full bg-neutral-950/80 px-3 py-1.5 text-[12px] text-neutral-400 ring-1 ring-neutral-800">
-                  <Loader2 size={13} aria-hidden className="animate-spin motion-reduce:animate-none" />
-                  {docVisible ? "Connecting video…" : "Paused while the page is hidden"}
-                </div>
-              )}
-            </div>
-          ) : null}
-          {stream.state === "stalled" ? (
-            <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/85 px-2.5 py-1 text-[11px] text-neutral-400 ring-1 ring-neutral-800">
-              Waiting for device video…
-            </div>
-          ) : null}
-          {inputBlocked ? (
-            <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/85 px-2.5 py-1 text-[11px] text-warn ring-1 ring-warn-500/30">
-              Another viewer holds this simulator's input
-            </div>
-          ) : null}
-          {toast ? (
-            <div className="absolute bottom-3 left-1/2 z-20 flex max-w-[90%] -translate-x-1/2 items-center gap-2 rounded-full bg-neutral-900/95 py-1 pl-2.5 pr-1 text-[11.5px] text-neutral-200 shadow-lg ring-1 ring-neutral-700" role="status">
-              <Hand size={12} aria-hidden className="shrink-0 text-info" />
-              <span className="truncate">{toast}</span>
-              <button
-                type="button"
-                onClick={() => changeController("agent", "button")}
-                onPointerDown={(event) => event.preventDefault()}
-                className="shrink-0 rounded-full bg-neutral-800 px-2 py-0.5 text-[11px] font-medium text-neutral-200 hover:bg-neutral-700"
-              >
-                Give back
-              </button>
-            </div>
-          ) : focused && live ? (
-            <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/80 px-2.5 py-1 text-[11px] text-neutral-400 ring-1 ring-neutral-800 transition-opacity group-hover/device:opacity-100">
-              Typing goes to {props.name}
-            </div>
-          ) : null}
+      <div ref={areaRef} className="flex min-h-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 flex-1">
+          <div
+            className={cn(
+              "relative m-2 min-h-0 min-w-0 flex-1 rounded-2xl transition-shadow motion-reduce:transition-none",
+              focused && "ring-1 ring-info/50"
+            )}
+          >
+            <DeviceViewport
+              ref={viewport}
+              source={stream.canvas}
+              platform={lease.platform}
+              deviceName={lease.name}
+              profileName={lease.profile}
+              screen={screenSize}
+              orientation={orientation}
+              mode={mode}
+              onTouch={onTouch}
+              onModeUnavailable={setUnavailable}
+              foldAngle={foldable ? androidFoldAngle(fold?.posture ?? null, fold?.hingeAngle ?? null) : null}
+            />
+            <DeviceAgentOverlay
+              entries={props.actions}
+              screen={lease.screen}
+              orientation={orientation}
+              project={(x, y) => viewport.current?.projectPoint(x, y) ?? null}
+              active={live}
+            />
+            {!live ? (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 text-center" aria-live="polite">
+                {stream.state === "error" ? (
+                  <div className="mx-6 flex max-w-xs flex-col items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
+                    <VideoOff size={18} aria-hidden className="text-danger" />
+                    <p className="text-[12px] leading-relaxed text-neutral-300">{stream.error?.message ?? "The video stopped."}</p>
+                    <button
+                      type="button"
+                      onClick={() => setRestarting(true)}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-neutral-100 px-2.5 py-1 text-[12px] font-medium text-neutral-900 hover:bg-white"
+                    >
+                      <RefreshCw size={12} aria-hidden />
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-2 rounded-full bg-neutral-950/80 px-3 py-1.5 text-[12px] text-neutral-400 ring-1 ring-neutral-800">
+                    <Loader2 size={13} aria-hidden className="animate-spin motion-reduce:animate-none" />
+                    {docVisible ? "Connecting video…" : "Paused while the page is hidden"}
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {stream.state === "stalled" ? (
+              <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/85 px-2.5 py-1 text-[11px] text-neutral-400 ring-1 ring-neutral-800">
+                Waiting for device video…
+              </div>
+            ) : null}
+            {inputBlocked ? (
+              <div className="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/85 px-2.5 py-1 text-[11px] text-warn ring-1 ring-warn-500/30">
+                Another viewer holds this simulator's input
+              </div>
+            ) : null}
+            {toast ? (
+              <div className="absolute bottom-3 left-1/2 z-20 flex max-w-[90%] -translate-x-1/2 items-center gap-2 rounded-full bg-neutral-900/95 py-1 pl-2.5 pr-1 text-[11.5px] text-neutral-200 shadow-lg ring-1 ring-neutral-700" role="status">
+                <Hand size={12} aria-hidden className="shrink-0 text-info" />
+                <span className="truncate">{toast}</span>
+                <button
+                  type="button"
+                  onClick={() => changeController("agent", "button")}
+                  onPointerDown={(event) => event.preventDefault()}
+                  className="shrink-0 rounded-full bg-neutral-800 px-2 py-0.5 text-[11px] font-medium text-neutral-200 hover:bg-neutral-700"
+                >
+                  Give back
+                </button>
+              </div>
+            ) : focused && live ? (
+              <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-neutral-950/80 px-2.5 py-1 text-[11px] text-neutral-400 ring-1 ring-neutral-800 transition-opacity group-hover/device:opacity-100">
+                Typing goes to {props.name}
+              </div>
+            ) : null}
+          </div>
+          {layout === "rail" ? <div className="flex shrink-0 flex-col justify-center py-2 pr-2">{toolbar}</div> : null}
         </div>
-        {props.layout === "rail" ? <div className="flex shrink-0 flex-col justify-center py-2 pr-2">{toolbar}</div> : null}
+        {layout === "bar" ? <div className="shrink-0 px-2 pb-2">{toolbar}</div> : null}
       </div>
-      {props.layout === "bar" ? <div className="shrink-0 px-2 pb-2">{toolbar}</div> : null}
       <DeviceActionLog
         rows={props.logRows}
         open={props.logOpen}
