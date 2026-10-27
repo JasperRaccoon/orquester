@@ -164,6 +164,8 @@ export interface DeviceHost {
   hubToken?(): string | null;
   /** What the host's hub can stream for iOS: serve-sim H.264 fails in Apple VMs (no H.264 encoder). */
   streamCapabilities?(): { iosH264: boolean };
+  /** A viewer is watching one of its devices (the service relays `viewerActive`): a host may keep or end stream sessions by it. */
+  viewerActive?(deviceId: string): void;
   /** The agent-device config file pinned to this host's daemon (token inside, never returned); null while not running. */
   agentDeviceConfigPath(): string | null;
   /** How to run agent-device for this host; absent: the toolchain's pinned CLI with the daemon's environment. */

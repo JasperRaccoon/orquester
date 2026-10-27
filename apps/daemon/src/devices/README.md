@@ -45,11 +45,41 @@ inside it, keep the exported signature `wiring.ts` calls):
 
 | File | Owner | Stand-in today |
 |---|---|---|
-| `toolchain/` (`index.ts`, `../tool-versions.json`) | toolchain: pinned npm tools, Android SDK, AVDs, golden snapshots | reports everything missing, refuses installs |
-| `hosts/local-android.ts` | local Android host: supervised hub, emulators, capacity, readiness with fix actions | adds a `PlaceholderDeviceHost` (`hosts/placeholder.ts`) while Android is enabled |
+| `toolchain/` (`index.ts`, `../tool-versions.json`) | toolchain: pinned npm tools, Android SDK, AVDs | implemented (below) |
+| `hosts/local-android.ts` | local Android host: emulators, supervised hub, capacity, readiness with fix actions | implemented (below) |
 | `hosts/box-host.ts` | Mac device hosts (box purpose `device-host`, setup step `devices`), `provision`, `provisionQuote`, `destroy` | adds no host, cannot provision |
 | `pool.ts` | phase 2 scheduler (`decidePool`), keeping `choosePlacement`'s contract | phase 1 rules |
 | `service.ts`, `leases.ts`, `http-routes.ts`, `ws-routes.ts`, `wiring.ts` | shared: extend, don't fork | complete for phase 1 |
+
+## Local Android (toolchain, `android/`, `hosts/local-android.ts`)
+
+Facts and flags come from the spike (`docs/superpowers/research/2026-10-27-devices-spikes.md` §2).
+
+| File | What it is |
+|---|---|
+| `toolchain/index.ts` | `DeviceToolchain`: tool and SDK status, `ensureTool`, `ensureAndroidSdk`, `ensureSystemImage`, `ensureAvd`; the appdir's `layout` and private `env`. |
+| `toolchain/npm-tools.ts` | `<tools>/<name>@<version>`: staging dir, `.install-complete`, rename, per-tool lock (`lock.ts`), prune to current + previous; the hub's scrcpy-server v4.0 jar pre-seeded (pinned SHA-256). |
+| `toolchain/android-sdk.ts` | cmdline-tools (pinned URL + SHA-256), `sdkmanager --licenses` (the owner's Install click accepts), packages, AVD creation + markers (`orq-avd.json`, `orq-golden.json`). |
+| `toolchain/download.ts` | Pinned, checksummed downloads (`<dest>.part` → rename). |
+| `android/env.ts` | `androidLayout` (every path under `devicesDir`) and `buildAndroidEnv` (allowlisted daemon env + `ANDROID_*`, `XDG_RUNTIME_DIR`, `TMPDIR`, `HOME`, hub and agent-device state dirs, private `ANDROID_ADB_SERVER_PORT` 16000–19999 from the appdir). |
+| `android/avd-config.ts` | Per-profile framebuffer (≈720 px across, the real aspect; foldable hinges and display regions scaled) and the `config.ini` patch (avdmanager placeholders, 2 GB, 2 cores, `swangle_indirect`, no cameras/audio, keyboard). |
+| `android/emulator.ts` | Flags, port allocation (5554–5682, above adb's 5555–5585 scan first), detached launch (direct or `sg kvm -c`), QEMU pid lookup, `sys.boot_completed` wait, `adb emu kill` → SIGTERM → SIGKILL. |
+| `android/golden.ts` | The golden snapshot, made lazily on a profile's first open: cold writable boot, CPU settle (≤ 5 min), guest settings, agent-device helper APKs, `emu kill` saves `default_boot`. |
+| `android/hub.ts`, `hub-launcher.mjs` | The supervised hub (detached; token from its 0600 `server-<port>.json`, redacted from its log), backoff, capture-session recycling. |
+| `android/agent-device-daemon.ts` | Starts agent-device's daemon (`devices --json`), writes the 0600 `--config` (`daemonBaseUrl`, `daemonAuthToken`). |
+| `android/state.ts` | `hub.json`: hub and emulator pids; `planReattach` (keep / reap / forget). |
+| `android/capacity.ts`, `readiness.ts`, `procs.ts` | Capacity formula, the readiness checklist with fix action ids, `/proc` readers. |
+
+Integration check on a KVM machine — install, two concurrent leases, hub `/api/devices` with the
+token, agent-device through `--config`, a simulated daemon restart (reattach), release; then
+`open_device` + `device_action snapshot` through a real `DeviceService` — in a throwaway appdir
+(~6 min the first time: ~2 min install, ~4 min golden snapshot;
+`ORQ_IT_SDK=<sdk>` hard-links an existing SDK instead of downloading it; never touches the live
+daemon's appdir or ports):
+
+```sh
+cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/android/integration.it.ts /var/lib/orquester/tmp/devices-local-it/app [profile]
+```
 
 ## Rules
 
