@@ -205,6 +205,42 @@ test("single-source: claims on exactly one visible entry in a cluster of 3 or mo
   assert.deepEqual((await s.insights.list({}, s.seoOnly)).singleSource.map((item) => item.concept.id), ["metric-solo3"]);
 });
 
+test("single-source: never a claim another visible entry backs in other words, nor a rule; saved posts before notes", async () => {
+  const s = await setup();
+  // Solo rule is about Pricing tables too now: a claim of its cluster's topic, yet a rule.
+  await loadGraph(
+    s.graph,
+    [
+      node("topic-marketing", "Marketing", files("p1", "p2", "p3", "p4", "q1", "q2", "r1", "r2", "r3")),
+      node("topic-pa", "Pricing tables", files("p2", "p3")),
+      node("topic-ra", "Retention", files("r2", "r3")),
+      node("tactic-solo1", "Solo tactic", files("p1")),
+      node("rule-solo2", "Solo rule", files("p1"), { type: "rule" }),
+      node("metric-solo3", "Solo metric", files("r1"), { type: "metric" }),
+      node("tactic-solo1-reworded", "Solo tactic, reworded", files("q1")),
+      node("metric-solo3-hidden", "Solo metric, as H says it", files("h"))
+    ],
+    [
+      edge("t1", "tactic-solo1", "topic-pa", null, "about"),
+      edge("t1r", "rule-solo2", "topic-pa", null, "about"),
+      edge("t2", "metric-solo3", "topic-ra", null, "measures")
+    ]
+  );
+  const listed = async (scope: KnowledgeScope) => (await s.insights.list({}, scope)).singleSource.map((item) => item.concept.id);
+  assert.deepEqual(await listed(s.all), ["metric-solo3", "tactic-solo1"], "a rule restates a policy: never listed");
+
+  // Q1 says Solo tactic in other words; only H (hidden from SEO) says Solo metric in other words.
+  s.graph.setBackingConcepts((id) => (id === "tactic-solo1" ? ["tactic-solo1-reworded"] : id === "metric-solo3" ? ["metric-solo3-hidden"] : []));
+  assert.deepEqual(await listed(s.all), [], "backed elsewhere");
+  assert.deepEqual(await listed(s.seoOnly), ["metric-solo3"], "a hidden entry backs nothing");
+
+  // A saved post's claim comes before a research note's, however central the note's is.
+  s.graph.setBackingConcepts(null);
+  s.store.put(ke("r1"), "body r1", ["kc_seo"], { title: "R note 1", kind: "research note" }, true);
+  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "P note 1", kind: "post" }, true);
+  assert.deepEqual(await listed(s.seoOnly), ["tactic-solo1", "metric-solo3"]);
+});
+
 test("contradictions: graph and checked, checked first; a hidden entry is never on either side", async () => {
   const s = await setup();
   s.pairChecks.push({ a: ke("p1"), b: ke("p2"), verdict: "contradicts", note: "P1 says annual, P2 monthly", checkedAt: "2026-10-27T00:00:00.000Z" });

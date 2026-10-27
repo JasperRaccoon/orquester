@@ -46,6 +46,11 @@ export interface ConceptMergeThresholds {
   merge: number;
   /** Listed as a similar concept (when not merged with it). */
   similar: number;
+  /**
+   * The bar for a concept whose name holds every word of the other's ({@link conceptBacks}); absent:
+   * `similar`.
+   */
+  contained?: number;
 }
 
 /**
@@ -71,8 +76,17 @@ export interface ConceptMergeThresholds {
  *   arrival" → "No SIM in the phone" 0.922). → `similar` 0.93 (3 concepts in 5 have one or more).
  *   It is above `merge` because a merge also needs the name guards: a similar concept is any
  *   unmerged one at or above it.
+ * - Backing (live graph of 2026-10-27 late, 126 entries; claims on different entries with the same
+ *   numbers and negations): of the 105 pairs where one name holds every word (3 or more) of the
+ *   other, all read as the same claim, a part of it or a restatement down to 0.859 ("Per-user
+ *   ad-value model driving UA bidding…" ~ "Ad-value models"; "Create TikTok accounts with a 2-3
+ *   account limit per device" ~ "2–3 accounts per device" 0.906, whose nearest neighbours by cosine
+ *   alone are other TikTok tactics at 0.92) → `contained` 0.85. Cosine alone is no backing, even
+ *   at `similar`: "Buying press releases…" ~ "Look for creators who get rebooked" 0.930, "Allow
+ *   OAI-SearchBot" ~ "Block OAI-SearchBot" 0.934, "Bumble annual revenue" ~ "Candy Crush annual
+ *   revenue" 0.941; hence the name rules of {@link conceptBacks}.
  */
-export const E5_SMALL_CONCEPT_THRESHOLDS: ConceptMergeThresholds = { merge: 0.91, similar: 0.93 };
+export const E5_SMALL_CONCEPT_THRESHOLDS: ConceptMergeThresholds = { merge: 0.91, similar: 0.93, contained: 0.85 };
 
 /** Calibrated models only: another model's vectors make no merges and no similar concepts. */
 const THRESHOLDS_BY_MODEL: Readonly<Record<string, ConceptMergeThresholds>> = { [EMBEDDING_MODEL_ID]: E5_SMALL_CONCEPT_THRESHOLDS };
@@ -176,6 +190,29 @@ export function conceptMergeRefusal(
   }
   if (listsThings(a.name) !== listsThings(b.name)) return "list";
   return null;
+}
+
+/** Name words two concepts must share (of their union) for cosine at `similar` to make one back the other. */
+const BACKS_MIN_JACCARD = 0.5;
+
+/**
+ * Whether one concept backs the other: another entry linking it says the same thing (insights'
+ * single-source claims and an entry's novelty count it). Same type, the same numbers and negations,
+ * and either one name holds every word (three or more) of the other at cosine ≥ `contained`, or
+ * cosine ≥ `similar` with half their words shared and not a one-word swap ("Allow OAI-SearchBot" ~
+ * "Block OAI-SearchBot"). Looser than a merge: a restatement or a part of a claim backs it.
+ */
+function conceptBacks(a: { type: string; name: string }, b: { type: string; name: string }, similarity: number, thresholds: ConceptMergeThresholds): boolean {
+  if (a.type !== b.type || !(similarity >= Math.min(thresholds.contained ?? thresholds.similar, thresholds.similar))) return false;
+  if (!sameSet(conceptNameNumbers(a.name), conceptNameNumbers(b.name)) || !sameSet(conceptNameNegations(a.name), conceptNameNegations(b.name))) return false;
+  const ta = conceptNameTokens(a.name);
+  const tb = conceptNameTokens(b.name);
+  const [small, large] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  let shared = 0;
+  for (const token of small) if (large.has(token)) shared += 1;
+  if (small.size >= 3 && shared === small.size) return similarity >= (thresholds.contained ?? thresholds.similar);
+  if (similarity < thresholds.similar || shared < 2 || shared / (ta.size + tb.size - shared) < BACKS_MIN_JACCARD) return false;
+  return !(ta.size - shared === 1 && tb.size - shared === 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +634,9 @@ export class KnowledgeConceptMerges {
   private readonly plannedListeners = new Set<() => void>();
   private readonly unsubscribe: (() => void)[] = [];
   private byType: { revision: number; map: Map<string, string[]> } | null = null;
+  private byId: { revision: number; map: Map<string, GraphConcept> } | null = null;
+  /** {@link backing}'s answers for one set of vectors, load and merges. */
+  private backed: { set: ConceptVectorSet; revision: string; map: Map<string, readonly string[]> } | null = null;
   private stopped = false;
 
   constructor(options: KnowledgeConceptMergesOptions) {
@@ -620,8 +660,14 @@ export class KnowledgeConceptMerges {
     // Nothing to overlay leaves the graph (and its revision) as it is.
     if (this.file.merges.length > 0) this.graph.setConceptMerges(overlayOf(this.file));
     this.graph.setSimilarConcepts((id) => this.similar(id));
+    this.graph.setBackingConcepts((id) => this.backing(id));
     this.unsubscribe.push(this.graph.onLoad(() => this.graphLoaded()));
-    this.unsubscribe.push(this.vectors.onComputed(() => void this.plan()));
+    this.unsubscribe.push(
+      this.vectors.onComputed(() => {
+        this.graph.backingMoved();
+        void this.plan();
+      })
+    );
     this.vectors.start();
     if (this.graph.loadRevision() > 0) this.graphLoaded();
   }
@@ -630,6 +676,7 @@ export class KnowledgeConceptMerges {
     this.stopped = true;
     for (const off of this.unsubscribe.splice(0)) off();
     this.graph.setSimilarConcepts(null);
+    this.graph.setBackingConcepts(null);
     await this.vectors.stop();
     await this.chain.catch(() => undefined);
   }
@@ -770,6 +817,68 @@ export class KnowledgeConceptMerges {
       .map(([id, similarity]) => ({ id, similarity: Math.round(similarity * 10_000) / 10_000 }))
       .sort((a, b) => b.similarity - a.similarity || (a.id < b.id ? -1 : 1))
       .slice(0, 50);
+  }
+
+  /**
+   * The concepts of the current graph that back `conceptId` ({@link conceptBacks}), as the ids the
+   * graph goes by (merged ones under the concept they were merged into), never itself; none until
+   * vectors from a calibrated model are complete. Remembered per vectors, load and merges.
+   */
+  backing(conceptId: string): readonly string[] {
+    const set = this.vectors.current();
+    const thresholds = set ? this.thresholdsOf(set.modelId) : null;
+    if (!set || !thresholds) return [];
+    const revision = `${set.modelId}\u0000${this.graph.loadRevision()}\u0000${this.graph.revision()}`;
+    if (this.backed?.set !== set || this.backed.revision !== revision) this.backed = { set, revision, map: new Map() };
+    const known = this.backed.map.get(conceptId);
+    if (known) return known;
+    const own = this.graph.canonicalConceptId(conceptId);
+    const sources = this.namesOf(own);
+    const type = this.graph.conceptType(own);
+    const found = new Set<string>();
+    if (type !== null) {
+      const bar = Math.min(thresholds.contained ?? thresholds.similar, thresholds.similar);
+      for (const source of sources) {
+        const vector = set.vectors.get(source.id);
+        if (!vector) continue;
+        for (const other of this.idsOfType(type)) {
+          const canonical = this.graph.canonicalConceptId(other);
+          if (canonical === own || found.has(canonical)) continue;
+          const otherVector = set.vectors.get(other);
+          if (!otherVector) continue;
+          const similarity = dot(vector, otherVector);
+          if (similarity < bar) continue;
+          const concept = this.conceptsById().get(other);
+          if (concept && conceptBacks(source, concept, similarity, thresholds)) found.add(canonical);
+        }
+      }
+    }
+    const out = [...found].sort();
+    this.backed.map.set(conceptId, out);
+    return out;
+  }
+
+  /** myKG's concepts by id (the current load). */
+  private conceptsById(): ReadonlyMap<string, GraphConcept> {
+    const revision = this.graph.loadRevision();
+    if (!this.byId || this.byId.revision !== revision) this.byId = { revision, map: new Map(this.graph.baseConcepts().map((concept) => [concept.id, concept])) };
+    return this.byId.map;
+  }
+
+  /** The concept and every concept merged into it (each name a claim may be worded as). */
+  private namesOf(canonical: string): GraphConcept[] {
+    const byId = this.conceptsById();
+    const out: GraphConcept[] = [];
+    const own = byId.get(canonical);
+    if (own) out.push(own);
+    for (const merge of this.graph.conceptMerges()) {
+      if (this.graph.canonicalConceptId(merge.into.id) !== canonical) continue;
+      for (const source of merge.merged) {
+        const concept = byId.get(source.id);
+        if (concept && concept.id !== canonical) out.push(concept);
+      }
+    }
+    return out;
   }
 
   private idsOfType(type: string): readonly string[] {

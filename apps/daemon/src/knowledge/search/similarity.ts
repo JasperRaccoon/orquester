@@ -142,7 +142,7 @@ export type KnowledgeClusterRef = { label: string | null; size: number };
 
 export interface KnowledgeSimilarityOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef">;
+  graph: Pick<KnowledgeGraph, "relatedEntries" | "conceptsOfEntry" | "conceptIdsOfEntry" | "revision" | "visibleEntriesOf" | "visibleEdgesOfType" | "conceptRef" | "backingConcepts">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it (snippet, visible collections, link count, citation). */
@@ -553,7 +553,7 @@ export class KnowledgeSimilarity {
   // -------------------------------------------------------------------------
 
   /**
-   * What the entry adds: its concepts no other visible entry has (claims first, people and
+   * What the entry adds: its concepts no other visible entry has, in these words or in others (`backingConcepts`; claims first, people and
    * organizations last, up to 8), and the cluster it sits in by the latest similarity graph drawn
    * for `scope` (any `k` and `limit`: the layer's, insights'). Null when none is drawn yet: it never
    * waits for one, it starts drawing one in the background for the next read. Null while the entry
@@ -567,9 +567,11 @@ export class KnowledgeSimilarity {
       const key = type.toLowerCase();
       return CLAIM_CONCEPT_TYPES.has(key) ? 0 : NON_TOPIC_CONCEPT_TYPES.has(key) ? 2 : 1;
     };
+    const onlyHere = (conceptId: string): boolean => this.knowledgeGraph.visibleEntriesOf(conceptId, scope).every((other) => other === id);
     const newConcepts = this.knowledgeGraph
       .conceptsOfEntry(id, scope)
-      .filter((concept) => this.knowledgeGraph.visibleEntriesOf(concept.id, scope).every((other) => other === id))
+      // Nor said in other words by another entry (a concept that backs it).
+      .filter((concept) => onlyHere(concept.id) && this.knowledgeGraph.backingConcepts(concept.id).every(onlyHere))
       .map((concept, order) => ({ concept, order, rank: rankOf(concept.type) }))
       .sort((a, b) => a.rank - b.rank || a.order - b.order)
       .slice(0, NOVELTY_CONCEPTS_MAX)

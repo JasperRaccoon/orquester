@@ -9,13 +9,14 @@
  * - Bridges: entries whose distinctive concepts ({@link distinctiveLimit}; never a person or an
  *   organization) are shared with entries in at least 2 other clusters of two or more; most
  *   clusters first, then most such concepts, then newest.
- * - Single-source claims worth verifying: claims (Tactic, Rule, Guideline, Result, Metric) linked
- *   to exactly one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3
- *   or more, whose topic other entries of that cluster discuss: at least
+ * - Single-source claims worth verifying: claims ({@link SINGLE_SOURCE_TYPES}) linked to exactly
+ *   one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3 or more,
+ *   that no other visible entry backs in other words (`KnowledgeGraph.backingConcepts`), and
+ *   whose topic other entries of that cluster discuss: at least
  *   {@link SINGLE_SOURCE_MIN_PEERS} and {@link SINGLE_SOURCE_MIN_SHARE} of its other (non-survey)
  *   entries link to a concept the claim is linked to (never a person or an organization, nor a concept on most entries). Peers that
- *   discuss the topic and do not back the claim are what makes it worth checking. Ranked by
- *   centrality: the share of the cluster's peers that discuss its topic; taken one per entry in
+ *   discuss the topic and do not back the claim are what makes it worth checking. Ranked by what
+ *   they came from (a saved post, thread or article before a note: {@link noteTier}), then centrality: the share of the cluster's peers that discuss its topic; taken one per entry in
  *   turn (entries by their most central claim), so one prolific entry does not fill the list.
  * - Link gaps: {@link findLinkGaps} at the model's `strong` threshold; `queued` from the re-linker.
  *
@@ -61,13 +62,20 @@ import { type KnowledgeScope, entryInScope } from "./visibility.ts";
 export const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_INSIGHTS_MAX_LIMIT = 50;
 /** How insights are derived; part of the cache key. */
-const INSIGHTS_ALGORITHM = "insights-v2";
+const INSIGHTS_ALGORITHM = "insights-v3";
 /** Insights responses (and, separately, link-gap lists) kept. */
 const INSIGHTS_CACHE_SIZE = 8;
 /** Other clusters a bridge's distinctive concepts must reach. */
 const BRIDGE_MIN_CLUSTERS = 2;
 /** Concepts named per bridge. */
 const BRIDGE_CONCEPTS_MAX = 5;
+/**
+ * Claims whose single source is worth checking: what someone did and what it gave. Not rules or
+ * guidelines: those restate a platform's policy, one reference note per rule by design (126 real
+ * entries: 20 of the first 50 single-source items were App Store Preflight rules, each the only note
+ * on its rule), and the policy is checked against the platform, not against other entries.
+ */
+const SINGLE_SOURCE_TYPES: ReadonlySet<string> = new Set(["tactic", "result", "metric"]);
 /** The cluster size from which an unbacked claim counts (peers that could have said it and did not). */
 const SINGLE_SOURCE_MIN_CLUSTER = 3;
 /**
@@ -92,7 +100,7 @@ const CENTRALITY_WEIGHT = 0.1;
 
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType">;
+  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType" | "backingConcepts" | "backingRevision">;
   similarity: Pick<KnowledgeSimilarity, "graph" | "clusterLabelsRevision">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
@@ -150,7 +158,7 @@ export class KnowledgeInsights {
     const base = [scopeKey(scope), vectors?.index.modelId() ?? null, vectors?.thresholds ?? null, vectors?.index.generation() ?? null, this.options.graph.revision(), visibleKey];
     const gapsKey = JSON.stringify(base);
     // The clusters' LLM names are part of what insights show (a cluster ref's label).
-    const key = JSON.stringify([INSIGHTS_ALGORITHM, ...base, limit, this.options.pairChecksRevision?.() ?? 0, this.options.similarity.clusterLabelsRevision()]);
+    const key = JSON.stringify([INSIGHTS_ALGORITHM, ...base, limit, this.options.pairChecksRevision?.() ?? 0, this.options.similarity.clusterLabelsRevision(), this.options.graph.backingRevision()]);
 
     const gaps = vectors
       ? remember(this.gapCache, gapsKey, () =>
@@ -310,12 +318,15 @@ export class KnowledgeInsights {
         if (peers.length < SINGLE_SOURCE_MIN_PEERS) continue;
         const scored: { concept: KnowledgeConceptRef; peers: number }[] = [];
         for (const concept of conceptsOf.get(meta.id)!) {
-          if (!CLAIM_CONCEPT_TYPES.has(concept.type.toLowerCase()) || entriesOf.get(concept.id)!.length !== 1) continue;
+          if (!SINGLE_SOURCE_TYPES.has(concept.type.toLowerCase()) || entriesOf.get(concept.id)!.length !== 1) continue;
           const topics = neighbours(graph.canonicalConceptId(concept.id)).filter(isTopic);
           if (topics.length === 0) continue;
           let discussing = 0;
           for (const peer of peers) if (topics.some((id) => ownOf(peer).has(id))) discussing += 1;
-          if (discussing >= Math.max(SINGLE_SOURCE_MIN_PEERS, SINGLE_SOURCE_MIN_SHARE * peers.length)) scored.push({ concept, peers: discussing });
+          if (discussing < Math.max(SINGLE_SOURCE_MIN_PEERS, SINGLE_SOURCE_MIN_SHARE * peers.length)) continue;
+          // Another entry says it in other words: backed, not single-source.
+          if (graph.backingConcepts(concept.id).some((other) => graph.visibleEntriesOf(other, scope).some((id) => id !== meta.id && metaOf.has(id)))) continue;
+          scored.push({ concept, peers: discussing });
         }
         if (scored.length === 0) continue;
         scored.sort((x, y) => y.peers - x.peers);
@@ -323,7 +334,7 @@ export class KnowledgeInsights {
         singleSourceTotal += scored.length;
         await pause();
       }
-      perEntry.sort((x, y) => y.best - x.best || clusterSize(y.cluster) - clusterSize(x.cluster) || newestFirst(x.meta, y.meta));
+      perEntry.sort((x, y) => noteTier(x.meta) - noteTier(y.meta) || y.best - x.best || clusterSize(y.cluster) - clusterSize(x.cluster) || newestFirst(x.meta, y.meta));
     }
     const singleSource: KnowledgeSingleSource[] = [];
     for (let turn = 0; singleSource.length < limit && perEntry.some((item) => item.concepts.length > turn); turn += 1) {
@@ -375,6 +386,15 @@ export function conceptCentrality(conceptId: string, entryConcepts: ReadonlySet<
   let near = entryConcepts.has(conceptId) ? 1 : 0;
   for (const id of new Set(neighbours(conceptId))) if (entryConcepts.has(id)) near += 1;
   return near / entryConcepts.size;
+}
+
+/**
+ * Where a single-source claim ranks by what it came from: 0 for a source someone saved (a post, a
+ * thread, an article, a video: a practitioner's claim, the one worth checking), 1 for a note (a
+ * research or reference note: already a check, or a restated policy).
+ */
+function noteTier(meta: Pick<KnowledgeEntryMeta, "kind">): number {
+  return /^(research[ _-]?|reference[ _-]?)?notes?$/i.test((meta.kind ?? "").trim()) ? 1 : 0;
 }
 
 /** A deep copy of a cached, JSON-shaped value (callers may change what they are given). */

@@ -685,6 +685,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   private base: BaseGraph = EMPTY_BASE;
   private merges: readonly ConceptMergeOverlay[] = [];
   private similarProvider: SimilarConceptsProvider | null = null;
+  private backingProvider: ((conceptId: string) => readonly string[]) | null = null;
+  private backingRev = 0;
   private readonly loadListeners = new Set<() => void>();
   /** Numbers loads in the order they start; `appliedLoad` is the current base graph's. */
   private loadSeq = 0;
@@ -784,6 +786,32 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
   /** Where concept details read similar concepts from (null: none). */
   setSimilarConcepts(provider: SimilarConceptsProvider | null): void {
     this.similarProvider = provider;
+  }
+
+  /** Where {@link backingConcepts} reads from (null: none). */
+  setBackingConcepts(provider: ((conceptId: string) => readonly string[]) | null): void {
+    this.backingProvider = provider;
+    this.backingMoved();
+  }
+
+  /** What the backing provider answers may have changed (its vectors were computed). */
+  backingMoved(): void {
+    this.backingRev += 1;
+  }
+
+  /** Moves with every change {@link backingMoved} announces (a cache key next to {@link revision}). */
+  backingRevision(): number {
+    return this.backingRev;
+  }
+
+  /**
+   * Concepts that say what `conceptId` says in other words (concept merges' `backing`: same type,
+   * close in meaning and in wording), as the graph's ids, never itself; unscoped (callers ask which
+   * entries they can see link one). None without a provider.
+   */
+  backingConcepts(conceptId: string): readonly string[] {
+    const own = this.canonicalConceptId(conceptId);
+    return (this.backingProvider?.(own) ?? []).filter((id) => id !== own && this.snapshot.concepts.has(id));
   }
 
   /** The concept a folded concept was merged into, or the id itself. */

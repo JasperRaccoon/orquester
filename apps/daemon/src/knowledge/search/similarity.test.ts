@@ -862,6 +862,19 @@ test("novelty: concepts no other visible entry has (claims first, people last), 
   assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster?.size, 3, "P1, P3 and the late entry");
 });
 
+test("novelty: a concept another visible entry says in other words (a backing concept) is not new", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [
+    node("tactic-unique", "Create a US Apple ID verified with a US number", files([ke("p1")])),
+    node("tactic-reworded", "Create a US Apple ID using the US phone number", files([ke("p2")])),
+    node("tactic-hidden-reworded", "Only here, as a hidden entry says it", files([ke("hidden")])),
+    node("tactic-other", "Only here", files([ke("p1")]))
+  ]);
+  s.graph.setBackingConcepts((id) => (id === "tactic-unique" ? ["tactic-reworded"] : id === "tactic-other" ? ["tactic-hidden-reworded"] : []));
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts.map((c) => c.id), ["tactic-other"], "a hidden entry backs nothing");
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.all)!.newConcepts, []);
+});
+
 test("novelty reads the latest graph drawn for the scope at any k and limit (insights' graph counts)", async () => {
   const s = graphFixture();
   await loadGraph(s.graph, [node("topic-shared", "Comparison pages", files([ke("p1"), ke("p2"), ke("p3")]))]);
