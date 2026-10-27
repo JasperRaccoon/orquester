@@ -6,12 +6,15 @@ import test, { type TestContext } from "node:test";
 import type { KnowledgeConceptMergeCheck, KnowledgeConceptMergeRecord } from "@orquester/config";
 import type { KnowledgeEmbedder } from "./embedder.ts";
 import {
+  CONCEPT_CHECK_EXCERPT_ENTRIES,
+  CONCEPT_CHECK_INPUT_VERSION,
   CONCEPT_CHECK_STEP,
   CONCEPT_CHECK_SYSTEM,
   ConceptMergeCheckSource,
   conceptCheckCandidates,
   conceptCheckInput,
   conceptExcerpt,
+  conceptExcerptFor,
   parseConceptCheckAnswer,
   validateConceptCheckAnswer,
   type ConceptCheckBars
@@ -269,8 +272,55 @@ test("the task shows both concepts with type, aliases, description and an excerp
   assert.match(CONCEPT_CHECK_SYSTEM, /\{"same": true \| false, "keep": "a" \| "b", "reason"/);
 
   const body = "Intro line about phones.\n\n7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue.\n\n8) Warm up.";
-  assert.equal(conceptExcerpt(body, { name: "Proxy risk check", aliases: [] }), "7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue. 8) Warm up.");
-  assert.ok(conceptExcerpt("x ".repeat(400), { name: "nothing", aliases: [] }).endsWith("[…]"));
+  assert.deepEqual(conceptExcerpt(body, { name: "Proxy risk check", aliases: [] }), {
+    text: "7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue. 8) Warm up.",
+    score: 2
+  });
+  const none = conceptExcerpt("x ".repeat(400), { name: "nothing", aliases: [] });
+  assert.ok(none.text.startsWith("x x") && none.text.endsWith("[…]"), "nothing names it: the opening");
+  assert.equal(none.score, 0);
+});
+
+test("concept excerpts: the passage naming the concept (name or alias whole, else the largest share of one's words), not the opening", () => {
+  const body = [
+    "Intro about games and apps in general, nothing specific here.",
+    "Guidelines for casual, hardcore, streaming, and gambling apps.",
+    "Section 4.7: Mini games, streaming games and emulators must follow every rule.",
+    "Later: streaming games again."
+  ].join("\n");
+  // The name whole beats a sentence with its words apart; the first such sentence wins.
+  assert.ok(conceptExcerpt(body, { name: "Streaming games", aliases: [] }).text.startsWith("Section 4.7: Mini games, streaming games"));
+  // An alias whole counts like the name.
+  const aliased = conceptExcerpt("Opening.\nThe app directory moved.\nNow called the Plugin Directory since July.", { name: "ChatGPT Plugin Directory", aliases: ["Plugin Directory"] });
+  assert.deepEqual([aliased.text.startsWith("Now called the Plugin Directory"), aliased.score], [true, 2]);
+  // No phrase: the share of one name's words (an alias's words do not add to the name's).
+  const shared = conceptExcerpt("Opening.\nWarm the phone.\nWarm up the account for two days before posting.", { name: "Account warm-up before posting", aliases: [] });
+  assert.ok(shared.text.startsWith("Warm up the account for two days"), shared.text);
+  assert.ok(shared.score > 0 && shared.score < 2);
+  // Punctuation and case do not hide a name ("GPT-4" in "(ChatGPT, GPT-4, Gemini)").
+  assert.equal(conceptExcerpt("Use no brand names.\nDon't keyword-stuff with AI brand names (ChatGPT, GPT-4, Gemini, etc.).", { name: "GPT-4", aliases: [] }).score, 2);
+});
+
+test("concept excerpts across entries: the first entries are searched, the best naming one is shown, a tie keeps the earlier", async () => {
+  const bodies: Record<string, { title: string; body: string }> = {
+    ke_1: { title: "First", body: "About warm-ups in general.\nSome other text." },
+    ke_2: { title: "Second", body: "Opening.\nWarm up the account for 48 hours before posting, every time." },
+    ke_3: { title: "Third", body: "Warm up the account for 48 hours before posting." },
+    ke_4: { title: "Fourth", body: "Nothing." }
+  };
+  const read: string[] = [];
+  const entry = async (id: string) => {
+    read.push(id);
+    return bodies[id] ?? null;
+  };
+  const found = await conceptExcerptFor({ name: "Warm up the account for 48 hours before posting", aliases: [], entryIds: ["ke_1", "ke_2", "ke_3", "ke_4"] }, entry);
+  assert.deepEqual(found, { title: "Second", text: "Warm up the account for 48 hours before posting, every time.", score: 2 });
+  assert.deepEqual(read, ["ke_1", "ke_2"], "a whole name ends the search");
+  read.length = 0;
+  const weak = await conceptExcerptFor({ name: "Account warm-up", aliases: [], entryIds: ["ke_4", "ke_1", "ke_9", "ke_2"] }, entry);
+  assert.equal(weak?.title, "First", "the first entry with the best share");
+  assert.equal(read.length, CONCEPT_CHECK_EXCERPT_ENTRIES, "at most the first few entries");
+  assert.equal(await conceptExcerptFor({ name: "x", aliases: [], entryIds: ["ke_9"] }, entry), null);
 });
 
 test("answers: exactly {same, keep, reason}; anything else (bad JSON too) is refused", () => {
@@ -394,6 +444,7 @@ test("the source: tasks once planning is done, a 'same' answer merges (checked),
   );
   assert.match(tasks[0]!.user, /Name: 48-hour account warm-up\nExcerpt from "US TikTok phone": Warm up the account for 48 hours before posting, scroll a few times a day\./);
   assert.equal(tasks[0]!.system, CONCEPT_CHECK_SYSTEM);
+  assert.equal((tasks[0]!.payload as { inputVersion?: number }).inputVersion, CONCEPT_CHECK_INPUT_VERSION);
   // A pair rounds gave up on is skipped, and the next one takes its place under the cap.
   const one = new ConceptMergeCheckSource({ merges: h.merges, entry: async () => null, bars: () => CHECK_BARS, limit: 1, pause: noPause });
   assert.deepEqual((await one.tasks()).map((task) => task.label), [tasks[0]!.label]);
@@ -411,10 +462,10 @@ test("the source: tasks once planning is done, a 'same' answer merges (checked),
   assert.equal(h.merges.count(), 2, "the checked merge and the Person rule's");
   const file = await h.file();
   assert.deepEqual(
-    file.checks.map((c) => [c.a, c.b, c.same, c.keep]),
+    file.checks.map((c) => [c.a, c.b, c.same, c.keep, c.inputVersion]),
     [
-      ["tactic-48h", "tactic-warm", true, "tactic-warm"],
-      ["tactic-risk", "tactic-score", false, "tactic-score"]
+      ["tactic-48h", "tactic-warm", true, "tactic-warm", CONCEPT_CHECK_INPUT_VERSION],
+      ["tactic-risk", "tactic-score", false, "tactic-score", CONCEPT_CHECK_INPUT_VERSION]
     ]
   );
   assert.deepEqual(await h.source.tasks(), [], "both pairs answered: nothing asked again");
