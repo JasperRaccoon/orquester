@@ -4,7 +4,10 @@ import {
   KNOWLEDGE_CHANGED_EVENT,
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_COLORS,
+  KNOWLEDGE_FILTER_MAX_VALUES,
   KNOWLEDGE_GRAPH_MAX_NODES,
+  KNOWLEDGE_SEARCH_MAX_LIMIT,
+  KNOWLEDGE_SIMILAR_MAX_EXAMPLES,
   knowledgeRoutes,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
@@ -115,19 +118,48 @@ const saveSchema = z.object({
     .transform((value) => value ?? undefined),
   sessionId
 });
+/** A field an agent may also send as `null` (read as absent). */
+const nullish = <T extends z.ZodTypeAny>(schema: T) => schema.nullish().transform((value) => value ?? undefined);
+const filterValue = z.string().max(200);
+/** ISO dates are checked by the search's filter parser (`search/filters.ts`), which says what is wrong. */
+const isoBound = nullish(z.string().max(40));
+const exampleList = nullish(z.array(z.string().max(100)).max(KNOWLEDGE_SIMILAR_MAX_EXAMPLES));
 const searchSchema = z.object({
-  query: z.string(),
-  collections: z
-    .array(z.string())
-    .nullish()
-    .transform((value) => value ?? undefined),
-  limit: z.number().int().optional(),
+  query: nullish(z.string()),
+  collections: nullish(z.array(z.string())),
+  limit: nullish(z.number().int().min(1).max(KNOWLEDGE_SEARCH_MAX_LIMIT)),
+  filters: nullish(
+    z.object({
+      kinds: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      authors: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      years: nullish(z.array(filterValue).max(KNOWLEDGE_FILTER_MAX_VALUES)),
+      postedAfter: isoBound,
+      postedBefore: isoBound,
+      savedAfter: isoBound,
+      savedBefore: isoBound
+    })
+  ),
+  similarTo: exampleList,
+  unlike: exampleList,
+  sort: nullish(z.enum(["relevance", "recent", "newest"])),
+  diverse: nullish(z.boolean()),
+  cursor: nullish(z.string().min(1).max(500)),
+  facets: nullish(z.boolean()),
   sessionId
 });
+/** A comma-separated filter list on the query string (`search/filters.ts` splits and checks it). */
+const filterListParam = z.string().max(KNOWLEDGE_FILTER_MAX_VALUES * 201).optional();
 const entriesQuerySchema = z.object({
   collection: z.string().min(1).optional(),
   cursor: z.string().min(1).max(500).optional(),
   limit: intFromQuery(1, 1_000),
+  kinds: filterListParam,
+  authors: filterListParam,
+  years: filterListParam,
+  postedAfter: z.string().max(40).optional(),
+  postedBefore: z.string().max(40).optional(),
+  savedAfter: z.string().max(40).optional(),
+  savedBefore: z.string().max(40).optional(),
   sessionId
 });
 const graphQuerySchema = z.object({
@@ -345,7 +377,8 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     handle(async (request): Promise<KnowledgeEntriesResponse> => {
       const query = parse(entriesQuerySchema, request.query, "query");
       const visibility = await visibilityOf(request, query.sessionId);
-      return deps.search.listEntries({ collection: query.collection, cursor: query.cursor, limit: query.limit }, visibility);
+      const { sessionId: _session, ...entriesQuery } = query;
+      return deps.search.listEntries(entriesQuery, visibility);
     })
   );
 
@@ -420,7 +453,8 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     handle(async (request): Promise<KnowledgeSearchResponse> => {
       const body = parse(searchSchema, request.body, "search");
       const visibility = await visibilityOf(request, body.sessionId);
-      return deps.search.search({ query: body.query, collections: body.collections, limit: body.limit }, visibility);
+      const { sessionId: _session, ...searchRequest } = body;
+      return deps.search.search(searchRequest, visibility);
     })
   );
 
