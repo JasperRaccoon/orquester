@@ -114,7 +114,7 @@ const PROC_BUFFER_BYTES = 1024 * 1024;
 const PROGRESS_MAX_CHARS = 200;
 
 /** A project box whose Browser tab runs Chromium in the box: the Linux kinds. */
-export function boxRunsBrowser(record: Pick<StoredBox, "kind">): boolean {
+function boxRunsBrowser(record: Pick<StoredBox, "kind">): boolean {
   return record.kind === "linux" || record.kind === "linux-gpu";
 }
 
@@ -124,7 +124,7 @@ export function projectBrowserHash(projectPath: string): string {
 }
 
 /** Port and path of Chromium's `DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>` line. */
-export function parseDevtoolsListening(line: string): { port: number; path: string } | null {
+function parseDevtoolsListening(line: string): { port: number; path: string } | null {
   const match = /DevTools listening on (ws:\/\/\S+)/.exec(line);
   if (!match) return null;
   try {
@@ -139,7 +139,7 @@ export function parseDevtoolsListening(line: string): { port: number; path: stri
 }
 
 /** The argv of a box Chromium (after the binary). */
-export function boxChromiumArgs(profileDir: string, noSandbox: boolean): string[] {
+function boxChromiumArgs(profileDir: string, noSandbox: boolean): string[] {
   return [
     "--headless=new",
     "--remote-debugging-port=0",

@@ -44,10 +44,4 @@ describe("scanAccessUnit", () => {
     assert.deepEqual(scanAccessUnit(Uint8Array.from([0x41, 0, 0, 1])), { isKey: false, sps: null });
   });
 
-  it("marks only the first frame of the recorded stream as key", () => {
-    const keys = readWsFixture("serve-emu-semu-v1.bin").map(
-      (record) => scanAccessUnit(parseSemuPacket(record as ArrayBuffer).data).isKey
-    );
-    assert.deepEqual(keys, [true, ...Array(keys.length - 1).fill(false)]);
-  });
 });

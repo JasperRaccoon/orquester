@@ -24,6 +24,10 @@ test("a ts-rust record with an engine and tsrs's versions round-trips; a record 
     enabled: true,
     engine: "tsrs",
     current: { version: "0.7.0", integrity: "sha512-a", installedAt: "2026-10-14T10:00:00.000Z" },
+    previous: { version: "0.6.0", integrity: "sha512-b", installedAt: "2026-10-13T10:00:00.000Z" },
+    skippedVersion: "0.6.1",
+    lastCheckAt: "2026-10-14T11:00:00.000Z",
+    lastError: { at: "2026-10-14T11:00:00.000Z", step: "download", message: "timed out" },
     tsrs: {
       current: { version: "0.16.0-ts7.1.0-dev.20260929", integrity: "sha512-c", installedAt: "2026-10-17T10:00:00.000Z" },
       previous: { version: "0.15.0", integrity: "sha512-d", installedAt: "2026-10-16T10:00:00.000Z" },
@@ -56,19 +60,6 @@ test("an empty plugins.json reads as no plugin state", () => {
   assert.deepEqual(pluginStateOf(createDefaultPluginsConfig(), "ts-rust"), {});
 });
 
-test("a full plugin record round-trips", () => {
-  const record = {
-    enabled: true,
-    current: { version: "0.7.0", integrity: "sha512-a", installedAt: "2026-10-14T10:00:00.000Z" },
-    previous: { version: "0.6.0", integrity: "sha512-b", installedAt: "2026-10-13T10:00:00.000Z" },
-    skippedVersion: "0.6.1",
-    lastCheckAt: "2026-10-14T11:00:00.000Z",
-    lastError: { at: "2026-10-14T11:00:00.000Z", step: "download", message: "timed out" }
-  };
-  const parsed = parsePluginsConfig({ version: 1, plugins: { "ts-rust": record } });
-  assert.deepEqual(pluginStateOf(parsed, "ts-rust"), record);
-});
-
 test("an older build's per-workspace list is read as it is, and never defaulted in", () => {
   const legacy = parsePluginsConfig({ version: 1, plugins: { "ts-rust": { enabledWorkspaces: ["jaspersito"] } } });
   assert.deepEqual(pluginStateOf(legacy, "ts-rust"), { enabledWorkspaces: ["jaspersito"] });
@@ -82,7 +73,8 @@ test("unknown fields and unknown plugin ids written by other versions are kept",
     future: { a: 1 },
     plugins: {
       "ts-rust": { enabledWorkspaces: [], channel: "next", current: { version: "1.0.0", integrity: "x", installedAt: "t", arch: "x64" } },
-      "other-plugin": { enabledWorkspaces: ["w"], extra: true }
+      "other-plugin": { enabledWorkspaces: ["w"], extra: true },
+      "knowledge-graph": { enabled: true, settings: { concurrency: 2, future: [1, 2] }, other: "kept" }
     }
   });
   const roundTripped = JSON.parse(JSON.stringify(parsed));
@@ -90,6 +82,9 @@ test("unknown fields and unknown plugin ids written by other versions are kept",
   assert.equal(roundTripped.plugins["ts-rust"].channel, "next");
   assert.equal(roundTripped.plugins["ts-rust"].current.arch, "x64");
   assert.deepEqual(roundTripped.plugins["other-plugin"], { enabledWorkspaces: ["w"], extra: true });
+  const knowledge = pluginStateOf(parsed, "knowledge-graph");
+  assert.deepEqual(knowledge.settings, { concurrency: 2, future: [1, 2] });
+  assert.equal((knowledge as Record<string, unknown>).other, "kept");
 });
 
 test("an unknown plugin id with any shape does not make the file unreadable, and round-trips verbatim", () => {
@@ -166,13 +161,4 @@ test("knowledge-graph settings read the account policy field by field, keeping u
   );
   // A policy that is not an object reads as absent.
   for (const accountPolicy of ["fixed", null, [1], 3]) assert.deepEqual(read({ accountPolicy }), {}, JSON.stringify(accountPolicy));
-});
-
-test("a plugin record's settings and their unknown keys survive a parse", () => {
-  const config = parsePluginsConfig({
-    plugins: { "knowledge-graph": { enabled: true, settings: { concurrency: 2, future: [1, 2] }, other: "kept" } }
-  });
-  const state = pluginStateOf(config, "knowledge-graph");
-  assert.deepEqual(state.settings, { concurrency: 2, future: [1, 2] });
-  assert.equal((state as Record<string, unknown>).other, "kept");
 });

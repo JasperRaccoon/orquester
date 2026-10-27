@@ -32,7 +32,7 @@ function isLandscape(orientation: ScreenOrientation): boolean {
 }
 
 /** The screen's size in points in `orientation`, or null when unknown. */
-export function orientedScreen(screen: Pick<DeviceScreen, "width" | "height"> | undefined, orientation: ScreenOrientation): { width: number; height: number } | null {
+function orientedScreen(screen: Pick<DeviceScreen, "width" | "height"> | undefined, orientation: ScreenOrientation): { width: number; height: number } | null {
   if (!screen || !(screen.width > 0) || !(screen.height > 0)) return null;
   const short = Math.min(screen.width, screen.height);
   const long = Math.max(screen.width, screen.height);
@@ -40,14 +40,14 @@ export function orientedScreen(screen: Pick<DeviceScreen, "width" | "height"> | 
 }
 
 /** A point in points → 0..1 over the screen as seen; null without a screen size. */
-export function normalizePoint(point: { x: number; y: number } | undefined, screen: Pick<DeviceScreen, "width" | "height"> | undefined, orientation: ScreenOrientation): NormalizedPoint | null {
+function normalizePoint(point: { x: number; y: number } | undefined, screen: Pick<DeviceScreen, "width" | "height"> | undefined, orientation: ScreenOrientation): NormalizedPoint | null {
   const size = orientedScreen(screen, orientation);
   if (!point || !size || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
   return { x: clamp(point.x / size.width), y: clamp(point.y / size.height) };
 }
 
 /** `@e7 Search` → `Search`; a bare `@e7` stays. */
-export function targetLabel(target: string | undefined): string | null {
+function targetLabel(target: string | undefined): string | null {
   const text = target?.trim();
   if (!text) return null;
   const stripped = text.replace(/^@e\d+\s+/, "").trim();

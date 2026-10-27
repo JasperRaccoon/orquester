@@ -22,7 +22,8 @@ import {
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
-import { threadCacheScopeFor, type ThreadCacheBackend } from "./persistent-cache";
+import { threadCacheScopeFor } from "./persistent-cache";
+import { fakeIndexedDb } from "./testing/indexed-db";
 import type { AgentChatThreadState, ThreadStore } from "./store";
 import type { AgentChatStreamOptions, AgentChatTransport } from "./transport";
 import { activity, ev, resetBuilders } from "./test-helpers";
@@ -39,7 +40,9 @@ const local = new Map<string, string>();
 };
 
 const pages: Page[] = [];
-function newPage(): Page {
+function newPage(storage?: ReturnType<typeof fakeIndexedDb> | null): Page {
+  if (storage === null) Reflect.deleteProperty(globalThis, "indexedDB");
+  else if (storage !== undefined) globalThis.indexedDB = storage.factory;
   const page = isolatedPage();
   pages.push(page);
   return page;
@@ -47,38 +50,12 @@ function newPage(): Page {
 
 afterEach(() => {
   for (const page of pages.splice(0)) page.dispose();
+  Reflect.deleteProperty(globalThis, "indexedDB");
 });
 
 // ---------------------------------------------------------------------------
 // The device and the host
 // ---------------------------------------------------------------------------
-
-function memoryBackend(): ThreadCacheBackend & { metas: Map<string, Record<string, unknown>> } {
-  const metas = new Map<string, Record<string, unknown>>();
-  const bodies = new Map<string, unknown>();
-  return {
-    metas,
-    async read(key) {
-      return { meta: structuredClone(metas.get(key)), body: structuredClone(bodies.get(key)) };
-    },
-    async readMetas() {
-      return [...metas.values()].map((meta) => structuredClone(meta));
-    },
-    async readKeys() {
-      return [...new Set([...metas.keys(), ...bodies.keys()])];
-    },
-    async write(change) {
-      for (const key of change.remove ?? []) {
-        metas.delete(key);
-        bodies.delete(key);
-      }
-      for (const { meta, body } of change.put ?? []) {
-        metas.set(meta.key, structuredClone(meta) as unknown as Record<string, unknown>);
-        if (body !== undefined) bodies.set(body.key, structuredClone(body));
-      }
-    }
-  };
-}
 
 /** The thread's log, as the host holds it. */
 function hostLog(): DomainEvent[] {
@@ -161,21 +138,24 @@ function fakeHost(log: DomainEvent[]) {
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /** Open `s1` on a fresh page, with the device storage `backend` (or none). */
-async function openPage(log: DomainEvent[], backend: ThreadCacheBackend | null) {
-  const page = newPage();
+async function openPage(log: DomainEvent[], backend: ReturnType<typeof fakeIndexedDb> | null) {
+  const page = newPage(backend);
   const cache = page.persistentCache;
-  cache.setThreadCacheBackend(backend);
   const host = fakeHost(log);
   cache.bindThreadCacheScope(host.transport, { kind: "remote", endpoint: "https://daemon.example" });
   const store = page.store.createThreadStore("s1", { transport: host.transport }) as Destroyable;
-  return { page, cache, host, store, state: (): AgentChatThreadState => store.getState() };
+  return { page, cache, host, store, state: (): AgentChatThreadState => store.getState(), async saved() {
+    const link = cache.linkThreadCache(host.transport, "s1", { load: true });
+    try { return await link?.restored ?? null; }
+    finally { link?.close(); }
+  } };
 }
 
 const texts = (state: AgentChatThreadState): string[] =>
   state.rows.flatMap((row) => (row.kind === "message" ? [row.message.text] : []));
 
 /** A first page that synchronized at `seq` and was then killed: what it left on the device. */
-async function leaveDeviceCopy(log: DomainEvent[], backend: ThreadCacheBackend, seq: number): Promise<void> {
+async function leaveDeviceCopy(log: DomainEvent[], backend: ReturnType<typeof fakeIndexedDb>, seq: number): Promise<void> {
   const first = await openPage(log, backend);
   await settle();
   assert.deepEqual(first.host.opened, [{}], "nothing on the device yet: a cold stream");
@@ -183,7 +163,7 @@ async function leaveDeviceCopy(log: DomainEvent[], backend: ThreadCacheBackend, 
   // A killed page gets no teardown; its last write came from the throttle or
   // from `pagehide`. The generation's own flush on teardown stands in for both.
   first.store.destroy?.();
-  await first.cache.threadCacheIdle();
+  await backend.idle();
   await settle();
 }
 
@@ -197,7 +177,7 @@ beforeEach(() => {
 describe("a thread opened with a copy on the device", () => {
   it("paints the copy before any frame, resumes by cursor and applies the replay", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
 
     const reopened = await openPage(log, backend);
@@ -221,11 +201,8 @@ describe("a thread opened with a copy on the device", () => {
 
     // The device copy moves forward with the thread.
     reopened.store.destroy?.();
-    await reopened.cache.threadCacheIdle();
-    const saved = await reopened.cache.loadPersistedThread(
-      reopened.cache.threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" }),
-      "s1"
-    );
+    await backend.idle();
+    const saved = await reopened.saved();
     assert.equal(saved?.seq, 8);
   });
 
@@ -240,7 +217,7 @@ describe("a thread opened with a copy on the device", () => {
     ] as const) {
       resetBuilders();
       const log = hostLog();
-      const backend = memoryBackend();
+      const backend = fakeIndexedDb();
       const first = await openPage(log, backend);
       await settle();
       first.host.push(
@@ -248,7 +225,7 @@ describe("a thread opened with a copy on the device", () => {
         { kind: "synchronized", hostInstanceId: "host-1" }
       );
       first.store.destroy?.();
-      await first.cache.threadCacheIdle();
+      await backend.idle();
       await settle();
 
       const reopened = await openPage(log, backend);
@@ -269,7 +246,7 @@ describe("a thread opened with a copy on the device", () => {
 
   it("offers nothing pending from the copy until the host confirms the thread", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
 
     const reopened = await openPage(log, backend);
@@ -291,7 +268,7 @@ describe("a thread opened with a copy on the device", () => {
 
   it("answers a request once the host has confirmed it still stands", async () => {
     const log = hostLog().slice(0, 5);
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
 
     const reopened = await openPage(log, backend);
@@ -304,9 +281,8 @@ describe("a thread opened with a copy on the device", () => {
 
   it("re-reads the thread over a fresh stream when the host restarted, and replaces the device copy", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
-    const scope = threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" });
 
     const reopened = await openPage(log, backend);
     await settle();
@@ -322,8 +298,8 @@ describe("a thread opened with a copy on the device", () => {
     assert.equal(reopened.state().slice.fromDeviceCache, true, "nothing is confirmed yet");
     // Nothing of this in-between state reaches the device.
     reopened.store.destroy?.();
-    await reopened.cache.threadCacheIdle();
-    assert.equal((await reopened.cache.loadPersistedThread(scope, "s1"))?.hostInstanceId, "host-1");
+    await backend.idle();
+    assert.equal((await reopened.saved())?.hostInstanceId, "host-1");
 
     const again = await openPage(log, backend);
     await settle();
@@ -336,8 +312,8 @@ describe("a thread opened with a copy on the device", () => {
     assert.equal(again.state().slice.fromDeviceCache, false);
     assert.equal(again.state().slice.seq, 8);
     again.store.destroy?.();
-    await again.cache.threadCacheIdle();
-    const saved = await again.cache.loadPersistedThread(scope, "s1");
+    await backend.idle();
+    const saved = await again.saved();
     assert.equal(saved?.hostInstanceId, "host-2");
     assert.equal(saved?.seq, 8);
   });
@@ -360,7 +336,7 @@ describe("a thread opened with a copy on the device", () => {
 
   it("acts on nothing in the copy - rewind, Stop, a task's Stop - until the host confirms it", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
     const reopened = await openPage(log, backend);
     await settle();
@@ -377,7 +353,7 @@ describe("a thread opened with a copy on the device", () => {
 
   it("stops a live thread's writes for good when its daemon is signed out of", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     const live = await openPage(log, backend);
     await settle();
     live.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
@@ -385,43 +361,41 @@ describe("a thread opened with a copy on the device", () => {
     // Frames still in flight, then the teardown's flush: none of it is written back.
     live.host.push(...eventFrames(log, 5));
     live.store.destroy?.();
-    await live.cache.threadCacheIdle();
+    await backend.idle();
     await settle();
-    assert.equal(backend.metas.size, 0);
+    assert.equal((await backend.all("thread-meta")).length, 0);
   });
 
   it("holds a clear another tab recorded, and a clear whose deletes never ran", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     // Another tab signs out while this one has a pending change.
     const live = await openPage(log, backend);
     await settle();
     live.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
-    const other = newPage();
-    other.persistentCache.setThreadCacheBackend(memoryBackend());
+    const other = newPage(fakeIndexedDb());
     await other.persistentCache.clearThreadCache(threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example" }));
     live.store.destroy?.();
-    await live.cache.threadCacheIdle();
-    assert.equal(backend.metas.size, 0, "refused when it would land");
+    await backend.idle();
+    assert.equal((await backend.all("thread-meta")).length, 0, "refused when it would land");
 
     // A copy left on the device; its clear is recorded, but the deletes never ran.
     await leaveDeviceCopy(log, backend, 5);
-    assert.equal(backend.metas.size, 1);
-    const stale = newPage();
-    stale.persistentCache.setThreadCacheBackend(memoryBackend());
+    assert.equal((await backend.all("thread-meta")).length, 1);
+    const stale = newPage(fakeIndexedDb());
     await stale.persistentCache.clearThreadCache();
     const reopened = await openPage(log, backend);
     await settle();
     assert.deepEqual(reopened.host.opened, [{}], "the cleared copy is not painted");
     assert.equal(reopened.state().rows.length, 0);
-    await reopened.cache.threadCacheIdle();
-    assert.equal(backend.metas.size, 0, "and the next page deletes it");
+    await backend.idle();
+    assert.equal((await backend.all("thread-meta")).length, 0, "and the next page deletes it");
     reopened.store.destroy?.();
   });
 
   it("caches nothing where clears cannot be recorded", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     const globals = globalThis as { localStorage?: unknown };
     const saved = globals.localStorage;
     delete globals.localStorage;
@@ -430,8 +404,8 @@ describe("a thread opened with a copy on the device", () => {
       await settle();
       page.host.push({ kind: "snapshot", thread: snapshotAt(log, 5) }, { kind: "synchronized", hostInstanceId: "host-1" });
       page.store.destroy?.();
-      await page.cache.threadCacheIdle();
-      assert.equal(backend.metas.size, 0);
+      await backend.idle();
+      assert.equal((await backend.all("thread-meta")).length, 0);
     } finally {
       globals.localStorage = saved;
     }
@@ -439,33 +413,33 @@ describe("a thread opened with a copy on the device", () => {
 
   it("drops the copy of a thread the host no longer has", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
-    assert.equal(backend.metas.size, 1);
+    assert.equal((await backend.all("thread-meta")).length, 1);
 
     const reopened = await openPage(log, backend);
     await settle();
     reopened.host.gone();
     assert.equal(reopened.state().slice.connection, "gone");
-    await reopened.cache.threadCacheIdle();
-    assert.equal(backend.metas.size, 0);
+    await backend.idle();
+    assert.equal((await backend.all("thread-meta")).length, 0);
     reopened.store.destroy?.();
-    await reopened.cache.threadCacheIdle();
-    assert.equal(backend.metas.size, 0, "and the teardown does not write it back");
+    await backend.idle();
+    assert.equal((await backend.all("thread-meta")).length, 0, "and the teardown does not write it back");
   });
 
   it("ignores a copy another app version wrote, and loads cold", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
-    for (const meta of backend.metas.values()) meta.v = 999;
+    for (const meta of await backend.all("thread-meta")) await backend.put("thread-meta", { ...meta, v: 999 });
 
     const reopened = await openPage(log, backend);
     await settle();
     assert.deepEqual(reopened.host.opened, [{}]);
     assert.equal(reopened.state().rows.length, 0);
     assert.equal(reopened.state().slice.fromDeviceCache, undefined);
-    assert.equal(backend.metas.size, 0, "deleted, never trusted");
+    assert.equal((await backend.all("thread-meta")).length, 0, "deleted, never trusted");
     reopened.store.destroy?.();
   });
 
@@ -480,13 +454,12 @@ describe("a thread opened with a copy on the device", () => {
 
   it("forgets the daemon's copies on sign-out", async () => {
     const log = hostLog();
-    const backend = memoryBackend();
+    const backend = fakeIndexedDb();
     await leaveDeviceCopy(log, backend, 5);
-    const page = newPage();
-    page.persistentCache.setThreadCacheBackend(backend);
+    const page = newPage(backend);
     await page.persistentCache.clearThreadCache(
       page.persistentCache.threadCacheScopeFor({ kind: "remote", endpoint: "https://daemon.example/" })
     );
-    assert.equal(backend.metas.size, 0);
+    assert.equal((await backend.all("thread-meta")).length, 0);
   });
 });

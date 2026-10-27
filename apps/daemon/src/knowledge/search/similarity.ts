@@ -34,15 +34,15 @@ import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
 /** `similar` on an entry (all reasons together). */
-export const KNOWLEDGE_SIMILAR_MAX = 8;
+const KNOWLEDGE_SIMILAR_MAX = 8;
 /** `possibleDuplicates` on an entry. */
-export const KNOWLEDGE_DUPLICATES_MAX = 3;
+const KNOWLEDGE_DUPLICATES_MAX = 3;
 /** Same-author entries considered for `similar`. */
 const SAME_AUTHOR_MAX = 2;
 /** Shared concepts named in a `concepts` reason. */
 const SHARED_CONCEPTS_NAMED = 3;
 /** `similar` on a saved entry. */
-export const KNOWLEDGE_SAVE_SIMILAR_MAX = 3;
+const KNOWLEDGE_SAVE_SIMILAR_MAX = 3;
 /** Neighbours per node the spanning forest chooses from (at least `k`). */
 const TREE_CANDIDATES = 8;
 /** Work between two yields to the event loop while drawing the graph (spec: at most every 50 ms). */

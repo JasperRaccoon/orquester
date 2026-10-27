@@ -58,37 +58,13 @@ describe("the compaction phase", () => {
 
   const live = { sessionStatus: "running" as const, turnStatus: "running" as const };
 
-  it("ends on `compacted`", () => {
-    assert.equal(
-      isCompactingThread({
-        activities: [
-          compacting(),
-          activity("context-compaction", { state: "compacted", beforeTokens: 800, afterTokens: 11 }, {
-            summary: "Context compacted",
-            createdAt: stamp(2)
-          })
-        ],
+  it("ends on either successful or failed compaction", () => {
+    for (const state of ["compacted", "compaction-failed"]) {
+      assert.equal(isCompactingThread({
+        activities: [compacting(), activity("context-compaction", { state }, { createdAt: stamp(2) })],
         ...live
-      }),
-      false
-    );
-  });
-
-  it("ends on `compaction-failed`", () => {
-    assert.equal(
-      isCompactingThread({
-        activities: [
-          compacting(),
-          activity("context-compaction", { state: "compaction-failed", error: "quota" }, {
-            tone: "error",
-            summary: "Context compaction failed",
-            createdAt: stamp(2)
-          })
-        ],
-        ...live
-      }),
-      false
-    );
+      }), false, state);
+    }
   });
 
   it("ends when the turn settles even though no terminal marker ever arrived", () => {

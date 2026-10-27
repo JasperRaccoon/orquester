@@ -480,7 +480,6 @@ describe("KnowledgeLinkingService — tasks a previous myKG process left in the 
     };
     const h = await harness({
       clock,
-      extra: { timings: { settleMs } },
       workerMode: "manual",
       spawn: (_file, args) => {
         const child = new FakeChild(args);

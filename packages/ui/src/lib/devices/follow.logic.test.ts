@@ -15,7 +15,6 @@ describe("follow the agent", () => {
   it("the first list is the baseline: a reload never reopens a device", () => {
     const first = run(INITIAL_FOLLOW_STATE, [l("a")]);
     assert.equal(first.open, null);
-    assert.equal(first.state.baselined, true);
     assert.equal(run(first.state, [l("a")]).open, null);
   });
   it("an agent opening a device for the visible chat opens the panel on it", () => {
@@ -37,19 +36,17 @@ describe("follow the agent", () => {
   });
   it("closing the panel on a chat with a device dismisses that chat for the session; showing it again forgets that", () => {
     let state = run(INITIAL_FOLLOW_STATE, []).state;
-    assert.equal(followPanel(state, "chat", false, false), state, "closing an empty panel dismisses nothing");
+    state = followPanel(state, "chat", false, false);
+    assert.deepEqual(run(state, [l("empty")]).open, { threadId: "chat", leaseId: "empty" }, "closing an empty panel dismisses nothing");
     state = followPanel(state, "chat", false, true);
     assert.equal(run(state, [l("a")]).open, null);
     state = run(state, [l("a")]).state;
     state = followPanel(state, "chat", true, true);
     assert.deepEqual(run(state, [l("a"), l("b")]).open, { threadId: "chat", leaseId: "b" });
-    assert.equal(followPanel(state, null, false, true), state);
   });
-  it("the newest new lease wins, and a reset (null) takes a new baseline", () => {
+  it("a connection reset takes a new baseline", () => {
     const base = run(INITIAL_FOLLOW_STATE, []).state;
-    assert.deepEqual(run(base, [l("a"), l("b")]).open, { threadId: "chat", leaseId: "b" });
     const reset = run(base, null).state;
-    assert.equal(reset.baselined, false);
     assert.equal(run(reset, [l("z")]).open, null, "the list after a reconnect is a baseline again");
   });
 });

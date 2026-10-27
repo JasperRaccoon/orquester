@@ -11,7 +11,7 @@ import type { ConnectionFailure } from "./failure";
  */
 
 /** How many failures the diagnostics report keeps. */
-export const CONNECTION_LOG_LIMIT = 20;
+const CONNECTION_LOG_LIMIT = 20;
 
 export interface LoggedFailure extends ConnectionFailure {
   /** How many times in a row it happened (the latest at `at`). */

@@ -259,7 +259,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 - `attach(service.events)` (`changed` → re-prepare known keys and seed the default ones;
   `deleted` → once its jobs settle, drop its pointers and collect its versions), `start()` (boot:
   empty `staging/`, drop pointers of deleted profiles, re-check the rest in the background, then
-  GC), `gc()`, `stop()`, `idle()` (drain for tests).
+  GC), `gc()`, `stop()`.
 - Staleness fingerprint (in `manifest.json` `fingerprint`): revision + preparer `version` + CLI
   version (registry) + content hashes of `inputs`. Per-key serialization, at most 2 preparations
   at once. Failure reasons have the profile's MCP secret values redacted.
@@ -278,7 +278,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 ## Launching a chat with a profile (`launch.ts`, `agent-chat/service.ts`)
 
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
-ProfileLaunchContribution }` is read directly by the launch resolver. Codex's, Grok's and
+ProfileLaunchContribution }`, read directly by `createProfileLaunchResolver`. Codex's, Grok's and
 OpenCode's are in `contributions/codex.ts`, `contributions/grok.ts` and `preparers/opencode.ts`;
 Claude contributes nothing. A change to one agent's launch touches ITS entry only:
 

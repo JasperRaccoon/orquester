@@ -189,7 +189,7 @@ describe("the knowledge store", () => {
     assert.equal(state().graphRevision, 2);
 
     await mergeKnowledgeEntries(fake.api, { ids: ["ke_1", "ke_2"], keep: "ke_1" });
-    assert.equal(fake.calls.at(-2), "merge:ke_1,ke_2");
+    assert.ok(fake.calls.includes("merge:ke_1,ke_2"), "the merge reaches the daemon API");
     assert.deepEqual(state().changedEntryIds, ["ke_1", "ke_2"], "the kept entry and the deleted one");
     assert.equal(state().graphRevision, 3, "a deleted entry's concepts go at once");
   });

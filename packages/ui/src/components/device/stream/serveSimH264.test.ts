@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
-import { simulatorAvcConfig } from "./avcConfig.ts";
 import { ServeSimH264Session } from "./serveSimH264.ts";
 import {
   encodeAvccEnvelope,
@@ -9,7 +8,8 @@ import {
   fakeStreamingFetch,
   fakeVideoDecoderClass,
   settle,
-  testDeps
+  browserApis,
+  restoreBrowserApis
 } from "./testing/fakes.ts";
 
 const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.avcc";
@@ -25,6 +25,7 @@ const sessions: ServeSimH264Session[] = [];
 beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
+  restoreBrowserApis();
   mock.timers.reset();
 });
 
@@ -34,16 +35,11 @@ function setup(decoderOptions: Parameters<typeof fakeVideoDecoderClass>[0] = { s
   const bitmaps = fakeImageBitmaps(() => ({ width: 603, height: 1311 }));
   const canvas = fakeCanvas();
   const frames: string[] = [];
+  browserApis({ fetch: http.fetch, createImageBitmap: bitmaps.createImageBitmap, VideoDecoder: decoders.VideoDecoder, EncodedVideoChunk: decoders.EncodedVideoChunk });
   const session = new ServeSimH264Session({
     url: URL,
     headers: { Authorization: "Bearer t" },
     canvas,
-    deps: testDeps({
-      fetch: http.fetch,
-      createImageBitmap: bitmaps.createImageBitmap,
-      VideoDecoder: decoders.VideoDecoder,
-      EncodedVideoChunk: decoders.EncodedVideoChunk
-    }),
     onFrame: () => frames.push(`${canvas.width}x${canvas.height}`)
   });
   sessions.push(session);
@@ -83,8 +79,10 @@ describe("ServeSimH264Session", () => {
     const [config] = t.decoders.log.configs;
     assert.equal(config!.codec, "avc1.640033");
     assert.equal(config!.optimizeForLatency, true);
-    assert.deepEqual(config!.description, simulatorAvcConfig(description));
-    assert.notDeepEqual(config!.description, description, "VUI with zero reorder frames was added");
+    assert.deepEqual(config!.description, Uint8Array.from([
+      1, 100, 0, 51, 255, 225, 0, 17, 39, 100, 0, 51, 172, 86, 128, 76, 1, 73, 230, 168, 6, 208, 68, 35,
+      80, 1, 0, 4, 40, 238, 60, 176
+    ]), "the known zero-reorder configuration reaches WebCodecs");
     assert.deepEqual(t.decoders.log.chunks.map((c) => [c.type, [...c.data]]), [
       ["key", [...keyframe]],
       ["delta", [...delta]]

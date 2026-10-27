@@ -223,6 +223,7 @@ describe("ToolApprovalCard", () => {
     const approve = q<HTMLButtonElement>("[data-approve]");
     assert.equal(approve.disabled, true);
     const input = q<HTMLInputElement>('input[type="password"]');
+    assert.equal(input.autocomplete, "off");
     type(input, "s3cret-value");
     assert.equal(approve.disabled, false);
     clock = START + 60_000;

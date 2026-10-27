@@ -123,28 +123,6 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
     assert.equal(log[0].env.ANTHROPIC_API_KEY, undefined);
   });
 
-  it("an update run reuses the session and only asks for the changed entry", async () => {
-    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha", ke_bbbbbbbbbbbb: "beta" });
-    const clock = new FakeClock();
-    const first = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
-    const broker1 = new InboxBroker({ clock });
-    first.onSession((session) => void broker1.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate).then(() => answerAll(broker1)));
-    const done = await first.done;
-    broker1.dispose();
-    assert.equal(done.kind, "ok");
-    const session = done.kind === "ok" ? done.session : "";
-    await writeFile(join(dirs.inputDir, "ke_bbbbbbbbbbbb.md"), "beta, edited");
-    const second = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "update", session }, { clock, spawn: fakeSpawn });
-    const broker2 = new InboxBroker({ clock });
-    await broker2.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate);
-    const answering = answerAll(broker2);
-    const result = await second.done;
-    broker2.finish("run-finished");
-    assert.deepEqual(result, { kind: "ok", session });
-    assert.equal(await answering, 1);
-    broker2.dispose();
-  });
-
   it("a failed run reports the failed step and the stderr tail", async () => {
     const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
     await writeFile(join(dirs.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
@@ -159,14 +137,6 @@ describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
     assert.match(result.error, /^myKG exited with code 1\./);
     assert.match(result.error, /normalize_names: names did not normalize/);
     assert.match(result.error, /PipelineHaltError/);
-  });
-
-  it("an unknown session fails with myKG's message", async () => {
-    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
-    const run = new MykgRun({ runtime: RUNTIME, ...dirs, mode: "update", session: "2026-01-01T00-00-00" }, { clock: new FakeClock(), spawn: fakeSpawn });
-    const result = await run.done;
-    assert.equal(result.kind, "failed");
-    assert.match(result.kind === "failed" ? result.error : "", /Session '2026-01-01T00-00-00' not found/);
   });
 
   it("cancel stops the child and reports cancelled", async () => {

@@ -83,7 +83,7 @@ import type {
   KnowledgeSettingsPort,
   KnowledgeStorePort
 } from "../ports.ts";
-import { clearUnansweredTasks, InboxBroker, type InboxWatch } from "./inbox.ts";
+import { clearUnansweredTasks, InboxBroker } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
 import {
   commitMykgManifest,
@@ -128,16 +128,7 @@ export interface KnowledgeLinkingOptions {
   /** The worker chats (`createDaemonWorkerSessions`). */
   workers: WorkerSessionPort<WorkerCandidate>;
   clock: Clock;
-  /** Run ids (`kr_` + 12 hex by default). */
-  mintId?: () => string;
   spawn?: SpawnMykg;
-  timings?: Partial<typeof DEFAULT_TIMINGS>;
-  /** Worker chat budget (`inbox.ts` `DEFAULT_SESSION_BUDGET`). */
-  sessionBudget?: { tasks: number; tokens: number };
-  /** `InboxBroker` long-poll (`DEFAULT_NEXT_WAIT_MS`). */
-  nextWaitMs?: number;
-  /** `null` = rescans on demand only (tests). */
-  inboxWatch?: InboxWatch | null;
   /** Reads and signals a pid (the stale-child check, `runner.ts` `stopStaleMykg`); tests stub it. */
   processProbe?: MykgProcessProbe;
   logger?: KnowledgeLinkingLogger;
@@ -175,7 +166,6 @@ export interface KnowledgeLinkingSnapshot {
 export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   readonly events = new EventEmitter<KnowledgeLinkingEvents>();
   private readonly opts: KnowledgeLinkingOptions;
-  private readonly timings: typeof DEFAULT_TIMINGS;
   private readonly stateFile: LinkingStateFile;
   private readonly mykgDir: string;
   private readonly homeDir: string;
@@ -197,7 +187,6 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
 
   constructor(options: KnowledgeLinkingOptions) {
     this.opts = options;
-    this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.stateFile = new LinkingStateFile(knowledgeStatePath(options.appdir), () => options.clock.now());
     this.mykgDir = knowledgeMykgDir(options.appdir);
     this.homeDir = knowledgeMykgHomeDir(options.appdir);
@@ -461,7 +450,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     } else if (state.pendingEntryIds.length > 0 && state.pendingSince) {
       const first = Date.parse(state.pendingSince);
       const last = this.lastChangeAt ?? now;
-      at = Math.min(last + this.timings.debounceMs, Number.isFinite(first) ? first + this.timings.maxWaitMs : last + this.timings.debounceMs);
+      at = Math.min(last + DEFAULT_TIMINGS.debounceMs, Number.isFinite(first) ? first + DEFAULT_TIMINGS.maxWaitMs : last + DEFAULT_TIMINGS.debounceMs);
     } else {
       return;
     }
@@ -525,7 +514,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         else state.pendingEntryIds = [...new Set([...record.entryIds, ...state.pendingEntryIds])];
         state.pendingSince ??= now;
         state.lastError = { message, at: at.toISOString() };
-        state.pause = { reason: "error", message, resumesAt: new Date(at.getTime() + this.timings.errorRetryMs).toISOString() };
+        state.pause = { reason: "error", message, resumesAt: new Date(at.getTime() + DEFAULT_TIMINGS.errorRetryMs).toISOString() };
         await this.stateFile.save(state);
         this.schedule();
         this.emitStatus();
@@ -557,7 +546,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   }
 
   private mintRunId(): string {
-    return this.opts.mintId?.() ?? `kr_${randomBytes(6).toString("hex")}`;
+    return `kr_${randomBytes(6).toString("hex")}`;
   }
 
   // --- a run ---------------------------------------------------------------------------------------
@@ -603,9 +592,6 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
 
     const broker = new InboxBroker({
       clock: this.opts.clock,
-      ...(this.opts.sessionBudget ? { budget: this.opts.sessionBudget } : {}),
-      ...(this.opts.nextWaitMs !== undefined ? { nextWaitMs: this.opts.nextWaitMs } : {}),
-      ...(this.opts.inboxWatch !== undefined ? { watch: this.opts.inboxWatch } : {}),
       ...(this.opts.logger ? { logger: this.opts.logger } : {})
     });
     let active!: ActiveRun;
@@ -692,7 +678,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       void this.refreshProgress(active).finally(() => {
         if (this.active === active) this.scheduleProgress(active);
       });
-    }, this.timings.progressMs);
+    }, DEFAULT_TIMINGS.progressMs);
   }
 
   private async refreshProgress(active: ActiveRun): Promise<void> {
@@ -767,7 +753,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       session = result.session;
     }
     active.broker.finish(outcome === "cancelled" ? "run-cancelled" : "run-finished");
-    await active.pool.settle(this.timings.settleMs);
+    await active.pool.settle(DEFAULT_TIMINGS.settleMs);
     active.broker.dispose();
 
     // Only entries still as the run saw them get a verdict; one edited mid-run (it is pending
@@ -830,7 +816,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       if (existing.length > 0) await this.opts.store.setLinkState(existing, "failed");
       const at = this.opts.clock.now();
       state.lastError = { message: error ?? "The linking run failed.", at: at.toISOString() };
-      state.pause = { reason: "error", message: state.lastError.message, resumesAt: new Date(at.getTime() + this.timings.errorRetryMs).toISOString() };
+      state.pause = { reason: "error", message: state.lastError.message, resumesAt: new Date(at.getTime() + DEFAULT_TIMINGS.errorRetryMs).toISOString() };
     }
     if (outcome !== "ok") {
       // Linked by the next run (a rebuild's whole corpus is the next rebuild's again).
@@ -881,7 +867,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     const state = this.requireState();
     const at = this.opts.clock.now();
     state.lastError = { message, at: at.toISOString() };
-    state.pause = { reason: "error", message, resumesAt: new Date(at.getTime() + this.timings.errorRetryMs).toISOString() };
+    state.pause = { reason: "error", message, resumesAt: new Date(at.getTime() + DEFAULT_TIMINGS.errorRetryMs).toISOString() };
     this.persist();
     this.schedule();
     this.emitStatus();

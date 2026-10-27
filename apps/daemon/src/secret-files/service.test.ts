@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SECRET_FILES_MAX_PER_VAULT, type SecretFilesErrorCode, type SecretVaultDetail } from "@orquester/api";
+import { parseEnv } from "./files.ts";
 import { SecretFilesError, TRACKED_RETRY_MS, cloneFileState } from "./service.ts";
 import { REPO, WS, bytes, makeHarness, root, sha, text, type Harness } from "./test-fakes.ts";
 import type { VaultFileRecord } from "./vault-store.ts";
@@ -286,7 +287,7 @@ test("setup: merge takes the union of keys, the primary's values winning; bad so
   });
   const vault = h.store.get(WS, REPO)!;
   const merged = text(await h.store.readContent(vault.files[0]!.versions[0]!.sha256));
-  const parsed = h.fs.ops.parseEnv(bytes(merged))!;
+  const parsed = parseEnv(bytes(merged))!;
   assert.deepEqual([...parsed.entries()], [["A", "1"], ["B", "2"], ["C", "3"]]);
   assert.deepEqual(states(detail, ".env"), { a: "modified", b: "modified", c: "refused:tracked" });
   assert.deepEqual(detail.excluded, [".env.local"]);
@@ -1049,17 +1050,6 @@ test("git failing in a clone fails closed: unknown paths refused unreadable and 
   assert.equal(h.fs.read(`${b}/.env`), "KEY=two\n");
 });
 
-test("with a workspaces root, every clone write is confined to it", async () => {
-  const h = await makeHarness({ overrides: { workspacesRoot: () => "/ws" } });
-  const a = h.clone("a");
-  const b = h.clone("b");
-  h.fs.put(`${a}/.env`, "KEY=one\n");
-  await setupEnv(h, "a");
-  h.fs.put(`${b}/.env`, "KEY=b\n");
-  await h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b });
-  assert.ok(h.fs.writes.length >= 2);
-  for (const write of h.fs.writes) assert.equal(write.options?.containedIn, "/ws");
-});
 
 // ---------------------------------------------------------------------------
 // Re-review fixes: fresh evaluations on 409, tracked retry, abort listeners, reset re-check

@@ -17,11 +17,9 @@ import { codecFromAvcC } from "./h264.ts";
 import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./lifecycle.ts";
 import {
   DeviceStreamError,
-  resolveDeps,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
-  type StreamDeps,
   type VideoSessionOptions
 } from "./types.ts";
 
@@ -29,19 +27,16 @@ import {
  * Silence before a reconnect; also how long a session waits for its first
  * decoded frame before deciding the host has no H.264 encoder.
  */
-export const H264_FIRST_FRAME_MS = 8_000;
+const H264_FIRST_FRAME_MS = 8_000;
 
 export class ServeSimH264Session implements DeviceVideoSession {
   readonly transport = "serve-sim-h264" as const;
-  private readonly deps: StreamDeps;
   private readonly lifecycle: StreamLifecycle;
   private readonly decoder: H264Decoder;
   private decodedFrame = false;
 
   constructor(private readonly options: VideoSessionOptions) {
-    this.deps = resolveDeps(options.deps);
     this.decoder = new H264Decoder({
-      deps: this.deps,
       onFrame: (frame) => {
         if (paintCanvas(options.canvas, frame, frame.displayWidth, frame.displayHeight)) {
           this.decodedFrame = true;
@@ -57,10 +52,7 @@ export class ServeSimH264Session implements DeviceVideoSession {
       transport: this.transport,
       callbacks: options,
       connect: (attempt) => void this.run(attempt),
-      now: this.deps.now,
-      random: this.deps.random,
-      stallMs: options.stallMs,
-      reconnectAfterMs: options.reconnectAfterMs ?? H264_FIRST_FRAME_MS,
+      reconnectAfterMs: H264_FIRST_FRAME_MS,
       silenceError: (hadFrame) =>
         this.decodedFrame
           ? new DeviceStreamError("no-video", "The device stopped sending video. Reconnecting…")
@@ -97,7 +89,7 @@ export class ServeSimH264Session implements DeviceVideoSession {
     const demuxer = new AvccDemuxer();
     let seedPending = false;
     try {
-      const response = await this.deps.fetch(this.options.url, {
+      const response = await fetch(this.options.url, {
         ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
         signal: attempt.signal,
         cache: "no-store"
@@ -177,7 +169,7 @@ export class ServeSimH264Session implements DeviceVideoSession {
 
   private async paintSeed(jpeg: Uint8Array, attempt: StreamAttempt): Promise<void> {
     try {
-      const bitmap = await this.deps.createImageBitmap(new Blob([jpeg as BlobPart], { type: "image/jpeg" }));
+      const bitmap = await createImageBitmap(new Blob([jpeg as BlobPart], { type: "image/jpeg" }));
       try {
         if (attempt.current() && !this.decodedFrame && paintCanvas(this.options.canvas, bitmap, bitmap.width, bitmap.height)) {
           this.lifecycle.frame(bitmap.width, bitmap.height);

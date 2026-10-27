@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import type { AgentAccount, EventMessage, UsageResponse } from "@orquester/api";
-import { OVERLOAD_RETRY_BASE_MS, OVERLOAD_RETRY_MAX_MS, USAGE_LIMIT_CONTINUE_MESSAGE, USAGE_LIMIT_RESUME_MARGIN_MS, type ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
+import { USAGE_LIMIT_CONTINUE_MESSAGE, USAGE_LIMIT_RESUME_MARGIN_MS, type ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import type { AccountCooldown } from "@orquester/config";
 
 import type { DaemonApi, DaemonMethod, DaemonRequestOptions, DaemonResponse } from "../mcp/daemon-api.ts";
@@ -524,21 +524,22 @@ function overload(extra: Partial<ThreadUsageLimitNotice> = {}): ThreadUsageLimit
 
 test("an overload is retried shortly: no cooldown, no account switch, the continue message after the base wait", async () => {
   const h = harness({ refId: "codex", prefs: { switchAccount: true } });
+  h.accounts.splice(0, h.accounts.length, account("acc1", "codex"), account("acc2", "codex"));
   await report(h, overload());
   const state = h.chat.get("s1")?.usageLimit;
   assert.equal(state?.kind, "overloaded");
   assert.equal(state?.autoResume, "armed");
-  assert.equal(state?.resetAt, iso(T0 + OVERLOAD_RETRY_BASE_MS));
-  assert.equal(state?.resumeAt, iso(T0 + OVERLOAD_RETRY_BASE_MS), "no reset margin");
+  assert.equal(state?.resetAt, iso(T0 + 30_000));
+  assert.equal(state?.resumeAt, iso(T0 + 30_000), "no reset margin");
   assert.deepEqual(h.cooldowns.data, {}, "the account is not cooled down");
   assert.equal(h.chat.records()[0]?.chat?.usageLimit?.kind, "overloaded", "persisted");
-  await advance(h, OVERLOAD_RETRY_BASE_MS - 1_500);
+  await advance(h, 28_500);
   assert.equal(h.api.turns().length, 0);
   await advance(h, 1_500);
   assert.equal(h.api.posts.filter((post) => post.path.endsWith("/account")).length, 0, "never switches accounts");
   const [turn] = h.api.turns();
-  assert.equal(turn?.body.input, USAGE_LIMIT_CONTINUE_MESSAGE);
-  assert.equal(turn?.body.commandId, `limit-resume:s1:turn-1:${T0 + OVERLOAD_RETRY_BASE_MS}`);
+  assert.equal(turn?.body.input, "Continue where you left off.");
+  assert.equal(turn?.body.commandId, `limit-resume:s1:turn-1:${T0 + 30_000}`);
 });
 
 test("an overload met again after a retry waits twice as long, up to the cap; a quiet spell starts over", async () => {
@@ -552,17 +553,17 @@ test("an overload met again after a retry waits twice as long, up to the cap; a 
     assert.equal(h.api.turns().length, n);
     await report(h, null);
   }
-  assert.deepEqual(waits, [30_000, 60_000, 120_000, 240_000, OVERLOAD_RETRY_MAX_MS, OVERLOAD_RETRY_MAX_MS]);
+  assert.deepEqual(waits, [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]);
   await advance(h, HOUR);
   await report(h, overload({ activityId: "o9", turnId: "turn-9", at: iso(h.clock.t) }));
-  assert.equal(Date.parse(h.chat.get("s1")!.usageLimit!.resumeAt!) - h.clock.t, OVERLOAD_RETRY_BASE_MS);
+  assert.equal(Date.parse(h.chat.get("s1")!.usageLimit!.resumeAt!) - h.clock.t, 30_000);
 });
 
 test("an overload that blocked a Codex goal is retried with /goal resume", async () => {
   const h = harness({ refId: "codex" });
   h.api.goal = { objective: "ship it", status: "blocked", updatedAt: iso(T0) };
   await report(h, overload());
-  await advance(h, OVERLOAD_RETRY_BASE_MS);
+  await advance(h, 30_000);
   assert.equal(h.api.turns()[0]?.body.input, "/goal resume");
 });
 
@@ -579,5 +580,5 @@ test("an overload seen late (a daemon restart) is retried at once; with the sett
   assert.equal(off.chat.get("s1")?.usageLimit?.autoResume, "off");
   assert.equal(off.clock.pending(), 0);
   await off.recovery.setAutoResume("s1", true);
-  assert.equal(off.chat.get("s1")?.usageLimit?.resumeAt, iso(T0 + OVERLOAD_RETRY_BASE_MS), "re-armed with no reset margin");
+  assert.equal(off.chat.get("s1")?.usageLimit?.resumeAt, iso(T0 + 30_000), "re-armed with no reset margin");
 });

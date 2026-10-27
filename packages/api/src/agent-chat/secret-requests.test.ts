@@ -89,12 +89,12 @@ test("text that only mentions the words — this module's own source, prose — 
   assert.equal(stripSecretRequestValues(`log: ${escaped}`), SECRET_REDACTED_TEXT);
 });
 
-test("nothing else changes, and an untouched value is the same reference", () => {
+test("unrelated data stays intact, and the input is not mutated", () => {
   const plain = { command: "ls", output: "a\nb", nested: [{ text: '{"other":1}' }] };
-  assert.equal(stripSecretRequestValues(plain), plain);
+  assert.deepEqual(stripSecretRequestValues(plain), { command: "ls", output: "a\nb", nested: [{ text: '{"other":1}' }] });
   // An object that merely has a `value` key is not a result.
   const form = { name: "x", value: "kept" };
-  assert.equal(stripSecretRequestValues(form), form);
+  assert.deepEqual(stripSecretRequestValues(form), { name: "x", value: "kept" });
   // JSON naming the marker but holding no value: unchanged text.
   const recorded = JSON.stringify({ secretRequest: record });
   assert.equal(stripSecretRequestValues(recorded), recorded);

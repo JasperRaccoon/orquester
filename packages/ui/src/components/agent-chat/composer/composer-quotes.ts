@@ -25,7 +25,6 @@ import {
 } from "../../../lib/agent-chat/composer.logic";
 
 export type { ComposerQuote } from "../../../lib/agent-chat/composer.logic";
-export { MAX_COMPOSER_QUOTE_CHARS, MAX_COMPOSER_QUOTES } from "../../../lib/agent-chat/composer.logic";
 
 // ---------------------------------------------------------------------------
 // The passage itself
@@ -41,7 +40,7 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
  * — an open fence inside a blockquote would swallow everything after it, the
  * user's own text included.
  */
-export function normalizeQuoteText(text: string): string {
+function normalizeQuoteText(text: string): string {
   const lines = text
     .replace(/\r\n?/g, "\n")
     .replace(/^(?:[ \t]*\n)+/, "")
@@ -106,7 +105,7 @@ export function quoteExcerpt(text: string, max = 280): string {
  * quotes a code fence and its lines — a fenced block inside a blockquote is
  * ordinary CommonMark — and nests a line that was already a quote.
  */
-export function blockquote(text: string): string {
+function blockquote(text: string): string {
   return normalizeQuoteText(text)
     .split("\n")
     .map((line) => (line.trim().length === 0 ? ">" : `> ${line}`))

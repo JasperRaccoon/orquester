@@ -11,7 +11,7 @@ import Fastify from "fastify";
 import { redactUrlTokens } from "../../devtools.ts";
 import type { PairingScriptOutcome } from "../service/byo.ts";
 import type { BoxHubServer } from "./hub.ts";
-import { BOX_HUB_PUBLIC_ROUTES, BYO_PAIR_ROUTE, registerBoxHubRoutes, type BoxPairingScripts } from "./routes.ts";
+import { registerBoxHubRoutes, type BoxPairingScripts } from "./routes.ts";
 
 async function app(t: test.TestContext, pairing?: BoxPairingScripts) {
   const server = Fastify({ logger: false });
@@ -56,8 +56,7 @@ test("refusals: 404 for any dead code, 429 with Retry-After when throttled, 404 
   assert.equal((await bare.inject({ method: "GET", url: boxRoutes.pair("x".repeat(24)) })).statusCode, 404);
 });
 
-test("the pair route is exempt from user auth by its exact pattern, and its code never reaches a log line", () => {
-  assert.ok(BOX_HUB_PUBLIC_ROUTES.includes(BYO_PAIR_ROUTE));
+test("pairing URLs use the public route and redact the secret code from logs", () => {
   assert.equal(boxRoutes.pair("c0de"), "/api/boxes/pair/c0de");
   assert.equal(redactUrlTokens("/api/boxes/pair/AbC_123-xyz?x=1"), "/api/boxes/pair/[redacted]?x=1");
   assert.equal(redactUrlTokens("/api/boxes/agent/linux-x64"), "/api/boxes/agent/linux-x64");

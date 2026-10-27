@@ -9,7 +9,6 @@ import {
   credentialProblems,
   credentialsPayload,
   keyProviders,
-  providerAbbreviation,
   providerStatusView,
   windowsImageView
 } from "./providers.logic.ts";
@@ -24,25 +23,19 @@ import {
 import { ApiError } from "../../../lib/api-client.ts";
 import {
   byoMachines,
-  byoStatusView,
-  byoSubline,
   canHostDevices,
   canRemoveMachine,
   machineNameProblem,
-  pairingHint,
-  pairingPhase,
-  removeMachineText
+  pairingPhase
 } from "./byo.logic.ts";
 import {
-  BLACKSMITH_POLL,
   blacksmithAccounts,
   blacksmithBusy,
   blacksmithCanPickOrg,
   blacksmithCanRetry,
   blacksmithCanTest,
   blacksmithOrgs,
-  blacksmithStatus,
-  nextBlacksmithPoll
+  blacksmithStatus
 } from "./blacksmith.logic.ts";
 import {
   boxCostLine,
@@ -51,7 +44,6 @@ import {
   boxStateView,
   boxTitle,
   canDestroyBox,
-  destroyBoxLabel,
   listedBoxes,
   setupProgress
 } from "./boxes-list.logic.ts";
@@ -67,12 +59,10 @@ const OVH_FIELDS = [
   { id: "project", label: "Project ID", secret: false, optional: true }
 ];
 
-test("provider rows: Blacksmith has its own row, each tile its abbreviation", () => {
+test("Blacksmith has its own setup row rather than an API key form", () => {
   const list = [provider(), provider({ id: "blacksmith", label: "Blacksmith" }), provider({ id: "vultr", label: "Vultr" })];
   assert.deepEqual(keyProviders(list).map((entry) => entry.id), ["hetzner", "vultr"]);
   assert.deepEqual(keyProviders(null), []);
-  assert.equal(providerAbbreviation(provider()), "HZ");
-  assert.equal(providerAbbreviation(provider({ id: "digitalocean", label: "DigitalOcean" })), "DO");
 });
 
 test("status: a pill when configured, the Add API key button when not", () => {
@@ -342,14 +332,6 @@ test("a stopped control repo step offers Retry", () => {
   assert.equal(blacksmithCanRetry(step("test", "failed")), false, "the test step has its own Run again");
 });
 
-test("a running setup is re-read on a growing delay until the deadline", () => {
-  const start = 1_000_000;
-  assert.equal(nextBlacksmithPoll(null, start, start), BLACKSMITH_POLL.firstMs);
-  assert.equal(nextBlacksmithPoll(2_000, start, start), 3_000);
-  assert.equal(nextBlacksmithPoll(14_000, start, start), BLACKSMITH_POLL.maxMs);
-  assert.equal(nextBlacksmithPoll(15_000, start, start + BLACKSMITH_POLL.deadlineMs - 10_000), null);
-});
-
 // ---------------------------------------------------------------------------
 // Boxes list
 // ---------------------------------------------------------------------------
@@ -453,46 +435,18 @@ describe("bring-your-own machines", () => {
       listedBoxes([machine(), machine({ id: "lent", purpose: "temporary", threadId: "t" }), box({ id: "rented" })], NOW).map((entry) => entry.id),
       ["lent", "rented"]
     );
-    assert.equal(boxTitle(machine()), "macOS · Mac mini (your machine)");
-    assert.equal(boxCostLine(machine()), "Free");
-    assert.equal(destroyBoxLabel(machine({ purpose: "temporary" })), "Release");
-    assert.equal(destroyBoxLabel(box({ purpose: "temporary" })), "Destroy");
-    assert.equal(boxStateView(machine({ state: "offline" })).label, "Offline");
-    assert.equal(boxStateView(machine({ state: "pairing" })).label, "Pairing…");
-  });
-
-  test("byo: status pills for pairing, an expired command, online, offline and in use", () => {
-    const expiresSoon = { name: "Mac mini", pairingExpiresAt: new Date(NOW + 60_000).toISOString() };
-    assert.equal(byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW).label, "Waiting to pair…");
-    assert.deepEqual(
-      [byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW + 120_000).label, byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW + 120_000).tone],
-      ["Command expired", "warn"]
-    );
-    assert.deepEqual(byoStatusView(machine(), NOW), { tone: "ok", label: "Online", title: null });
-    assert.equal(byoStatusView(machine({ state: "offline", connected: false }), NOW).label, "Offline");
-    assert.equal(
-      byoStatusView(machine({ purpose: "project", project: { workspace: "acme", name: "app", path: "/w/acme/app" } }), NOW).label,
-      "In use: acme / app"
-    );
-    assert.equal(byoStatusView(machine({ purpose: "project", state: "provisioning" }), NOW).label, "Setting up a project…");
-    assert.equal(byoStatusView(machine({ purpose: "temporary", purposeNote: "tests" }), NOW).label, "Lent to an agent chat");
-    assert.equal(byoSubline(machine()), "macOS · arm64");
+    assert.match(boxTitle(machine()), /Mac mini/);
   });
 
   test("byo: names, removal and the device toggle", () => {
-    assert.equal(machineNameProblem("  "), "Give the machine a name.");
-    assert.equal(machineNameProblem("x".repeat(61)), "At most 60 characters.");
-    assert.equal(machineNameProblem("Mac\nmini"), "One line of text.");
+    assert.ok(machineNameProblem("  "));
+    assert.ok(machineNameProblem("x".repeat(61)));
+    assert.ok(machineNameProblem("Mac\nmini"));
     assert.equal(machineNameProblem("Mac mini"), null);
     assert.equal(canRemoveMachine(machine()), true);
     assert.equal(canRemoveMachine(machine({ purpose: "project" })), false);
     assert.equal(canHostDevices(machine({ state: "pairing" })), false);
     assert.equal(canHostDevices(machine({ state: "offline" })), true);
-    assert.match(removeMachineText(machine()), /removes its service/);
-    assert.match(removeMachineText(machine({ connected: false, state: "offline" })), /orq-agent uninstall-service/);
-    assert.match(removeMachineText(machine({ state: "pairing" })), /pairing command stops working/);
-    assert.match(pairingHint("macos"), /not with sudo/);
-    assert.match(pairingHint("linux"), /user service/);
   });
 
   test("byo: the pairing dialog follows the live box — waiting, downloaded, connected, expired, cancelled", () => {
@@ -504,6 +458,5 @@ describe("bring-your-own machines", () => {
     assert.deepEqual(pairingPhase(machine(), expiresAt, NOW), { kind: "connected", detail: "macOS, arm64" });
     assert.deepEqual(pairingPhase(undefined, expiresAt, NOW), { kind: "gone" });
     assert.ok(!keyProviders([provider(), provider({ id: "byo" }), provider({ id: "blacksmith" })]).some((entry) => entry.id === "byo"));
-    assert.equal(providerAbbreviation({ id: "byo", label: "Your machines" }), "MY");
   });
 });

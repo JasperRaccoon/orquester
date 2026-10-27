@@ -1,0 +1,19 @@
+# Final boxes title aliases
+
+Docs-only final-title aliases for current boxes tests. These existing owners were already audited; no baseline count, test execution, disposition count or source code changes are introduced.
+
+11 current titles from the supplied final-new-unmapped manifest are linked below. Full six-bar evidence is in [final-aliases-boxes.json](final-aliases-boxes.json).
+
+- `apps/daemon/src/boxes/github/device-cache.test.ts:10` — **device tool installation uses the lockfile without dependency lifecycle scripts** (REWRITE). Original owner: “the device tools install the pinned versions from the shipped lockfile without lifecycle scripts” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/github/device-cache.test.ts:14` — **the Android cache installs the x86_64 API 35 image and SDK tools** (REWRITE). Original owner: “the Android cache holds the API 35 x86_64 image and the default Pixel profiles, from the box host's pinned cmdline-tools” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/github/device-cache.test.ts:36` — **the iOS runner build picks the newest available iOS runtime and its newest iPhone** (REWRITE). Original owner: “the iOS runner build picks the newest iOS runtime and its newest iPhone” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/github/workflow-template.test.ts:105` — **Linux device hosts restore their SDK and tools before the agent, without saving on cancellation** (REWRITE). Original owner: “Linux boxes enable KVM before orq-agent starts; device hosts restore the Android and tool caches” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/github/workflow-template.test.ts:119` — **macOS device hosts restore the iOS runner only for a known Xcode build** (REWRITE). Original owner: “macOS device hosts restore agent-device's iOS runner keyed on the Xcode build” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/github/workflow-template.test.ts:128` — **the device-cache workflow saves the same SDK, tools and iOS runner keys and paths that box runs restore** (REWRITE). Original owner: “the device-cache workflow builds what is missing and saves it under the keys box runs restore” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/hub/pair-route.test.ts:59` — **pairing URLs use the public route and redact the secret code from logs** (REWRITE). Original owner: “the pair route is exempt from user auth by its exact pattern, and its code never reaches a log line” in `docs/testing-audit/devices-boxes.json`.
+- `apps/daemon/src/boxes/remote/fs/secret-files.test.ts:117` — **watchBoxDir filters events, invalidates on a link drop, and unsubscribes on close** (REWRITE). Original owner: “watchBoxDir: fs.change events for its watch id reach the service; a link change re-arms” in `docs/testing-audit/boxes.json`.
+- `apps/daemon/src/boxes/sync/box-fs.test.ts:76` — **the read-back hasher (no hash tool in the box) hashes whole files and requested prefixes** (REWRITE). Original owner: “the read-back hasher (no hash tool in the box) reads each file with a length” in `docs/testing-audit/boxes.json`.
+- `apps/daemon/src/boxes/sync/codecs.test.ts:13` — **the box copy blanks nested credential values while preserving settings that name credentials** (REWRITE). Original owner: “secret paths: MCP env/headers and credential-named keys, not names of secrets” in `docs/testing-audit/boxes.json`.
+- `apps/daemon/src/boxes/sync/store.test.ts:47` — **baselines survive a fresh store and disappear when their box is forgotten** (REWRITE). Original owner: “baselines round-trip and drop unreadable entries” in `docs/testing-audit/boxes.json`.
+
+No tests were run. These aliases repair traceability only; they do not represent additional coverage.

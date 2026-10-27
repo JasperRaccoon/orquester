@@ -37,7 +37,7 @@ import { KNOWLEDGE_WORKER_PROMPT } from "./indexer-profile.ts";
 import { WorkerStartError, type WorkerCandidate, type WorkerOutcome, type WorkerPick, type WorkerSessionPort } from "./workers.ts";
 
 /** The indexing model when the settings name none (a Sonnet-class model). */
-export const DEFAULT_KNOWLEDGE_MODEL = "sonnet";
+const DEFAULT_KNOWLEDGE_MODEL = "sonnet";
 /** A worker's turn never runs this long; past it the chat is treated as failed. */
 const WATCH_DEADLINE_MS = 24 * 60 * 60_000;
 
@@ -65,7 +65,7 @@ export interface DaemonWorkerSessionsDeps {
  * The selection chain for the current settings: one Claude entry with the settings' account
  * policy as it is (a legacy `accountId` was already mapped to its policy when the settings were read).
  */
-export function knowledgeWorkerChain(settings: KnowledgeSettings): AgentChainEntry[] {
+function knowledgeWorkerChain(settings: KnowledgeSettings): AgentChainEntry[] {
   const model = settings.model?.trim() || DEFAULT_KNOWLEDGE_MODEL;
   return [{ agent: "claude", model, options: [], accounts: settings.accountPolicy }];
 }

@@ -159,6 +159,19 @@ describe("InboxBroker", () => {
     assert.deepEqual(JSON.parse(await readFile(join(h.outbox, `${a}.answer.json`), "utf8")), { task_id: a, answer: '{"nodes":[]}' });
   });
 
+  it("repeated invalid answers retire the chat and hand its task to another chat", async () => {
+    const h = await harness();
+    const id = await h.addTask("S", "A");
+    await h.broker.next("w1");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assert.equal((await h.broker.submit("w1", id, "not JSON")).accepted, false);
+    }
+    assert.deepEqual(await h.broker.next("w1"), { kind: "done", reason: "session-budget" });
+    const reassigned = await h.broker.next("w2");
+    assert.equal(reassigned.kind === "task" && reassigned.task.taskId, id);
+    assert.deepEqual(await readdir(h.outbox), [], "invalid answers never reach myKG");
+  });
+
   it("writes the answer (temp + rename) strictly before the .done marker", async () => {
     const h = await harness();
     const a = await h.addTask("S", "A");

@@ -14,10 +14,6 @@ import {
   FORK_HANDOFF_CLOSE_TAG,
   FORK_HANDOFF_OPEN_TAG,
   gitStatusSection,
-  HANDOFF_BUDGET_BYTES,
-  HANDOFF_BYTES_PER_TOKEN,
-  HANDOFF_FALLBACK_CONTEXT_WINDOW,
-  HANDOFF_MIN_RESERVE_TOKENS,
   handoffBudgetBytes,
   handoffContextWindow,
   handoffMessagesOf,
@@ -137,18 +133,16 @@ describe("handoffBudgetBytes", () => {
     // 80k window: a quarter (20k) is the reserve.
     assert.equal(handoffBudgetBytes({ contextWindow: 80_000, capBytes: 1_000_000 }), 60_000);
     // A large window is capped at the handoff ceiling.
-    assert.equal(handoffBudgetBytes({ contextWindow: 1_000_000 }), HANDOFF_BUDGET_BYTES);
+    assert.equal(handoffBudgetBytes({ contextWindow: 1_000_000 }), 65_536);
     assert.equal(handoffBudgetBytes({ contextWindow: 1_000_000, capBytes: 120_000 }), 120_000);
   });
 
   it("assumes the documented fallback window when the target's is unknown", () => {
-    const fallback = (HANDOFF_FALLBACK_CONTEXT_WINDOW - Math.max(HANDOFF_MIN_RESERVE_TOKENS, HANDOFF_FALLBACK_CONTEXT_WINDOW / 4)) * HANDOFF_BYTES_PER_TOKEN;
-    assert.equal(fallback, 96_000);
     for (const contextWindow of [undefined, null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      assert.equal(handoffBudgetBytes({ contextWindow, capBytes: 1_000_000 }), fallback, String(contextWindow));
-      assert.equal(handoffBudgetBytes({ contextWindow }), HANDOFF_BUDGET_BYTES, String(contextWindow));
+      assert.equal(handoffBudgetBytes({ contextWindow, capBytes: 1_000_000 }), 96_000, String(contextWindow));
+      assert.equal(handoffBudgetBytes({ contextWindow }), 65_536, String(contextWindow));
     }
-    assert.equal(handoffBudgetBytes(), HANDOFF_BUDGET_BYTES);
+    assert.equal(handoffBudgetBytes(), 65_536);
   });
 
   it("leaves nothing in a tiny window, never a negative budget", () => {
@@ -197,7 +191,7 @@ describe("handoffContextWindow", () => {
 
 /** Every selection must fit its budget: carried text, per-message overhead and one marker per omitted run. */
 function assertWithinBudget(selection: HandoffSelection, budget: number): void {
-  const cost = selection.messages.reduce((sum, m) => sum + utf8ByteLength(m.text) + OVERHEAD, 0) + selection.spans.length * MARKER;
+  const cost = selection.messages.reduce((sum, m) => sum + Buffer.byteLength(m.text, "utf8") + OVERHEAD, 0) + selection.spans.length * MARKER;
   assert.ok(cost <= budget, `cost ${cost} over budget ${budget}`);
   assert.equal(selection.omitted, selection.spans.reduce((sum, span) => sum + span.end - span.start, 0));
   assert.equal(selection.messages.length + selection.omitted, selection.total);
@@ -314,22 +308,6 @@ describe("selectHandoffMessages", () => {
     assert.equal(selectHandoffMessages(history, 0).messages.length, 0);
   });
 
-  it("stays within budget and in order over a huge history", () => {
-    const history: HandoffMessage[] = [];
-    for (let turn = 1; turn <= 2_500; turn += 1) {
-      history.push({ role: "user", text: `question ${turn} ${"q".repeat(turn % 97)}`, turn });
-      history.push({ role: "assistant", text: `answer ${turn} ${"a".repeat((turn * 31) % 2_000)}`, turn });
-    }
-    const started = Date.now();
-    const selection = selectHandoffMessages(history);
-    assert.ok(Date.now() - started < 2_000, "linear enough for a long chat");
-    assertWithinBudget(selection, HANDOFF_BUDGET_BYTES);
-    assert.equal(selection.messages[0]!.text.startsWith("question 1 "), true, "the original request leads");
-    assert.equal(selection.messages.at(-1)!.text.startsWith("answer 2500 "), true, "the newest reply ends it");
-    assert.ok(selection.bytes > HANDOFF_BUDGET_BYTES * 0.9, "the budget is used, not wasted");
-    assert.equal(selection.total, 5_000);
-  });
-
   it("never splits a surrogate pair or a multi-byte character where it cuts", () => {
     for (const unit of ["😀", "é", "€", "a😀", "𝒳y"]) {
       const history: HandoffMessage[] = [
@@ -354,8 +332,8 @@ describe("cutHandoffText", () => {
     assert.deepEqual(cutHandoffText("short", 100), { text: "short", cutBytes: 0 });
     assert.equal(cutHandoffText("x".repeat(10_000), 200), null);
     const cut = cutHandoffText("x".repeat(10_000), 1_000)!;
-    assert.ok(utf8ByteLength(cut.text) <= 1_000);
-    assert.equal(cut.cutBytes + utf8ByteLength(cut.text.replace(/\n\[….*…\]\n/, "")), 10_000);
+    assert.ok(Buffer.byteLength(cut.text, "utf8") <= 1_000);
+    assert.equal(cut.cutBytes + Buffer.byteLength(cut.text.replace(/\n\[….*…\]\n/, ""), "utf8"), 10_000);
   });
 });
 

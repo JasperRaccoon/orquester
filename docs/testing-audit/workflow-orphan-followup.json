@@ -1,0 +1,69 @@
+{
+  "scope": "workflow-orphan-followup",
+  "baselineCommit": "beb7516b10a3c4472399e0f6f2f2b0a187a61186",
+  "supersedes": "docs/testing-audit/workflows.json tests entry with the same baseline path, line and name; one disposition override, not an additional test",
+  "tests": [
+    {
+      "path": "apps/daemon/src/workflows/sandbox/sandbox.test.ts",
+      "line": 285,
+      "name": "a runner killed outright reads as interrupted, and its work is ended",
+      "priorDisposition": "KEEP",
+      "disposition": "OPTIMIZE",
+      "reason": "Advance the existing host grace timer only after real orphan termination, while retaining real OS signal/process identity and interrupted result assertions. Add guarded exact-owned process group cleanup on every failure.",
+      "evidence": {
+        "independentContract": "Workflow design §5.6/§5.8: an outright-killed detached supervisor with no exit record is interrupted, and its recorded process group is terminated safely.",
+        "realRegression": "A dead runner leaves its child running, or wait fabricates an ordinary success/exit code instead of an interrupted SIGKILL outcome.",
+        "independentOracle": "The fixture starts actual sleep work and kills the supervisor with OS SIGKILL. Literal interrupted=true, code=null, signal=SIGKILL and /proc pid/starttime liveness establish results independently. The documented 5,000 ms host grace is advanced only after real child termination.",
+        "stableSeam": "Public SandboxRunner.spawn/wait and OS process identity; native timer mocking controls the existing host Clock scheduling boundary. No result, process signal, filesystem receipt or child liveness is mocked.",
+        "refactorResistance": "No private call count, helper arrangement or timer inventory is asserted. The contract is observed through durable child identity, actual process death and public wait result; skipping an unnecessary grace after child death would also pass.",
+        "uniqueProtection": "The separate real-time SIGTERM-resistant case owns escalation after the actual 5 s grace. FakeSandbox/engine resume tests cannot prove cleanup of a real orphaned process after an unrecorded runner death. Neither is a substitute for this interrupted-record fixture."
+      }
+    }
+  ],
+  "declarationDelta": 0,
+  "runtimeCaseDelta": 0,
+  "additionalTestLOC": 12,
+  "additionalProductionLOC": 0,
+  "timings": {
+    "runnerConfiguration": "Node v24.22.1, uncached tsx via TSX_DISABLE_CACHE=1; test concurrency4, same single-name filter, same checkout and host; one before/two after observations",
+    "beforeNamedMs": 5060.965733,
+    "afterNamedMs": [
+      48.923872,
+      56.927325
+    ],
+    "beforeWallSeconds": 6.04,
+    "afterWallSeconds": [
+      0.88,
+      1.0
+    ],
+    "namedMeanSavedMs": 5008.0401345,
+    "namedMeanImprovementPercent": 98.95423914540858,
+    "wallMeanSavedSeconds": 5.1,
+    "wallMeanImprovementPercent": 84.43708609271522,
+    "limitation": "Focused measurements only; no whole-suite or CI speedup is inferred."
+  },
+  "validation": {
+    "cwd": "apps/daemon",
+    "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=600000 --test-concurrency=4 '--test-name-pattern=a runner killed outright reads as interrupted, and its work is ended' src/workflows/sandbox/sandbox.test.ts",
+    "beforeExit": 0,
+    "afterExits": [
+      0,
+      0
+    ],
+    "mutationCommand": "ORQUESTER_AUDIT_MUTATION=orphan-term TSX_DISABLE_CACHE=1 node --import tsx --import /tmp/orquester-test-audit/workflows-mutate.mjs --test --test-timeout=600000 --test-concurrency=4 '--test-name-pattern=a runner killed outright reads as interrupted, and its work is ended' src/workflows/sandbox/sandbox.test.ts",
+    "mutationExit": 1,
+    "mutationFailure": "Timed out waiting for the orphaned work to be gone",
+    "diffCheck": "git diff --check -- apps/daemon/src/workflows/sandbox/sandbox.test.ts passed",
+    "remaining": "Root final typecheck/full-suite gate after integration"
+  },
+  "artifacts": [
+    "/tmp/orquester-test-audit/workflows-orphan-before.log",
+    "/tmp/orquester-test-audit/workflows-orphan-before.time",
+    "/tmp/orquester-test-audit/workflows-orphan-after-1.log",
+    "/tmp/orquester-test-audit/workflows-orphan-after-1.time",
+    "/tmp/orquester-test-audit/workflows-orphan-after-2.log",
+    "/tmp/orquester-test-audit/workflows-orphan-after-2.time",
+    "/tmp/orquester-test-audit/workflows-orphan-mutant.log",
+    "/tmp/orquester-test-audit/workflows-orphan-mutant.time"
+  ]
+}

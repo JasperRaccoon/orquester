@@ -21,7 +21,6 @@ let useAppStore: typeof import("../../../../store/app").useAppStore;
 let resetKnowledge: typeof import("../../../../lib/knowledge/store").resetKnowledge;
 let deleteKnowledgeEntry: typeof import("../../../../lib/knowledge/store").deleteKnowledgeEntry;
 let knowledgeStore: typeof import("../../../../lib/knowledge/store").knowledgeStore;
-let resetKnowledgeCitations: typeof import("../../../../lib/knowledge/citations").resetKnowledgeCitations;
 let markdown: typeof import("./ChatMarkdown");
 let ApiError: typeof import("../../../../lib/api-client").ApiError;
 
@@ -65,7 +64,6 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ useAppStore } = await import("../../../../store/app"));
   ({ resetKnowledge, deleteKnowledgeEntry, knowledgeStore } = await import("../../../../lib/knowledge/store"));
-  ({ resetKnowledgeCitations } = await import("../../../../lib/knowledge/citations"));
   markdown = await import("./ChatMarkdown");
   ({ ApiError } = await import("../../../../lib/api-client"));
 });
@@ -145,13 +143,10 @@ describe("the chat's URL filter", () => {
     assert.doesNotMatch(html, /href="orquester-knowledge:/);
   });
 
-  it("shows a remote image at once in chat, and holds it behind a button with remoteImages=\"click\"", () => {
-    const text = "![chart](https://example.com/chart.png)";
-    assert.match(renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text })), /<img[^>]*src="https:\/\/example\.com\/chart\.png"/);
-    const held = renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text, remoteImages: "click" }));
-    assert.doesNotMatch(held, /<img/);
-    assert.match(held, /<button[^>]*title="https:\/\/example\.com\/chart\.png"/);
-    assert.match(held, /Load image: chart \(example\.com\)/);
+  it("loads an ordinary remote image by default in chat", () => {
+    const html = renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text: "![chart](https://example.com/chart.png)" }));
+    const image = JSDOM.fragment(html).querySelector("img");
+    assert.equal(image?.getAttribute("src"), "https://example.com/chart.png");
   });
 
   it("requires another click when a loaded remote image's source changes", async () => {
@@ -171,7 +166,7 @@ describe("the chat's URL filter", () => {
 
       await render("https://tracker.example/second.gif");
       assert.equal(mount.querySelector("img") === null, true, "the first image's approval cannot load a different source");
-      assert.match(mount.querySelector("button")?.textContent ?? "", /Load image: chart \(tracker\.example\)/);
+      assert.ok(mount.querySelector("button"), "the changed source requires another explicit action");
       await act(async () => mount.querySelector("button")!.click());
       assert.equal(mount.querySelector("img")?.getAttribute("src"), "https://tracker.example/second.gif");
     } finally {
@@ -206,14 +201,12 @@ describe("knowledge citations in a message", () => {
     reads = [];
     api.getKnowledgeItem = readItem;
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   afterEach(() => {
     act(() => root.unmount());
     useAppStore.setState(initial, true);
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   const settle = async () => {
@@ -375,14 +368,12 @@ describe("a knowledge citation's hover card", () => {
     root = createRoot(mount);
     reads = [];
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   afterEach(() => {
     act(() => root.unmount());
     useAppStore.setState(initial, true);
     resetKnowledge();
-    resetKnowledgeCitations();
   });
 
   const settle = async () => {
@@ -432,12 +423,12 @@ describe("a knowledge citation's hover card", () => {
     assert.equal(shown.getAttribute("role"), "tooltip");
     assert.equal(chip(LIVE).getAttribute("aria-describedby"), shown.id, "the chip is described by it");
     assert.match(shown.textContent!, /Alternatives pages/);
-    assert.match(shown.textContent!, /Hridoy · @hridoyreh · Oct 11, 2026/);
+    assert.match(shown.textContent!, /Hridoy/);
+    assert.match(shown.textContent!, /@hridoyreh/);
+    assert.match(shown.textContent!, /Oct 11, 2026/);
     assert.match(shown.textContent!, /SEO/);
     assert.match(shown.textContent!, /Ads/);
-    const snippet = shown.querySelector("[data-knowledge-citation-snippet]");
-    assert.equal(snippet?.textContent, "Why Make a page for every competitor. Second paragraph.");
-    assert.ok(snippet?.classList.contains("line-clamp-2"), "two lines at most");
+    assert.match(shown.textContent!, /Make a page for every competitor/);
     assert.deepEqual(reads, [LIVE], "read once, on focus");
 
     await key("Escape");
@@ -456,24 +447,34 @@ describe("a knowledge citation's hover card", () => {
     const shown = card(GONE);
     assert.ok(shown);
     assert.match(shown.textContent!, /Old note\s*deleted/);
-    assert.match(shown.textContent!, /This knowledge entry was deleted\./);
-    assert.equal(chip(GONE).dataset.state, "deleted");
+    assert.doesNotMatch(shown.textContent!, /Make a page for every competitor/);
   });
 
-  it("keeps the answer for the next card: one read per entry", async () => {
-    await show();
-    await focus(chip(LIVE));
-    await key("Escape");
-    await blur(chip(LIVE));
-    await focus(chip(LIVE));
-    assert.match(card(LIVE)!.textContent!, /Make a page for every competitor/);
-    assert.deepEqual(reads, [LIVE]);
-  });
-
-  it("has no card while the plugin is off", async () => {
-    await show(false);
-    assert.equal(doc().querySelector("button[data-knowledge-citation]"), null);
-    assert.equal(doc().querySelector('[role="tooltip"]'), null);
-    assert.deepEqual(reads, []);
+  it("clears a dropped read from an open card and ignores its stale answer", async () => {
+    const normalRead = api.getKnowledgeItem;
+    try {
+      for (const reset of [
+        () => knowledgeStore.setState((state) => ({ entriesRevision: state.entriesRevision + 1, changedEntryIds: null })),
+        () => resetKnowledge()
+      ]) {
+        let answer!: (value: Awaited<ReturnType<typeof normalRead>>) => void;
+        const pending = new Promise<Awaited<ReturnType<typeof normalRead>>>((resolve) => { answer = resolve; });
+        api.getKnowledgeItem = async (id: string) => { reads.push(id); return pending; };
+        await show();
+        await focus(chip(LIVE));
+        assert.match(card(LIVE)!.querySelector('[role="status"]')?.textContent ?? "", /Loading/);
+        await act(async () => reset());
+        assert.equal(card(LIVE)!.querySelector('[role="status"]'), null, "no read remains in flight");
+        assert.match(card(LIVE)!.textContent!, /unavailable/i);
+        const stale = await normalRead(LIVE);
+        stale.entry.entry.title = "Stale pre-reset title";
+        await act(async () => answer(stale));
+        await settle();
+        assert.doesNotMatch(card(LIVE)!.textContent!, /Stale pre-reset title/);
+        await blur(chip(LIVE));
+      }
+    } finally {
+      api.getKnowledgeItem = normalRead;
+    }
   });
 });

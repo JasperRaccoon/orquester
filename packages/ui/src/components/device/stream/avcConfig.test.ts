@@ -20,15 +20,11 @@ const repaired = Uint8Array.from([
 
 describe("simulator AVC reorder metadata", () => {
   it("adds zero reordering and one reference frame to the captured fallback SPS", () => {
-    assert.deepEqual(simulatorAvcConfig(fallback), repaired);
-    assert.equal(simulatorAvcConfig(repaired), repaired);
-  });
-
-  it("preserves existing VUI and leaves the original codec description untouched", () => {
     const original = fallback.slice();
-    simulatorAvcConfig(fallback);
-    assert.deepEqual(fallback, original);
-    assert.equal(simulatorAvcConfig(lowLatency), lowLatency);
+    assert.deepEqual(simulatorAvcConfig(fallback), repaired);
+    assert.deepEqual(simulatorAvcConfig(repaired), repaired);
+    assert.deepEqual(fallback, original, "the recorded input is never mutated");
+    assert.deepEqual(simulatorAvcConfig(lowLatency), lowLatency, "existing VUI is preserved");
   });
 
   it("repairs multiple SPS entries while preserving PPS and profile extensions", () => {
@@ -53,16 +49,14 @@ describe("simulator AVC reorder metadata", () => {
     );
   });
 
-  it("passes through every truncated prefix of the captured configurations", () => {
+  it("preserves unsupported, truncated and malformed codec descriptions", () => {
     for (const config of [fallback, lowLatency]) {
       for (let length = 0; length < config.length; length++) {
         const truncated = config.subarray(0, length);
-        assert.equal(simulatorAvcConfig(truncated), truncated);
+        assert.deepEqual(simulatorAvcConfig(truncated), truncated);
       }
     }
-  });
 
-  it("does not modify unsupported profiles, scaling lists, or invalid parameter-set lengths", () => {
     const unsupportedProfile = fallback.slice();
     unsupportedProfile[9] = 110;
     const scalingLists = fallback.slice();
@@ -72,23 +66,19 @@ describe("simulator AVC reorder metadata", () => {
     const invalidPpsLength = fallback.slice();
     invalidPpsLength[21] = 0xff;
     for (const config of [unsupportedProfile, scalingLists, invalidSpsLength, invalidPpsLength]) {
-      assert.equal(simulatorAvcConfig(config), config);
+      assert.deepEqual(simulatorAvcConfig(config), config);
     }
-  });
 
-  it("requires valid SPS trailing bits before appending VUI metadata", () => {
     const invalidPadding = fallback.slice();
     invalidPadding[19] = 0;
-    assert.equal(simulatorAvcConfig(invalidPadding), invalidPadding);
-  });
+    assert.deepEqual(simulatorAvcConfig(invalidPadding), invalidPadding);
 
-  it("passes through invalid NAL headers and unterminated Exp-Golomb values", () => {
     const forbiddenBit = fallback.slice();
     forbiddenBit[8] = forbiddenBit[8]! | 0x80;
-    assert.equal(simulatorAvcConfig(forbiddenBit), forbiddenBit);
+    assert.deepEqual(simulatorAvcConfig(forbiddenBit), forbiddenBit);
     const unterminated = fallback.slice();
     unterminated.fill(0, 12, 20);
-    assert.equal(simulatorAvcConfig(unterminated), unterminated);
+    assert.deepEqual(simulatorAvcConfig(unterminated), unterminated);
     const overlong = Uint8Array.from([
       ...fallback.subarray(0, 6),
       0,
@@ -108,18 +98,16 @@ describe("simulator AVC reorder metadata", () => {
       0,
       ...fallback.subarray(20),
     ]);
-    assert.equal(simulatorAvcConfig(overlong), overlong);
-  });
+    assert.deepEqual(simulatorAvcConfig(overlong), overlong);
 
-  it("bounds parsing of oversized configurations and SPS data", () => {
     const oversizedConfig = new Uint8Array(64 * 1024 + 1);
     oversizedConfig.set(fallback);
-    assert.equal(simulatorAvcConfig(oversizedConfig), oversizedConfig);
+    assert.deepEqual(simulatorAvcConfig(oversizedConfig), oversizedConfig);
     const oversizedSps = new Uint8Array(6 + 2 + 4097 + 7);
     oversizedSps.set(fallback.subarray(0, 6));
     oversizedSps.set([0x10, 1], 6);
     oversizedSps.set(fallback.subarray(8, 20), 8);
     oversizedSps.set(fallback.subarray(20), 8 + 4097);
-    assert.equal(simulatorAvcConfig(oversizedSps), oversizedSps);
+    assert.deepEqual(simulatorAvcConfig(oversizedSps), oversizedSps);
   });
 });

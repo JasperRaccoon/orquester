@@ -6,64 +6,17 @@ import {
   Mesh,
   PlaneGeometry,
   Quaternion,
-  type Object3D,
-  type PerspectiveCamera,
-  type Scene,
 } from "three";
 import { createPhoneViewer } from "./phoneViewer.ts";
 import { createFoldRig } from "./foldRig.testing.ts";
-import { type DeviceShapeProfile } from "./shapeProfile.ts";
 import type { DeviceRenderer } from "./types.ts";
 
-type GpuState = {
-  blank: boolean;
-  allocations: number;
-  disposed: boolean;
-  size: { width: number; height: number; pixelRatio: number };
-  frames: {
-    scene: Scene;
-    phone: Object3D | undefined;
-    rotation: Quaternion | undefined;
-    displayAngle: number | undefined;
-    yaw: number | undefined;
-    cameraZ: number;
-  }[];
-};
-const gpu = { instances: [] as GpuState[] };
-
-/** Records what the viewer would draw; a stand-in for three's WebGLRenderer. */
+/** Replaces only WebGL; scene construction, input and model installation run normally. */
 class FakeRenderer {
   outputColorSpace = "";
-  state: GpuState = {
-    blank: true,
-    allocations: 0,
-    disposed: false,
-    size: { width: 0, height: 0, pixelRatio: 1 },
-    frames: [],
-  };
-  constructor() {
-    gpu.instances.push(this.state);
-  }
-  setDrawingBufferSize(width: number, height: number, pixelRatio: number) {
-    this.state.size = { width, height, pixelRatio };
-    this.state.allocations++;
-    this.state.blank = true;
-  }
-  render(scene: Scene, camera: PerspectiveCamera) {
-    const phone = scene.children.find((child) => child.type === "Group");
-    this.state.frames.push({
-      scene,
-      phone,
-      rotation: phone?.quaternion.clone(),
-      displayAngle: phone?.children[0]?.rotation.z,
-      yaw: phone?.rotation.y,
-      cameraZ: camera.position.z,
-    });
-    this.state.blank = false;
-  }
-  dispose() {
-    this.state.disposed = true;
-  }
+  setDrawingBufferSize() {}
+  render() {}
+  dispose() {}
   forceContextLoss() {}
 }
 
@@ -78,11 +31,10 @@ const frameGlobals = ["requestAnimationFrame", "cancelAnimationFrame"] as const;
 afterEach(() => {
   mock.restoreAll();
   for (const name of frameGlobals) delete (globalThis as Record<string, unknown>)[name];
-  gpu.instances.length = 0;
   models.pending.length = 0;
 });
 
-function fixture(profile?: DeviceShapeProfile) {
+function fixture() {
   const pending = new Map<number, FrameRequestCallback>();
   let id = 0;
   let now = 0;
@@ -103,7 +55,6 @@ function fixture(profile?: DeviceShapeProfile) {
     onUnavailable,
     createRenderer: () => new FakeRenderer() as unknown as DeviceRenderer,
     loadModel,
-    ...(profile ? { profile } : {}),
   });
   const draw = (time = now) => {
     now = time;
@@ -119,7 +70,6 @@ function fixture(profile?: DeviceShapeProfile) {
     pending,
     source,
     onUnavailable,
-    state: gpu.instances[0]!,
   };
 }
 
@@ -146,7 +96,7 @@ it("rejects incompatible accessories and releases an accessory that finishes aft
 });
 
 it("folds a foldable model to the reported hinge angle; a slab model ignores it", async () => {
-  const { viewer, draw, state, onUnavailable } = fixture();
+  const { viewer, draw, onUnavailable } = fixture();
   viewer.setModel({ id: "galaxy-z-fold8", url: "/fold.glb" });
   const asset = createFoldRig("vertical");
   models.pending[0]!.resolve({ asset, dispose: () => {} });
@@ -155,7 +105,6 @@ it("folds a foldable model to the reported hinge angle; a slab model ignores it"
   const leaf = asset.getObjectByName("left-half")!;
   // No angle reported yet: shown open, upright.
   assert.equal(leaf.quaternion.w, 1);
-  assert.equal(state.frames.at(-1)!.displayAngle, 0);
   viewer.setFoldAngle(0);
   draw(100);
   const midway = leaf.rotation.y;
@@ -178,20 +127,7 @@ it("folds a foldable model to the reported hinge angle; a slab model ignores it"
   await Promise.resolve();
   viewer.setFoldAngle(90);
   draw(4000);
-  assert.equal(state.frames.at(-1)!.phone?.children[0]?.children[0], slab);
+  assert.notEqual(slab.parent, null);
   assert.equal(onUnavailable.mock.callCount(), 0);
   viewer.dispose();
-});
-
-it("projects screen points into the canvas for the overlay, inverse of screenPoint", () => {
-  const { viewer } = fixture();
-  viewer.setScreen({ width: 1206, height: 2622, orientation: "portrait" });
-  const center = viewer.projectPoint(0.5, 0.5);
-  assert.ok(center, "the screen's centre is in view");
-  assert.ok(Math.abs(center.x - 0.5) < 0.05 && Math.abs(center.y - 0.5) < 0.1);
-  const corner = viewer.projectPoint(0.1, 0.9)!;
-  const back = viewer.screenPoint(corner.x, corner.y)!;
-  assert.ok(Math.abs(back.x - 0.1) < 0.01 && Math.abs(back.y - 0.9) < 0.01);
-  viewer.dispose();
-  assert.equal(viewer.projectPoint(0.5, 0.5), null);
 });

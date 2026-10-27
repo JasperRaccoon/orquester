@@ -20,7 +20,9 @@ beforeEach(() => {
   useAppStore.setState({
     currentWorkspace: "acme",
     currentProject: { path: "/w/acme/app", name: "app", workspace: "acme", isArchived: false } as ProjectSummary,
-    activeTabByProject: { "/w/acme/app": "c1" }
+    activeTabByProject: { "/w/acme/app": "c1" },
+    knowledgeView: { open: false, focus: null },
+    devicesFleetOpen: false
   });
 });
 

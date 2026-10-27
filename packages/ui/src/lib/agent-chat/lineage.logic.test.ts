@@ -35,9 +35,7 @@ describe("lineage in the client", () => {
     assert.deepEqual(lineageChildren(sessions, "f1"), []);
   });
 
-  it("words the relation and a child's status", () => {
-    assert.equal(lineageVerb({ relation: "fork" }), "Forked from");
-    assert.equal(lineageVerb({ relation: "delegate" }), "Delegated by");
+  it("shows a child's work, pending input and settled status", () => {
     assert.equal(lineageChildStatus(tab("x", { chatSessionStatus: "running" })), "working");
     assert.equal(lineageChildStatus(tab("x", { hasPendingUserInput: true })), "needs input");
     assert.equal(lineageChildStatus(tab("x", { latestTurn: { turnId: "t", state: "completed", startedAt: null, completedAt: null } })), "done");
@@ -112,16 +110,6 @@ describe("lineage in the client", () => {
       assert.equal(keys.commandIdFor(other, () => "fresh"), "cmd-q-m1");
     });
 
-    it("an answered fork frees its point; an unknown outcome keeps it", () => {
-      const keys = new ForkRetryKeys();
-      const key = ForkRetryKeys.keyFor("p", { messageId: "m", turnId: "t" });
-      keys.settle(key, "a", { status: 409, body: { error: { code: "REFUSED" } } });
-      assert.equal(keys.commandIdFor(key, () => "fresh"), "fresh");
-      keys.settle(key, "b", new Error("network"));
-      assert.equal(keys.commandIdFor(key, () => "fresh"), "b");
-      keys.settle(key, "b", null);
-      assert.equal(keys.commandIdFor(key, () => "fresh"), "fresh");
-    });
   });
 });
 

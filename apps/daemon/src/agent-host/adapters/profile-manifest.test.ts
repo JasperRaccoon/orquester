@@ -36,8 +36,7 @@ describe("loadProfileManifest — what an adapter launches a profile thread from
     ] as const) {
       await assert.rejects(
         () => loadProfileManifest(input, agent),
-        (error: unknown) =>
-          error instanceof ProfileLaunchError && /Agent Profile could not be loaded/.test(error.message),
+        ProfileLaunchError,
         label
       );
     }

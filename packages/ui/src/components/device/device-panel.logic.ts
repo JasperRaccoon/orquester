@@ -34,7 +34,7 @@ export function leaseName(lease: Pick<DeviceLeaseSummary, "name" | "profile">, p
 }
 
 /** "8s", "1m 05s", "1h 02m" — a booting step's elapsed time. */
-export function formatElapsed(ms: number): string {
+function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   if (total < 60) return `${total}s`;
   const minutes = Math.floor(total / 60);
@@ -83,7 +83,7 @@ export type DeviceStreamAvailability =
   | { ok: true }
   | { ok: false; reason: "transport" | "no-stream" | "unsupported"; message: string };
 
-export const NO_TRANSPORT_MESSAGE = "Live devices need a server connection";
+const NO_TRANSPORT_MESSAGE = "Live devices need a server connection";
 
 export interface DevicePanelInput {
   sessionId: string | null;

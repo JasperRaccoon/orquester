@@ -104,7 +104,7 @@ export async function providerRequest<T = unknown>(
   request: ProviderRequest,
   options: ProviderCallOptions
 ): Promise<ProviderResponse<T>> {
-  const doFetch = options.fetch ?? fetch;
+  const doFetch = fetch;
   const attempts = Math.max(1, request.attempts ?? DEFAULT_ATTEMPTS);
   const headers: Record<string, string> = { Accept: "application/json", ...request.headers };
   let body: string | undefined;

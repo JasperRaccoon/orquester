@@ -12,7 +12,7 @@ import { inflateSync } from "node:zlib";
 /** As `html-preview`'s `MAX_SCREENSHOT_BASE64_CHARS`: the largest image an MCP result inlines. */
 export const DEVICE_SCREENSHOT_MAX_BASE64_CHARS = 4 * 1024 * 1024;
 
-export interface RgbImage {
+interface RgbImage {
   width: number;
   height: number;
   /** RGB, 3 bytes per pixel, row-major. */
@@ -29,13 +29,13 @@ export interface FittedScreenshot {
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** A PNG's width and height from its header, or null when it is not a PNG. */
-export function pngSize(png: Buffer): { width: number; height: number } | null {
+function pngSize(png: Buffer): { width: number; height: number } | null {
   if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIGNATURE) || png.toString("latin1", 12, 16) !== "IHDR") return null;
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
 }
 
 /** Decode an 8-bit, non-interlaced PNG (gray, RGB, palette, with or without alpha; alpha is dropped). */
-export function decodePng(png: Buffer): RgbImage {
+function decodePng(png: Buffer): RgbImage {
   if (!png.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error("not a PNG");
   let offset = 8;
   let width = 0;
@@ -126,7 +126,7 @@ export function decodePng(png: Buffer): RgbImage {
 }
 
 /** Shrink by an integer factor (each output pixel averages a `factor`×`factor` block). */
-export function downscale(image: RgbImage, factor: number): RgbImage {
+function downscale(image: RgbImage, factor: number): RgbImage {
   if (factor <= 1) return image;
   const width = Math.max(1, Math.floor(image.width / factor));
   const height = Math.max(1, Math.floor(image.height / factor));
@@ -156,7 +156,7 @@ export function downscale(image: RgbImage, factor: number): RgbImage {
 }
 
 /** Base64 length of `bytes` bytes. */
-export function base64Length(bytes: number): number {
+function base64Length(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
@@ -233,7 +233,7 @@ const AC_CHROMA_SYMBOLS = [
   0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa
 ];
 
-export const JPEG_HUFFMAN: Readonly<Record<"dcLuma" | "acLuma" | "dcChroma" | "acChroma", HuffmanSpec>> = {
+const JPEG_HUFFMAN: Readonly<Record<"dcLuma" | "acLuma" | "dcChroma" | "acChroma", HuffmanSpec>> = {
   dcLuma: { counts: [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], symbols: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
   acLuma: { counts: [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d], symbols: AC_LUMA_SYMBOLS },
   dcChroma: { counts: [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0], symbols: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
@@ -352,7 +352,7 @@ function bitLength(value: number): number {
 }
 
 /** Encode RGB as a baseline JPEG (4:4:4). */
-export function encodeJpeg(image: RgbImage, quality = 80): Buffer {
+function encodeJpeg(image: RgbImage, quality = 80): Buffer {
   const { width, height, data } = image;
   // Quant tables in zigzag order (as DQT stores them).
   const lumaNatural = scaledQuant(LUMA_QUANT, quality);

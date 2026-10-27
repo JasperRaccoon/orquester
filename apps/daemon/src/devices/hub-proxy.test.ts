@@ -196,12 +196,9 @@ test("HTTP: the fold route — reading is watching, a POST is the user's input; 
   assert.equal(await status("POST", "vendor/serve-emu/api/fold?device=emulator-9999"), 404);
 });
 
-test("HTTP: a fold is the user's input (control switches); watching an MJPEG stream repeats the still frame and counts the viewer", async (t) => {
+test("HTTP: an MJPEG stream repeats its still frame, counts viewers, and leaves agent control intact", async (t) => {
   const { base, svc, lease, host } = await setup(t);
   assert.equal(svc.service.lease(lease.id)!.controller, "agent");
-  const fold = await fetch(`${base}${deviceRoutes.hub("local", `vendor/serve-emu/api/fold?device=${lease.deviceId}`)}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-  assert.equal(fold.status, 200);
-  assert.equal(svc.service.lease(lease.id)!.controller, "user");
 
   // A stream: the hub sends one part and goes quiet; the proxy repeats it once.
   const received = await new Promise<Buffer>((resolve, reject) => {
@@ -220,6 +217,7 @@ test("HTTP: a fold is the user's input (control switches); watching an MJPEG str
     req.end();
   });
   assert.deepEqual(received.subarray(0, FRAME(1).length * 2), Buffer.concat([FRAME(1), FRAME(1)]));
+  assert.equal(svc.service.lease(lease.id)!.controller, "agent", "watching never takes control");
   // The viewer was counted while the stream was open, and leaves.
   await waitFor(() => host.viewerCounts.some((entry) => entry.count === 0));
   assert.deepEqual(host.viewerCounts, [

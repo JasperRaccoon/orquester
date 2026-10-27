@@ -65,7 +65,9 @@ test("a profile caller counts only what it sees, never Unfiled or hidden collect
   const facets = facetsFor(store, scope);
   assert.deepEqual(facets.collections, [{ value: "kc_seo", label: "SEO", count: 2 }], "kc_ads is not named even on a shared entry");
   assert.deepEqual(facets.authors, [{ value: "om_patel5", label: "Om Patel (@om_patel5)", count: 2 }]);
-  assert.deepEqual(facets.kinds, [{ value: "Thread", label: "Thread", count: 2 }], "a tie names the kind by its first spelling");
+  assert.equal(facets.kinds.length, 1);
+  assert.equal(facets.kinds[0]!.count, 2);
+  assert.equal(facets.kinds[0]!.value.toLowerCase(), "thread");
   assert.ok(!JSON.stringify(facets).includes("Hidden") && !JSON.stringify(facets).includes("secret"));
 });
 

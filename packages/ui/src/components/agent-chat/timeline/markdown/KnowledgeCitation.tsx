@@ -90,7 +90,7 @@ function SummaryDetails({
         </div>
       )}
       {summary.snippet && (
-        <p data-knowledge-citation-snippet="true" className="mt-1.5 text-xs leading-snug text-neutral-400 [overflow-wrap:anywhere] line-clamp-2">
+        <p className="mt-1.5 text-xs leading-snug text-neutral-400 [overflow-wrap:anywhere] line-clamp-2">
           {summary.snippet}
         </p>
       )}

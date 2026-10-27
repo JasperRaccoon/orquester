@@ -159,16 +159,12 @@ export const MCP_APP_TOOLS_CACHE_MS = 30_000;
 export class McpAppSessionCache<T> {
   private readonly entries = new Map<string, { value: T; at: number }>();
 
-  constructor(
-    private readonly ttlMs: number,
-    private readonly now: () => number = Date.now,
-    private readonly max = 64
-  ) {}
+  constructor(private readonly ttlMs: number) {}
 
   get(key: string): T | undefined {
     const entry = this.entries.get(key);
     if (entry === undefined) return undefined;
-    if (this.now() - entry.at >= this.ttlMs) {
+    if (Date.now() - entry.at >= this.ttlMs) {
       this.entries.delete(key);
       return undefined;
     }
@@ -177,8 +173,8 @@ export class McpAppSessionCache<T> {
 
   set(key: string, value: T): void {
     this.entries.delete(key);
-    this.entries.set(key, { value, at: this.now() });
-    while (this.entries.size > this.max) {
+    this.entries.set(key, { value, at: Date.now() });
+    while (this.entries.size > 64) {
       const oldest = this.entries.keys().next().value;
       if (oldest === undefined) break;
       this.entries.delete(oldest);
@@ -213,8 +209,6 @@ export function mcpAppReferenceForCall(
 export class McpAppSnapshotStore {
   private readonly stored = new Map<string, string>();
 
-  constructor(private readonly max = 256) {}
-
   async store(
     context: Pick<AdapterContext, "storeAttachment" | "resolveAttachmentPath">,
     input: { threadId: string; server: string; resourceUri: string; name: string; html: string }
@@ -243,7 +237,7 @@ export class McpAppSnapshotStore {
   private remember(key: string, attachmentId: string): void {
     this.stored.delete(key);
     this.stored.set(key, attachmentId);
-    while (this.stored.size > this.max) {
+    while (this.stored.size > 256) {
       const oldest = this.stored.keys().next().value;
       if (oldest === undefined) break;
       this.stored.delete(oldest);
@@ -262,7 +256,6 @@ export interface McpAppCaptureInput {
   /** `resources/read` through the provider's MCP client: the result's `contents`. */
   read: () => Promise<unknown>;
   signal: AbortSignal;
-  timeoutMs?: number;
 }
 
 /**
@@ -280,7 +273,7 @@ export async function captureMcpApp(input: McpAppCaptureInput): Promise<McpAppRe
   try {
     contents = await withDeadline(input.read, {
       label: "mcp app resource read",
-      timeoutMs: input.timeoutMs ?? MCP_APP_CAPTURE_TIMEOUT_MS,
+      timeoutMs: MCP_APP_CAPTURE_TIMEOUT_MS,
       signal: input.signal
     });
   } catch (error) {

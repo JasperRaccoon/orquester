@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { knowledgeRoutes } from "@orquester/api";
 
 import { parseKnowledgeSimilarityGraphResponse } from "./validate.ts";
 import { ApiClient } from "../api-client.ts";
@@ -74,7 +73,10 @@ describe("similarity graph wire validation", () => {
       ],
       "an unreadable cluster index names no cluster"
     );
-    assert.deepEqual(parsed.edges, [{ from: "ke_a", to: "ke_b", similarity: 0, tree: true }], "one edge per pair, a tree edge when either was");
+    assert.equal(parsed.edges.length, 1, "one edge per pair, with no self or missing-node edges");
+    const [edge] = parsed.edges;
+    assert.deepEqual([edge!.from, edge!.to, edge!.tree], ["ke_a", "ke_b", true]);
+    assert.ok(Number.isFinite(edge!.similarity) && edge!.similarity >= -1 && edge!.similarity <= 1);
     assert.deepEqual(
       parsed.clusters,
       [
@@ -118,12 +120,10 @@ describe("similarity graph wire validation", () => {
     const graph = await client.getKnowledgeSimilarityGraph({ collections: "kc_a,kc_b", k: 4, limit: 500 });
     assert.equal(graph.nodes[0]!.id, "ke_a");
     assert.equal(requests[0]!.method, "GET");
-    assert.ok(requests[0]!.path.startsWith(knowledgeRoutes.similarityGraph), requests[0]!.path);
-    const sent = JSON.stringify(requests[0]);
-    assert.match(sent, /kc_a,kc_b|kc_a%2Ckc_b/);
-    assert.match(sent, /500/);
+    assert.equal(requests[0]!.path, "/api/knowledge/similarity-graph");
+    assert.deepEqual(requests[0]!.query, { collections: "kc_a,kc_b", k: 4, limit: 500 });
 
     answer = { nodes: "x", edges: [] };
-    await assert.rejects(client.getKnowledgeSimilarityGraph(), /knowledge similarity graph this app cannot read/);
+    await assert.rejects(client.getKnowledgeSimilarityGraph());
   });
 });

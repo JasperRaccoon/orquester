@@ -15,11 +15,11 @@ import { boxDiskConnection, fakeBoxRegistry, type BoxDiskConnection } from "./te
 
 const CLONE = "/ws/acme/engine";
 
-async function setup(t: test.TestContext, windows = false): Promise<{ fs: BoxProjectFs; connection: BoxDiskConnection; local: (rel?: string) => string; disk: string }> {
+async function setup(t: test.TestContext): Promise<{ fs: BoxProjectFs; connection: BoxDiskConnection; local: (rel?: string) => string; disk: string }> {
   const disk = await realpath(await mkdtemp(join(tmpdir(), "orq-box-secrets-")));
   t.after(() => rm(disk, { recursive: true, force: true }));
   // `ln` names the temp file and the target by their box paths.
-  const connection = boxDiskConnection({ disk, windows, argRoots: [windows ? "C:\\orq\\ws" : "/ws"] });
+  const connection = boxDiskConnection({ disk, argRoots: ["/ws"] });
   const fs = new BoxProjectFs(connection);
   const root = connection.local(fs.toBox(CLONE));
   await mkdir(root, { recursive: true });
@@ -56,34 +56,32 @@ test("readBoxCloneFile reads a regular file and refuses links, nested repos and 
 });
 
 test("writeBoxCloneFile writes atomically with the mode, never creates folders, and createOnly never replaces", async (t) => {
-  for (const windows of [false, true]) {
-    const { fs, local } = await setup(t, windows);
-    await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=1\n"), 0o640);
-    assert.equal(await readFile(local(".env"), "utf8"), "A=1\n");
-    if (!windows) assert.equal((await lstat(local(".env"))).mode & 0o777, 0o640);
-    await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=2\n"));
-    assert.equal(await readFile(local(".env"), "utf8"), "A=2\n");
+  const { fs, local } = await setup(t);
+  await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=1\n"), 0o640);
+  assert.equal(await readFile(local(".env"), "utf8"), "A=1\n");
+  assert.equal((await lstat(local(".env"))).mode & 0o777, 0o640);
+  await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=2\n"));
+  assert.equal(await readFile(local(".env"), "utf8"), "A=2\n");
 
-    await assert.rejects(
-      writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=3\n"), undefined, { createOnly: true }),
-      (error: unknown) => error instanceof CloneFileError && error.exists === true
-    );
-    assert.equal(await readFile(local(".env"), "utf8"), "A=2\n");
-    await writeBoxCloneFile(fs, CLONE, ".env.local", new TextEncoder().encode("B=1\n"), undefined, { createOnly: true });
-    assert.equal(await readFile(local(".env.local"), "utf8"), "B=1\n");
+  await assert.rejects(
+    writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=3\n"), undefined, { createOnly: true }),
+    (error: unknown) => error instanceof CloneFileError && error.exists === true
+  );
+  assert.equal(await readFile(local(".env"), "utf8"), "A=2\n");
+  await writeBoxCloneFile(fs, CLONE, ".env.local", new TextEncoder().encode("B=1\n"), undefined, { createOnly: true });
+  assert.equal(await readFile(local(".env.local"), "utf8"), "B=1\n");
 
-    await assert.rejects(
-      writeBoxCloneFile(fs, CLONE, "missing/.env", new TextEncoder().encode("x")),
-      (error: unknown) => error instanceof CloneFileError && error.parentMissing === true
-    );
-    await assert.rejects(
-      writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("x"), undefined, { containedIn: "/elsewhere" }),
-      (error: unknown) => error instanceof CloneFileError && error.refusal === "outside"
-    );
-    await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=4\n"), undefined, { containedIn: "/ws" });
-    assert.equal(await readFile(local(".env"), "utf8"), "A=4\n");
-    assert.deepEqual((await readdir(local())).filter((name) => name.includes("orq-tmp")), [], windows ? "windows: no temp left" : "no temp left");
-  }
+  await assert.rejects(
+    writeBoxCloneFile(fs, CLONE, "missing/.env", new TextEncoder().encode("x")),
+    (error: unknown) => error instanceof CloneFileError && error.parentMissing === true
+  );
+  await assert.rejects(
+    writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("x"), undefined, { containedIn: "/elsewhere" }),
+    (error: unknown) => error instanceof CloneFileError && error.refusal === "outside"
+  );
+  await writeBoxCloneFile(fs, CLONE, ".env", new TextEncoder().encode("A=4\n"), undefined, { containedIn: "/ws" });
+  assert.equal(await readFile(local(".env"), "utf8"), "A=4\n");
+  assert.deepEqual((await readdir(local())).filter((name) => name.includes("orq-tmp")), [], "no temp left");
 });
 
 test("writeBoxCloneFile refuses a symlink at the target and never writes through it", async (t) => {
@@ -116,7 +114,7 @@ test("git runs in the box for the candidate scan and the tracked check", { skip:
   await assert.rejects(git(CLONE, ["status"], aborted.signal));
 });
 
-test("watchBoxDir: fs.change events for its watch id reach the service; a link change re-arms", async (t) => {
+test("watchBoxDir filters events, invalidates on a link drop, and unsubscribes on close", async (t) => {
   const { fs, connection } = await setup(t);
   const changes: Array<string | null> = [];
   const errors: Error[] = [];

@@ -1,0 +1,132 @@
+{
+  "scope": "Final three quantization dead export follow-up",
+  "baseCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "supersedes": [
+    {
+      "sourceLedger": "docs/testing-audit/devices-three.json",
+      "path": "packages/ui/src/components/device/three/modelScene.test.ts",
+      "originalName": "bakes a meshopt-quantized display's node transform back into float geometry",
+      "oldDisposition": "REWRITE",
+      "newDisposition": "CONSOLIDATE"
+    },
+    {
+      "sourceLedger": "docs/testing-audit/final-aliases-ui.json",
+      "intermediateName": "preserves normalized screen coordinates when loading a meshopt-quantized display",
+      "note": "This intermediate title is no longer a final survivor; count only the original identity once."
+    }
+  ],
+  "entries": [
+    {
+      "path": "packages/ui/src/components/device/three/modelScene.test.ts",
+      "line": 82,
+      "originalName": "bakes a meshopt-quantized display's node transform back into float geometry",
+      "intermediateName": "preserves normalized screen coordinates when loading a meshopt-quantized display",
+      "disposition": "CONSOLIDATE",
+      "reason": "B4/B5/B6: private preparation helper import kept a test-only export alive; mutation proves existing public deployed-asset owners already catch the historical corruption. Delete unit case and make helper private. No new fixture or replacement test.",
+      "survivingOwners": [
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads iphone-18-pro.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads iphone-18-pro-max.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads ipad-pro-13-m5.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads iphone-17.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads iphone-air.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads iphone-17e.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads ipad-air.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads ipad-a16.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads galaxy-s26.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads galaxy-s26-plus.glb into its viewer scene"
+        },
+        {
+          "path": "packages/ui/src/components/device/three/modelAssets.test.ts",
+          "name": "loads galaxy-s26-ultra.glb into its viewer scene"
+        }
+      ],
+      "behavioralBarOfSurvivingOwners": {
+        "B1_independentContract": "Phase1core\u00a710.4 requires shipped GLBs to load with meshopt; converter header defines centred2.2-unit +Z device-screen format. These actual deployed binaries must construct a usable scene.",
+        "B2_realRegression": "Skipping conversion of normalized Int16 vertex attributes before the node transform corrupts display bounds; the public loader+scene test fails for11actual slab GLBs with Device model display is not normalized.",
+        "B3_independentOracle": "Actual committed binary assets and the independently documented converter format determine successful scene construction. Tests use production loadDeviceModel, not a separately configured loader or geometry-returning mock. Only native fetch/image decoding is isolated.",
+        "B4_stableSeam": "loadDeviceModel followed by createImportedPhoneScene, exactly the production phoneViewer loading/installation path.",
+        "B5_refactorResistance": "No dependency on bakeDisplayTransform export/name, buffer class or internal transform loop. Asset acceptance and required serialized display format remain valid if normalization moves or is rewritten.",
+        "B6_uniqueProtection": "Each asset file remains its own deployed-binary compatibility owner; together they also catch the concrete historical conversion omission, so the private helper test adds no necessary regression protection."
+      }
+    }
+  ],
+  "followUpCounts": {
+    "CONSOLIDATE": 1,
+    "removedRuntimeCases": 1,
+    "newRuntimeCases": 0,
+    "testLOCDelta": -34
+  },
+  "resultingThreeSubtreeTotals": {
+    "originalRuntimeCases": 74,
+    "finalRuntimeCases": 49,
+    "originalDeclarations": 50,
+    "finalDeclarations": 34,
+    "originalTestLOC": 1634,
+    "finalTestLOC": 1154,
+    "netTestLOC": -480,
+    "dispositions": {
+      "DELETE": 16,
+      "REWRITE": 29,
+      "CONSOLIDATE": 9,
+      "KEEP": 20
+    }
+  },
+  "removedProductionSeam": "bakeDisplayTransform export; implementation remains private and called by loadDeviceModel at the same owner. No other external production caller exists.",
+  "hashProof": {
+    "beforeIntentionalExportRemoval": "ee5a6fe90e56421d0ea5c17141170adbb0b9c3bba242ec2db3dbec1813408852",
+    "mutationWasExternalLoaderOnly": true,
+    "finalPrivateSource": "043895e8e98b0667e6b1fbbfb3c87e49b0863c3297c974d4a8ba2dc53095212c",
+    "onlyIntentionalProductionDifference": "Removed export keyword from bakeDisplayTransform; reconstructed pre-edit hash matches exactly."
+  },
+  "validation": [
+    {
+      "cwd": "packages/ui",
+      "command": "TSX_DISABLE_CACHE=1 node --import tsx --import ./test/svg-loader.mjs --import /tmp/orquester-test-audit/three-quantization-mutation-loader.mjs --test --test-timeout=600000 --test-concurrency=4 src/components/device/three/modelAssets.test.ts",
+      "result": "EXPECTED FAILURE:11slab assets fail correct normalization reason,4casespass(accessory,Duo,twofolds).",
+      "durationMs": 766.966575,
+      "log": "/tmp/orquester-test-audit/dead-seams-three-quantization-mutant.log"
+    },
+    {
+      "cwd": "packages/ui",
+      "command": "TSX_DISABLE_CACHE=1 node --import tsx --import ./test/svg-loader.mjs --test --test-timeout=600000 --test-concurrency=4 src/components/device/three/modelAssets.test.ts src/components/device/three/modelScene.test.ts",
+      "result": "PASS:17tests,0failures after consolidation/export removal",
+      "durationMs": 747.928433,
+      "log": "/tmp/orquester-test-audit/dead-seams-three-focused.log"
+    },
+    {
+      "command": "git diff --check -- packages/ui/src/components/device/three/modelScene.ts packages/ui/src/components/device/three/modelScene.test.ts",
+      "result": "PASS"
+    }
+  ],
+  "mutationHarnessNote": "Initial external-loader regex expected parentheses that tsx had removed; corrected optional parentheses before treating the mutation result as behavioral evidence. Mutations affected loader output only, never live source.",
+  "performance": "No comparable before/after isolated measurement for this two-file target; 747.928ms is final runner wall, not a speedup claim. One duplicate scenario and34testLOC removed; all real asset cases still run."
+}

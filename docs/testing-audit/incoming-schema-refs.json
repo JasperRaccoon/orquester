@@ -1,0 +1,200 @@
+{
+  "scope": {
+    "remoteCommit": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+    "previousReference": "ee5c32495c88e39ff8cfef73dce8d43e59f4483f",
+    "incomingTestFiles": 1,
+    "incomingTestLOC": 52,
+    "incomingDeclarations": 2,
+    "existingSurvivingOwnerOverrides": 1,
+    "accounting": "Incoming reference adds two declarations / one file / 52 LOC. Both donors are consolidated into the existing registry declaration (REWRITE becomes CONSOLIDATE, not a new declaration). Final candidate adds only 10 LOC to that existing owner and removes both incoming registrations/their 52-LOC file. Relative to incoming reference: -1 test file, -2 declarations, -42 LOC. Root recomputes repository-wide totals.",
+    "state": "Implemented and validated: focused71/71, both intended wire mutants fail and restore, changed gate, all workspace typechecks, full production build, and final full pnpm test pass. Central resources/timings and limits are in performance-results.json/validation-results.json.",
+    "implementedTestLOCAddedToExistingOwner": 10,
+    "implementedNetTestLOCRelativeToIncoming": -42,
+    "finalTestFileDeltaRelativeToPreviousCandidate": 0,
+    "finalDeclarationDeltaRelativeToPreviousCandidate": 0
+  },
+  "independentSources": [
+    "Commit e866b62bd0d197200683dcdd61e38d1302235b4e records a concrete Claude Code interoperability failure: SDK-generated references hide array/object field schemas and callers send rejected strings. The compatibility requirement is self-contained advertised input schemas for supported clients; it is not a requirement to use Zod factories.",
+    "docs/orquester-mcp.md documents supported Claude Code/external MCP clients and public tools/list over the authenticated Streamable HTTP endpoint.",
+    "apps/daemon/src/agent-host/session-tools/definitions.ts documents the actual in-chat catalog serialized through the MCP SDK and consumed by provider sessions; apps/daemon/src/mcp/server.ts owns the external tools/list registration."
+  ],
+  "productionReview": {
+    "paths": [
+      "apps/daemon/src/mcp/tools/agent-profile.ts",
+      "apps/daemon/src/mcp/tools/devices.ts",
+      "apps/daemon/src/mcp/tools/knowledge.ts",
+      "apps/daemon/src/mcp/tools/watch.ts"
+    ],
+    "finding": "Incoming changes construct fresh equivalent Zod nodes for reused fields. Literal validation constraints, input field names, audience policy and handler semantics remain unchanged. The claimed regression is in serialized advertised schemas, so direct handler/parser acceptance tests cannot replace the serialized owner.",
+    "strongerOwner": "apps/daemon/src/mcp/catalog/registry.test.ts already obtains the chat catalog through serializeChatTools and the external catalog through actual registerMcp/Fastify HTTP initialize and tools/list. Its existing per-audience/per-tool loop can assert recursive absence of $ref without another SDK catalog setup.",
+    "externalDonorWeakness": "The incoming external test manually reconstructs server registration from audienceShape/audienceSchema instead of entering registerMcp. Consolidating into the real HTTP catalog owner removes duplicated registration logic and observes the delivered wire boundary.",
+    "recommendedImplementation": "Retain the independent recursive $ref-key rejection, including nested arrays/objects and diagnostic field paths, in registry.test.ts's existing per-tool loop. Remove schema-refs.test.ts after transferring assertions. Update four production comments to point at catalog/registry.test.ts so no orphan reference remains. Do not assert factory identities or Zod node allocation.",
+    "implemented": "Transferred the independent recursive $ref-key rejection into the existing audience/row loop; removed schema-refs.test.ts; all four incoming production comments now point at catalog/registry.test.ts. All upstream factories and validation behavior are preserved."
+  },
+  "tests": [
+    {
+      "path": "apps/daemon/src/mcp/catalog/schema-refs.test.ts",
+      "line": 27,
+      "name": "no chat tool's input schema holds a $ref",
+      "disposition": "CONSOLIDATE",
+      "survives": false,
+      "failedBar": "B6: after its independent assertion is transferred, a second serialization of the same static chat catalog adds no unique protection.",
+      "survivingOwner": "apps/daemon/src/mcp/catalog/registry.test.ts :: tools/list and instructions preserve audience names, MCP annotations and context byte budgets",
+      "sixBar": {
+        "independentContract": "Supported in-chat clients must receive self-contained advertised input schemas; e866 records the concrete array/object-as-string regression.",
+        "realRegression": "A reused schema introduces a nested $ref into knowledge unlike/ids/keep, device drag destination, wait sessionIds or profile changes; clients lose field type guidance and send refused or mistyped calls.",
+        "independentOracle": "An independently authored recursive walk expects zero $ref schema keys. The expectation is not computed from Zod factory allocation or the producer's serialization algorithm.",
+        "stableSeam": "Actual serializeChatTools output is the provider-visible tools/list catalog, rather than source text or helper shape.",
+        "refactorResistance": "Equivalent schema builders, serializers and helper names may change; self-contained wire schemas continue to satisfy the assertion.",
+        "uniqueProtection": "The property is meaningful and was not previously asserted, but a separate execution duplicates the existing registry owner's identical catalog acquisition. Transfer it there, then remove the donor."
+      },
+      "validation": "PASS: root focused71/71, chat and external intended-regression controls, changed gate, full workspace check/build and pnpm test. See rootValidation and central validation-results.json.",
+      "sourceIdentity": {
+        "commit": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+        "path": "apps/daemon/src/mcp/catalog/schema-refs.test.ts",
+        "line": 27,
+        "name": "no chat tool's input schema holds a $ref"
+      },
+      "finalAlias": {
+        "path": "apps/daemon/src/mcp/catalog/registry.test.ts",
+        "line": 92,
+        "name": "tools/list and instructions preserve audience names, MCP annotations and context byte budgets"
+      }
+    },
+    {
+      "path": "apps/daemon/src/mcp/catalog/schema-refs.test.ts",
+      "line": 34,
+      "name": "no external tool's input schema holds a $ref",
+      "disposition": "CONSOLIDATE",
+      "survives": false,
+      "failedBar": "B6: the existing actual external HTTP tools/list owner can prove the same new schema property during its already-required catalog read. The donor's manually reproduced registration is weaker than that delivered boundary.",
+      "survivingOwner": "apps/daemon/src/mcp/catalog/registry.test.ts :: tools/list and instructions preserve audience names, MCP annotations and context byte budgets",
+      "sixBar": {
+        "independentContract": "Documented external clients must receive self-contained input schemas for the tools actually advertised by the MCP endpoint.",
+        "realRegression": "External wait/profile schemas acquire references and supported clients mistake sessionIds or nested edit fields for strings, preventing valid public calls.",
+        "independentOracle": "Literal prohibition of recursive $ref keys follows the recorded client compatibility constraint, independent of production Zod assembly.",
+        "stableSeam": "The surviving owner uses registerMcp and actual HTTP JSON-RPC initialize/tools/list. This is stronger than this donor's manually rebuilt McpServer registration.",
+        "refactorResistance": "No private schema-node identity, field declaration ordering or server collaborator call shape is retained; only advertised JSON schema bytes matter.",
+        "uniqueProtection": "External and chat audience projections can fail independently, so both delivered catalogs must remain checked. One existing registry execution already loads both and can own both assertions without the donor's additional server/client lifecycle."
+      },
+      "validation": "PASS: root focused71/71, chat and external intended-regression controls, changed gate, full workspace check/build and pnpm test. See rootValidation and central validation-results.json.",
+      "sourceIdentity": {
+        "commit": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+        "path": "apps/daemon/src/mcp/catalog/schema-refs.test.ts",
+        "line": 34,
+        "name": "no external tool's input schema holds a $ref"
+      },
+      "finalAlias": {
+        "path": "apps/daemon/src/mcp/catalog/registry.test.ts",
+        "line": 92,
+        "name": "tools/list and instructions preserve audience names, MCP annotations and context byte budgets"
+      }
+    },
+    {
+      "path": "apps/daemon/src/mcp/catalog/registry.test.ts",
+      "line": 83,
+      "name": "tools/list and instructions preserve audience names, MCP annotations and context byte budgets",
+      "disposition": "CONSOLIDATE",
+      "survives": true,
+      "existingOwner": true,
+      "notANewDeclaration": true,
+      "reason": "Own both transferred schema compatibility assertions in the already-paid loop over actual advertised chat and external catalogs. Retain its prior independent annotations/audience/name/context-budget contracts.",
+      "sixBar": {
+        "independentContract": "Existing unified-MCP audience/annotation/context budgets plus the independently recorded e866 supported-client self-contained-schema requirement.",
+        "realRegression": "Detects loss of audience filtering/annotations, obsolete actionable names or oversized delivered catalogs, and newly detects nested references that make supported clients send invalid array/object arguments.",
+        "independentOracle": "Existing literal version/annotation/key/byte budgets remain independent. The new zero-$ref expectation is a client compatibility requirement, not a mirror of schema factory implementation.",
+        "stableSeam": "Chat's actual serializeChatTools output and external registerMcp/Fastify initialize/tools/list JSON response consumed by real clients.",
+        "refactorResistance": "Checks public metadata, names, documented size bounds and reference-free schemas; identifiers, helper decomposition, data structures and equivalent schema construction remain free to change.",
+        "uniqueProtection": "Handler/parser tests never exercise SDK JSON-schema conversion or audience-specific delivered lists. This is the lowest stable common owner that already obtains both serialized catalogs, so no second whole-catalog execution is warranted."
+      },
+      "validation": "PASS: root focused71/71, chat and external intended-regression controls, changed gate, full workspace check/build and pnpm test. See rootValidation and central validation-results.json.",
+      "sourceIdentity": {
+        "commit": "e866b62bd0d197200683dcdd61e38d1302235b4e",
+        "path": "apps/daemon/src/mcp/catalog/registry.test.ts",
+        "line": 83,
+        "name": "tools/list and instructions preserve audience names, MCP annotations and context byte budgets"
+      },
+      "finalAlias": {
+        "path": "apps/daemon/src/mcp/catalog/registry.test.ts",
+        "line": 92,
+        "name": "tools/list and instructions preserve audience names, MCP annotations and context byte budgets"
+      }
+    }
+  ],
+  "counts": {
+    "incoming": {
+      "CONSOLIDATE": 2
+    },
+    "overlappingExistingOwner": {
+      "CONSOLIDATE": 1
+    }
+  },
+  "infrastructure": "Removed the incoming two-registration file and its duplicate SDK server/client setup; reused existing actual chat serialization and external HTTP catalog reads. Added no dependency, production export, timeout, retry, worker override or test command.",
+  "performance": "No runtime measurements performed by this reviewer. Consolidation avoids two additional full-catalog SDK listings and one dedicated test-file process/import lifecycle; do not claim a measured speedup from that structural observation.",
+  "rootValidation": {
+    "focused": {
+      "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=600000 --test-concurrency=4 src/mcp/catalog/registry.test.ts src/mcp/tools/agent-profile.test.ts src/mcp/tools/devices.test.ts src/mcp/tools/knowledge.test.ts src/mcp/tools/watch.test.ts src/agent-host/session-tools/definitions.test.ts",
+      "cwd": "apps/daemon",
+      "pass": 71,
+      "fail": 0,
+      "skip": 0,
+      "runnerMilliseconds": 5944.017031
+    },
+    "mutations": [
+      {
+        "mutation": "Reuse one example-id array schema for knowledge_search.similarTo and unlike",
+        "command": [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-timeout=600000",
+          "src/mcp/catalog/registry.test.ts"
+        ],
+        "mutantExit": 1,
+        "mutantWall": 1.9841550950004603,
+        "restoredExit": 0,
+        "restoredSha256": "afb128896470fc352b30f7fae94992a8666b304e9de522293844f576d36e437a"
+      },
+      {
+        "mutation": "Reuse session-id schema for external wait_for_session scalar and array fields",
+        "command": [
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-timeout=600000",
+          "src/mcp/catalog/registry.test.ts"
+        ],
+        "mutantExit": 1,
+        "mutantWall": 1.991207529001258,
+        "restoredExit": 0,
+        "restoredSha256": "8e6ddb5d8fae4767a96830a34033bff5e7ef9decc706cdb25dd54dc6860d2644"
+      }
+    ],
+    "changedGate": {
+      "command": "pnpm check:changed --no-cache --base 9b6308a7",
+      "result": "PASS",
+      "testFiles": 5,
+      "typecheckSeconds": 6.2,
+      "testSeconds": 8.2
+    },
+    "fullTypecheck": {
+      "command": "pnpm check",
+      "result": "PASS"
+    },
+    "fullSuite": {
+      "command": "pnpm test",
+      "result": "PASS",
+      "wallSeconds": 518.8344938910013,
+      "nodeTotals": {
+        "tests": 11442,
+        "failed": 0,
+        "passed": 11410,
+        "cancelled": 0,
+        "skipped": 32,
+        "todo": 0
+      }
+    }
+  }
+}

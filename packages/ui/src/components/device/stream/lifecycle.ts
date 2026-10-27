@@ -10,7 +10,6 @@ import {
   backoffDelayMs,
   RECONNECT_BACKOFF,
   scheduleRetry,
-  type BackoffPolicy,
   type PendingRetry
 } from "../../../lib/connection/backoff.ts";
 import {
@@ -21,23 +20,18 @@ import {
   type DeviceTransport
 } from "./types.ts";
 
-export const DEFAULT_STALL_MS = 2_000;
-export const DEFAULT_RECONNECT_AFTER_MS = 15_000;
+const DEFAULT_STALL_MS = 2_000;
+const DEFAULT_RECONNECT_AFTER_MS = 15_000;
 /** Consecutive attempts without a frame before the state reads `error` (retries continue). */
-export const ERROR_AFTER_FAILURES = 3;
+const ERROR_AFTER_FAILURES = 3;
 const RATE_WINDOW_MS = 2_000;
 
 /** Frames and bytes over a sliding window. */
-export class RateMeter {
+class RateMeter {
   private readonly samples: Array<{ at: number; frames: number; bytes: number }> = [];
 
-  constructor(
-    private readonly now: () => number,
-    private readonly windowMs = RATE_WINDOW_MS
-  ) {}
-
   add(frames: number, bytes: number): void {
-    this.samples.push({ at: this.now(), frames, bytes });
+    this.samples.push({ at: performance.now(), frames, bytes });
     this.prune();
   }
 
@@ -49,12 +43,12 @@ export class RateMeter {
       frames += sample.frames;
       bytes += sample.bytes;
     }
-    const seconds = this.windowMs / 1000;
+    const seconds = RATE_WINDOW_MS / 1000;
     return { fps: Math.round((frames / seconds) * 10) / 10, kbps: Math.round((bytes * 8) / 1000 / seconds) };
   }
 
   private prune(): void {
-    const cutoff = this.now() - this.windowMs;
+    const cutoff = performance.now() - RATE_WINDOW_MS;
     let drop = 0;
     while (drop < this.samples.length && this.samples[drop]!.at <= cutoff) drop++;
     if (drop) this.samples.splice(0, drop);
@@ -63,7 +57,6 @@ export class RateMeter {
 
 /** One connection attempt. Its signal aborts when it is superseded or the session closes. */
 export interface StreamAttempt {
-  readonly id: number;
   readonly signal: AbortSignal;
   /** Still the session's attempt and the session is open. */
   current(): boolean;
@@ -73,12 +66,9 @@ export interface StreamLifecycleOptions {
   readonly transport: DeviceTransport;
   readonly callbacks: DeviceStreamCallbacks;
   readonly connect: (attempt: StreamAttempt) => void;
-  readonly now: () => number;
-  readonly random: () => number;
   /** `null` disables stall detection (input-only sockets, slow screenshot polls use their own). */
   readonly stallMs?: number | null;
   readonly reconnectAfterMs?: number;
-  readonly backoff?: BackoffPolicy;
   /** The stream went quiet: a chance to ask for a keyframe. */
   readonly onStall?: () => void;
   /**
@@ -110,7 +100,7 @@ export class StreamLifecycle {
   private readonly reconnectAfterMs: number;
 
   constructor(private readonly options: StreamLifecycleOptions) {
-    this.meter = new RateMeter(options.now);
+    this.meter = new RateMeter();
     this.stallMs = options.stallMs === undefined ? DEFAULT_STALL_MS : options.stallMs;
     this.reconnectAfterMs = options.reconnectAfterMs ?? DEFAULT_RECONNECT_AFTER_MS;
   }
@@ -186,7 +176,7 @@ export class StreamLifecycle {
     }
     this.failures++;
     this.setState(this.failures >= ERROR_AFTER_FAILURES ? "error" : "connecting", error);
-    const delay = backoffDelayMs(this.backoffAttempt++, this.options.backoff ?? RECONNECT_BACKOFF, this.options.random);
+    const delay = backoffDelayMs(this.backoffAttempt++, RECONNECT_BACKOFF, Math.random);
     this.retry = scheduleRetry(delay, (woken) => {
       this.retry = null;
       if (woken) this.backoffAttempt = 0;
@@ -224,7 +214,6 @@ export class StreamLifecycle {
     if (this.stateValue !== "connecting" && this.stateValue !== "error") this.setState("connecting", this.errorValue);
     this.armWatchdog(false);
     const attempt: StreamAttempt = {
-      id,
       signal: controller.signal,
       current: () => !this.closed && this.attemptId === id && this.controller === controller
     };

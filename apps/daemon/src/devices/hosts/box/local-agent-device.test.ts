@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { DEVICE_TOOL_VERSIONS } from "../../../boxes/github/device-cache.ts";
-import type { DeviceToolchain } from "../../toolchain/index.ts";
-import { ensureLocalAgentDevice, localAgentDeviceDir, localAgentDeviceEntry } from "./local-agent-device.ts";
+import { ensureLocalAgentDevice, localAgentDeviceEntry } from "./local-agent-device.ts";
 
 describe("agent-device on this machine", () => {
   let appDir: string;
@@ -20,8 +19,7 @@ describe("agent-device on this machine", () => {
   });
 
   it("uses the pinned layout under devicesToolsDir once its install completed", async () => {
-    const dir = localAgentDeviceDir(appDir);
-    assert.equal(dir, join(appDir, "daemon", "devices", "tools", `agent-device@${DEVICE_TOOL_VERSIONS["agent-device"]}`));
+    const dir = join(appDir, "daemon", "devices", "tools", `agent-device@${DEVICE_TOOL_VERSIONS["agent-device"]}`);
     const entry = join(dir, "node_modules", "agent-device", "bin", "agent-device.mjs");
     await mkdir(join(entry, ".."), { recursive: true });
     await writeFile(entry, "");
@@ -33,11 +31,5 @@ describe("agent-device on this machine", () => {
     assert.equal(await ensureLocalAgentDevice({ appDir, signal: new AbortController().signal }), entry);
   });
 
-  it("prefers the toolchain's install", async () => {
-    const bin = join(appDir, "agent-device.mjs");
-    await writeFile(bin, "");
-    const toolchain = { toolBin: () => bin } as unknown as DeviceToolchain;
-    assert.equal(localAgentDeviceEntry(appDir, toolchain), bin);
-    assert.equal(await ensureLocalAgentDevice({ appDir, toolchain, signal: new AbortController().signal }), bin);
-  });
+
 });

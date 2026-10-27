@@ -30,7 +30,7 @@ export function completeDeviceReference(reference: DeviceToolReference, data: Re
 }
 
 /** "Tapped @e7 “Search”" → "Tapped “Search”": the ref only stays when nothing names the target. */
-export function deviceSummaryWords(summary: string): string {
+function deviceSummaryWords(summary: string): string {
   const text = summary.trim();
   if (!/[“"]/.test(text)) return text;
   return text.replace(/(^|\s)@e\d+\s+(?=[“"])/, "$1").replace(/\s{2,}/g, " ");

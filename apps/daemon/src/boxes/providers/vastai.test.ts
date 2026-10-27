@@ -14,20 +14,20 @@ import { vastaiAdapter } from "./vastai.ts";
 const creds = { apiKey: "vast_test" };
 const f = (name: string): string => fixture("vastai", name);
 
-test("vastai: validate reads the current user; a bad key is ok:false", async () => {
+test("vastai: validate reads the current user; a bad key is ok:false", async (t) => {
   const good = routedFetch([{ path: "/api/v0/users/current/", replies: [{ body: f("users-current.json") }] }]);
-  assert.deepEqual(await vastaiAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await vastaiAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(good.seen[0]!.headers.authorization, "Bearer vast_test");
 
   const bad = routedFetch([{ path: "/api/v0/users/current/", replies: [{ status: 401, body: f("unauthorized.json") }] }]);
-  const result = await vastaiAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await vastaiAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Invalid user key/);
 });
 
-test("vastai: offers search verified on-demand single-GPU offers and keep the best price per GPU model", async () => {
+test("vastai: offers search verified on-demand single-GPU offers and keep the best price per GPU model", async (t) => {
   const { fetch, seen } = routedFetch([{ method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] }]);
-  const offers = await vastaiAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await vastaiAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   const body = seen[0]!.body as Record<string, unknown>;
   assert.deepEqual(body.verified, { eq: true });
   assert.deepEqual(body.rentable, { eq: true });
@@ -56,16 +56,16 @@ test("vastai: offers search verified on-demand single-GPU offers and keep the be
     ["any", "CA", "DE", "US"]
   );
   assert.equal(offers.images[0]!.id, "vastai/base-image:cuda-12.8.1-auto");
-  assert.deepEqual((await vastaiAdapter.offers(creds, "linux", callOptions(fetch))).sizes, []);
+  assert.deepEqual((await vastaiAdapter.offers(creds, "linux", callOptions(t, fetch))).sizes, []);
 });
 
-test("vastai: create rents the cheapest matching offer once, with label, onstart and env", async () => {
+test("vastai: create rents the cheapest matching offer once, with label, onstart and env", async (t) => {
   const { fetch, seen } = routedFetch([
     { method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] },
     { method: "PUT", path: "/api/v0/asks/", replies: [{ body: f("rent-ok.json") }] }
   ]);
   const request = sampleCreateRequest({ size: "RTX 4090", region: "US" });
-  const result = await vastaiAdapter.create(creds, request, callOptions(fetch));
+  const result = await vastaiAdapter.create(creds, request, callOptions(t, fetch));
   const search = seen[0]!.body as Record<string, unknown>;
   assert.deepEqual(search.gpu_name, { eq: "RTX 4090" });
   assert.deepEqual(search.geolocation, { in: ["US"] });
@@ -87,13 +87,13 @@ test("vastai: create rents the cheapest matching offer once, with label, onstart
   assert.ok(!JSON.stringify(result).includes("instance_api_key"));
 });
 
-test("vastai: create moves to the next offer only when the offer is gone, and never retries a failed rent", async () => {
+test("vastai: create moves to the next offer only when the offer is gone, and never retries a failed rent", async (t) => {
   const taken = routedFetch([
     { method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] },
     { method: "PUT", path: "/api/v0/asks/22001002/", replies: [{ status: 410, body: f("rent-no-such-ask.json") }] },
     { method: "PUT", path: "/api/v0/asks/22001003/", replies: [{ body: f("rent-ok.json") }] }
   ]);
-  const result = await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(taken.fetch));
+  const result = await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(t, taken.fetch));
   assert.equal(result.ref.offerId, 22001003);
   assert.equal((taken.seen[0]!.body as Record<string, unknown>).geolocation, undefined);
 
@@ -101,7 +101,7 @@ test("vastai: create moves to the next offer only when the offer is gone, and ne
     { method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] },
     { method: "PUT", path: "/api/v0/asks/", replies: [{ status: 500, body: '{"success":false,"error":"server_error","msg":"try later"}' }] }
   ]);
-  await assert.rejects(vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(failing.fetch)), /try later/);
+  await assert.rejects(vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(t, failing.fetch)), /try later/);
   assert.equal(failing.seen.filter((request) => request.method === "PUT").length, 1);
 
   const refused = routedFetch([
@@ -109,15 +109,15 @@ test("vastai: create moves to the next offer only when the offer is gone, and ne
     { method: "PUT", path: "/api/v0/asks/", replies: [{ body: '{"success":false,"error":"invalid_args","msg":"disk too small"}' }] }
   ]);
   await assert.rejects(
-    vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(refused.fetch)),
+    vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any" }), callOptions(t, refused.fetch)),
     (error: unknown) => error instanceof ProviderHttpError && /disk too small/.test(error.message)
   );
 
   const none = routedFetch([{ method: "POST", path: "/api/v0/bundles/", replies: [{ body: '{"offers":[]}' }] }]);
-  await assert.rejects(vastaiAdapter.create(creds, sampleCreateRequest({ size: "B200", region: "IS" }), callOptions(none.fetch)), /no rentable B200 offer in IS/);
+  await assert.rejects(vastaiAdapter.create(creds, sampleCreateRequest({ size: "B200", region: "IS" }), callOptions(t, none.fetch)), /no rentable B200 offer in IS/);
 });
 
-test("vastai: onstart is the staged first stage of a real bootstrap, with Tailscale, and fits", async () => {
+test("vastai: onstart is the staged first stage of a real bootstrap, with Tailscale, and fits", async (t) => {
   const { fetch, seen } = routedFetch([
     { method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] },
     { method: "PUT", path: "/api/v0/asks/", replies: [{ body: f("rent-ok.json") }] }
@@ -131,7 +131,7 @@ test("vastai: onstart is the staged first stage of a real bootstrap, with Tailsc
     tailscaleAuthKey: tailscaleKey,
     container: true
   });
-  await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any", bootstrap }), callOptions(fetch));
+  await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any", bootstrap }), callOptions(t, fetch));
   const rent = seen[1]!.body as Record<string, unknown>;
   assert.equal(rent.onstart, bootstrap.stagedPosixScript);
   assert.match(rent.onstart as string, /\/api\/boxes\/bootstrap\/container/);
@@ -145,19 +145,19 @@ test("vastai: onstart is the staged first stage of a real bootstrap, with Tailsc
   assert.ok(!JSON.stringify(rest).includes(token) && !JSON.stringify(rest).includes(tailscaleKey), "secrets only in onstart");
 });
 
-test("vastai: create refuses an onstart script over 4048 characters before renting", async () => {
+test("vastai: create refuses an onstart script over 4048 characters before renting", async (t) => {
   const { fetch, seen } = routedFetch([]);
   const request = sampleCreateRequest({ size: "RTX 4090", region: "any" });
   const long = { ...request, bootstrap: { ...request.bootstrap, posixScript: "#".repeat(4049) } };
-  await assert.rejects(vastaiAdapter.create(creds, long, callOptions(fetch)), /at most 4048/);
+  await assert.rejects(vastaiAdapter.create(creds, long, callOptions(t, fetch)), /at most 4048/);
   const longStaged = { ...request, bootstrap: { ...request.bootstrap, stagedPosixScript: "#".repeat(4049) } };
-  await assert.rejects(vastaiAdapter.create(creds, longStaged, callOptions(fetch)), /at most 4048/);
+  await assert.rejects(vastaiAdapter.create(creds, longStaged, callOptions(t, fetch)), /at most 4048/);
   assert.equal(seen.length, 0);
 });
 
-test("vastai: status maps the instance, and {instances:null} means gone", async () => {
+test("vastai: status maps the instance, and {instances:null} means gone", async (t) => {
   const running = routedFetch([{ path: "/api/v0/instances/31002002/?owner=me", replies: [{ body: f("instance-show-running.json") }] }]);
-  assert.deepEqual(await vastaiAdapter.status(creds, { instanceId: 31002002 }, callOptions(running.fetch)), {
+  assert.deepEqual(await vastaiAdapter.status(creds, { instanceId: 31002002 }, callOptions(t, running.fetch)), {
     state: "running",
     detail: "success, running vastai/base-image_cuda-12.8.1-auto/ssh",
     publicIp: "203.0.113.42",
@@ -165,7 +165,7 @@ test("vastai: status maps the instance, and {instances:null} means gone", async 
   });
 
   const gone = routedFetch([{ path: "/api/v0/instances/", replies: [{ body: f("instance-show-null.json") }] }]);
-  assert.equal((await vastaiAdapter.status(creds, { instanceId: 1 }, callOptions(gone.fetch))).state, "gone");
+  assert.equal((await vastaiAdapter.status(creds, { instanceId: 1 }, callOptions(t, gone.fetch))).state, "gone");
 
   const base = JSON.parse(f("instance-show-running.json")).instances;
   for (const [actual, intended, state] of [
@@ -181,37 +181,37 @@ test("vastai: status maps the instance, and {instances:null} means gone", async 
     const stub = routedFetch([
       { path: "/api/v0/instances/", replies: [{ body: JSON.stringify({ instances: { ...base, actual_status: actual, intended_status: intended } }) }] }
     ]);
-    assert.equal((await vastaiAdapter.status(creds, { instanceId: 1 }, callOptions(stub.fetch))).state, state, `${actual}/${intended}`);
+    assert.equal((await vastaiAdapter.status(creds, { instanceId: 1 }, callOptions(t, stub.fetch))).state, state, `${actual}/${intended}`);
   }
 });
 
-test("vastai: destroy is idempotent (200, 404, and success:false for a gone instance)", async () => {
+test("vastai: destroy is idempotent (200, 404, and success:false for a gone instance)", async (t) => {
   const ok = routedFetch([{ method: "DELETE", path: "/api/v0/instances/31002002/", replies: [{ body: f("destroy-ok.json") }] }]);
-  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(ok.fetch));
+  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(t, ok.fetch));
   assert.deepEqual(ok.seen[0]!.body, {});
 
   const missing = routedFetch([{ method: "DELETE", path: "/api/v0/instances/", replies: [{ status: 404, body: f("destroy-not-found.json") }] }]);
-  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(missing.fetch));
+  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(t, missing.fetch));
 
   const softGone = routedFetch([
     { method: "DELETE", path: "/api/v0/instances/", replies: [{ body: f("destroy-not-found.json") }] },
     { path: "/api/v0/instances/", replies: [{ body: f("instance-show-null.json") }] }
   ]);
-  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(softGone.fetch));
+  await vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(t, softGone.fetch));
 
   const refused = routedFetch([
     { method: "DELETE", path: "/api/v0/instances/", replies: [{ body: '{"success":false,"msg":"instance is locked"}' }] },
     { path: "/api/v0/instances/", replies: [{ body: f("instance-show-running.json") }] }
   ]);
-  await assert.rejects(vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(refused.fetch)), /instance is locked/);
+  await assert.rejects(vastaiAdapter.destroy(creds, { instanceId: 31002002 }, callOptions(t, refused.fetch)), /instance is locked/);
 });
 
-test("vastai: listManaged pages through v1 instances and keeps orq- labels", async () => {
+test("vastai: listManaged pages through v1 instances and keeps orq- labels", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/api/v1/instances/?limit=25&after_token=tok-2", replies: [{ body: f("instances-page2.json") }] },
     { path: "/api/v1/instances/?limit=25", replies: [{ body: f("instances-page1.json") }] }
   ]);
-  const managed = await vastaiAdapter.listManaged(creds, callOptions(fetch));
+  const managed = await vastaiAdapter.listManaged(creds, callOptions(t, fetch));
   assert.equal(seen.length, 2);
   assert.deepEqual(
     managed.map((instance) => [instance.name, instance.boxId, instance.state, instance.ref.instanceId]),

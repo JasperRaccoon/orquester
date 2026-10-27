@@ -386,8 +386,6 @@ async function startSession(
     resumeCursor?: unknown;
     runtimeMode?: "approval-required" | "full-access";
     cwd?: string;
-    /** The session's wait between attempts; a real timer when absent. */
-    delay?: (ms: number, signal: AbortSignal) => Promise<void>;
     /** The thread's session-tool server (design 2026-10-14 §1.2). */
     sessionTools?: OpenCodeSessionToolsLaunch;
     /** The host has session tools (this thread's grant may still have failed). */
@@ -400,8 +398,7 @@ async function startSession(
     {
       ctx: harness.ctx,
       emit: harness.emit,
-      onClosed: () => undefined,
-      ...(options.delay !== undefined ? { delay: options.delay } : {})
+      onClosed: () => undefined
     },
     {
       threadId: "thread-1",
@@ -1892,6 +1889,17 @@ function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Advance only virtual timers until the session produces the requested public receipt. */
+async function advanceTo<T>(t: test.TestContext, receipt: Promise<T>): Promise<T> {
+  let settled = false;
+  void receipt.then(() => { settled = true; }, () => { settled = true; });
+  while (!settled) {
+    await nextTurn();
+    if (!settled) t.mock.timers.runAll();
+  }
+  return await receipt;
+}
+
 /**
  * Rewind the thread past `turnId`, the turn its session's first prompt opened:
  * the fork keeps nothing before it. `children` is what `GET …/children`
@@ -2530,16 +2538,17 @@ test("a NESTED subagent that survives the Stop is relaunched too: its first star
   harness.dispose();
 });
 
-test("after a failed admission a relaunched child holds the drain, but reads interrupted: that session reads error, which the roster takes for dead", async () => {
+test("after a failed admission a relaunched child holds the drain, but reads interrupted: that session reads error, which the roster takes for dead", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
   harness.fake.statusMap = { ses_bg: { type: "busy" } };
-  const session = await startSession(harness, { delay: async () => undefined });
+  const session = await startSession(harness);
   const sessionId = session.sessionId;
   // The prompt's message never shows: machine (3) fails the turn and aborts,
   // closing the child the turn launched.
   const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
   pushAll(harness.fake, childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }));
-  await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  await advanceTo(t, waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId));
   assert.deepEqual(taskEnds(harness.events).map((row) => row.split(":").slice(0, 2).join(":")), ["ses_bg:stopped"]);
 
   const revival = nextStartOf(harness, "ses_bg");
@@ -3281,7 +3290,8 @@ test("after a Stop whose abort request failed, an abort error before the run's i
   harness.dispose();
 });
 
-test("a Stop whose abort request failed: the stream's or the server's word that the run ended settles the turn as the abort would have — two idle frames or a lone one, before the failure or after it, or a reconnect's status poll; without that word, the next Stop asks the server again — and the next run is a new one", async () => {
+test("a Stop whose abort request failed: the stream's or the server's word that the run ended settles the turn as the abort would have — two idle frames or a lone one, before the failure or after it, or a reconnect's status poll; without that word, the next Stop asks the server again — and the next run is a new one", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const orders = [
     "run ends before the failure",
     "run ends after the failure",
@@ -3296,7 +3306,7 @@ test("a Stop whose abort request failed: the stream's or the server's word that 
     for (const after of afters) {
       const title = `${order} / ${after}`;
       const harness = makeHarness();
-      const session = await startSession(harness, { delay: async () => undefined });
+      const session = await startSession(harness);
       const sessionId = session.sessionId;
       const stopped = await turnStreaming(harness, session);
       const abortPath = `/session/${sessionId}/abort`;
@@ -3334,7 +3344,7 @@ test("a Stop whose abort request failed: the stream's or the server's word that 
           // server (`GET /session/status`), which says the session is idle.
           const reconnected = harness.fake.nextStream();
           harness.fake.endStream();
-          await reconnected;
+          await advanceTo(t, reconnected);
           await waitFor(harness, "turn.aborted");
         } else {
           const sent = aborts();
@@ -3453,7 +3463,7 @@ test("a steer after a failed Stop takes the turn back: the run's own end complet
 async function failedStopWithChild(
   harness: Harness
 ): Promise<{ session: OpenCodeThreadSession; sessionId: string; turnId: string }> {
-  const session = await startSession(harness, { delay: async () => undefined });
+  const session = await startSession(harness);
   const sessionId = session.sessionId;
   const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
   const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
@@ -3490,7 +3500,8 @@ function holdChildAbort(harness: Harness, childId: string, also?: () => void): {
   return { sent: sent.promise, answer: () => answered.resolve() };
 }
 
-test("the end of a Stop whose abort request failed closes the children, then aborts them: a child's report in between asks the server only once that abort is over, so a child it ends is never relaunched — the run's idle or a reconnect's status poll", async () => {
+test("the end of a Stop whose abort request failed closes the children, then aborts them: a child's report in between asks the server only once that abort is over, so a child it ends is never relaunched — the run's idle or a reconnect's status poll", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   for (const end of ["the run's idle", "a reconnect's status poll"] as const) {
     const harness = makeHarness();
     const { session, sessionId, turnId } = await failedStopWithChild(harness);
@@ -3505,7 +3516,7 @@ test("the end of a Stop whose abort request failed closes the children, then abo
       // server, which runs the child and not the parent.
       const reconnected = harness.fake.nextStream();
       harness.fake.endStream();
-      await reconnected;
+      await advanceTo(t, reconnected);
     }
     await waitFor(harness, "turn.aborted", (event) => event.turnId === turnId);
     await childAbort.sent;
@@ -3656,25 +3667,27 @@ test("after a Stop, a busy from before the stopped run's idle ends nothing: a re
 
 /**
  * The parent at rest after a run's `busy` — its `idle` not yet seen — then
- * the stream dropped and the session reconnected. The session's wait between
- * attempts returns at once: the reconnect needs no clock.
+ * the stream dropped and the session reconnected. Native virtual timers advance
+ * until the next stream opens; the production reconnect delay runs unchanged.
  */
 async function reconnectedAfterBusy(
-  harness: Harness
+  harness: Harness,
+  t: test.TestContext
 ): Promise<{ session: OpenCodeThreadSession; sessionId: string }> {
-  const session = await startSession(harness, { delay: async () => undefined });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const session = await startSession(harness);
   const sessionId = session.sessionId;
   harness.fake.push({ type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } });
   await drainedWith(harness, sessionId, "before the gap");
   const reconnected = harness.fake.nextStream();
   harness.fake.endStream();
-  await reconnected;
+  await advanceTo(t, reconnected);
   return { session, sessionId };
 }
 
-test("a reconnect clears a stale busy: a reply the host never started, after the gap, opens no turn", async () => {
+test("a reconnect clears a stale busy: a reply the host never started, after the gap, opens no turn", async (t) => {
   const harness = makeHarness();
-  const { session, sessionId } = await reconnectedAfterBusy(harness);
+  const { session, sessionId } = await reconnectedAfterBusy(harness, t);
 
   // The run whose `busy` came before the gap may have ended in it: its reply
   // to a prompt the server wrote, arriving with no `busy` since, is no
@@ -3692,9 +3705,9 @@ test("a reconnect clears a stale busy: a reply the host never started, after the
   harness.dispose();
 });
 
-test("a reconnect keeps what a live run says after it: a busy after the gap still opens the woken turn", async () => {
+test("a reconnect keeps what a live run says after it: a busy after the gap still opens the woken turn", async (t) => {
   const harness = makeHarness();
-  const { session, sessionId } = await reconnectedAfterBusy(harness);
+  const { session, sessionId } = await reconnectedAfterBusy(harness, t);
 
   const reply = wokenReply({ sessionId, ...FIRST });
   pushAll(harness.fake, [
@@ -3960,14 +3973,15 @@ test("an ask that arrives while the Stop withdraws the parked cards is held too:
   harness.dispose();
 });
 
-test("after a prompt admission fails and aborts the session, a request is judged as after a Stop: the aborted run's is rejected, a live asker's shown", async () => {
+test("after a prompt admission fails and aborts the session, a request is judged as after a Stop: the aborted run's is rejected, a live asker's shown", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
-  const session = await startSession(harness, { delay: async () => undefined });
+  const session = await startSession(harness);
   const sessionId = session.sessionId;
   // Accepted, but its message never shows and the session reads idle: machine
   // (3) gives up after five attempts, aborts the session and fails the turn.
   const turn = await session.sendTurn({ threadId: "thread-1", input: "run it", attachments: [], interactionMode: "default" });
-  const failed = await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  const failed = await advanceTo(t, waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId));
   assert.equal((failed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "failed");
   assert.ok(harness.fake.find("POST", `/session/${sessionId}/abort`) !== undefined, "the admission's abort");
 
@@ -4154,38 +4168,6 @@ function probeCount(harness: Harness, sessionId: string): number {
 }
 
 /**
- * The session's wait between attempts as these tests drive it: it keeps what
- * it was asked to wait, and answers at once — or, `held`, only when the
- * session's stop aborts it, as `util.ts`'s `delay` does. `asked(n)` settles
- * once the n-th wait has been asked for. No clock is involved.
- */
-function recordedDelay(options: { held?: boolean } = {}): {
-  delay: (ms: number, signal: AbortSignal) => Promise<void>;
-  waits: number[];
-  asked: (count: number) => Promise<void>;
-} {
-  const waits: number[] = [];
-  let waiters: { count: number; resolve: () => void }[] = [];
-  const delay = (ms: number, signal: AbortSignal): Promise<void> => {
-    waits.push(ms);
-    waiters = waiters.filter((waiter) => {
-      if (waits.length < waiter.count) {
-        return true;
-      }
-      waiter.resolve();
-      return false;
-    });
-    if (options.held !== true || signal.aborted) {
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
-  };
-  const asked = (count: number): Promise<void> =>
-    waits.length >= count ? Promise.resolve() : new Promise((resolve) => waiters.push({ count, resolve }));
-  return { delay, waits, asked };
-}
-
-/**
  * Make one session id unreadable, **before** the session starts: the client is
  * built with whatever `fetchImpl` the fake holds at that moment.
  */
@@ -4206,10 +4188,10 @@ function failReadsOf(harness: Harness, sessionId: string): void {
   });
 }
 
-test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", async () => {
+test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
-  const backoff = recordedDelay();
-  const session = await startSession(harness, { delay: backoff.delay });
+  const session = await startSession(harness);
   // A session that exists on this shared server and has no parent: the walk
   // completes at a root that is not ours, which is a definitive answer.
   harness.fake.sessions.set("ses_cotenant", { id: "ses_cotenant", directory: "/repo" });
@@ -4226,61 +4208,62 @@ test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", asyn
   await harness.fake.waitForRequest("GET", "/session/ses_cotenant");
   await nextTurn();
 
+  t.mock.timers.runAll();
+  await nextTurn();
   assert.equal(probeCount(harness, "ses_cotenant"), 1, "a walked foreign root is not retried");
-  assert.deepEqual(backoff.waits, [], "nor waited on to retry");
   // And it never became this thread's card.
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 
-test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async () => {
+test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
   failReadsOf(harness, "ses_unreadable");
-  const backoff = recordedDelay();
-  const session = await startSession(harness, { delay: backoff.delay });
+  const session = await startSession(harness);
 
-  // A non-`asked` request frame takes the SHORT cap: five probes, each unknown
-  // answer backing off `250 ms · 2^n` before the next.
+  // A non-`asked` request frame has a five-probe budget. The backoff schedule
+  // is incidental; only real provider requests and eventual termination matter.
   harness.fake.push({
     type: "permission.replied",
     properties: { requestID: "per_unreadable", sessionID: "ses_unreadable", reply: "once" }
   });
-  await backoff.asked(5);
+  // Give the chain more opportunities than its cap, without asserting timer calls.
+  for (let opportunity = 0; opportunity < 10; opportunity += 1) {
+    await nextTurn();
+    t.mock.timers.runAll();
+  }
   await nextTurn();
-
   assert.equal(probeCount(harness, "ses_unreadable"), 5, "the unknown outcome is retried, up to the cap");
-
-  // Capped means STOPPED, not merely slowed: nothing more follows the last wait.
+  t.mock.timers.runAll();
   await nextTurn();
-  assert.equal(probeCount(harness, "ses_unreadable"), 5);
-  assert.equal(backoff.waits.length, 5);
+  assert.equal(probeCount(harness, "ses_unreadable"), 5, "no later request survives the cap");
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 
-test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async () => {
+test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const harness = makeHarness();
   failReadsOf(harness, "ses_gone");
-  // The chain waits to retry until the stop ends the wait.
-  const backoff = recordedDelay({ held: true });
-  const session = await startSession(harness, { delay: backoff.delay });
+  const session = await startSession(harness);
 
   harness.fake.push({
     type: "permission.asked",
     properties: { id: "per_gone", sessionID: "ses_gone", permission: "bash", patterns: ["x"] }
   });
-  await backoff.asked(1);
+  await nextTurn();
   assert.equal(probeCount(harness, "ses_gone"), 1, "one probe, unknown: the chain waits to retry");
 
   await session.stop({ reason: "test", hostInitiated: true });
+  t.mock.timers.runAll();
   await nextTurn();
   assert.equal(
     probeCount(harness, "ses_gone"),
     1,
     "a closed session must not keep polling the provider"
   );
-  assert.equal(backoff.waits.length, 1);
   harness.dispose();
 });
 

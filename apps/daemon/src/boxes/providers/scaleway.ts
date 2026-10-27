@@ -670,7 +670,6 @@ export const scalewayAdapter: BoxProviderAdapter = {
     } catch (error) {
       // The server never started: remove it and its volume. If that fails too, its tags let the reconciler find it.
       await destroyServer(credentials, zone, server.id, volumeIds, {
-        fetch: options.fetch,
         signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS)
       }).catch(() => undefined);
       throw error;

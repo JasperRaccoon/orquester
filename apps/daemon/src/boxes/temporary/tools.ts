@@ -72,7 +72,7 @@ export const MAX_RUNNING_JOBS_PER_BOX = 16;
 /** Open port forwards per box. */
 export const MAX_FORWARDS_PER_BOX = 16;
 /** One download's size cap (a file's bytes or a directory's tar stream). */
-export const BOX_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+const BOX_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 /** After SIGTERM (timeout, cancel), how long before SIGKILL. */
 export const KILL_GRACE_MS = 5_000;
 /** After the process exited, how long its output streams may take to end. */
@@ -154,8 +154,6 @@ export interface TemporaryBoxToolsDeps {
   isChatOpen?(threadId: string): boolean;
   clock?: TemporaryBoxClock;
   newId?: () => string;
-  /** The host's tar for directory transfers (default `tar`). */
-  tar?: string;
   logger?: { warn?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
 }
 
@@ -178,7 +176,7 @@ export interface BoxCallOptions {
 // ---------------------------------------------------------------------------
 
 /** The last `cap` bytes of a stream, and how many bytes it carried in all. */
-export class OutputTail {
+class OutputTail {
   private chunks: Buffer[] = [];
   private held = 0;
   total = 0;
@@ -605,7 +603,7 @@ export class TemporaryBoxTools {
       }
       if (stats.isDirectory()) {
         // The directory's CONTENTS: unpacked into `remote`, which becomes the copy.
-        const tar = spawn(this.deps.tar ?? "tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"] });
+        const tar = spawn("tar", ["-cf", "-", "-C", local.value, "."], { stdio: ["ignore", "pipe", "pipe"] });
         const exited = processExit(tar);
         abortWith(options.signal, () => tar.kill("SIGTERM"));
         try {
@@ -681,7 +679,7 @@ export class TemporaryBoxTools {
       abortWith(options.signal, () => source.destroy(new Error("cancelled")));
       // Unpacked by the host's tar into a fresh, private directory (tar refuses members that climb
       // out with `..` or absolute names, and links cannot redirect writes into existing paths there).
-      const tar = spawn(this.deps.tar ?? "tar", ["-xf", "-", "-C", staging, "--no-same-owner"], { stdio: ["pipe", "ignore", "pipe"] });
+      const tar = spawn("tar", ["-xf", "-", "-C", staging, "--no-same-owner"], { stdio: ["pipe", "ignore", "pipe"] });
       const exited = processExit(tar);
       // Tar may stop at its end markers before the box finishes the stream. Keep reading and
       // counting that tail: a later box error or an oversized stream must still fail the download.

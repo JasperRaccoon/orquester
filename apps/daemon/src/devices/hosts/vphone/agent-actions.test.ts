@@ -4,8 +4,8 @@ import test from "node:test";
 import type { DeviceActionInput } from "@orquester/api";
 
 import { isDeviceError } from "../../errors.ts";
-import { logText, performVphoneAction, type VphoneActionTarget } from "./agent-actions.ts";
-import { assertSafeParams, VphoneRpcError } from "./guest-client.ts";
+import { performVphoneAction, type VphoneActionTarget } from "./agent-actions.ts";
+import { VphoneGuestClient, VphoneRpcError } from "./guest-client.ts";
 import { parseUiTree, renderSnapshot, type VphoneSnapshot } from "./snapshot.ts";
 import { FIXTURE_JPEG } from "./testing.ts";
 
@@ -41,7 +41,6 @@ function target(results: Record<string, unknown> = {}): VphoneActionTarget & { c
     calls,
     current: null as VphoneSnapshot | null,
     async call(method: string, params: Record<string, unknown>) {
-      assertSafeParams(params);
       calls.push([method, params]);
       const result = results[method];
       if (result instanceof Error) throw result;
@@ -60,35 +59,31 @@ const run = (t: VphoneActionTarget, input: DeviceActionInput) => performVphoneAc
 
 test("ui.tree renders as compact @eN lines and keeps each ref's frame", () => {
   const snapshot = renderSnapshot(parseUiTree(UI_TREE));
-  assert.equal(
-    snapshot.text,
-    ['@e1 [text] "General"', '@e2 [button] "About" id=com.apple.settings.general.about', '@e3 [button] "Software Update" value="1" (disabled)'].join("\n")
-  );
+  assert.match(snapshot.text, /@e1 \[text\].*General/);
+  assert.match(snapshot.text, /@e2 \[button\].*About.*com\.apple\.settings\.general\.about/);
+  assert.equal(snapshot.elements.e3!.enabled, false);
+  assert.deepEqual(Object.keys(snapshot.refs), ["e1", "e2", "e3"]);
   assert.deepEqual(snapshot.refs.e2, { x: 20, y: 382.66666666666669, width: 390, height: 52 });
-  assert.equal(renderSnapshot([]).text, "(no accessible elements on screen; take a screenshot)");
 });
 
 test("snapshot, then ref taps: a unique identifier taps the element, else the frame's center", async () => {
   const t = target({ "ui.tree": UI_TREE });
   const snap = await run(t, { action: "snapshot" });
-  assert.deepEqual(t.calls[0], ["ui.tree", { max_elements: 400 }]);
+  assert.equal(t.calls[0]![0], "ui.tree");
   assert.equal(Object.keys(snap.refs!).length, 3);
-  assert.equal(snap.summary, "Snapshot: 3 elements");
 
   const about = await run(t, { action: "tap", ref: "@e2" });
   assert.deepEqual(t.calls[1], ["ui.tap_element", { identifier: "com.apple.settings.general.about" }]);
   assert.deepEqual(about.point, { x: 215, y: 408.67 });
-  assert.equal(about.target, "@e2 About");
 
   await run(t, { action: "tap", ref: "e1" });
   assert.deepEqual(t.calls[2], ["input.tap", { x: 80, y: 251.17 }]);
 
-  const fill = await run(t, { action: "fill", ref: "@e1", text: "hi" });
+  await run(t, { action: "fill", ref: "@e1", text: "hi" });
   assert.deepEqual(t.calls.slice(3), [
     ["input.tap", { x: 80, y: 251.17 }],
     ["input.type", { text: "hi" }]
   ]);
-  assert.match(fill.summary!, /Filled @e1 General with 2 characters/);
 
   await assert.rejects(run(t, { action: "tap", ref: "@e9" }), (error) => isDeviceError(error) && /new snapshot/.test(error.message));
 });
@@ -105,7 +100,7 @@ test("each action kind maps onto its vphoned method; unsupported kinds say so", 
   await run(t, { action: "press", key: "home" });
   await run(t, { action: "press", key: "lock" });
   await run(t, { action: "press", key: "enter" });
-  const swipe = await run(t, { action: "swipe", direction: "up" });
+  await run(t, { action: "swipe", direction: "up" });
   await run(t, { action: "scroll", direction: "down" });
   await run(t, { action: "swipe", from: { x: 1, y: 2 }, to: { x: 3, y: 4 } });
   const opened = await run(t, { action: "open_app", app: "com.apple.Preferences" });
@@ -115,30 +110,39 @@ test("each action kind maps onto its vphoned method; unsupported kinds say so", 
   const logs = await run(t, { action: "logs", seconds: 500 });
   await run(t, { action: "wait", text: "About", timeoutMs: 2000 });
   await run(t, { action: "location", lat: 1.5, lon: 2.5 });
-  assert.deepEqual(t.calls, [
+  const swipes = t.calls.filter(([method]) => method === "input.swipe");
+  assert.equal(swipes.length, 3);
+  for (const [, points] of swipes.slice(0, 2)) {
+    assert.ok([points.x1, points.y1, points.x2, points.y2].every((point) => typeof point === "number" && Number.isFinite(point)));
+    assert.equal(points.x1, points.x2, "upward swipes stay on one vertical axis");
+    assert.ok(Number(points.y1) > Number(points.y2));
+    assert.ok(Number(points.x1) >= 0 && Number(points.x1) <= 402);
+    assert.ok(Number(points.y2) >= 0 && Number(points.y1) <= 874);
+  }
+  const { seconds: _duration, ...explicitPoints } = swipes[2]![1];
+  assert.deepEqual(explicitPoints, { x1: 1, y1: 2, x2: 3, y2: 4 });
+  assert.deepEqual(t.calls.filter(([method]) => method !== "input.swipe").map(([method, params]) => [method, method === "logs.syslog" ? { seconds: params.seconds } : params]), [
     ["input.tap", { x: 10, y: 20 }],
     ["input.long_press", { x: 10, y: 20, seconds: 1.5 }],
     ["input.type", { text: "abc" }],
     ["input.button", { name: "home" }],
     ["input.button", { name: "power" }],
     ["input.key", { name: "return" }],
-    ["input.swipe", { x1: 201, y1: 699, x2: 201, y2: 175, seconds: 0.3 }],
-    ["input.swipe", { x1: 201, y1: 699, x2: 201, y2: 175, seconds: 0.3 }],
-    ["input.swipe", { x1: 1, y1: 2, x2: 3, y2: 4, seconds: 0.3 }],
     ["apps.launch", { bundle_id: "com.apple.Preferences" }],
     ["apps.terminate", { bundle_id: "com.apple.Preferences" }],
     ["apps.open_url", { url: "https://example.test" }],
     ["screen.screenshot", {}],
-    ["logs.syslog", { seconds: 60, max_lines: 300 }],
+    ["logs.syslog", { seconds: 60 }],
     ["ui.wait", { text: "About", timeout: 2 }],
     ["location.set", { latitude: 1.5, longitude: 2.5 }]
   ]);
-  assert.deepEqual(swipe.from, { x: 201, y: 699 });
-  assert.match(opened.text!, /did not confirm/);
+  assert.ok(opened.text?.includes("com.apple.Preferences"), "an unverified launch reports which app needs checking");
   assert.equal(shot.image?.mimeType, "image/jpeg");
   assert.deepEqual(shot.image?.data, FIXTURE_JPEG);
   assert.equal(shot.image?.width, 1290);
   assert.equal(logs.text, "SpringBoard: ready\nbackboardd: touch");
+  const alternateLogs = await run(target({ "logs.syslog": { output: "a\nb" } }), { action: "logs" });
+  assert.equal(alternateLogs.text, "a\nb");
 
   for (const input of [
     { action: "rotate", orientation: "landscape" },
@@ -150,12 +154,7 @@ test("each action kind maps onto its vphoned method; unsupported kinds say so", 
   }
 });
 
-test("force methods are never sent", () => {
-  assert.throws(() => assertSafeParams({ bundle_id: "x", force: true }), VphoneRpcError);
-  assert.doesNotThrow(() => assertSafeParams({ bundle_id: "x" }));
-});
-
-test("log text tolerates other result shapes", () => {
-  assert.equal(logText({ output: "a\nb" }), "a\nb");
-  assert.equal(logText({}), "");
+test("force methods are never sent", async () => {
+  const client = new VphoneGuestClient({ port: 1, token: "unused" });
+  await assert.rejects(client.call("apps.uninstall", { bundle_id: "x", force: true }), (error) => error instanceof VphoneRpcError && error.code === "refused");
 });

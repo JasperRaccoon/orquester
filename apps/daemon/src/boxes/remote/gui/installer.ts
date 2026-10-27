@@ -48,9 +48,9 @@ import {
   type BoxGuiProgress
 } from "./types.ts";
 
-export const PROBE_TIMEOUT_MS = 60_000;
-export const INSTALL_TIMEOUT_MS = 15 * 60_000;
-export const CHROME_START_TIMEOUT_MS = 3 * 60_000;
+const PROBE_TIMEOUT_MS = 60_000;
+const INSTALL_TIMEOUT_MS = 15 * 60_000;
+const CHROME_START_TIMEOUT_MS = 3 * 60_000;
 /** Lines of the install log a failure message ends with. */
 const TAIL_LINES = 15;
 
@@ -105,15 +105,7 @@ class GuiInstaller implements BoxGuiInstaller {
   private readonly desktops = new FeatureMemo<DesktopHostStatus>();
   private readonly browsers = new FeatureMemo<BoxBrowserRuntime>();
 
-  private readonly probeMs: number;
-  private readonly installMs: number;
-  private readonly chromeStartMs: number;
-
-  constructor(private readonly deps: BoxGuiInstallerDeps) {
-    this.probeMs = deps.timeouts?.probeMs ?? PROBE_TIMEOUT_MS;
-    this.installMs = deps.timeouts?.installMs ?? INSTALL_TIMEOUT_MS;
-    this.chromeStartMs = deps.timeouts?.chromeStartMs ?? CHROME_START_TIMEOUT_MS;
-  }
+  constructor(private readonly deps: BoxGuiInstallerDeps) {}
 
   async desktopStatus(connection: BoxConnection, options: { signal?: AbortSignal } = {}): Promise<DesktopHostStatus> {
     if (connection.sys.os !== "linux") return nonLinuxDesktopStatus();
@@ -170,7 +162,7 @@ class GuiInstaller implements BoxGuiInstaller {
       progress(`Installing ${plan.missing.join(" ")} in the box; the first desktop takes a few minutes.`);
     }
     const started = Date.now();
-    const result = await this.runScript(connection, { script: desktopInstallScript({ manager, ...plan }), asRoot: true, timeoutMs: this.installMs, what: "Installing the desktop packages" }, facts, signal, progress);
+    const result = await this.runScript(connection, { script: desktopInstallScript({ manager, ...plan }), asRoot: true, timeoutMs: INSTALL_TIMEOUT_MS, what: "Installing the desktop packages" }, facts, signal, progress);
     if (result.code !== 0) {
       this.warn("box desktop install failed", connection, "desktop", result);
       throw new BoxGuiUnavailableError(
@@ -220,7 +212,7 @@ class GuiInstaller implements BoxGuiInstaller {
       }
       progress("Installing Google Chrome from Google's signed repository; this takes a minute or two.");
       const started = Date.now();
-      const result = await this.runScript(connection, { script: browserInstallScript(manager), asRoot: true, timeoutMs: this.installMs, what: "Installing Google Chrome" }, facts, signal, progress);
+      const result = await this.runScript(connection, { script: browserInstallScript(manager), asRoot: true, timeoutMs: INSTALL_TIMEOUT_MS, what: "Installing Google Chrome" }, facts, signal, progress);
       if (result.code === EXIT_UNSUPPORTED) {
         throw new BoxGuiUnavailableError(`Google Chrome has no Linux build for this box's architecture.`, "Use an x86-64 or arm64 box for the in-box browser.");
       }
@@ -244,7 +236,7 @@ class GuiInstaller implements BoxGuiInstaller {
     const trySandbox = !root && !connection.sys.container;
     const result = await this.runScript(
       connection,
-      { script: chromeStartScript(), args: [chrome.path, trySandbox ? "1" : "0"], asRoot: false, timeoutMs: this.chromeStartMs, what: "Starting Chrome" },
+      { script: chromeStartScript(), args: [chrome.path, trySandbox ? "1" : "0"], asRoot: false, timeoutMs: CHROME_START_TIMEOUT_MS, what: "Starting Chrome" },
       facts,
       signal
     );
@@ -282,7 +274,7 @@ class GuiInstaller implements BoxGuiInstaller {
     progress("Adding CJK and emoji fonts for the browser");
     const result = await this.runScript(
       connection,
-      { script: browserFontsScript(manager, fonts), asRoot: true, timeoutMs: this.installMs, what: "Installing the browser's fonts" },
+      { script: browserFontsScript(manager, fonts), asRoot: true, timeoutMs: INSTALL_TIMEOUT_MS, what: "Installing the browser's fonts" },
       facts,
       signal,
       progress
@@ -298,7 +290,7 @@ class GuiInstaller implements BoxGuiInstaller {
   // -------------------------------------------------------------------------
 
   private async probe(connection: BoxConnection, parts: { desktop: boolean; browser: boolean }, signal: AbortSignal): Promise<BoxGuiFacts> {
-    const result = await this.runScript(connection, { script: guiProbeScript(parts), asRoot: false, timeoutMs: this.probeMs, what: "Checking the box" }, null, signal);
+    const result = await this.runScript(connection, { script: guiProbeScript(parts), asRoot: false, timeoutMs: PROBE_TIMEOUT_MS, what: "Checking the box" }, null, signal);
     if (result.code !== 0) {
       throw new BoxGuiUnavailableError(`${failurePrefix(connection, result, "Checking the box")}\n${tailLines(result.tail)}`, connection.connected ? null : NOT_CONNECTED_HINT);
     }

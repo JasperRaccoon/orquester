@@ -95,7 +95,7 @@ function secretLeafPaths(doc: unknown, blank: boolean, prefix: KeyPath = []): Ke
 }
 
 /** Paths of every non-empty string value that is a secret (objects only; arrays are not entered). */
-export function secretPaths(doc: unknown, prefix: KeyPath = []): KeyPath[] {
+function secretPaths(doc: unknown, prefix: KeyPath = []): KeyPath[] {
   return secretLeafPaths(doc, false, prefix);
 }
 

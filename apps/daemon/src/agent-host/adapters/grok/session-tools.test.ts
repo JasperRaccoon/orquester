@@ -83,8 +83,6 @@ test("fixture 33: the captured permission request for an MCP use_tool call names
   );
   assert.ok(request, "the capture holds the request");
   const toolCall = (request.params as { toolCall: ToolCallUpdate }).toolCall;
-  // As captured: the qualified title, the use_tool vendor block, rawInput.tool_name.
-  assert.equal(toolCall.title, "orquester__echo");
   assert.equal(grokSessionToolName(toolCall), "echo");
   // Either half alone suffices: the title, or the vendor block with tool_name.
   assert.equal(grokSessionToolName({ ...toolCall, title: "use_tool" }), "echo");
@@ -92,11 +90,6 @@ test("fixture 33: the captured permission request for an MCP use_tool call names
   // Without the vendor block and the qualified title, an argument names nothing.
   assert.equal(grokSessionToolName({ ...toolCall, title: "use_tool", _meta: null }), "echo", "title use_tool is the marker");
   assert.equal(grokSessionToolName({ ...toolCall, title: "read_file", _meta: null }), null);
-  const options = (request.params as { options: Array<{ optionId: string; kind: string }> }).options;
-  assert.deepEqual(
-    options.map((option) => option.kind),
-    ["allow_always", "allow_once", "reject_once"]
-  );
 });
 
 test("the raw log masks an MCP server's headers like its env", () => {

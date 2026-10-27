@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { boxMcpSettingsPath, withRunInBox } from "@orquester/config";
 
@@ -21,12 +21,20 @@ import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBo
 
 const quiet: AdapterLogger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
 
+const scratchDirs: string[] = [];
+after(async () => { await Promise.all(scratchDirs.map((dir) => rm(dir, { recursive: true, force: true }))); });
+async function scratch(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  scratchDirs.push(dir);
+  return dir;
+}
+
 /**
  * A "box" home holding a stand-in CLI in `~/.local/bin`, one of the dirs a box launch looks in,
  * and a login shell (`~/sh`) that reports a PATH without this machine's own agent CLIs.
  */
 async function boxHome(bins: string[] = []): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), "box-home-"));
+  const home = await scratch("box-home-");
   const dir = join(home, ".local", "bin");
   await mkdir(dir, { recursive: true });
   await writeFile(join(home, "sh"), '#!/bin/sh\nprintf "%s" "/usr/bin:/bin"\n', "utf8");
@@ -53,7 +61,7 @@ test("the System account never launches in a box (spec §7); OpenCode, which has
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const sync = recordingSync();
   const boxes = createAgentHostBoxes({
-    appdir: await mkdtemp(join(tmpdir(), "box-appdir-")),
+    appdir: await scratch("box-appdir-"),
     connector: () => connection,
     tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
     sync,
@@ -74,7 +82,7 @@ test("a launch syncs the CLI's config roots first, pushes the transcript of a re
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const sync = recordingSync();
   const boxes = createAgentHostBoxes({
-    appdir: await mkdtemp(join(tmpdir(), "box-appdir-")),
+    appdir: await scratch("box-appdir-"),
     connector: () => connection,
     tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
     sync,
@@ -175,7 +183,7 @@ test("a CLI missing in the box is installed on first use (npm's globals under th
 
 test("Claude's box login: a refresh-token-free credentials file, rewritten only when the token runs short", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   let now = 1_800_000_000_000;
   const tokens = recordingTokens({
@@ -228,7 +236,7 @@ test("Claude's box login: a refresh-token-free credentials file, rewritten only 
 
 test("Claude's box login is renewed mid-turn: a timer armed for the margin rewrites the file with no turn boundary", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   let now = 1_800_000_000_000;
   const timers: { callback: () => void; delayMs: number; done: boolean }[] = [];
@@ -341,7 +349,7 @@ function manualLoginFiles(): {
 
 test("a renewal of the account's login on this machine reaches every box chat on it at once: the old token is revoked", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   const now = 1_800_000_000_000;
   const hostHome = "/accounts/claude/acct-1/home";
@@ -406,7 +414,7 @@ test("a renewal of the account's login on this machine reaches every box chat on
 
 test("a box login renewed on this machine between the install's grant and its watch is still adopted", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   const now = 1_800_000_000_000;
   const hostHome = "/accounts/claude/acct-1/home";
@@ -435,7 +443,7 @@ test("a box login renewed on this machine between the install's grant and its wa
 
 test("a box login the API refuses is renewed past that token, once per refused token", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   let now = 1_800_000_000_000;
   const requests: { rejectedAccessToken?: string }[] = [];
@@ -510,10 +518,10 @@ test("a box login the API refuses is renewed past that token, once per refused t
 
 test("the box login follows the account's real login file: rewritten in place or replaced by a rename", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
   const now = Date.now();
-  const hostHome = await mkdtemp(join(tmpdir(), "account-home-"));
+  const hostHome = await scratch("account-home-");
   const hostPath = join(hostHome, ".credentials.json");
   await writeFile(hostPath, hostLogin("access-1", now + 2 * 60 * 60_000), { mode: 0o600 });
   const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 2 * 60 * 60_000 });
@@ -559,7 +567,7 @@ test("a Claude frame refusing the box's login: a 401 retry or the authentication
 
 test("a turn's attachments are copied into the box at their mapped path and named by it", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const windows = localBoxConnection({
     sys: { home, shell: join(home, "sh"), agentPath: "C:\\orq\\agent\\orq-agent.exe" },
     paths: { kind: "windows-prefix", prefix: "C:\\orq" }
@@ -579,7 +587,7 @@ test("a turn's attachments are copied into the box at their mapped path and name
     home: { kind: "account", accountId: "a", path: "/accounts/claude/a/home" },
     cwd: "/w/p"
   });
-  const attachments = await mkdtemp(join(tmpdir(), "box-attachments-"));
+  const attachments = await scratch("box-attachments-");
   const file = join(attachments, "notes-txt");
   await writeFile(file, "the attachment's bytes", "utf8");
   const host = { resolveAttachmentPath: async () => file, attachmentsDir: () => attachments } as unknown as AdapterContext;
@@ -594,7 +602,7 @@ test("a turn's attachments are copied into the box at their mapped path and name
 
 test("bridged MCP servers are registered for the box and go with the launch; secrets stay in the host registry", async () => {
   const home = await boxHome(["claude"]);
-  const appdir = await mkdtemp(join(tmpdir(), "box-appdir-"));
+  const appdir = await scratch("box-appdir-");
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const boxes = createAgentHostBoxes({ appdir, connector: () => connection, tokens: recordingTokens({ accessToken: "t", expiresAt: null }), sync: recordingSync(), logger: quiet });
   const launch = await boxes.launch({
@@ -817,7 +825,7 @@ test("a box that cannot list its processes fails the start before anything is sy
 
 test("a Claude box start loads the profile launch through the box: the project's files are the box's, the walk stops at the box's home", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const boxFiles = join(root, "box");
   // The project's `.mcp.json` exists only in the box; the host path `/w/p` holds nothing.
   await mkdir(join(boxFiles, "w", "p"), { recursive: true });
@@ -861,7 +869,7 @@ test("a Claude box start loads the profile launch through the box: the project's
 
 test("a Claude Global box start gives a \"Run in box\" server its secrets from the host's definition, in the CLI's env only", async () => {
   const home = await boxHome(["claude"]);
-  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const root = await scratch("box-root-");
   const appdir = join(root, "appdir");
   // The account's own `.claude.json` on the host (the source of truth; the box's copy has every
   // env value blanked): one server switched to "Run in box", one bridged.
@@ -918,7 +926,7 @@ test("a Claude Global box start gives a \"Run in box\" server its secrets from t
 test("a Claude box start as root says the box is a sandbox (IS_SANDBOX=1), so Full access may skip permissions; not as a user", async () => {
   for (const isRoot of [true, false]) {
     const home = await boxHome(["claude"]);
-    const root = await mkdtemp(join(tmpdir(), "box-root-"));
+    const root = await scratch("box-root-");
     const configDir = join(root, "accounts", "claude", "acct-1", "home");
     await mkdir(configDir, { recursive: true });
     const connection = redirectedBoxConnection(

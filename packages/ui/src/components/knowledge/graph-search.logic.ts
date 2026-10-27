@@ -46,14 +46,14 @@ export function searchIsNarrowed(query: KnowledgeQuery): boolean {
 // Keyboard highlight
 // ---------------------------------------------------------------------------
 
-export interface SearchNavState {
+interface SearchNavState {
   /** Options in the list. */
   count: number;
   /** The highlighted option; -1 with none. */
   index: number;
 }
 
-export type SearchNavAction =
+type SearchNavAction =
   /** New results: the first is highlighted (Enter opens it). */
   | { type: "results"; count: number }
   | { type: "down" }
@@ -118,7 +118,7 @@ export function bandLabel(band: KnowledgeMatchBand): string {
   return BAND_LABEL[band];
 }
 
-export interface TextPart {
+interface TextPart {
   text: string;
   /** A query term (drawn highlighted). */
   hit: boolean;

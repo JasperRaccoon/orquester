@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import {
-  savedPromptIdsOf,
   type EventMessage,
   type SavedPrompt
 } from "@orquester/api";
@@ -16,8 +15,7 @@ import {
   SavedPromptError,
   SavedPromptsService,
   publishSavedPromptEvents,
-  registerSavedPromptRoutes,
-  savedPromptWorkflowUses
+  registerSavedPromptRoutes
 } from "./saved-prompts.ts";
 import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
 
@@ -1058,26 +1056,6 @@ test("createdBy tolerance: a newer kind, unknown fields and a null survive the r
   assert.deepEqual(disk.prompts.find((p) => p.id === "newer")?.createdBy, { kind: "workflow", workflowId: "wf_1" });
   assert.deepEqual(disk.prompts.find((p) => p.id === "broken"), storedRecord({ id: "broken", createdBy: "agent" }), "kept verbatim");
   assert.equal("createdBy" in disk.prompts.find((p) => p.id === "null")!, false, "rewritten as absent");
-});
-
-test("savedPromptWorkflowUses: every workflow whose agent block names a saved prompt, once each (from the workflow store's reference index)", () => {
-  const agent = (id: string, prompt: unknown) => ({ id, name: id, type: "agent", config: { prompt } });
-  const workflows = [
-    { id: "wf_1", name: "Nightly", nodes: [agent("a", { kind: "saved", promptId: "p1" }), agent("b", { kind: "saved", promptId: "p1" }), agent("c", { kind: "text", text: "p2" })] },
-    { id: "wf_2", name: "Review", nodes: [{ id: "x", name: "x", type: "code", config: { prompt: { kind: "saved", promptId: "p2" } } }, agent("d", { kind: "saved", promptId: "p2" })] }
-  ];
-  const index = new WorkflowReferenceIndex();
-  index.rebuild({ workflows: workflows as never });
-  const uses = new Map(["p1", "p2", "p3"].map((id) => [id, savedPromptWorkflowUses(index, id)]));
-  assert.deepEqual(Object.fromEntries(uses), {
-    p1: [{ workflowId: "wf_1", name: "Nightly" }],
-    p2: [{ workflowId: "wf_2", name: "Review" }],
-    p3: []
-  });
-  // One rule: the list rows agree with Task 10's `savedPromptIdsOf`, which the workflow tools use.
-  for (const workflow of workflows) {
-    for (const id of savedPromptIdsOf(workflow)) assert.ok(uses.get(id)?.some((use) => use.workflowId === workflow.id), `${workflow.id} → ${id}`);
-  }
 });
 
 /** A workflow whose agent block uses saved prompt `promptId`. */

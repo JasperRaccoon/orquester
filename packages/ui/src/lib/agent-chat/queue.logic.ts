@@ -204,7 +204,7 @@ export type QueuePhase = "connecting" | "running" | "ready" | "disconnected";
  * `apps/web/src/components/ChatView.tsx:8604-8642`, folded in here so the one
  * predicate answers the whole question.*
  */
-export function isQueuedMessageDue(input: {
+function isQueuedMessageDue(input: {
   message: Pick<QueuedComposerMessage, "queuedAfterToolActivityId" | "holdUntilUserAction">;
   phase: QueuePhase;
   latestToolActivityId: string | null;

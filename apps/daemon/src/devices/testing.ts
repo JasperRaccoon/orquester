@@ -8,7 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
-import { deflateSync } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 
 import type { DeviceActionInput, DeviceHostKind, DeviceHostPoolInfo, DeviceHostReadiness, DevicePlatform, DevicesEventType, DeviceSummary } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
@@ -296,13 +296,20 @@ export async function startTestDeviceService(
 export function solidPng(width: number, height: number, rgba: [number, number, number, number] = [200, 40, 40, 255]): Buffer {
   const raw = Buffer.alloc(height * (width * 4 + 1));
   for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) Buffer.from(rgba).copy(raw, y * (width * 4 + 1) + 1 + x * 4);
+    for (let x = 0; x < width; x += 1) {
+      const offset = y * (width * 4 + 1) + 1 + x * 4;
+      raw[offset] = rgba[0];
+      raw[offset + 1] = rgba[1];
+      raw[offset + 2] = rgba[2];
+      raw[offset + 3] = rgba[3];
+    }
   }
   const chunk = (type: string, body: Buffer) => {
     const out = Buffer.alloc(12 + body.length);
     out.writeUInt32BE(body.length, 0);
     out.write(type, 4, "latin1");
     body.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + body.length)), 8 + body.length);
     return out;
   };
   const ihdr = Buffer.alloc(13);

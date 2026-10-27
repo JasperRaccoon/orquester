@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClaudeSource, createCodexSource, createGrokSource } from "./usage-sources";
 
+const fixtureRoot = await mkdtemp(join(tmpdir(), "orq-usage-sources-fixtures-"));
 const originalFetch = globalThis.fetch;
 
 const NOW = Date.parse("2026-07-07T08:00:00Z");
@@ -20,7 +21,7 @@ const jsonRes = (status: number, body: unknown, headers: Record<string, string> 
   new Response(JSON.stringify(body), { status, headers });
 
 async function claudeTests() {
-  const home = await mkdtemp(join(tmpdir(), "usage-claude-"));
+  const home = await mkdtemp(join(fixtureRoot, "usage-claude-"));
   const dir = join(home, ".claude");
   await mkdir(dir, { recursive: true });
   const creds = {
@@ -43,14 +44,14 @@ async function claudeTests() {
   assert.equal(a1.session, null, "no number yet");
 
   // No creds file → genuinely not logged in (null → widget shows "not logged in").
-  const empty = await mkdtemp(join(tmpdir(), "usage-empty-"));
+  const empty = await mkdtemp(join(fixtureRoot, "usage-empty-"));
   globalThis.fetch = async () => jsonRes(200, {});
   const srcNone = createClaudeSource({ userhome: empty, now });
   assert.equal(await srcNone(), null, "no creds → null");
 }
 
 async function codexTests() {
-  const home = await mkdtemp(join(tmpdir(), "usage-codex-"));
+  const home = await mkdtemp(join(fixtureRoot, "usage-codex-"));
   const codex = join(home, ".codex");
   const day = join(codex, "sessions", "2026", "07", "07");
   await mkdir(day, { recursive: true });
@@ -95,7 +96,7 @@ async function codexTests() {
   // REGRESSION (F8): auth.json missing (or no access_token) must NOT return null —
   // usage rendered purely from rollout token_count events must still fall back to the
   // log-scrape reading, mirroring the old scan-rollouts-when-unauthenticated behavior.
-  const noAuth = await mkdtemp(join(tmpdir(), "usage-codex-noauth-"));
+  const noAuth = await mkdtemp(join(fixtureRoot, "usage-codex-noauth-"));
   const noAuthCodex = join(noAuth, ".codex");
   const noAuthDay = join(noAuthCodex, "sessions", "2026", "07", "07");
   await mkdir(noAuthDay, { recursive: true });
@@ -118,7 +119,7 @@ async function codexTests() {
 }
 
 async function grokTests() {
-  const base = await mkdtemp(join(tmpdir(), "usage-grok-"));
+  const base = await mkdtemp(join(fixtureRoot, "usage-grok-"));
   const grokHome = join(base, ".grok");
   const acctB = join(base, "acct-b", "auth.json");
   const managedAuthJson = (key: string, email: string, userId: string, expiresAt: string) =>
@@ -168,7 +169,7 @@ async function grokTests() {
   assert.ok(!JSON.stringify(g1).includes("uid-1"), "credential identity must never reach the usage payload");
 
   // Expired stamp → signed-in/stale, NO fetch (the accounts refresher refreshes, never us).
-  const expiredDir = await mkdtemp(join(tmpdir(), "usage-grok-expired-"));
+  const expiredDir = await mkdtemp(join(fixtureRoot, "usage-grok-expired-"));
   const expiredAuth = join(expiredDir, "auth.json");
   await writeFile(expiredAuth, managedAuthJson("SECRET-TOK", "user@example.com", "uid-1", "2026-07-07T07:00:00Z"));
   let fetches = 0;
@@ -206,7 +207,7 @@ async function grokTests() {
   assert.ok(stale2?.stale);
 
   // grok CLI auth.json fallback (no managed home): userId resolved via /user once.
-  const cliOnly = await mkdtemp(join(tmpdir(), "usage-grok-cli-"));
+  const cliOnly = await mkdtemp(join(fixtureRoot, "usage-grok-cli-"));
   const cliHome = join(cliOnly, ".grok");
   await mkdir(cliHome, { recursive: true });
   await writeFile(
@@ -234,16 +235,16 @@ async function grokTests() {
  * explicit `claudeHome` / `codexHome` over both. Set only inside this case and cleared after it.
  */
 async function homeOverrideTests() {
-  const empty = await mkdtemp(join(tmpdir(), "usage-override-empty-"));
+  const empty = await mkdtemp(join(fixtureRoot, "usage-override-empty-"));
 
-  const claudeDir = await mkdtemp(join(tmpdir(), "usage-override-claude-"));
+  const claudeDir = await mkdtemp(join(fixtureRoot, "usage-override-claude-"));
   await writeFile(
     join(claudeDir, ".credentials.json"),
     JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: NOW - 1, subscriptionType: "pro" } })
   );
-  const codexDir = await mkdtemp(join(tmpdir(), "usage-override-codex-"));
+  const codexDir = await mkdtemp(join(fixtureRoot, "usage-override-codex-"));
   await writeFile(join(codexDir, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-x" }));
-  const codexLogs = await mkdtemp(join(tmpdir(), "usage-override-codex-logs-"));
+  const codexLogs = await mkdtemp(join(fixtureRoot, "usage-override-codex-logs-"));
   const codexDay = join(codexLogs, "sessions", "2026", "07", "07");
   await mkdir(codexDay, { recursive: true });
   const rollout = join(codexDay, "rollout-2026-07-07T06-00-00-dddd.jsonl");
@@ -285,5 +286,6 @@ try {
   await homeOverrideTests();
 } finally {
   globalThis.fetch = originalFetch;
+  await rm(fixtureRoot, { recursive: true, force: true });
 }
 console.log("usage-sources.check OK");

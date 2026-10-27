@@ -11,7 +11,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  HTML_RENDER_MAX_IMAGE_BYTES,
   HtmlRenderPublishError,
   openInsideRoot,
   publishHtmlRender,
@@ -141,10 +140,12 @@ test("an image outside the project is refused, symlinked in or not", async (t) =
     );
   }
   // And a thread with no project inlines nothing at all.
+  const inside = join(project, "inside.png");
+  await writeFile(inside, PNG);
   const noProject = { ...deps, sandboxRoot: async () => null };
   await assert.rejects(
-    publishHtmlRender(noProject, { threadId: "t1", html: `<img src="${join(project, "x.png")}">`, title: "T", height: 200 }),
-    (error) => errorCode(error) === "images-not-found" || errorCode(error) === "images-outside-project"
+    publishHtmlRender(noProject, { threadId: "t1", html: `<img src="${inside}">`, title: "T", height: 200 }),
+    (error) => errorCode(error) === "images-outside-project"
   );
   assert.equal(stored.length, 0, "a refusal stores nothing");
 });
@@ -166,7 +167,7 @@ test("an image over 10 MiB is refused", async (t) => {
   const { project, deps } = await fixture(t);
   const big = join(project, "big.png");
   await writeFile(big, PNG);
-  await truncate(big, HTML_RENDER_MAX_IMAGE_BYTES + 1);
+  await truncate(big, 10 * 1024 * 1024 + 1);
   await assert.rejects(
     publishHtmlRender(deps, { threadId: "t1", html: `<img src="${big}">`, title: "T", height: 200 }),
     (error) => errorCode(error) === "image-too-large"
@@ -175,18 +176,13 @@ test("an image over 10 MiB is refused", async (t) => {
 
 test("a page over 25 MiB once its images are inlined is refused", async (t) => {
   const { project, deps } = await fixture(t);
-  const images = await Promise.all(
-    [1, 2, 3].map(async (index) => {
-      const file = join(project, `i${index}.png`);
-      await writeFile(file, PNG);
-      await truncate(file, 7 * 1024 * 1024);
-      return file;
-    })
-  );
+  const image = join(project, "chart.png");
+  await writeFile(image, PNG);
+  await truncate(image, 7 * 1024 * 1024);
   await assert.rejects(
     publishHtmlRender(deps, {
       threadId: "t1",
-      html: images.map((file) => `<img src="${file}">`).join(""),
+      html: `<img src="${image}">`.repeat(3),
       title: "T",
       height: 200
     }),

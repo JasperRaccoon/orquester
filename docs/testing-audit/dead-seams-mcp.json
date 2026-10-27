@@ -1,0 +1,190 @@
+{
+  "remote": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "status": "bounded cleanup implemented; pending centrally scheduled validation",
+  "scope": "Bounded production-seam audit plus one existing test result-reader adjustment. Zero declarations added/removed; one exact610d existing case receives direct public parser import. Other tests retain owning baseline ledgers.",
+  "count": 1,
+  "tests": [
+    {
+      "path": "apps/daemon/src/secret-files/service.test.ts",
+      "line": 249,
+      "name": "setup: merge takes the union of keys, the primary's values winning; bad sources are refused",
+      "disposition": "REWRITE",
+      "newDeclaration": false,
+      "survives": true,
+      "reason": "Removed fake FileOps.parseEnv slot exposed one test result-reader dependency. Import the public real parser directly while preserving the independently authored expected key/value union and all service effects/refusals.",
+      "independent_source": "Secret-files design setup/merge contract: primary values win; missing keys from eligible clones are included; tracked/refused/invalid clones never contribute; setup commits the chosen content and exclusion metadata.",
+      "contract_and_failure": "Setup must save A=1,B=2,C=3 from fixture primaryA=1/B=2 plus secondaryA=9/C=3, omit TRACKED=1, refuse bad source/configuration choices and report actual per-clone states. Detects incorrect source selection, primary precedence, dropped union keys or wrong committed vault content.",
+      "oracle": "Expected entries remain literal [[A,1],[B,2],[C,3]], independent from merge implementation. parseEnv only decodes actual persisted .env result via its public parser; it does not compute expected values.",
+      "stable_seam": "SecretFilesService.setup and actual saved vault bytes; parser import replaces private fake-dependency-object accessor.",
+      "refactor_resistance": "A future I/O-port reshape no longer breaks the result reader; it observes logical persisted keys, preserving behavior across harmless formatting changes.",
+      "unique_protection": "Pure merge/parser tests do not protect service source eligibility, primary selection, tracked exclusion, committed vault content and state metadata together; retained case owns that transactional integration.",
+      "validation": "Pending root rerun of secret-files/service.test.ts and daemon typecheck; no child tests run."
+    }
+  ],
+  "counts": {
+    "REWRITE": 1
+  },
+  "seamCounts": {
+    "DELETE": 4,
+    "KEEP": 2
+  },
+  "seams": [
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/agent-host/session-tools/index.ts",
+      "line": 149,
+      "name": "SessionToolsHost.enabled",
+      "disposition": "DELETE",
+      "sixBar": {
+        "B1": "No independent enabled/disabled feature exists: real host and recording stub both set true; adapters gate on optional host presence, never this field.",
+        "B2": "No user/caller-visible failure can be caught by a field with no reads; removing declarations changes no call, credential or manifest decision.",
+        "B3": "Literal true written by both implementations is not an independent behavioral oracle.",
+        "B4": "No public protocol or stable production consumer reads the field; it is an internal inert interface member.",
+        "B5": "Keeping a test asserting the member would freeze dead shape; none exists.",
+        "B6": "No unique regression protection. Real manifest/credential/cancellation tests remain unchanged."
+      },
+      "nonTestCallers": [
+        "No reads in repository production or tests. Only interface, real-return initializer and recording-return initializer.",
+        "Claude createClaudeSessionToolsLaunch uses prepare/listSource/launchInProcess/call; Codex/Grok/OpenCode call issueSessionToolsGrant, which gates only context.sessionTools === undefined."
+      ]
+    },
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/secret-files/service.ts",
+      "line": 126,
+      "name": "SecretFilesFileOps.parseEnv",
+      "disposition": "DELETE",
+      "sixBar": {
+        "B1": "Pure implementation has a real independent content contract, but the injection slot itself has no requirement. Production host and box paths both always use the imported pure function.",
+        "B2": "Preserve actual scan candidate env format/key count by calling the already imported function directly. Removing an unused override slot does not change default or fake behavior.",
+        "B3": "No test supplies an alternative expected implementation: FakeFs.ops repeats the production function reference, so injected alias adds no oracle.",
+        "B4": "Pure helper has its own stable content boundary; the service dependency object slot is unnecessary private plumbing.",
+        "B5": "Direct calls survive service I/O-port reshaping; remove test-fake alias/import obligations.",
+        "B6": "Existing pure files.ts tests and service integration retain all parser/compare/merge behavioral protection. No unique failure depends on the override slot."
+      },
+      "nonTestCallers": [
+        "All non-test calls use real imported function. boxAwareSecretFileIo overrides only readCloneFile/writeCloneFile/scanCandidates/trackedPaths.",
+        "Only FakeFs.ops supplies the removed slot, as a direct alias to the same real function; repository search found no custom override."
+      ]
+    },
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/secret-files/service.ts",
+      "line": 127,
+      "name": "SecretFilesFileOps.compareContents",
+      "disposition": "DELETE",
+      "sixBar": {
+        "B1": "Pure implementation has a real independent content contract, but the injection slot itself has no requirement. Production host and box paths both always use the imported pure function.",
+        "B2": "Preserve actual names-only compare response by calling the already imported function directly. Removing an unused override slot does not change default or fake behavior.",
+        "B3": "No test supplies an alternative expected implementation: FakeFs.ops repeats the production function reference, so injected alias adds no oracle.",
+        "B4": "Pure helper has its own stable content boundary; the service dependency object slot is unnecessary private plumbing.",
+        "B5": "Direct calls survive service I/O-port reshaping; remove test-fake alias/import obligations.",
+        "B6": "Existing pure files.ts tests and service integration retain all parser/compare/merge behavioral protection. No unique failure depends on the override slot."
+      },
+      "nonTestCallers": [
+        "All non-test calls use real imported function. boxAwareSecretFileIo overrides only readCloneFile/writeCloneFile/scanCandidates/trackedPaths.",
+        "Only FakeFs.ops supplies the removed slot, as a direct alias to the same real function; repository search found no custom override."
+      ]
+    },
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/secret-files/service.ts",
+      "line": 128,
+      "name": "SecretFilesFileOps.mergeEnvContents",
+      "disposition": "DELETE",
+      "sixBar": {
+        "B1": "Pure implementation has a real independent content contract, but the injection slot itself has no requirement. Production host and box paths both always use the imported pure function.",
+        "B2": "Preserve actual merge-source contents by calling the already imported function directly. Removing an unused override slot does not change default or fake behavior.",
+        "B3": "No test supplies an alternative expected implementation: FakeFs.ops repeats the production function reference, so injected alias adds no oracle.",
+        "B4": "Pure helper has its own stable content boundary; the service dependency object slot is unnecessary private plumbing.",
+        "B5": "Direct calls survive service I/O-port reshaping; remove test-fake alias/import obligations.",
+        "B6": "Existing pure files.ts tests and service integration retain all parser/compare/merge behavioral protection. No unique failure depends on the override slot."
+      },
+      "nonTestCallers": [
+        "All non-test calls use real imported function. boxAwareSecretFileIo overrides only readCloneFile/writeCloneFile/scanCandidates/trackedPaths.",
+        "Only FakeFs.ops supplies the removed slot, as a direct alias to the same real function; repository search found no custom override."
+      ]
+    },
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/secret-files/service.ts",
+      "line": 119,
+      "name": "SecretFilesFileOps external I/O port",
+      "disposition": "KEEP",
+      "sixBar": {
+        "B1": "Secrets plugin must operate on host projects and box projects while preserving clone/path safety and tracked-file refusal.",
+        "B2": "Removing this transport boundary would make box paths use host filesystem/git and violate actual caller-visible secret synchronization.",
+        "B3": "Host/box transport behavior is independently specified; meaningful tests assert literal file state/refusals and cancellation rather than port declaration inventories.",
+        "B4": "Four real clone I/O operations cross a production host/box boundary; not a test-only wrapper.",
+        "B5": "Transport implementation can change behind these file/git operations while service contracts remain stable.",
+        "B6": "Production box routing cannot be replaced by default host helpers. Existing real filesystem/git tests own I/O correctness and service tests own transactional sync."
+      },
+      "nonTestCallers": [
+        "apps/daemon/src/boxes/remote/fs/secret-files.ts:331 BoxAwareSecretFileIo and :342 boxAwareSecretFileIo implement the four-operation boundary.",
+        "apps/daemon/src/index.ts:859 creates SecretFilesService and :888 spreads boxAwareSecretFileIo into its production options."
+      ]
+    },
+    {
+      "kind": "production-seam",
+      "path": "apps/daemon/src/secret-files/files.ts",
+      "line": 32,
+      "name": "GitRunner / scanCandidates and trackedPaths injection",
+      "disposition": "KEEP",
+      "sixBar": {
+        "B1": "Host and box repositories require the same ignored-candidate and literal-tracked-file protocols, with actual git execution on the correct machine and shutdown aborts.",
+        "B2": "Hardwiring host git would scan the wrong filesystem for box projects; dropping abort/failure propagation could write tracked files or retain shutdown children.",
+        "B3": "Existing tests use independent literal paths/errors/AbortError and real temp git repositories, not expected values computed from the implementation.",
+        "B4": "A real command transport boundary: boxGitRunner executes through the connected box; defaultGitRunner uses host child process.",
+        "B5": "Source identifiers and subprocess implementation may change without altering literal path/abort/error contracts.",
+        "B6": "Non-test boxAwareSecretFileIo passes boxGitRunner into both functions; no single host-only runner can replace it. Underlying direct I/O tests and upper service tests protect distinct effects."
+      },
+      "nonTestCallers": [
+        "apps/daemon/src/boxes/remote/fs/secret-files.ts:264 boxGitRunner is production execution transport.",
+        "Same module :371/:375 passes boxGitRunner or defaultGitRunner to scanCandidates/trackedPaths based on actual project location.",
+        "apps/daemon/src/secret-files/service.ts DEFAULT_FILE_OPS also passes defaultGitRunner; abort signal is part of real shutdown behavior."
+      ]
+    }
+  ],
+  "changes": {
+    "files": 6,
+    "codeLocNet": -13,
+    "testInfrastructureLocNet": -5,
+    "testsAdded": 0,
+    "testsRemoved": 0,
+    "notes": [
+      "Removed four dead members: inert enabled field and three unused pure-function override slots.",
+      "Keep four actual external I/O operations and production host/box GitRunner transport.",
+      "Comments now name actual production transport usage rather than suggesting tests are the sole consumer."
+    ],
+    "testCaseLocNet": 1,
+    "testsAdjusted": 1
+  },
+  "validation": {
+    "executed": [
+      "Repository rg searches for enabled reads and SecretFilesFileOps/GitRunner/pure-helper overrides",
+      "Manual review of all four provider adapters, issueSessionToolsGrant, both host implementations, real box-aware I/O and daemon wiring",
+      "git diff --check -- scoped five files (passed)",
+      "All-repository search for .ops.parseEnv/.ops.compareContents/.ops.mergeEnvContents found one result reader, now corrected; scoped diff check passed again."
+    ],
+    "pending": [
+      "Daemon typecheck (covers adapters and changed dependency interface)",
+      "Host/session-tools security/lifecycle tests",
+      "secret-files/files.test.ts, service.test.ts, service.integration.test.ts, routes.test.ts; boxes/remote/fs/secret-files.test.ts",
+      "Required repository changed/full checks"
+    ],
+    "reason": "Root coordinator explicitly withheld test slot. No child tests, typechecks or timings run."
+  },
+  "performance": {
+    "measured": false,
+    "claim": "No measured runtime improvement. Removes inert metadata and unused pure-function plumbing; no meaningful test or external I/O work removed."
+  },
+  "fixtureFix": {
+    "path": "apps/daemon/src/secret-files/service.test.ts",
+    "remoteLine": 249,
+    "failure": "After deleting the unused pure injection slot, root focused run failed at h.fs.ops.parseEnv in this retained service case.",
+    "resolution": "Import existing parseEnv from files.ts directly; preserve literal expected union and all assertions.",
+    "sourceSha256Before": "693b8babecf3fe785f2635956af53f79f171fe2d31225de62d2ef648395e4b13",
+    "sourceSha256After": "f59537cd516bae2cd3d4fc414bb9e9968fa9393a058c06832ef5232421249257",
+    "rerun": "Pending central root rerun, no claimed pass."
+  }
+}

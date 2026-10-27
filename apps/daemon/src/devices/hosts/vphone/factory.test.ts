@@ -6,10 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { BoxSummary } from "@orquester/api";
-import { defaultDevicesSettings, type DevicesSettings } from "@orquester/config";
+import { createDefaultDevicesSettingsFile, type DevicesSettings } from "@orquester/config";
 
 import type { DeviceHost, DeviceHostFactoryContext } from "../../host.ts";
-import { createVphoneHostFactory, isVphoneCandidate } from "./factory.ts";
+import { createVphoneHostFactory } from "./factory.ts";
 import { FakeMacLink } from "./testing.ts";
 
 function box(id: string, extra: Partial<BoxSummary> = {}): BoxSummary {
@@ -47,22 +47,17 @@ function box(id: string, extra: Partial<BoxSummary> = {}): BoxSummary {
   };
 }
 
-test("only bring-your-own Macs marked for devices AND switched to research iPhones become vphone hosts", () => {
-  const settings = defaultDevicesSettings();
-  settings.research.vphoneHosts = { a: { enabled: true, iphoneSource: null, cloudosSource: null } };
-  assert.equal(isVphoneCandidate(box("a"), settings), true);
-  assert.equal(isVphoneCandidate(box("b"), settings), false, "research switch off");
-  assert.equal(isVphoneCandidate(box("a", { deviceHost: false }), settings), false);
-  assert.equal(isVphoneCandidate(box("a", { provider: "blacksmith" }), settings), false);
-  assert.equal(isVphoneCandidate(box("a", { kind: "linux", os: "linux" }), settings), false);
-  assert.equal(isVphoneCandidate(box("a", { state: "pairing" }), settings), false);
-});
 
-test("the factory follows the box registry and the settings", async () => {
+test("the factory follows the box registry and the settings", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-vphone-factory-"));
   const boxes = new Map<string, BoxSummary>([
     ["a", box("a")],
-    ["b", box("b", { deviceHost: false })]
+    ["b", box("b", { deviceHost: false })],
+    ["paid", box("paid", { provider: "blacksmith" })],
+    ["linux", box("linux", { kind: "linux", os: "linux" })],
+    ["pairing", box("pairing", { state: "pairing" })],
+    ["destroyed", box("destroyed", { state: "destroyed" })],
+    ["off", box("off")]
   ]);
   const registryEvents = new EventEmitter();
   const links = new Map([["a", new FakeMacLink()]]);
@@ -81,7 +76,12 @@ test("the factory follows the box registry and the settings", async () => {
     logger: { info: () => undefined, warn: () => undefined, error: () => undefined }
   });
 
-  let settings: DevicesSettings = defaultDevicesSettings();
+  t.after(async () => {
+    await factory.stop();
+    await links.get("a")!.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  let settings: DevicesSettings = createDefaultDevicesSettingsFile().settings;
   const hosts = new Map<string, DeviceHost>();
   const ctx: DeviceHostFactoryContext = {
     settings: () => settings,
@@ -94,12 +94,11 @@ test("the factory follows the box registry and the settings", async () => {
   assert.deepEqual([...hosts.keys()], []);
 
   settings = structuredClone(settings);
-  settings.research.vphoneHosts = { a: { enabled: true, iphoneSource: null, cloudosSource: null }, b: { enabled: true, iphoneSource: null, cloudosSource: null } };
+  settings.research.vphoneHosts = Object.fromEntries([...boxes.keys()].filter((id) => id !== "off").map((id) => [id, { enabled: true, iphoneSource: null, cloudosSource: null }]));
   factory.settingsChanged?.(settings);
   assert.deepEqual([...hosts.keys()], ["vphone:a"], "b is not marked for device simulators");
   const host = hosts.get("vphone:a")!;
   assert.equal(host.kind, "byo");
-  assert.equal(host.label, "Virtual iPhones (research) on Mac a");
   assert.deepEqual(host.box?.(), { boxId: "a", provider: "byo", hourlyUsd: 0, startedAt: "2026-10-27T09:01:00.000Z", deadlineAt: null });
 
   boxes.set("a", box("a", { deviceHost: false }));
@@ -111,6 +110,4 @@ test("the factory follows the box registry and the settings", async () => {
   assert.deepEqual([...hosts.keys()], ["vphone:a"]);
   await factory.stop();
   assert.deepEqual([...hosts.keys()], []);
-  await links.get("a")!.close();
-  await rm(dir, { recursive: true, force: true });
 });

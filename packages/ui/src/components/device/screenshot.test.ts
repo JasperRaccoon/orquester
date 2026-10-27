@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 
-import { drawTurned, screenshotTurn, type ScreenshotTurn } from "./screenshot.ts";
+import { drawTurned, type ScreenshotTurn } from "./screenshot.ts";
 
 /** A 2D context that records where the source's corners land (translate, then rotate, as canvas composes them). */
 function recorder() {
@@ -24,16 +24,6 @@ function recorder() {
     }
   };
 }
-
-it("iOS frames turn by the stream's screen orientation; Android and already-landscape frames never do", () => {
-  const portrait = { width: 1206, height: 2622 };
-  assert.equal(screenshotTurn("ios", portrait, "portrait"), 0);
-  assert.equal(screenshotTurn("ios", portrait, "landscape_left"), 90);
-  assert.equal(screenshotTurn("ios", portrait, "landscape_right"), -90);
-  assert.equal(screenshotTurn("ios", portrait, "portrait_upside_down"), 180);
-  assert.equal(screenshotTurn("ios", { width: 2622, height: 1206 }, "landscape_left"), 0);
-  assert.equal(screenshotTurn("android", portrait, "landscape_left"), 0);
-});
 
 it("the turned frame fills its output: corners land where a clockwise turn puts them", () => {
   const source = { width: 4, height: 10 };

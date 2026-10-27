@@ -37,7 +37,7 @@ import {
 } from "@orquester/api";
 import { readDevicesSettings } from "@orquester/config";
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -67,7 +67,7 @@ function capacity(value: unknown): DeviceCapacity {
   return isRecord(value) && num(value.used) && num(value.total) ? { used: value.used, total: value.total } : { used: 0, total: 0 };
 }
 
-export function sanitizeReadinessCheck(value: unknown): DeviceReadinessCheck | null {
+function sanitizeReadinessCheck(value: unknown): DeviceReadinessCheck | null {
   if (!isRecord(value) || !str(value.id) || !str(value.label) || !oneOf(READINESS_STATES, value.state)) return null;
   return {
     id: value.id,
@@ -83,7 +83,7 @@ function readiness(value: unknown): DeviceHostReadiness {
   return { ready: value.ready === true, checks: listOf(value.checks, sanitizeReadinessCheck) ?? [], checkedAt: strOrNull(value.checkedAt) };
 }
 
-export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
+function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   if (!isRecord(value) || !str(value.id) || !str(value.label) || !oneOf<DeviceHostKind>(DEVICE_HOST_KINDS, value.kind) || !oneOf(HOST_STATUSES, value.status)) return null;
   const host: DeviceHostSummary = {
     id: value.id,
@@ -122,7 +122,7 @@ export function sanitizeDeviceHost(value: unknown): DeviceHostSummary | null {
   return host;
 }
 
-export function sanitizeDeviceLease(value: unknown): DeviceLeaseSummary | null {
+function sanitizeDeviceLease(value: unknown): DeviceLeaseSummary | null {
   if (
     !isRecord(value) ||
     !str(value.id) ||
@@ -165,7 +165,7 @@ export function sanitizeDeviceLease(value: unknown): DeviceLeaseSummary | null {
   return lease;
 }
 
-export function sanitizeDeviceProfile(value: unknown): DeviceProfile | null {
+function sanitizeDeviceProfile(value: unknown): DeviceProfile | null {
   if (!isRecord(value) || !str(value.id) || !isDevicePlatform(value.platform) || !str(value.label) || !str(value.os)) return null;
   const formFactor = oneOf(["phone", "tablet", "foldable"] as const, value.formFactor) ? value.formFactor : "phone";
   return {
@@ -178,7 +178,7 @@ export function sanitizeDeviceProfile(value: unknown): DeviceProfile | null {
   };
 }
 
-export function sanitizeActionEntry(value: unknown): DeviceActionEntry | null {
+function sanitizeActionEntry(value: unknown): DeviceActionEntry | null {
   if (
     !isRecord(value) ||
     !str(value.id) ||
@@ -208,7 +208,7 @@ function setupStep(value: unknown): DeviceSetupStep | null {
   return { id: value.id, label: value.label, state: value.state, detail: strOrNull(value.detail) };
 }
 
-export function sanitizeSetupJob(value: unknown): DeviceSetupJob | null {
+function sanitizeSetupJob(value: unknown): DeviceSetupJob | null {
   if (
     !isRecord(value) ||
     !str(value.id) ||
@@ -233,7 +233,7 @@ export function sanitizeSetupJob(value: unknown): DeviceSetupJob | null {
   };
 }
 
-export function sanitizeDevicesSettings(value: unknown): DevicesSettings | null {
+function sanitizeDevicesSettings(value: unknown): DevicesSettings | null {
   return isRecord(value) ? readDevicesSettings(value) : null;
 }
 

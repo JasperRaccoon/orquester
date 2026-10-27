@@ -394,7 +394,7 @@ export const ionosAdapter: BoxProviderAdapter = {
       serverId = server.data.id;
     } catch (error) {
       // Nothing billable runs yet; drop the data center. If that fails too, its name marks it for the reconciler.
-      await deleteDatacenter(credentials, datacenterId, { fetch: options.fetch, signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS) }).catch(
+      await deleteDatacenter(credentials, datacenterId, { signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS) }).catch(
         () => undefined
       );
       throw error;

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CLAUDE_FORK_EMPTY_HISTORY, forkClaudeConversation } from "./fork.ts";
+import { forkClaudeConversation } from "./fork.ts";
 import type { ClaudeHistoryReader } from "./history.ts";
 import type { ClaudeHistoryMessage } from "./rollback.ts";
 
@@ -101,7 +101,7 @@ describe("forkClaudeConversation", () => {
   });
 
   it("refuses an empty transcript", async () => {
-    const { history } = fakeHistory([]);
+    const { history, forks } = fakeHistory([]);
     await assert.rejects(
       forkClaudeConversation({
         history,
@@ -110,7 +110,8 @@ describe("forkClaudeConversation", () => {
         cwd: "/w",
         firstRemovedTurnId: null
       }),
-      new RegExp(CLAUDE_FORK_EMPTY_HISTORY.slice(0, 30))
+      /no saved conversation/i
     );
+    assert.deepEqual(forks, [], "an empty conversation never creates a native fork");
   });
 });

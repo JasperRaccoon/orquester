@@ -136,8 +136,6 @@ export interface DeviceServiceDeps {
   now?(): number;
   id?(): string;
   logger?: Pick<Console, "info" | "warn" | "error">;
-  /** Overrides {@link OPEN_DEVICE_WAIT_MS} (tests). */
-  openWaitMs?: number;
   /** Run the idle sweep on a timer (default true; tests drive `sweepIdle`). */
   idleTimer?: boolean;
   /** `device-pool.json` (absent: kept in memory). */
@@ -1241,7 +1239,7 @@ export class DeviceService implements DeviceToolsPort {
     const waited = await Promise.race([
       opening.done.then((lease) => ({ lease })),
       new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), this.deps.openWaitMs ?? OPEN_DEVICE_WAIT_MS);
+        timer = setTimeout(() => resolve(null), OPEN_DEVICE_WAIT_MS);
         timer.unref?.();
       })
     ]).finally(() => clearTimeout(timer));

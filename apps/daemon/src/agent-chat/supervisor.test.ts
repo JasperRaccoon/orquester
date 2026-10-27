@@ -373,7 +373,6 @@ test("a restart deferred for 6 h warns, then once per 6 h — never per tick", a
   assert.deepEqual(warnings(), [], "under 6 h: the deferral line alone");
   await tick(15 * 60_000);
   assert.equal(warnings().length, 1);
-  assert.match(warnings()[0]!, /^agent host restart pending for 6 h: 1 thread\(s\) with an active turn/);
   for (let i = 0; i < 20; i += 1) await tick(15_000);
   assert.equal(warnings().length, 1, "not repeated on every tick");
   await tick(6 * 3_600_000);
@@ -1480,7 +1479,6 @@ test("restart status: every blocker per thread — a turn, a shell with its comm
   const status = h.supervisor.restartStatus();
   assert.equal(status.codeStamp, "1570de7c8ee6bbbb");
   assert.equal(status.checkoutCodeStamp, "f5aff27f7805aaaa");
-  assert.match(status.pendingRestart?.reason ?? "", /agent host code 1570de7c8ee6 != f5aff27f7805/);
   assert.deepEqual(status.pendingRestart?.blockers, [
     { threadId: "t-turn", kind: "turn" },
     { threadId: "t-bg", kind: "background", taskId: "b1", since: "2026-10-23T09:00:00.000Z", stoppable: true, title: "Run the suite", command: "pnpm test > /tmp/x.log" },

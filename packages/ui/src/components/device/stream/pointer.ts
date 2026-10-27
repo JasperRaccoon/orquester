@@ -12,23 +12,19 @@ export type TouchSender = (phase: TouchPhase, x: number, y: number) => void;
 
 export interface PointerThrottle {
   push(phase: TouchPhase, x: number, y: number): void;
-  /** Send a pending move now. */
-  flush(): void;
   /** Drop a pending move and stop scheduling. */
   dispose(): void;
 }
 
 export function createPointerThrottle(
-  send: TouchSender,
-  requestFrame: (callback: FrameRequestCallback) => number = (callback) => requestAnimationFrame(callback),
-  cancelFrame: (handle: number) => void = (handle) => cancelAnimationFrame(handle)
+  send: TouchSender
 ): PointerThrottle {
   let pending: { x: number; y: number } | null = null;
   let frame: number | null = null;
   let disposed = false;
 
   const flush = () => {
-    if (frame !== null) cancelFrame(frame);
+    if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
     const move = pending;
     pending = null;
@@ -40,7 +36,7 @@ export function createPointerThrottle(
       if (disposed) return;
       if (phase === "move") {
         pending = { x, y };
-        frame ??= requestFrame(() => {
+        frame ??= requestAnimationFrame(() => {
           frame = null;
           flush();
         });
@@ -49,16 +45,15 @@ export function createPointerThrottle(
       if (phase === "end") flush();
       else {
         // A new gesture discards a stale move from the last one.
-        if (frame !== null) cancelFrame(frame);
+        if (frame !== null) cancelAnimationFrame(frame);
         frame = null;
         pending = null;
       }
       send(phase, x, y);
     },
-    flush,
     dispose() {
       disposed = true;
-      if (frame !== null) cancelFrame(frame);
+      if (frame !== null) cancelAnimationFrame(frame);
       frame = null;
       pending = null;
     }

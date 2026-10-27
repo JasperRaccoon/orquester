@@ -20,7 +20,7 @@ const AVCC_TAGS: Record<number, AvccChunkType | undefined> = {
 };
 
 /** A single envelope larger than this means the stream is not avcc; the demuxer throws. */
-export const MAX_AVCC_ENVELOPE_BYTES = 32 * 1024 * 1024;
+const MAX_AVCC_ENVELOPE_BYTES = 32 * 1024 * 1024;
 
 export class AvccDemuxer {
   private buffer = new Uint8Array(64 * 1024);

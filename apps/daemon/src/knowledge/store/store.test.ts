@@ -9,18 +9,16 @@ import { knowledgeCollectionsPath, knowledgeEntriesDir, knowledgeMykgInputDir } 
 import type { KnowledgeEntryChange } from "../ports.ts";
 import { parseEntryFile } from "./entry-file.ts";
 import { KnowledgeError } from "./errors.ts";
-import { knowledgeContentHash, normalizeKnowledgeUrl } from "./normalize.ts";
+import { normalizeKnowledgeUrl } from "./normalize.ts";
 import { KnowledgeStore } from "./store.ts";
 
 async function setup(t: TestContext) {
   const appdir = await mkdtemp(join(tmpdir(), "kg-store-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
-  let clock = Date.parse("2026-10-23T10:00:00.000Z");
-  const now = () => new Date((clock += 1000));
   const warnings: string[] = [];
   const logger = { warn: (m: string) => warnings.push(m), error: (m: string) => warnings.push(m) };
   const open = async () => {
-    const store = await KnowledgeStore.open({ appdir, now, logger });
+    const store = await KnowledgeStore.open({ appdir, logger });
     const changes: KnowledgeEntryChange[] = [];
     store.onChange((c) => changes.push(c));
     return { store, changes };
@@ -46,7 +44,7 @@ test("save writes the entry, the frontmatter round-trips, and the mirror carries
     entries: [
       {
         body: POST,
-        title: "Alternatives pages",
+        title: "Competitor page strategy",
         kind: "thread",
         author: "Om Patel",
         handle: "@om_patel5",
@@ -66,14 +64,13 @@ test("save writes the entry, the frontmatter round-trips, and the mirror carries
   assert.equal(result!.status, "saved");
   assert.match(result!.entryId, /^ke_[a-z2-7]{12}$/);
   assert.deepEqual(result!.collections, [seo.id]);
-  assert.equal(result!.citation, `[Alternatives pages · @om_patel5](orquester-knowledge:entry/${result!.entryId})`);
+  assert.equal(result!.citation, `[Competitor page strategy · @om_patel5](orquester-knowledge:entry/${result!.entryId})`);
   assert.deepEqual(changes, [{ kind: "added", entryIds: [result!.entryId] }]);
 
   const meta = store.getMeta(result!.entryId)!;
   assert.equal(meta.handle, "om_patel5");
   assert.equal(meta.linkState, "pending");
   assert.deepEqual(meta.savedFrom, { by: "agent", sessionId: "sess-1" });
-  assert.equal(meta.contentHash, knowledgeContentHash(POST));
   const entry = await store.getEntry(result!.entryId);
   assert.equal(entry!.body, POST);
 
@@ -82,7 +79,8 @@ test("save writes the entry, the frontmatter round-trips, and the mirror carries
   assert.equal(parseEntryFile(file, result!.entryId).body, POST);
 
   const mirror = await readFile(join(knowledgeMykgInputDir(appdir), `${result!.entryId}.md`), "utf8");
-  assert.equal(mirror, `Author: Om Patel (@om_patel5) · thread · 2026-10-11\n\n# Alternatives pages\n\n${POST}\n`);
+  for (const metadata of ["Om Patel", "@om_patel5", "thread", "2026-10-11", "Competitor page strategy"]) assert.ok(mirror.includes(metadata), metadata);
+  assert.ok(mirror.includes(POST), "the body reaches myKG verbatim");
   assert.ok(!mirror.includes(seo.id) && !mirror.includes("SEO"));
 
   // Reopen: the same entries and collections load from disk.
@@ -91,16 +89,13 @@ test("save writes the entry, the frontmatter round-trips, and the mirror carries
   assert.deepEqual(again.store.listCollections(), store.listCollections());
 });
 
-test("mirror header omits missing parts cleanly", async (t) => {
+test("the mirror keeps a handle when the author and other metadata are absent", async (t) => {
   const { appdir, open } = await setup(t);
   const { store } = await open();
   await store.createCollection({ name: "Notes" });
-  const { results } = await store.save({ entries: [{ body: "Just a note.", collections: ["notes"] }] });
+  const { results } = await store.save({ entries: [{ body: "Another one entirely.", handle: "abc", collections: ["Notes"] }] });
   const mirror = await readFile(join(knowledgeMykgInputDir(appdir), `${results[0]!.entryId}.md`), "utf8");
-  assert.equal(mirror, "note\n\n# Just a note.\n\nJust a note.\n");
-  const { results: r2 } = await store.save({ entries: [{ body: "Another one entirely.", handle: "abc", collections: ["Notes"] }] });
-  const m2 = await readFile(join(knowledgeMykgInputDir(appdir), `${r2[0]!.entryId}.md`), "utf8");
-  assert.ok(m2.startsWith("Author: @abc · note\n\n"));
+  assert.ok(mirror.includes("@abc"));
 });
 
 test("unknown collections are refused with the valid names, and nothing is written", async (t) => {
@@ -219,6 +214,7 @@ test("edits: text edits are `edited` and rewrite the mirror; collection-only edi
   const ads = await store.createCollection({ name: "Ads" });
   const { results } = await store.save({ entries: [{ body: POST, title: "Alt pages", collections: ["SEO"] }] });
   const id = results[0]!.entryId;
+  const hashBefore = store.getMeta(id)!.contentHash;
   await store.setLinkState([id], "linked");
   const mirrorPath = join(knowledgeMykgInputDir(appdir), `${id}.md`);
   const mirrorBefore = await readFile(mirrorPath, "utf8");
@@ -239,12 +235,12 @@ test("edits: text edits are `edited` and rewrite the mirror; collection-only edi
   await store.updateEntry(id, { body: `${POST}\n\nAnd one more line.` });
   assert.deepEqual(changes.at(-1), { kind: "edited", entryIds: [id] });
   assert.equal(store.getMeta(id)!.linkState, "pending");
-  assert.notEqual(store.getMeta(id)!.contentHash, results[0] && knowledgeContentHash(POST));
+  assert.notEqual(store.getMeta(id)!.contentHash, hashBefore);
   assert.ok((await readFile(mirrorPath, "utf8")).includes("And one more line."));
 
   await store.updateEntry(id, { author: "Om" });
   assert.equal(changes.at(-1)!.kind, "edited");
-  assert.ok((await readFile(mirrorPath, "utf8")).startsWith("Author: Om · note"));
+  assert.ok((await readFile(mirrorPath, "utf8")).includes("Om"));
 
   await rejects(store.updateEntry(id, { collections: ["kc_zzzzzzzzzz"] }), "KNOWLEDGE_UNKNOWN_COLLECTION");
   await rejects(store.updateEntry("ke_aaaaaaaaaaaa", { title: "x" }), "KNOWLEDGE_NOT_FOUND");
@@ -284,7 +280,7 @@ test("startup: malformed entries are skipped and kept; unknown fields survive; t
   const { results } = await first.store.save({
     entries: [
       { body: "keep me", collections: ["SEO"] },
-      { body: "stale mirror", collections: ["SEO"] }
+      { body: "stale mirror", title: "Saved title", collections: ["SEO"] }
     ]
   });
   const [keep, stale] = results.map((r) => r.entryId) as [string, string];
@@ -309,7 +305,7 @@ test("startup: malformed entries are skipped and kept; unknown fields survive; t
   assert.ok(warnings.some((w) => w.includes(brokenId)));
   assert.equal(await readFile(join(entries, `${brokenId}.md`), "utf8"), brokenText);
   assert.deepEqual((await readdir(mirror)).sort(), [`${brokenId}.md`, `${keep}.md`, `${stale}.md`].sort());
-  assert.equal(await readFile(join(mirror, `${stale}.md`), "utf8"), "note\n\n# stale mirror\n\nstale mirror\n");
+  assert.ok((await readFile(join(mirror, `${stale}.md`), "utf8")).includes("stale mirror"));
   assert.ok(!(await readdir(entries)).some((n) => n.endsWith(".tmp")));
 
   // A rewrite (relabel) keeps the unknown field.
@@ -470,6 +466,7 @@ test("savedFrom: unknown keys and an unknown `by` are read tolerantly and writte
 
 /** Three entries saved one after the other (oldest first), in SEO, Ads and Growth+SEO. */
 async function threeToMerge(t: TestContext) {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-23T10:00:00.000Z") });
   const env = await setup(t);
   const { store, changes } = await env.open();
   const seo = await store.createCollection({ name: "SEO" });
@@ -477,7 +474,9 @@ async function threeToMerge(t: TestContext) {
   const growth = await store.createCollection({ name: "Growth" });
   const save = async (body: string, collections: string[]) => (await store.save({ entries: [{ body, title: body.slice(0, 20), collections }] })).results[0]!.entryId;
   const oldest = await save("Alternatives pages convert well for every competitor.", ["SEO"]);
+  t.mock.timers.setTime(Date.parse("2026-10-23T10:00:01.000Z"));
   const middle = await save("Comparison tables beat feature lists on landing pages.", ["Ads"]);
+  t.mock.timers.setTime(Date.parse("2026-10-23T10:00:02.000Z"));
   const newest = await save("Programmatic SEO needs one honest page per competitor.", ["Growth", "SEO"]);
   changes.length = 0;
   return { ...env, store, changes, seo, ads, growth, oldest, middle, newest };

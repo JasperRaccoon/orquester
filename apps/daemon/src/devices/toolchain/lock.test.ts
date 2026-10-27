@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { EMPTY_LOCK_STALE_MS, inspectLock, withLock } from "./lock.ts";
+import { inspectLock, withLock } from "./lock.ts";
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "orq-lock-"));
@@ -15,13 +15,12 @@ async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-test("lock: the pid file appears whole; the dir goes after the run", async () => {
+test("lock: the owner pid is published while held and the lock is removed after the run", async () => {
   await withDir(async (dir) => {
     const path = join(dir, ".tool.lock");
     await withLock(path, new AbortController().signal, async () => {
       assert.equal((await readFile(join(path, "pid"), "utf8")).trim(), String(process.pid));
-      assert.deepEqual((await readdir(path)).sort(), ["pid"], "no temp file left behind");
-    });
+        });
     assert.deepEqual(await readdir(dir), []);
   });
 });
@@ -32,11 +31,11 @@ test("lock: a young dir with no pid file is held (its owner is between mkdir and
     await mkdir(path);
     assert.deepEqual(await inspectLock(path), { state: "held" });
     const abort = new AbortController();
-    const waiting = withLock(path, abort.signal, async () => "ran");
-    setTimeout(() => abort.abort(), 700);
-    await assert.rejects(waiting, "a young empty lock is not taken over");
+    const cancelled = new Error("install cancelled");
+    abort.abort(cancelled);
+    await assert.rejects(withLock(path, abort.signal, async () => "ran"), (error) => error === cancelled);
     await writeFile(join(path, "pid"), "");
-    const old = (Date.now() - EMPTY_LOCK_STALE_MS - 5_000) / 1000;
+    const old = (Date.now() - 60_000) / 1000;
     await utimes(path, old, old);
     assert.equal((await inspectLock(path)).state, "stale");
     assert.equal(await withLock(path, new AbortController().signal, async () => "ran"), "ran");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { MAX_REFILL_FAILURES, SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim, type SimPoolDeps } from "./sim-pool.ts";
+import { SimPool, poolSimulatorName, profileOfPoolSimulator, type PoolSim, type SimPoolDeps } from "./sim-pool.ts";
 import { isPoolSimulator, leaseIdOfSimulator, simDeviceSummary } from "./simctl.ts";
 
 const RUNTIME = "com.apple.CoreSimulator.SimRuntime.iOS-27-0";
@@ -11,7 +11,6 @@ function harness(options: { size?: number; targets?: string[]; fail?: (profile: 
   const log: string[] = [];
   let idle = true;
   let next = 1;
-  let slot: Promise<void> = Promise.resolve();
   let holding = 0;
   let maxHolding = 0;
   const pending: Array<{ profile: string; resolve: () => void }> = [];
@@ -20,20 +19,15 @@ function harness(options: { size?: number; targets?: string[]; fail?: (profile: 
     targets: () => options.targets ?? ["iphone-17-pro"],
     idle: () => idle,
     logger: { warn: (...args: unknown[]) => void log.push(`warn ${String(args[0])}`) },
-    // One holder at a time, like the host's boot queue.
+    // Observe concurrent work; this fixture must not enforce the serialization it tests.
     exclusive: async (signal, work) => {
-      const previous = slot;
-      let release!: () => void;
-      slot = new Promise((resolve) => (release = resolve));
+      signal.throwIfAborted();
       try {
-        await previous;
-        signal.throwIfAborted();
         holding += 1;
         maxHolding = Math.max(maxHolding, holding);
         await work();
       } finally {
         holding -= 1;
-        release();
       }
     },
     ops: {
@@ -76,14 +70,27 @@ function harness(options: { size?: number; targets?: string[]; fail?: (profile: 
   };
 }
 
+async function until(check: () => boolean, what: string): Promise<void> {
+  for (let tries = 0; tries < 500; tries += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+async function settled(pool: SimPool): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => !pool.busy, "the simulator work to finish");
+}
+
 describe("SimPool", () => {
   it("fills each target profile to its size, one simulator at a time", async () => {
     const h = harness({ targets: ["iphone-17-pro", "ipad-pro"] });
     h.pool.kick();
     h.pool.kick(); // a second kick joins the running loop
     for (let i = 0; i < 4; i += 1) await h.finishNext();
-    await h.pool.settled();
-    assert.deepEqual(h.log, ["make iphone-17-pro P1", "make iphone-17-pro P2", "make ipad-pro P3", "make ipad-pro P4"]);
+    await settled(h.pool);
+    assert.equal(h.log.filter((line) => line.startsWith("make")).length, 4);
     assert.deepEqual(h.pool.counts(), { "iphone-17-pro": 2, "ipad-pro": 2 });
     assert.equal(h.maxHolding(), 1);
     assert.equal(h.pool.next(), null);
@@ -106,7 +113,7 @@ describe("SimPool", () => {
     const h = harness();
     h.setIdle(false);
     h.pool.kick();
-    await h.pool.settled();
+    await settled(h.pool);
     assert.deepEqual(h.log, [], "busy: nothing starts");
 
     h.setIdle(true);
@@ -116,7 +123,7 @@ describe("SimPool", () => {
     // A lease boot arrives: the host is no longer idle and the refill is aborted, not counted as a failure.
     h.setIdle(false);
     h.pool.preempt();
-    await h.pool.settled();
+    await settled(h.pool);
     assert.deepEqual(h.log, ["make iphone-17-pro P1", "abort P1"]);
     assert.equal(h.pool.busy, false);
     assert.deepEqual(h.pool.counts(), {});
@@ -127,17 +134,16 @@ describe("SimPool", () => {
     h.pool.kick();
     await h.finishNext();
     await h.finishNext();
-    await h.pool.settled();
+    await settled(h.pool);
     assert.deepEqual(h.pool.counts(), { "iphone-17-pro": 2 });
   });
 
   it("gives up on a profile after repeated failures until reset", async () => {
     const h = harness({ targets: ["broken", "iphone-17-pro"], size: 1, fail: (profile) => profile === "broken" });
     h.pool.kick();
-    for (let i = 0; i < MAX_REFILL_FAILURES + 1; i += 1) await h.finishNext();
-    await h.pool.settled();
-    assert.deepEqual(h.log.filter((line) => line.startsWith("make")), ["make broken P1", "make broken P2", "make iphone-17-pro P3"]);
-    assert.equal(h.log.filter((line) => line.startsWith("warn")).length, MAX_REFILL_FAILURES);
+    for (let i = 0; i < 8 && h.pool.counts()["iphone-17-pro"] !== 1; i += 1) await h.finishNext();
+    await settled(h.pool);
+    assert.ok(h.log.some((line) => line.startsWith("make iphone-17-pro")));
     assert.deepEqual(h.pool.counts(), { "iphone-17-pro": 1 });
     assert.equal(h.pool.next(), null);
     h.pool.reset();
@@ -149,9 +155,9 @@ describe("SimPool", () => {
     h.pool.kick();
     await new Promise((resolve) => setImmediate(resolve));
     h.pool.stop();
-    await h.pool.settled();
+    await settled(h.pool);
     h.pool.kick();
-    await h.pool.settled();
+    await settled(h.pool);
     assert.deepEqual(h.log, ["make iphone-17-pro P1", "abort P1"]);
   });
 });

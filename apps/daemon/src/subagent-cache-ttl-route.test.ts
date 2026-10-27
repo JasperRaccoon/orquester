@@ -6,13 +6,13 @@
 
 import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "./index.ts";
-import { SubagentCacheTtlController, type SubagentRequest } from "./subagent-cache-ttl.ts";
+import { SubagentCacheTtlController } from "./subagent-cache-ttl.ts";
 import { testAuthSessions } from "./auth/testing.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
@@ -21,19 +21,14 @@ const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
 const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 const NOW = Date.parse("2026-10-11T00:00:00Z");
 
-/** 300 subagents that each re-write a 100k prefix after a 10 minute wait: 1h is 16% cheaper. */
-const idleUsage: SubagentRequest[] = Array.from({ length: 300 }, (_, i) => [
-  { sub: `a${i}`, ts: NOW - 3_600_000, cacheWrite: 100_000, cacheRead: 0, cacheWrite1h: 0 },
-  { sub: `a${i}`, ts: NOW - 3_000_000, cacheWrite: 100_000, cacheRead: 0, cacheWrite1h: 0 }
-]).flat();
-
-test("the status route answers for the stored mode, to authenticated clients only", async () => {
+test("the status route answers for the stored mode, to authenticated clients only", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "orq-sub-ttl-route-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const appConfigFile = join(root, "app.json");
   const subagentCacheTtl = new SubagentCacheTtlController({
     stateFile: join(root, "subagent-cache-ttl.json"),
     now: () => NOW,
-    requests: () => idleUsage
+    requests: () => null
   });
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = USERNAME;
@@ -60,13 +55,18 @@ test("the status route answers for the stored mode, to authenticated clients onl
       nextCheckAt: null
     });
 
-    // No app.json group at all is the default: auto, decided on the spot.
+    await writeFile(appConfigFile, JSON.stringify({ agents: { claudeSubagentCacheTtl: "1h" } }), "utf8");
+    assert.deepEqual((await get({ authorization: BEARER })).json(), {
+      mode: "1h", ttl: "1h", lastCheck: null, nextCheckAt: null
+    });
+
+    // No app.json group at all is the default: auto. Usage is not ready yet.
     await writeFile(appConfigFile, "{}", "utf8");
     assert.deepEqual((await get({ authorization: BEARER })).json(), {
       mode: "auto",
-      ttl: "1h",
-      lastCheck: { at: "2026-10-11T00:00:00.000Z", outcome: "1h", requests: 600, windowDays: 14, changePct: -16 },
-      nextCheckAt: "2026-10-18T00:00:00.000Z"
+      ttl: "5m",
+      lastCheck: null,
+      nextCheckAt: null
     });
   } finally {
     await app.close();

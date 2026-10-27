@@ -21,6 +21,7 @@ function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; brows
   const connection = localBoxConnection({ boxId: "box-1" });
   const forwardCalls: { boxPort: number; hostPort?: number }[] = [];
   const closed: number[] = [];
+  const forwardEvents = new EventEmitter();
   if (options.fakeForward) {
     let next = 50_000;
     connection.forwardToHost = async (boxPort, forwardOptions) => {
@@ -31,6 +32,7 @@ function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; brows
         boxPort,
         close: async () => {
           closed.push(hostPort);
+          forwardEvents.emit("closed", hostPort);
         }
       };
       return forward;
@@ -62,6 +64,7 @@ function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; brows
     forwards,
     forwardCalls,
     closed,
+    nextClosed: () => new Promise<number>((resolve) => forwardEvents.once("closed", resolve)),
     sessionEvents,
     browserEvents,
     setSessions: (next: SessionSummary[]) => (sessions = next),
@@ -139,8 +142,9 @@ test("forwards live while the project has sessions or a tab uses them; a destroy
     assert.deepEqual(r.closed, [50001]);
     assert.deepEqual(r.forwards.list().map((f) => f.boxPort), [5173], "the tab's forward stays");
 
+    const destroyedClose = r.nextClosed();
     r.boxes.update("box-1", { state: "destroyed" });
-    await r.forwards.dispose();
+    assert.equal(await destroyedClose, 50000, "destruction closes the tab's forward before teardown");
     assert.deepEqual(r.closed.sort(), [50000, 50001]);
   } finally {
     await r.forwards.dispose();

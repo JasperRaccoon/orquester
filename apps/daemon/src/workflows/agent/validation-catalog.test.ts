@@ -65,9 +65,9 @@ test("expire() reads again at once — even inside a failure's backoff — and k
   // A failing read after expire keeps the last reading, then backs off.
   failing = true;
   catalog.expire();
-  assert.equal(catalog.current(), first, "the last reading answers while the new one is read");
+  assert.deepEqual(catalog.current(), first, "the last reading answers while the new one is read");
   await catalog.ready();
-  assert.equal(catalog.current(), first);
+  assert.deepEqual(catalog.current(), first);
   const failed = api.requests;
   await catalog.ready();
   assert.equal(api.requests, failed, "backing off");

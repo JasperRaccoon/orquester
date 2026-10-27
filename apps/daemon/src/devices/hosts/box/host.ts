@@ -30,7 +30,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { posix } from "node:path";
 import type { Readable } from "node:stream";
-import { setTimeout as delay } from "node:timers/promises";
+import timers from "node:timers/promises";
 
 import {
   DEVICE_ERROR_CODES,
@@ -118,8 +118,8 @@ import {
   type SimTarget
 } from "./simctl.ts";
 
-/** How long things may take (tests shorten them). */
-export interface BoxHostTiming {
+/** Production command and polling deadlines. */
+interface BoxHostTiming {
   /** The hub writing its state file after start. */
   hubStartMs: number;
   /** Between looks at the hub's state file while it starts. */
@@ -138,7 +138,7 @@ export interface BoxHostTiming {
   slimMs: number;
 }
 
-export const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
+const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
   hubStartMs: 60_000,
   hubPollMs: 500,
   installMs: 15 * 60_000,
@@ -153,7 +153,7 @@ export const DEFAULT_BOX_HOST_TIMING: BoxHostTiming = {
 };
 
 /** agent-device's iOS simulator runner build under the box user's home (the runner cache restores it). */
-export const APPLE_RUNNER_BUILD_DIR = ".agent-device/apple-runner/derived/ios-simulator";
+const APPLE_RUNNER_BUILD_DIR = ".agent-device/apple-runner/derived/ios-simulator";
 
 /** A host whose box's time limit ends within this takes no new lease. */
 export const DEADLINE_MARGIN_MS = 20 * 60_000;
@@ -176,17 +176,10 @@ export interface BoxDeviceHostDeps {
   destroyBox?(): Promise<void>;
   logger: Pick<Console, "info" | "warn" | "error">;
   fetch?: typeof fetch;
-  now?(): number;
-  timing?: Partial<BoxHostTiming>;
-  /**
-   * Pre-slimmed shut-down simulators kept per profile (default {@link DEFAULT_SIM_POOL_SIZE} on
-   * rented hosts, 0 on the owner's own Mac: its simulator list stays theirs).
-   */
-  simPoolSize?: number;
 }
 
 /** Pool simulators per profile on a rented host. */
-export const DEFAULT_SIM_POOL_SIZE = 2;
+const DEFAULT_SIM_POOL_SIZE = 2;
 
 type Phase = "pending" | "preparing" | "ready" | "needs-setup" | "failed" | "stopped";
 
@@ -209,7 +202,7 @@ export class BoxDeviceHost implements DeviceHost {
   readonly platforms: readonly DevicePlatform[];
 
   private readonly events = new EventEmitter();
-  private readonly timing: BoxHostTiming;
+  private readonly timing = { ...DEFAULT_BOX_HOST_TIMING };
   private phase: Phase = "pending";
   private detail: string | null = null;
   /** The readiness check being worked on while preparing. */
@@ -253,7 +246,6 @@ export class BoxDeviceHost implements DeviceHost {
     this.kind = deps.kind;
     this.label = deps.label;
     this.platforms = ["ios"];
-    this.timing = { ...DEFAULT_BOX_HOST_TIMING, ...deps.timing };
   }
 
   get boxId(): string {
@@ -582,7 +574,7 @@ export class BoxDeviceHost implements DeviceHost {
         throw new DeviceError(DEVICE_ERROR_CODES.PLATFORM_NOT_READY, `The device hub on ${this.label} did not start within ${Math.round(this.timing.hubStartMs / 1000)} s: ${outputTail(stderr) || "no output"}`);
       }
       // The hub signals readiness only through its state file: look again shortly.
-      await delay(this.timing.hubPollMs, undefined, { signal });
+      await timers.setTimeout(this.timing.hubPollMs, undefined, { signal });
     }
   }
 
@@ -611,7 +603,7 @@ export class BoxDeviceHost implements DeviceHost {
     while (this.now() < deadline) {
       const proc = (await link.request("proc.list", {}).catch(() => [])).find((entry) => entry.procId === HUB_PROC_ID);
       if (!proc?.running) break;
-      await delay(250);
+      await timers.setTimeout(250);
     }
     await link.request("proc.signal", { procId: HUB_PROC_ID, signal: "SIGKILL" }).catch(() => undefined);
     await link.request("proc.release", { procId: HUB_PROC_ID }).catch(() => undefined);
@@ -676,12 +668,6 @@ export class BoxDeviceHost implements DeviceHost {
         this.warming = null;
         this.simPool?.kick();
       });
-  }
-
-  /** Resolves once a warm-up started by `prepare` finished (tests, the integration run). */
-  async warmSettled(): Promise<boolean> {
-    await this.warming;
-    return this.warmed;
   }
 
   private async warmRunner(link: BoxConnection): Promise<void> {
@@ -750,7 +736,7 @@ export class BoxDeviceHost implements DeviceHost {
       await link.writeFile(profilePath, ORQ_SLIM_PROFILE_JSON, { mode: 0o600 });
       this.slim = { bin: simslimBin(layout.tools), profilePath };
       this.slimCheck = { ok: true, detail: SIMSLIM_RELEASE.version };
-      const size = this.deps.simPoolSize ?? (this.kind === "box" ? DEFAULT_SIM_POOL_SIZE : 0);
+      const size = this.kind === "box" ? DEFAULT_SIM_POOL_SIZE : 0;
       if (size > 0 && !this.simPool) this.simPool = this.createPool(size);
     } catch (error) {
       if (signal.aborted) throw error;
@@ -817,12 +803,6 @@ export class BoxDeviceHost implements DeviceHost {
     } catch (error) {
       this.deps.logger.warn(`[devices] verifying ${udid}'s slim state on ${this.id} failed`, errorText(error));
     }
-  }
-
-  /** Resolves once the pool's refill in progress ended (tests, the integration run). */
-  async poolSettled(): Promise<Record<string, number>> {
-    await this.simPool?.settled();
-    return this.simPool?.counts() ?? {};
   }
 
   /** A simulator booted or went: measure again, then refill the pool. */
@@ -1006,7 +986,7 @@ export class BoxDeviceHost implements DeviceHost {
         return;
       }
       // simctl has no "first frame" signal: look again shortly.
-      await delay(this.timing.framePollMs, undefined, { signal });
+      await timers.setTimeout(this.timing.framePollMs, undefined, { signal });
     }
   }
 
@@ -1305,7 +1285,7 @@ export class BoxDeviceHost implements DeviceHost {
   }
 
   private now(): number {
-    return this.deps.now?.() ?? Date.now();
+    return Date.now();
   }
 }
 

@@ -195,8 +195,9 @@ function sanitizeByoInfo(value: unknown, fallbackName: string): BoxByoInfo {
 export function sanitizeByoPairingResponse(value: unknown): ByoPairingResponse | null {
   if (!isRecord(value) || !nonEmpty(value.command) || !nonEmpty(value.expiresAt)) return null;
   const box = sanitizeBoxSummary(value.box);
-  // Only ever a `curl … | sh` line: anything else is not shown to be pasted into a shell.
-  if (!box || !/^curl -fsSL https?:\/\/\S+\/api\/boxes\/pair\/[A-Za-z0-9_-]+ \| sh$/.test(value.command)) return null;
+  // The URL is unquoted: shell operators and substitutions must never be offered for pasting.
+  const command = /^curl -fsSL (https?:\/\/\S+\/api\/boxes\/pair\/[A-Za-z0-9_-]+) \| sh$/.exec(value.command);
+  if (!box || !command || /[\s'"`\\$;&|<>()]/.test(command[1]!)) return null;
   return { box, command: value.command, expiresAt: value.expiresAt };
 }
 

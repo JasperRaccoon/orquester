@@ -265,9 +265,11 @@ describe("agent host server — readiness (§3.1, §8)", () => {
 });
 
 describe("agent host server — commands and reads (§6.2, §6.3)", () => {
-  it("routes every §6.2 command and answers `{seq}`", async () => {
+  it("routes §6.2 commands to their recorded state changes and answers `{seq}`", async (t) => {
     const h = await harness();
+    t.after(() => h.stop());
     const threadId = await h.host.createThread();
+    const snapshot = async () => ((await h.call("GET", agentHostRoutes.read(threadId))).body as { thread: ThreadSnapshotPayload }).thread;
 
     const turn = await h.call("POST", agentHostRoutes.turn(threadId), {
       commandId: "c-turn",
@@ -276,24 +278,30 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     assert.equal(turn.status, 200);
     assert.equal(typeof (turn.body as { seq: number }).seq, "number");
     await h.host.settle();
+    assert.equal((await snapshot()).head.session.status, "running");
 
     const interrupt = await h.call("POST", agentHostRoutes.interrupt(threadId), {
       commandId: "c-int"
     });
     assert.equal(interrupt.status, 200);
+    await h.host.settle();
+    assert.ok((await h.host.store.readAll(threadId)).events.some((event) =>
+      event.type === "thread.turn-interrupt-requested" && event.commandId === "c-int"
+    ));
 
     const mode = await h.call("POST", agentHostRoutes.mode(threadId), {
       commandId: "c-mode",
       runtimeMode: "auto"
     });
     assert.equal(mode.status, 200);
+    assert.equal((await snapshot()).head.runtimeMode, "auto");
 
     const stop = await h.call("POST", agentHostRoutes.sessionStop(threadId), {
       commandId: "c-stop"
     });
     assert.equal(stop.status, 200);
     await h.host.settle();
-    await h.stop();
+    assert.equal((await snapshot()).head.session.status, "stopped");
   });
 
   it("maps every rejection to its §6.2 status", async () => {
@@ -1316,9 +1324,13 @@ describe("agent host server — Agent Profiles' prepared-dir leases", () => {
   it("GET /profiles/leases answers the orchestrator's live prepared dirs, behind the host's auth", async () => {
     const h = await harness();
     try {
+      const threadId = await h.host.createThread({ profile: { profileId: "p1", revision: "1", preparedDir: "/profiles/p1/prepared/v1" } });
+      assert.deepEqual((await h.call("GET", agentHostRoutes.profileLeases)).body, { preparedDirs: [] });
+      await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "lease-start", input: "go" });
+      await h.host.settle();
       const answered = await h.call("GET", agentHostRoutes.profileLeases);
       assert.equal(answered.status, 200);
-      assert.deepEqual(answered.body, { preparedDirs: [] });
+      assert.deepEqual(answered.body, { preparedDirs: ["/profiles/p1/prepared/v1"] });
       assert.equal((await h.call("GET", agentHostRoutes.profileLeases, undefined, "wrong-token")).status, 401);
       assert.equal((await h.call("POST", agentHostRoutes.profileLeases)).status, 404, "only GET is the route");
     } finally {
@@ -1685,7 +1697,8 @@ describe("agent host server — on-demand agent rows", () => {
     const omitted = (lazy.body as { thread: ThreadSnapshotPayload }).thread;
     const status = Object.fromEntries(snap.roster.map((entry) => [entry.id, entry.status]));
     assert.equal(status.a, "completed");
-    assert.deepEqual(omitted.omittedAgentIds, status.b === "completed" ? ["a", "b"] : ["a"]);
+    assert.equal(status.b, "running");
+    assert.deepEqual(omitted.omittedAgentIds, ["a"]);
     const left = idsOf(snap.items).filter((id) => !idsOf(omitted.items).includes(id));
     assert.deepEqual(left.filter((id) => id.startsWith("a")), ["a1-start", "a1-done", "aw"]);
     for (const id of ["a-launch", "a-end", "b-launch"]) assert.ok(idsOf(omitted.items).includes(id), id);

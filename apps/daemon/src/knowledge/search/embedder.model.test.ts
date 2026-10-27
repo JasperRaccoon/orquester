@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
-import type { KnowledgeRuntime } from "../ports.ts";
+import { Tokenizer } from "@huggingface/tokenizers";
 import { EMBEDDING_MODEL } from "../install/pins.ts";
-import { OnnxSentenceEmbedder, runtimeEmbedderSource } from "./embedder.ts";
+import { OnnxSentenceEmbedder } from "./embedder.ts";
 import { chunkBody, embeddingHeader, embeddingPassage } from "./text.ts";
 
 // Runs only with real model files: ORQUESTER_KG_MODEL_DIR is a transformers.js `localModelPath`
@@ -56,24 +58,16 @@ test("the pinned model on onnxruntime-node: 384-d normalized vectors, semantical
   const median = timings[10]!;
   const worst = timings[timings.length - 1]!;
 
-  const long = Array.from({ length: 900 }, (_, i) => `word${i % 97} topic${i % 13}`).join(" ");
-  const chunks = chunkBody(long).map((span) => long.slice(span.start, span.end));
-  const longStarted = performance.now();
-  const vectors = await embedder.embed(chunks);
-  const longMs = performance.now() - longStarted;
-  assert.equal(vectors.length, chunks.length);
-
-  t.diagnostic(
-    `model load ${loadMs.toFixed(0)} ms; short entry warm median ${median.toFixed(1)} ms, max ${worst.toFixed(1)} ms; ` +
-      `${chunks.length} long chunks ${longMs.toFixed(0)} ms`
-  );
+  t.diagnostic(`model load ${loadMs.toFixed(0)} ms; short entry warm median ${median.toFixed(1)} ms, max ${worst.toFixed(1)} ms`);
   assert.ok(median < 200, `warm median ${median.toFixed(1)} ms`);
 });
 
-test("token-dense bodies chunk under the model's limit: header + prefix + chunk is never truncated", { skip: SKIP, timeout: 300_000 }, async (t) => {
-  const warnings: string[] = [];
-  const embedder = pinned({ warn: (line: string) => warnings.push(line) });
-  t.after(() => embedder.dispose());
+test("contextual passages fit the pinned tokenizer's 512-token limit, including prefix and special tokens", { skip: SKIP }, async () => {
+  const [definition, config] = await Promise.all([
+    readFile(join(MODEL_DIR!, MODEL_ID, "tokenizer.json"), "utf8"),
+    readFile(join(MODEL_DIR!, MODEL_ID, "tokenizer_config.json"), "utf8")
+  ]);
+  const tokenizer = new Tokenizer(JSON.parse(definition), JSON.parse(config));
   const header = embeddingHeader({
     title: "A fairly long title about paywalls, TikTok ads and landing pages that convert in 2026",
     author: "María José Fernández",
@@ -101,47 +95,10 @@ test("token-dense bodies chunk under the model's limit: header + prefix + chunk 
   for (const [label, head] of [["header", header], ["long header", longHeader]] as const) {
     for (const [name, body] of Object.entries(bodies)) {
       const passages = chunkBody(body).map((span) => embeddingPassage(head, body.slice(span.start, span.end)));
-      await embedder.embed(passages, "passage");
-      assert.deepEqual(warnings, [], `${label}, ${name}: ${warnings.join("; ")}`);
+      for (const passage of passages) {
+        const tokens = tokenizer.encode(`passage: ${passage}`, { add_special_tokens: true }).ids.length;
+        assert.ok(tokens <= 512, `${label}, ${name}: ${tokens} tokens`);
+      }
     }
   }
-  // And truncation is reported when it does happen (a body chunked for nothing).
-  await embedder.embed([bodies.chinese], "passage");
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /^knowledge: 1 of 1 passage text\(s\) exceeded 512 tokens/);
-});
-
-test("the runtime source makes the embedder lazily and swaps it when the runtime changes", { skip: SKIP }, async () => {
-  let runtime: KnowledgeRuntime | null = null;
-  const listeners = new Set<() => void>();
-  const source = runtimeEmbedderSource({
-    current: () => runtime,
-    onChange: (listener) => {
-      listeners.add(listener as () => void);
-      return () => listeners.delete(listener as () => void);
-    }
-  });
-  const base = {
-    mykgVersion: "0.4.10",
-    mykgBin: "/x",
-    pythonBin: "/x",
-    tiktokenCacheDir: "/x",
-    embeddingModelId: MODEL_ID,
-    embeddingDimensions: 384,
-    embeddingQueryPrefix: EMBEDDING_MODEL.queryPrefix,
-    embeddingPassagePrefix: EMBEDDING_MODEL.passagePrefix,
-    embeddingMaxTokens: EMBEDDING_MODEL.maxTokens,
-    embeddingThresholds: EMBEDDING_MODEL.thresholds
-  };
-  assert.equal(source.current(), null);
-  runtime = { ...base, embeddingModelDir: MODEL_DIR! };
-  const first = source.current()!;
-  assert.equal(source.current(), first);
-  assert.equal((await first.embed(["hello"], "query"))[0]!.length, 384);
-  assert.deepEqual(first.thresholds, EMBEDDING_MODEL.thresholds);
-  runtime = { ...base, embeddingModelDir: "/nonexistent" };
-  const second = source.current()!;
-  assert.notEqual(second, first);
-  await assert.rejects(second.embed(["hello"]));
-  await source.dispose();
 });

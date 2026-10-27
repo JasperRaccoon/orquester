@@ -5,17 +5,18 @@
  */
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { DEFAULT_DEVICES_SETTINGS, DEVICE_PROFILES, type DeviceHostSummary, type DeviceLeaseSummary, type DevicesSettings } from "@orquester/api";
+import { DEFAULT_DEVICES_SETTINGS, DEVICE_PROFILES, type DeviceActionEntry, type DeviceHostSummary, type DeviceLeaseSummary, type DevicesSettings } from "@orquester/api";
 
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let DevicePanel: typeof import("./DevicePanel").DevicePanel;
 let ControllerPill: typeof import("./DeviceLiveView").ControllerPill;
 let DeviceToolbar: typeof import("./DeviceToolbar").DeviceToolbar;
+let DeviceAgentOverlay: typeof import("./DeviceAgentOverlay").DeviceAgentOverlay;
 let devicesStore: typeof import("../../lib/devices/store").devicesStore;
 let resetDevices: typeof import("../../lib/devices/store").resetDevices;
 let useAppStore: typeof import("../../store/app").useAppStore;
@@ -36,6 +37,7 @@ before(async () => {
   ({ DevicePanel } = await import("./DevicePanel"));
   ({ ControllerPill } = await import("./DeviceLiveView"));
   ({ DeviceToolbar } = await import("./DeviceToolbar"));
+  ({ DeviceAgentOverlay } = await import("./DeviceAgentOverlay"));
   ({ devicesStore, resetDevices } = await import("../../lib/devices/store"));
   ({ useAppStore } = await import("../../store/app"));
 });
@@ -144,10 +146,10 @@ describe("DevicePanel", () => {
 
   it("the picker opens a ready profile and explains a disabled one with a link to Settings", async () => {
     await render([]);
-    assert.match(text(), /No device in this chat yet/);
-    const iphone = host.querySelector('[data-profile="iphone-17-pro"]')!;
-    assert.match(iphone.textContent ?? "", /iPhone & iPad is off/);
-    await act(async () => (iphone.querySelector("button") as HTMLButtonElement).click());
+    const iphones = host.querySelector('section[aria-label="iPhone & iPad"]')!;
+    assert.match(iphones.textContent ?? "", /is off/);
+    const settingsLink = [...iphones.querySelectorAll("button")].find((item) => item.textContent?.trim() === "Open")!;
+    await act(async () => settingsLink.click());
     assert.deepEqual(calls, ["settings devices"]);
     await act(async () => button("Open Pixel 9")!.click());
     assert.ok(calls.includes("open android pixel-9"));
@@ -155,21 +157,19 @@ describe("DevicePanel", () => {
 
   it("a full host's profile reads Queue with what that means, and opens (the pool queues it)", async () => {
     await render([], [{ ...localHost, capacity: { used: 4, total: 4 } }]);
-    const row = host.querySelector('[data-profile="pixel-9"]')!;
-    assert.equal(row.getAttribute("aria-disabled"), null);
     const queue = button("Queue Pixel 9")!;
     assert.equal(queue.textContent?.trim(), "Queue");
     assert.equal(queue.disabled, false);
-    assert.equal(queue.title, "All 4 slots are in use — it opens when one frees up, or on a rented host if the fleet allows.");
+    assert.match(queue.title, /slot.*rent/i);
     assert.equal(button("Open Pixel 9"), undefined);
     await act(async () => queue.click());
     assert.ok(calls.includes("open android pixel-9"));
   });
 
-  it("a booting device lists its steps; Cancel releases it", async () => {
+  it("Cancel releases a starting device before control is available", async () => {
     await render([lease({ state: "starting", stream: undefined, progress: { step: "start-device", label: "Starting device", startedAt: new Date().toISOString() } })]);
-    const steps = [...host.querySelectorAll("[data-step]")].map((li) => `${li.getAttribute("data-step")}:${li.getAttribute("data-state")}`);
-    assert.deepEqual(steps, ["prepare-host:done", "start-device:active", "connect-video:pending"]);
+    assert.equal(button("Take over"), undefined);
+    assert.equal(button("Give back"), undefined);
     await act(async () => button("Cancel")!.click());
     assert.deepEqual(calls, ["release l1"]);
   });
@@ -184,14 +184,14 @@ describe("DevicePanel", () => {
   it("a live device off HTTP says it needs a server connection and keeps its log", async () => {
     await render([lease()]);
     assert.match(text(), /Live devices need a server connection/);
-    assert.ok(host.querySelector("[data-device-action-log]"));
+    assert.ok(host.querySelector('section[aria-label="Device actions"]'));
     // Tabs: middle-click releases.
-    const tab = host.querySelector('[role="tab"]')!.parentElement!;
+    const tab = host.querySelector('[role="tab"]')!;
     await act(async () => tab.dispatchEvent(new dom.window.MouseEvent("auxclick", { bubbles: true, button: 1 })));
     assert.deepEqual(calls, ["release l1"]);
   });
 
-  it("the toolbar: Rotate is live for Android, More → Restart app asks for it", async () => {
+  it("toolbar dispatches Rotate and Restart app and refuses disabled Rotate", async () => {
     const pressed: string[] = [];
     const toolbar = (rotate: { enabled: boolean; reason: string | null }) =>
       createElement(DeviceToolbar, {
@@ -207,7 +207,9 @@ describe("DevicePanel", () => {
       });
     await act(async () => root.render(toolbar({ enabled: true, reason: null })));
     await act(async () => button("Rotate")!.click());
-    await act(async () => (host.querySelector('[aria-label="More device actions"]')!.closest("button") as HTMLButtonElement).click());
+    const more = button("More");
+    assert.ok(more, "the toolbar offers More actions");
+    await act(async () => more.click());
     const restart = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restart app") as HTMLButtonElement | undefined;
     assert.ok(restart, "More lists Restart app");
     await act(async () => restart.click());
@@ -216,7 +218,7 @@ describe("DevicePanel", () => {
     await act(async () => root.render(toolbar({ enabled: false, reason: "Waiting for video" })));
     await act(async () => button("Rotate")!.click());
     assert.deepEqual(pressed, ["rotate", "restart"]);
-    assert.match(text(), /Rotate — Waiting for video/);
+    assert.equal(button("Rotate")!.getAttribute("aria-disabled"), "true");
   });
 
   it("the controller pill: Take over while the agent drives, Give back after", async () => {
@@ -228,5 +230,36 @@ describe("DevicePanel", () => {
     assert.match(text(), /You have control/);
     await act(async () => button("Give back")!.click());
     assert.deepEqual(changes, ["user", "agent"]);
+  });
+
+  it("animates only new visible actions for 1200ms", async () => {
+    const action = (id: string, target: string): DeviceActionEntry => ({
+      id, leaseId: "l1", at: "2026-10-27T10:00:00.000Z", actor: "agent", kind: "tap", summary: `Tapped ${target}`, ok: true, target
+    });
+    const old = action("old", "Old action");
+    const fresh = action("fresh", "New action");
+    const hidden = action("hidden", "Hidden action");
+    const renderOverlay = async (entries: DeviceActionEntry[], active: boolean) => {
+      await act(async () => root.render(createElement(DeviceAgentOverlay, {
+        entries, active, screen: { width: 400, height: 800 }, orientation: "portrait", project: (x: number, y: number) => ({ x, y })
+      })));
+    };
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await renderOverlay([old], true);
+      assert.equal(text(), "", "loaded history is not replayed");
+      await renderOverlay([old, fresh], true);
+      assert.match(text(), /New action/);
+      assert.doesNotMatch(text(), /Old action/);
+      await act(async () => mock.timers.tick(1199));
+      assert.match(text(), /New action/);
+      await act(async () => mock.timers.tick(1));
+      assert.equal(text(), "", "the spec's 1200ms lifetime elapsed");
+      await renderOverlay([old, fresh, hidden], false);
+      await renderOverlay([old, fresh, hidden], true);
+      assert.equal(text(), "", "hidden history is not replayed on return");
+    } finally {
+      mock.timers.reset();
+    }
   });
 });

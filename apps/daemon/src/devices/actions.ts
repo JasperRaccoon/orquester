@@ -106,7 +106,7 @@ type ActionPlan =
   /** Several steps of its own (`executeSpecial`). */
   | { via: "special"; kind: "snapshot" | "screenshot" | "logs" | "rotate-emulator" };
 
-export interface PlanContext {
+interface PlanContext {
   platform: "ios" | "android";
   deviceId: string;
   /** agent-device coordinate units per device point (Android: pixels per dp; iOS: 1). */
@@ -150,7 +150,7 @@ function units(value: number, ctx: PlanContext): string {
 }
 
 /** A swipe `direction` as two points (the finger moves that way), in points. */
-export function swipePoints(direction: "up" | "down" | "left" | "right", screen: { width: number; height: number }): { from: DevicePoint; to: DevicePoint } {
+function swipePoints(direction: "up" | "down" | "left" | "right", screen: { width: number; height: number }): { from: DevicePoint; to: DevicePoint } {
   const { width: w, height: h } = screen;
   const vertical = { x: Math.round(w / 2), top: Math.round(h * 0.3), bottom: Math.round(h * 0.7) };
   const horizontal = { y: Math.round(h / 2), left: Math.round(w * 0.2), right: Math.round(w * 0.8) };
@@ -167,7 +167,7 @@ export function swipePoints(direction: "up" | "down" | "left" | "right", screen:
 }
 
 /** Quote one argument for the device's `sh` (adb shell joins its arguments into one command line). */
-export function shellQuote(value: string): string {
+function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -193,7 +193,7 @@ function textStep(command: "type" | "wait", input: Record<string, string | numbe
 }
 
 /** Map one validated action onto agent-device or the host's tool. Throws `INVALID_ARGUMENT` for what the platform cannot do. */
-export function planAction(input: DeviceActionInput, ctx: PlanContext): ActionPlan {
+function planAction(input: DeviceActionInput, ctx: PlanContext): ActionPlan {
   const target = (): string[] => (input.ref !== undefined ? [input.ref] : [units(input.x!, ctx), units(input.y!, ctx)]);
   switch (input.action) {
     case "snapshot":
@@ -294,7 +294,7 @@ function quoted(value: unknown): string | null {
 }
 
 /** A `snapshot -i --json` answer as compact text (`@e7 [button] "Search"`), and its refs' frames in points. */
-export function renderSnapshot(data: Record<string, unknown>, unitsPerPoint: number): { text: string; refs: Record<string, DeviceRect>; count: number } {
+function renderSnapshot(data: Record<string, unknown>, unitsPerPoint: number): { text: string; refs: Record<string, DeviceRect>; count: number } {
   const nodes = (Array.isArray(data.nodes) ? data.nodes : []) as SnapshotNode[];
   const refs: Record<string, DeviceRect> = {};
   const lines: string[] = [];
@@ -324,7 +324,7 @@ export function renderSnapshot(data: Record<string, unknown>, unitsPerPoint: num
 }
 
 /** An input action's `settle` as text: the diff, or why there is none. */
-export function renderSettle(data: Record<string, unknown>): string | null {
+function renderSettle(data: Record<string, unknown>): string | null {
   const settle = data.settle as { settled?: unknown; diff?: { summary?: { additions?: unknown; removals?: unknown }; lines?: unknown }; hint?: unknown } | undefined;
   if (!settle) return null;
   const lines = Array.isArray(settle.diff?.lines) ? (settle.diff!.lines as { kind?: unknown; text?: unknown }[]) : null;
@@ -349,7 +349,7 @@ function pointOf(data: Record<string, unknown>, xKey: string, yKey: string, unit
 }
 
 /** Where a tap landed (points): agent-device's answer, else the ref's frame centre from the last snapshot. */
-export function resolvePoint(input: Pick<DeviceActionInput, "ref" | "x" | "y">, data: Record<string, unknown>, refs: Readonly<Record<string, DeviceRect>>, unitsPerPoint: number): DevicePoint | undefined {
+function resolvePoint(input: Pick<DeviceActionInput, "ref" | "x" | "y">, data: Record<string, unknown>, refs: Readonly<Record<string, DeviceRect>>, unitsPerPoint: number): DevicePoint | undefined {
   const reported = pointOf(data, "x", "y", unitsPerPoint);
   if (reported) return reported;
   if (input.ref !== undefined) {
@@ -443,7 +443,7 @@ function isLandscapeNative(wmSize: string): boolean {
 const SPRINGBOARD = "com.apple.springboard";
 
 /** The launcher package `cmd package resolve-activity --brief … HOME` names (its last `pkg/activity` line), or null. */
-export function homePackageOf(stdout: string): string | null {
+function homePackageOf(stdout: string): string | null {
   const line = stdout
     .split("\n")
     .map((entry) => entry.trim())

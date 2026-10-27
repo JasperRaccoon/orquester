@@ -51,7 +51,7 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
 **The agent host loads the catalog statically** (it advertises the definitions:
 `agent-host/session-tools/definitions.ts`), so a tool module never imports a daemon service: it
 reaches the daemon through `ctx.api` (the daemon's own REST API in-process, `../mcp/daemon-api.ts`).
-`mcp/catalog/registry.test.ts` walks the import graph from `catalog/index.ts` against an allow-list.
+`mcp/catalog/registry.test.ts` checks the emitted audience metadata and documented context budgets.
 No dynamic `import()` either.
 
 ## Toolsets: groups, never switches (§9.1, §9.5)

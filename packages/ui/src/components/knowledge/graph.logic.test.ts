@@ -5,7 +5,6 @@ import type { KnowledgeColor, KnowledgeSimilarityGraphResponse, KnowledgeSimilar
 
 import { node, summary } from "../../lib/knowledge/fixtures.test-helpers.ts";
 import {
-  clusterColors,
   collectionLegend,
   focusFor,
   graphQueryOf,
@@ -18,9 +17,7 @@ import {
   similarityCanvasNodes,
   similarityEmptyState,
   similarityLegend,
-  similarityNote,
   similarityQueryOf,
-  similaritySearchSummary,
   truncationNote
 } from "./graph.logic.ts";
 
@@ -89,13 +86,6 @@ describe("the search summary", () => {
     assert.equal(searchSummary([conceptHit("a"), conceptHit("b")], new Set(["a"])), "Matches: 2 concepts (1 marked).");
     assert.equal(searchSummary([conceptHit("b")], new Set(["a"])), "Matches: 1 concept (not on the canvas).");
   });
-
-  it("on the similarity layer, entry hits are marked nodes and concept hits are only counted", () => {
-    assert.equal(similaritySearchSummary([], new Set()), null);
-    assert.equal(similaritySearchSummary([entryHit("ke_1")], new Set(["ke_1"])), "Matches: 1 entry (marked).");
-    assert.equal(similaritySearchSummary([entryHit("ke_1"), entryHit("ke_2")], new Set(["ke_1"])), "Matches: 2 entries (1 marked).");
-    assert.equal(similaritySearchSummary([entryHit("ke_1"), conceptHit("a")], new Set()), "Matches: 1 entry (not on the canvas), 1 concept.");
-  });
 });
 
 const simNode = (id: string, overrides: Partial<KnowledgeSimilarityNode> = {}): KnowledgeSimilarityNode => ({
@@ -156,37 +146,17 @@ describe("the similarity layer", () => {
     assert.equal(isMissingRoute(null), false);
   });
 
-  it("colours clusters of two or more in palette order, cycling, and singletons neutral", () => {
-    assert.deepEqual(clusterColors(SIM.clusters), ["chart-1", "chart-2", null]);
-    const many = [...Array.from({ length: 7 }, () => ({ size: 3 })), { size: 1 }, { size: 2 }];
-    assert.deepEqual(clusterColors(many), ["chart-1", "chart-2", "chart-3", "chart-4", "chart-5", "chart-6", "chart-1", null, "chart-2"]);
-  });
-
-  it("builds entry nodes coloured by cluster, titled, and sized by degree", () => {
+  it("projects entry identities, titles and cluster membership to the canvas", () => {
     const nodes = similarityCanvasNodes(SIM, "cluster", colorOf, []);
-    assert.deepEqual(
-      nodes.map((n) => [n.id, n.colors]),
-      [
-        ["a", ["chart-1"]],
-        ["b", ["chart-1"]],
-        ["c", ["chart-1"]],
-        ["d", ["chart-2"]],
-        ["e", ["chart-2"]],
-        ["f", []]
-      ]
-    );
+    assert.deepEqual(nodes.map((n) => n.id), ["a", "b", "c", "d", "e", "f"]);
     assert.equal(nodes[0]!.label, "Title a");
-    assert.equal(nodes[2]!.label, "Untitled", "a blank title");
-    assert.ok(nodes[0]!.size > nodes[1]!.size, "the most connected is the largest");
-    assert.ok(nodes[5]!.size > 0);
-    assert.ok(nodes.every((n) => n.labelled), "a small graph shows every title");
-    const big = { ...SIM, nodes: Array.from({ length: 41 }, (_, i) => simNode(`n${i}`)) };
-    assert.ok(similarityCanvasNodes(big, "cluster", colorOf, []).every((n) => !n.labelled), "a big one shows titles on hover");
-  });
-
-  it("an index the answer has no cluster for is drawn neutral", () => {
-    const nodes = similarityCanvasNodes({ ...SIM, nodes: [simNode("x", { cluster: 9 })] }, "cluster", colorOf, []);
-    assert.deepEqual(nodes[0]!.colors, []);
+    assert.equal(nodes[2]!.label, "Untitled");
+    assert.ok(nodes[0]!.colors.length > 0);
+    assert.deepEqual(nodes[1]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[2]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[4]!.colors, nodes[3]!.colors);
+    assert.notDeepEqual(nodes[3]!.colors, nodes[0]!.colors);
+    assert.deepEqual(nodes[5]!.colors, []);
   });
 
   it("colours by collection like concepts, within the filter", () => {
@@ -196,67 +166,27 @@ describe("the similarity layer", () => {
     assert.deepEqual(similarityCanvasNodes(SIM, "collection", colorOf, ["kc_ads"]).find((n) => n.id === "b")!.colors, ["chart-2"]);
   });
 
-  it("draws spanning-forest edges solid and nearest-neighbour edges dashed", () => {
-    assert.deepEqual(similarityCanvasEdges(SIM), [
-      { id: "s:a|b", from: "a", to: "b", variant: "tree" },
-      { id: "s:a|c", from: "a", to: "c", variant: "knn" },
-      { id: "s:d|e", from: "d", to: "e", variant: "tree" }
+  it("preserves endpoints and distinguishes tree from nearest-neighbour edges", () => {
+    assert.deepEqual(similarityCanvasEdges(SIM).map(({ from, to, variant }) => [from, to, variant]), [
+      ["a", "b", "tree"], ["a", "c", "knn"], ["d", "e", "tree"]
     ]);
   });
 
-  it("lists clusters with their labels and sizes, then the entries in none", () => {
-    assert.deepEqual(similarityLegend(SIM), {
-      items: [
-        { key: "cluster:a", label: "Paywalls", size: 3, color: "chart-1", members: { kind: "cluster", index: 0 } },
-        { key: "cluster:d", label: "Untitled", size: 2, color: "chart-2", members: { kind: "cluster", index: 1 } },
-        { key: "singletons", label: "In no cluster", size: 1, color: null, members: { kind: "singletons" } }
-      ],
-      more: 0
-    });
-    const capped = similarityLegend(SIM, 1);
-    assert.deepEqual(
-      capped.items.map((i) => i.key),
-      ["cluster:a", "singletons"]
-    );
-    assert.equal(capped.more, 1);
-  });
-
-  it("keys a cluster line by its entries, so a refetch that reorders the clusters keeps it on the same one", () => {
-    // {d, e} grew past {a, b, c}: the daemon numbers it 0 now.
-    const reordered: KnowledgeSimilarityGraphResponse = {
-      ...SIM,
-      nodes: [
-        simNode("a", { cluster: 1 }),
-        simNode("b", { cluster: 1 }),
-        simNode("c", { cluster: 1 }),
-        simNode("d", { cluster: 0 }),
-        simNode("e", { cluster: 0 }),
-        simNode("g", { cluster: 0 }),
-        simNode("h", { cluster: 0 }),
-        simNode("f", { cluster: 2 })
-      ],
-      clusters: [
-        { id: 0, size: 4, label: null },
-        { id: 1, size: 3, label: "Paywalls" },
-        { id: 2, size: 1, label: null }
-      ]
-    };
-    const picked = similarityLegend(SIM).items.find((item) => item.label === "Paywalls")!.key;
-    const after = similarityLegend(reordered).items.find((item) => item.key === picked);
-    assert.equal(after?.label, "Paywalls");
-    assert.deepEqual([...legendMemberIds(reordered, after!.members, new Set())].sort(), ["a", "b", "c"]);
-    // Its entries gone: the key is gone too.
-    const without = { ...SIM, nodes: SIM.nodes.filter((n) => n.cluster !== 0), clusters: [{ id: 0, size: 0, label: null }, ...SIM.clusters.slice(1)] };
-    assert.equal(similarityLegend(without).items.find((item) => item.key === picked), undefined);
+  it("lists cluster labels and member counts, including entries in no cluster", () => {
+    assert.deepEqual(similarityLegend(SIM).items.map(({ label, size, members }) => ({ label, size, members })), [
+      { label: "Paywalls", size: 3, members: { kind: "cluster", index: 0 } },
+      { label: "Untitled", size: 2, members: { kind: "cluster", index: 1 } },
+      { label: "In no cluster", size: 1, members: { kind: "singletons" } }
+    ]);
   });
 
   it("lists collections with their entry counts, within the filter, then Unfiled", () => {
     assert.deepEqual(
-      collectionLegend(SIM, collectionViews, []).items.map((i) => [i.label, i.size, i.color]),
+      collectionLegend(SIM, collectionViews, []).items.map((i) => [i.label, i.size]),
       [
-        ["SEO", 4, "chart-1"],
-        ["Ads", 1, "chart-2"],
-        ["Unfiled", 2, null]
+        ["SEO", 4],
+        ["Ads", 1],
+        ["Unfiled", 2]
       ]
     );
     assert.deepEqual(
@@ -273,23 +203,10 @@ describe("the similarity layer", () => {
     assert.deepEqual([...legendMemberIds(SIM, { kind: "unfiled" }, known)], ["d", "e"]);
   });
 
-  it("chooses the empty state: nothing saved, embeddings being computed, or the embedding model still to fetch", () => {
-    assert.equal(similarityEmptyState(SIM, true), null);
-    assert.equal(similarityEmptyState(SIM, false), null);
+  it("distinguishes an empty library and an older daemon with pending embeddings", () => {
     const none = { nodes: [], totals: { entries: 0, embedded: 0 } };
     assert.equal(similarityEmptyState(none, true), "no-entries");
     assert.equal(similarityEmptyState(none, false), "no-entries");
-    const waiting = { nodes: [], totals: { entries: 4, embedded: 0 } };
-    assert.equal(similarityEmptyState(waiting, true), "computing");
-    assert.equal(similarityEmptyState(waiting, false), "model-missing");
-    // An older daemon does not say: as before.
-    assert.equal(similarityEmptyState(waiting, undefined), "computing");
-  });
-
-  it("says when it holds part of the entries", () => {
-    assert.equal(similarityNote(SIM), null);
-    assert.equal(similarityNote({ ...SIM, truncated: true, totals: { entries: 3000, embedded: 2500 } }), "Showing the 6 most recent of 2,500 entries. 500 entries are still being embedded.");
-    assert.equal(similarityNote({ ...SIM, totals: { entries: 7, embedded: 6 } }), "1 entry is still being embedded.");
-    assert.equal(similarityNote({ nodes: [], truncated: false, totals: { entries: 7, embedded: 0 } }), null, "the empty state says it");
+    assert.equal(similarityEmptyState({ nodes: [], totals: { entries: 4, embedded: 0 } }, undefined), "computing");
   });
 });

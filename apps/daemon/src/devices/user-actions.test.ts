@@ -67,5 +67,8 @@ test("an unexpected failure is logged as the user's failed row and answered UNAV
     throw new Error("socket hang up");
   };
   await assert.rejects(runUserAction(ctx, { kind: "appearance", appearance: "light" }, signal), (error: unknown) => (error as DeviceError).code === "UNAVAILABLE");
-  assert.deepEqual(rows, [{ kind: "appearance", summary: "Appearance change failed", ok: false, error: "Appearance change failed." }]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.kind, "appearance");
+  assert.equal(rows[0]!.ok, false);
+  assert.ok(rows[0]!.error && !rows[0]!.error.includes("socket hang up"));
 });

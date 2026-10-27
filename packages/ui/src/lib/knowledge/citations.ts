@@ -23,8 +23,6 @@ import { knowledgeErrorCode } from "../../components/knowledge/knowledge.logic";
 import { knowledgeStore, onKnowledgeReset } from "./store";
 import { parseKnowledgeItemResponse } from "./validate";
 
-export type KnowledgeCitationState = "unknown" | "exists" | "deleted";
-
 /** What a citation's hover card shows about an entry that exists. */
 export type KnowledgeCitationSummary = Pick<KnowledgeEntryMeta, "id" | "title" | "author" | "handle" | "postedAt" | "savedAt" | "collections"> & {
   /** The body's opening words as plain text (Markdown marks stripped), at most {@link CITATION_SNIPPET_MAX} characters. */
@@ -34,10 +32,11 @@ export type KnowledgeCitationSummary = Pick<KnowledgeEntryMeta, "id" | "title" |
 /** A known answer; `summary` is null when the daemon's answer was no readable entry. */
 export type KnowledgeCitationAnswer = { state: "exists"; summary: KnowledgeCitationSummary | null } | { state: "deleted" };
 
-export const CITATION_SNIPPET_MAX = 240;
+const CITATION_SNIPPET_MAX = 240;
 
 /** A body's opening as one plain line: fences, headings, quotes, list marks, emphasis and link targets dropped. */
-export function citationSnippet(body: string, max = CITATION_SNIPPET_MAX): string {
+function citationSnippet(body: string): string {
+  const max = CITATION_SNIPPET_MAX;
   // Look at no more than the opening of a long body.
   const head = body.slice(0, max * 8);
   const lines: string[] = [];
@@ -88,7 +87,7 @@ function emit(): void {
 }
 
 /** Forget every answer (and drop those in flight). */
-export function resetKnowledgeCitations(): void {
+function resetKnowledgeCitations(): void {
   generation += 1;
   connectionId = null;
   client = null;
@@ -106,10 +105,6 @@ function forgetAll(): void {
   latest.clear();
   known.clear();
   if (had) emit();
-}
-
-export function knowledgeCitationState(id: string): KnowledgeCitationState {
-  return known.get(id)?.state ?? "unknown";
 }
 
 /** The known answer about entry `id`, or undefined (never asked, asked again after a change, or the last ask failed). */
@@ -182,8 +177,8 @@ knowledgeStore.subscribe((state, previous) => {
   entriesChanged(state.entriesRevision < previous.entriesRevision ? null : state.changedEntryIds);
 });
 
-/** Run `listener` whenever an answer or a pending read changes (the hooks below; tests). */
-export function subscribeKnowledgeCitations(listener: () => void): () => void {
+/** Run `listener` whenever an answer or a pending read changes. */
+function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
@@ -194,7 +189,7 @@ export function subscribeKnowledgeCitations(listener: () => void): () => void {
 export function useKnowledgeCitation(id: string): { answer: KnowledgeCitationAnswer | undefined; pending: boolean } {
   const answerOf = () => knowledgeCitationAnswer(id);
   const pendingOf = () => knowledgeCitationPending(id);
-  const answer = useSyncExternalStore(subscribeKnowledgeCitations, answerOf, answerOf);
-  const pending = useSyncExternalStore(subscribeKnowledgeCitations, pendingOf, pendingOf);
+  const answer = useSyncExternalStore(subscribe, answerOf, answerOf);
+  const pending = useSyncExternalStore(subscribe, pendingOf, pendingOf);
   return { answer, pending };
 }

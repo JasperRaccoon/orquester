@@ -204,7 +204,7 @@ function directional(target: VphoneActionTarget, direction: DeviceDirection, scr
 }
 
 /** The log lines of a `logs.syslog` result, whatever IcliKit named them. */
-export function logText(result: Record<string, unknown>): string {
+function logText(result: Record<string, unknown>): string {
   const lines = [result.lines, result.logs, result.entries, result.messages].find(Array.isArray) as unknown[] | undefined;
   let text: string;
   if (lines) {

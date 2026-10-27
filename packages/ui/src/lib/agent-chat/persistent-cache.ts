@@ -74,7 +74,7 @@ import { omittedAgentIdsOf, type AgentChatReducerState } from "./reducer.logic";
 // ---------------------------------------------------------------------------
 
 /** This record format. Bump it whenever what is written changes shape or meaning. */
-export const THREAD_CACHE_VERSION = 1;
+const THREAD_CACHE_VERSION = 1;
 /**
  * The same format for a snapshot that holds only part of the rows: on-demand
  * agent rows (`agent-rows.ts`) left some agents' own rows out, and its
@@ -83,29 +83,29 @@ export const THREAD_CACHE_VERSION = 1;
  * record instead of trusting it; a whole snapshot is still written as
  * {@link THREAD_CACHE_VERSION}, which every bundle reads.
  */
-export const THREAD_CACHE_PARTIAL_VERSION = 2;
+const THREAD_CACHE_PARTIAL_VERSION = 2;
 
 /** Whether `v` is a record format this bundle reads. */
 function isReadableVersion(v: unknown): boolean {
   return v === THREAD_CACHE_VERSION || v === THREAD_CACHE_PARTIAL_VERSION;
 }
 /** How many threads are kept on the device; the least recently used go first. */
-export const THREAD_CACHE_MAX_ENTRIES = 20;
+const THREAD_CACHE_MAX_ENTRIES = 20;
 /** One thread's serialized snapshot above this is not kept (UTF-16 code units). */
-export const THREAD_CACHE_MAX_ENTRY_CHARS = 8 * 1024 * 1024;
+const THREAD_CACHE_MAX_ENTRY_CHARS = 8 * 1024 * 1024;
 /** Every thread's serialized snapshot together, at most (UTF-16 code units). */
-export const THREAD_CACHE_MAX_TOTAL_CHARS = 16 * 1024 * 1024;
+const THREAD_CACHE_MAX_TOTAL_CHARS = 16 * 1024 * 1024;
 /** The first write waits this long after the first change (T3: 500 ms). */
-export const THREAD_CACHE_FIRST_SAVE_DELAY_MS = 500;
+const THREAD_CACHE_FIRST_SAVE_DELAY_MS = 500;
 /** Then at most one write per thread per this interval (T3: 10 s). */
-export const THREAD_CACHE_SAVE_INTERVAL_MS = 10_000;
+const THREAD_CACHE_SAVE_INTERVAL_MS = 10_000;
 /**
  * How long a thread's open waits for its saved copy before it streams as if
  * there were none. IndexedDB normally answers in milliseconds; WebKit has
  * been known to leave a request hanging after a page resumes, and a chat must
  * never wait on that.
  */
-export const THREAD_CACHE_LOAD_TIMEOUT_MS = 750;
+const THREAD_CACHE_LOAD_TIMEOUT_MS = 750;
 
 /** How long a due write may wait for an idle moment. */
 const IDLE_WRITE_TIMEOUT_MS = 2_000;
@@ -146,7 +146,7 @@ export function bindThreadCacheScope(transport: object, connection: ThreadCacheC
 }
 
 /** The scope a transport was bound to, or `null` (a transport nobody bound caches nothing). */
-export function threadCacheScopeOf(transport: object): string | null {
+function threadCacheScopeOf(transport: object): string | null {
   return scopes.get(transport) ?? null;
 }
 
@@ -155,7 +155,7 @@ export function threadCacheScopeOf(transport: object): string | null {
 // ---------------------------------------------------------------------------
 
 /** The small, always-read half of a record: what eviction and the version check need. */
-export interface ThreadCacheMeta {
+interface ThreadCacheMeta {
   key: string;
   v: number;
   /** `FOLD_SNAPSHOT_VERSION` of the fold that produced the snapshot. */
@@ -175,7 +175,7 @@ export interface ThreadCacheMeta {
 }
 
 /** The large half: the snapshot, serialized once. */
-export interface ThreadCacheBody {
+interface ThreadCacheBody {
   key: string;
   v: number;
   seq: number;
@@ -184,9 +184,9 @@ export interface ThreadCacheBody {
 
 /**
  * What the cache needs from storage. The IndexedDB implementation is
- * {@link indexedDbThreadCacheBackend}; tests inject their own.
+ * {@link indexedDbThreadCacheBackend}.
  */
-export interface ThreadCacheBackend {
+interface ThreadCacheBackend {
   /** Both halves of one key, as stored — unvalidated; `undefined` for a missing half. */
   read(key: string): Promise<{ meta: unknown; body: unknown }>;
   /** Every meta record, as stored — unvalidated. */
@@ -201,18 +201,9 @@ export interface ThreadCacheBackend {
 }
 
 /** `undefined` until first asked for: resolved lazily, so a page without chats opens nothing. */
-let backendOverride: ThreadCacheBackend | null | undefined;
 let defaultBackend: ThreadCacheBackend | null | undefined;
 
-/** Test seam: the backend every call uses from now on (`null`: none; `undefined`: the default). */
-export function setThreadCacheBackend(backend: ThreadCacheBackend | null | undefined): void {
-  backendOverride = backend;
-}
-
 function activeBackend(): ThreadCacheBackend | null {
-  if (backendOverride !== undefined) {
-    return backendOverride;
-  }
   if (defaultBackend === undefined) {
     defaultBackend = indexedDbThreadCacheBackend();
   }
@@ -239,9 +230,8 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
  * stores keyed by `key`: the metas (small, read whole for eviction) and the
  * bodies (read one at a time).
  */
-export function indexedDbThreadCacheBackend(
-  factory: IDBFactory | undefined = (globalThis as { indexedDB?: IDBFactory }).indexedDB
-): ThreadCacheBackend | null {
+function indexedDbThreadCacheBackend(): ThreadCacheBackend | null {
+  const factory = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
   if (factory === undefined || factory === null || typeof factory.open !== "function") {
     return null;
   }
@@ -344,7 +334,7 @@ const isSequence = (value: unknown): value is number =>
 const isStamp = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
 
-export function threadCacheKey(scope: string, sessionId: string): string {
+function threadCacheKey(scope: string, sessionId: string): string {
   return `${scope}${KEY_SEPARATOR}${sessionId}`;
 }
 
@@ -422,7 +412,7 @@ function parsePersistedSnapshot(
 }
 
 /** Both halves of a record, validated against each other and the key asked for. */
-export function parsePersistedThread(
+function parsePersistedThread(
   metaValue: unknown,
   bodyValue: unknown,
   scope: string,
@@ -488,7 +478,7 @@ function boundsOfWindow(
  * read shape (`toThreadSnapshot`) plus the window's bounds. `null` for a
  * state there is nothing to keep of — headless, deleted, or never folded.
  */
-export function persistableSnapshotOf(state: PersistableThreadState): ThreadSnapshotPayload | null {
+function persistableSnapshotOf(state: PersistableThreadState): ThreadSnapshotPayload | null {
   const fold = state.reducer.fold;
   if (fold.head === null || fold.deleted || fold.seq <= 0 || fold.head.id !== state.slice.sessionId) {
     return null;
@@ -560,7 +550,7 @@ function readMarker(storage: Storage, key: string): string | null {
  * then nothing is cached at all: content whose clear could not be recorded
  * must not be kept.
  */
-export function clearGenerationOf(scope: string): string | null {
+function clearGenerationOf(scope: string): string | null {
   const storage = durableStorage();
   if (storage === null) return null;
   const all = readMarker(storage, CLEARED_ALL_KEY);
@@ -626,7 +616,7 @@ async function currentMeta(backend: ThreadCacheBackend, key: string): Promise<Th
  * written before its scope's last clear (which is deleted). A record read is
  * touched, so it is the last to be evicted.
  */
-export async function loadPersistedThread(
+async function loadPersistedThread(
   scope: string,
   sessionId: string
 ): Promise<PersistedThread | null> {
@@ -713,16 +703,15 @@ function saveSerializedThread(
  * scope's last clear, and then, newest use first, whatever no longer fits the
  * count or the size bound.
  */
-export function evictionsFor(
+function evictionsFor(
   stored: readonly unknown[],
-  incoming: ThreadCacheMeta,
-  current: (meta: ThreadCacheMeta) => boolean = writtenUnderCurrentGeneration
+  incoming: ThreadCacheMeta
 ): string[] {
   const remove: string[] = [];
   const kept: ThreadCacheMeta[] = [];
   for (const value of stored) {
     const meta = parseMeta(value);
-    if (meta === null || !current(meta)) {
+    if (meta === null || !writtenUnderCurrentGeneration(meta)) {
       if (isRecord(value) && typeof value.key === "string" && value.key !== incoming.key) remove.push(value.key);
       continue;
     }
@@ -743,7 +732,7 @@ export function evictionsFor(
 }
 
 /** Forget one saved thread (the host no longer has it, it was deleted, or it outgrew the bound). */
-export function dropPersistedThread(scope: string, sessionId: string): Promise<void> {
+function dropPersistedThread(scope: string, sessionId: string): Promise<void> {
   const backend = activeBackend();
   if (backend === null) return Promise.resolve();
   const key = threadCacheKey(scope, sessionId);
@@ -804,11 +793,6 @@ function sweepStale(backend: ThreadCacheBackend): void {
     const remove = (await backend.readKeys()).filter((key) => !valid.has(key));
     if (remove.length > 0) await backend.write({ remove });
   });
-}
-
-/** Resolves once every write queued so far has settled (tests, and a caller that must wait). */
-export function threadCacheIdle(): Promise<void> {
-  return chain;
 }
 
 // ---------------------------------------------------------------------------

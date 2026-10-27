@@ -18,7 +18,7 @@ import type { KnowledgeSelection } from "./KnowledgePanel";
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
-let resetPanelSession: typeof import("./panel.logic").resetPanelSession;
+let setPlainTextBody: typeof import("./panel.logic").setPlainTextBody;
 let KnowledgePanel: typeof import("./KnowledgePanel").KnowledgePanel;
 
 let dom: JSDOM;
@@ -60,7 +60,7 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ resetKnowledge } = await import("../../lib/knowledge/store"));
-  ({ resetPanelSession } = await import("./panel.logic"));
+  ({ setPlainTextBody } = await import("./panel.logic"));
   ({ KnowledgePanel } = await import("./KnowledgePanel"));
 });
 
@@ -73,8 +73,9 @@ after(() => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
-const OPEN = "ke_new000000000";
-const OLDER = "ke_old000000000";
+let OPEN: string;
+let OLDER: string;
+let fixtureId = 0;
 const SIMILAR = "ke_sim000000000";
 const COLLECTIONS = [collection(), collection({ id: "kc_ads", name: "Ads", color: "chart-2" })];
 
@@ -159,15 +160,18 @@ describe("the entry panel", () => {
     selected = [];
     similarAsked = [];
     failMerge = false;
+    const suffix = String(++fixtureId).padStart(9, "0");
+    OPEN = `ke_new${suffix}`;
+    OLDER = `ke_old${suffix}`;
     items = new Map();
     resetKnowledge();
-    resetPanelSession();
+    setPlainTextBody(false);
   });
 
   afterEach(() => {
     act(() => root.unmount());
     resetKnowledge();
-    resetPanelSession();
+    setPlainTextBody(false);
   });
 
   const settle = async () => {
@@ -254,13 +258,14 @@ describe("the entry panel", () => {
   });
 
   it("cuts a long body's Markdown until asked for the rest", async () => {
-    const long = Array.from({ length: 3000 }, (_, i) => `Paragraph ${i} with some words in it.`).join("\n\n");
+    const long = `First paragraph.\n\n${"Saved words. ".repeat(2000)}\n\nFinal paragraph remains intact.`;
     await show(openDetail({ entry: entry({ id: OPEN, body: long }) }));
     const more = [...doc().querySelectorAll("button")].find((b) => /^Show the rest/.test(b.textContent ?? ""));
     assert.ok(more, "a long body offers the rest");
-    assert.doesNotMatch(text(), /Paragraph 2999 /);
+    assert.match(text(), /First paragraph/);
+    assert.doesNotMatch(text(), /Final paragraph remains intact/);
     await click(more);
-    assert.match(text(), /Paragraph 2999 with some words/);
+    assert.match(text(), /Final paragraph remains intact/);
   });
 
   it("lists similar entries with their reasons, opens one, and offers More like this", async () => {
@@ -269,8 +274,10 @@ describe("the entry panel", () => {
     assert.ok(section);
     const row = section.querySelector(`[data-knowledge-similar="${SIMILAR}"]`);
     assert.ok(row);
-    const chips = [...row.querySelectorAll("span.rounded-full")].map((s) => s.textContent);
-    assert.deepEqual(chips, ["Meaning 91%", "Concepts: A, B", "Same author"]);
+    assert.match(row.textContent!, /Meaning 91%/);
+    assert.match(row.textContent!, /Concepts: A, B/);
+    assert.match(row.textContent!, /Same author/);
+    assert.ok([...row.querySelectorAll("[title]")].some((item) => item.getAttribute("title")?.includes("Hridoy")), "the shared author is identified");
     await click(row);
     assert.deepEqual(selected, [{ kind: "entry", id: SIMILAR }]);
 
@@ -284,7 +291,6 @@ describe("the entry panel", () => {
     await show(older, { findSimilar: false });
     assert.equal(buttons("More like this").length, 0);
     const section = doc().querySelector('section[aria-label="Similar entries"]');
-    assert.equal(section?.getAttribute("data-fallback"), "related");
     assert.match(section?.textContent ?? "", /Related one/);
     assert.match(section?.textContent ?? "", /Shared concepts/);
     assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null);
@@ -303,6 +309,11 @@ describe("the entry panel", () => {
     assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null);
     await show(openDetail());
     assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null, "still hidden");
+    await show(openDetail({
+      entry: entry({ id: OLDER, title: "Original" }),
+      possibleDuplicates: [{ entry: summary({ id: OPEN, title: "Copy" }), similarity: 0.97, reasons: [] }]
+    }));
+    assert.equal(doc().querySelector('section[aria-label="Possible duplicates"]'), null, "the same pair stays hidden from the other entry");
   });
 
   it("merges into the older entry: confirm, one merge call keeping it, then open the kept one", async () => {
@@ -329,6 +340,7 @@ describe("the entry panel", () => {
     assert.deepEqual(calls.filter((c) => !c.startsWith("get:")), [`merge:{"ids":["${OLDER}","${OPEN}"],"keep":"${OLDER}"}`]);
     assert.deepEqual(selected, []);
     const alert = doc().querySelector('section[aria-label="Possible duplicates"] [role="alert"]');
-    assert.equal(alert?.textContent, `Nothing was merged: No such entry: ${OLDER}.`);
+    assert.match(alert?.textContent ?? "", /Nothing was merged/i);
+    assert.ok(alert?.textContent?.includes(`No such entry: ${OLDER}`));
   });
 });

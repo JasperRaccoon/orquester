@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parseKnowledgeEntryMatch, parseKnowledgeFacets, parseKnowledgeFacetsResponse, parseKnowledgeSearchResponse } from "./validate.ts";
+import { parseKnowledgeFacetsResponse, parseKnowledgeSearchResponse } from "./validate.ts";
 import { ApiClient } from "../api-client.ts";
 import type { TransportRequest, Transporter } from "../transporter.ts";
 
@@ -29,7 +29,7 @@ const entry = (id = "ke_aaaaaaaaaaaa") => ({
 
 const MATCH = {
   band: "strong",
-  via: ["meaning", "keyword"],
+  via: ["concept", "meaning", "similar", "keyword"],
   terms: ["competitor", "pages", ""],
   passage: { start: 120, end: 480, chunk: 2, chunks: 12 },
   concepts: [{ id: "tactic-alt", name: "Alternatives pages", type: "Tactic" }, { bad: true }]
@@ -61,7 +61,7 @@ describe("search answers", () => {
     assert.ok(hit?.kind === "entry");
     assert.deepEqual(hit.match, {
       band: "strong",
-      via: ["keyword", "meaning"],
+      via: ["keyword", "meaning", "similar", "concept"],
       terms: ["competitor", "pages"],
       passage: { start: 120, end: 480, chunk: 2, chunks: 12 },
       concepts: [{ id: "tactic-alt", name: "Alternatives pages", type: "Tactic" }]
@@ -79,9 +79,14 @@ describe("search answers", () => {
       searched: []
     });
     assert.ok(parsed);
-    assert.deepEqual(Object.keys(parsed).sort(), ["hits", "searched"]);
-    assert.deepEqual(Object.keys(parsed.hits[0]!).sort(), ["entry", "kind", "score"]);
-    assert.deepEqual(Object.keys(parsed.hits[1]!).sort(), ["concept", "entryIds", "kind", "score"]);
+    assert.equal(parsed.total, undefined);
+    assert.equal(parsed.nextCursor, undefined);
+    assert.equal(parsed.facets, undefined);
+    const [hit, concept] = parsed.hits;
+    assert.ok(hit?.kind === "entry");
+    assert.equal(hit.match, undefined);
+    assert.ok(concept?.kind === "concept");
+    assert.equal(concept.entries, undefined);
   });
 
   it("read the last page's null cursor, and drop malformed totals, cursors and facets", () => {
@@ -119,20 +124,25 @@ describe("search answers", () => {
       { start: 0, end: 5 },
       "chunk 1"
     ]) {
-      assert.equal(parseKnowledgeEntryMatch({ ...MATCH, passage })?.passage, null, JSON.stringify(passage));
+      const parsed = parseKnowledgeSearchResponse({ hits: [{ kind: "entry", score: 1, entry: entry(), match: { ...MATCH, passage } }], searched: [] });
+      const hit = parsed?.hits[0];
+      assert.ok(hit?.kind === "entry");
+      assert.equal(hit.match?.passage, null, JSON.stringify(passage));
     }
-    const match = parseKnowledgeEntryMatch({ band: "weak", via: ["concept", "future-signal", "keyword", "keyword"], terms: [3, "seo", "seo"], passage: null });
-    assert.deepEqual(match, { band: "weak", via: ["keyword", "concept"], terms: ["seo"], passage: null, concepts: [] });
+    const parsed = parseKnowledgeSearchResponse({ hits: [{ kind: "entry", score: 1, entry: entry(), match: { band: "weak", via: ["concept", "future-signal", "keyword", "keyword"], terms: [3, "seo", "seo"], passage: null } }], searched: [] });
+    const hit = parsed?.hits[0];
+    assert.ok(hit?.kind === "entry");
+    assert.deepEqual(hit.match, { band: "weak", via: ["keyword", "concept"], terms: ["seo"], passage: null, concepts: [] });
   });
 });
 
 describe("facets", () => {
   it("read counts, defaulting a missing list, a label and a bad count, and dropping unreadable or repeated values", () => {
-    const facets = parseKnowledgeFacets({
+    const facets = parseKnowledgeFacetsResponse({ facets: {
       kinds: [{ value: "thread", count: 4 }, { value: "post", label: "post", count: -1 }, { value: "", count: 2 }, { label: "x" }, { value: "thread", count: 9 }],
       authors: "many",
       years: [{ value: "2026", label: "2026", count: 2.7 }]
-    });
+    } })?.facets;
     assert.deepEqual(facets, {
       kinds: [
         { value: "thread", label: "thread", count: 4 },
@@ -142,7 +152,7 @@ describe("facets", () => {
       collections: [],
       years: [{ value: "2026", label: "2026", count: 2 }]
     });
-    assert.equal(parseKnowledgeFacets(null), null);
+    assert.equal(parseKnowledgeFacetsResponse({ facets: null }), null);
   });
 
   it("need the facets in POST /facets' answer; a missing total is the kinds' sum", () => {
@@ -192,22 +202,21 @@ describe("the client", () => {
     assert.equal(sent[0]?.path, "/api/knowledge/facets");
     assert.deepEqual(sent[0]?.body, { collections: ["kc_seo"], filters: { authors: ["@om"] } });
     answer = "<html>";
-    await assert.rejects(api.getKnowledgeFacets({}), /knowledge facets this app cannot read/);
+    await assert.rejects(api.getKnowledgeFacets({}));
   });
 
   it("lists entries with the filter params on the query string", async () => {
     const { api, sent } = client(() => ({ entries: [entry()], nextCursor: null }));
     await api.listKnowledgeEntries({ collection: "kc_seo", limit: 50, kinds: "thread,post", authors: "om_patel5", years: "2026", savedBefore: "2026-09-01" });
-    assert.deepEqual(sent[0]?.query, {
+    assert.equal(sent[0]?.method, "GET");
+    assert.equal(sent[0]?.path, "/api/knowledge/entries");
+    const query = Object.fromEntries(Object.entries(sent[0]?.query ?? {}).filter(([, value]) => value !== undefined));
+    assert.deepEqual(query, {
       collection: "kc_seo",
-      cursor: undefined,
       limit: 50,
       kinds: "thread,post",
       authors: "om_patel5",
       years: "2026",
-      postedAfter: undefined,
-      postedBefore: undefined,
-      savedAfter: undefined,
       savedBefore: "2026-09-01"
     });
   });

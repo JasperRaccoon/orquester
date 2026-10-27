@@ -17,19 +17,19 @@ const offerRoutes = (pricebook = f("pricebook.json")) => [
   { path: "/v1/pricebook", replies: [{ body: pricebook }] }
 ];
 
-test("hyperstack: validate sends the api_key header; a bad key is ok:false", async () => {
+test("hyperstack: validate sends the api_key header; a bad key is ok:false", async (t) => {
   const good = routedFetch([{ path: "/v1/core/environments", replies: [{ body: f("environments.json") }] }]);
-  assert.deepEqual(await hyperstackAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await hyperstackAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(good.seen[0]!.headers.api_key, "hs_test");
   const bad = routedFetch([{ path: "/v1/core/environments", replies: [{ status: 401, body: f("unauthorized.json") }] }]);
-  const result = await hyperstackAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await hyperstackAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Invalid API Key/);
 });
 
-test("hyperstack: offers list in-stock GPU flavors priced from the pricebook plus the public IP", async () => {
+test("hyperstack: offers list in-stock GPU flavors priced from the pricebook plus the public IP", async (t) => {
   const { fetch } = routedFetch(offerRoutes());
-  const offers = await hyperstackAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await hyperstackAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.equal(offers.priceSource, "live");
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
@@ -55,15 +55,15 @@ test("hyperstack: offers list in-stock GPU flavors priced from the pricebook plu
   );
 });
 
-test("hyperstack: a GPU missing from the pricebook is priced from the bundled table", async () => {
+test("hyperstack: a GPU missing from the pricebook is priced from the bundled table", async (t) => {
   const pricebook = JSON.stringify(JSON.parse(f("pricebook.json")).filter((entry: { name: string }) => entry.name !== "H100-80G-PCIe"));
   const { fetch } = routedFetch(offerRoutes(pricebook));
-  const offers = await hyperstackAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await hyperstackAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.equal(offers.priceSource, "table");
   assert.equal(offers.sizes.find((size) => size.id === "n3-H100x1")!.hourlyUsd, 2.507);
 });
 
-test("hyperstack: create ensures the region environment, imports the box key pair and starts one labelled VM", async () => {
+test("hyperstack: create ensures the region environment, imports the box key pair and starts one labelled VM", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/v1/core/flavors?region=CANADA-1", replies: [{ body: f("flavors.json") }] },
     { path: "/v1/pricebook", replies: [{ body: f("pricebook.json") }] },
@@ -73,7 +73,7 @@ test("hyperstack: create ensures the region environment, imports the box key pai
     { method: "POST", path: "/v1/core/virtual-machines", replies: [{ body: f("vm-create.json") }] }
   ]);
   const request = sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1" });
-  const result = await hyperstackAdapter.create(creds, request, callOptions(fetch));
+  const result = await hyperstackAdapter.create(creds, request, callOptions(t, fetch));
   const posts = seen.filter((call) => call.method === "POST");
   assert.deepEqual(posts[0]!.body, { name: "orquester-canada-1", region: "CANADA-1" });
   assert.deepEqual(posts[1]!.body, { name: "orq-box-0123abcd", environment_name: "orquester-canada-1", public_key: request.sshPublicKey });
@@ -96,7 +96,7 @@ test("hyperstack: create ensures the region environment, imports the box key pai
   });
 });
 
-test("hyperstack: a key pair left by an earlier attempt (409) is reused", async () => {
+test("hyperstack: a key pair left by an earlier attempt (409) is reused", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/v1/core/flavors?region=CANADA-1", replies: [{ body: f("flavors.json") }] },
     { path: "/v1/pricebook", replies: [{ body: f("pricebook.json") }] },
@@ -110,12 +110,12 @@ test("hyperstack: a key pair left by an earlier attempt (409) is reused", async 
     { path: "/v1/core/keypairs?search=orq-box-0123abcd", replies: [{ body: f("keypairs-search.json") }] },
     { method: "POST", path: "/v1/core/virtual-machines", replies: [{ body: f("vm-create.json") }] }
   ]);
-  const result = await hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1" }), callOptions(fetch));
+  const result = await hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1" }), callOptions(t, fetch));
   assert.equal(result.ref.keypairId, 5521);
   assert.equal((seen.at(-1)!.body as { key_name: string }).key_name, "orq-box-0123abcd");
 });
 
-test("hyperstack: a rejected VM create removes the key pair it imported; unknown flavors fail early", async () => {
+test("hyperstack: a rejected VM create removes the key pair it imported; unknown flavors fail early", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: "/v1/core/flavors?region=CANADA-1", replies: [{ body: f("flavors.json") }] },
     { path: "/v1/pricebook", replies: [{ body: f("pricebook.json") }] },
@@ -129,7 +129,7 @@ test("hyperstack: a rejected VM create removes the key pair it imported; unknown
     { method: "DELETE", path: "/v1/core/keypair/5521", replies: [{ body: f("keypair-deleted.json") }] }
   ]);
   await assert.rejects(
-    hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1", image: "Ubuntu Server 24.04 LTS (Noble Numbat)" }), callOptions(fetch)),
+    hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1", image: "Ubuntu Server 24.04 LTS (Noble Numbat)" }), callOptions(t, fetch)),
     /Insufficient stock/
   );
   assert.ok(!seen.some((call) => call.url.includes("/core/images")), "an explicit image skips the image lookup");
@@ -140,19 +140,19 @@ test("hyperstack: a rejected VM create removes the key pair it imported; unknown
     { path: "/v1/pricebook", replies: [{ body: f("pricebook.json") }] },
     { path: "/v1/core/images", replies: [{ body: f("images.json") }] }
   ]);
-  await assert.rejects(hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-B200x1", region: "US-1" }), callOptions(unknown.fetch)), /not offered/);
+  await assert.rejects(hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-B200x1", region: "US-1" }), callOptions(t, unknown.fetch)), /not offered/);
 });
 
-test("hyperstack: status maps VM states and 404 → gone", async () => {
+test("hyperstack: status maps VM states and 404 → gone", async (t) => {
   const running = routedFetch([{ path: "/v1/core/virtual-machines/7613", replies: [{ body: f("vm-get.json") }] }]);
-  assert.deepEqual(await hyperstackAdapter.status(creds, { vmId: 7613 }, callOptions(running.fetch)), {
+  assert.deepEqual(await hyperstackAdapter.status(creds, { vmId: 7613 }, callOptions(t, running.fetch)), {
     state: "running",
     detail: "ACTIVE",
     publicIp: "192.0.2.118",
     hourlyUsd: null
   });
   const gone = routedFetch([{ path: "/v1/core/virtual-machines/", replies: [{ status: 404, body: f("vm-not-found.json") }] }]);
-  assert.equal((await hyperstackAdapter.status(creds, { vmId: 7613 }, callOptions(gone.fetch))).state, "gone");
+  assert.equal((await hyperstackAdapter.status(creds, { vmId: 7613 }, callOptions(t, gone.fetch))).state, "gone");
   const vm = JSON.parse(f("vm-get.json")).instance;
   for (const [raw, state] of [
     ["CREATING", "pending"],
@@ -163,17 +163,17 @@ test("hyperstack: status maps VM states and 404 → gone", async () => {
     ["ERROR", "error"]
   ] as const) {
     const stub = routedFetch([{ path: "/v1/core/virtual-machines/", replies: [{ body: JSON.stringify({ instance: { ...vm, status: raw } }) }] }]);
-    assert.equal((await hyperstackAdapter.status(creds, { vmId: 1 }, callOptions(stub.fetch))).state, state, raw);
+    assert.equal((await hyperstackAdapter.status(creds, { vmId: 1 }, callOptions(t, stub.fetch))).state, state, raw);
   }
 });
 
-test("hyperstack: destroy deletes the VM and its key pair, idempotently, retrying after creation settles", async () => {
+test("hyperstack: destroy deletes the VM and its key pair, idempotently, retrying after creation settles", async (t) => {
   const plain = routedFetch([
     { method: "DELETE", path: "/v1/core/virtual-machines/7613", replies: [{ body: f("vm-deleted.json") }, { status: 404, body: f("vm-not-found.json") }] },
     { method: "DELETE", path: "/v1/core/keypair/5521", replies: [{ body: f("keypair-deleted.json") }, { status: 404, body: '{"status":false,"message":"Keypair not found","error_reason":"not_found"}' }] }
   ]);
-  await hyperstackAdapter.destroy(creds, { vmId: 7613, keypairId: 5521 }, callOptions(plain.fetch));
-  await hyperstackAdapter.destroy(creds, { vmId: 7613, keypairId: 5521 }, callOptions(plain.fetch));
+  await hyperstackAdapter.destroy(creds, { vmId: 7613, keypairId: 5521 }, callOptions(t, plain.fetch));
+  await hyperstackAdapter.destroy(creds, { vmId: 7613, keypairId: 5521 }, callOptions(t, plain.fetch));
   assert.equal(plain.seen.length, 4);
 
   const creating = routedFetch([
@@ -187,7 +187,7 @@ test("hyperstack: destroy deletes the VM and its key pair, idempotently, retryin
     { method: "DELETE", path: "/v1/core/keypair/5521", replies: [{ body: f("keypair-deleted.json") }] }
   ]);
   // A ref from listManaged: the key pair is found by its exact name.
-  await hyperstackAdapter.destroy(creds, { vmId: 7613, keyName: "orq-box-0123abcd" }, callOptions(creating.fetch));
+  await hyperstackAdapter.destroy(creds, { vmId: 7613, keyName: "orq-box-0123abcd" }, callOptions(t, creating.fetch));
   assert.deepEqual(
     creating.seen.map((call) => `${call.method} ${new URL(call.url).pathname}`),
     [
@@ -200,9 +200,9 @@ test("hyperstack: destroy deletes the VM and its key pair, idempotently, retryin
   );
 });
 
-test("hyperstack: listManaged keeps labelled or orq- named VMs", async () => {
+test("hyperstack: listManaged keeps labelled or orq- named VMs", async (t) => {
   const { fetch, seen } = routedFetch([{ path: "/v1/core/virtual-machines?page=1&pageSize=100", replies: [{ body: f("vms-list.json") }] }]);
-  const managed = await hyperstackAdapter.listManaged(creds, callOptions(fetch));
+  const managed = await hyperstackAdapter.listManaged(creds, callOptions(t, fetch));
   assert.equal(seen.length, 1);
   assert.deepEqual(
     managed.map((vm) => [vm.ref.vmId, vm.boxId, vm.state, vm.ref.keyName]),
@@ -213,7 +213,7 @@ test("hyperstack: listManaged keeps labelled or orq- named VMs", async () => {
   );
 });
 
-test("hyperstack: helpers pick the newest CUDA image and name environments; 429 is retried", async () => {
+test("hyperstack: helpers pick the newest CUDA image and name environments; 429 is retried", async (t) => {
   assert.equal(
     pickHyperstackImage([
       "Ubuntu Server 22.04 LTS R535 CUDA 12.2 with Docker",
@@ -229,6 +229,6 @@ test("hyperstack: helpers pick the newest CUDA image and name environments; 429 
   const { fetch, seen } = routedFetch([
     { path: "/v1/core/environments", replies: [{ status: 429, headers: { "retry-after": "0" }, body: "" }, { body: f("environments.json") }] }
   ]);
-  assert.deepEqual(await hyperstackAdapter.validate(creds, callOptions(fetch)), { ok: true });
+  assert.deepEqual(await hyperstackAdapter.validate(creds, callOptions(t, fetch)), { ok: true });
   assert.equal(seen.length, 2);
 });

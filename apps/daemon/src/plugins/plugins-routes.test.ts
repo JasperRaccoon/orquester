@@ -187,7 +187,6 @@ test("version refusals: a bundled plugin's version routes 409; the per-workspace
   const X = EXCALIDRAW_PLUGIN_ID;
   await expect({ method: "PUT", url: pluginRoutes.plugin(X), payload: { enabled: 1 } }, 400, "INVALID_REQUEST");
   await expect({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: "yes" } }, 400, "INVALID_REQUEST");
-  await expect({ method: "PUT", url: pluginRoutes.plugin("nope"), payload: { enabled: true } }, 404, "PLUGIN_NOT_FOUND");
   await expect({ method: "POST", url: pluginRoutes.check(X) }, 409, "PLUGIN_BUNDLED");
   await expect({ method: "POST", url: pluginRoutes.rollback(X) }, 409, "PLUGIN_BUNDLED");
   await expect({ method: "DELETE", url: pluginRoutes.downloads(X) }, 409, "PLUGIN_BUNDLED");

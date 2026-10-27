@@ -61,7 +61,7 @@ export interface VphoneReadinessContext {
 }
 
 /** Pick vphone-cli: `$VPHONE_CLI_PATH`, PATH, the Homebrew prefixes; else vphone-launchpad-cli (`exec`). */
-export function locateVphoneCli(found: { envPath: string | null; whichCli: string | null; whichLaunchpad: string | null; executable: ReadonlySet<string> }): VphoneCliLocation | null {
+function locateVphoneCli(found: { envPath: string | null; whichCli: string | null; whichLaunchpad: string | null; executable: ReadonlySet<string> }): VphoneCliLocation | null {
   const cli = [found.envPath, found.whichCli, ...VPHONE_CLI_CANDIDATES].find((path): path is string => !!path && found.executable.has(path));
   if (cli) return { command: cli, prefix: [] };
   const launchpad = [found.whichLaunchpad, ...VPHONE_LAUNCHPAD_CANDIDATES].find((path): path is string => !!path && found.executable.has(path));
@@ -83,7 +83,7 @@ function checkCli(cli: VphoneCliLocation | null): DeviceReadinessCheck {
   };
 }
 
-export function checkMacos(version: string): DeviceReadinessCheck {
+function checkMacos(version: string): DeviceReadinessCheck {
   const trimmed = version.trim();
   const major = Number.parseInt(trimmed.split(".")[0] ?? "", 10);
   if (Number.isFinite(major) && major >= 15) return { id: "macos", label: "macOS 15 or newer", state: "ok", detail: `macOS ${trimmed}` };
@@ -97,7 +97,7 @@ export function checkMacos(version: string): DeviceReadinessCheck {
   };
 }
 
-export function checkNotVm(hvVmmPresent: string): DeviceReadinessCheck {
+function checkNotVm(hvVmmPresent: string): DeviceReadinessCheck {
   const value = hvVmmPresent.trim();
   if (value === "0") return { id: "not-vm", label: "A physical Mac (not a VM)", state: "ok", detail: "kern.hv_vmm_present = 0" };
   return {
@@ -111,7 +111,7 @@ export function checkNotVm(hvVmmPresent: string): DeviceReadinessCheck {
   };
 }
 
-export function checkResearchGuests(csrutilOutput: string): DeviceReadinessCheck {
+function checkResearchGuests(csrutilOutput: string): DeviceReadinessCheck {
   // `csrutil allow-research-guests status` → "Allow Research Guests status: enabled." / "…: disabled."
   const enabled = /:\s*enabled\b/i.test(csrutilOutput) && !/:\s*disabled\b/i.test(csrutilOutput);
   if (enabled) return { id: "research-guests", label: "Research guests allowed", state: "ok", detail: "csrutil allow-research-guests: enabled" };
@@ -126,7 +126,7 @@ export function checkResearchGuests(csrutilOutput: string): DeviceReadinessCheck
 }
 
 /** True when `boot-args` carries `key=<v>` with a nonzero value. */
-export function bootArgIsSet(bootArgs: string, key: string): boolean {
+function bootArgIsSet(bootArgs: string, key: string): boolean {
   for (const token of bootArgs.split(/[\s\t\n]+/)) {
     if (!token.startsWith(`${key}=`)) continue;
     const value = token.slice(key.length + 1);
@@ -141,7 +141,7 @@ function bundleOf(cli: VphoneCliLocation | null): string | null {
   return match ? match[1]! : null;
 }
 
-export function checkAmfi(probe: Pick<VphoneProbe, "processes" | "bootArgs" | "preflight" | "cli">): DeviceReadinessCheck {
+function checkAmfi(probe: Pick<VphoneProbe, "processes" | "bootArgs" | "preflight" | "cli">): DeviceReadinessCheck {
   const amfidont = probe.processes.split("\n").some((line) => line.includes("amfidont") && !line.includes("vphone-amfidont"));
   const bootArg = bootArgIsSet(probe.bootArgs, "amfi_get_out_of_my_way");
   const preflightOk = probe.preflight?.exitCode === 0;
@@ -172,7 +172,7 @@ export function chooseCloneSource(probe: Pick<VphoneProbe, "templates" | "machin
   return null;
 }
 
-export function checkTemplate(probe: Pick<VphoneProbe, "templates" | "machines" | "cli">, context: VphoneReadinessContext): DeviceReadinessCheck {
+function checkTemplate(probe: Pick<VphoneProbe, "templates" | "machines" | "cli">, context: VphoneReadinessContext): DeviceReadinessCheck {
   const label = "A vphone template to clone";
   const source = chooseCloneSource(probe);
   if (source) {

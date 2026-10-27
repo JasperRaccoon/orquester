@@ -22,9 +22,7 @@ import {
   projectBarMessage,
   projectBarModel,
   projectSecretBadge,
-  pushConfirmText,
   repoSecretCount,
-  resetConfirmText,
   type BarDismissal
 } from "./drift.logic";
 
@@ -206,50 +204,7 @@ describe("projectBarModel and projectBarMessage", () => {
   });
 });
 
-describe("push and reset confirms", () => {
-  const me = clone("Mine", [file(".env", "modified")]);
-  const v = vault([
-    me,
-    clone("Synced", [file(".env", "synced")]),
-    clone("Behind", [file(".env", "outdated")]),
-    clone("Fresh", [file(".env", "missing")]),
-    clone("Diverged", [file(".env", "modified")]),
-    clone("NoDir", [file(".env", "missing-dir")])
-  ]);
-
-  it("names the clones the push overwrites and the ones that stay flagged", () => {
-    assert.equal(
-      pushConfirmText(v, me.projectPath, [".env"]),
-      "This makes this project's .env the vault's version. It overwrites the copy in Synced, Behind, Fresh. Diverged has its own changes and stays flagged."
-    );
-  });
-
-  it("says when no other clone is overwritten", () => {
-    const alone = vault([me, clone("Other1", [file(".env", "modified")]), clone("Other2", [file(".env", "modified")])]);
-    assert.equal(
-      pushConfirmText(alone, me.projectPath, [".env", "b/.env"]),
-      "This makes this project's 2 changed secret files the vault's version. No other clone is overwritten. Other1, Other2 have their own changes and stay flagged."
-    );
-  });
-
-  it("judges each pushed file on its own: a clone with mixed states is named in both, a missing copy receives it", () => {
-    const mine = clone("Mine", [file(".env", "modified"), file("b/.env", "modified")]);
-    const mixed = vault([
-      mine,
-      clone("Mixed", [file(".env", "modified"), file("b/.env", "synced")]),
-      clone("Missing", [file(".env", "missing"), file("b/.env", "missing-dir")]),
-      clone("Gone", [file(".env", "deleted")])
-    ]);
-    assert.equal(
-      pushConfirmText(mixed, mine.projectPath, [".env", "b/.env"]),
-      "This makes this project's 2 changed secret files the vault's version. It overwrites the copy in Mixed, Missing. Mixed has its own changes and stays flagged."
-    );
-    assert.equal(
-      pushConfirmText(mixed, mine.projectPath, ["b/.env"]),
-      "This makes this project's b/.env the vault's version. It overwrites the copy in Mixed."
-    );
-  });
-
+describe("content preconditions", () => {
   it("expects the content tokens shown, null for a copy the clone doesn't have", () => {
     const files = [
       file(".env", "modified", { contentToken: "t1" }),
@@ -259,17 +214,6 @@ describe("push and reset confirms", () => {
     ];
     assert.deepEqual(expectedContent(files, [".env", "b/.env", "c/.env"]), { ".env": "t1", "b/.env": null });
     assert.deepEqual(expectedContent(files, ["c/.env", "nope"]), undefined);
-  });
-
-  it("warns that a reset discards this project's changes", () => {
-    assert.equal(
-      resetConfirmText([".env"]),
-      "This replaces .env in this project with the vault's version. This project's changes to it are discarded."
-    );
-    assert.equal(
-      resetConfirmText([".env", "b/.env"]),
-      "This replaces 2 secret files in this project with the vault's version. This project's changes to them are discarded."
-    );
   });
 });
 

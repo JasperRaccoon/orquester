@@ -10,7 +10,7 @@
  *   cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx src/devices/hosts/box/android-integration.it.ts <root> <appDir>
  *
  * Env: `ORQ_IT_SDK=<sdk>` hard-links an SDK into `<root>/android-sdk` first; `ORQ_IT_DEVICES`
- * (default 2); `ORQ_IT_GPU=swangle_indirect,swiftshader_indirect` (the GPU modes a golden tries);
+ * (default 2);
  * `ORQ_IT_KIND=box|byo` (default byo); `ORQ_IT_PROFILE` (default pixel-9).
  */
 
@@ -22,7 +22,7 @@ import { promisify } from "node:util";
 import { DEFAULT_DEVICES_SETTINGS, deviceProfile, type DevicesSettings } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 
-import { localBoxConnection } from "../../../boxes/testing.ts";
+import { isolatedDeviceBox } from "./local-namespace.ts";
 import { createAgentDeviceClient } from "../../agent-device.ts";
 import type { DeviceToolchain } from "../../toolchain/index.ts";
 import { BoxAndroidHost } from "./android-host.ts";
@@ -36,7 +36,6 @@ if (!root || !appDir) {
 const profile = deviceProfile(process.env.ORQ_IT_PROFILE ?? "pixel-9")!;
 const count = Number(process.env.ORQ_IT_DEVICES ?? 2);
 const kind = process.env.ORQ_IT_KIND === "box" ? "box" : "byo";
-const gpuModes = process.env.ORQ_IT_GPU ? process.env.ORQ_IT_GPU.split(",") : undefined;
 
 const started = Date.now();
 const t = () => `${((Date.now() - started) / 1000).toFixed(1)}s`;
@@ -58,7 +57,7 @@ if (process.env.ORQ_IT_SDK) {
   await execFile("cp", ["-al", process.env.ORQ_IT_SDK, join(root, "android-sdk")]).catch((error) => log("SDK copy:", String(error)));
 }
 
-const connection = localBoxConnection({ boxId: "it-box" });
+const connection = isolatedDeviceBox({ root, boxId: "it-box", provider: kind === "box" ? "blacksmith" : "byo" });
 const settings: DevicesSettings = { ...DEFAULT_DEVICES_SETTINGS, android: { ...DEFAULT_DEVICES_SETTINGS.android, enabled: true, profiles: [profile.id], maxLocalDevices: Math.max(count, 2) } };
 const record = {
   id: "it-box",
@@ -83,9 +82,7 @@ const make = () =>
     connection: () => connection,
     settings: () => settings,
     activeLeases: () => leases,
-    logger,
-    root,
-    ...(gpuModes ? { gpuModes } : {})
+    logger
   });
 const signal = AbortSignal.timeout(40 * 60_000);
 let failed = false;

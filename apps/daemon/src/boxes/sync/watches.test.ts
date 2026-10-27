@@ -12,7 +12,7 @@ import { BoxConfigWatches } from "./watches.ts";
 
 function recordingSync(options: { failSync?: boolean } = {}) {
   const watching = new Map<string, number>();
-  const keyOf = (boxId: string, scope: BoxSyncScope) => `${boxId}|${scope.agent}|${scope.configRoots.join(",")}`;
+  const keyOf = (boxId: string, scope: BoxSyncScope) => `${boxId}|${scope.agent}|${[...new Set(scope.configRoots)].sort().join(",")}`;
   const sync: BoxConfigSync = {
     ensureSynced: async () => {
       if (options.failSync) throw new Error("box gone");

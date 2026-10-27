@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,8 +6,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import type { ExecFn } from "../android/exec.ts";
-import type { DownloadFn } from "./download.ts";
-import { BOX_TOOLS_LOCK, INSTALL_SENTINEL, installNpmTool, isToolInstalled, lockPins, pruneToolVersions, SCRCPY_SERVER, scrcpyJarPath, TOOL_ENTRY, toolDir, toolLock } from "./npm-tools.ts";
+import { downloadPinned, type DownloadFn } from "./download.ts";
+import { BOX_TOOLS_LOCK, INSTALL_SENTINEL, installNpmTool, isToolInstalled, pruneToolVersions, toolDir, toolLock } from "./npm-tools.ts";
 import { DEVICE_TOOL_VERSIONS } from "./index.ts";
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -20,14 +19,6 @@ async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-/** A lock pinning `name@version` (tests install versions this build ships no lock for). */
-function lockFor(name: string, version: string) {
-  return {
-    packageJson: JSON.stringify({ name: "orquester-device-tool", private: true, dependencies: { [name]: version } }),
-    packageLock: JSON.stringify({ lockfileVersion: 3, packages: { [`node_modules/${name}`]: { version } } })
-  };
-}
-
 /** `npm ci` that "installs" the lock's package entry module into the prefix; `fail` makes it exit 1. */
 function fakeNpm(calls: string[][], options: { fail?: boolean } = {}): ExecFn {
   return async (_command, args) => {
@@ -37,74 +28,59 @@ function fakeNpm(calls: string[][], options: { fail?: boolean } = {}): ExecFn {
     const pkg = JSON.parse(await readFile(join(prefix, "package.json"), "utf8")) as { dependencies: Record<string, string> };
     assert.ok(existsSync(join(prefix, "package-lock.json")), "the lockfile is in the prefix");
     const name = Object.keys(pkg.dependencies)[0]!;
-    const entry = join(prefix, TOOL_ENTRY[name]!.entry);
+    const entry = join(prefix, name === "agent-device" ? "node_modules/agent-device/bin/agent-device.mjs" : "node_modules/expo-device-hub/dist/server/cli.mjs");
     await mkdir(dirname(entry), { recursive: true });
     await writeFile(entry, "// entry\n");
     return { exitCode: 0, stdout: "added 1 package", stderr: "" };
   };
 }
 
-/** A downloader that writes "jar". */
-function fakeDownload(downloads: string[]): DownloadFn {
-  return async (file, dest) => {
-    downloads.push(file.url);
-    await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, "jar");
-  };
-}
+const noDownload: DownloadFn = async () => { throw new Error("unexpected download while installing agent-device"); };
 
-test("install: staging → sentinel → rename; the hub gets its scrcpy jar; installing again is a no-op", async () => {
+test("pinned downloads verify actual bytes, reuse verified cache and preserve prior files on checksum failure", async (t) => {
   await withDir(async (root) => {
-    const calls: string[][] = [];
-    const downloads: string[] = [];
-    // The cached jar is checked against the pinned SHA-256: pin the fake's bytes.
-    const scrcpy = { ...SCRCPY_SERVER, sha256: createHash("sha256").update("jar").digest("hex") };
-    const deps = { exec: fakeNpm(calls), download: fakeDownload(downloads), nodePath: "/usr/bin/node", npmCli: "/npm-cli.js", env: {}, downloads: join(root, ".dl"), scrcpy, lock: lockFor("expo-device-hub", "1.0.0") };
-    {
-      const dir = await installNpmTool(root, "expo-device-hub", "1.0.0", deps, new AbortController().signal);
-      assert.equal(dir, toolDir(root, "expo-device-hub", "1.0.0"));
-      assert.ok(existsSync(join(dir, INSTALL_SENTINEL)));
-      assert.ok(existsSync(scrcpyJarPath(dir)));
-      assert.ok(isToolInstalled(root, "expo-device-hub", "1.0.0"));
-      assert.deepEqual(calls[0]!.slice(0, 3), ["/npm-cli.js", "ci", "--ignore-scripts"]);
-      assert.ok(calls[0]!.includes("--no-audit") && calls[0]!.includes("--no-fund"));
-      assert.equal(calls[0]!.includes("expo-device-hub@1.0.0"), false, "no spec: the lockfile decides");
-      assert.deepEqual(downloads, [SCRCPY_SERVER.url]);
-      await installNpmTool(root, "expo-device-hub", "1.0.0", deps, new AbortController().signal);
-      assert.equal(calls.length, 1, "already installed");
-      assert.deepEqual((await readdir(root)).filter((entry) => entry.startsWith(".staging")), []);
-      // The jar removed: repaired in place without reinstalling.
-      await rm(scrcpyJarPath(dir));
-      assert.equal(isToolInstalled(root, "expo-device-hub", "1.0.0"), false);
-      await installNpmTool(root, "expo-device-hub", "1.0.0", deps, new AbortController().signal);
-      assert.equal(calls.length, 1);
-      assert.ok(isToolInstalled(root, "expo-device-hub", "1.0.0"));
-      // A jar that does not match the pin is refused.
-      await rm(scrcpyJarPath(dir));
-      await assert.rejects(installNpmTool(root, "expo-device-hub", "1.0.0", { ...deps, scrcpy: { ...scrcpy, sha256: "0".repeat(64) } }, new AbortController().signal), /checksum/);
-    }
+    let calls = 0;
+    let body = "hello";
+    t.mock.method(globalThis, "fetch", async () => { calls += 1; return new Response(body); });
+    const file = { url: "https://fixture.invalid/tool", sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" };
+    const dest = join(root, "tool");
+    const signal = new AbortController().signal;
+    await downloadPinned(file, dest, { signal });
+    assert.equal(await readFile(dest, "utf8"), "hello");
+    await downloadPinned(file, dest, { signal });
+    assert.equal(calls, 1);
+    body = "untrusted bytes";
+    await assert.rejects(downloadPinned({ ...file, sha256: "0".repeat(64) }, dest, { signal }), /checksum/);
+    assert.equal(calls, 2);
+    assert.equal(await readFile(dest, "utf8"), "hello");
+    assert.equal(existsSync(`${dest}.part`), false);
   });
 });
 
 test("install: a failed npm leaves nothing installed and no staging dir; the error names npm's last line", async () => {
   await withDir(async (root) => {
-    const deps = { exec: fakeNpm([], { fail: true }), download: fakeDownload([]), nodePath: "/n", npmCli: "/c", env: {}, downloads: join(root, ".dl") };
-    await assert.rejects(installNpmTool(root, "agent-device", "0.21.31", deps, new AbortController().signal), /404 Not Found/);
-    assert.equal(isToolInstalled(root, "agent-device", "0.21.31"), false);
+    const version = DEVICE_TOOL_VERSIONS["agent-device"];
+    const deps = { exec: fakeNpm([], { fail: true }), download: noDownload, nodePath: "/n", npmCli: "/c", env: {}, downloads: join(root, ".dl") };
+    await assert.rejects(installNpmTool(root, "agent-device", version, deps, new AbortController().signal), /404 Not Found/);
+    assert.equal(isToolInstalled(root, "agent-device", version), false);
     assert.deepEqual((await readdir(root)).filter((entry) => !entry.startsWith(".agent-device.lock")), []);
   });
 });
 
 test("install: a dir without the sentinel is not installed and is replaced", async () => {
   await withDir(async (root) => {
-    const half = toolDir(root, "agent-device", "2.0.0");
+    const version = DEVICE_TOOL_VERSIONS["agent-device"];
+    const half = toolDir(root, "agent-device", version);
     await mkdir(join(half, "node_modules", "agent-device", "bin"), { recursive: true });
-    await writeFile(join(half, TOOL_ENTRY["agent-device"]!.entry), "");
-    assert.equal(isToolInstalled(root, "agent-device", "2.0.0"), false);
+    await writeFile(join(half, "node_modules/agent-device/bin/agent-device.mjs"), "");
+    assert.equal(isToolInstalled(root, "agent-device", version), false);
     const calls: string[][] = [];
-    await installNpmTool(root, "agent-device", "2.0.0", { exec: fakeNpm(calls), download: fakeDownload([]), nodePath: "/n", npmCli: "/c", env: {}, downloads: root, lock: lockFor("agent-device", "2.0.0") }, new AbortController().signal);
+    await installNpmTool(root, "agent-device", version, { exec: fakeNpm(calls), download: noDownload, nodePath: "/n", npmCli: "/c", env: {}, downloads: root }, new AbortController().signal);
     assert.equal(calls.length, 1);
-    assert.ok(isToolInstalled(root, "agent-device", "2.0.0"));
+    assert.ok(isToolInstalled(root, "agent-device", version));
+    assert.deepEqual(calls[0]!.slice(0, 3), ["/c", "ci", "--ignore-scripts"]);
+    await installNpmTool(root, "agent-device", version, { exec: fakeNpm(calls), download: noDownload, nodePath: "/n", npmCli: "/c", env: {}, downloads: root }, new AbortController().signal);
+    assert.equal(calls.length, 1, "an installed tool is reused");
   });
 });
 
@@ -137,9 +113,15 @@ test("locks: every pinned tool ships a lock of exactly its version (and the box 
     for (const [path, entry] of Object.entries(parsed.packages)) if (path !== "") assert.ok(entry.integrity && entry.resolved, `${path} is pinned with its integrity`);
     assert.equal(toolLock(name, "0.0.1"), null);
   }
-  assert.ok(BOX_TOOLS_LOCK && lockPins(BOX_TOOLS_LOCK, DEVICE_TOOL_VERSIONS));
+  assert.ok(BOX_TOOLS_LOCK);
+  const boxPackage = JSON.parse(BOX_TOOLS_LOCK.packageJson) as { dependencies: Record<string, string> };
+  const boxLock = JSON.parse(BOX_TOOLS_LOCK.packageLock) as { packages: Record<string, { version: string }> };
+  for (const [name, version] of Object.entries(DEVICE_TOOL_VERSIONS)) {
+    assert.equal(boxPackage.dependencies[name], version);
+    assert.equal(boxLock.packages[`node_modules/${name}`]!.version, version);
+  }
   await withDir(async (root) => {
-    const deps = { exec: fakeNpm([]), download: fakeDownload([]), nodePath: "/n", npmCli: "/c", env: {}, downloads: root };
+    const deps = { exec: fakeNpm([]), download: noDownload, nodePath: "/n", npmCli: "/c", env: {}, downloads: root };
     await assert.rejects(installNpmTool(root, "agent-device", "9.9.9", deps, new AbortController().signal), /no lockfile/);
   });
 });

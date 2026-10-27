@@ -7,10 +7,10 @@
  * capture per lease per {@link THUMBNAIL_CACHE_MS}: concurrent viewers share it.
  */
 
-import { deviceImages, ImagePoolBusyError, type ImageWorkerPool } from "./image-pool.ts";
+import { deviceImages, ImagePoolBusyError } from "./image-pool.ts";
 
 /** A thumbnail is reused for this long. */
-export const THUMBNAIL_CACHE_MS = 1_000;
+const THUMBNAIL_CACHE_MS = 1_000;
 const HUB_TIMEOUT_MS = 10_000;
 
 /** Where a lease's screen is captured. */
@@ -35,13 +35,13 @@ interface Entry {
 export class DeviceThumbnails {
   private readonly entries = new Map<string, Entry>();
 
-  constructor(private readonly deps: { now(): number; fetch?: typeof fetch; cacheMs?: number; images?: Pick<ImageWorkerPool, "thumbnail"> }) {}
+  constructor(private readonly deps: { now(): number; fetch?: typeof fetch }) {}
 
   /** The lease's thumbnail: the cached one (same width, younger than the cache time), else a new capture. */
   get(leaseId: string, source: ThumbnailSource, width: number): Promise<Buffer> {
     const now = this.deps.now();
     const cached = this.entries.get(leaseId);
-    if (cached && cached.width === width && now - cached.at < (this.deps.cacheMs ?? THUMBNAIL_CACHE_MS)) return cached.done;
+    if (cached && cached.width === width && now - cached.at < THUMBNAIL_CACHE_MS) return cached.done;
     const done = this.capture(leaseId, source, width);
     const entry: Entry = { at: now, width, done };
     this.entries.set(leaseId, entry);
@@ -69,7 +69,7 @@ export class DeviceThumbnails {
     if (!response.ok) throw new ThumbnailError(`The device hub answered ${response.status} for the screenshot.`);
     const bytes = Buffer.from(await response.arrayBuffer());
     try {
-      return await (this.deps.images ?? deviceImages).thumbnail(leaseId, bytes, width);
+      return await deviceImages.thumbnail(leaseId, bytes, width);
     } catch (error) {
       if (error instanceof ImagePoolBusyError) throw new ThumbnailError("Too many thumbnails are being made right now; the next one follows shortly.");
       throw new ThumbnailError("The device hub's screenshot is not an image this build can read.");

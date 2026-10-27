@@ -78,13 +78,13 @@ export function usageView(res: UsageResponse, accounts: readonly AgentAccount[],
  * cap: an oversized table is shed here, whole buckets oldest first, so it never reaches ok()'s last-resort cut. The head
  * (≤ 90 bucket totals, a few KB) is never shed.
  */
-export const MAX_COST_VIEW_BYTES = 50_000;
+const MAX_COST_VIEW_BYTES = 50_000;
 
 const round4 = (usd: number): number => Math.round(usd * 10_000) / 10_000;
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 /** `YYYY-MM-DD` (UTC) → its ISO week, `YYYY-Www`, and that week's Monday. */
-export function isoWeek(day: string): { week: string; from: string } {
+function isoWeek(day: string): { week: string; from: string } {
   const date = new Date(`${day}T00:00:00.000Z`);
   const weekday = (date.getUTCDay() + 6) % 7; // Monday 0 … Sunday 6
   const monday = new Date(date.getTime() - weekday * 86_400_000);
@@ -101,7 +101,7 @@ type CostRowView = { agent: string; model: string; inputTokens: number; outputTo
 type CostInputRow = Pick<UsageTokenRow, "agent" | "model" | "day" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "costUsd"> & { scope?: "orquester-chats" };
 
 /** What the cost view says of an agent counted from Orquester's own chats only. */
-export const ORQUESTER_CHATS_ONLY_NOTE = (agent: string): string =>
+const ORQUESTER_CHATS_ONLY_NOTE = (agent: string): string =>
   `${AGENT_NAMES[agent] ?? agent}: Orquester chats only — the cost and tokens it reported per turn in Orquester's own agent chats (closed ones included). Its use outside Orquester (its own CLI) is not counted.`;
 
 /**

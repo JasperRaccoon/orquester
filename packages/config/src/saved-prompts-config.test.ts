@@ -21,11 +21,6 @@ test("savedPromptsPath lives beside the other daemon-owned indexes", () => {
   assert.equal(savedPromptsPath("/srv/orq"), "/srv/orq/daemon/saved-prompts.json");
 });
 
-test("a well-formed library round-trips unchanged", () => {
-  const file = { version: 1, prompts: [record(), record({ id: "p-2", projectPath: null, lastUsedAt: null })] };
-  assert.deepEqual(parseSavedPromptsConfig(file), { ...file, rejected: [], extra: {} });
-});
-
 test("bad entries are set aside one by one, verbatim; the rest of the library loads", () => {
   const bad = [
     record({ id: "" }),

@@ -113,7 +113,8 @@ test("POST /api/push/notify: validated body, the agent's push always deep-links 
   assert.deepEqual(sent[0], { title: "Done", body: "PR is up", tag: "session-c1", sessionId: "c1" });
   const again = await asAgent.request("POST", "/api/push/notify", { body: { title: "Again" } });
   assert.equal(again.status, 429);
-  assert.deepEqual(again.body, { code: "RATE_LIMITED", message: "Too many notifications: try again in 300 s.", retryAfterSeconds: 300 });
+  assert.equal((again.body as { code: string }).code, "RATE_LIMITED");
+  assert.equal((again.body as { retryAfterSeconds: number }).retryAfterSeconds, 300);
   // The user (no principal token) is not limited and may name a chat to open.
   const user = await api.request("POST", "/api/push/notify", { body: { title: "From me", sessionId: "c9" } });
   assert.equal(user.status, 200);

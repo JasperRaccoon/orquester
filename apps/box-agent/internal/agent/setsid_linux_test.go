@@ -15,20 +15,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// setsidScript is the daemon's DETACH_SCRIPT (apps/daemon/src/devices/hosts/box/android-executor.ts):
-// the Linux box Android host starts emulators, the device hub and agent-device with it over a
-// plain exec and expects them to outlive that exec, the link and an orq-agent restart.
+// The fixture reports its PID from inside the new session, then closes its
+// readiness pipe before exec. It does not copy the device launcher's script.
 const setsidScript = `log=$1; shift
 umask 077
 mkdir -p "$(dirname "$log")"
-setsid "$@" >> "$log" 2>&1 < /dev/null &
-pid=$!
-i=0
-while [ "$i" -lt 100 ] && kill -0 "$pid" 2> /dev/null && [ "$(awk '{ sub(/^.*\) /, ""); print $4 }' "/proc/$pid/stat" 2> /dev/null)" != "$pid" ]; do
-  sleep 0.02
-  i=$((i + 1))
-done
-echo "$pid"
+pid=$(setsid /bin/sh -c 'printf "%s\n" "$$" >&3; exec 3>&-; exec "$@"' orq-session "$@" 3>&1 >> "$log" 2>&1 < /dev/null &)
+printf '%s\n' "$pid"
 `
 
 // holdAfterSetsid keeps the exec running after the setsid'd start, ignoring the channel's

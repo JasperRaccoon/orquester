@@ -5,7 +5,7 @@ import type { ThreadItem, Turn } from "@orquester/api/agent-chat";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
 import { chatSummary, head, snapshot, turn } from "../fixtures.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { isoWeek } from "../usage-view.ts";
+import { costView } from "../usage-view.ts";
 import { usageFamily } from "./usage.ts";
 
 const getUsage: AnyOrquesterTool = usageFamily.find((t) => t.name === "get_usage")!;
@@ -81,12 +81,15 @@ test("get_usage cost keeps an oversized result in budget by dropping the oldest 
   assert.equal(r.totalUsd, 100); assert.equal(r.days, 90); assert.equal(r.asOf, "2026-09-22T11:00:00.000Z");
 });
 
-test("isoWeek: ISO 8601 weeks in UTC, the week-year of the Thursday, Monday as `from`", () => {
-  assert.deepEqual(isoWeek("2026-09-22"), { week: "2026-W39", from: "2026-09-21" });
-  assert.deepEqual(isoWeek("2026-09-27"), { week: "2026-W39", from: "2026-09-21" }, "Sunday ends the week");
-  assert.deepEqual(isoWeek("2026-09-28"), { week: "2026-W40", from: "2026-09-28" });
-  assert.deepEqual(isoWeek("2027-01-01"), { week: "2026-W53", from: "2026-12-28" }, "a Friday's week belongs to the previous year");
-  assert.deepEqual(isoWeek("2024-12-30"), { week: "2025-W01", from: "2024-12-30" }, "a Monday's week can belong to the next year");
+test("weekly cost uses the ISO week-year across December and January", () => {
+  for (const [day, week, from] of [
+    ["2027-01-01", "2026-W53", "2026-12-28"],
+    ["2024-12-30", "2025-W01", "2024-12-30"]
+  ] as const) {
+    const result = costView({ asOf: day, rows: [{ agent: "codex", model: "model", day, inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1, costSource: "api_equivalent" }] },
+      { days: 1, bucket: "week", now: Date.parse(`${day}T12:00:00Z`) });
+    assert.deepEqual(result.byWeek, [{ week, from, usd: 1 }]);
+  }
 });
 
 test("get_usage cost by week extends the window back to the Monday of its first week: no partial week (days 7 on Thursday 2026-10-15)", async () => {
@@ -267,21 +270,6 @@ test("get_usage session needs a sessionId and a chat session; its scope is that 
   const scope = await getUsage.scope(z.object(getUsage.input).parse({ sessionId: "s1" }), { api, signal: new AbortController().signal, now: () => NOW, caller: chat });
   assert.deepEqual(scope, { projects: [], sessions: ["s1"], reads: "metadata", writes: false, causesTurnIn: [] });
   assert.deepEqual(await getUsage.scope(z.object(getUsage.input).parse({}), { api, signal: new AbortController().signal, now: () => NOW, caller: chat }), { projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] });
-});
-
-test("get_usage session: a context-tagged model (claude-opus-4-8[1m]) is priced at its standard rates — fixture 01's catalogue: `default` and `opus[1m]`", async () => {
-  // Fixture 01's catalogue: both slugs resolve to the 1M-context opus; its result frame billed it at standard rates (0.21547).
-  const providers = { hostInstanceId: "h", providers: [{ id: "claude", installed: true, status: "ready", auth: { status: "authenticated" }, models: [
-    { slug: "default", name: "Default (recommended)", subProvider: "claude-opus-4-8[1m]", isDefault: true, capabilities: null },
-    { slug: "opus[1m]", name: "Opus", subProvider: "claude-opus-4-8[1m]", capabilities: null },
-    { slug: "sonnet", name: "Sonnet", subProvider: "claude-sonnet-5", capabilities: null }
-  ] }] };
-  for (const model of ["default", "opus[1m]"]) {
-    const r = (await run(sessionApi([claudeTurn("t1", { input: 2, read: 0, write: 21_536, output: 4 })], { adapter: "claude", model, providers }), { sessionId: "s1" })).session;
-    assert.equal(r.costUsd, 0.2155, model);
-    assert.equal(r.costSource, "estimated", model);
-  }
-  // Unrounded, the estimate is the CLI's charge exactly (usage-tokens.test.ts).
 });
 
 test("get_usage session: mainAgentOnly always, with the turns that ran subagents and the conversation's compactions counted (the estimate is a floor there)", async () => {

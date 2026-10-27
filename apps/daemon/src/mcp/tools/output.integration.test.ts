@@ -113,8 +113,9 @@ async function shellEntry(api: DaemonApi): Promise<{ tool: { status: string }; o
 }
 
 describe("a background shell's output through read_transcript and read_tool_output, against the real orchestrator", () => {
-  it("a running shell grows between two pages: the next page continues at the last one's end, until it finishes", async () => {
+  it("a running shell grows between two pages: the next page continues at the last one's end, until it finishes", async (t) => {
     const host = await shellThread();
+    t.after(() => host.stop());
     const api = hostApi(host);
     const entry = await shellEntry(api);
     assert.deepEqual([entry.tool.status, entry.outputItemId], ["inProgress", "shell-start"]);
@@ -140,13 +141,13 @@ describe("a background shell's output through read_transcript and read_tool_outp
     await host.settle();
     const done = await page(Buffer.byteLength(soFar + grown));
     assert.deepEqual(done, { itemId: "shell-start", kind: "command-output", text: "", offset: Buffer.byteLength(soFar + grown), totalBytes: Buffer.byteLength(soFar + grown) });
-    await host.stop();
   });
 });
 
 describe("a subagent's command pushed past the cap, through read_transcript and read_tool_output, against the real orchestrator", () => {
-  it("past the cap a running command loses its start — sixteen later calls of its agent, all more recently active, hold the slots — so its latest chunk is the entry and the id, and its whole output reads back from the log", async () => {
+  it("past the cap a running command loses its start — sixteen later calls of its agent, all more recently active, hold the slots — so its latest chunk is the entry and the id, and its whole output reads back from the log", async (t) => {
     const host = createTestHost();
+    t.after(() => host.stop());
     await host.createThread({ threadId: THREAD });
     for (const event of [
       sinkEvent(host, "ask:sent", "thread.message-sent", { messageId: "ask", role: "user", text: "start the dev server, then build every part", streaming: false, turnId: null }),
@@ -189,6 +190,5 @@ describe("a subagent's command pushed past the cap, through read_transcript and 
     // The whole output, from the log — the chunks the window dropped included.
     const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
     assert.deepEqual([whole.kind, whole.text, whole.running, "nextOffset" in whole], ["command-output", lines.join(""), true, false]);
-    await host.stop();
   });
 });

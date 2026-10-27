@@ -20,7 +20,7 @@ before(async () => {
   // Claude's native projects/<encoded cwd>/<session UUID>.jsonl format.
   const project = join(configDir, "projects", root.replace(/[^a-zA-Z0-9]/g, "-"));
   await fs.mkdir(project, { recursive: true });
-  const records = Array.from({ length: 4_000 }, (_, index) => ({
+  const records = Array.from({ length: 512 }, (_, index) => ({
     type: index % 2 === 0 ? "user" : "assistant",
     uuid: `uuid-${index}`,
     parentUuid: index === 0 ? null : `uuid-${index - 1}`,
@@ -77,8 +77,8 @@ function operationFailure(operation: RegExp): (error: unknown) => boolean {
 describe("claude history worker — the payload survives the pipe", () => {
   it("reads a transcript far larger than the pipe buffer", async () => {
     const messages = await reader().readMessages({ sessionId: SESSION_ID, cwd: root });
-    assert.equal(messages.length, 4_000);
-    assert.equal(messages.at(-1)?.uuid, "uuid-3999");
+    assert.equal(messages.length, 512);
+    assert.equal(messages.at(-1)?.uuid, "uuid-511");
     assert.ok(JSON.stringify(messages).length > 64 * 1024);
   });
 

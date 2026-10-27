@@ -23,7 +23,7 @@ import { NPM_CI_ARGS, toolLock } from "../../toolchain/npm-tools.ts";
 const VERSION = DEVICE_TOOL_VERSIONS["agent-device"];
 const INSTALL_TIMEOUT_MS = 10 * 60_000;
 
-export function localAgentDeviceDir(appDir: string): string {
+function localAgentDeviceDir(appDir: string): string {
   return join(devicesToolsDir(appDir), `agent-device@${VERSION}`);
 }
 

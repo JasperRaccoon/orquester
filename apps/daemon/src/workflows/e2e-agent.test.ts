@@ -19,7 +19,7 @@ import type { AgentBlockOutput } from "./agent/executor.ts";
 import { account, staticAccounts, staticUsage } from "./agent/testing/fake-context.ts";
 import { FakeChatHost } from "./agent/testing/fake-chat-host.ts";
 import { FakeClock, flushAsync } from "./agent/testing/fake-clock.ts";
-import { boot, runFinished, tempAppdir, waitForFileState, type Booted } from "./testing/daemon-harness.ts";
+import { boot, retainWorkflowArtifact, runFinished, tempAppdir, waitForFileState, type Booted } from "./testing/daemon-harness.ts";
 
 const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
 const ACCOUNTS = [account("claude", "a1", "alpha")];
@@ -106,6 +106,7 @@ describe("e2e: agent blocks through the engine", () => {
       assert.ok(host.turnLog[0]!.input.startsWith(`Run Long agent (${workflowId}).`), host.turnLog[0]!.input);
       assert.equal(host.sessionsOwnedBy("work")[0]!.title, "Long agent · chat");
       assert.equal(host.sessionsOwnedBy("work").length, 1, "one session");
+      await retainWorkflowArtifact(t, { runId, status: run.status, attempt: run.blocks.work!.attempt, output: run.blocks.work!.output });
     } finally {
       await h.close();
     }

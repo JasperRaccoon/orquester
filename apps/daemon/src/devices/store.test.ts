@@ -40,7 +40,6 @@ test("settings: a missing file reads the defaults; an update is written atomical
     const file = join(dir, "devices.json");
     const store = new DeviceSettingsStore({ file, logger: quiet });
     assert.deepEqual(await store.load(), DEFAULT_DEVICES_SETTINGS);
-    assert.equal(store.loaded, true);
     await writeFile(file, JSON.stringify({ version: 1, other: 1, settings: { android: { enabled: true, extra: "x" } } }));
     const again = new DeviceSettingsStore({ file, logger: quiet });
     assert.equal((await again.load()).android.enabled, true);

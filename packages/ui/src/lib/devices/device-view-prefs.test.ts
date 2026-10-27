@@ -6,8 +6,6 @@ import {
   effectiveDeviceViewMode,
   readDevicePanelPrefs,
   readDeviceViewPrefs,
-  sanitizeDevicePanelPrefs,
-  sanitizeDeviceViewPrefs,
   writeDevicePanelPrefs,
   writeDeviceViewPrefs
 } from "./device-view-prefs.ts";
@@ -25,11 +23,13 @@ describe("device view prefs", () => {
     delete (globalThis as { localStorage?: unknown }).localStorage;
   });
   it("validates field by field with defaults", () => {
-    assert.deepEqual(sanitizeDeviceViewPrefs({ mode: "flat", extra: 1 }), { mode: "flat" });
-    assert.deepEqual(sanitizeDeviceViewPrefs({ mode: "4d" }), { mode: null });
-    assert.deepEqual(sanitizeDeviceViewPrefs("nope"), { mode: null });
-    assert.deepEqual(sanitizeDevicePanelPrefs({ logOpen: true }), { logOpen: true });
-    assert.deepEqual(sanitizeDevicePanelPrefs({ logOpen: "yes" }), { logOpen: false });
+    const key = "android:pixel-9";
+    store.set("orq.device.view." + key, JSON.stringify({ mode: "flat", extra: 1 }));
+    assert.deepEqual(readDeviceViewPrefs(key), { mode: "flat" });
+    store.set("orq.device.view." + key, JSON.stringify({ mode: "4d" }));
+    assert.deepEqual(readDeviceViewPrefs(key), { mode: null });
+    store.set("orq.device.panel", JSON.stringify({ logOpen: "yes" }));
+    assert.deepEqual(readDevicePanelPrefs(), { logOpen: false });
   });
   it("persists per device model and survives corrupt storage", () => {
     const key = deviceViewKey({ platform: "android", profile: "pixel-9" });

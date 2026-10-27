@@ -1,0 +1,1863 @@
+{
+  "scope": "Bounded follow-up of four explicit knowledge seam leads. All71 source610d declarations in store/store.test.ts, install/plugin.test.ts, linking/service.test.ts and settings.test.ts mapped to69 current declarations with six-part evidence and final aliases. No additional test declaration or meaningful assertion is deleted in this follow-up. Two prior removals and one prior rename remain as previously audited.",
+  "sourceCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "counts": {
+    "REWRITE": 9,
+    "KEEP": 60,
+    "CONSOLIDATE": 1,
+    "DELETE": 1
+  },
+  "countsNote": "Disposition counts include inherited audit decisions; four chronological merge declarations are additionally rewritten only to use native Date. No newly deleted/consolidated test in this follow-up.",
+  "productionSeams": [
+    {
+      "path": "apps/daemon/src/knowledge/store/store.ts",
+      "name": "KnowledgeStoreOptions.now / stored now closure",
+      "disposition": "DELETE",
+      "callers": "Only store.test.ts passed now; KnowledgeService forwarded an unused optional option. Production always used new Date.",
+      "reason": "Test-only native clock injection with no production caller; directly use new Date()/Date.now(). Merge ordering now uses Node native Date timers at independently supplied instants."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/service.ts",
+      "name": "KnowledgeServiceOptions.now forwarding",
+      "disposition": "DELETE",
+      "callers": "No constructor sets it anywhere, including tests; only read forwarded into KnowledgeStore.",
+      "reason": "Unused transitive test-only production option."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/runtime.ts",
+      "name": "KnowledgeRuntimeTracker.settled()",
+      "disposition": "DELETE",
+      "callers": "Only install/plugin.test.ts settle helper. Production uses start/stop/current/onChange.",
+      "reason": "Exposes private serialized chain solely as test drain; await existing idempotent start operation receipt after plugin completion instead."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.ts",
+      "name": "KnowledgeLinkingOptions.mintId/timings/sessionBudget/nextWaitMs/inboxWatch",
+      "disposition": "DELETE",
+      "callers": "No object supplies any of these five fields anywhere in the repository, including tests.",
+      "reason": "Unused override and forwarding infrastructure; use actual random IDs, existing default timings and actual InboxBroker defaults. The rescanIntervalMs search lead does not exist at610d; inboxWatch was its actual null/on-demand-only counterpart."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/updater.ts",
+      "name": "KnowledgeGraphUpdaterOptions.overlayRoot/locksDir",
+      "disposition": "DELETE",
+      "callers": "No createKnowledgeGraphUpdater caller supplies either field. Production PluginsService passes baseDir/platform/arch/libc/env only.",
+      "reason": "Unused artifact overrides/forwarders; use already shipped defaults directly."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/updater.ts",
+      "name": "KnowledgeGraphUpdaterOptions.deps/uv/model/encodings",
+      "disposition": "KEEP",
+      "callers": "Production updater uses default genuine network/process dependencies and pinned artifact specs. plugin.test.ts and settings.test.ts supply tiny independently hashed artifact specs served by isolated network/process ports.",
+      "reason": "Necessary real orchestration/installer boundary: validates download integrity, installation files, model-only repair, rollback/readiness and hourly/manual retry behavior. Replacing the real updater/installer with mocks would simulate the asserted result; using pinned hundreds-of-MiB remote assets would be slower and network-dependent. No new abstraction introduced.",
+      "sixBar": {
+        "independentContract": "Knowledge plugin install/update/repair/retry and verified artifact contracts in2026-10-23 plugin and2026-10-27 retrieval specs.",
+        "realRegression": "Wrong updater target, repeated failed model download, discarded working runtime or model readiness following failure.",
+        "independentOracle": "Known tiny artifact bytes/hashes, original manifest fields, literal version/error/readiness/attempt outcomes.",
+        "stableSeam": "The actual updater/installer artifact configuration and network/process boundaries, consumed through PluginsService public operations and runtime port.",
+        "refactorResistance": "Tests retain filesystem/state/typed-error outcomes rather than installer private method shape.",
+        "uniqueProtection": "Installer unit owns individual asset/atomic-swap rules; plugin tests uniquely own persisted lane/retry/repair/tracker composition; settings tests own configuration integration."
+      }
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/runtime.ts",
+      "name": "KnowledgeRuntimeTrackerOptions.model",
+      "disposition": "KEEP",
+      "callers": "KnowledgeService uses pinned default; plugin integration supplies same independently hashed fixture model as actual updater installation.",
+      "reason": "Required to observe actual fixture runtime/model readiness; default real model would classify valid tiny fixture as missing. The tracker still checks actual files and metadata."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.ts",
+      "name": "clock/spawn/processProbe and workers/runtime/store/graph/settings ports",
+      "disposition": "KEEP",
+      "callers": "Daemon wiring supplies clock/worker/runtime/store/graph/settings; real spawn and process probe defaults execute production child/process ownership operations. Tests supply controlled boundary ports.",
+      "reason": "Legitimate runtime/process isolation seams: preserve independently timed debounce/retry and OS child identity/security/handover contracts. No simulated public outcome replaces the production orchestrator."
+    }
+  ],
+  "removedOptionsOrMethods": 10,
+  "entries": [
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 42,
+      "name": "save writes the entry, the frontmatter round-trips, and the mirror carries the header",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Preserve file/frontmatter/citation/reopen and metadata/body/collection-exclusion assertions; delete the hash assertion that recomputed its expected value through the production hash function; dedup/edit cases retain meaningful hash behavior; replace cosmetic Markdown separator/header snapshot by independent supplied field contents. Distinct title prevents body from satisfying title oracle.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "save writes the entry, the frontmatter round-trips, and the mirror carries the header; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 40,
+        "name": "save writes the entry, the frontmatter round-trips, and the mirror carries the header"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 94,
+      "name": "mirror header omits missing parts cleanly",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Keep unique handle-without-author data preservation via actual mirror; delete redundant empty-metadata save and cosmetic note/header whitespace snapshots. Main save owns full body/metadata roundtrip.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "mirror header omits missing parts cleanly; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 92,
+        "name": "the mirror keeps a handle when the author and other metadata are absent"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 106,
+      "name": "unknown collections are refused with the valid names, and nothing is written",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "unknown collections are refused with the valid names, and nothing is written; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 101,
+        "name": "unknown collections are refused with the valid names, and nothing is written"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 128,
+      "name": "limits use the contract's codes",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "limits use the contract's codes; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 123,
+        "name": "limits use the contract's codes"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 152,
+      "name": "dedup: same URL, same normalized text, near-identical text; new collections are unioned in",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "dedup: same URL, same normalized text, near-identical text; new collections are unioned in; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 147,
+        "name": "dedup: same URL, same normalized text, near-identical text; new collections are unioned in"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 208,
+      "name": "url normalization",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "url normalization; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 203,
+        "name": "url normalization"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 215,
+      "name": "edits: text edits are `edited` and rewrite the mirror; collection-only edits are `relabelled` and leave it alone",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Compare the post-edit content hash to the previously observed stored hash, not to a production hash function called again by the test. Preserve edited/relabelled event distinctions and all file/link-state checks.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "edits: text edits are `edited` and rewrite the mirror; collection-only edits are `relabelled` and leave it alone; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 210,
+        "name": "edits: text edits are `edited` and rewrite the mirror; collection-only edits are `relabelled` and leave it alone"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 253,
+      "name": "deleting a collection relabels its entries; deleting an entry removes its mirror",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "deleting a collection relabels its entries; deleting an entry removes its mirror; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 249,
+        "name": "deleting a collection relabels its entries; deleting an entry removes its mirror"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 280,
+      "name": "startup: malformed entries are skipped and kept; unknown fields survive; the mirror is reconciled",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Preserve malformed/unknown-field/orphan/temp/missing-mirror recovery; assert repaired stale mirror contains its original body, whose distinct stored title prevents false positive. Drop cosmetic Markdown framing.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "startup: malformed entries are skipped and kept; unknown fields survive; the mirror is reconciled; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 276,
+        "name": "startup: malformed entries are skipped and kept; unknown fields survive; the mirror is reconciled"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 322,
+      "name": "a corrupt collections.json is moved aside, not overwritten",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "a corrupt collections.json is moved aside, not overwritten; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 318,
+        "name": "a corrupt collections.json is moved aside, not overwritten"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 333,
+      "name": "collection colours go round-robin and writes are serialized",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "collection colours go round-robin and writes are serialized; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 329,
+        "name": "collection colours go round-robin and writes are serialized"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 348,
+      "name": "a save is all or nothing even when relabelling a duplicate fails after the new entries were written",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "a save is all or nothing even when relabelling a duplicate fails after the new entries were written; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 344,
+        "name": "a save is all or nothing even when relabelling a duplicate fails after the new entries were written"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 375,
+      "name": "bodies without a single word are only duplicates when identical",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "bodies without a single word are only duplicates when identical; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 371,
+        "name": "bodies without a single word are only duplicates when identical"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 391,
+      "name": "a collections.json from a newer version is left in place and never written over",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "a collections.json from a newer version is left in place and never written over; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 387,
+        "name": "a collections.json from a newer version is left in place and never written over"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 410,
+      "name": "a collection colour this build does not know shows as a palette colour and stays on disk through rewrites",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "a collection colour this build does not know shows as a palette colour and stays on disk through rewrites; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 406,
+        "name": "a collection colour this build does not know shows as a palette colour and stays on disk through rewrites"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 430,
+      "name": "savedFrom: unknown keys and an unknown `by` are read tolerantly and written back as found",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Saving/dedup/collections/on-disk layout and AGENTS.md tolerant atomic persistence",
+        "realRegression": "savedFrom: unknown keys and an unknown `by` are read tolerantly and written back as found; Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner.",
+        "independentOracle": "Independent bodies/metadata/URLs, literal dedup IDs and unknown fields, observed original file bytes and change events",
+        "stableSeam": "KnowledgeStore save/update/delete/open over real entry/frontmatter/mirror/collections files",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost entry data, bad dedup/collection union, non-atomic partial save, stale/missing mirror, newer data destruction or relabel triggering extraction. Routes drive transport; this is the lowest filesystem/dedup/recovery owner."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 426,
+        "name": "savedFrom: unknown keys and an unknown `by` are read tolerantly and written back as found"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 486,
+      "name": "merge: keeps the oldest by default, unions collections (its own first, then the others' in order), deletes the rest",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Use native Date mock times10:00:00/01/02 for independently ordered saves, replacing the production now injection. Preserve literal kept/removed IDs, collections/body, durable bytes, no-rewrite and preflight atomicity assertions.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7R8 merge rules; API merge oldest/default, explicit keeper and preflight atomicity; AGENTS.md tolerant persistence.",
+        "realRegression": "merge: keeps the oldest by default, unions collections (its own first, then the others' in order), deletes the rest",
+        "independentOracle": "Independently scheduled literal native Date instants, supplied original bodies/collection IDs, original disk bytes and literal changed/deleted states. Expected values never call a selection implementation.",
+        "stableSeam": "KnowledgeStore.save/mergeEntries over real entry/mirror/collection files.",
+        "refactorResistance": "Clock-call count, private helper identity and exact internal writes are unobserved; kept-entry data and surviving files define the result.",
+        "uniqueProtection": "Actual store merge persistence/atomicity owner; API helper owns only pure keeper selection, route/UI tests cannot prove filesystem survivors, unchanged bytes and preflight write safety."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 485,
+        "name": "merge: keeps the oldest by default, unions collections (its own first, then the others' in order), deletes the rest"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 512,
+      "name": "merge: an explicit keep, a new title and a combined body are applied to the kept entry",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Use native Date mock times10:00:00/01/02 for independently ordered saves, replacing the production now injection. Preserve literal kept/removed IDs, collections/body, durable bytes, no-rewrite and preflight atomicity assertions.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7R8 merge rules; API merge oldest/default, explicit keeper and preflight atomicity; AGENTS.md tolerant persistence.",
+        "realRegression": "merge: an explicit keep, a new title and a combined body are applied to the kept entry",
+        "independentOracle": "Independently scheduled literal native Date instants, supplied original bodies/collection IDs, original disk bytes and literal changed/deleted states. Expected values never call a selection implementation.",
+        "stableSeam": "KnowledgeStore.save/mergeEntries over real entry/mirror/collection files.",
+        "refactorResistance": "Clock-call count, private helper identity and exact internal writes are unobserved; kept-entry data and surviving files define the result.",
+        "uniqueProtection": "Actual store merge persistence/atomicity owner; API helper owns only pure keeper selection, route/UI tests cannot prove filesystem survivors, unchanged bytes and preflight write safety."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 511,
+        "name": "merge: an explicit keep, a new title and a combined body are applied to the kept entry"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 528,
+      "name": "merge: a kept entry that already has every collection and gets no new title or text is not rewritten",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Use native Date mock times10:00:00/01/02 for independently ordered saves, replacing the production now injection. Preserve literal kept/removed IDs, collections/body, durable bytes, no-rewrite and preflight atomicity assertions.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7R8 merge rules; API merge oldest/default, explicit keeper and preflight atomicity; AGENTS.md tolerant persistence.",
+        "realRegression": "merge: a kept entry that already has every collection and gets no new title or text is not rewritten",
+        "independentOracle": "Independently scheduled literal native Date instants, supplied original bodies/collection IDs, original disk bytes and literal changed/deleted states. Expected values never call a selection implementation.",
+        "stableSeam": "KnowledgeStore.save/mergeEntries over real entry/mirror/collection files.",
+        "refactorResistance": "Clock-call count, private helper identity and exact internal writes are unobserved; kept-entry data and surviving files define the result.",
+        "uniqueProtection": "Actual store merge persistence/atomicity owner; API helper owns only pure keeper selection, route/UI tests cannot prove filesystem survivors, unchanged bytes and preflight write safety."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 527,
+        "name": "merge: a kept entry that already has every collection and gets no new title or text is not rewritten"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 544,
+      "name": "merge: entries saved at the same instant keep the smaller id",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "Retain; the incoming change protects the independently specified behavior below without a lower stable owner that supersedes this case.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7A2 documented deterministic savedAt tie-break",
+        "realRegression": "Default tie picks input order/largest ID instead of documented minID.",
+        "independentOracle": "Independent lexicographic order of randomized IDs with equal savedAt.",
+        "stableSeam": "KnowledgeStore.mergeEntries with a single simultaneous-save batch.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "Chronological three-entry merge fixture never has equal timestamps."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 543,
+        "name": "merge: entries saved at the same instant keep the smaller id"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/store/store.test.ts",
+      "line": 560,
+      "name": "merge: refusals are checked before anything changes",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Use native Date mock times10:00:00/01/02 for independently ordered saves, replacing the production now injection. Preserve literal kept/removed IDs, collections/body, durable bytes, no-rewrite and preflight atomicity assertions.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7R8 merge rules; API merge oldest/default, explicit keeper and preflight atomicity; AGENTS.md tolerant persistence.",
+        "realRegression": "merge: refusals are checked before anything changes",
+        "independentOracle": "Independently scheduled literal native Date instants, supplied original bodies/collection IDs, original disk bytes and literal changed/deleted states. Expected values never call a selection implementation.",
+        "stableSeam": "KnowledgeStore.save/mergeEntries over real entry/mirror/collection files.",
+        "refactorResistance": "Clock-call count, private helper identity and exact internal writes are unobserved; kept-entry data and surviving files define the result.",
+        "uniqueProtection": "Actual store merge persistence/atomicity owner; API helper owns only pure keeper selection, route/UI tests cannot prove filesystem survivors, unchanged bytes and preflight write safety."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "Shared setup opens the real store without a clock override. Only chronological merge scenarios control native Date; no timestamps are derived from private time-call counts.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/store/store.test.ts",
+        "line": 559,
+        "name": "merge: refusals are checked before anything changes"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 148,
+      "name": "off by default, no installed version or active job; nothing fetched",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "off by default, no installed version or active job; nothing fetched; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 148,
+        "name": "off by default, no installed version or active job; nothing fetched"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 159,
+      "name": "turning it on installs the pinned runtime in its own lane; the runtime port follows",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "Retain; the incoming change protects the independently specified behavior below without a lower stable owner that supersedes this case.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7P0.1/P0.2 runtime configuration plus original plugin lifecycle",
+        "realRegression": "Runtime loses new prefix/token-limit/threshold/readiness metadata when publishing installed model.",
+        "independentOracle": "Literal supplied fixture model input metadata, current installed version and emitted runtime DTO.",
+        "stableSeam": "Real PluginsService/KnowledgeRuntimeTracker and persisted files.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "Embedder helper receives a runtime already built; this owns producer/tracker propagation of new fields."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 159,
+        "name": "turning it on installs the pinned runtime in its own lane; the runtime port follows"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 206,
+      "name": "the first install is the pinned version even when PyPI has a newer patch; the next check offers that",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "the first install is the pinned version even when PyPI has a newer patch; the next check offers that; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 206,
+        "name": "the first install is the pinned version even when PyPI has a newer patch; the next check offers that"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 233,
+      "name": "checks offer newer patches of the pinned line only; updates keep current and previous",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "checks offer newer patches of the pinned line only; updates keep current and previous; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 233,
+        "name": "checks offer newer patches of the pinned line only; updates keep current and previous"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 264,
+      "name": "rollback swaps current and previous and skips the version rolled back from",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "rollback swaps current and previous and skips the version rolled back from; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 264,
+        "name": "rollback swaps current and previous and skips the version rolled back from"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 300,
+      "name": "a previous version installed with an older overlay is still a rollback target; the next check repairs it",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a previous version installed with an older overlay is still a rollback target; the next check repairs it; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 300,
+        "name": "a previous version installed with an older overlay is still a rollback target; the next check repairs it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 325,
+      "name": "an update over a current version with an older overlay keeps it as the rollback target",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "an update over a current version with an older overlay keeps it as the rollback target; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 325,
+        "name": "an update over a current version with an older overlay keeps it as the rollback target"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 357,
+      "name": "an install from before the model change keeps linking; the hourly check brings the model alone",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "Retain; the incoming change protects the independently specified behavior below without a lower stable owner that supersedes this case.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7P0.2 automatic upgrade",
+        "realRegression": "A normal hourly check never repairs an existing old-model install or makes linking unavailable before model upgrade.",
+        "independentOracle": "Current myKG version stays present, readiness false\u2192true, no uv runs and only independent model download URLs.",
+        "stableSeam": "Real updater/runtime-tracker over old installed model and virtual hourly clock.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "Installer direct tests do not prove automatic trigger selection or tracker model readiness transition."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 357,
+        "name": "an install from before the model change keeps linking; the hourly check brings the model alone"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 387,
+      "name": "a model download that fails its hash records a model error; the runtime keeps linking without the model",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "CONSOLIDATE",
+      "reason": "Delete separate full plugin-install execution; move its unique manifest-old-model preservation, embeddingModelReady:false and sha256 failure-reason assertions into the following failed-model-repair retry test after its first failed hourly attempt.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7P0.2 / Install and updates",
+        "realRegression": "Failed model repair must leave the installed myKG runtime usable, preserve old model metadata and expose a model integrity error.",
+        "independentOracle": "Original model ID, known bad download bytes, model error reason and false model readiness.",
+        "stableSeam": "PluginsService updater + KnowledgeRuntimeTracker persisted public lifecycle.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "Installer integrity owner protects atomic bytes; following retry test already performs the identical failed upgrade and can own all remaining runtime/error assertions."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 387,
+        "name": "a failed model repair is not retried every hour; turning on and a manual check retry it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 405,
+      "name": "a failed model repair is not retried every hour; turning on and a manual check retry it",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "REWRITE",
+      "reason": "Absorb integrity/runtime/manifest assertions from the deleted duplicate case at first failure. Keep virtual-hour non-retry and enable/manual recovery checks unchanged.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7P0.2; updater documented large-download retry discipline",
+        "realRegression": "An hourly failed repair must not download130MB repeatedly, explicit starts/manual checks must retry, and myKG must remain usable throughout.",
+        "independentOracle": "Literal attempt counts across distinct trigger events, known original manifest model ID and subsequent ready/error states.",
+        "stableSeam": "PluginsService and KnowledgeRuntimeTracker with real temp files and controlled network/clock.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "This is the lowest public orchestration owner for distinct hourly/enable/manual trigger behavior; installer helpers do not schedule or persist plugin errors."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 387,
+        "name": "a failed model repair is not retried every hour; turning on and a manual check retry it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 451,
+      "name": "rollback to a version with the old model still works; the next check gives it the new model",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "Retain; the incoming change protects the independently specified behavior below without a lower stable owner that supersedes this case.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md \u00a7P0.2 rollback compatibility",
+        "realRegression": "Rollback rejects old-model runtime or repair upgrades to the rejected/skipped version instead of repairing selected one.",
+        "independentOracle": "Explicit current/previous versions, skipped newer version, old model false readiness followed by true.",
+        "stableSeam": "Plugin rollback/check/current/previous/skipped state plus runtime tracker/files.",
+        "refactorResistance": "Retained assertions target public files/DTO/state/protocol outcomes; proposed rewrites remove private overrides, reference identity, helper-derived expected values and cosmetic wording.",
+        "uniqueProtection": "Ordinary repair does not exercise rollback candidate gates and skipped-version preservation."
+      },
+      "previousAudit": "docs/testing-audit/incoming-knowledge.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 440,
+        "name": "rollback to a version with the old model still works; the next check gives it the new model"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 481,
+      "name": "a failed install records its step and version; the hourly check does not retry it, a manual one does",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a failed install records its step and version; the hourly check does not retry it, a manual one does; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 470,
+        "name": "a failed install records its step and version; the hourly check does not retry it, a manual one does"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 514,
+      "name": "a first install that failed is retried by the hourly check",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a first install that failed is retried by the hourly check; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 503,
+        "name": "a first install that failed is retried by the hourly check"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 528,
+      "name": "a myKG that rejects the generated config records a smoke-test error and keeps the working version",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a myKG that rejects the generated config records a smoke-test error and keeps the working version; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 517,
+        "name": "a myKG that rejects the generated config records a smoke-test error and keeps the working version"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 547,
+      "name": "a runtime missing its tiktoken encoding is repaired by the next check",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a runtime missing its tiktoken encoding is repaired by the next check; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 536,
+        "name": "a runtime missing its tiktoken encoding is repaired by the next check"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 562,
+      "name": "remove downloads is refused while on, then deletes the runtime and keeps the settings",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "remove downloads is refused while on, then deletes the runtime and keeps the settings; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 551,
+        "name": "remove downloads is refused while on, then deletes the runtime and keeps the settings"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 579,
+      "name": "a runtime whose files vanished is repaired by the next check; the port drops it meanwhile",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "a runtime whose files vanished is repaired by the next check; the port drops it meanwhile; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 568,
+        "name": "a runtime whose files vanished is repaired by the next check; the port drops it meanwhile"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 595,
+      "name": "the hourly timer runs for Knowledge Graph alone, and only while it is on",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "the hourly timer runs for Knowledge Graph alone, and only while it is on; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 584,
+        "name": "the hourly timer runs for Knowledge Graph alone, and only while it is on"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 613,
+      "name": "an unsupported host: no turning on, no checks",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "an unsupported host: no turning on, no checks; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+        "line": 602,
+        "name": "an unsupported host: no turning on, no checks"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/install/plugin.test.ts",
+      "line": 622,
+      "name": "settings live on the record: merged, unknown keys kept, unreadable state never written",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "DELETE",
+      "reason": "Failed unique-protection bar: generic PluginsService settings merge, not knowledge updater behavior; knowledge/settings.test.ts update persistence/unknown-field tests own the same record. Name claimed unreadable-state check absent from body.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Install and updates/settings plugin lifecycle",
+        "realRegression": "settings live on the record: merged, unknown keys kept, unreadable state never written; Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions.",
+        "independentOracle": "Current/previous/skipped versions, literal errors/steps and actual retained/deleted runtime files",
+        "stableSeam": "PluginsService knowledge updater plus KnowledgeRuntimeTracker over real temp files and isolated network/process ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong initial release, rollback/retry/repair state, cross-plugin job coupling, working runtime discarded or stale runtime port. Installer unit tests do not drive persisted plugin state and runtime tracker transitions."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "After the existing PluginsService operation receipt, await the tracker public idempotent start/recheck receipt instead of reading its private pending-work chain. Assertions and isolated per-test runtime files are retained.",
+      "finalIdentity": null,
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/install/plugin.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 261,
+      "name": "a save made while start() still loads the state reports queued, and is linked once loading finishes",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "a save made while start() still loads the state reports queued, and is linked once loading finishes; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 261,
+        "name": "a save made while start() still loads the state reports queued, and is linked once loading finishes"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 283,
+      "name": "starts 20 s after the last change, never later than 2 min after the first; relabels never queue",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "starts 20 s after the last change, never later than 2 min after the first; relabels never queue; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 283,
+        "name": "starts 20 s after the last change, never later than 2 min after the first; relabels never queue"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 341,
+      "name": "two environment changes in a row resume an interrupted run once, and a stopped service starts none",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "two environment changes in a row resume an interrupted run once, and a stopped service starts none; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 341,
+        "name": "two environment changes in a row resume an interrupted run once, and a stopped service starts none"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 379,
+      "name": "is stopped (SIGTERM, SIGKILL after the grace) and gone before the resumed run starts its own child",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "is stopped (SIGTERM, SIGKILL after the grace) and gone before the resumed run starts its own child; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 379,
+        "name": "is stopped (SIGTERM, SIGKILL after the grace) and gone before the resumed run starts its own child"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 436,
+      "name": "a survivor that cannot be stopped pauses the run with an error instead of starting a second child",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "a survivor that cannot be stopped pauses the run with an error instead of starting a second child; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 436,
+        "name": "a survivor that cannot be stopped pauses the run with an error instead of starting a second child"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 470,
+      "name": "a re-run hands workers only the tasks its own process asks for; answered tasks stay cached",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "a re-run hands workers only the tasks its own process asks for; answered tasks stay cached; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 470,
+        "name": "a re-run hands workers only the tasks its own process asks for; answered tasks stay cached"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 524,
+      "name": "counts one name-normalization call per concept type of the current graph that has names to merge",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "counts one name-normalization call per concept type of the current graph that has names to merge; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 524,
+        "name": "counts one name-normalization call per concept type of the current graph that has names to merge"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 543,
+      "name": "an entry edited while its run is in flight stays pending and goes in the next run",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "an entry edited while its run is in flight stays pending and goes in the next run; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 543,
+        "name": "an entry edited while its run is in flight stays pending and goes in the next run"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 575,
+      "name": "an entry whose title or author is edited mid-run (its body hash unchanged) stays pending too",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "an entry whose title or author is edited mid-run (its body hash unchanged) stays pending too; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 575,
+        "name": "an entry whose title or author is edited mid-run (its body hash unchanged) stays pending too"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 607,
+      "name": "links new entries through worker chats, then re-links only an edited one with --update",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "links new entries through worker chats, then re-links only an edited one with --update; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 607,
+        "name": "links new entries through worker chats, then re-links only an edited one with --update"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 643,
+      "name": "pauses with resumesAt when every account is limited, survives a restart, and resumes the same run",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "pauses with resumesAt when every account is limited, survives a restart, and resumes the same run; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 643,
+        "name": "pauses with resumesAt when every account is limited, survives a restart, and resumes the same run"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 677,
+      "name": "a failed run keeps the error, marks its entries failed, and a later change retries it",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "a failed run keeps the error, marks its entries failed, and a later change retries it; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 677,
+        "name": "a failed run keeps the error, marks its entries failed, and a later change retries it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 706,
+      "name": "an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 706,
+        "name": "an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 738,
+      "name": "an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 738,
+        "name": "an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 767,
+      "name": "turning the plugin off cancels the run and ends its chats; turning it on runs it again",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "turning the plugin off cancels the run and ends its chats; turning it on runs it again; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 767,
+        "name": "turning the plugin off cancels the run and ends its chats; turning it on runs it again"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 785,
+      "name": "rebuild extracts into a fresh session and switches to it only on success",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "rebuild extracts into a fresh session and switches to it only on success; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 785,
+        "name": "rebuild extracts into a fresh session and switches to it only on success"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 804,
+      "name": "a failed rebuild waits for the error retry like any failed run (no tight loop)",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "a failed rebuild waits for the error retry like any failed run (no tight loop); Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 804,
+        "name": "a failed rebuild waits for the error retry like any failed run (no tight loop)"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 830,
+      "name": "only the run's own worker chats pass the worker gate",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "only the run's own worker chats pass the worker gate; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 830,
+        "name": "only the run's own worker chats pass the worker gate"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 872,
+      "name": "keeps the session and runs, links nothing, says why, and rewrites the file with its version and unknown fields",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "keeps the session and runs, links nothing, says why, and rewrites the file with its version and unknown fields; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 872,
+        "name": "keeps the session and runs, links nothing, says why, and rewrites the file with its version and unknown fields"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+      "line": 902,
+      "name": "never writes over a newer file holding a field this build cannot read",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md Linking runs, retry/pause/rebuild/metadata edit and persisted restart contracts",
+        "realRegression": "never writes over a newer file holding a field this build cannot read; Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing.",
+        "independentOracle": "Handwritten status/run/entry states, known file hashes, independent child output and persisted file data",
+        "stableSeam": "KnowledgeLinkingService public status/events/rebuild and persisted state with controlled child/clock ports",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Lost mid-run edits, overlapping children, stale inbox work, broken debounce/retry/reset resume, failed graph rebuild publication or newer state destruction. Broker/pool/runner tests cannot prove persisted orchestration sequencing."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "No test uses the removed mintId/timings/sessionBudget/nextWaitMs/inboxWatch forwarding overrides. Actual default deadlines, crypto IDs, worker/session ports, process probe and Clock boundary remain.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/linking/service.test.ts",
+        "line": 902,
+        "name": "never writes over a newer file holding a field this build cannot read"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/linking/service.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 95,
+      "name": "defaults until set; a stored value of the wrong type or out of range reads as its default",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "defaults until set; a stored value of the wrong type or out of range reads as its default; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 95,
+        "name": "defaults until set; a stored value of the wrong type or out of range reads as its default"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 109,
+      "name": "a legacy accountId reads as the policy it meant",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "a legacy accountId reads as the policy it meant; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 109,
+        "name": "a legacy accountId reads as the policy it meant"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 119,
+      "name": "a stored policy is read field by field, and wins unless an older build changed accountId after it",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "a stored policy is read field by field, and wins unless an older build changed accountId after it; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 119,
+        "name": "a stored policy is read field by field, and wins unless an older build changed accountId after it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 136,
+      "name": "an update is validated, merged into the record and kept beside keys another build wrote",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "an update is validated, merged into the record and kept beside keys another build wrote; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 136,
+        "name": "an update is validated, merged into the record and kept beside keys another build wrote"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 154,
+      "name": "a policy update is stored with the accountId an older build would run; a legacy accountId update drops it",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "a policy update is stored with the accountId an older build would run; a legacy accountId update drops it; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 154,
+        "name": "a policy update is stored with the accountId an older build would run; a legacy accountId update drops it"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 182,
+      "name": "refusals: concurrency out of bounds, a bad policy, a non-Claude account, an unknown legacy accountId, an empty model, a non-object",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "refusals: concurrency out of bounds, a bad policy, a non-Claude account, an unknown legacy accountId, an empty model, a non-object; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 182,
+        "name": "refusals: concurrency out of bounds, a bad policy, a non-Claude account, an unknown legacy accountId, an empty model, a non-object"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 210,
+      "name": "the port: enabled follows the plugin, and onChange fires on a toggle or a settings change only",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "the port: enabled follows the plugin, and onChange fires on a toggle or a settings change only; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 210,
+        "name": "the port: enabled follows the plugin, and onChange fires on a toggle or a settings change only"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 230,
+      "name": "GET and PUT the settings route; refusals are { code, message }",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "GET and PUT the settings route; refusals are { code, message }; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 230,
+        "name": "GET and PUT the settings route; refusals are { code, message }"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 254,
+      "name": "an unreadable plugins.json is reported and never written over",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "an unreadable plugins.json is reported and never written over; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 254,
+        "name": "an unreadable plugins.json is reported and never written over"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    },
+    {
+      "path": "apps/daemon/src/knowledge/settings.test.ts",
+      "line": 263,
+      "name": "settings route: bad JSON, an oversized body and a wrong media type answer { code, message }",
+      "remoteCommit": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "KEEP",
+      "reason": "The exact named observable contract is independently specified by the file evidence; supplied literal/file/protocol oracle detects its opposite outcome at this owning seam.",
+      "sixBar": {
+        "independentContract": "docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md indexing account/model/concurrency settings and legacy accountId compatibility; AGENTS.md tolerant stores",
+        "realRegression": "settings route: bad JSON, an oversized body and a wrong media type answer { code, message }; Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior.",
+        "independentOracle": "Literal legacy policy order, supplied current/older records, refused codes and preserved on-disk unknown keys",
+        "stableSeam": "KnowledgeSettingsService plus real PluginsService and settings HTTP routes",
+        "refactorResistance": "Assertions observe the named public data/protocol/state/error result, without depending on private collaborator identities or cosmetic layout. Rewritten cases remove the exceptions described in their disposition.",
+        "uniqueProtection": "Would remove the named protocol/state/security failure mode; higher layers do not enumerate this case. Wrong downgrade-compatible account selection, invalid/wrong-family settings written, no-op broadcasts, unreadable record overwritten or malformed HTTP errors leaking body. Config parsers alone do not drive service merge/write/HTTP behavior."
+      },
+      "previousAudit": "docs/testing-audit/knowledge-desktops.json",
+      "action": "Retain real updater fixture artifact specifications and actual PluginsService/config/HTTP behavior; deleted updater overlay/lock overrides had no caller in this test or production.",
+      "finalIdentity": {
+        "path": "apps/daemon/src/knowledge/settings.test.ts",
+        "line": 263,
+        "name": "settings route: bad JSON, an oversized body and a wrong media type answer { code, message }"
+      },
+      "validation": "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/settings.test.ts",
+      "validationStatus": "Pending root-coordinated validation; no tests run by this workstream."
+    }
+  ],
+  "validation": {
+    "completed": [
+      "Inspected repository-wide constructor/call sites before every removal; no production caller of removed overrides/drain.",
+      "Parsed five changed production files and four scoped test files with TypeScript AST, no parse diagnostics.",
+      "Scoped git diff --check passed."
+    ],
+    "pending": [
+      "cd apps/daemon && TSX_DISABLE_CACHE=1 node --import tsx --test src/knowledge/store/store.test.ts src/knowledge/install/plugin.test.ts src/knowledge/linking/service.test.ts src/knowledge/settings.test.ts",
+      "Root daemon typecheck, check:changed and full required gates."
+    ],
+    "limitation": "No tests/timing runs launched; root owns the worktree test slot. Native Date and public runtime recheck are unverified at runtime until that gate. Recheck may perform an extra small filesystem readiness read; no speedup is claimed."
+  }
+}

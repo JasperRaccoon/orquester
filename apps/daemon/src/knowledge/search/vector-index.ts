@@ -29,7 +29,7 @@ export type VectorEntryText = { title: string; author: string | null; handle: st
  * The vector cache key of an entry (retrieval spec, "Contextual chunks"): the sha256 of its
  * embedding header and body, so a title, author, handle or kind edit re-embeds and a relabel never does.
  */
-export function vectorCacheKey(header: string, body: string): string {
+function vectorCacheKey(header: string, body: string): string {
   return createHash("sha256").update(`${header}\u0000${body}`, "utf8").digest("hex");
 }
 
@@ -52,8 +52,6 @@ export interface InProcessVectorIndexOptions {
   /** `knowledgeIndexDir(appdir)`: the disposable vector cache. */
   indexDir: string;
   logger?: KnowledgeLogger;
-  /** Overrides the model's `minimum` cosine for a chunk to count as a semantic match (tests). */
-  minSimilarity?: number;
 }
 
 /**
@@ -69,7 +67,6 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
   private readonly embedders: KnowledgeEmbedderSource;
   private readonly indexDir: string;
   private readonly logger: KnowledgeLogger;
-  private readonly minSimilarity: number | undefined;
   private readonly docs = new Map<string, VectorDoc>();
   private unsubscribe: (() => void) | null = null;
   private stopped = false;
@@ -92,7 +89,6 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     this.embedders = options.embedders;
     this.indexDir = options.indexDir;
     this.logger = options.logger ?? console;
-    this.minSimilarity = options.minSimilarity;
   }
 
   /**
@@ -254,7 +250,7 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     const embedder = this.usableEmbedder();
     if (!embedder) return null;
     const { minimum, good, strong, duplicate } = embedder.thresholds;
-    return { minimum: this.minSimilarity ?? minimum, good, strong, duplicate };
+    return { minimum, good, strong, duplicate };
   }
 
   async embedQuery(text: string): Promise<Float32Array | null> {
@@ -275,7 +271,7 @@ export class InProcessVectorIndex implements KnowledgeVectorIndex {
     const embedder = this.usableEmbedder();
     if (!embedder || limit <= 0 || query.length !== embedder.dimensions) return [];
     const model = embedder.modelId;
-    const floor = minimum ?? this.minSimilarity ?? embedder.thresholds.minimum;
+    const floor = minimum ?? embedder.thresholds.minimum;
     const dims = embedder.dimensions;
     const hits: KnowledgeVectorHit[] = [];
     for (const doc of this.docs.values()) {

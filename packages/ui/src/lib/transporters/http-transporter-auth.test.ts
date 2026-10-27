@@ -25,8 +25,11 @@ describe("HttpTransporter.authHeaders", () => {
     const transporter = new HttpTransporter({ baseUrl: "http://daemon.test", credential: "s3cret", httpClient: client });
     assert.deepEqual(transporter.authHeaders(), { Authorization: "Bearer s3cret" });
     await transporter.request({ method: "GET", path: "/api/x" });
-    assert.equal(seen[0]?.Authorization, transporter.authHeaders().Authorization);
-    assert.deepEqual(new HttpTransporter({ baseUrl: "http://daemon.test", httpClient: client }).authHeaders(), {});
+    assert.equal(seen[0]?.Authorization, "Bearer s3cret");
+    const anonymous = new HttpTransporter({ baseUrl: "http://daemon.test", httpClient: client });
+    assert.deepEqual(anonymous.authHeaders(), {});
+    await anonymous.request({ method: "GET", path: "/api/x" });
+    assert.equal(seen[1]?.Authorization, undefined);
   });
 });
 
@@ -36,7 +39,7 @@ describe("ApiClient device URLs", () => {
     kind: "http",
     request: async () => ({ status: 200, ok: true, data: {} }),
     openStream: () => ({ close() {} }),
-    authHeaders: () => ({ Authorization: "Bearer s3cret" })
+    authHeaders: () => ({ Authorization: "Bearer transport-token" })
   };
   const api = new ApiClient({ id: "c1", endpoint: "http://daemon.test/", password: "s3cret" } as never, transporter as never);
 
@@ -44,7 +47,7 @@ describe("ApiClient device URLs", () => {
     const path = deviceRoutes.hub("local", "vendor/serve-emu/api/screenshot?device=emulator-5554");
     assert.deepEqual(api.deviceHttpRequest(path), {
       url: `http://daemon.test${path}`,
-      headers: { Authorization: "Bearer s3cret" }
+      headers: { Authorization: "Bearer transport-token" }
     });
   });
 

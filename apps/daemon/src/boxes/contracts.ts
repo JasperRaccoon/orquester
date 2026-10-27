@@ -272,8 +272,6 @@ export interface ProviderOffers {
 
 export interface ProviderCallOptions {
   signal: AbortSignal;
-  /** Injected for tests; defaults to global fetch. */
-  fetch?: typeof fetch;
 }
 
 export interface BoxProviderAdapter {
@@ -340,7 +338,7 @@ export interface GithubOidcExpectation {
 export type VerifyGithubOidc = (
   jwt: string,
   expectation: GithubOidcExpectation,
-  options: { signal: AbortSignal; fetch?: typeof fetch; now?: () => number }
+  options: { signal: AbortSignal; now?: () => number }
 ) => Promise<{ ok: true } | { ok: false; message: string }>;
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ import { after, before, describe, test } from "node:test";
 
 import type { SandboxHandle, SandboxSpawnRequest } from "../contracts.ts";
 import { AGENT_LAUNCH_ENV_VAR } from "../../agent-host/support/leftover-processes.ts";
-import { isSameProcessAlive, readStarttime } from "./proc.ts";
+import { isSameProcessAlive, readStarttime, signalGroupIfOurs } from "./proc.ts";
 import { createSandboxRunner, type SandboxExitDetail } from "./sandbox.ts";
 
 const runner = createSandboxRunner();
@@ -140,6 +140,7 @@ describe("code blocks", () => {
   test("a syntax error is a failure", async () => {
     const { exit } = await code("export default () => {");
     assert.ok(exit.result && "ok" in exit.result && exit.result.ok === false, "an unparsable module fails");
+    assert.match(exit.result.error.stack ?? "", /^SyntaxError:/);
   });
 
 });
@@ -231,7 +232,7 @@ describe("deadlines, cancels and restarts", () => {
     const handle = await runner.spawn(
       request({
         kind: "shell",
-        source: `trap '' TERM; touch ${JSON.stringify(ready)}; while true; do sleep 0.05; done`,
+        source: `trap '' TERM; touch ${JSON.stringify(ready)}; exec tail -f /dev/null`,
         attemptDir
       })
     );
@@ -289,14 +290,26 @@ describe("deadlines, cancels and restarts", () => {
     }
     const attemptDir = await freshDir();
     const handle = await runner.spawn(request({ kind: "shell", source: "sleep 60", attemptDir }));
+    let child: { pid: number; starttime: number } | undefined;
+    t.after(() => {
+      signalGroupIfOurs(handle.pid, handle.starttime, "SIGKILL");
+      if (child) signalGroupIfOurs(child.pid, child.starttime, "SIGKILL");
+    });
     await until("child.json", () => existsSync(join(attemptDir, "child.json")));
-    const child = JSON.parse(await readFile(join(attemptDir, "child.json"), "utf8")) as { pid: number; starttime: number };
+    child = JSON.parse(await readFile(join(attemptDir, "child.json"), "utf8")) as { pid: number; starttime: number };
+    assert.equal(isSameProcessAlive(child.pid, child.starttime), true, "the work is running before the runner dies");
     process.kill(handle.pid, "SIGKILL");
-    const exit = await runner.wait(handle, waitOpts());
+    await until("the runner to exit", () => !runner.isAlive(handle));
+    // The live work and its SIGTERM remain real. Once it is gone, advance only the host's
+    // documented 5 s escalation grace; the separate SIGTERM-resistant case keeps real time.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const waiting = runner.wait(handle, waitOpts());
+    await until("the orphaned work to be gone", () => !isSameProcessAlive(child!.pid, child!.starttime), 5_000);
+    t.mock.timers.tick(5_000);
+    const exit = await waiting;
     assert.equal(exit.interrupted, true, "no exit.json: interrupted");
     assert.equal(exit.code, null, "no exit code");
     assert.equal(exit.signal, "SIGKILL", "reported as killed");
-    await until("the orphaned work to be gone", () => !isSameProcessAlive(child.pid, child.starttime), 5_000);
   });
 
   test("a restarted daemon adopts a running attempt and reads its exit", async () => {

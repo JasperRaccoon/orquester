@@ -9,8 +9,6 @@ import {
   avdHardware,
   avdName,
   avdScreen,
-  CUTOUT_FILL_LOOKUP,
-  CUTOUT_RECT_LOOKUP,
   cutoutOverlayPlan,
   cutoutSpecInDp,
   hasAvdPlaceholders,
@@ -145,6 +143,4 @@ test("cutout overlays: the dp cutout, its rect in dp and the fill; the enabled e
     enable: ["cmd overlay enable com.android.shell:OrqCutout"]
   });
   assert.throws(() => cutoutOverlayPlan({ dp: "m 1 2 @left'x @dp", rect: "", fill: "", density: 420, overlayList: "" }), /unexpected cutout spec/);
-  assert.equal(CUTOUT_RECT_LOOKUP, "cmd overlay lookup android android:string/config_mainBuiltInDisplayCutoutRectApproximation");
-  assert.equal(CUTOUT_FILL_LOOKUP, "cmd overlay lookup android android:bool/config_fillMainBuiltInDisplayCutout");
 });

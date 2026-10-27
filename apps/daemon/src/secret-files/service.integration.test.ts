@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import type { SecretFilesChangedPayload, SecretVaultDetail } from "@orquester/api";
-import { SecretFilesService, type SecretFilesProject } from "./service.ts";
+import { SecretFilesError, SecretFilesService, type SecretFilesProject } from "./service.ts";
 import { SecretVaultStore } from "./vault-store.ts";
 
 // End to end over the REAL vault store, on-disk helpers and git, in temp dirs: clones of one repo
@@ -37,6 +37,11 @@ test("two clones stay in sync through setup and push; a modified third stays fla
     projects.push({ workspace: WS, name, path, repoKey: REPO });
   }
   const [a, b, c, d] = projects.map((project) => project.path) as [string, string, string, string];
+  const outside = join(dir, "outside");
+  await gitClone(outside);
+  const escaped = join(dir, "workspaces", WS, "escaped");
+  await symlink(outside, escaped);
+  projects.push({ workspace: WS, name: "escaped", path: escaped, repoKey: REPO });
   await writeFile(join(a, ".env"), "API_KEY=fake-one\nDB=fake-db\n", { mode: 0o640 });
   await writeFile(join(c, ".env"), "API_KEY=fake-c-own\n");
   await writeFile(join(d, ".env"), "API_KEY=fake-tracked\n");
@@ -53,6 +58,7 @@ test("two clones stay in sync through setup and push; a modified third stays fla
     publish: (payload) => events.push(payload),
     watch: () => ({ close: () => {} }),
     timers: { setTimeout: () => null, clearTimeout: () => {}, setInterval: () => null, clearInterval: () => {} },
+    workspacesRoot: () => join(dir, "workspaces"),
     logger: quiet
   });
   t.after(() => service.stop());
@@ -70,6 +76,7 @@ test("two clones stay in sync through setup and push; a modified third stays fla
   assert.equal(stateOf(setup, "b"), "synced");
   assert.equal(stateOf(setup, "c"), "modified");
   assert.equal(stateOf(setup, "d"), "refused");
+  await assert.rejects(readFile(join(outside, ".env")), { code: "ENOENT" }, "automatic sync never writes outside the workspaces root");
   assert.equal(await readFile(join(b, ".env"), "utf8"), "API_KEY=fake-one\nDB=fake-db\n");
   assert.equal((await stat(join(b, ".env"))).mode & 0o777, 0o600);
 
@@ -84,6 +91,12 @@ test("two clones stay in sync through setup and push; a modified third stays fla
   assert.equal(await readFile(join(b, ".env"), "utf8"), "API_KEY=fake-two\nDB=fake-db\nNEW=fake-new\n");
   assert.equal((await stat(join(b, ".env"))).mode & 0o777, 0o600);
   assert.equal(await readFile(join(c, ".env"), "utf8"), "API_KEY=fake-c-own\n");
+  await writeFile(join(outside, ".env"), "USER=outside\n");
+  await assert.rejects(
+    service.reset({ workspace: WS, repoKey: REPO, projectPath: escaped }),
+    (error: unknown) => error instanceof SecretFilesError && error.code === "SECRET_FILES_ERROR"
+  );
+  assert.equal(await readFile(join(outside, ".env"), "utf8"), "USER=outside\n", "reset never overwrites an outside clone");
 
   const compare = await service.compare({ workspace: WS, repoKey: REPO, projectPath: c, path: ".env" });
   assert.equal(compare.compare.format, "env");

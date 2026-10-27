@@ -13,31 +13,23 @@ import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./
 import { MjpegParser, multipartBoundary } from "./mjpeg.ts";
 import {
   DeviceStreamError,
-  resolveDeps,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
-  type StreamDeps,
   type VideoSessionOptions
 } from "./types.ts";
 
 export class ServeSimMjpegSession implements DeviceVideoSession {
   readonly transport = "serve-sim-mjpeg" as const;
-  private readonly deps: StreamDeps;
   private readonly lifecycle: StreamLifecycle;
   private decoding = false;
   private pending: { jpeg: Uint8Array; attempt: StreamAttempt } | null = null;
 
   constructor(private readonly options: VideoSessionOptions) {
-    this.deps = resolveDeps(options.deps);
     this.lifecycle = new StreamLifecycle({
       transport: this.transport,
       callbacks: options,
-      connect: (attempt) => void this.run(attempt),
-      now: this.deps.now,
-      random: this.deps.random,
-      stallMs: options.stallMs,
-      reconnectAfterMs: options.reconnectAfterMs
+      connect: (attempt) => void this.run(attempt)
     });
     this.lifecycle.setDecoder("mjpeg");
     this.lifecycle.start();
@@ -62,7 +54,7 @@ export class ServeSimMjpegSession implements DeviceVideoSession {
 
   private async run(attempt: StreamAttempt): Promise<void> {
     try {
-      const response = await this.deps.fetch(this.options.url, {
+      const response = await fetch(this.options.url, {
         ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
         signal: attempt.signal,
         cache: "no-store"
@@ -124,7 +116,7 @@ export class ServeSimMjpegSession implements DeviceVideoSession {
   private async decode(jpeg: Uint8Array, attempt: StreamAttempt): Promise<void> {
     let bitmap: ImageBitmap;
     try {
-      bitmap = await this.deps.createImageBitmap(new Blob([jpeg as BlobPart], { type: "image/jpeg" }));
+      bitmap = await createImageBitmap(new Blob([jpeg as BlobPart], { type: "image/jpeg" }));
     } catch {
       this.lifecycle.warn("Skipped an MJPEG frame that failed to decode.");
       return;

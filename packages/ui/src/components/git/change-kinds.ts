@@ -12,7 +12,7 @@ import {
 } from "@orquester/api";
 
 // Adapted from T3 Code (MIT): apps/web/src/components/pullRequest/PullRequestChangeBreakdownStat.tsx
-export const CHANGE_KIND_LABELS: Record<ChangedFileKind, string> = {
+const CHANGE_KIND_LABELS: Record<ChangedFileKind, string> = {
   code: "Code",
   tests: "Tests",
   mocks: "Mocks",

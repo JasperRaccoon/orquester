@@ -6,7 +6,7 @@
  * — and waits on events rather than sleeps (§9).
  */
 
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { AcpRpcError, AcpTransportClosedError } from "./errors.ts";
@@ -23,6 +23,11 @@ interface Harness {
   replyError(error: { code: number; message: string; data?: unknown }): void;
 }
 
+const peers: AcpPeer[] = [];
+afterEach(() => {
+  for (const peer of peers.splice(0)) peer.close("test finished");
+});
+
 function harness(options: { agentOwnReplyIds?: ReadonlySet<string> } = {}): Harness {
   const sent: Array<Record<string, unknown>> = [];
   const warnings: Array<{ message: string; detail?: unknown }> = [];
@@ -33,9 +38,9 @@ function harness(options: { agentOwnReplyIds?: ReadonlySet<string> } = {}): Harn
     onWarning: (message, detail) => {
       warnings.push({ message, detail });
     },
-    defaultTimeoutMs: 0,
     ...(options.agentOwnReplyIds === undefined ? {} : { agentOwnReplyIds: options.agentOwnReplyIds })
   });
+  peers.push(peer);
   const lastId = (): number => {
     const outbound = [...sent].reverse().find((frame) => typeof frame["id"] === "number" && "method" in frame);
     return outbound?.["id"] as number;

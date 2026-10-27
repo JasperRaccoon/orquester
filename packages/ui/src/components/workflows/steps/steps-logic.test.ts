@@ -32,12 +32,14 @@ describe("addStepAfter", () => {
     const mint = sequentialIds();
     const before = chain();
     const { workflow: next, nodeId } = addStepAfter(before, { nodeId: "a", handle: "success" }, "shell", mint);
+    assert.equal(next.nodes.find((node) => node.id === nodeId)?.type, "shell");
     assert.deepEqual(edgesOf(next), [`a:success>${nodeId}`, `${nodeId}:success>b`, "t:success>a"].sort());
   });
 
   it("a block with no outputs (Stop) never splices: it becomes another branch", () => {
     const mint = sequentialIds();
     const { workflow: next, nodeId } = addStepAfter(chain(), { nodeId: "a", handle: "success" }, "stop", mint);
+    assert.equal(next.nodes.find((node) => node.id === nodeId)?.type, "stop");
     assert.deepEqual(edgesOf(next), ["a:success>b", `a:success>${nodeId}`, "t:success>a"].sort());
   });
 

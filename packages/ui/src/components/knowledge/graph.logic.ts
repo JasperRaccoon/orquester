@@ -202,7 +202,7 @@ const isSingleton = (cluster: Pick<KnowledgeSimilarityCluster, "size"> | undefin
  * or more entries (largest first, as the daemon orders them), null (neutral)
  * for singletons.
  */
-export function clusterColors(clusters: readonly Pick<KnowledgeSimilarityCluster, "size">[]): (KnowledgeColor | null)[] {
+function clusterColors(clusters: readonly Pick<KnowledgeSimilarityCluster, "size">[]): (KnowledgeColor | null)[] {
   let next = 0;
   return clusters.map((cluster) => (isSingleton(cluster) ? null : KNOWLEDGE_COLORS[next++ % KNOWLEDGE_COLORS.length]!));
 }

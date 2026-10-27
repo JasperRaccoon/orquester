@@ -61,8 +61,6 @@ async function readJson(file: string): Promise<JsonRead> {
 abstract class TolerantJsonStore {
   /** Why writes are refused this run, or null. */
   readOnlyReason: string | null = null;
-  /** The file was read cleanly (or did not exist). */
-  loaded = false;
   private writes: Promise<void> = Promise.resolve();
 
   protected constructor(
@@ -74,11 +72,9 @@ abstract class TolerantJsonStore {
   /** Read the file and hand its value to `accept` (which may throw: the file is then quarantined). Never throws. */
   protected async read(accept: (value: unknown) => void, reset: () => void): Promise<void> {
     this.readOnlyReason = null;
-    this.loaded = false;
     reset();
     const read = await readJson(this.file);
     if (read.kind === "missing") {
-      this.loaded = true;
       return;
     }
     if (read.kind === "unreadable") {
@@ -92,7 +88,6 @@ abstract class TolerantJsonStore {
     }
     try {
       accept(read.value);
-      this.loaded = true;
     } catch (error) {
       reset();
       await this.quarantine(error instanceof Error ? error.message : String(error));
@@ -239,7 +234,6 @@ export class DevicePoolStore extends TolerantJsonStore {
   /** Read the file; never throws. The state is empty when it is missing or unusable. */
   async load(): Promise<DevicePoolState> {
     if (this.memoryOnly) {
-      this.loaded = true;
       return this.state();
     }
     await this.read(

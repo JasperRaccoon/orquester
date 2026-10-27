@@ -33,9 +33,8 @@ const sessionId = "01a0c19e-de22-78c0-a72a-7e230ccfbec0";
  * reply to a request of the agent's (a permission, a question) is one too,
  * met by the adapter's reply to the same request id: the CLI waited for the
  * answer, and so does the replay. A client frame the capture has no match for
- * is answered `{}` (a request) or ignored. Frames are paced by their recorded
- * gaps, clamped to 1–25 ms, so each reaches the adapter in its own read, as it
- * did live.
+ * is answered `{}` (a request) or ignored. Each frame yields to I/O; the
+ * capture's outbound sync points determine when replay may continue.
  */
 const replay =
   scenario === "replay"
@@ -83,11 +82,8 @@ function handleReplay(frame) {
   const window = replay.slice(at + 1, end).filter((entry) => entry.dir === "recv");
   replayCursor = end;
   replayQueue = replayQueue.then(async () => {
-    let previous = replay[at].t;
     for (const entry of window) {
-      const gap = Math.min(25, Math.max(1, entry.t - previous));
-      previous = entry.t;
-      await new Promise((resolve) => setTimeout(resolve, gap));
+      await new Promise((resolve) => setImmediate(resolve));
       const out = { ...entry.frame };
       if (out.method === undefined && replayIds.has(out.id)) {
         out.id = replayIds.get(out.id);

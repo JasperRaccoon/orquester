@@ -85,7 +85,7 @@ const PRIMARY_BUTTON =
  * The line under the card's title: the MCP server that asks, and whether a
  * subagent asked — a message sent over its card goes to that subagent.
  */
-export function approvalCardDescription(
+function approvalCardDescription(
   approval: Pick<PendingApproval, "appName" | "requestingAgentId">
 ): string | undefined {
   if (approval.requestingAgentId === undefined) return approval.appName;

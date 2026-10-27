@@ -311,7 +311,6 @@ export interface BoxReconcilerDeps {
   lifecycle: BoxLifecycle;
   connectivity: BoxConnectivity;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error" | "log">;
   /** The plugin switch: interrupted setups are resumed only while it is on. */
   enabled(): boolean;
@@ -549,6 +548,6 @@ export class BoxReconciler {
   }
 
   private callOptions(timeoutMs: number) {
-    return { signal: AbortSignal.timeout(timeoutMs), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    return { signal: AbortSignal.timeout(timeoutMs) };
   }
 }

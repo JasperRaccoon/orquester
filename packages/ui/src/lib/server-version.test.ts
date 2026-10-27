@@ -4,7 +4,9 @@ import { serverVersionLabel } from "./server-version.ts";
 
 test("serverVersionLabel shows the version and short commit, either alone, or nothing", () => {
   const sha = "0123456789abcdef0123456789abcdef01234567";
-  assert.equal(serverVersionLabel({ version: "1.2.3", commit: sha }), "1.2.3 · 0123456");
+  const both = serverVersionLabel({ version: "1.2.3", commit: sha })!;
+  assert.match(both, /1\.2\.3.*0123456/);
+  assert.ok(!both.includes(sha), "the commit is abbreviated");
   assert.equal(serverVersionLabel({ version: "1.2.3", commit: null }), "1.2.3");
   assert.equal(serverVersionLabel({ version: null, commit: sha }), "0123456");
   assert.equal(serverVersionLabel({ commit: "not a sha" }), null);

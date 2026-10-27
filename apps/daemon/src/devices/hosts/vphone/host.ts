@@ -48,7 +48,7 @@ import type {
   DeviceHostState
 } from "../../host.ts";
 import { performVphoneAction } from "./agent-actions.ts";
-import { VphoneBridge, type VphoneStreamTuning } from "./bridge.ts";
+import { VphoneBridge } from "./bridge.ts";
 import {
   createStageIndex,
   CREATE_STAGES,
@@ -83,10 +83,6 @@ export interface VphoneHostDeps {
   /** 0700 directory builds are staged in before they go to a VM. */
   uploadsDir: string;
   logger: Pick<Console, "info" | "warn" | "error">;
-  /** Tests: faster waits, smaller streams, a fixed token source. */
-  timing?: { launchTimeoutMs?: number; healthTimeoutMs?: number; healthIntervalMs?: number };
-  tuning?: Partial<VphoneStreamTuning>;
-  newToken?: () => string;
 }
 
 /** One running research iPhone. */
@@ -139,8 +135,7 @@ export class VphoneDeviceHost implements DeviceHost {
         const machine = this.machines.get(id);
         return machine?.client ? { client: machine.client, screen: machine.screen } : null;
       },
-      logger: deps.logger,
-      ...(deps.tuning ? { tuning: deps.tuning } : {})
+      logger: deps.logger
     });
   }
 
@@ -336,7 +331,7 @@ export class VphoneDeviceHost implements DeviceHost {
       name,
       leaseId: request.leaseId,
       boxPort: 0,
-      token: this.deps.newToken?.() ?? randomBytes(32).toString("hex"),
+      token: randomBytes(32).toString("hex"),
       procId: `vphone-${name}`,
       osVersion: "iOS",
       screen: null,
@@ -425,14 +420,14 @@ export class VphoneDeviceHost implements DeviceHost {
       });
       const onAbort = () => finish(new Error("cancelled"));
       signal.addEventListener("abort", onAbort, { once: true });
-      const timer = setTimeout(() => finish(new Error("vphone-cli vm launch did not report its API address in time")), this.deps.timing?.launchTimeoutMs ?? 5 * 60_000);
+      const timer = setTimeout(() => finish(new Error("vphone-cli vm launch did not report its API address in time")), 5 * 60_000);
     });
   }
 
   /** Poll `/v1/health` until vphoned answers (the guest boots after `vm launch` returns). */
   private async waitForHealth(record: VphoneMachineRecord, signal: AbortSignal): Promise<void> {
-    const deadline = Date.now() + (this.deps.timing?.healthTimeoutMs ?? 10 * 60_000);
-    const interval = this.deps.timing?.healthIntervalMs ?? 2_000;
+    const deadline = Date.now() + 10 * 60_000;
+    const interval = 2_000;
     let last = "no answer";
     for (;;) {
       this.throwIfAborted(signal);

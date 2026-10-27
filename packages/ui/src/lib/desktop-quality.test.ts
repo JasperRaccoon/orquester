@@ -7,15 +7,10 @@ function feed(state: DesktopQualityState, samples: number[]): DesktopQualityStat
   return samples.reduce(nextDesktopQuality, state);
 }
 
-test("3 consecutive slow samples step down one level", () => {
-  const s = initialDesktopQuality();
-  assert.equal(feed(s, [200, 200]).level, 6);
-  assert.equal(feed(s, [200, 200, 200]).level, 4);
-});
-
 test("steps 6 → 4 → 2 and stops at 2", () => {
   const slow = Array<number>(3).fill(400);
   let s = initialDesktopQuality();
+  assert.equal(feed(s, [400, 400]).level, 6, "two slow samples do not step down");
   s = feed(s, slow);
   assert.equal(s.level, 4);
   s = feed(s, slow);

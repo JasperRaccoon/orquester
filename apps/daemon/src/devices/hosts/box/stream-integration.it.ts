@@ -30,7 +30,7 @@ import { type RawData, WebSocket } from "ws";
 import { DEFAULT_DEVICES_SETTINGS, DEVICES_LEASE_EVENT, deviceProfile, deviceRoutes, type DevicesSettings } from "@orquester/api";
 import type { StoredBox } from "@orquester/config";
 
-import { localBoxConnection } from "../../../boxes/testing.ts";
+import { isolatedDeviceBox } from "./local-namespace.ts";
 import { createHubProxy } from "../../hub-proxy.ts";
 import { FakeHostFactory, startTestDeviceService, type TestDeviceService } from "../../testing.ts";
 import { registerDeviceWsRoutes } from "../../ws-routes.ts";
@@ -68,7 +68,7 @@ if (process.env.ORQ_IT_SDK) {
   await execFile("cp", ["-al", process.env.ORQ_IT_SDK, join(root, "android-sdk")]).catch((error) => log("SDK copy:", String(error)));
 }
 
-const connection = localBoxConnection({ boxId: "it-stream-box" });
+const connection = isolatedDeviceBox({ root, boxId: "it-stream-box", provider: kind === "box" ? "blacksmith" : "byo" });
 const settings: DevicesSettings = { ...DEFAULT_DEVICES_SETTINGS, android: { ...DEFAULT_DEVICES_SETTINGS.android, enabled: true, profiles: [profile.id], maxLocalDevices: 2 } };
 const record = {
   id: "it-stream-box",
@@ -92,8 +92,7 @@ const host: BoxAndroidHost = new BoxAndroidHost({
   connection: () => connection,
   settings: () => settings,
   activeLeases: () => factory?.ctx?.activeLeases(host.id) ?? [],
-  logger,
-  root
+  logger
 });
 
 /** One stream's tally. */

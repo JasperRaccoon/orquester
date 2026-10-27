@@ -2,7 +2,7 @@
  * The REAL adapter — `createGrokAdapter`, the session, the ACP peer and the
  * spawn path — driven by a recorded capture played back by the mock peer
  * (`testing/mock-grok.mjs`, `GROK_MOCK_SCENARIO=replay`): the CLI's own frames
- * in the CLI's own order, paced by their recorded gaps. What the session
+ * in the CLI's own order, synchronized on its outbound frames. What the session
  * itself decides is what these pin — above all the turns the CLI starts on its
  * own (fixtures README observation 40).
  *
@@ -43,8 +43,7 @@ async function replayRig(fixture: string): Promise<ReplayRig> {
   let ids = 0;
   const context: AdapterContext = {
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
-    // Real time: the mock paces frames by their recorded gaps, so a registry
-    // whose clock follows `createdAt` sees the capture's order of events.
+    // The registry observes the same ordered event timestamps as the host.
     clock: { now: () => new Date(), nowIso: () => new Date().toISOString() },
     ids: {
       eventId: () => `e${(ids += 1)}`,
@@ -224,18 +223,24 @@ test("20 replayed: a monitor's first event wakes the agent before the prompt set
     const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock });
-    const readings: string[] = [];
-    for (const event of r.events) {
+    const monitorRow = (event: RuntimeEvent) =>
+      event.type.startsWith("task.") && (event.payload as { taskId?: string }).taskId === MONITOR;
+    const startAt = r.events.findIndex((event) => event.type === "task.started" && monitorRow(event));
+    const endAt = r.events.findIndex((event) => event.type === "task.completed" && monitorRow(event));
+    assert.ok(startAt >= 0 && endAt > startAt);
+    for (const [index, event] of r.events.entries()) {
       clock.set(Date.parse(event.createdAt));
       registry.observe(event);
-      if (event.type === "task.completed" && event.payload.taskId === MONITOR) {
-        break;
-      }
-      if (event.type === "turn.completed") {
-        readings.push(String(registry.liveness("t1")));
+      const monitor = registry.liveTasks("t1").find((task) => task.taskId === MONITOR);
+      if (index >= startAt && index < endAt) {
+        assert.equal(monitor?.kind, "background", "the monitor stays live until its own end");
+        if (index === startAt || event.type === "turn.completed") {
+          assert.equal(registry.liveness("t1"), "monitoring", "a wake's end never drops the monitor");
+        }
+      } else {
+        assert.equal(monitor, undefined, "only the monitor's own lifecycle determines its liveness");
       }
     }
-    assert.deepEqual(readings, ["monitoring", "monitoring", "monitoring"], "never dropped while it runs");
   } finally {
     await r.dispose();
   }

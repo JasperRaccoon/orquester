@@ -84,7 +84,6 @@ export interface BoxServiceDeps {
   localTailscale?: LocalTailscale;
   /** Where the daemon's HTTP transport listens. */
   daemonHttp?: () => DaemonHttpAddress;
-  fetch?: typeof fetch;
   clock?: BoxClock;
   logger?: Pick<Console, "warn" | "error" | "log">;
 }
@@ -199,7 +198,6 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     ...(deps.localTailscale ? { localTailscale: deps.localTailscale } : {}),
     ...(deps.daemonHttp ? { daemonHttp: deps.daemonHttp } : {}),
     clock,
-    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
     providersChanged: publishProviders
   });
@@ -219,7 +217,6 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     ...(deps.agentClis ? { agentClis: deps.agentClis } : {}),
     setupLog,
     clock,
-    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
     onProviderError: () => void reconciler.requestRun(),
     ...(deps.agentBuilds ? { agentBuilds: deps.agentBuilds } : {}),
@@ -232,7 +229,6 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     lifecycle,
     connectivity: settings,
     clock,
-    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
     enabled: () => enabled,
     publishChanged: publishBoxes

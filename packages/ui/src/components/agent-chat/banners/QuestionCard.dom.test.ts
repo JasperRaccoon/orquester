@@ -276,6 +276,10 @@ describe("QuestionCard — the multi-line custom answer", () => {
     type(textarea, "from my phone");
     assert.equal(key(textarea, { key: "Enter" }).defaultPrevented, false);
     assert.deepEqual(submitted, []);
+    const submit = all<HTMLButtonElement>("button").find((button) => button.textContent === "Submit answer");
+    assert.ok(submit);
+    act(() => submit.click());
+    assert.deepEqual(submitted, [{ "Which one?": "from my phone" }]);
   });
 
   it("an Enter on the first of two questions moves on rather than answering", () => {

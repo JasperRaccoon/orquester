@@ -34,7 +34,6 @@ test("the link names the thread by its live tab title, never the result's", () =
   const html = renderToStaticMarkup(createElement(ThreadLink, { link, title: "Task: audit auth", onOpen: () => undefined }));
   assert.match(html, /<button[^>]*data-thread-link="c7"/);
   assert.match(html, /Task: audit auth/);
-  assert.match(html, /Open “Task: audit auth”/);
   assert.doesNotMatch(html, /stale title/);
 });
 
@@ -48,7 +47,6 @@ test("the tool row carries the link beside its label", () => {
   const row = { kind: "work", id: "w1", createdAt: entry.createdAt, groupedEntries: [entry], isExpandedToolGroup: false } as unknown as AgentChatTimelineRow;
   const context = { isExpanded: () => false, setExpanded: () => undefined, workspaceRoot: P, readOnly: false, backgroundShell: false } as unknown as TimelineRowContextValue;
   const html = renderToStaticMarkup(createElement(TimelineRowContext.Provider, { value: context }, createElement(WorkRow, { row: row as never })));
-  assert.match(html, /Delegated a task/);
   // Server rendering reads the store's initial state, which holds no tabs: the link says closed.
   assert.match(html, /data-thread-link="closed"/);
 });

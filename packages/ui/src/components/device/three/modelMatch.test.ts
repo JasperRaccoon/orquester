@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { it } from "node:test";
 import { resolveDeviceModelId, type DeviceModelId } from "./model.ts";
 
@@ -58,35 +57,4 @@ it("matches Samsung emulator names and AVD profiles exactly and case-insensitive
   ];
   for (const [name, id] of cases) assert.equal(resolveDeviceModelId("android", name), id, name);
   assert.equal(resolveDeviceModelId("ios", "Galaxy S26"), null);
-});
-
-it("has a recorded source for every model id it can return", () => {
-  const manifest = JSON.parse(
-    readFileSync(new URL("../models/sources.json", import.meta.url), "utf8"),
-  ) as { models: { id: string; file: string }[] };
-  const recorded = new Set(manifest.models.map((model) => model.id));
-  const names = [
-    "iPhone 18 Pro",
-    "iPhone 18 Pro Max",
-    "iPhone Duo",
-    "iPhone 17",
-    "iPhone Air",
-    "iPhone 17e",
-    "iPad Pro 13-inch (M5)",
-    "iPhone 17 Pro",
-    "iPad Air 13-inch (M4)",
-    "iPad Air 11-inch (M3)",
-    "iPad (A16)",
-  ];
-  for (const name of names) {
-    const id = resolveDeviceModelId("ios", name);
-    assert.ok(id && recorded.has(id), `${name} -> ${id} has no sources.json entry`);
-  }
-  const samsung = ["Galaxy S26", "Galaxy S26+", "Galaxy S26 Ultra", "Galaxy Z Fold8", "Galaxy Z Flip8"];
-  for (const name of samsung) {
-    const id = resolveDeviceModelId("android", name);
-    assert.ok(id && recorded.has(id), `${name} -> ${id} has no sources.json entry`);
-  }
-  for (const model of manifest.models)
-    assert.doesNotThrow(() => readFileSync(new URL(`../models/${model.file}`, import.meta.url)));
 });

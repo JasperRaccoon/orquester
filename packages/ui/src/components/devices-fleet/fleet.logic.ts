@@ -47,7 +47,7 @@ const HOST_STATUS_RANK: Readonly<Record<DeviceHostStatus, number>> = {
 };
 
 /** Live leases first (ready, starting, suspended, lost), oldest first within a state. */
-export function compareLeases(a: DeviceLeaseSummary, b: DeviceLeaseSummary): number {
+function compareLeases(a: DeviceLeaseSummary, b: DeviceLeaseSummary): number {
   return LEASE_STATE_RANK[a.state] - LEASE_STATE_RANK[b.state] || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 }
 
@@ -56,7 +56,7 @@ function hostStartedAt(host: DeviceHostSummary): string {
 }
 
 /** This host first, then hosts by status (ready first), then the longest-running, then label. */
-export function compareHosts(a: DeviceHostSummary, b: DeviceHostSummary): number {
+function compareHosts(a: DeviceHostSummary, b: DeviceHostSummary): number {
   const local = Number(b.kind === "local") - Number(a.kind === "local");
   if (local !== 0) return local;
   return (
@@ -249,7 +249,7 @@ export function costSharers(leases: readonly Pick<DeviceLeaseSummary, "state">[]
 // The pool header
 // ---------------------------------------------------------------------------
 
-export const PLACEMENT_LABELS: Readonly<Record<DevicePlacementMode, string>> = {
+const PLACEMENT_LABELS: Readonly<Record<DevicePlacementMode, string>> = {
   "local-only": "This host only",
   "prefer-local": "This host first",
   "pool-only": "Pool only"
@@ -369,12 +369,12 @@ export function leaseStateNote(lease: Pick<DeviceLeaseSummary, "state" | "progre
  * takes the hub's screenshot, downscales it and answers a small JPEG). Null while it has nothing
  * to show (not ready, no stream yet, or a stream kind without a hub screenshot).
  */
-export function thumbnailPath(lease: Pick<DeviceLeaseSummary, "id" | "state" | "stream">, width?: number): string | null {
+export function thumbnailPath(lease: Pick<DeviceLeaseSummary, "id" | "state" | "stream">): string | null {
   if (lease.state !== "ready" || !lease.stream || lease.stream.deviceParam.length === 0) return null;
   switch (lease.stream.kind) {
     case "serve-emu":
     case "serve-sim":
-      return deviceRoutes.thumbnail(lease.id, width);
+      return deviceRoutes.thumbnail(lease.id);
     case "vphone":
       return null;
   }

@@ -218,7 +218,7 @@ export const DEFAULT_DEVICES_SETTINGS: DevicesSettings = Object.freeze({
 }) as DevicesSettings;
 
 /** A fresh, mutable copy of the defaults. */
-export function defaultDevicesSettings(): DevicesSettings {
+function defaultDevicesSettings(): DevicesSettings {
   return structuredClone(DEFAULT_DEVICES_SETTINGS);
 }
 
@@ -640,8 +640,8 @@ export interface DevicePoolState {
 export interface DevicePoolStateFile {
   version: typeof DEVICE_POOL_STATE_VERSION;
   state: DevicePoolState;
-  /** Entries of `rentals` / `learnedCapacity` this build cannot read, kept verbatim. */
-  rejected: { rentals: unknown[]; learnedCapacity: unknown[] };
+  /** Unreadable rental, learned-capacity and per-OS cache records, kept verbatim for rewrite. */
+  rejected: { rentals: unknown[]; learnedCapacity: unknown[]; cache?: Record<string, unknown> };
   /** Every top-level key this build does not use, as found. */
   extra: Record<string, unknown>;
 }
@@ -679,11 +679,15 @@ export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
   const learned = entries(record.learnedCapacity, deviceLearnedCapacitySchema);
   const cacheRaw = record.cache !== null && typeof record.cache === "object" && !Array.isArray(record.cache) ? (record.cache as Record<string, unknown>) : {};
   const cache: DevicePoolState["cache"] = { ...cacheRaw };
+  const unreadableCache: Record<string, unknown> = {};
   for (const os of ["linux", "macos"] as const) {
     if (cacheRaw[os] === undefined) continue;
     const parsed = devicePoolCacheSchema.safeParse(cacheRaw[os]);
     if (parsed.success) cache[os] = parsed.data;
-    else delete cache[os];
+    else {
+      unreadableCache[os] = cacheRaw[os];
+      delete cache[os];
+    }
   }
   const draining = Array.isArray(record.drainingHostIds) ? record.drainingHostIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
   return {
@@ -694,7 +698,7 @@ export function parseDevicePoolStateFile(raw: unknown): DevicePoolStateFile {
       drainingHostIds: [...new Set(draining)],
       cache
     },
-    rejected: { rentals: rentals.rejected, learnedCapacity: learned.rejected },
+    rejected: { rentals: rentals.rejected, learnedCapacity: learned.rejected, ...(Object.keys(unreadableCache).length > 0 ? { cache: unreadableCache } : {}) },
     extra: Object.fromEntries(Object.entries(record).filter(([key]) => !POOL_KEYS.includes(key)))
   };
 }
@@ -706,6 +710,7 @@ export function serializeDevicePoolStateFile(file: DevicePoolStateFile): Record<
     rentals: [...file.state.rentals, ...file.rejected.rentals],
     learnedCapacity: [...file.state.learnedCapacity, ...file.rejected.learnedCapacity],
     drainingHostIds: file.state.drainingHostIds,
-    cache: file.state.cache
+    // A readable value the current host writes replaces an unreadable older one.
+    cache: { ...file.rejected.cache, ...file.state.cache }
   };
 }

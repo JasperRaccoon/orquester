@@ -10,9 +10,9 @@
  */
 
 /** About 1 fps. */
-export const THUMBNAIL_INTERVAL_MS = 1_000;
+const THUMBNAIL_INTERVAL_MS = 1_000;
 /** The pauses after 1, 2, 3, … failures in a row (the last repeats). */
-export const THUMBNAIL_BACKOFF_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
+const THUMBNAIL_BACKOFF_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
 
 /**
  * - `off` — nothing to show (no URL, or never active yet).
@@ -54,13 +54,13 @@ export function defaultThumbnailDeps(): ThumbnailDeps {
 }
 
 /** The pause after `failures` failures in a row. */
-export function thumbnailBackoffMs(failures: number): number {
+function thumbnailBackoffMs(failures: number): number {
   if (failures <= 0) return THUMBNAIL_INTERVAL_MS;
   return THUMBNAIL_BACKOFF_MS[Math.min(failures, THUMBNAIL_BACKOFF_MS.length) - 1]!;
 }
 
 /** A failed request in the card's words. */
-export function thumbnailErrorText(status: number | null): string {
+function thumbnailErrorText(status: number | null): string {
   if (status === null) return "Can't reach the host";
   if (status === 401 || status === 403) return "Not allowed to view it";
   if (status === 404) return "The device is gone";

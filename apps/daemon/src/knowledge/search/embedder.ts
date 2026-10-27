@@ -52,7 +52,7 @@ export interface OnnxEmbedderOptions {
 }
 
 /** The part of `@huggingface/tokenizers`' Tokenizer the embedder uses. */
-export interface EmbedderTokenizer {
+interface EmbedderTokenizer {
   encode(text: string, options?: { add_special_tokens?: boolean }): { ids: number[] };
   token_to_id(token: string): number | undefined;
 }
@@ -62,7 +62,7 @@ export interface EmbedderTokenizer {
  * ids): the special tokens its post-processor puts before and after the text (XLM-R: `<s>` …
  * `</s>`; BERT: `[CLS]` … `[SEP]`), and its padding token.
  */
-export interface TokenFrame {
+interface TokenFrame {
   before: readonly number[];
   after: readonly number[];
   pad: number;
@@ -73,7 +73,7 @@ export interface TokenFrame {
  * what the post-processor adds on each side; the padding token is `tokenizer_config.json`'s
  * `pad_token` (else the end token: padding is masked out anyway).
  */
-export function tokenFrameOf(tokenizer: EmbedderTokenizer, config: unknown): TokenFrame {
+function tokenFrameOf(tokenizer: EmbedderTokenizer, config: unknown): TokenFrame {
   const framed = tokenizer.encode("a").ids;
   const bare = tokenizer.encode("a", { add_special_tokens: false }).ids;
   let at = -1;
@@ -102,7 +102,7 @@ function tokenName(value: unknown): string | null {
  * `bare` (text ids without special tokens) framed for the model in at most `maxTokens` ids: cut
  * to fit, still closed with the model's own end token(s), as the tokenizer's own truncation would.
  */
-export function frameIds(frame: TokenFrame, bare: readonly number[], maxTokens: number): { ids: number[]; truncated: boolean } {
+function frameIds(frame: TokenFrame, bare: readonly number[], maxTokens: number): { ids: number[]; truncated: boolean } {
   const room = Math.max(0, maxTokens - frame.before.length - frame.after.length);
   const truncated = bare.length > room;
   return { ids: [...frame.before, ...(truncated ? bare.slice(0, room) : bare), ...frame.after], truncated };
@@ -113,7 +113,7 @@ export function frameIds(frame: TokenFrame, bare: readonly number[], maxTokens: 
  * recipe): `hidden` is the last hidden state, rows × width × dims; row `r` has `lengths[r]` real
  * tokens (the rest is padding).
  */
-export function meanPoolNormalized(hidden: Float32Array, lengths: readonly number[], width: number, dims: number): Float32Array[] {
+function meanPoolNormalized(hidden: Float32Array, lengths: readonly number[], width: number, dims: number): Float32Array[] {
   return lengths.map((length, row) => {
     const vector = new Float32Array(dims);
     for (let t = 0; t < length; t += 1) {
@@ -132,7 +132,7 @@ export function meanPoolNormalized(hidden: Float32Array, lengths: readonly numbe
 }
 
 /** One forward pass of the model: ids and attention mask (rows × width) → its last hidden state (rows × width × dims). */
-export interface EmbeddingSession {
+interface EmbeddingSession {
   run(inputIds: BigInt64Array, mask: BigInt64Array, rows: number, width: number): Promise<{ hidden: Float32Array; dims: number }>;
   release(): Promise<void>;
 }
@@ -156,7 +156,7 @@ export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
   readonly dimensions: number;
   readonly thresholds: KnowledgeVectorThresholds;
   readonly maxTokens: number;
-  protected readonly modelDir: string;
+  private readonly modelDir: string;
   private readonly prefixes: Record<KnowledgeEmbedKind, string>;
   private readonly threads: number;
   private readonly batchSize: number;
@@ -198,8 +198,8 @@ export class OnnxSentenceEmbedder implements KnowledgeEmbedder {
     await loaded?.session.release().catch(() => undefined);
   }
 
-  /** The ONNX session over `onnx/model_quantized.onnx` (tests replace it). */
-  protected async openSession(): Promise<EmbeddingSession> {
+  /** The ONNX session over `onnx/model_quantized.onnx`. */
+  private async openSession(): Promise<EmbeddingSession> {
     const ortModule = (await import("onnxruntime-node")) as typeof Ort & { default?: typeof Ort };
     const ort = (ortModule.InferenceSession ? ortModule : ortModule.default) as typeof Ort;
     const session = await ort.InferenceSession.create(join(this.modelDir, "onnx", "model_quantized.onnx"), {

@@ -58,7 +58,7 @@ function phoneViewport(): boolean {
 
 /**
  * Bring the Device panel up on a lease: the docked rail on a desktop viewport, the full-screen
- * section on a phone (`phone` overrides the viewport check, for tests).
+ * section on a phone; the desktop-only auto-follow caller explicitly keeps the docked rail.
  */
 export function showDeviceInPanel(target: { threadId: string; leaseId: string }, options: { phone?: boolean } = {}): void {
   selectDeviceLease(target.threadId, target.leaseId);

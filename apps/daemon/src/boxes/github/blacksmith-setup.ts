@@ -28,8 +28,6 @@ import { BLACKSMITH_CONTROL_REPO_NAME, BLACKSMITH_WORKFLOW_FILE } from "./workfl
 const TOKENS_URL = "https://github.com/settings/tokens";
 
 export interface BlacksmithSetupDriverOptions {
-  /** Injected for tests; defaults to global fetch. */
-  fetch?: typeof fetch;
   /** Default https://api.github.com. */
   apiUrl?: string;
 }
@@ -46,7 +44,6 @@ export function createBlacksmithSetupDriver(options: BlacksmithSetupDriverOption
   const call = (token: string, signal: AbortSignal): GithubCallOptions => ({
     token,
     signal,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.apiUrl ? { apiUrl: options.apiUrl } : {})
   });
 
@@ -143,11 +140,11 @@ export function createBlacksmithSetupDriver(options: BlacksmithSetupDriverOption
     },
 
     dispatchDeviceCacheWarm(credentials, request, signal) {
-      return dispatchDeviceCacheWarm(credentials, request, { signal, ...(options.fetch ? { fetch: options.fetch } : {}) });
+      return dispatchDeviceCacheWarm(credentials, request, { signal });
     },
 
     deviceCacheWarmStatus(credentials, runId, signal) {
-      return deviceCacheWarmStatus(credentials, runId, { signal, ...(options.fetch ? { fetch: options.fetch } : {}) });
+      return deviceCacheWarmStatus(credentials, runId, { signal });
     }
   };
 }

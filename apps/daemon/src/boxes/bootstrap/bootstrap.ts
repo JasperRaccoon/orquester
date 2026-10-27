@@ -80,7 +80,7 @@ export function normalizeDaemonUrl(raw: string): string {
     throw new Error("The daemon URL must not carry credentials, a query or a fragment");
   }
   const href = url.href.replace(/\/+$/, "");
-  if (/[\s'"`\\$]/.test(href)) throw new Error("The daemon URL contains characters a bootstrap cannot carry");
+  if (/[\s'"`\\$;&|<>()]/.test(href)) throw new Error("The daemon URL contains characters a bootstrap cannot carry");
   return href;
 }
 

@@ -2,65 +2,26 @@
 import assert from "node:assert/strict";
 import { afterEach, it, mock } from "node:test";
 import {
-  Box3,
   Group,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
   Texture,
-  type PerspectiveCamera,
-  type Quaternion,
-  type Scene,
 } from "three";
 import { createDuoViewer } from "./duoViewer.ts";
 import type { DeviceRenderer } from "./types.ts";
 
-type GpuState = {
-  blank: boolean;
-  allocations: number;
-  frames: Scene[];
-  views: { camera: PerspectiveCamera; bounds: Box3; quaternion: Quaternion }[];
-  dispose: ReturnType<typeof mock.fn>;
-  forceContextLoss: ReturnType<typeof mock.fn>;
-};
-const gpu = { instances: [] as GpuState[], environmentDispose: mock.fn() };
+const gpu = { instances: [] as { frames: number }[] };
 
-/** Records what the viewer would draw; a stand-in for three's WebGLRenderer. */
+/** Only substitutes WebGL; the viewer owns scheduling and model lifetime. */
 class FakeRenderer {
   outputColorSpace = "";
-  state: GpuState = {
-    blank: true,
-    allocations: 0,
-    frames: [],
-    views: [],
-    dispose: mock.fn(),
-    forceContextLoss: mock.fn(),
-  };
-  constructor() {
-    gpu.instances.push(this.state);
-  }
-  setDrawingBufferSize() {
-    this.state.blank = true;
-    this.state.allocations++;
-  }
-  render(scene: Scene, camera: PerspectiveCamera) {
-    this.state.blank = false;
-    this.state.frames.push(scene);
-    const root = scene.children.find((child) => child instanceof Group)!;
-    root.updateMatrixWorld(true);
-    camera.updateMatrixWorld(true);
-    this.state.views.push({
-      camera: camera.clone(),
-      bounds: new Box3().setFromObject(root),
-      quaternion: root.quaternion.clone(),
-    });
-  }
-  dispose() {
-    this.state.dispose();
-  }
-  forceContextLoss() {
-    this.state.forceContextLoss();
-  }
+  state = { frames: 0 };
+  constructor() { gpu.instances.push(this.state); }
+  setDrawingBufferSize() {}
+  render() { this.state.frames++; }
+  dispose() {}
+  forceContextLoss() {}
 }
 
 type LoadedModel = { asset: Group; dispose: () => void };
@@ -82,17 +43,11 @@ const stubbedGlobals = [
   "document",
 ] as const;
 afterEach(() => {
-  mock.timers.reset();
   for (const name of stubbedGlobals) delete (globalThis as Record<string, unknown>)[name];
   gpu.instances.length = 0;
-  gpu.environmentDispose.mock.resetCalls();
 });
 
-function fixture(
-  reduced = true,
-  onOrientationRequested = mock.fn(),
-  onPanelRequested?: (panel: 1 | 3) => void,
-) {
+function fixture() {
   const pending = new Map<number, FrameRequestCallback>();
   let id = 0;
   const drawImage = mock.fn((_source: unknown, ..._rest: unknown[]) => {});
@@ -102,7 +57,7 @@ function fixture(
       return id;
     },
     cancelAnimationFrame: (id: number) => pending.delete(id),
-    matchMedia: () => ({ matches: reduced }),
+    matchMedia: () => ({ matches: true }),
     document: {
       createElement: () => ({
         width: 0,
@@ -128,18 +83,16 @@ function fixture(
     },
     model: { id: "iphone-duo", url: "/duo.glb" },
     onUnavailable: mock.fn(),
-    onOrientationRequested,
     createRenderer: () => new FakeRenderer() as unknown as DeviceRenderer,
-    createEnvironment: () => ({ texture: new Texture(), dispose: gpu.environmentDispose }),
+    createEnvironment: () => ({ texture: new Texture(), dispose() {} }),
     loadModel,
-    ...(onPanelRequested ? { onPanelRequested } : {}),
   });
   const draw = () => {
     const callbacks = [...pending.values()];
     pending.clear();
     callbacks.forEach((callback) => callback(0));
   };
-  return { viewer, draw, pending, state: gpu.instances[0]!, onOrientationRequested, drawImage };
+  return { viewer, draw, state: gpu.instances[0]!, drawImage };
 }
 
 function asset() {
@@ -176,7 +129,7 @@ it("cancels loading and disposes a late model after unmount without installing o
   await Promise.resolve();
   draw();
   assert.equal(dispose.mock.callCount(), 1);
-  assert.equal(state.frames.length, 0);
+  assert.equal(state.frames, 0);
 });
 
 it("uses the elected primary frame during handoff and never lets a stale fixed-panel feed overwrite it", async () => {

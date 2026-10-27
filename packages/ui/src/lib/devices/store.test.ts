@@ -22,11 +22,8 @@ import {
   leasesOfThread,
   loadDeviceActions,
   loadDevices,
-  openDevice,
-  releaseDevice,
   resetDevices,
   runDeviceUserAction,
-  setDeviceController,
   setDevicesPluginOn,
   startDeviceSetup,
   updateDevicesSettings,
@@ -34,7 +31,7 @@ import {
 } from "./store.ts";
 import { localDeviceActions, logLocalDeviceAction } from "./local-actions.ts";
 import { selectDeviceLease, selectedDeviceLease } from "./panel-focus.ts";
-import { sanitizeDeviceHost, sanitizeDeviceLease, sanitizeDevicesState } from "./validate.ts";
+import { sanitizeDevicesState } from "./validate.ts";
 
 const host = (over: Partial<DeviceHostSummary> = {}): DeviceHostSummary => ({
   id: "local",
@@ -83,9 +80,6 @@ function fakeApi(over: Partial<DevicesApi> = {}, connection = "c1"): DevicesApi 
     connection: { id: connection },
     devicesState: async () => state(),
     deviceLeaseActions: async (leaseId) => ({ leaseId, actions: [entry("x1", leaseId)] }),
-    openDeviceLease: async (req) => ({ lease: lease("new", { threadId: req.threadId, state: "starting", key: null, deviceId: null, openedBy: "user", controller: "user" }) }),
-    releaseDeviceLease: async (leaseId) => ({ lease: lease(leaseId, { state: "released" }) }),
-    setDeviceController: async (leaseId, controller) => ({ lease: lease(leaseId, { controller }) }),
     deviceUserAction: async (leaseId, req) => ({
       lease: lease(leaseId, { controller: "user", ...(req.kind === "power_off" ? { state: "released" as const } : {}) }),
       entry: { ...entry(`u-${req.kind}`, leaseId), actor: "user", kind: req.kind === "rotate" ? "rotate" : "open_app", summary: req.kind }
@@ -93,7 +87,7 @@ function fakeApi(over: Partial<DevicesApi> = {}, connection = "c1"): DevicesApi 
     updateDevicesSettings: async (patch) => ({ settings: { ...structuredClone(DEFAULT_DEVICES_SETTINGS), android: { ...DEFAULT_DEVICES_SETTINGS.android, enabled: patch.android?.enabled ?? false } } }),
     startDeviceSetup: async (platform) => ({ job: { id: "j", platform, hostId: "local", state: "running", steps: [], percent: 5, logLine: null, error: null, startedAt: "x", finishedAt: null } }),
     ...over
-  };
+  } as DevicesApi;
 }
 
 describe("devices store", () => {
@@ -111,7 +105,7 @@ describe("devices store", () => {
     applyDevicesEvent({ type: DEVICES_LEASE_EVENT, payload: { lease: { id: "broken" } } });
     assert.deepEqual(devicesStore.getState().leases?.map((l) => l.id), ["a", "bb"]);
     assert.deepEqual(leasesOfThread(devicesStore.getState().leases, "t2").map((l) => l.id), ["bb"]);
-    assert.equal(leasesOfThread(devicesStore.getState().leases, "none"), leasesOfThread(null, "x"), "a stable empty list");
+    assert.deepEqual(leasesOfThread(devicesStore.getState().leases, "none"), []);
 
     applyDevicesEvent({ type: DEVICES_ACTION_EVENT, payload: { leaseId: "a", threadId: "t1", entry: entry("e1") } });
     applyDevicesEvent({ type: DEVICES_ACTION_EVENT, payload: { leaseId: "a", threadId: "t1", entry: entry("e1") } });
@@ -126,7 +120,7 @@ describe("devices store", () => {
 
     applyDevicesEvent({ type: DEVICES_SETTINGS_EVENT, payload: { settings: { android: { enabled: true } } } });
     assert.equal(devicesStore.getState().settings?.android.enabled, true);
-    assert.equal(devicesStore.getState().settings?.leaseIdleMinutes, DEFAULT_DEVICES_SETTINGS.leaseIdleMinutes);
+    assert.equal(devicesStore.getState().settings?.leaseIdleMinutes, 60);
 
     applyDevicesEvent({ type: DEVICES_LEASE_CLOSED_EVENT, payload: { leaseId: "a", threadId: "t1", reason: "agent" } });
     assert.deepEqual(devicesStore.getState().leases?.map((l) => l.id), ["bb"]);
@@ -143,18 +137,13 @@ describe("devices store", () => {
     assert.equal(devicesStore.getState().hosts?.[0]?.label, "From the load");
   });
 
-  it("mutations apply their answers; action logs merge with events; a connection switch resets", async () => {
+  it("settings and setup answers update the store; action loads preserve events across a connection", async () => {
     const api = fakeApi();
     await loadDevices(api);
-    const opened = await openDevice(api, { threadId: "t3", platform: "android" });
-    assert.equal(opened.state, "starting");
-    assert.ok(devicesStore.getState().leases?.some((l) => l.id === "new"));
-    assert.equal((await setDeviceController(api, "a", "user")).controller, "user");
-    assert.equal(devicesStore.getState().leases?.find((l) => l.id === "a")?.controller, "user");
-    await releaseDevice(api, "new");
-    assert.ok(!devicesStore.getState().leases?.some((l) => l.id === "new"));
-    assert.equal((await updateDevicesSettings(api, { android: { enabled: true } })).android.enabled, true);
-    assert.equal((await startDeviceSetup(api, "android"))?.state, "running");
+    await updateDevicesSettings(api, { android: { enabled: true } });
+    assert.equal(devicesStore.getState().settings?.android.enabled, true);
+    await startDeviceSetup(api, "android");
+    assert.equal(devicesStore.getState().setupJobs.android?.state, "running");
 
     applyDevicesEvent({ type: DEVICES_ACTION_EVENT, payload: { leaseId: "a", threadId: "t1", entry: entry("live") } });
     await loadDeviceActions(api, "a");
@@ -167,12 +156,13 @@ describe("devices store", () => {
   it("a user action applies its lease (now the user's) and its row at once; power off removes the lease", async () => {
     const api = fakeApi();
     await loadDevices(api);
-    const rotated = await runDeviceUserAction(api, "a", { kind: "rotate", orientation: "landscape" });
-    assert.equal(rotated.entry.actor, "user");
+    await runDeviceUserAction(api, "a", { kind: "rotate", orientation: "landscape" });
     assert.equal(devicesStore.getState().leases?.find((l) => l.id === "a")?.controller, "user");
     assert.deepEqual(devicesStore.getState().actions.a?.map((row) => row.id), ["u-rotate"]);
     // A malformed answer is refused, not applied.
     await assert.rejects(runDeviceUserAction(fakeApi({ deviceUserAction: async () => ({ lease: lease("a"), entry: { id: "x" } }) as never }), "a", { kind: "restart_app" }));
+    assert.equal(devicesStore.getState().leases?.find((l) => l.id === "a")?.controller, "user", "a malformed answer applies nothing");
+    assert.deepEqual(devicesStore.getState().actions.a?.map((row) => row.id), ["u-rotate"]);
     await runDeviceUserAction(api, "a", { kind: "power_off" });
     assert.equal(devicesStore.getState().leases?.some((l) => l.id === "a"), false);
   });
@@ -208,22 +198,24 @@ describe("devices validation", () => {
   it("reads what it knows and drops the rest", () => {
     assert.equal(sanitizeDevicesState({ enabled: true }), null);
     assert.equal(sanitizeDevicesState(state())?.leases.length, 1);
-    assert.equal(sanitizeDeviceHost({ ...host(), kind: "mainframe" }), null);
-    const parsed = sanitizeDeviceHost({ ...host(), box: { boxId: "b", provider: "blacksmith", hourlyUsd: "x", startedAt: "s" }, readiness: "nope" });
+    const parsed = sanitizeDevicesState(state({ hosts: [
+      { ...host(), kind: "mainframe" },
+      { ...host(), box: { boxId: "b", provider: "blacksmith", hourlyUsd: "x", startedAt: "s" }, readiness: "nope" }
+    ] } as never))?.hosts[0];
     assert.deepEqual(parsed?.box, { boxId: "b", provider: "blacksmith", hourlyUsd: null, startedAt: "s", deadlineAt: null });
     assert.deepEqual(parsed?.readiness, { ready: false, checks: [], checkedAt: null });
     assert.equal(parsed?.stream, undefined);
-    assert.deepEqual(sanitizeDeviceHost({ ...host(), stream: { iosH264: true } })?.stream, { iosH264: true });
-    assert.deepEqual(sanitizeDeviceHost({ ...host(), stream: { iosH264: "yes" } })?.stream, { iosH264: false });
-    assert.equal(sanitizeDeviceLease({ ...lease("a"), state: "parked" }), null);
-    assert.deepEqual(sanitizeDeviceLease({ ...lease("a"), stream: { kind: "webrtc", deviceParam: "x" } })?.stream, undefined);
+    assert.deepEqual(sanitizeDevicesState(state({ hosts: [{ ...host(), stream: { iosH264: true } }] }))?.hosts[0]?.stream, { iosH264: true });
+    assert.deepEqual(sanitizeDevicesState(state({ hosts: [{ ...host(), stream: { iosH264: "yes" } }] } as never))?.hosts[0]?.stream, { iosH264: false });
+    assert.deepEqual(sanitizeDevicesState(state({ leases: [{ ...lease("a"), state: "parked" }] } as never))?.leases, []);
+    assert.deepEqual(sanitizeDevicesState(state({ leases: [{ ...lease("a"), stream: { kind: "webrtc", deviceParam: "x" } }] } as never))?.leases[0]?.stream, undefined);
   });
 
   it("keeps a research host's flag and notice", () => {
-    const parsed = sanitizeDeviceHost({ ...host(), kind: "byo", research: true, notice: "Research — real iOS in a VM" });
+    const parsed = sanitizeDevicesState(state({ hosts: [{ ...host(), kind: "byo", research: true, notice: "Research — real iOS in a VM" }] }))?.hosts[0];
     assert.equal(parsed?.research, true);
     assert.equal(parsed?.notice, "Research — real iOS in a VM");
-    const plain = sanitizeDeviceHost({ ...host(), research: "yes", notice: 3 });
+    const plain = sanitizeDevicesState(state({ hosts: [{ ...host(), research: "yes", notice: 3 }] } as never))?.hosts[0];
     assert.equal(plain?.research, undefined);
     assert.equal(plain?.notice, undefined);
   });

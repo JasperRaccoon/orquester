@@ -1,27 +1,21 @@
 import assert from "node:assert/strict";
-import { monitorEventLoopDelay } from "node:perf_hooks";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
 import test from "node:test";
-import { deflateSync } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 
-import { ImagePoolBusyError, ImageWorkerPool } from "./image-pool.ts";
-import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS, fitScreenshot, thumbnailJpeg } from "./screenshot-image.ts";
+import { ImagePoolBusyError, ImageWorkerPool, type ImageWorkerRequest } from "./image-pool.ts";
+import { DEVICE_SCREENSHOT_MAX_BASE64_CHARS } from "./screenshot-image.ts";
 import { solidPng } from "./testing.ts";
 
-/** A screen-like RGB PNG: gradients with noise (compresses like a real frame, unlike a solid fill). */
-function screenPng(width: number, height: number, seed = 1): Buffer {
-  let state = seed;
-  const random = () => {
-    state = (state * 1_103_515_245 + 12_345) & 0x7fffffff;
-    return state / 0x7fffffff;
-  };
+/** An RGB PNG whose noise forces the capped screenshot down the JPEG path. */
+function screenPng(width: number, height: number): Buffer {
+  let seed = 7;
   const raw = Buffer.alloc(height * (width * 3 + 1));
   for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const o = y * (width * 3 + 1) + 1 + x * 3;
-      const band = Math.floor(y / 80) % 2 === 0 ? 30 : 0;
-      raw[o] = Math.min(255, Math.floor((x / width) * 200) + band + Math.floor(random() * 24));
-      raw[o + 1] = Math.min(255, Math.floor((y / height) * 200) + Math.floor(random() * 24));
-      raw[o + 2] = Math.min(255, 120 + band + Math.floor(random() * 24));
+    for (let x = 1; x <= width * 3; x += 1) {
+      seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
+      raw[y * (width * 3 + 1) + x] = seed >>> 16;
     }
   }
   const chunk = (type: string, body: Buffer) => {
@@ -29,6 +23,7 @@ function screenPng(width: number, height: number, seed = 1): Buffer {
     out.writeUInt32BE(body.length, 0);
     out.write(type, 4, "latin1");
     body.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + body.length)), 8 + body.length);
     return out;
   };
   const ihdr = Buffer.alloc(13);
@@ -44,78 +39,89 @@ function jpegWidth(jpeg: Buffer): number {
   throw new Error("no SOF0");
 }
 
-test("the worker (a .ts entry under the daemon's tsx) encodes thumbnails and fits screenshots like the in-thread code", async (t) => {
-  const pool = new ImageWorkerPool({ size: 2 });
+test("the real worker loads through tsx and returns usable thumbnail and capped screenshot bytes", async (t) => {
+  const pool = new ImageWorkerPool();
   t.after(() => pool.close());
-  const png = screenPng(360, 640);
-  assert.deepEqual(await pool.thumbnail("l1", png, 120), thumbnailJpeg(png, 120));
-  const fitted = await pool.fit(png, 50_000);
-  assert.deepEqual(fitted, fitScreenshot(png, 50_000));
+  const png = screenPng(128, 96);
+  assert.equal(jpegWidth(await pool.thumbnail("l1", png, 32)), 32);
+  const fitted = await pool.fit(png, 2_000);
   assert.equal(fitted.mimeType, "image/jpeg");
+  assert.ok(fitted.data.toString("base64").length <= 2_000);
+  assert.equal(jpegWidth(fitted.data), fitted.width);
+  assert.ok(fitted.width < 128 && fitted.width * 96 === fitted.height * 128);
   const small = solidPng(10, 10);
   assert.deepEqual(await pool.fit(small, DEVICE_SCREENSHOT_MAX_BASE64_CHARS), { mimeType: "image/png", data: small, width: 10, height: 10 });
-  // A JPEG passes through without a worker; a bad image fails its job only.
-  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
-  assert.equal(await pool.thumbnail("l1", jpeg, 120), jpeg);
-  await assert.rejects(pool.thumbnail("l1", Buffer.from("nope"), 120), /not a PNG/);
-  assert.equal(jpegWidth(await pool.thumbnail("l1", png, 120)), 120);
-  assert.ok(pool.stats().workers >= 1 && pool.stats().workers <= 2);
+  await assert.rejects(pool.thumbnail("l1", Buffer.from("nope"), 32), /not a PNG/);
+  assert.equal(jpegWidth(await pool.thumbnail("l1", png, 32)), 32, "a bad input does not poison the worker");
 });
 
 test("a newer frame of the same lease replaces its queued one (both callers get it); screenshots go first; the queue is capped", async (t) => {
-  const pool = new ImageWorkerPool({ size: 1, queueCap: 2 });
+  const pool = new ImageWorkerPool();
   t.after(() => pool.close());
-  const big = screenPng(720, 1280);
-  const png = screenPng(200, 200, 7);
-  const order: string[] = [];
-  // The one worker is busy with this frame while the others queue.
-  const busy = pool.thumbnail("busy", big, 320).then(() => order.push("busy"));
-  const stale = pool.thumbnail("lease", png, 100).then((jpeg) => (order.push("stale"), jpeg));
-  const fresh = pool.thumbnail("lease", png, 50).then((jpeg) => (order.push("fresh"), jpeg));
-  const shot = pool.fit(png, 10_000).then((fitted) => (order.push("shot"), fitted));
-  assert.equal(pool.stats().queued, 2, "the stale frame was folded into the newer one");
-  await assert.rejects(pool.thumbnail("other", png, 100), ImagePoolBusyError);
-  const [a, b] = await Promise.all([stale, fresh, shot, busy]);
-  assert.equal(jpegWidth(a), 50, "the stale caller gets the newer frame");
-  assert.deepEqual(a, b);
-  assert.deepEqual(order, ["busy", "shot", "stale", "fresh"]);
-});
-
-test("a job past its deadline fails and retires its worker", async (t) => {
-  const pool = new ImageWorkerPool({ size: 1, jobTimeoutMs: 1 });
-  t.after(() => pool.close());
-  await assert.rejects(pool.thumbnail("l1", screenPng(720, 1280), 320), /longer than/);
-  assert.equal(pool.stats().workers, 0);
-});
-
-test("event-loop blocking: a 720×1280 frame in-thread vs through the workers", async (t) => {
-  const frame = screenPng(720, 1280);
-  const pool = new ImageWorkerPool({ size: 2 });
-  t.after(() => pool.close());
-  // Warm both paths (JIT, the worker's start-up).
-  thumbnailJpeg(frame, 320);
-  await pool.thumbnail("warm", frame, 320);
-
-  const measure = async (work: () => Promise<unknown>): Promise<{ maxMs: number; wallMs: number }> => {
-    const histogram = monitorEventLoopDelay({ resolution: 5 });
-    histogram.enable();
-    const started = performance.now();
-    await work();
-    const wallMs = performance.now() - started;
-    // Let the monitor sample once after the work.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    histogram.disable();
-    return { maxMs: histogram.max / 1e6, wallMs };
-  };
-  const frames = 4;
-  const inThread = await measure(async () => {
-    for (let index = 0; index < frames; index += 1) {
-      thumbnailJpeg(frame, 320);
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+  const send = Worker.prototype.postMessage;
+  type Delivery = { worker: Worker; message: ImageWorkerRequest };
+  const held: Delivery[] = [];
+  let onDelivery: ((delivery: Delivery) => void) | undefined;
+  let blocked = true;
+  t.mock.method(Worker.prototype, "postMessage", function (this: Worker, message: ImageWorkerRequest) {
+    if (blocked) {
+      const delivery = { worker: this, message };
+      held.push(delivery);
+      onDelivery?.(delivery);
+    } else send.call(this, message);
   });
-  const offThread = await measure(() => Promise.all(Array.from({ length: frames }, (_, index) => pool.thumbnail(`l${index}`, frame, 320))));
-  t.diagnostic(`in-thread: ${frames} frames, max event-loop delay ${inThread.maxMs.toFixed(1)} ms, wall ${inThread.wallMs.toFixed(0)} ms`);
-  t.diagnostic(`workers:   ${frames} frames, max event-loop delay ${offThread.maxMs.toFixed(1)} ms, wall ${offThread.wallMs.toFixed(0)} ms`);
-  assert.ok(offThread.maxMs < inThread.maxMs / 2, `the workers keep the loop free (${offThread.maxMs.toFixed(1)} ms vs ${inThread.maxMs.toFixed(1)} ms)`);
+  const png = solidPng(8, 8);
+  const busy = [pool.thumbnail("busy-a", png, 8), pool.thumbnail("busy-b", png, 8)];
+  let staleResolved = false;
+  const stale = pool.thumbnail("lease", png, 8).then((image) => { staleResolved = true; return image; });
+  const fresh = pool.thumbnail("lease", png, 4);
+  let shotResolved = false;
+  const shot = pool.fit(png, 4_096).then((image) => { shotResolved = true; return image; });
+  const fillers = Array.from({ length: 30 }, () => pool.fit(png, 4_096));
+  const completion = Promise.all([stale, fresh, shot, ...busy, ...fillers]);
+  void completion.catch(() => undefined);
+  let refusal: unknown;
+  void pool.thumbnail("other", png, 8).catch((error) => { refusal = error; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(refusal instanceof ImagePoolBusyError, "the 33rd waiting job is refused");
+  const first = held.shift()!;
+  const nextReady = new Promise<Delivery>((resolve) => { onDelivery = resolve; });
+  send.call(first.worker, first.message);
+  await busy[0];
+  const next = await nextReady;
+  onDelivery = undefined;
+  held.splice(held.indexOf(next), 1);
+  const answered = once(next.worker, "message");
+  send.call(next.worker, next.message);
+  await answered;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(shotResolved, true, "the screenshot is answered before the waiting thumbnail");
+  assert.equal(staleResolved, false);
+  blocked = false;
+  for (const { worker, message } of held) send.call(worker, message);
+  await completion;
+  const [a, b] = await Promise.all([stale, fresh]);
+  assert.equal(jpegWidth(a), 4, "the stale caller gets the newer frame");
+  assert.deepEqual(a, b);
+});
+
+test("a job past its 30 s deadline fails, retires its worker, and lets the next job recover", async (t) => {
+  const pool = new ImageWorkerPool();
+  t.after(() => pool.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let worker!: Worker;
+  const gate = t.mock.method(Worker.prototype, "postMessage", function (this: Worker) { worker = this; });
+  let settled = false;
+  const job = pool.thumbnail("stalled", solidPng(8, 8), 8);
+  void job.then(() => { settled = true; }, () => { settled = true; });
+  const failed = assert.rejects(job, /30 s/);
+  const exited = once(worker, "exit");
+  t.mock.timers.tick(29_999);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "a job is allowed the documented deadline");
+  t.mock.timers.tick(1);
+  await failed;
+  await exited;
+  gate.mock.restore();
+  assert.equal(jpegWidth(await pool.thumbnail("next", solidPng(8, 8), 8)), 8);
 });

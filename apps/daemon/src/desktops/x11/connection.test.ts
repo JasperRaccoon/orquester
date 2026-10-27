@@ -11,11 +11,16 @@ class FakeServer {
   readonly requests: Buffer[] = [];
   private waiters: Array<() => void> = [];
   private setupSeen = false;
+  onRequest?: (request: Buffer, sequence: number) => void;
   readonly stream = new Duplex({
     read() {},
     write: (chunk: Buffer, _encoding, callback) => {
       if (!this.setupSeen) this.setupSeen = true;
-      else this.requests.push(Buffer.from(chunk));
+      else {
+        const request = Buffer.from(chunk);
+        this.requests.push(request);
+        this.onRequest?.(request, this.requests.length);
+      }
       for (const wake of this.waiters.splice(0)) wake();
       callback();
     }
@@ -128,20 +133,17 @@ describe("X11Connection", () => {
     assert.equal(await good, 0x200);
   });
 
-  test("void requests are checked through a GetInputFocus sync", async () => {
+  test("void requests resolve after processing and reject their own server error", async () => {
     const { server, conn } = await connected();
-    const ok = conn.selectInput(0x400001, 0x400000);
-    const failed = conn.selectInput(0x400002, 0x400000);
-    await server.untilRequests(4);
-    assert.deepEqual(
-      server.requests.map((r) => r[0]),
-      [Opcode.ChangeWindowAttributes, Opcode.GetInputFocus, Opcode.ChangeWindowAttributes, Opcode.GetInputFocus]
+    // Answer whichever query the client uses to synchronize with the server.
+    server.onRequest = (request, sequence) => queueMicrotask(() => {
+      if (request[0] !== Opcode.ChangeWindowAttributes) server.push(reply(sequence));
+      else if (request.readUInt32LE(4) === 0x400002) server.push(xerror(sequence, 3, 0x400002, Opcode.ChangeWindowAttributes));
+    });
+    await conn.selectInput(0x400001, 0x400000);
+    await assert.rejects(conn.selectInput(0x400002, 0x400000), (error: unknown) =>
+      error instanceof X11Error && error.code === 3 && error.badValue === 0x400002
     );
-    server.push(reply(2));
-    await ok;
-    server.push(xerror(3, 3, 0x400002, Opcode.ChangeWindowAttributes));
-    server.push(reply(4));
-    await assert.rejects(failed, (error: unknown) => error instanceof X11Error && error.code === 3);
   });
 
   test("sequence numbers widen across the 16-bit wrap", async () => {

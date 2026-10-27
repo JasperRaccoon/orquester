@@ -27,7 +27,7 @@ interface Body extends SimulationNodeDatum {
 }
 
 /** Clear space kept between two dots, beyond their radii. */
-export const LAYOUT_GAP = 4;
+const LAYOUT_GAP = 4;
 /** Rest length of a link, beyond the radii of its ends. */
 const LINK_GAP = 24;
 /** Pull towards the centre: what keeps unlinked concepts and small clusters near the rest. */
@@ -53,7 +53,7 @@ const ALPHA_MIN = 0.001;
  * the same picture. With `initial`, the concepts it places start there.
  */
 export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string, { x: number; y: number }> {
-  const warm = request.initial && request.nodes.some((n) => request.initial![n.id]);
+  const warm = request.initial && request.nodes.some((n) => Object.hasOwn(request.initial!, n.id) && request.initial![n.id]);
   const seeds = warm ? seedPositions(request.nodes, request.edges, request.initial!) : null;
   const bodies: Body[] = request.nodes.map((n) => {
     const at = seeds?.[n.id];
@@ -85,9 +85,9 @@ export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string
     .stop()
     .tick(warm ? Math.ceil((TICKS * Math.log(ALPHA_MIN / WARM_ALPHA)) / Math.log(ALPHA_MIN)) : TICKS);
   separate(bodies);
-  const positions: Record<string, { x: number; y: number }> = {};
+  const positions: Record<string, { x: number; y: number }> = Object.create(null);
   for (const b of bodies) positions[b.id] = { x: b.x ?? 0, y: b.y ?? 0 };
-  return positions;
+  return { ...positions };
 }
 
 /**
@@ -98,7 +98,7 @@ export function computeLayout(request: Omit<LayoutRequest, "id">): Record<string
  * better laid out afresh.
  */
 export function warmStart(ids: readonly string[], placed: ReadonlyMap<string, { x: number; y: number }>): Positions | null {
-  const out: Positions = {};
+  const out: Positions = Object.create(null);
   let kept = 0;
   for (const id of ids) {
     const at = placed.get(id);
@@ -106,7 +106,7 @@ export function warmStart(ids: readonly string[], placed: ReadonlyMap<string, { 
     out[id] = { x: at.x, y: at.y };
     kept += 1;
   }
-  return kept > 0 && kept * 2 >= ids.length && kept * 2 >= placed.size ? out : null;
+  return kept > 0 && kept * 2 >= ids.length && kept * 2 >= placed.size ? { ...out } : null;
 }
 
 /**
@@ -120,9 +120,9 @@ export function seedPositions(
   edges: readonly { source: string; target: string }[],
   placed: Positions
 ): Positions {
-  const out: Positions = {};
+  const out: Positions = Object.create(null);
   for (const n of nodes) {
-    const at = placed[n.id];
+    const at = Object.hasOwn(placed, n.id) ? placed[n.id] : undefined;
     if (at) out[n.id] = { x: at.x, y: at.y };
   }
   const neighbours = new Map<string, string[]>();
@@ -140,8 +140,7 @@ export function seedPositions(
   // long chain quadratic, and this also runs on the main thread before paint.
   const unplaced = new Set(pending.map((n) => n.id));
   const depth = new Map<string, number>();
-  // Use the same truthy lookup as `near` below. Concept ids are arbitrary
-  // strings, so a seed can also be inherited (notably `__proto__`).
+  // Only positions stored for real concept IDs seed their neighbours.
   const queue = [...neighbours.keys()].filter((id) => Boolean(out[id]));
   for (let i = 0; i < queue.length; i += 1) {
     const id = queue[i]!;
@@ -185,7 +184,7 @@ export function seedPositions(
     const away = direction(n.id);
     out[n.id] = { x: cx + away.x * radius, y: cy + away.y * radius };
   }
-  return out;
+  return { ...out };
 }
 
 /**

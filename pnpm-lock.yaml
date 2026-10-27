@@ -142,6 +142,9 @@ importers:
       '@types/yauzl':
         specifier: ^3.4.0
         version: 3.4.0
+      jpeg-js:
+        specifier: 0.4.4
+        version: 0.4.4
       tsx:
         specifier: ^4.20.3
         version: 4.22.4
@@ -3691,6 +3694,9 @@ packages:
         optional: true
       react:
         optional: true
+
+  jpeg-js@0.4.4:
+    resolution: {integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -9034,6 +9040,8 @@ snapshots:
     optionalDependencies:
       '@types/react': 18.3.31
       react: 18.3.1
+
+  jpeg-js@0.4.4: {}
 
   js-tokens@4.0.0: {}
 

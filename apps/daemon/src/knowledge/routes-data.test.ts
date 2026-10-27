@@ -440,7 +440,6 @@ test("entries list takes the search filters as query params", async (t) => {
   // An author whose name holds a comma travels as a JSON array (the client's encoding).
   await h.store.updateEntry(billing, { author: "Smith, John" });
   const authors = (values: string[]) => `authors=${encodeURIComponent(encodeKnowledgeFilterList(values)!)}`;
-  assert.equal(encodeKnowledgeFilterList(["Smith, John"]), '["Smith, John"]');
   assert.deepEqual(await list(authors(["Smith, John"])), [billing]);
   assert.deepEqual((await list(authors(["smith, john", "Hridoy"]))).sort(), [alt, billing].sort());
   assert.deepEqual(await list(authors(["Smith"])), [], "the comma form still splits");
@@ -554,7 +553,7 @@ test("merge: without keep the oldest stays (same instant: the smaller id); a kep
   const merged = ok<KnowledgeMergeResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.entriesMerge, payload: { ids: [goneId, keptId] } }));
   assert.equal(merged.kept.entry.id, keptId);
   assert.deepEqual(merged.deleted, [goneId]);
-  assert.equal(h.store.getMeta(keptId), before, "not rewritten");
+  assert.equal(merged.kept.entry.updatedAt, before.updatedAt, "not rewritten");
   assert.deepEqual(h.linkingSaw, [{ kind: "deleted", entryIds: [goneId] }]);
   assert.deepEqual(h.events.at(-1)!.payload, { entryIds: [goneId], collections: true });
   assert.ok(merged.kept.entry.collections.includes(seo.id));

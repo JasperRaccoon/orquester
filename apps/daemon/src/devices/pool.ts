@@ -129,11 +129,11 @@ export function choosePlacement(input: PlacementInput): Placement {
 // Android hosts never run more than {@link ANDROID_HOST_HARD_CAP} devices (spike §3).
 
 /** No host runs more Android emulators than this (the 17th aborts and may take others down; spike §3). */
-export const ANDROID_HOST_HARD_CAP = 16;
+const ANDROID_HOST_HARD_CAP = 16;
 /** Devices a new Android pool host is planned with before one was measured (16 vCPU Blacksmith Linux: 8; spike §3). */
 const DEFAULT_ANDROID_POOL_CAPACITY = 8;
 /** Seconds from renting a host to its first device (spike §3: ~30–40 s Linux with caches; a Mac takes minutes). */
-export const HOST_START_SECONDS: Readonly<Record<DevicePlatform, number>> = { android: 40, ios: 300 };
+const HOST_START_SECONDS: Readonly<Record<DevicePlatform, number>> = { android: 40, ios: 300 };
 /** How long a request may wait on a starting host before it fails. */
 const DEFAULT_HOST_WAIT_SECONDS = 600;
 

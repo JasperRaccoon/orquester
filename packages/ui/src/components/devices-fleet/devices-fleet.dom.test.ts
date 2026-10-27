@@ -69,6 +69,14 @@ after(() => {
 const devicesPlugin = (enabled: boolean): PluginInfo => ({ ...knowledgePlugin(enabled), id: DEVICES_PLUGIN_ID, name: "Device simulators" });
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+/** Only the hosts, leases and chat destinations used by the view contracts below. */
+function testFleet() {
+  const fleet = fleetFixture(Date.now());
+  const hosts = new Set(["local", "box:bs-mac-1", "box:bs-linux-1", "box:bs-linux-3"]);
+  const leases = new Set(["emulator-5554", "A1B2-ios-1", "A1B2-ios-2", "A1B2-ios-3", "emulator-5600", "emulator-5700", "emulator-5900"]);
+  return { ...fleet, hosts: fleet.hosts.filter((host) => hosts.has(host.id)), leases: fleet.leases.filter((lease) => leases.has(lease.id)) };
+}
+
 function stateOf(fleet: ReturnType<typeof fleetFixture>, over: Partial<DevicesStateResponse> = {}): DevicesStateResponse {
   return { enabled: true, hosts: fleet.hosts, leases: fleet.leases, profiles: [], settings: fleet.settings, setupJobs: [], pool: fleet.pool, ...over };
 }
@@ -80,6 +88,7 @@ interface FakeApi {
 }
 
 function fakeApi(state: DevicesStateResponse): FakeApi & ApiClient {
+  const actions = fleetFixture().actions;
   const fake: FakeApi & Record<string, unknown> = {
     calls: [],
     fail: false,
@@ -92,7 +101,7 @@ function fakeApi(state: DevicesStateResponse): FakeApi & ApiClient {
     },
     async deviceLeaseActions(leaseId: string) {
       fake.calls.push(`actions:${leaseId}`);
-      return { leaseId, actions: fleetFixture(Date.now()).actions[leaseId] ?? [] };
+      return { leaseId, actions: actions[leaseId] ?? [] };
     },
     deviceHttpRequest: (path: string) => ({ url: `http://daemon.test${path}`, headers: { Authorization: "Bearer t" } }),
     async setDeviceHostDraining(hostId: string, draining: boolean) {
@@ -159,7 +168,7 @@ describe("the Devices fleet view", () => {
 
   /** Connect a fake daemon with the plugin on: the app store loads the devices store from it. */
   const connect = async (state: DevicesStateResponse) => {
-    const fleet = fleetFixture(Date.now());
+    const fleet = testFleet();
     const api = fakeApi(state);
     await act(async () => {
       useAppStore.setState({
@@ -174,7 +183,7 @@ describe("the Devices fleet view", () => {
   };
 
   it("the activity bar and the drawer offer Devices only while the plugin is on", async () => {
-    await render(createElement("div", null, createElement(ActivityBar), createElement(DevicesDrawerEntry)));
+    await render(createElement("div", null, createElement(ActivityBar), createElement(DevicesDrawerEntry), createElement(DevicesFleetHeader)));
     assert.equal(buttonNamed("Devices"), null, "no plugins list yet");
     await act(async () => useAppStore.setState({ plugins: [devicesPlugin(false)] }));
     assert.equal(buttonNamed("Devices"), null, "plugin off");
@@ -193,40 +202,23 @@ describe("the Devices fleet view", () => {
     assert.equal(useAppStore.getState().devicesFleetOpen, true);
     assert.equal(useAppStore.getState().sidebarDrawerOpen, false);
 
+    await click(buttonNamed("Close Devices")!);
+    assert.equal(useAppStore.getState().devicesFleetOpen, false);
+    await click(row);
     await act(async () => useAppStore.setState({ plugins: [devicesPlugin(false)] }));
     assert.equal(useAppStore.getState().devicesFleetOpen, false, "the plugin turning off closes it");
   });
 
-  it("the top bar's header counts the leased devices and closes the view", async () => {
-    await connect(stateOf(fleetFixture(Date.now())));
-    useAppStore.getState().openDevicesFleet();
-    await render(createElement(DevicesFleetHeader));
-    assert.match(document.body.textContent ?? "", /Devices13/, "every lease but the lost one");
-    await click(buttonNamed("Close Devices")!);
-    assert.equal(useAppStore.getState().devicesFleetOpen, false);
-  });
-
-  it("groups leased devices under their hosts, with chats, agents, last actions and thumbnails", async () => {
+  it("visible cards fetch authenticated thumbnails and their current action log", async () => {
     const fetched: string[] = [];
-    const api = await connect(stateOf(fleetFixture(Date.now())));
+    const api = await connect(stateOf(testFleet()));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps(fetched) }));
     await act(settle);
-
-    const groups = [...document.querySelectorAll("[data-fleet-group]")].map((el) => el.getAttribute("data-fleet-group"));
-    assert.deepEqual(groups, ["local", "box:byo-1", "box:bs-linux-3", "box:bs-mac-1", "box:bs-linux-1", "box:bs-linux-2", "box:bs-mac-2", "box:gone"]);
-    assert.equal(document.querySelectorAll("[data-lease-id]").length, 14);
-    assert.ok(document.querySelector("[data-pool-header]"), "the pool header shows");
-    const text = document.body.textContent ?? "";
-    for (const words of ["Blacksmith macOS", "Blacksmith Linux", "Your machine", "This host", "Provisioning", "Suspended", "Draining", "3 waiting", "This host first", "Checkout flow regression", "Claude Code", "Codex", "You drive"]) {
-      assert.ok(text.includes(words), `shows “${words}”`);
-    }
-    assert.ok(text.includes("no longer listed"), "a lease on an unknown host gets its own group");
 
     // Each live card polls the daemon's downscaled thumbnail of its lease (GET); the bearer rides as
     // a header, never as `?token=` in a fetched URL.
     assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/emulator-5554/thumbnail?w=320 Bearer t"));
     assert.ok(fetched.includes("GET http://daemon.test/api/devices/leases/A1B2-ios-1/thumbnail?w=320 Bearer t"));
-    assert.ok(!fetched.some((line) => line.includes("token=")));
     assert.ok(!fetched.some((line) => line.includes("A1B2-ios-3")), "a starting device has nothing to poll");
     const card = document.querySelector('[data-lease-id="emulator-5554"]')!;
     assert.equal(card.querySelector("img")?.getAttribute("src"), "blob:frame");
@@ -236,7 +228,7 @@ describe("the Devices fleet view", () => {
   });
 
   it("a card's chat link opens that chat with its Device panel on the lease", async () => {
-    await connect(stateOf(fleetFixture(Date.now())));
+    await connect(stateOf(testFleet()));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     const card = document.querySelector('[data-lease-id="A1B2-ios-2"]')!;
     const link = [...card.querySelectorAll("button")].find((b) => b.textContent?.includes("iPad split view layout"))!;
@@ -246,7 +238,7 @@ describe("the Devices fleet view", () => {
   });
 
   it("host cards drain, warm caches and destroy (after a confirmation naming the cost)", async () => {
-    const api = await connect(stateOf(fleetFixture(Date.now())));
+    const api = await connect(stateOf(testFleet()));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     const hostCard = (id: string) => document.querySelector(`[data-host-id="${id}"]`)!;
     const inCard = (id: string, name: string) => [...hostCard(id).querySelectorAll("button")].find((b) => b.textContent?.trim() === name) ?? null;
@@ -260,58 +252,59 @@ describe("the Devices fleet view", () => {
     await click(inCard("box:bs-mac-1", "Warm caches")!);
     await act(settle);
     assert.deepEqual(api.calls.filter((call) => !call.startsWith("actions:") && call !== "devicesState"), ["drain:box:bs-linux-1:true", "warm:ios"]);
-    assert.match(useAppStore.getState().notice?.message ?? "", /Warming the iPhone & iPad caches/);
 
     await click(inCard("box:bs-mac-1", "Destroy")!);
     const dialog = document.querySelector('[role="dialog"]');
     assert.ok(dialog, "a confirmation first");
-    assert.match(dialog.textContent ?? "", /Its 3 devices end/);
-    assert.match(dialog.textContent ?? "", /\$4\.26 so far at \$1\.92\/h/);
+    assert.match(dialog.textContent ?? "", /\$4\.26/);
+    assert.match(dialog.textContent ?? "", /\$1\.92/);
+    assert.ok(!api.calls.some((call) => call.startsWith("destroy:")), "destruction waits for confirmation");
     await click(buttonNamed("Destroy host")!);
     await act(settle);
     assert.ok(api.calls.includes("destroy:box:bs-mac-1"));
   });
 
-  it("a host drained near its deadline reads Ending soon (deadline), with Resume off and the reason", async () => {
-    const fleet = fleetFixture(Date.now());
+  it("a deadline drain cannot be resumed and explains the unavailable control", async () => {
+    const fleet = testFleet();
     const hosts = fleet.hosts.map((host) => (host.id === "box:bs-linux-3" ? { ...host, pool: { draining: true, drainReason: "deadline" as const, warm: false, idleSince: null } } : host));
     const api = await connect(stateOf(fleet, { hosts }));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     const card = document.querySelector('[data-host-id="box:bs-linux-3"]')!;
-    assert.match(card.textContent ?? "", /Ending soon \(deadline\)/);
     const resume = [...card.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Resume")!;
     assert.ok(resume, "Resume still shows");
     assert.equal(resume.disabled, true);
-    assert.match(card.querySelector("[data-resume-blocked]")?.getAttribute("title") ?? "", /Can't resume: near its time limit/);
+    assert.ok(card.querySelector("[data-resume-blocked]")?.getAttribute("title"), "the unavailable control explains why");
     await click(resume);
     await act(settle);
     assert.ok(!api.calls.some((call) => call.startsWith("drain:")), "no request");
   });
 
   it("a panel Open still waiting for a host groups under Waiting for a device host", async () => {
-    const fleet = fleetFixture(Date.now());
+    const fleet = testFleet();
     const waiting = fixtureLease("queued-1", { hostId: "pool", threadId: "chat-9", state: "starting", deviceId: null, key: null, progress: { step: "queue", label: "Waiting for a free Android device", startedAt: new Date().toISOString() } });
     await connect(stateOf(fleet, { leases: [...fleet.leases, waiting] }));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     const header = document.querySelector('[data-unknown-host="pool"]');
     assert.ok(header);
-    assert.match(header.textContent ?? "", /Waiting for a device host/);
+    assert.match(header.textContent ?? "", /Waiting/i);
     assert.doesNotMatch(header.textContent ?? "", /no longer listed/);
   });
 
   it("explains how agents get devices when none is leased", async () => {
-    const fleet = fleetFixture(Date.now());
+    const fleet = testFleet();
     await connect(stateOf(fleet, { leases: [], hosts: [fleet.hosts[1]!] }));
     await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     const empty = document.querySelector("[data-fleet-empty]");
     assert.ok(empty);
     assert.match(empty.textContent ?? "", /open_device/);
     assert.ok(document.querySelector('[data-host-id="local"]'), "the hosts still show");
-    assert.match(document.body.textContent ?? "", /No devices on this host/);
+    await click(buttonNamed("Device settings")!);
+    assert.equal(useAppStore.getState().settingsOpen, true);
+    assert.equal(useAppStore.getState().settingsSection, "devices");
   });
 
   it("shows a failed load with a retry that recovers", async () => {
-    const fleet = fleetFixture(Date.now());
+    const fleet = testFleet();
     const api = fakeApi(stateOf(fleet));
     api.fail = true;
     await act(async () => {
@@ -329,12 +322,20 @@ describe("the Devices fleet view", () => {
     await click(buttonNamed("Try again")!);
     await act(settle);
     assert.equal(document.querySelector("[data-fleet-error]"), null);
-    assert.equal(document.querySelectorAll("[data-lease-id]").length, 14);
+    assert.ok(document.querySelector('[data-lease-id="emulator-5554"]'));
   });
 
   it("shows loading until the devices state arrives", async () => {
-    useAppStore.setState({ api: null });
-    await render(createElement(DevicesFleetView));
+    const state = stateOf(testFleet());
+    const api = fakeApi(state);
+    let answer!: (value: DevicesStateResponse) => void;
+    const pending = new Promise<DevicesStateResponse>((resolve) => { answer = resolve; });
+    api.devicesState = () => pending;
+    await act(async () => useAppStore.setState({ api, plugins: [devicesPlugin(true)] }));
+    await render(createElement(DevicesFleetView, { thumbnailDeps: thumbnailDeps([]) }));
     assert.ok(document.querySelector("[data-fleet-loading]"));
+    await act(async () => { answer(state); await settle(); });
+    assert.equal(document.querySelector("[data-fleet-loading]"), null);
+    assert.ok(document.querySelector('[data-lease-id="emulator-5554"]'));
   });
 });

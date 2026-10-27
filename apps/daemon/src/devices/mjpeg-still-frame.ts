@@ -38,7 +38,7 @@ function endsWithCrlf(part: readonly Buffer[]): boolean {
  * the last complete part as views into the forwarded chunks (frame bytes are never copied). Any
  * other framing turns tracking off and the rest passes through untouched.
  */
-export class MjpegPartTracker {
+class MjpegPartTracker {
   /** The last complete part, while the stream sits at a part boundary; null otherwise. */
   still: Buffer[] | null = null;
   private pieces: Buffer[] = [];
@@ -89,7 +89,7 @@ export class MjpegPartTracker {
 }
 
 /** A pass-through that re-sends the latest complete part once when the stream goes quiet. */
-export function repeatStillFrame(delayMs = STILL_FRAME_DELAY_MS): Transform {
+export function repeatStillFrame(): Transform {
   const tracker = new MjpegPartTracker();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const clear = () => {
@@ -108,7 +108,7 @@ export function repeatStillFrame(delayMs = STILL_FRAME_DELAY_MS): Transform {
           if (stream.destroyed || stream.writableEnded) return;
           tracker.still = null;
           for (const piece of still) stream.push(piece);
-        }, delayMs);
+        }, STILL_FRAME_DELAY_MS);
         timer.unref?.();
       }
       callback();

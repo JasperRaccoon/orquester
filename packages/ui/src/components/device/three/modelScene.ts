@@ -122,7 +122,7 @@ export function createImportedPhoneScene(
  * viewer projects touches in the display's own coordinates, so bake that node transform back into
  * a float copy of the display geometry. Other meshes render quantized as they are.
  */
-export function bakeDisplayTransform(root: Object3D) {
+function bakeDisplayTransform(root: Object3D) {
   root.updateMatrixWorld(true);
   root.traverse((object) => {
     if (!(object instanceof Mesh) || object.name !== "device-screen") return;

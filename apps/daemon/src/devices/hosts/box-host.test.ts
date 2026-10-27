@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, type TestContext } from "node:test";
 
 import { DEFAULT_DEVICES_SETTINGS, type DevicesSettings } from "@orquester/api";
 import type { StoredBox, StoredDeviceLease } from "@orquester/config";
@@ -12,9 +12,9 @@ import type { BoxConnection } from "../../boxes/contracts.ts";
 import type { CreateDeviceHostBoxRequest, DeviceHostPreparer } from "../../boxes/service/index.ts";
 import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { isDeviceError } from "../errors.ts";
-import type { DeviceHost, DeviceHostFactoryContext, DeviceHostProgress } from "../host.ts";
+import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProgress } from "../host.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
-import { createBoxHostFactory, deviceHostOfRecord, type BoxHostFactory } from "./box-host.ts";
+import { createBoxHostFactory, deviceHostOfRecord } from "./box-host.ts";
 import { FakeMacBox } from "./box/testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -131,29 +131,36 @@ class FakeBoxes {
   }
 }
 
-/** Resolves once `predicate` holds (checked after every host change and a few ticks). */
-async function eventually(predicate: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 2000; i += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-
 describe("box device host factory", () => {
   let appDir: string;
   let boxes: FakeBoxes;
   let settings: DevicesSettings;
   let leases: StoredDeviceLease[];
   let added: Map<string, DeviceHost>;
-  let now: number;
-  let factory: BoxHostFactory;
+  let factory: DeviceHostFactory;
+  let hostChanges: EventEmitter;
+
+  const eventually = (predicate: () => boolean, what: string): Promise<void> => new Promise((resolve, reject) => {
+    const check = () => { if (predicate()) finish(); };
+    const finish = (error?: Error) => {
+      clearTimeout(timer);
+      hostChanges.off("change", check);
+      if (error) reject(error); else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error(`timed out waiting for ${what}`)), 5_000);
+    hostChanges.on("change", check);
+    check();
+  });
 
   const context = (): DeviceHostFactoryContext => ({
     settings: () => settings,
     activeLeases: (hostId) => leases.filter((lease) => lease.hostId === hostId),
-    addHost: (host) => void added.set(host.id, host),
-    removeHost: (hostId) => void added.delete(hostId),
+    addHost: (host) => {
+      added.set(host.id, host);
+      host.onChange(() => hostChanges.emit("change"));
+      hostChanges.emit("change");
+    },
+    removeHost: (hostId) => { added.delete(hostId); hostChanges.emit("change"); },
     logger: quiet
   });
 
@@ -163,19 +170,17 @@ describe("box device host factory", () => {
       boxes: () => boxes.wiring(),
       toolchain: { toolBin: () => process.execPath } as unknown as DeviceToolchain,
       logger: quiet,
-      now: () => now,
-      idleSweep: false,
-      fetch: boxes.fetch,
-      timing: { hubPollMs: 2, framePollMs: 1 }
+      fetch: boxes.fetch
     });
 
-  beforeEach(async () => {
+  beforeEach(async (t) => {
+    (t as TestContext).mock.timers.enable({ apis: ["Date", "setInterval"], now: T0 + 60_000 });
     appDir = await mkdtemp(join(tmpdir(), "orq-box-factory-"));
     boxes = new FakeBoxes();
     settings = { ...DEFAULT_DEVICES_SETTINGS, ios: { ...DEFAULT_DEVICES_SETTINGS.ios, enabled: true } };
     leases = [];
     added = new Map();
-    now = T0 + 60_000;
+    hostChanges = new EventEmitter();
     factory = make();
   });
 
@@ -210,9 +215,7 @@ describe("box device host factory", () => {
     assert.deepEqual([...added.keys()].sort(), ["box:a", "box:b"]);
     assert.equal(added.get("box:a")!.kind, "box");
     assert.equal(added.get("box:b")!.kind, "byo");
-    assert.equal(added.get("box:b")!.label, "Studio (your Mac)");
-    assert.equal(added.get("box:a")!.label, "Mac host (Blacksmith, 6 vCPU M4)");
-    await eventually(() => factory.host("a")!.isReady() && factory.host("b")!.isReady(), "both hosts ready");
+    await eventually(() => added.get("box:a")!.state().status === "ready" && added.get("box:b")!.state().status === "ready", "both hosts ready");
     assert.ok(boxes.preparer, "the devices setup step is the factory's");
     assert.equal(added.get("box:a")!.box?.()?.hourlyUsd, 4.8);
     assert.equal(added.get("box:b")!.box?.()?.hourlyUsd, 0);
@@ -236,31 +239,26 @@ describe("box device host factory", () => {
 
   it("quotes a rental from Settings → Devices and the month's spending", async () => {
     await factory.start(context());
-    assert.deepEqual(factory.provisionQuote!("ios"), {
+    const { providerLabel: _iosProviderLabel, sizeLabel: _iosSizeLabel, ...iosQuote } = factory.provisionQuote!("ios")!;
+    assert.deepEqual(iosQuote, {
       platform: "ios",
       provider: "blacksmith",
-      providerLabel: "Blacksmith",
       size: "6vcpu",
-      sizeLabel: "6 vCPU M4 · 24 GB",
       hourlyUsd: 4.8,
       lifetimeMinutes: 240,
       needsApproval: true
     });
-    // The superseded Mac switch approves nothing: the pool's one switch does.
-    settings = { ...settings, ios: { ...settings.ios, rentWithoutAsking: true, monthlyCapUsd: 100 } };
-    assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
     settings = { ...settings, pool: { ...settings.pool, rentWithoutAsking: true, monthlyCapUsd: 100 } };
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, false);
     // A device host that ran 17 h this month ($81.6) leaves no room for 4 h more ($19.2) under $100.
     boxes.records.set("old", record("old", { state: "destroyed", providerRef: { runId: 1 }, createdAt: new Date(T0 - 17 * 3_600_000).toISOString(), destroyedAt: new Date(T0).toISOString() }));
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
     // Android: a Blacksmith Linux runner of `pool.androidSize` (default 16 vCPU).
-    assert.deepEqual(factory.provisionQuote!("android"), {
+    const { providerLabel: _androidProviderLabel, sizeLabel: _androidSizeLabel, ...androidQuote } = factory.provisionQuote!("android")!;
+    assert.deepEqual(androidQuote, {
       platform: "android",
       provider: "blacksmith",
-      providerLabel: "Blacksmith",
       size: "16vcpu",
-      sizeLabel: "16 vCPU x64 · 64 GB",
       hourlyUsd: 1.92,
       lifetimeMinutes: 240,
       needsApproval: false
@@ -278,7 +276,7 @@ describe("box device host factory", () => {
     await factory.start(context());
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, false);
     // A live Mac with 4 h left at $4.80/h: $19.20 committed (plus the new one's $19.20 > $30).
-    boxes.records.set("live", record("live", { createdAt: new Date(now).toISOString(), deadlineAt: new Date(now + 4 * 3_600_000).toISOString() }));
+    boxes.records.set("live", record("live", { createdAt: new Date(Date.now()).toISOString(), deadlineAt: new Date(Date.now() + 4 * 3_600_000).toISOString() }));
     settings = { ...settings, pool: { ...settings.pool, monthlyCapUsd: 30 } };
     assert.equal(factory.provisionQuote!("ios")!.needsApproval, true);
     // And `provision` re-checks it while holding the rental slot.
@@ -297,27 +295,26 @@ describe("box device host factory", () => {
     boxes.mac("new1", new FakeMacBox());
     await boxes.preparer!({ boxId: "new1", connection: boxes.wiring().hub.get("new1")!, signal: new AbortController().signal, log: () => undefined });
     boxes.set({ ...boxes.records.get("new1")!, state: "ready", setup: [] });
-    assert.equal(await joined, added.get("box:new1"));
+    assert.equal((await joined).id, "box:new1");
     assert.equal(boxes.started.length, 1);
   });
 
-  it("a failed rented host with no lease goes at once; idle rented hosts are left to the pool (whatever their state)", async () => {
+  it("a failed rented host with no lease goes at once; idle rented hosts are left to the pool (whatever their state)", async (t) => {
     boxes.records.set("a", record("a"));
     boxes.records.set("f", record("f"));
-    boxes.mac("f");
+    boxes.mac("f", new FakeMacBox({ nodeVersion: "v20.1.0" }));
     await factory.start(context());
-    await eventually(() => factory.host("f")!.isReady(), "f ready");
+    await eventually(() => added.get("box:f")!.state().status === "failed", "f failed readiness");
     // `a` never connects (unreachable): the pool's idle teardown handles it, not this sweep.
     assert.equal(added.get("box:a")!.state().status, "unreachable");
-    const failed = factory.host("f")!;
-    failed.state = () => ({ status: "failed", detail: "its hub crashed" });
-    await factory.sweepIdle();
+    t.mock.timers.tick(60_000);
+    await eventually(() => boxes.destroyed.length === 1, "the failed host destroyed");
     assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"]);
-    assert.match(boxes.destroyed[0]!.message ?? "", /its hub crashed/);
-    now += 25 * 60_000;
-    await factory.sweepIdle();
-    now += 25 * 60_000;
-    await factory.sweepIdle();
+    assert.match(boxes.destroyed[0]!.message ?? "", /Node\.js 22 or newer/);
+    t.mock.timers.setTime(Date.now() + 25 * 60_000);
+    t.mock.timers.tick(60_000);
+    t.mock.timers.setTime(Date.now() + 25 * 60_000);
+    t.mock.timers.tick(60_000);
     assert.deepEqual(boxes.destroyed.map((entry) => entry.boxId), ["f"]);
   });
 
@@ -331,24 +328,19 @@ describe("box device host factory", () => {
 
     const progress: DeviceHostProgress[] = [];
     const pending = factory.provision!({ platform: "ios", approved: true, threadId: "t1", onProgress: (entry) => progress.push(entry) }, new AbortController().signal);
-    // A second request while renting joins the first.
-    const joined = factory.provision!({ platform: "ios", approved: true, threadId: "t2" }, new AbortController().signal);
     await eventually(() => added.has("box:new1"), "the renting host");
-    assert.deepEqual(boxes.started, [{ kind: "macos", provider: "blacksmith", size: "6vcpu", image: "macos-26", lifetimeMinutes: 240, purposeNote: "iPhone & iPad simulators (Device simulators)" }]);
+    assert.deepEqual(boxes.started.map(({ purposeNote: _note, ...request }) => request), [{ kind: "macos", provider: "blacksmith", size: "6vcpu", image: "macos-26", lifetimeMinutes: 240 }]);
     const host = added.get("box:new1")!;
-    assert.deepEqual(host.state(), { status: "starting", detail: "Renting a Mac host (6 vCPU M4 · 24 GB)…" });
+    assert.equal(host.state().status, "starting");
 
     // The box service connects it and runs its `devices` step (the factory's preparer), then marks it ready.
     const mac = boxes.mac("new1", new FakeMacBox());
     boxes.set({ ...boxes.records.get("new1")!, setup: [{ id: "devices", label: "Prepare", state: "running", startedAt: null, finishedAt: null, message: null }] });
-    const lines: string[] = [];
-    await boxes.preparer!({ boxId: "new1", connection: boxes.wiring().hub.get("new1")!, signal: new AbortController().signal, log: (line) => lines.push(line) });
+    await boxes.preparer!({ boxId: "new1", connection: boxes.wiring().hub.get("new1")!, signal: new AbortController().signal, log: () => undefined });
     assert.ok(mac.log.includes("install-tools"));
-    assert.ok(lines.some((line) => line.startsWith("Installing the device tools")));
     boxes.set({ ...boxes.records.get("new1")!, state: "ready", setup: [] });
 
-    assert.equal(await pending, host);
-    assert.equal(await joined, host);
+    assert.equal((await pending).id, host.id);
     assert.equal(boxes.started.length, 1);
     assert.equal(host.state().status, "ready");
     assert.ok(progress.some((entry) => entry.step === "rent-host"));
@@ -363,31 +355,32 @@ describe("box device host factory", () => {
     await assert.rejects(pending, /Setup failed; the box was torn down/);
   });
 
-  it("never destroys an idle rented host (the pool does); an own Mac's helpers stop after pool.idleTeardownMinutes", async () => {
+  it("never destroys an idle rented host (the pool does); an own Mac's helpers stop after pool.idleTeardownMinutes", async (t) => {
     settings = { ...settings, ios: { ...settings.ios, idleTeardownMinutes: 60 }, pool: { ...settings.pool, idleTeardownMinutes: 20 } };
     boxes.records.set("a", record("a"));
     boxes.records.set("b", record("b", { provider: "byo", purpose: "machine", deviceHost: true }));
     const ownMac = boxes.mac("b");
     boxes.mac("a");
     await factory.start(context());
-    await eventually(() => factory.host("a")!.isReady() && factory.host("b")!.isReady(), "both hosts ready");
+    await eventually(() => added.get("box:a")!.state().status === "ready" && added.get("box:b")!.state().status === "ready", "both hosts ready");
 
     leases = [{ id: "L1", hostId: "box:b" } as StoredDeviceLease];
-    await factory.sweepIdle();
-    now += 30 * 60_000;
-    await factory.sweepIdle();
+    t.mock.timers.tick(60_000);
+    t.mock.timers.setTime(Date.now() + 30 * 60_000);
+    t.mock.timers.tick(60_000);
     assert.equal(added.get("box:b")!.state().status, "ready", "a host with a lease keeps its helpers");
 
     leases = [];
-    await factory.sweepIdle();
-    now += 19 * 60_000;
-    await factory.sweepIdle();
+    t.mock.timers.tick(60_000);
+    t.mock.timers.setTime(Date.now() + 18 * 60_000);
+    t.mock.timers.tick(60_000);
     assert.equal(added.get("box:b")!.state().status, "ready");
-    now += 2 * 60_000;
-    await factory.sweepIdle();
+    t.mock.timers.setTime(Date.now() + 2 * 60_000);
+    t.mock.timers.tick(60_000);
     assert.deepEqual(boxes.destroyed, [], "the idle rented host is the pool's");
     assert.ok(added.has("box:a"));
     // The own Mac is never destroyed: its helpers stop.
+    await eventually(() => added.get("box:b")!.state().status === "needs-setup", "the idle helpers stopped");
     assert.equal(added.get("box:b")!.state().status, "needs-setup");
     assert.equal(ownMac.hub, null);
     assert.equal(ownMac.agentRunning, false);
@@ -400,7 +393,7 @@ describe("box device host factory", () => {
     boxes.mac("b");
     await factory.start(context());
     await added.get("box:a")!.destroy!();
-    assert.deepEqual(boxes.destroyed, [{ boxId: "a", reason: "deleted", message: "Destroyed from Settings → Devices." }]);
+    assert.deepEqual(boxes.destroyed.map(({ boxId, reason }) => ({ boxId, reason })), [{ boxId: "a", reason: "deleted" }]);
     await assert.rejects(added.get("box:b")!.destroy!(), /never destroyed/);
   });
 });

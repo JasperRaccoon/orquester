@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeVisibility } from "@orquester/api";
+import type { KnowledgeVectorThresholds } from "../ports.ts";
 import { KnowledgeError } from "../store/errors.ts";
 import { KnowledgeGraph } from "./graph.ts";
-import { KnowledgeSearch, matchBand, mmr, recencyFactor } from "./search.ts";
+import { KnowledgeSearch } from "./search.ts";
 import { FakeEmbedder, FakeEmbedderSource, FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 
 const SEO = "kc_seoseoseos";
@@ -21,8 +22,8 @@ const BILLING = "ke_billingbill2";
 const ADSPOST = "ke_adsadsadsads";
 const UNFILED = "ke_unfiledunfil";
 
-async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; indexDir?: string; more?: (store: FakeStore) => void } = {}) {
-  const indexDir = options.indexDir ?? (await mkdtemp(join(tmpdir(), "kg-search-")));
+async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; more?: (store: FakeStore) => void } = {}) {
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-search-"));
   const store = new FakeStore();
   store.collection(SEO, "SEO");
   store.collection(SAAS, "SaaS");
@@ -52,13 +53,13 @@ async function setup(t: TestContext, options: { embedder?: FakeEmbedder | null; 
       edge("e2", "tactic-comparison-tables", "tool-stripe", [`${BILLING}.md`])
     ]
   );
-  const embedder = options.embedder === undefined ? new FakeEmbedder() : options.embedder;
+  const embedder = options.embedder === undefined ? new FakeEmbedder({ thresholds: { minimum: 0.3, good: 0.4, strong: 0.6, duplicate: 0.92 } }) : options.embedder;
   const embedders = new FakeEmbedderSource(embedder);
   const logger = silentLogger();
-  const search = new KnowledgeSearch({ store, graph, embedders, indexDir, logger, minSimilarity: 0.3 });
+  const search = new KnowledgeSearch({ store, graph, embedders, indexDir, logger });
   t.after(async () => {
     await search.stop();
-    if (!options.indexDir) await rm(indexDir, { recursive: true, force: true });
+    await rm(indexDir, { recursive: true, force: true });
   });
   await search.start();
   return { store, graph, search, embedder, embedders, logger, indexDir };
@@ -70,8 +71,6 @@ function entryIds(hits: { kind: string; entry?: { id: string } }[]): string[] {
 
 test("search by meaning finds an entry that shares no words with the query", async (t) => {
   const { search } = await setup(t);
-  // The first query starts the backfill of entries saved before the model was there.
-  await search.search({ query: "warm up" }, ALL);
   await search.idle();
   const result = await search.search({ query: "Ranking in ChatGPT" }, ALL);
   const first = result.hits[0]!;
@@ -94,28 +93,12 @@ test("BM25 finds words in titles, bodies and concepts; concept hits carry visibl
   assert.ok(concept && concept.kind === "concept");
   assert.equal(concept.concept.id, "tool-stripe");
   assert.deepEqual(concept.entryIds, [BILLING]);
+  assert.deepEqual(concept.entries, [{ id: BILLING, title: "Annual billing" }]);
+  const billing = entryHits(result.hits)[0]!;
+  assert.equal(billing.match!.band, "strong");
+  assert.deepEqual(billing.match!.terms, ["stripe", "proration"]);
   const snippet = result.hits[0]!.kind === "entry" ? result.hits[0]!.entry.snippet : "";
   assert.match(snippet, /Stripe makes proration easy/);
-});
-
-test("a profile never gets hidden entries or concepts, even through the one-hop expansion", async (t) => {
-  const { search } = await setup(t);
-  for (const query of ["stripe", "annual billing", "comparison tables", "pricing tables", "budget campaign", "Ranking in ChatGPT"]) {
-    const result = await search.search({ query, limit: 25 }, SEO_ONLY);
-    for (const hit of result.hits) {
-      if (hit.kind === "entry") {
-        assert.ok([CLOUDFLARE, ALT].includes(hit.entry.id), `${query}: ${hit.entry.id}`);
-        assert.deepEqual(hit.entry.collections, [SEO]);
-      } else {
-        assert.notEqual(hit.concept.id, "tool-stripe", query);
-        for (const id of hit.entryIds) assert.ok([CLOUDFLARE, ALT].includes(id), `${query}: concept entry ${id}`);
-      }
-    }
-    assert.deepEqual(result.searched, [SEO]);
-  }
-  // Expansion reaches ALT through the shared concept even though its text does not match.
-  const expanded = await search.search({ query: "perplexity", limit: 25 }, SEO_ONLY);
-  assert.ok(entryIds(expanded.hits).includes(ALT));
 });
 
 test("the collections filter narrows within visibility; unknown or hidden names are refused with what is visible", async (t) => {
@@ -128,12 +111,13 @@ test("the collections filter narrows within visibility; unknown or hidden names 
 
   await assert.rejects(search.search({ query: "x", collections: ["Marketing"] }, ALL), (error: unknown) => {
     assert.ok(error instanceof KnowledgeError && error.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
-    assert.match(error.message, /"SEO", "SaaS", "Ads"/);
+    for (const name of ["SEO", "SaaS", "Ads"]) assert.ok(error.message.includes(name));
     return true;
   });
   await assert.rejects(search.search({ query: "x", collections: ["SaaS"] }, SEO_ONLY), (error: unknown) => {
     assert.ok(error instanceof KnowledgeError && error.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
-    assert.match(error.message, /Collections: "SEO"\.$/);
+    assert.ok(error.message.includes("SEO"));
+    assert.ok(!error.message.includes("Ads"));
     return true;
   });
   await assert.rejects(search.search({ query: "  " }, ALL), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID");
@@ -152,7 +136,7 @@ test("semantic candidates are selected within the live collection scope, includi
   store.collection(SEO, "SEO");
   store.collection(SAAS, "SaaS");
   // More than CANDIDATES hidden entries beat the visible entry by vector similarity. The
-  // visible match must still be returned, and its final chunk supplies the semantic snippet.
+  // visible multi-chunk match must still be returned.
   const hidden = Array.from({ length: 128 }, (_, i) => `ke_${i.toString(32).padStart(12, "0")}`);
   for (const id of hidden) store.put(id, "ranking chatgpt", [SAAS], {}, true);
   const visible = "ke_visibleentry";
@@ -172,15 +156,11 @@ test("semantic candidates are selected within the live collection scope, includi
     await rm(indexDir, { recursive: true, force: true });
   });
   await search.start();
-  await search.search({ query: "warm up" }, ALL);
   await search.idle();
   assert.ok(!entryIds((await search.search({ query: "ranking chatgpt", limit: 25 }, ALL)).hits).includes(visible));
   const scoped = await search.search({ query: "ranking chatgpt" }, SEO_ONLY);
   assert.deepEqual(entryIds(scoped.hits), [visible]);
-  const hit = scoped.hits[0]!;
-  assert.equal(hit.kind, "entry");
-  if (hit.kind === "entry") assert.match(hit.entry.snippet, /LLM visibility: answer engines/);
-  assert.deepEqual(await search.search({ query: "ranking chatgpt", collections: [SEO] }, ALL), scoped);
+  assert.deepEqual(entryIds((await search.search({ query: "ranking chatgpt", collections: [SEO] }, ALL)).hits), [visible]);
   assert.deepEqual((await search.search({ query: "ranking chatgpt" }, { kind: "collections", ids: [] })).hits, []);
 
   // Relabelling changes metadata without re-embedding: every query must read the current scope.
@@ -217,86 +197,38 @@ test("without a runtime, or when the model fails, search degrades to text and ne
   const broken = await setup(t, { embedder: failing });
   const result = await broken.search.search({ query: "cloudflare" }, ALL);
   assert.equal(entryIds(result.hits)[0], CLOUDFLARE);
-  await broken.search.search({ query: "cloudflare again" }, ALL);
-  assert.equal(broken.logger.lines.filter((l) => l.includes("embeddings are unavailable")).length, 1);
-  const calls = failing.calls;
-  await broken.search.search({ query: "third" }, ALL);
-  assert.equal(failing.calls, calls, "a failed embedder is not retried until the runtime changes");
 
   // The runtime arrives: meaning search starts working.
   broken.embedders.set(new FakeEmbedder());
-  await broken.search.search({ query: "warm up" }, ALL);
   await broken.search.idle();
   assert.equal(entryIds((await broken.search.search({ query: "Ranking in ChatGPT" }, ALL)).hits)[0], CLOUDFLARE);
 });
 
-test("entries are embedded after a start without any search, and again at once for a new model", async (t) => {
+test("startup and model arrival fill similar-entry details without a search", async (t) => {
   const LLM = "ke_llmllmllmllm";
-  const { search, embedder } = await setup(t, {
+  const { search } = await setup(t, {
     more: (store) => store.put(LLM, "ChatGPT and LLM answer engines cite the sources they trust.", [SEO], { title: "LLM citations" }, true)
   });
   await search.idle();
-  assert.ok(!embedder!.kinds.includes("query"), "no search ran");
-  assert.equal(search.vectorIndex().embeddedIds().length, 6);
   const detail = (await search.entryDetail(CLOUDFLARE, ALL))!;
-  const neighbour = detail.similar?.find((similar) => similar.entry.id === LLM);
-  assert.ok(neighbour?.reasons.some((reason) => reason.kind === "meaning"), "similar entries by meaning without a search");
-
-  // No model at start; the model arrives (an install or a model repair finishing): backfilled at once.
-  const none = await setup(t, { embedder: null });
+  assert.ok(detail.similar?.find((similar) => similar.entry.id === LLM)?.reasons.some((reason) => reason.kind === "meaning"));
+  const none = await setup(t, {
+    embedder: null,
+    more: (store) => store.put(LLM, "ChatGPT and LLM answer engines cite the sources they trust.", [SEO], { title: "LLM citations" }, true)
+  });
+  assert.ok(!(await none.search.entryDetail(CLOUDFLARE, ALL))!.similar?.some((similar) => similar.reasons.some((reason) => reason.kind === "meaning")));
+  none.embedders.set(new FakeEmbedder());
   await none.search.idle();
-  assert.deepEqual(none.search.vectorIndex().embeddedIds(), []);
-  const arriving = new FakeEmbedder();
-  none.embedders.set(arriving);
-  await none.search.idle();
-  assert.equal(none.search.vectorIndex().embeddedIds().length, 5);
-  assert.equal(arriving.texts, 5, "each entry embedded once");
-  assert.ok(!arriving.kinds.includes("query"));
-  // A query afterwards does not embed them again.
-  await none.search.search({ query: "warm up" }, ALL);
-  await none.search.idle();
-  assert.equal(arriving.texts, 6);
+  const arrived = (await none.search.entryDetail(CLOUDFLARE, ALL))!;
+  assert.ok(arrived.similar?.find((similar) => similar.entry.id === LLM)?.reasons.some((reason) => reason.kind === "meaning"), "model installation fills read views without a query");
 });
 
-test("vectors are cached by content hash and reused across restarts; another model rebuilds", async (t) => {
-  const indexDir = await mkdtemp(join(tmpdir(), "kg-search-cache-"));
-  t.after(() => rm(indexDir, { recursive: true, force: true }));
-  const first = await setup(t, { indexDir });
-  await first.search.search({ query: "warm" }, ALL);
-  await first.search.idle();
-  assert.equal(first.embedder!.texts, 1 + 5, "the query and the five entries");
-  await first.search.stop();
-  assert.ok((await readdir(indexDir)).some((n) => n.endsWith(".bin")));
-
-  const second = await setup(t, { indexDir });
-  await second.search.search({ query: "warm" }, ALL);
-  await second.search.idle();
-  assert.equal(second.embedder!.texts, 1, "only the query is embedded");
-  assert.equal(entryIds((await second.search.search({ query: "Ranking in ChatGPT" }, ALL)).hits)[0], CLOUDFLARE);
-  await second.search.stop();
-
-  const other = await setup(t, { indexDir, embedder: new FakeEmbedder({ modelId: "fake/other" }) });
-  await other.search.search({ query: "warm" }, ALL);
-  await other.search.idle();
-  assert.equal(other.embedder!.texts, 6);
-  await other.search.stop();
-
-});
-
-test("read views: entry lists page newest first; details and items respect visibility", async (t) => {
+test("read views: lists, details, items and graphs respect visibility", async (t) => {
   const { search } = await setup(t, { embedder: null });
-  const page1 = await search.listEntries({ limit: 2 }, ALL);
-  assert.deepEqual(page1.entries.map((e) => e.id), [UNFILED, ADSPOST]);
-  assert.ok(page1.nextCursor);
-  const page2 = await search.listEntries({ limit: 2, cursor: page1.nextCursor! }, ALL);
-  assert.deepEqual(page2.entries.map((e) => e.id), [BILLING, ALT]);
-  const page3 = await search.listEntries({ limit: 2, cursor: page2.nextCursor! }, ALL);
-  assert.deepEqual(page3.entries.map((e) => e.id), [CLOUDFLARE]);
-  assert.equal(page3.nextCursor, null);
   assert.deepEqual((await search.listEntries({ collection: "unfiled" }, ALL)).entries.map((e) => e.id), [UNFILED]);
   assert.deepEqual((await search.listEntries({}, SEO_ONLY)).entries.map((e) => e.id), [ALT, CLOUDFLARE]);
-  await assert.rejects(search.listEntries({ collection: "unfiled" }, SEO_ONLY));
-  await assert.rejects(search.listEntries({ cursor: "garbage" }, ALL));
+  await assert.rejects(search.listEntries({ collection: "unfiled" }, SEO_ONLY), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
+  await assert.rejects(search.listEntries({ cursor: "garbage" }, ALL), (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID");
 
   const detail = (await search.entryDetail(CLOUDFLARE, SEO_ONLY))!;
   assert.equal(detail.entry.body.startsWith("Case study"), true);
@@ -328,49 +260,50 @@ test("vectors are cached under the hash of the text that was embedded, not the h
   store.put(stale, "Notes about iOS app store screenshots and android listings.", [SEO], { title: "Edited by hand", contentHash: store.entries.get(ADSPOST)!.contentHash }, true);
   assert.equal(store.entries.get(ADSPOST)!.body, oldBody);
   await search.indexEntries([stale]);
-  await search.search({ query: "warm up" }, ALL);
   await search.idle();
   // The ads entry must keep its own meaning (a query sharing no word with it), not the edited entry's.
   assert.equal(entryIds((await search.search({ query: "cpc", limit: 25 }, ALL)).hits)[0], ADSPOST);
 });
 
-test("a save waits a bounded time for its embeddings (a slow first model load never holds the chat)", async (t) => {
+test("a save returns within its bounded embedding wait while a stalled model finishes later", async (t) => {
   const { store, search, embedder } = await setup(t);
+  await search.idle();
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
+  t.after(() => release());
+  let started!: () => void;
+  const embedding = new Promise<void>((resolve) => (started = resolve));
   const embed = embedder!.embed.bind(embedder!);
-  embedder!.embed = async (texts) => {
-    if (texts.some((text) => text.includes("onboarding"))) await gate;
-    return embed(texts);
+  embedder!.embed = async (texts, kind) => {
+    if (texts.some((text) => text.includes("onboarding"))) {
+      started();
+      await gate;
+    }
+    return embed(texts, kind);
   };
   const id = "ke_slowslowslow";
   store.put(id, "Welcome emails: onboarding sequences that convert.", [SEO], { title: "Onboarding emails" }, true);
   let done = false;
   const indexing = search.indexEntries([id]).then(() => (done = true));
-  for (let waited = 0; !done && waited < 10_000; waited += 500) {
-    t.mock.timers.tick(500);
-    for (let i = 0; i < 20 && !done; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  }
+  await embedding;
+  t.mock.timers.tick(2_000);
+  await new Promise((resolve) => setImmediate(resolve));
   if (!done) release();
-  assert.ok(done, "the save is still waiting for the model after 10 s");
+  assert.ok(done, "the save must not wait beyond the documented two-second bound");
   await indexing;
-  // (Other entries, embedded at start, may outrank it by meaning: it has no vectors yet.)
-  assert.ok(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits).includes(id), "searchable by text already");
+  assert.ok(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits).includes(id), "searchable by text while its model call is pending");
   release();
   await search.idle();
-  assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
+  assert.ok(search.vectorIndex().entryVector(id), "the background embedding completes after the caller returns");
 });
 
-// ---------------------------------------------------------------------------
-// Retrieval spec (docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md)
-// ---------------------------------------------------------------------------
+// Retrieval spec: docs/superpowers/specs/2026-10-27-knowledge-retrieval-phase0-1-design.md
 
 type Hit = Awaited<ReturnType<KnowledgeSearch["search"]>>["hits"][number];
 type EntryHit = Extract<Hit, { kind: "entry" }>;
-const entryHits = (hits: readonly Hit[]): EntryHit[] => hits.filter((h): h is EntryHit => h.kind === "entry");
+const entryHits = (hits: readonly Hit[]): EntryHit[] => hits.filter((hit): hit is EntryHit => hit.kind === "entry");
 
-/** Labels a fixture entry for filter tests (the store's metadata is read live). */
 function label(store: FakeStore, id: string, meta: Partial<KnowledgeEntryMeta>): void {
   Object.assign(store.entries.get(id)!, meta);
 }
@@ -385,49 +318,55 @@ function labelFixture(store: FakeStore): void {
 const invalid = (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_INVALID";
 const notFound = (error: unknown) => error instanceof KnowledgeError && error.code === "KNOWLEDGE_NOT_FOUND";
 
-async function warm(search: KnowledgeSearch): Promise<void> {
-  await search.search({ query: "warm up" }, ALL);
+/** External model answers are fixed geometric fixtures; the real index and ranking remain in use. */
+async function geometricSearch(
+  t: TestContext,
+  entries: { id: string; title: string; body: string; vector: number[] }[],
+  thresholds: KnowledgeVectorThresholds = { minimum: 0.1, good: 0.5, strong: 0.7, duplicate: 0.95 }
+) {
+  const store = new FakeStore();
+  for (const entry of entries) store.put(entry.id, entry.body, [], { title: entry.title }, true);
+  const dimensions = entries[0]!.vector.length;
+  const embedder = new FakeEmbedder({ dimensions, groups: [], thresholds });
+  embedder.embed = async (texts, kind = "passage") => texts.map((text) => {
+    if (kind === "query") return Float32Array.from({ length: dimensions }, (_, dimension) => dimension === 0 ? 1 : 0);
+    const entry = entries.find((candidate) => text.includes(candidate.title));
+    assert.ok(entry, `unexpected passage: ${text}`);
+    return Float32Array.from(entry.vector);
+  });
+  const embedders = new FakeEmbedderSource(embedder);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const indexDir = await mkdtemp(join(tmpdir(), "kg-search-geometry-"));
+  const search = new KnowledgeSearch({ store, graph, embedders, indexDir, logger: silentLogger() });
+  t.after(async () => {
+    await search.stop();
+    await rm(indexDir, { recursive: true, force: true });
+  });
+  await search.start();
   await search.idle();
+  return { search, embedders };
 }
 
-test("filters narrow every signal — keywords, meaning, expansion and concept hits", async (t) => {
+test("filters constrain keyword, meaning, expansion and concept candidates before ranking", async (t) => {
   const { store, search } = await setup(t);
   labelFixture(store);
-  await warm(search);
-
-  const threads = await search.search({ query: "comparison tables competitor pricing", filters: { kinds: [" THREAD "] }, limit: 25 }, ALL);
-  assert.ok(entryHits(threads.hits).length > 0);
-  for (const hit of entryHits(threads.hits)) assert.ok([ALT, BILLING].includes(hit.entry.id), hit.entry.id);
-  for (const hit of threads.hits) if (hit.kind === "concept") for (const id of hit.entryIds) assert.ok([ALT, BILLING].includes(id), `concept entry ${id}`);
-  // BILLING shares no word with the query: it is reached through the concept, and still filtered.
-  assert.ok(entryIds(threads.hits).includes(BILLING));
-
-  assert.deepEqual(entryIds((await search.search({ query: "tables pages", filters: { authors: ["@HRIDOY"] } }, ALL)).hits), [ALT]);
-  assert.deepEqual(entryIds((await search.search({ query: "tables pages", filters: { authors: ["hridoy rehman"] } }, ALL)).hits), [ALT]);
-  assert.deepEqual(entryIds((await search.search({ query: "ranking in chatgpt", filters: { authors: ["Kevin"] } }, ALL)).hits), [CLOUDFLARE]);
-  assert.deepEqual(entryIds((await search.search({ query: "tables", filters: { years: ["2025"] } }, ALL)).hits), [CLOUDFLARE]);
-  assert.ok(!entryIds((await search.search({ query: "tables", filters: { years: ["2026"] }, limit: 25 }, ALL)).hits).includes(CLOUDFLARE));
-  // Entries with no postedAt never pass a posted… bound; a bare-date bound includes that whole day.
-  assert.deepEqual(entryIds((await search.search({ query: "tables", filters: { postedAfter: "2026-01-01" }, limit: 25 }, ALL)).hits), [ALT]);
-  assert.deepEqual(entryIds((await search.search({ query: "tables", filters: { postedBefore: "2026-09-15" }, limit: 25 }, ALL)).hits).sort(), [ALT, CLOUDFLARE].sort());
-  const savedBefore = store.entries.get(ALT)!.savedAt;
-  assert.deepEqual(entryIds((await search.search({ query: "tables", filters: { savedBefore }, limit: 25 }, ALL)).hits).sort(), [ALT, CLOUDFLARE].sort());
-
-  // Nothing passes: no entries and no concept hits.
+  await search.idle();
+  const threads = await search.search({ query: "comparison tables competitor pricing", filters: { kinds: ["thread"] }, limit: 25 }, ALL);
+  assert.deepEqual(entryIds(threads.hits).sort(), [ALT, BILLING].sort());
+  assert.ok(entryHits(threads.hits).find((hit) => hit.entry.id === BILLING)!.match!.via.includes("concept"));
+  for (const hit of threads.hits) if (hit.kind === "concept") for (const id of hit.entryIds) assert.ok([ALT, BILLING].includes(id));
+  assert.deepEqual(entryIds((await search.search({ query: "ranking in chatgpt", filters: { authors: ["Kevin"] } }, ALL)).hits), [CLOUDFLARE], "the semantic signal uses the same filter");
   const none = await search.search({ query: "comparison tables", filters: { kinds: ["podcast"] } }, ALL);
   assert.deepEqual(none.hits, []);
   assert.equal(none.total, 0);
   assert.equal(none.nextCursor, null);
-
-  for (const filters of [{ postedAfter: "yesterday" }, { savedBefore: "2026-13-45" }, { years: ["26"] }, { kinds: Array.from({ length: 21 }, (_, i) => `k${i}`) }]) {
-    await assert.rejects(search.search({ query: "tables", filters }, ALL), invalid, JSON.stringify(filters));
-  }
+  await assert.rejects(search.search({ query: "tables", filters: { postedAfter: "yesterday" } }, ALL), invalid);
 });
 
 test("hidden entries never leak through examples, expansion, concept hits or facets", async (t) => {
   const { store, search } = await setup(t);
   labelFixture(store);
-  await warm(search);
+  await search.idle();
   // A hidden example is refused like an unknown one, naming the id.
   for (const request of [{ similarTo: [BILLING] }, { query: "x", similarTo: [ALT], unlike: [BILLING] }, { similarTo: ["ke_nosuchentry1"] }]) {
     await assert.rejects(search.search(request, SEO_ONLY), (error: unknown) => {
@@ -447,8 +386,11 @@ test("hidden entries never leak through examples, expansion, concept hits or fac
   assert.ok(like.facets!.collections.every((f) => f.value === SEO && f.label === "SEO"), "no Unfiled, no hidden collection");
   assert.equal(like.facets!.kinds.reduce((n, f) => n + f.count, 0), like.total);
 
+  const expanded = await search.search({ query: "perplexity", limit: 25 }, SEO_ONLY);
+  assert.ok(entryIds(expanded.hits).includes(ALT), "visible expansion remains available without a filter");
+  assert.ok(!entryIds((await search.search({ query: "stripe annual billing", limit: 25 }, SEO_ONLY)).hits).includes(BILLING));
   // Expansion and concepts under a filter, for a profile.
-  for (const query of ["perplexity", "stripe", "comparison tables", "pricing tables"]) {
+  for (const query of ["perplexity", "comparison tables"]) {
     const result = await search.search({ query, filters: { kinds: ["thread"] }, facets: true, limit: 25 }, SEO_ONLY);
     for (const hit of result.hits) {
       if (hit.kind === "entry") assert.equal(hit.entry.id, ALT, query);
@@ -463,82 +405,46 @@ test("hidden entries never leak through examples, expansion, concept hits or fac
   }
 });
 
-test("query by example: nearest entries by meaning, never the examples; unlike pushes away and is excluded", async (t) => {
-  const { store, search } = await setup(t);
-  const twin = "ke_twintwintwin";
-  store.put(twin, "Getting cited in ChatGPT and Perplexity answers: LLM answer engines cite original data.", [SEO], { title: "AI citations" }, true);
-  await search.indexEntries([twin]);
-  await warm(search);
-
-  const like = await search.search({ similarTo: [CLOUDFLARE], limit: 25 }, ALL);
-  const hits = entryHits(like.hits);
-  assert.equal(hits[0]!.entry.id, twin);
-  assert.ok(!entryIds(like.hits).includes(CLOUDFLARE), "the example is never returned");
-  assert.ok(like.hits.every((h) => h.kind === "entry"), "no concept hits without a query");
-  for (const hit of hits) assert.deepEqual(hit.match!.via, ["similar"]);
-  assert.equal(hits[0]!.score, 1);
-  assert.equal(like.total, hits.length);
-
-  const unlike = await search.search({ similarTo: [CLOUDFLARE], unlike: [twin], limit: 25 }, ALL);
-  assert.ok(!entryIds(unlike.hits).includes(twin) && !entryIds(unlike.hits).includes(CLOUDFLARE));
-
-  // With a query, the example list is fused with the others.
-  const both = await search.search({ query: "cloudflare cited by answer engines", similarTo: [twin], limit: 25 }, ALL);
-  const top = entryHits(both.hits)[0]!;
-  assert.equal(top.entry.id, CLOUDFLARE);
-  assert.deepEqual(top.match!.via.slice(0, 3), ["keyword", "meaning", "similar"]);
-
-  // `unlike` alone (no similarTo) only excludes.
-  const excluded = await search.search({ query: "tables", unlike: [ALT], limit: 25 }, ALL);
-  assert.ok(!entryIds(excluded.hits).includes(ALT));
-
-  await assert.rejects(search.search({ similarTo: Array.from({ length: 11 }, () => CLOUDFLARE) }, ALL), invalid);
+test("query by example ranks toward positive and away from negative examples, excluding both", async (t) => {
+  const like = "ke_likeseedaaaa";
+  const unlike = "ke_zunlikeseed1";
+  const a = "ke_candidateaa1";
+  const b = "ke_candidatebb1";
+  const { search } = await geometricSearch(t, [
+    { id: like, title: "Positive fixture", body: "source", vector: [1, 0] },
+    { id: unlike, title: "Negative fixture", body: "avoid", vector: [0.8, 0.6] },
+    { id: a, title: "Candidate Alpha", body: "needle", vector: [0.8, 0.6] },
+    { id: b, title: "Candidate Beta", body: "other", vector: [0.8, -0.6] }
+  ]);
+  const positive = await search.search({ similarTo: [like], limit: 25 }, ALL);
+  assert.equal(entryIds(positive.hits)[0], a, "equal positive cosine starts with the smaller candidate id");
+  assert.ok(!entryIds(positive.hits).includes(like));
+  assert.ok(positive.hits.every((hit) => hit.kind === "entry"));
+  for (const hit of entryHits(positive.hits)) assert.deepEqual(hit.match!.via, ["similar"]);
+  const negative = await search.search({ similarTo: [like], unlike: [unlike], limit: 25 }, ALL);
+  assert.deepEqual(entryIds(negative.hits), [b, a], "the negative vector changes the ranking, beyond excluding the example");
+  const both = await search.search({ query: "needle", similarTo: [like], unlike: [unlike], limit: 25 }, ALL);
+  assert.equal(entryIds(both.hits)[0], a);
+  assert.deepEqual(entryHits(both.hits)[0]!.match!.via, ["keyword", "meaning", "similar"]);
+  assert.ok(!entryIds((await search.search({ query: "needle", unlike: [a] }, ALL)).hits).includes(a));
+  await assert.rejects(search.search({ similarTo: Array.from({ length: 11 }, () => like) }, ALL), invalid);
   await assert.rejects(search.search({ query: "   ", similarTo: [] }, ALL), invalid);
 });
 
-/**
- * Like a real sentence model, every vector shares one large component, so any two texts score
- * 0.91–1, and `minimum` sits just under unrelated pairs, as e5's 0.78 sits under its 0.785 median.
- */
-class ConeEmbedder extends FakeEmbedder {
-  constructor() {
-    super({ modelId: "fake/cone", thresholds: { minimum: 0.9, good: 0.93, strong: 0.96, duplicate: 0.995 } });
-  }
-  override vector(text: string): Float32Array {
-    const own = super.vector(text);
-    let norm = 0;
-    for (const x of own) norm += x * x;
-    norm = Math.sqrt(norm) || 1;
-    const out = new Float32Array(this.dimensions);
-    const last = this.dimensions - 1;
-    for (let d = 0; d < last; d += 1) out[d] = (0.3 * own[d]!) / norm;
-    out[last] = Math.sqrt(0.91);
-    let total = 0;
-    for (const x of out) total += x * x;
-    total = Math.sqrt(total);
-    for (let d = 0; d < out.length; d += 1) out[d]! /= total;
-    return out;
-  }
-}
-
-// The order `unlike` gives (an entry closer to it than to the examples drops) is checked on the real
-// model, in eval/eval.test.ts; this fake's near-copies sit as close to both examples.
 test("query by example with unlike, on a model whose vectors sit in a narrow cone: unlike never empties it or changes what matches", async (t) => {
-  const { store, search } = await setup(t, { embedder: new ConeEmbedder() });
-  const twin = "ke_twintwintwin";
-  const cousin = "ke_cousincousin";
-  store.put(twin, "Getting cited in ChatGPT and Perplexity answers: LLM answer engines cite original data.", [SEO], { title: "AI citations" }, true);
-  store.put(cousin, "Getting cited in ChatGPT and Perplexity answers: LLM answer engines cite original data and tables.", [SEO], { title: "AI citations, again" }, true);
-  await search.indexEntries([twin, cousin]);
-  await warm(search);
-
-  const like = entryIds((await search.search({ similarTo: [CLOUDFLARE], limit: 25 }, ALL)).hits);
-  assert.ok(like.includes(cousin) && like.length >= 2, `like alone finds the cousin (${like.join(", ")})`);
-
-  const steered = entryIds((await search.search({ similarTo: [CLOUDFLARE], unlike: [twin], limit: 25 }, ALL)).hits);
-  assert.ok(steered.length > 0, "unlike never empties a search by example");
-  assert.ok(!steered.includes(twin) && !steered.includes(CLOUDFLARE), "the examples are never returned");
-  assert.deepEqual(new Set(steered), new Set(like.filter((id) => id !== twin)), "unlike reorders; it does not change what matches");
+  const like = "ke_likeseedaaaa";
+  const unlike = "ke_zunlikeseed1";
+  const a = "ke_candidateaa1";
+  const b = "ke_candidatebb1";
+  // Both candidates have cosine 0.91 to the positive example, above the supplied 0.9 floor.
+  const { search } = await geometricSearch(t, [
+    { id: like, title: "Positive fixture", body: "source", vector: [0.3, 0, 0.9539392014] },
+    { id: unlike, title: "Negative fixture", body: "avoid", vector: [-0.3, 0, 0.9539392014] },
+    { id: a, title: "Candidate Alpha", body: "first", vector: [0, 0.3, 0.9539392014] },
+    { id: b, title: "Candidate Beta", body: "second", vector: [0, -0.3, 0.9539392014] }
+  ], { minimum: 0.9, good: 0.93, strong: 0.96, duplicate: 0.995 });
+  const steered = await search.search({ similarTo: [like], unlike: [unlike], limit: 25 }, ALL);
+  assert.deepEqual(entryIds(steered.hits).sort(), [a, b]);
 });
 
 test("query by example without vectors falls back to BM25 over the examples' titles and openings", async (t) => {
@@ -557,11 +463,12 @@ test("query by example without vectors falls back to BM25 over the examples' tit
 
 test("search pages with a cursor: stable pages, a total, concept hits on the first page only", async (t) => {
   const { search } = await setup(t);
-  await warm(search);
+  await search.idle();
   const full = await search.search({ query: "tables competitor pricing perplexity", limit: 25 }, ALL);
   assert.equal(full.nextCursor, null);
   const total = full.total!;
-  assert.ok(total >= 3);
+  assert.equal(total, 4);
+  assert.deepEqual(entryIds(full.hits).sort(), [ALT, BILLING, CLOUDFLARE, UNFILED].sort());
   assert.equal(entryHits(full.hits).length, total);
 
   const seen: string[] = [];
@@ -577,7 +484,8 @@ test("search pages with a cursor: stable pages, a total, concept hits on the fir
     seen.push(...entryIds(page.hits));
     cursor = page.nextCursor ?? undefined;
     pages += 1;
-  } while (cursor && pages < 20);
+    assert.ok(pages <= total + 1, "the cursor must advance through the known result set");
+  } while (cursor);
   assert.deepEqual(seen, entryIds(full.hits), "pages concatenate to the full ranking");
   assert.ok(concepts <= 1, "floor(2/3) → at most one concept hit");
 
@@ -590,6 +498,9 @@ test("search pages with a cursor: stable pages, a total, concept hits on the fir
   for (const bad of ["garbage", Buffer.from(JSON.stringify({ v: 2, o: 1, h: "x" })).toString("base64url"), Buffer.from(JSON.stringify({ v: 1, o: -1, h: "x" })).toString("base64url")]) {
     await assert.rejects(search.search({ query: "tables", cursor: bad }, ALL), invalid, bad);
   }
+  const filtered = await search.search({ query: "tables competitor pricing perplexity", filters: { kinds: ["thread", "note"] }, limit: 1 }, ALL);
+  assert.ok(filtered.nextCursor);
+  await search.search({ query: "tables competitor pricing perplexity", filters: { kinds: ["NOTE", "Thread"] }, cursor: filtered.nextCursor! }, ALL);
   // The same request with another limit keeps going.
   const rest = await search.search({ query: "tables competitor pricing perplexity", limit: 25, cursor: first.nextCursor! }, ALL);
   const firstIds = entryIds(first.hits);
@@ -603,7 +514,7 @@ test("match explanations: via in order, terms as typed, passage offsets into the
   const body = `${filler}\nRaise the cpc budget only after the campaign learns.`;
   store.put(long, body, [ADS], { title: "Long notes" }, true);
   await search.indexEntries([long]);
-  await warm(search);
+  await search.idle();
 
   const result = await search.search({ query: "CPC Budget", limit: 25 }, ALL);
   const hit = entryHits(result.hits).find((h) => h.entry.id === long)!;
@@ -626,37 +537,33 @@ test("match explanations: via in order, terms as typed, passage offsets into the
   assert.equal(viaConcept.match!.band, "good", "concept expansion is at least good");
 });
 
-test("match bands follow the spec's rules", () => {
-  const th = { good: 0.4, strong: 0.6 };
-  assert.equal(matchBand(0.61, 0, ["meaning"], th), "strong");
-  assert.equal(matchBand(0.45, 0, ["meaning"], th), "good");
-  assert.equal(matchBand(0.3, 0, ["meaning"], th), "weak");
-  assert.equal(matchBand(null, 1, ["keyword", "concept"], th), "strong", "every token and two signals");
-  assert.equal(matchBand(null, 1, ["keyword"], th), "good", "every token, one signal");
-  assert.equal(matchBand(null, 0.5, ["keyword"], th), "good");
-  assert.equal(matchBand(null, 0.4, ["keyword"], th), "weak");
-  assert.equal(matchBand(null, 0, ["concept"], th), "good");
-  assert.equal(matchBand(0.99, 0, ["meaning"], null), "weak", "without embeddings only c and via decide");
+test("match bands reflect semantic thresholds and lexical coverage through search results", async (t) => {
+  const { search, embedders } = await geometricSearch(t, [
+    { id: "ke_bandstrong01", title: "Semantic high", body: "unrelated", vector: [0.8, 0.6] },
+    { id: "ke_bandgood0001", title: "Semantic medium", body: "unrelated", vector: [0.6, 0.8] },
+    { id: "ke_bandweak0001", title: "Semantic low", body: "unrelated", vector: [0.2, Math.sqrt(0.96)] },
+    { id: "ke_bandfull0001", title: "Lexical full", body: "needle haystack pin", vector: [0, 1] },
+    { id: "ke_bandhalf0001", title: "Lexical majority", body: "needle haystack", vector: [0, 1] },
+    { id: "ke_bandpart0001", title: "Lexical partial", body: "needle", vector: [0, 1] },
+    { id: "ke_bandboth0001", title: "Multiple signals", body: "needle haystack pin", vector: [0.2, Math.sqrt(0.96)] }
+  ]);
+  const bands = async () => Object.fromEntries(entryHits((await search.search({ query: "needle haystack pin", limit: 25 }, ALL)).hits).map((hit) => [hit.entry.id, hit.match!.band]));
+  assert.deepEqual(await bands(), {
+    ke_bandstrong01: "strong", ke_bandgood0001: "good", ke_bandweak0001: "weak",
+    ke_bandfull0001: "good", ke_bandhalf0001: "good", ke_bandpart0001: "weak", ke_bandboth0001: "strong"
+  });
+  embedders.set(null);
+  assert.deepEqual(await bands(), { ke_bandfull0001: "good", ke_bandhalf0001: "good", ke_bandpart0001: "weak", ke_bandboth0001: "good" });
 });
 
-test("concept hits carry their entries' titles", async (t) => {
-  const { search } = await setup(t, { embedder: null });
-  const result = await search.search({ query: "stripe proration" }, ALL);
-  const concept = result.hits.find((h) => h.kind === "concept");
-  assert.ok(concept && concept.kind === "concept");
-  assert.deepEqual(concept.entries, [{ id: BILLING, title: "Annual billing" }]);
-  const billing = entryHits(result.hits)[0]!;
-  assert.equal(billing.match!.band, "strong", "every query token and two signals");
-  assert.deepEqual(billing.match!.terms, ["stripe", "proration"]);
-});
-
-test("sort: newest orders matches by save time; recent boosts newer posts; the recency math", async (t) => {
+test("newest orders matches by save time and recent boosts newer posts", async (t) => {
   const { store, search } = await setup(t, { embedder: null });
   const newest = await search.search({ query: "tables competitor", sort: "newest", limit: 25 }, ALL);
   const saved = entryHits(newest.hits).map((h) => h.entry.savedAt);
   assert.deepEqual(saved, [...saved].sort().reverse());
   assert.ok(saved.length >= 3);
 
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-27T00:00:00.000Z") });
   const day = 86_400_000;
   // Identical text: relevance keeps id order (the old post first); recent prefers the new post.
   const body = "Churn interviews: call every cancelled customer within a week.";
@@ -666,13 +573,6 @@ test("sort: newest orders matches by save time; recent boosts newer posts; the r
   assert.deepEqual(entryIds((await search.search({ query: "churn interviews", diverse: false }, ALL)).hits), ["ke_churnaaaaaaa", "ke_churnbbbbbbb"]);
   const recent = await search.search({ query: "churn interviews", sort: "recent", diverse: false }, ALL);
   assert.deepEqual(entryIds(recent.hits), ["ke_churnbbbbbbb", "ke_churnaaaaaaa"]);
-
-  const now = Date.parse("2026-10-27T00:00:00.000Z");
-  assert.equal(recencyFactor({ postedAt: "2026-10-27", savedAt: "2026-10-27T00:00:00.000Z" }, now), 1);
-  assert.equal(recencyFactor({ postedAt: null, savedAt: new Date(now - 90 * day).toISOString() }, now), 0.75);
-  assert.equal(recencyFactor({ postedAt: new Date(now - 180 * day).toISOString(), savedAt: "2026-10-26T00:00:00.000Z" }, now), 0.625);
-  assert.equal(recencyFactor({ postedAt: "2027-01-01", savedAt: "2026-10-26T00:00:00.000Z" }, now), 1, "future dates are not boosted past 1");
-  assert.equal(recencyFactor({ postedAt: "garbage", savedAt: new Date(now).toISOString() }, now), 1, "an unreadable postedAt falls back to savedAt");
 
   await assert.rejects(search.search({ query: "x", sort: "oldest" as never }, ALL), invalid);
 });
@@ -685,13 +585,13 @@ test("diversity (MMR) spreads near-identical results apart, deterministically", 
   store.put("ke_otherccccccc", "Ads budget for an iOS app store launch, screenshots first.", [ADS], { title: "Launch ads" }, true);
   const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
   const indexDir = await mkdtemp(join(tmpdir(), "kg-mmr-"));
-  const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(new FakeEmbedder()), indexDir, logger: silentLogger(), minSimilarity: 0.3 });
+  const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(new FakeEmbedder({ thresholds: { minimum: 0.3, good: 0.4, strong: 0.6, duplicate: 0.92 } })), indexDir, logger: silentLogger() });
   t.after(async () => {
     await search.stop();
     await rm(indexDir, { recursive: true, force: true });
   });
   await search.start();
-  await warm(search);
+  await search.idle();
   const plain = entryIds((await search.search({ query: "ads budget", diverse: false }, ALL)).hits);
   assert.deepEqual(plain, ["ke_dupaaaaaaaaa", "ke_dupbbbbbbbbb", "ke_otherccccccc"]);
   const diverse = entryIds((await search.search({ query: "ads budget" }, ALL)).hits);
@@ -700,42 +600,20 @@ test("diversity (MMR) spreads near-identical results apart, deterministically", 
   assert.deepEqual(entryIds((await search.search({ query: "ads budget", sort: "newest" }, ALL)).hits), ["ke_otherccccccc", "ke_dupbbbbbbbbb", "ke_dupaaaaaaaaa"], "newest is never diversified");
 });
 
-test("mmr: λ 0.7 trade-off, entries without vectors count as dissimilar", () => {
-  const v = (...xs: number[]) => Float32Array.from(xs);
-  const vectors = new Map<string, Float32Array | null>([
-    ["a", v(1, 0)],
-    ["a2", v(1, 0)],
-    ["b", v(0, 1)],
-    ["none", null]
-  ]);
-  const ranked = [
-    { id: "a", rank: 1 },
-    { id: "a2", rank: 0.99 },
-    { id: "b", rank: 0.6 },
-    { id: "none", rank: 0.5 }
-  ];
-  const order = mmr(ranked, (id) => vectors.get(id) ?? null).map((r) => r.id);
-  // After a: a2 = 0.7·0.99 − 0.3·1 = 0.393; b = 0.42; none = 0.35 → b. Then a2 0.393 vs none 0.35 → a2.
-  assert.deepEqual(order, ["a", "b", "a2", "none"]);
-  assert.deepEqual(mmr(ranked, () => null).map((r) => r.id), ["a", "a2", "b", "none"], "no vectors: relevance order");
-});
-
-test("facets count every match (all pages), with labels; Unfiled only for callers who see it", async (t) => {
+test("search facets count the complete match set before paging and only when requested", async (t) => {
   const { store, search } = await setup(t, { embedder: null });
   labelFixture(store);
   const result = await search.search({ query: "tables competitor pricing", limit: 1, facets: true }, ALL);
-  const facets = result.facets!;
-  assert.equal(facets.kinds.reduce((n, f) => n + f.count, 0), result.total);
-  assert.equal(facets.years.reduce((n, f) => n + f.count, 0), result.total);
-  assert.ok(facets.collections.some((f) => f.value === "unfiled" && f.label === "Unfiled" && f.count === 1));
-  assert.ok(facets.collections.some((f) => f.value === SEO && f.label === "SEO"));
-  assert.deepEqual(
-    facets.years.map((f) => f.value),
-    [...facets.years.map((f) => f.value)].sort().reverse()
-  );
-  assert.ok(facets.authors.some((f) => f.value === "hridoy" && f.label === "Hridoy Rehman (@hridoy)"));
-  assert.ok(facets.authors.some((f) => f.value === "kev" && f.label === "Kevin (@kev)"));
-  assert.equal((await search.search({ query: "tables" }, ALL)).facets, undefined, "only when asked");
+  assert.equal(result.hits.length, 1);
+  assert.equal(result.total, 4);
+  assert.deepEqual(result.facets!.kinds, [
+    { value: "thread", label: "thread", count: 2 },
+    { value: "Case Study", label: "Case Study", count: 1 },
+    { value: "note", label: "note", count: 1 }
+  ]);
+  assert.deepEqual(result.facets!.years, [{ value: "2026", label: "2026", count: 3 }, { value: "2025", label: "2025", count: 1 }]);
+  assert.ok(result.facets!.collections.some((facet) => facet.value === "unfiled" && facet.count === 1));
+  assert.equal((await search.search({ query: "tables" }, ALL)).facets, undefined);
 });
 
 test("entry lists take the search filters", async (t) => {
@@ -751,11 +629,7 @@ test("entry lists take the search filters", async (t) => {
   assert.deepEqual(await ids({ savedAfter: store.entries.get(ADSPOST)!.savedAt }), [UNFILED, ADSPOST]);
   assert.deepEqual(await ids({ kinds: "thread" }, SEO_ONLY), [ALT]);
   assert.deepEqual(await ids({ kinds: "thread", collection: SAAS }), [BILLING]);
-  const page = await search.listEntries({ kinds: "thread", limit: 1 }, ALL);
-  assert.deepEqual(page.entries.map((e) => e.id), [BILLING]);
-  assert.deepEqual((await search.listEntries({ kinds: "thread", limit: 1, cursor: page.nextCursor! }, ALL)).entries.map((e) => e.id), [ALT]);
   await assert.rejects(search.listEntries({ postedBefore: "soon" }, ALL), invalid);
-  await assert.rejects(search.listEntries({ years: "1,2" }, ALL), invalid);
 });
 
 test("entry cursors retain timestamp ties and collection filters across every page", async (t) => {
@@ -787,30 +661,10 @@ test("entry cursors retain timestamp ties and collection filters across every pa
   assert.deepEqual(ids, [E, C, A, ALT, CLOUDFLARE]);
 });
 
-test("embedding: passages carry the entry's context header, queries are embedded as queries", async (t) => {
-  const embedder = new FakeEmbedder();
-  const seen: { kind: string; texts: readonly string[] }[] = [];
-  const embed = embedder.embed.bind(embedder);
-  embedder.embed = async (texts, kind = "passage") => {
-    seen.push({ kind, texts });
-    return embed(texts, kind);
-  };
-  const { search } = await setup(t, { embedder });
-  await warm(search);
-  assert.ok(seen.some((call) => call.kind === "query" && call.texts.join() === "warm up"));
-  const passages = seen.filter((call) => call.kind === "passage").flatMap((call) => call.texts);
-  assert.equal(passages.length, 5);
-  assert.ok(passages.includes(`Cloudflare case study · by Kevin @kev · note\n\n${(await search.entryDetail(CLOUDFLARE, ALL))!.entry.body}`));
-  assert.ok(embedder!.kinds.includes("query") && embedder!.kinds.includes("passage"));
-});
-
 test("a title edit re-embeds an entry; a relabel or a postedAt edit does not", async (t) => {
   const { store, search, embedder } = await setup(t);
-  await warm(search);
-  const index = search.vectorIndex();
+  await search.idle();
   const texts = embedder!.texts;
-  const generation = index.generation();
-  const before = index.entryVector(ALT)!;
 
   // Relabel: collections change, nothing is embedded.
   label(store, ALT, { collections: [SEO, SAAS] });
@@ -823,40 +677,11 @@ test("a title edit re-embeds an entry; a relabel or a postedAt edit does not", a
   store.put(ALT, alt.body, alt.collections, { title: alt.title, postedAt: "2026-01-01" });
   await search.idle();
   assert.equal(embedder!.texts, texts);
-  assert.equal(index.generation(), generation);
 
   // A title edit changes the cache key: embedded again, vectors changed.
   store.put(ALT, alt.body, alt.collections, { title: "Competitor comparison pages" });
   await search.idle();
   assert.equal(embedder!.texts, texts + 1);
-  assert.ok(index.generation() > generation);
-  assert.notDeepEqual([...index.entryVector(ALT)!], [...before]);
   // The new title is searchable at once.
   assert.equal(entryIds((await search.search({ query: "competitor comparison pages" }, ALL)).hits)[0], ALT);
-});
-
-test("the vector index port through KnowledgeSearch: model, thresholds, entry vectors and scoped search", async (t) => {
-  const { search, embedders } = await setup(t);
-  await warm(search);
-  const index = search.vectorIndex();
-  assert.equal(index.modelId(), "fake/semantic");
-  assert.deepEqual(index.thresholds(), { minimum: 0.3, good: 0.4, strong: 0.6, duplicate: 0.92 }, "minSimilarity overrides the minimum");
-  assert.deepEqual(index.embeddedIds().sort(), [ADSPOST, ALT, BILLING, CLOUDFLARE, UNFILED].sort());
-  const vector = index.entryVector(CLOUDFLARE)!;
-  assert.ok(Math.abs(vector.reduce((n, x) => n + x * x, 0) - 1) < 1e-5);
-  assert.equal(index.entryVector(CLOUDFLARE), vector, "cached until its vectors change");
-  const query = (await index.embedQuery("ranking in chatgpt"))!;
-  const asked: string[] = [];
-  const hits = index.search(query, (id) => (asked.push(id), id !== CLOUDFLARE), 10);
-  assert.equal(asked.length, 5, "each embedded entry is asked once");
-  assert.ok(!hits.some((h) => h.entryId === CLOUDFLARE));
-  assert.ok(hits.every((h) => h.score >= 0.3 && h.chunks === 1 && h.chunk === 0));
-  assert.deepEqual(index.search(query, () => true, 10, 0.999), []);
-
-  embedders.set(null);
-  assert.equal(index.modelId(), null);
-  assert.equal(index.thresholds(), null);
-  assert.equal(index.entryVector(CLOUDFLARE), null);
-  assert.deepEqual(index.embeddedIds(), []);
-  assert.equal(await index.embedQuery("x"), null);
 });

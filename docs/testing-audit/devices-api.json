@@ -1,0 +1,671 @@
+{
+  "status": "IMPLEMENTED_CODE_FROZEN_VALIDATION_PENDING",
+  "baseline": "923b3a51b594ef668483a5bd320af41187899e34",
+  "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+  "scope": "All25 new devices runtime cases (16 source declarations),3 changed surviving old declarations, and1 already-remote-removed model-selection declaration documented separately. Four old test files changed in the remote delta, plus the new devices file; unchanged baseline cases remain in api.json.",
+  "counts": {
+    "DELETE": 3,
+    "REWRITE": 6,
+    "OPTIMIZE": 0,
+    "CONSOLIDATE": 0,
+    "KEEP": 10
+  },
+  "audited_source_declarations_at610d": 19,
+  "runtime_counts": {
+    "DELETE": 8,
+    "REWRITE": 5,
+    "OPTIMIZE": 0,
+    "CONSOLIDATE": 0,
+    "KEEP": 15
+  },
+  "audited_runtime_cases_at610d": 28,
+  "remote_removed_entries": [
+    {
+      "path": "packages/api/src/agent-chat/model-selection.test.ts",
+      "line": 83,
+      "name": "option defaults resolve as the composer's chips do",
+      "revision": "923b3a51b594ef668483a5bd320af41187899e34",
+      "removed_by_revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "disposition": "DELETE",
+      "failedBarRequirements": [
+        4,
+        6
+      ],
+      "reason": "Remote removed defaultOptionValues production-unused helper and its only test. Its own exported wrapper had no non-test callers. Actual picker output still independently proves effort high/fastMode false defaults in the fixture view case, and real composer callers use currentOptionValue. Do not resurrect dead helper/test.",
+      "remainingProtection": "packages/api/src/agent-chat/model-selection.test.ts the fixture picker view (literal option defaults); public model/option callers and UI composer owners."
+    }
+  ],
+  "entries": [
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 36,
+      "name": "the plugin id is a built-in plugin",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a72/11 plugin registration",
+      "failure": "The old test only proved that a declaration appeared in another declaration; it did not enable a plugin or advertise/run a device tool.",
+      "oracle": "The PLUGIN_IDS and DEVICES_PLUGIN_ID declarations were asserted against themselves; failed independent behavioral oracle.",
+      "seam": "Static registry inventory.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "No independently observed workflow is lost.",
+      "completedAction": "Delete the test and its PLUGIN_IDS/isPluginId/DEVICES_PLUGIN_ID imports.",
+      "productionConsumers": [
+        "Actual plugin registry/settings/manifest consumers remain unchanged."
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      },
+      "failedBarRequirements": [
+        1,
+        2,
+        3,
+        6
+      ],
+      "remainingProtection": "Config device enablement/settings defaults, daemon service/HTTP gating and actual MCP/manifest availability owners remain; static registry inclusion is not their runtime behavior."
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 41,
+      "name": "profiles: ids are unique, each platform's defaults are known profiles of that platform",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a75/6 profile-based boot; docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.2 model profiles",
+      "failure": "Self-consistency checks cannot prove avdmanager/simctl accepts a profile or boots the requested device; no independent supported-model or OS oracle.",
+      "oracle": "Production DEVICE_PROFILES plus production config default arrays and optional-field truthiness.",
+      "seam": "Catalog declaration inventories, not actual launch boundary.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Runtime parser profile/platform rejection and real host launch/fixture owners remain.",
+      "completedAction": "Delete catalog/default/hint inventory and unused config/catalog imports.",
+      "productionConsumers": [
+        "deviceProfile/DEVICE_PROFILES/default arrays remain production-consumed by UI, settings and host launch."
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      },
+      "failedBarRequirements": [
+        1,
+        2,
+        3,
+        6
+      ],
+      "remainingProtection": "API open/settings tests keep cross-platform profile refusal; daemon Android/iOS profile-to-boot/host tests exercise generated launch behavior. Config owner confirms no independent catalog parity requirement."
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 57,
+      "name": "device keys and box host ids name their host",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a73/6 and packages/api/src/devices.ts public host/device identity contract",
+      "failure": "Repeated Android serials collide across hosts or box host identifiers no longer match persisted lease/device identities.",
+      "oracle": "Literal local/emulator-5554 and box:ab12.",
+      "seam": "Exported deviceKey/boxDeviceHostId public key serialization.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "These are the lowest shared serialized identity owners. Service lease tests use their keys and cannot independently pin these public bytes.",
+      "completedAction": "Keep two literal serialization checks.",
+      "productionConsumers": [
+        "Daemon DeviceService/box host factory",
+        "UI device references/panel selection"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 62,
+      "name": "routes encode their parameters",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a78/10.6/11 HTTP/WS routes; docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a74 pool/drain/cache contracts",
+      "failure": "Slash/colon identifiers escape their URL segment, proxy leading slash doubles the path, or HTTP/WS/pool/action/thumbnail requests target the wrong public endpoint.",
+      "oracle": "Literal encoded URL strings and query parameter bytes, including requested fractional width serialized as integer.",
+      "seam": "deviceRoutes public route-builder API used by transports.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Server tests register the same route builders, so they can accept a shared accidental path change. This literal external wire owner catches incompatible path bytes.",
+      "completedAction": "Keep path/encoding assertions. This is protocol serialization, not a visual geometry snapshot.",
+      "productionConsumers": [
+        "Shared reference API client",
+        "Daemon route registrations",
+        "UI media and WebSocket URL builders"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 75,
+      "name": "?token= is accepted on GET/HEAD of the image routes only: never the hub proxy, a POST or another route",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "source": [
+        "0e1d9690 fix(devices): ?token= only on GET image routes",
+        "AGENTS.md remote HTTP auth and secret/privacy guarantees",
+        "packages/api/src/devices.ts documented image-query bearer exception"
+      ],
+      "failure": "Bearer in query accepted on a hub or mutation route, or legitimate img GET/HEAD loses auth; prefix matching grants unrelated endpoint access.",
+      "oracle": "Literal independent matched screenshot/thumbnail/hub route patterns, true only GET/HEAD media; false for mutations, user-action and missing matched route.",
+      "seam": "Public deviceQueryTokenAllowed policy called by actual daemon bearer hook at index.ts:2273.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Host_other confirms route fixtures do not install actual bearer hook; its duplicate direct helper assertion is removed. WS token auth is a different boundary. Lowest policy owner remains here.",
+      "completedAction": "Replace producer route constants as inputs with literal public patterns; remove raw DEVICE_QUERY_TOKEN_ROUTES list inventory and imports. Make unread external export private.",
+      "productionConsumers": [
+        "apps/daemon/src/index.ts bearer hook"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      },
+      "remainingProtection": "The exported behavior/policy remains; only its private allowed-route array ceases to be a test-only export."
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 91,
+      "name": "drain and cache-warm requests",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a7\u00a72/4 drain controls and explicit-platform cache warming; public DeviceHostDrainRequest/DeviceCacheWarmRequest bodies",
+      "failure": "String truthiness changes a drain request, unsupported platform reaches provider/cache operations, or missing body is silently accepted.",
+      "oracle": "Literal normalized {draining:true}/{platform:android} values; malformed-only fixtures must return ok:false.",
+      "seam": "Shared strict parseDeviceHostDrainRequest/parseDeviceCacheWarmRequest HTTP boundary.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Host fleet scheduling tests use valid typed inputs and do not exercise untrusted route-body parsing.",
+      "completedAction": "Keep tiny independent normalization and invalid body cases.",
+      "productionConsumers": [
+        "apps/daemon/src/devices/http-routes.ts fleet endpoints"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 100,
+      "name": "user action requests: each kind with its own field, nothing else",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a710.1 panel toolbar and public DeviceUserActionRequest discriminated union",
+      "failure": "Unvalidated rotate/appearance reaches device input, unknown action bypasses controlled device_action path, or unknown payload fields leak into command shape.",
+      "oracle": "Literal four supported action results, known orientation/appearance values, extra field dropped; isolated malformed field/kind/object fixtures refuse.",
+      "seam": "Shared parseDeviceUserActionRequest at HTTP body boundary.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Daemon user-action workflow owns controller/logging/power-off semantics; it does not supersede full discriminated parser output and field filtering.",
+      "completedAction": "Keep action-shape normalization/rejection. Agent/external principal refusal stays in real daemon route owner.",
+      "productionConsumers": [
+        "apps/daemon/src/devices/http-routes.ts user-action handler"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 112,
+      "name": "open request: platform-matched profile, deviceId needs hostId, junk refused",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a75/6/7/9 open_device and DeviceOpenRequest public HTTP schema; AGENTS.md validate untrusted payloads",
+      "failure": "iOS request launches Android profile, device serial is ambiguous without host, hostile app argument reaches host commands, or missing/unknown thread/platform is accepted.",
+      "oracle": "Literal normalized Android pixel-fold/fresh object and valid existing-device/app input; each invalid fixture isolates platform/profile, host pairing, app grammar or body requirement.",
+      "seam": "parseDeviceOpenRequest strict public HTTP lease body parser.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "DeviceService consumes typed request and host tests launch valid fixtures. This owns schema/platform pairing before either side effect.",
+      "completedAction": "Keep shared input parser tests.",
+      "productionConsumers": [
+        "apps/daemon/src/devices/http-routes.ts POST leases"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 126,
+      "name": "controller and setup requests",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a76/7 setup and controller handoff; public DeviceSetupRequest/DeviceControllerRequest contracts",
+      "failure": "Unknown controller acquires control, empty setup cannot mean all fixes, duplicate fixes run twice, or shell metacharacters are treated as setup action ID.",
+      "oracle": "Literal user controller result; empty setup result; single install-android-sdk after duplicate input; malformed controller and action refused.",
+      "seam": "Shared controller/setup request parsers.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Controller and install service workflows own valid operations; neither protects body normalization/unknown identifier filtering.",
+      "completedAction": "Keep small parser cases.",
+      "productionConsumers": [
+        "Daemon device HTTP controller and setup handlers"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 137,
+      "name": "settings patch: each field checked against its range; unknown fields refused",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a710.5/11 settings; docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a7\u00a72/4 placement/budget; config DevicesSettingsPatch and DEVICES_SETTINGS_LIMITS public constraints",
+      "failure": "Fractional/zero capacity, wrong-platform default profile, negative spend cap, unsupported placement or unknown setting is persisted and triggers invalid/unsafe host work.",
+      "oracle": "Literal partial patch including nullable provider/minWarmHosts and unique profiles; isolated bad primitive/range/platform/unknown-field inputs. Expected values never come from DEFAULT_DEVICES_SETTINGS.",
+      "seam": "parseDevicesSettingsPatch strict PUT request parser.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Config persisted schema is intentionally tolerant/clamping; its tests cannot protect strict untrusted PUT rejection. API is the lowest shared strict owner.",
+      "completedAction": "Keep meaningful partial patch/range/type/unknown-field checks.",
+      "productionConsumers": [
+        "apps/daemon/src/devices/http-routes.ts PUT settings",
+        "Config persistence receives only accepted patch values"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 183,
+      "name": "settings patch: refuses inherited property name ${name}",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": true,
+      "disposition": "REWRITE",
+      "source": [
+        "AGENTS.md validate untrusted transport payloads and preserve security",
+        "Public settings PUT contract refuses every unknown field, including Object.prototype property names"
+      ],
+      "failure": "Inherited prototype names become accepted settings, permitting prototype writes or unsafe host/settings changes at distinct nested parser boundaries.",
+      "oracle": "Independent JSON bytes preserve own __proto__/constructor keys; expected ok:false and unknown-setting failure category.",
+      "seam": "Strict parseDevicesSettingsPatch public untrusted JSON boundary.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Retain one prototype-name probe at each independent grammar/lookup boundary: top-level, ordinary section, warm-host platform map, research section, research host fields. Five repeated names/ordinary-section variants add no distinct failure.",
+      "completedAction": "Reduce ten expanded input cases to five distinct validation boundaries; no mutable state is shared.",
+      "productionConsumers": [
+        "Daemon PUT device settings handler"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      },
+      "parameterized_cases": [
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name top-level constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "DELETE",
+          "reason": "Top-level __proto__ already detects unchecked inherited key acceptance in both top-level rule maps.",
+          "failedBarRequirements": [
+            6
+          ],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name top-level __proto__",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "KEEP",
+          "reason": "Unique top-level prototype-write/own-property refusal; catches either unchecked top rule or unchecked section lookup.",
+          "failedBarRequirements": [],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name top-level toString",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "DELETE",
+          "reason": "Same top-level inherited lookup as retained __proto__; no new grammar or behavioral outcome.",
+          "failedBarRequirements": [
+            6
+          ],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name android constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "KEEP",
+          "reason": "Unique ordinary section field rule lookup; detects inherited field acceptance after a valid section name.",
+          "failedBarRequirements": [],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name android __proto__",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "DELETE",
+          "reason": "Same ordinary-section lookup as retained android constructor; top-level __proto__ separately guards prototype-write spelling.",
+          "failedBarRequirements": [
+            6
+          ],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name pool constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "DELETE",
+          "reason": "Same ordinary-section rule lookup as retained android constructor; valid section name differs incidentally.",
+          "failedBarRequirements": [
+            6
+          ],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name pool __proto__",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "DELETE",
+          "reason": "Same ordinary-section rule lookup as retained android constructor; no separate parser branch before the inherited field rule.",
+          "failedBarRequirements": [
+            6
+          ],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name warm-host constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "KEEP",
+          "reason": "Unique warm-host platform-name validation path; prevents inherited names being accepted as a platform.",
+          "failedBarRequirements": [],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name research constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "KEEP",
+          "reason": "Unique research section field allowlist, separate parser from ordinary settings.",
+          "failedBarRequirements": [],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        },
+        {
+          "path": "packages/api/src/devices.test.ts",
+          "line": 183,
+          "name": "settings patch: refuses inherited property name research host constructor",
+          "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+          "disposition": "KEEP",
+          "reason": "Unique per-machine research field allowlist, separate nested parser path.",
+          "failedBarRequirements": [],
+          "sixBarEvidence": "Parent row states independent security contract, concrete inherited-key failure, JSON-byte oracle, public parser seam and refactor resistance. This row states the unique retained grammar/lookup boundary, or its stronger duplicate."
+        }
+      ]
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 190,
+      "name": "settings patch: research.vphoneHosts takes per-machine entries field by field, null forgets one",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.3 per-machine opt-in vphone hosts; 6fc99aad source safety/path or HTTPS contract; config isVphoneSource public validation",
+      "failure": "A machine cannot be removed with null, one partial host entry wipes another, or relative/option/HTTP/control-character source is passed into host commands.",
+      "oracle": "Literal trimmed absolute IPSW path and null removal; independent hostile/path/type/unknown-field fixtures rejected. No filesystem/network side effect is mocked as the behavior.",
+      "seam": "Strict research subtree in public settings PUT parser.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Config tolerant-read tests own preservation of old/unread host entries; API strict input owns refusal before saving or launching. Host CLI source tests operate after request acceptance.",
+      "completedAction": "Keep per-machine partial values/null and source-safety matrix; it covers distinct unsafe source classes rather than profile inventories.",
+      "productionConsumers": [
+        "Daemon settings PUT; per-machine research host setup consumes accepted settings"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 213,
+      "name": "device action input: each kind names what it needs",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a79 exact action alternatives and required fields",
+      "failure": "A tap accepts both accessibility ref and coordinates, incomplete coordinate/swipe is executed, or fill/press/permission/wait reaches host without its required value.",
+      "oracle": "Literal null for valid snapshot/tap alternatives/swipe; nonempty named-field diagnostics for independently missing fields. Press now expects stable key field instead of incidental home choice text.",
+      "seam": "Exported validateDeviceActionInput shared action contract, called by real DeviceService.toolAction.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "MCP owner confirms executor negatives cover enum/range/ref pattern and ownership/control, not action-specific missing fields/alternatives. Shared lowest owner remains API.",
+      "completedAction": "Check mutual-exclusion rejection without English wording; change press error assertion from incidental home wording to actionable key field. Retain alternatives and required-field tests.",
+      "productionConsumers": [
+        "apps/daemon/src/devices/service.ts toolAction validation"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 228,
+      "name": "deviceRef: kept through slimming, read back only from a marked session-tool row",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a7\u00a79/10.3 deviceRef reference kept without screenshot base64 in transcript; agent visuals/session-tools \u00a71.5 slimming contract",
+      "failure": "Device reference disappears in wire allowlist projection so Show device/screenshot thumbnail cannot render, an unmarked user server forges a link, or malformed screenshot ID becomes a path.",
+      "oracle": "Literal device/lease/screenshot values after actual slimActivityPayload; extra field is absent; traversal screenshot omitted, malformed reference undefined and unmarked row rejected.",
+      "seam": "Real public activity payload projection followed by public device reference reader.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Host_other confirms no root-device slimmed-reference owner. Generic session-tool slimming tests cannot detect omission of the newly added deviceRef key. Direct parser-only inventory could not detect it.",
+      "completedAction": "Replace SESSION_TOOL_REFERENCE_KEYS membership assertion and duplicate direct positive parse with actual slimming\u2192reader roundtrip using one small independent result fixture.",
+      "productionConsumers": [
+        "Daemon ingestion/wire payload slimming",
+        "UI devices chat-row reference and thumbnail rendering"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 243,
+      "name": "deviceRef: the row's words (name, action, summary) are kept only when valid",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a710.3 semantic action/device labels; public DeviceToolReference accepts only one-line typed provider-supplied words",
+      "failure": "Untrusted multi-line/control-character provider words leak into row labels or unknown action becomes an actionable device command; valid supplied words are lost/changed.",
+      "oracle": "Literal supplied and trimmed values, invalid newline/control/empty/type/unknown-action fields omitted while stable device identity stays.",
+      "seam": "readDeviceToolReference provider-result validation boundary.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Slimming/link test owns device/screenshot/provenance, not display-word validation. UI render tests consume accepted words and cannot protect this parser independently.",
+      "completedAction": "Remove undocumented exact120/200-character internal cutoff assertions; keep trimming, control/newline rejection and action type/enum filtering.",
+      "productionConsumers": [
+        "UI device chat-row formatting/Show device labels",
+        "Provider-relayed result parser"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/devices.test.ts",
+      "line": 253,
+      "name": "contracts other modules gained: the devices toolset, the device-host box purpose and setup step",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "DELETE",
+      "source": "docs/superpowers/specs/2026-10-27-devices-phase-1-core.md \u00a711 box purpose/setup types and \u00a79 catalog",
+      "failure": "Raw tool-name/label list, isBoxPurpose known member and setup-step index cannot prove actual provider setup, tool advertisement, ownership or device-host isolation.",
+      "oracle": "Producer declarations against inventories; no independent runtime outcome.",
+      "seam": "Static exported declaration/order inventory.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "No meaningful workflow protection is removed.",
+      "completedAction": "Delete case plus unused TOOLSETS/BOX_SETUP_STEP_IDS/isBoxPurpose imports.",
+      "productionConsumers": [
+        "Real manifest/MCP executor/box setup/host lifecycle consumers remain unchanged."
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      },
+      "failedBarRequirements": [
+        2,
+        4,
+        5,
+        6
+      ],
+      "remainingProtection": "Daemon real catalog manifest gates and runtime device-host setup/ownership tests remain. A harmless reordering or label rename should not fail this test."
+    },
+    {
+      "path": "packages/api/src/agent-chat/thread-tools.test.ts",
+      "line": 202,
+      "name": "a reply delivery reads as another chat's by its chip; an older build's continue turn is Orquester's, never another chat's",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "REWRITE",
+      "source": [
+        "Thread/delegation \u00a713 persisted composer provenance context protocol",
+        "Legacy stored toolset-continue context must remain readable"
+      ],
+      "failure": "Historical thread-reply context ceases to be recognized, or historical Orquester automatic continue is misidentified as another chat and routed incorrectly.",
+      "oracle": "Literal persisted kind bytes thread-reply and toolset-continue; literal LGTM stripped message body.",
+      "seam": "isThreadAuthoredMessage/isToolsetContinueMessage public persisted-context readers.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Remote removed unused isThreadReplyMessage helper. This owner keeps actual historical discrimination and body projection; constructing expected context with the same constants/builders obscured wire compatibility.",
+      "completedAction": "Replace production replyDeliveryContext/TOOLSET_CONTINUE_CONTEXT_KIND fixture coupling and raw constant inventory with literal persisted context values; remove now-unused imports.",
+      "productionConsumers": [
+        "Shared UI chat provenance decisions",
+        "Daemon thread/delegation reader flows"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/session-profiles.test.ts",
+      "line": 36,
+      "name": "validates scopes: non-empty, known agents, one agent for plugins and hooks, no OpenCode hooks",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": [
+        "Agent profiles spec scope compatibility: plugins/hooks single agent, no OpenCode hooks",
+        "Public sessionProfileScopeProblem validation contract"
+      ],
+      "failure": "Unsupported hook is offered/run on OpenCode, multi-agent plugin/hook scope accepted, duplicate/empty/unknown agents persist.",
+      "oracle": "Literal accepted scopes and named-field/refusal categories for each independently invalid scope.",
+      "seam": "Public sessionProfileScopeProblem shared UI/daemon validation.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Remote removed unused sessionProfileScopeIncludes and only its two membership assertions; scope constraint errors remain unique here rather than tolerant config reads.",
+      "completedAction": "Accept remote removal of dead helper assertions; preserve validation case unchanged.",
+      "productionConsumers": [
+        "Daemon profile mutations",
+        "UI profile item scope editor"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    },
+    {
+      "path": "packages/api/src/workflows/rules.test.ts",
+      "line": 100,
+      "name": "matches with plain and /literal/flags patterns",
+      "revision": "610d3c53b480dcfe71ff45f14ce59b6df29f8bf8",
+      "kind": "node",
+      "dynamic": false,
+      "disposition": "KEEP",
+      "source": [
+        "Workflow spec rule operators and public /literal/flags expression contract",
+        "Regex worker/safe matcher protocol"
+      ],
+      "failure": "Plain/literal patterns or case-insensitive flags are misparsed, global pattern rejected, invalid regex becomes true or lacks warning.",
+      "oracle": "Literal true/false matches for abc and known regexes; explicit invalid regex false plus warning and unsupported-flag warning.",
+      "seam": "evaluateRuleAsync public async rule boundary with actual safe matcher.",
+      "refactorResistance": "The surviving assertion concerns accepted/refused wire data, literal persisted bytes, returned values or observable projection. Identifier renames, helper decomposition, storage/container changes and equivalent algorithms do not affect it.",
+      "uniqueProtection": "Remote deletes an identical second /b/g invocation that creates no separate failure mode. Worker process tests own isolation/termination, not rule literal parsing.",
+      "completedAction": "Keep surviving named case; accept remote removal of identical repeated global-pattern call.",
+      "productionConsumers": [
+        "Workflow switch/condition evaluation"
+      ],
+      "performance": "Small synchronous inputs; no timer, IO, provider process, browser or network startup. No individual or suite timing measured in this agent workstream.",
+      "validation": {
+        "cwd": "packages/api",
+        "command": "TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=4 src/devices.test.ts src/agent-chat/model-selection.test.ts src/agent-chat/thread-tools.test.ts src/session-profiles.test.ts src/workflows/rules.test.ts"
+      }
+    }
+  ],
+  "test_loc": {
+    "added": 17,
+    "deleted": 71,
+    "net": -54
+  },
+  "infrastructure_removed": [
+    "Unused test imports for config/catalog/plugin/box declarations",
+    "Unread external DEVICE_QUERY_TOKEN_ROUTES export (array stays private and production-used)"
+  ],
+  "production_compatibility": [
+    "DEVICE_TOOL_REFERENCE_KEY kept exported: real UI import in devices/chat-rows.logic.ts",
+    "PRINCIPAL_ROUTES/PrincipalGate conflict resolved without resurrecting unread static inventory; only principal.ts conflict path staged per root instruction",
+    "Real user-action principal gate remains in devices/http-routes.ts:191; API principal prose now names the user-only endpoint",
+    "Remote dead defaultOptionValues/isThreadReplyMessage/sessionProfileScopeIncludes and unused inventories have no remaining non-test caller; accept remote removals"
+  ],
+  "validation_status": "No tests or typechecks run under shared baseline profiling freeze. git diff --check passes. Required package command recorded per entry; root coordinates focused/mutation/full gates and timing. No speedup claimed.",
+  "performance": "The removed work is small pure inventory/duplicate validation. No material runtime improvement is claimed without measurement; no expensive test or production behavior was removed."
+}

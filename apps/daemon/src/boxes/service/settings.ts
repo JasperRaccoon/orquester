@@ -126,7 +126,6 @@ export interface BoxSettingsDeps {
   /** Where the daemon's HTTP transport listens (the Check's reverse proxy hint names its port). */
   daemonHttp?: () => DaemonHttpAddress;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error">;
   /** Provider settings changed (credentials, Blacksmith steps). */
   providersChanged(): void;
@@ -628,7 +627,7 @@ export class BoxSettings implements BoxConnectivity {
       message = mode === "tailscale" ? "Enter the daemon's tailnet URL first." : "Enter the daemon's public URL first.";
     } else {
       try {
-        const response = await (this.deps.fetch ?? fetch)(`${url}/api/boxes/agent/linux-x64`, {
+        const response = await fetch(`${url}/api/boxes/agent/linux-x64`, {
           method: "GET",
           redirect: "manual",
           signal: AbortSignal.timeout(15_000)
@@ -954,6 +953,6 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   private callOptions() {
-    return { signal: AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS), ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    return { signal: AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS) };
   }
 }

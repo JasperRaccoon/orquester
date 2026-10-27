@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { ServeSimMjpegSession } from "./serveSimMjpeg.ts";
-import { fakeCanvas, fakeImageBitmaps, fakeStreamingFetch, settle, testDeps } from "./testing/fakes.ts";
+import { fakeCanvas, fakeImageBitmaps, fakeStreamingFetch, settle, browserApis, restoreBrowserApis } from "./testing/fakes.ts";
 
 const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.mjpeg";
 const enc = new TextEncoder();
@@ -19,6 +19,7 @@ const sessions: ServeSimMjpegSession[] = [];
 beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 }));
 afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
+  restoreBrowserApis();
   mock.timers.reset();
 });
 
@@ -28,11 +29,11 @@ function setup(contentType = "multipart/x-mixed-replace; boundary=frame") {
   const bitmaps = fakeImageBitmaps((bytes) => ({ width: 400 + bytes[2]!, height: 874 }));
   const canvas = fakeCanvas();
   const painted: number[] = [];
+  browserApis({ fetch: http.fetch, createImageBitmap: bitmaps.createImageBitmap });
   const session = new ServeSimMjpegSession({
     url: URL,
     headers: { Authorization: "Bearer t" },
     canvas,
-    deps: testDeps({ fetch: http.fetch, createImageBitmap: bitmaps.createImageBitmap }),
     onFrame: () => painted.push(canvas.width - 400)
   });
   sessions.push(session);
@@ -67,15 +68,9 @@ describe("ServeSimMjpegSession", () => {
     release();
     await settle();
     assert.deepEqual(t.painted, [1, 4]);
-  });
-
-  it("paints only the last of several parts that arrive in one read", async () => {
-    const t = setup();
+    t.request().push(new Uint8Array([...part(5), ...part(6), ...part(7)]));
     await settle();
-    const bytes = new Uint8Array([...part(5), ...part(6), ...part(7)]);
-    t.request().push(bytes);
-    await settle();
-    assert.deepEqual(t.painted, [7]);
+    assert.deepEqual(t.painted, [1, 4, 7], "a completed read presents its newest frame");
   });
 
   it("retries a response that is not multipart", async () => {

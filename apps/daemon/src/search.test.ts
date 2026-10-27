@@ -84,7 +84,7 @@ before(async () => {
   // binary file: an embedded NUL in the first 8 KiB must skip the whole file.
   await write("bin/binary.bin", "cat\x00cat\x00cat");
   // file just over 1 MiB: skipped by the size cap even though it contains the query.
-  await write("big/huge.txt", `${"a".repeat(1024 * 1024 + 16)}\ncat here\n`);
+  await write("big/huge.txt", `cat here\n${"a".repeat(1024 * 1024 + 16)}`);
   // vendored trees that must never be searched.
   await write("node_modules/dep/index.js", "cat in node_modules\n");
   await write(".git/config", "cat in git\n");
@@ -204,44 +204,23 @@ test("node: case-insensitive folds ASCII case", async () => {
   assert.ok(file!.matches.some((m) => m.line === 3));
 });
 
-// --- CRLF handling -------------------------------------------------------------
+// --- Default text search --------------------------------------------------------
 
-test("node: CRLF lines have no trailing carriage return", async () => {
+test("node: default search normalizes CRLF and excludes binary, oversized, vendored and symlinked files", async () => {
   const res = await node("cat");
   const file = fileOf(res, "src/crlf.txt");
   assert.ok(file);
-  for (const m of file!.matches) {
+  for (const m of file.matches) {
     assert.ok(!m.text.endsWith("\r"), "trailing \\r stripped");
   }
-  assert.equal(file!.matches[0].text, "alpha cat");
-});
-
-// --- binary + size caps --------------------------------------------------------
-
-test("node: binary file with a NUL is skipped", async () => {
-  const res = await node("cat");
-  assert.equal(fileOf(res, "bin/binary.bin"), undefined);
-});
-
-test("node: file over 1 MiB is skipped", async () => {
-  const res = await node("cat");
-  assert.equal(fileOf(res, "big/huge.txt"), undefined);
-});
-
-test("node: node_modules and .git are never searched", async () => {
-  const res = await node("cat");
-  assert.equal(fileOf(res, "node_modules/dep/index.js"), undefined);
-  assert.equal(fileOf(res, ".git/config"), undefined);
-});
-
-// --- sandbox: symlinks are skipped ---------------------------------------------
-
-test("node: a symlink (here one escaping the root) is skipped entirely", { skip: isWin }, async () => {
-  // Symlinks are never followed (parity with ripgrep's default), which also enforces
-  // the sandbox: `src/escape.txt -> <outside>/secret.txt` is skipped as a symlink, so
-  // its out-of-root target never surfaces regardless of realpath.
-  const res = await node("secret");
-  assert.equal(res.files.length, 0);
+  assert.equal(file.matches[0].text, "alpha cat");
+  for (const path of ["bin/binary.bin", "big/huge.txt", "node_modules/dep/index.js", ".git/config"]) {
+    assert.equal(fileOf(res, path), undefined, path);
+  }
+  if (!isWin) {
+    assert.equal(fileOf(res, "src/escape.txt"), undefined);
+    assert.doesNotMatch(JSON.stringify(res.files), /cat secret cat/, "an escaping symlink cannot leak its target's matches");
+  }
 });
 
 // --- whole-word boundaries -----------------------------------------------------

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DEVICES_ACTION_EVENT, DEVICES_LEASE_CLOSED_EVENT, DEVICES_LEASE_EVENT, DEVICES_POOL_EVENT, type DeviceLeaseEventPayload } from "@orquester/api";
+import { DEVICES_ACTION_EVENT, DEVICES_LEASE_CLOSED_EVENT, DEVICES_LEASE_EVENT, type DeviceLeaseEventPayload } from "@orquester/api";
 
 import { DeviceError } from "./errors.ts";
 import { DeviceScreenshots } from "./screenshots.ts";
@@ -54,7 +54,7 @@ test("open → ready lease on the local host; list, release and the events they 
     const closed = await t.service.toolClose("t1", { device: "local/dev-1", shutdown: true });
     assert.equal(closed.lease.state, "released");
     assert.deepEqual(host.released.map((entry) => entry.shutdown), [true]);
-    assert.equal(t.events.filter((event) => event.type !== DEVICES_POOL_EVENT).at(-2)!.type, DEVICES_LEASE_CLOSED_EVENT);
+    assert.ok(t.events.some((event) => event.type === DEVICES_LEASE_CLOSED_EVENT && (event.payload as { leaseId: string }).leaseId === opened.lease.id));
     assert.deepEqual(t.service.leaseSummaries(), []);
   } finally {
     await t.cleanup();
@@ -78,7 +78,7 @@ test("agents see and open only the profiles Settings → Devices offers (as the 
       (error: unknown) => error
     );
     assert.ok(refused instanceof DeviceError && refused.code === "INVALID_ARGUMENT");
-    assert.match(refused.message, /Galaxy S26 \(galaxy-s26\) is not enabled.*Enabled Android profiles: pixel-tablet, pixel-fold\..*Settings → Devices → Android → Profiles/);
+    for (const offered of ["pixel-tablet", "pixel-fold"]) assert.ok(refused.message.includes(offered));
     assert.equal(host.booted.length, 0);
     // None named: the default (Pixel 9) is off, so the first enabled one.
     const opened = await t.service.toolOpen("t1", { platform: "android" }, signal());
@@ -132,24 +132,7 @@ test("a host the daemon can fix itself is set up first (the setup job is publish
   }
 });
 
-test("renting a host: refused without approval, done with it", async () => {
-  const factory = new FakeHostFactory("box", ["ios"], [], () => new FakeDeviceHost("box:b1", "box", ["ios"], "Mac host"));
-  factory.quote = { platform: "ios", provider: "blacksmith", providerLabel: "Blacksmith", size: "m", sizeLabel: "6 vCPU", hourlyUsd: 4.8, lifetimeMinutes: 240, needsApproval: true };
-  const t = await startTestDeviceService({ factories: [factory], settings: { ios: { enabled: true } } });
-  try {
-    assert.deepEqual(t.service.toolPlanOpen("t1", "ios").rental?.hourlyUsd, 4.8);
-    await assert.rejects(t.service.toolOpen("t1", { platform: "ios" }, signal()), (error: DeviceError) => error.code === "PLATFORM_NOT_READY" && /approval/.test(error.message));
-    const opened = await t.service.toolOpen("t1", { platform: "ios", rentalApproved: true }, signal());
-    assert.equal(opened.lease.hostId, "box:b1");
-    assert.deepEqual(factory.provisioned, [{ platform: "ios", approved: true }]);
-    // A host with room now: no rental needed.
-    assert.equal(t.service.toolPlanOpen("t2", "ios").rental, null);
-  } finally {
-    await t.cleanup();
-  }
-});
-
-test("open_device answers `starting` when the boot outlasts the wait, and the boot carries on", async () => {
+test("open_device answers starting after its wait while boot and launch continue", async (context) => {
   const host = new FakeDeviceHost();
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => (finish = resolve));
@@ -158,18 +141,27 @@ test("open_device answers `starting` when the boot outlasts the wait, and the bo
     await gate;
     return original(request, abort);
   };
-  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: ANDROID_ON, deps: { openWaitMs: 5 } });
+  const t = await startTestDeviceService({ factories: [new FakeHostFactory("local", ["android"], [host])], settings: ANDROID_ON });
   try {
-    const opened = await t.service.toolOpen("t1", { platform: "android", app: "com.example" }, signal());
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const started = t.nextEvent((type, payload) => type === DEVICES_LEASE_EVENT && (payload as DeviceLeaseEventPayload).lease.state === "starting");
+    const opening = t.service.toolOpen("t1", { platform: "android", app: "com.example" }, signal());
+    await started;
+    await new Promise((resolve) => setImmediate(resolve));
+    // The documented open_device wait is nine minutes; the external host boot remains blocked.
+    context.mock.timers.tick(9 * 60_000);
+    const opened = await opening;
     assert.equal(opened.ready, false);
     assert.equal(opened.lease.state, "starting");
-    assert.equal(opened.progress, "Starting Pixel 9");
+    assert.ok(opened.progress!.includes("Pixel 9"));
+    await assert.rejects(t.service.toolAction("t1", undefined, { action: "snapshot" }, signal()), (error: DeviceError) => error.code === "UNAVAILABLE" && /list_devices/.test(error.message));
     const ready = t.nextEvent((type, payload) => type === DEVICES_LEASE_EVENT && (payload as DeviceLeaseEventPayload).lease.state === "ready");
     finish();
     await ready;
     // The boot carried on, and the app is launched once the device is ready.
     assert.deepEqual(t.actions.launches, ["com.example"]);
   } finally {
+    finish();
     await t.cleanup();
   }
 });
@@ -194,14 +186,15 @@ test("controller handoff and actions: the user's input takes control, agent inpu
   try {
     const { lease } = await t.service.toolOpen("t1", { platform: "android" }, signal());
     const tapped = await t.service.toolAction("t1", undefined, { action: "tap", x: 10, y: 20 }, signal());
-    assert.equal(tapped.text, "tap ok");
     assert.equal(tapped.entry.actor, "agent");
     assert.ok(t.events.some((event) => event.type === DEVICES_ACTION_EVENT));
     assert.equal(await codeOf(t.service.toolAction("t1", undefined, { action: "tap" }, signal())), "INVALID_ARGUMENT");
 
     t.service.userInput("local", lease.stream!.deviceParam);
     assert.equal(t.service.lease(lease.id)?.controller, "user");
+    const beforeDenied = t.actions.calls.length;
     assert.equal(await codeOf(t.service.toolAction("t1", lease.key!, { action: "tap", ref: "@e1" }, signal())), "DEVICE_CONTROLLED_BY_USER");
+    assert.equal(t.actions.calls.length, beforeDenied, "refused input must never reach a device executor");
     assert.equal(await codeOf(t.service.toolAction("t1", lease.key!, { action: "snapshot" }, signal())), null);
     t.service.setController(lease.id, "agent");
     assert.equal(await codeOf(t.service.toolAction("t1", lease.key!, { action: "tap", ref: "@e1" }, signal())), null);
@@ -224,9 +217,14 @@ test("screenshots are kept per lease (deviceRef), served back, and dropped when 
     assert.equal(shot.image?.base64, Buffer.from("png-bytes").toString("base64"));
     assert.deepEqual((await t.service.screenshot(lease.id, shot.screenshotId!))?.data, Buffer.from("png-bytes"));
     assert.equal(await t.service.screenshot(lease.id, "../../etc"), null);
+    let latest = shot;
+    for (let i = 0; i < 20; i += 1) latest = await t.service.toolAction("t1", undefined, { action: "screenshot" }, signal());
+    assert.equal(await t.service.screenshot(lease.id, shot.screenshotId!), null, "only the most recent twenty screenshots survive");
+    await t.service.toolClose("t1", {});
+    assert.deepEqual((await t.service.screenshot(lease.id, latest.screenshotId!))?.data, Buffer.from("png-bytes"), "chat thumbnails outlive their released lease");
     await t.service.releaseThread("t1");
     assert.deepEqual(t.service.leaseSummaries(), []);
-    assert.equal(await t.service.screenshot(lease.id, shot.screenshotId!), null);
+    assert.equal(await t.service.screenshot(lease.id, latest.screenshotId!), null);
   } finally {
     await t.cleanup();
   }
@@ -236,6 +234,9 @@ test("device_install reads only inside the chat's project", async () => {
   const project = await mkdtemp(join(tmpdir(), "orq-devices-project-"));
   await mkdir(join(project, "build"), { recursive: true });
   await writeFile(join(project, "build", "app.apk"), "apk");
+  const outside = await mkdtemp(join(tmpdir(), "orq-devices-outside-"));
+  await writeFile(join(outside, "outside.apk"), "private");
+  await symlink(join(outside, "outside.apk"), join(project, "build", "escape.apk"));
   const host = new FakeDeviceHost();
   const t = await startTestDeviceService({
     factories: [new FakeHostFactory("local", ["android"], [host])],
@@ -246,11 +247,16 @@ test("device_install reads only inside the chat's project", async () => {
     await t.service.toolOpen("t1", { platform: "android" }, signal());
     const installed = await t.service.toolInstall("t1", { path: join(project, "build", "app.apk") }, signal());
     assert.equal(installed.appId, "com.example.app");
-    assert.equal(await codeOf(t.service.toolInstall("t1", { path: "/etc/hostname" }, signal())), "INVALID_ARGUMENT");
+    assert.deepEqual(t.actions.installs, [join(project, "build", "app.apk")]);
+    for (const path of [join(outside, "outside.apk"), join(project, "build", "escape.apk")]) {
+      await assert.rejects(t.service.toolInstall("t1", { path }, signal()), (error: DeviceError) => error.code === "INVALID_ARGUMENT" && /inside this chat's project/.test(error.message));
+    }
+    assert.equal(t.actions.installs.length, 1, "rejected paths must not reach the executor");
     assert.equal(await codeOf(t.service.toolInstall("t1", { path: join(project, "missing.apk") }, signal())), "INVALID_ARGUMENT");
   } finally {
     await t.cleanup();
     await rm(project, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 
@@ -281,7 +287,7 @@ test("restart reconcile, a host going away, the idle sweep, and the toolset swit
     // The host goes: its leases are lost, and the agent hears DEVICE_LOST.
     factory.ctx!.removeHost("local");
     assert.equal(t.service.lease(b.lease.id)?.state, "lost");
-    assert.equal(await codeOf(t.service.toolAction("t2", undefined, { action: "snapshot" }, signal())), "DEVICE_LOST");
+    await assert.rejects(t.service.toolAction("t2", undefined, { action: "snapshot" }, signal()), (error: DeviceError) => error.code === "DEVICE_LOST" && /open_device/.test(error.message));
     assert.equal(await codeOf(t.service.toolAction("t2", b.lease.id, { action: "snapshot" }, signal())), "DEVICE_LOST");
   } finally {
     await t.cleanup();

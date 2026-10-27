@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync
 import { spawnSync } from "node:child_process";
 import { createServer, connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
@@ -22,7 +22,7 @@ import type { StoredBox } from "@orquester/config";
 import type { BoxProcess } from "../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
 import { boxSummary, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
-import { BOX_DOWNLOAD_MAX_BYTES, boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, OutputTail, shellArgv, TemporaryBoxTools } from "./tools.ts";
+import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, shellArgv, TemporaryBoxTools } from "./tools.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "boxes-temporary-")));
 const PROJECT = join(ROOT, "workspaces", "acme", "game");
@@ -47,7 +47,7 @@ interface World {
   open: Set<string>;
 }
 
-function world(options: { connect?: boolean; tar?: string } = {}): World {
+function world(options: { connect?: boolean } = {}): World {
   const boxes = new FakeTemporaryBoxes()
     .add(boxSummary({ id: "box-a", threadId: "chat-a" }))
     .add(boxSummary({ id: "box-b", threadId: "chat-b" }))
@@ -62,7 +62,7 @@ function world(options: { connect?: boolean; tar?: string } = {}): World {
   };
   const open = new Set(["chat-a", "chat-b"]);
   let next = 0;
-  const tools = new TemporaryBoxTools({ clock, isChatOpen: (id) => open.has(id), newId: () => `id${(next += 1)}`, logger: { warn: () => {}, error: () => {} }, ...(options.tar ? { tar: options.tar } : {}) });
+  const tools = new TemporaryBoxTools({ clock, isChatOpen: (id) => open.has(id), newId: () => `id${(next += 1)}`, logger: { warn: () => {}, error: () => {} } });
   if (options.connect !== false) {
     tools.connect({ boxes, hub: { get: (boxId) => (boxId === "box-a" || boxId === "box-b" ? connection : undefined) } });
   }
@@ -252,24 +252,6 @@ test("shells: bash by default on Linux and macOS, PowerShell on Windows; cmd onl
   assert.equal(boxPathFor({ os: "linux", home: "/root" }, "a\0b"), null);
 });
 
-test("output tails keep the last bytes, count all of them, and never start inside a UTF-8 character", () => {
-  const tail = new OutputTail(8);
-  tail.push(Buffer.from("0123456789"));
-  tail.push(Buffer.from("é€"));
-  const snapshot = tail.snapshot();
-  assert.equal(snapshot.bytes, 15);
-  assert.equal(snapshot.truncated, true);
-  assert.equal(snapshot.text, "789é€");
-  const whole = new OutputTail(64);
-  whole.push(Buffer.from("hi"));
-  assert.deepEqual(whole.snapshot(), { text: "hi", bytes: 2, truncated: false });
-  // Many small chunks stay bounded in memory and correct.
-  const many = new OutputTail(4);
-  for (let i = 0; i < 1000; i += 1) many.push(Buffer.from(String(i % 10)));
-  assert.equal(many.snapshot().text, "6789");
-  assert.equal(many.snapshot().bytes, 1000);
-});
-
 test("foreground exec: exit code, both streams, cwd in the box", async () => {
   const { tools } = world();
   mkdirSync(join(BOX, "work"), { recursive: true });
@@ -284,15 +266,16 @@ test("foreground exec: exit code, both streams, cwd in the box", async () => {
   assert.equal(result.value.connectionLost, false);
 });
 
-test("foreground exec: the returned output is capped (tail kept) with the total byte count", async () => {
+test("foreground exec: the returned output is capped on a UTF-8 boundary with the total byte count", async () => {
   const { tools } = world();
-  const result = await tools.exec("box-a", { command: "head -c 100000 /dev/zero | tr '\\000' a; printf END", shell: "sh", timeoutSeconds: 30, background: false }, { principal: agent() });
+  const result = await tools.exec("box-a", { command: 'awk \'BEGIN { for (i=0; i<50000; i++) printf "é"; printf "END" }\'', shell: "sh", timeoutSeconds: 30, background: false }, { principal: agent() });
   assert.ok(result.ok && !result.value.background);
   if (result.value.background) return;
   assert.equal(result.value.stdout.bytes, 100_003);
   assert.equal(result.value.stdout.truncated, true);
-  assert.equal(Buffer.byteLength(result.value.stdout.text), EXEC_STDOUT_TAIL_BYTES);
-  assert.ok(result.value.stdout.text.endsWith("aaaEND"));
+  // The 24 KiB cut falls inside a two-byte é, so its continuation byte is discarded.
+  assert.equal(Buffer.byteLength(result.value.stdout.text), EXEC_STDOUT_TAIL_BYTES - 1);
+  assert.match(result.value.stdout.text, /^é+END$/);
 });
 
 test("foreground exec: the timeout stops the command (SIGTERM, then SIGKILL after a grace)", async () => {
@@ -469,22 +452,26 @@ test("download: a file is read with a length (the stat's size), never until the 
 });
 
 test("download: tar can close its input before the box finishes; the entire source still decides success", async (t) => {
+  const lookup = spawnSync("/bin/sh", ["-c", "command -v tar"], { encoding: "utf8" });
+  assert.equal(lookup.status, 0, lookup.stderr);
+  const realTar = realpathSync(lookup.stdout.trim());
   const remote = join(BOX, "early-tar");
   mkdirSync(remote);
   writeFileSync(join(remote, "payload.txt"), "payload");
-  const packed = spawnSync("tar", ["-cf", "-", "-C", remote, "."]);
+  const packed = spawnSync(realTar, ["-cf", "-", "-C", remote, "."]);
   assert.equal(packed.status, 0, packed.stderr.toString());
 
   for (const scenario of ["success", "source-error", "cancel", "too-large", "tar-error"] as const) {
     await t.test(scenario, async (t) => {
-      const tar = join(ROOT, `early-tar-${scenario}.cjs`);
-      const receipt = `${tar}.closed`;
+      const bin = mkdtempSync(join(ROOT, `early-tar-${scenario}-`));
+      const tar = join(bin, "tar");
+      const receipt = join(ROOT, `early-tar-${scenario}.closed`);
       // Real tar reads the archive's end markers, then the wrapper closes fd 0 BEFORE the
       // source releases its tail. The watched receipt makes the ordering deterministic.
       writeFileSync(tar, `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
 const { closeSync, writeFileSync } = require("node:fs");
-const child = spawnSync("tar", process.argv.slice(2), { stdio: ["inherit", "ignore", "inherit"] });
+const child = spawnSync(${JSON.stringify(realTar)}, process.argv.slice(2), { stdio: ["inherit", "ignore", "inherit"] });
 closeSync(0);
 writeFileSync(${JSON.stringify(receipt)}, "closed");
 process.exit(child.status ?? 1);
@@ -495,8 +482,14 @@ process.exit(child.status ?? 1);
         if (name?.toString() === basename(receipt)) closed();
       });
       t.after(() => { closed(); watcher.close(); });
+      const previousPath = process.env.PATH;
+      t.after(() => {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+      });
+      process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
       const controller = new AbortController();
-      const { tools, connection } = world({ tar });
+      const { tools, connection } = world();
       const padding = Buffer.alloc(1024);
       const invalidArchive = Buffer.alloc(10240);
       invalidArchive.fill(1, 0, 512);
@@ -508,7 +501,7 @@ process.exit(child.status ?? 1);
         if (scenario === "too-large") {
           // Reuse one chunk: exercise the byte cap after tar exits without allocating 4 GiB.
           const chunk = Buffer.alloc(1024 * 1024);
-          for (let bytes = 0; bytes <= BOX_DOWNLOAD_MAX_BYTES; bytes += chunk.length) yield chunk;
+          for (let bytes = 0; bytes <= 4 * 1024 ** 3; bytes += chunk.length) yield chunk;
         } else {
           yield padding;
         }

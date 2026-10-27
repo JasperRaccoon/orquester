@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import type { Mock, TestContext } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -77,8 +78,13 @@ export function routedFetch(routes: Route[]): { fetch: typeof fetch; seen: SeenR
   return { fetch: stub, seen };
 }
 
-export function callOptions(fetchStub: typeof fetch): ProviderCallOptions {
-  return { signal: AbortSignal.timeout(10_000), fetch: fetchStub };
+const fetchMocks = new WeakMap<TestContext, Mock<typeof fetch>>();
+
+export function callOptions(t: TestContext, fetchStub: typeof fetch): ProviderCallOptions {
+  const mocked = fetchMocks.get(t);
+  if (mocked) mocked.mock.mockImplementation(fetchStub);
+  else fetchMocks.set(t, t.mock.method(globalThis, "fetch", fetchStub));
+  return { signal: AbortSignal.timeout(10_000) };
 }
 
 export const SAMPLE_BOOTSTRAP: BoxBootstrap = {

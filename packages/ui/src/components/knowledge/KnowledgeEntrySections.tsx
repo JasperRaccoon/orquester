@@ -165,7 +165,7 @@ const DuplicateRow: React.FC<{
 }> = ({ item, busy, merging, canMerge, onOpen, onMerge, onKeepBoth }) => {
   const { title, percent } = duplicateText(item);
   return (
-    <div data-knowledge-duplicate={item.entry.id} className="space-y-1.5">
+    <div className="space-y-1.5">
       <p className="flex items-start gap-1.5 text-xs text-neutral-200">
         <Copy size={13} aria-hidden className="mt-px shrink-0 text-warn" />
         <span className="min-w-0">
@@ -198,10 +198,10 @@ export const SimilarEntries: React.FC<{
   onOpen: (id: string) => void;
   onFindSimilar?: ((entryId: string) => void) | undefined;
 }> = ({ detail, onOpen, onFindSimilar }) => {
-  const { items, fallback } = similarSection(detail);
+  const { items } = similarSection(detail);
   if (items.length === 0 && !onFindSimilar) return null;
   return (
-    <section aria-label="Similar entries" data-fallback={fallback ? "related" : undefined}>
+    <section aria-label="Similar entries">
       <div className="mb-1.5 flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <SectionLabel>Similar</SectionLabel>

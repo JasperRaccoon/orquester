@@ -180,7 +180,7 @@ export function createGithubOidcVerifier(options: GithubOidcVerifierOptions = {}
 
   return async (jwt, expectation, callOptions) => {
     const now = (callOptions.now ?? Date.now)();
-    const doFetch = callOptions.fetch ?? fetch;
+    const doFetch = fetch;
     const parts = parseJwt(jwt);
     if (parts === null) return { ok: false, message: "not a JWT" };
     if (parts.header.alg !== "RS256") return { ok: false, message: "unsupported token algorithm" };

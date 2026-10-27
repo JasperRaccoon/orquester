@@ -30,10 +30,6 @@ export const SECRET_VAULT_VERSION_ID_PATTERN = /^v_[A-Za-z0-9_-]{8,64}$/;
 /** A content hash, lowercase hex — also a blob's file name, so nothing else is ever joined onto the blobs dir. */
 export const SECRET_BLOB_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
-export function isSecretVaultVersionId(value: unknown): value is string {
-  return typeof value === "string" && SECRET_VAULT_VERSION_ID_PATTERN.test(value);
-}
-
 export function isSecretBlobSha256(value: unknown): value is string {
   return typeof value === "string" && SECRET_BLOB_SHA256_PATTERN.test(value);
 }

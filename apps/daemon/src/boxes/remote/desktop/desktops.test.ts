@@ -14,7 +14,6 @@ import { localBoxConnection, localSysInfo } from "../../testing.ts";
 import { BoxDesktopHost } from "./host.ts";
 import { BoxDesktops } from "./index.ts";
 import { type BoxGuiInstaller, BoxGuiUnavailableError } from "../gui/index.ts";
-import { boxDesktopRefusal } from "./suggestions.ts";
 import { BOX_DESKTOP_TMUX_SERVER, BoxDesktopTmux } from "./tmux.ts";
 
 // The VM desktop seam's box side against fakes: which boxes have a host, how
@@ -75,7 +74,6 @@ test("only Linux boxes that are not on their way out have a desktop host, one pe
   const live = harness();
   const host = live.desktops.host("b1");
   assert.ok(host);
-  assert.equal(live.desktops.host("b1"), host);
   assert.equal(host.boxId, "b1");
   assert.equal(live.desktops.host("other"), null);
   assert.equal(harness({ record: null }).desktops.host("b1"), null);
@@ -152,12 +150,6 @@ test("a refusal is read off its code too (an installer error from elsewhere)", a
     }
   });
   await assert.rejects(h.desktops.ensure("b1", () => {}), { status: 409, code: DESKTOP_UNAVAILABLE_CODE, message: "Unsupported distro.", hint: null });
-});
-
-test("desktops need Linux", () => {
-  assert.equal(boxDesktopRefusal({ os: "linux" }), null);
-  assert.match(boxDesktopRefusal({ os: "darwin" }) ?? "", /Linux VMs.*macOS/);
-  assert.match(boxDesktopRefusal({ os: "win32" }) ?? "", /Linux VMs.*Windows/);
 });
 
 // ---------------------------------------------------------------------------

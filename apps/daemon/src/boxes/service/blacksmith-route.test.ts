@@ -43,9 +43,10 @@ async function harness(
   publicOrigin: string | null,
   fetch?: typeof globalThis.fetch
 ): Promise<TestService & { calls: DriverCall[]; warms: ReturnType<typeof fakeDriver>["warms"] }> {
+  if (fetch) t.mock.method(globalThis, "fetch", fetch);
   const root = await mkdtemp(join(tmpdir(), "orq-box-blacksmith-route-"));
   const { driver, calls, warms } = fakeDriver();
-  const service = testBoxService({ baseDir: root, overrides: { publicOrigin: () => publicOrigin, blacksmith: driver, ...(fetch ? { fetch } : {}) } });
+  const service = testBoxService({ baseDir: root, overrides: { publicOrigin: () => publicOrigin, blacksmith: driver } });
   await service.service.start();
   t.after(async () => {
     await service.service.stop();

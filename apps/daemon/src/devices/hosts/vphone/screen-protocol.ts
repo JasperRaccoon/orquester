@@ -16,7 +16,7 @@
  */
 
 /** serve-sim avcc envelope tags. */
-export const AVCC_TAG = { description: 1, keyframe: 2, delta: 3, seed: 4 } as const;
+const AVCC_TAG = { description: 1, keyframe: 2, delta: 3, seed: 4 } as const;
 
 /** A `/v1/host/screen` request. vphone requires every field (`bitrate` too). */
 interface HostScreenRequest {
@@ -102,7 +102,7 @@ export function decodeScreenReply(message: Buffer): HostScreenReply {
 }
 
 /** One serve-sim envelope. */
-export function avccEnvelope(tag: number, payload: Uint8Array): Buffer {
+function avccEnvelope(tag: number, payload: Uint8Array): Buffer {
   const out = Buffer.allocUnsafe(5 + payload.length);
   out.writeUInt32BE(payload.length + 1, 0);
   out[4] = tag;
@@ -111,7 +111,7 @@ export function avccEnvelope(tag: number, payload: Uint8Array): Buffer {
 }
 
 /** Whether `payload` is a run of 4-byte big-endian length-prefixed NAL units that ends exactly. */
-export function isLengthPrefixedAccessUnit(payload: Uint8Array): boolean {
+function isLengthPrefixedAccessUnit(payload: Uint8Array): boolean {
   if (payload.length === 0) return false;
   let offset = 0;
   while (offset < payload.length) {
@@ -124,7 +124,7 @@ export function isLengthPrefixedAccessUnit(payload: Uint8Array): boolean {
 }
 
 /** Whether `record` looks like an AVCDecoderConfigurationRecord with 4-byte NAL lengths. */
-export function isAvcC(record: Uint8Array): boolean {
+function isAvcC(record: Uint8Array): boolean {
   return record.length >= 7 && record[0] === 1 && (record[4]! & 0x03) === 3;
 }
 

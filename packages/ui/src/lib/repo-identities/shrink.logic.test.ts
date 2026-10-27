@@ -4,10 +4,8 @@ import { describe, it } from "node:test";
 import { REPO_ICON_MAX_BYTES } from "@orquester/api";
 
 import {
-  IMAGE_TOO_LARGE,
   canSendUnchanged,
   encodedFormat,
-  formatBytes,
   initialShrinkSize,
   nextShrinkStep,
   type ShrinkAttempt
@@ -84,7 +82,7 @@ describe("the step-down", () => {
     const at128: ShrinkAttempt = { width: 128, height: 100, format: "image/webp", quality: 0.6 };
     assert.deepEqual(nextShrinkStep(at128, OVER), { kind: "encode", attempt: { ...at128, width: 64, height: 50 } });
     const at64: ShrinkAttempt = { ...at128, width: 64, height: 50 };
-    assert.deepEqual(nextShrinkStep(at64, OVER), { kind: "give-up", reason: IMAGE_TOO_LARGE });
+    assert.deepEqual(nextShrinkStep(at64, OVER), { kind: "give-up", reason: "That image is too large to use" });
   });
 });
 
@@ -94,11 +92,5 @@ describe("helpers", () => {
     assert.equal(encodedFormat("image/png"), "image/png");
     assert.equal(encodedFormat("image/jpeg"), null);
     assert.equal(encodedFormat(""), null);
-  });
-
-  it("formatBytes reads like the dialog's note", () => {
-    assert.equal(formatBytes(6.3 * 1024 * 1024), "6.3 MB");
-    assert.equal(formatBytes(84 * 1024), "84 KB");
-    assert.equal(formatBytes(512), "512 B");
   });
 });

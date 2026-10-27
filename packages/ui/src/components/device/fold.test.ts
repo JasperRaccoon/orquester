@@ -1,16 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 
-import { parseAndroidFold, requestAndroidFold } from "./fold.ts";
-
-it("reads the hub's fold answer and refuses anything else", () => {
-  assert.deepEqual(parseAndroidFold({ ok: true, fold: { supported: true, posture: "opened", hingeAngle: 180 } }), { supported: true, posture: "opened", hingeAngle: 180 });
-  assert.deepEqual(parseAndroidFold({ ok: true, fold: { supported: false, posture: null, hingeAngle: null } }), { supported: false, posture: null, hingeAngle: null });
-  assert.equal(parseAndroidFold({ ok: false }), null);
-  assert.equal(parseAndroidFold({ ok: true, fold: { supported: true, posture: "sideways", hingeAngle: null } }), null);
-  assert.equal(parseAndroidFold({ ok: true, fold: { supported: true, posture: "closed", hingeAngle: Number.NaN } }), null);
-  assert.equal(parseAndroidFold("x"), null);
-});
+import { requestAndroidFold } from "./fold.ts";
 
 it("GETs the posture and POSTs a change as {posture} to the proxy URL; a refusal reads as the hub's message", async () => {
   const saved = globalThis.fetch;
@@ -32,8 +23,18 @@ it("GETs the posture and POSTs a change as {posture} to the proxy URL; a refusal
     ]);
     answer = { status: 404, body: { code: "DEVICE_NOT_LEASED", message: "That device is not leased on this host." } };
     await assert.rejects(requestAndroidFold(target, "opened"), /not leased/);
-    answer = { status: 200, body: { ok: true } };
-    await assert.rejects(requestAndroidFold(target), /unexpected shape/);
+    answer = { status: 200, body: { ok: true, fold: { supported: true, posture: "opened", hingeAngle: 180 } } };
+    assert.deepEqual(await requestAndroidFold(target), { supported: true, posture: "opened", hingeAngle: 180 });
+    answer = { status: 200, body: { ok: true, fold: { supported: false, posture: null, hingeAngle: null } } };
+    assert.deepEqual(await requestAndroidFold(target), { supported: false, posture: null, hingeAngle: null });
+    for (const body of [
+      { ok: false }, { ok: true }, "x",
+      { ok: true, fold: { supported: true, posture: "sideways", hingeAngle: null } },
+      { ok: true, fold: { supported: true, posture: "closed", hingeAngle: "bad" } }
+    ]) {
+      answer = { status: 200, body };
+      await assert.rejects(requestAndroidFold(target), /unexpected shape/);
+    }
   } finally {
     globalThis.fetch = saved;
   }

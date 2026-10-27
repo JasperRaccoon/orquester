@@ -32,9 +32,9 @@ import type { DaemonBoxes } from "../../boxes/wiring.ts";
 import { DeviceError, isDeviceError } from "../errors.ts";
 import type { DeviceHost, DeviceHostFactory, DeviceHostFactoryContext, DeviceHostProvisionRequest, DeviceRentalQuote } from "../host.ts";
 import type { DeviceToolchain } from "../toolchain/index.ts";
-import { BoxAndroidHost, type BoxAndroidHostDeps, type BoxAndroidTiming } from "./box/android-host.ts";
+import { BoxAndroidHost } from "./box/android-host.ts";
 import { androidRentalSpec } from "./box/android-remote.ts";
-import { BoxDeviceHost, type BoxHostTiming } from "./box/host.ts";
+import { BoxDeviceHost } from "./box/host.ts";
 import { deviceHostSpend, iosRentalSpec, rentalNeedsApproval } from "./box/rental.ts";
 
 export interface BoxHostDeps {
@@ -43,13 +43,7 @@ export interface BoxHostDeps {
   boxes: () => Pick<DaemonBoxes, "service" | "registry" | "hub"> | null;
   toolchain: DeviceToolchain;
   logger: Pick<Console, "info" | "warn" | "error">;
-  /** Tests: the clock, the sweep, waits and HTTP. */
-  now?: () => number;
-  idleSweep?: boolean;
-  timing?: Partial<BoxHostTiming>;
   fetch?: typeof fetch;
-  /** Tests and the integration run: Linux Android hosts' timing and box-side choices. */
-  android?: Partial<Pick<BoxAndroidHostDeps, "root" | "gpuModes" | "eagerGolden" | "localAgentDevice">> & { timing?: Partial<BoxAndroidTiming> };
 }
 
 /** A box host of either platform: Macs run iOS simulators, Linux boxes with KVM Android emulators. */
@@ -84,7 +78,7 @@ export function deviceHostOfRecord(record: StoredBox): DeviceHostRole | null {
   return null;
 }
 
-export function deviceHostLabel(record: StoredBox): string {
+function deviceHostLabel(record: StoredBox): string {
   const linux = record.kind === "linux" || record.os === "linux";
   if (record.provider === "byo") {
     const name = typeof record.machineName === "string" && record.machineName ? record.machineName : linux ? "Your machine" : "Your Mac";
@@ -100,21 +94,10 @@ function hostWord(platform: DevicePlatform): string {
   return platform === "ios" ? "Mac" : "Linux";
 }
 
-export interface BoxHostFactory extends DeviceHostFactory {
-  /** The Mac host of a box (tests, the integration run). */
-  host(boxId: string): BoxDeviceHost | undefined;
-  /** The Linux Android host of a box (tests, the integration run). */
-  androidHost(boxId: string): BoxAndroidHost | undefined;
-  /**
-   * Destroy failed rented hosts and stop idle own Macs' helpers now (tests drive it; a timer runs
-   * it every minute). Idle rented hosts are the pool's to tear down.
-   */
-  sweepIdle(): Promise<void>;
-}
 
-export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
+export function createBoxHostFactory(deps: BoxHostDeps): DeviceHostFactory {
   const { logger } = deps;
-  const now = () => deps.now?.() ?? Date.now();
+  const now = () => Date.now();
   const hosts = new Map<string, BoxHost>();
   /** Since when each host has had no lease (box id → ms). */
   const idleSince = new Map<string, number>();
@@ -157,7 +140,6 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
     const hostId = boxDeviceHostId(boxId);
     const kind = role.kind;
     if (role.platform === "android") {
-      const { timing, ...android } = deps.android ?? {};
       const host = new BoxAndroidHost({
         boxId,
         kind,
@@ -169,10 +151,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
         settings: () => settings()!,
         activeLeases: () => ctx?.activeLeases(hostId) ?? [],
         ...(kind === "box" ? { destroyBox: destroyBoxOf(boxId) } : {}),
-        logger,
-        ...(deps.now ? { now: deps.now } : {}),
-        ...(timing ? { timing } : {}),
-        ...android
+        logger
       });
       hosts.set(boxId, host);
       ctx?.addHost(host);
@@ -190,9 +169,7 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       activeLeases: () => ctx?.activeLeases(hostId) ?? [],
       ...(kind === "box" ? { destroyBox: destroyBoxOf(boxId) } : {}),
       logger,
-      ...(deps.fetch ? { fetch: deps.fetch } : {}),
-      ...(deps.now ? { now: deps.now } : {}),
-      ...(deps.timing ? { timing: deps.timing } : {})
+      ...(deps.fetch ? { fetch: deps.fetch } : {})
     });
     hosts.set(boxId, host);
     ctx?.addHost(host);
@@ -440,10 +417,8 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       // Synchronously: leases on hosts missing after `start` are marked lost.
       sync();
       refreshOffers();
-      if (deps.idleSweep !== false) {
-        sweepTimer = setInterval(() => void sweepIdle().catch(() => undefined), IDLE_SWEEP_MS);
-        sweepTimer.unref?.();
-      }
+      sweepTimer = setInterval(() => void sweepIdle().catch(() => undefined), IDLE_SWEEP_MS);
+      sweepTimer.unref?.();
     },
 
     provision,
@@ -454,18 +429,6 @@ export function createBoxHostFactory(deps: BoxHostDeps): BoxHostFactory {
       for (const host of hosts.values()) host.linkChanged();
       refreshOffers();
     },
-
-    host: (boxId) => {
-      const host = hosts.get(boxId);
-      return host instanceof BoxDeviceHost ? host : undefined;
-    },
-
-    androidHost: (boxId) => {
-      const host = hosts.get(boxId);
-      return host instanceof BoxAndroidHost ? host : undefined;
-    },
-
-    sweepIdle,
 
     async stop(options) {
       if (sweepTimer) clearInterval(sweepTimer);

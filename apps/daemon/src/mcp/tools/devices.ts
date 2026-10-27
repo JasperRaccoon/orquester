@@ -124,7 +124,7 @@ function deviceRef(lease: DeviceLeaseSummary, extra: { screenshotId?: string; ac
  * leaves out, per platform (devices spikes: iOS needs an app session before a snapshot, and its
  * first call warms agent-device's runner; `open` re-issues refs).
  */
-export function deviceQuickStart(platform: "ios" | "android"): string {
+function deviceQuickStart(platform: "ios" | "android"): string {
   return [
     platform === "ios"
       ? 'Open the app first ({action:"open_app",app:"<bundle id>"}; Settings is com.apple.Preferences), then {action:"snapshot"}: the screen as @eN refs. The first iOS call may take ~30 s.'
@@ -302,7 +302,7 @@ const deviceHandle = z
   .max(300)
   .optional()
   .describe("A device from open_device or list_devices; default: this chat's only device.");
-/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/schema-refs.test.ts`). */
+/** A factory: one instance in two fields is listed as a "$ref" (see `catalog/registry.test.ts`). */
 const point = () => z.object({ x: z.number().min(0).max(10_000), y: z.number().min(0).max(10_000) }).strict();
 
 const deviceActionInput = {

@@ -194,9 +194,18 @@ describe("captureMcpApp", () => {
     assert.match(stored, /^<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none';/);
   });
 
-  it("answers nothing for a read that fails or times out, a non-app or oversized document, a failed store, no store", async () => {
+  it("answers nothing for a read that fails or times out, a non-app or oversized document, a failed store, no store", async (t) => {
     assert.equal(await captureMcpApp(input({ read: async () => Promise.reject(new Error("down")) })), undefined);
-    assert.equal(await captureMcpApp(input({ read: () => new Promise(() => undefined), timeoutMs: 5 })), undefined);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let settled = false;
+    const pending = captureMcpApp(input({ read: () => new Promise(() => undefined) }))
+      .then((value) => { settled = true; return value; });
+    t.mock.timers.tick(14_999);
+    await tick();
+    assert.equal(settled, false, "the documented 15 s read window has not expired");
+    t.mock.timers.tick(1);
+    assert.equal(await pending, undefined);
+    t.mock.timers.reset();
     assert.equal(await captureMcpApp(input({ read: async () => [{ mimeType: "text/html", text: "<p>" }] })), undefined);
     assert.equal(
       await captureMcpApp(
@@ -302,18 +311,15 @@ describe("McpAppSnapshotStore", () => {
 });
 
 describe("McpAppSessionCache", () => {
-  it("answers within its time-to-live, forgets after it or on clear, and stays bounded", () => {
-    let now = 0;
-    const cache = new McpAppSessionCache<string>(100, () => now, 2);
+  it("reuses the tool listing for 30 s, then expires it; clear invalidates it immediately", (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: 0 });
+    const cache = new McpAppSessionCache<string>(30_000);
     cache.set("a", "1");
-    now = 99;
+    t.mock.timers.tick(29_999);
     assert.equal(cache.get("a"), "1");
-    now = 100;
+    t.mock.timers.tick(1);
     assert.equal(cache.get("a"), undefined);
-    cache.set("a", "1");
-    cache.set("b", "2");
     cache.set("c", "3");
-    assert.equal(cache.get("a"), undefined, "the oldest went past the bound");
     assert.equal(cache.get("c"), "3");
     cache.clear();
     assert.equal(cache.get("c"), undefined);

@@ -17,22 +17,22 @@ function readRoutes() {
   ];
 }
 
-test("validate: ok with a working token, Linode's reason for a bad or missing one", async () => {
+test("validate: ok with a working token, Linode's reason for a bad or missing one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/linode/instances?page=1&page_size=25`, body: fixture("linode", "instances-empty") },
     { method: "GET", url: `${API}/linode/instances?page=1&page_size=25`, status: 401, body: fixture("linode", "error-unauthorized") }
   ]);
-  assert.deepEqual(await linodeAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await linodeAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer linode-test-token");
-  const bad = await linodeAdapter.validate({ token: "wrong-token" }, replayOptions(replay));
+  const bad = await linodeAdapter.validate({ token: "wrong-token" }, replayOptions(t, replay));
   assert.deepEqual(bad, { ok: false, message: "Linode: Invalid Token (check the key and its permissions)" });
-  assert.deepEqual(await linodeAdapter.validate({ token: "" }, replayOptions(replay)), { ok: false, message: "Linode: API token is missing" });
+  assert.deepEqual(await linodeAdapter.validate({ token: "" }, replayOptions(t, replay)), { ok: false, message: "Linode: API token is missing" });
   assert.equal(replay.requests.length, 2);
 });
 
-test("offers linux: live prices per regional price, Metadata core regions only, no GPU or accelerated plans", async () => {
+test("offers linux: live prices per regional price, Metadata core regions only, no GPU or accelerated plans", async (t) => {
   const replay = replayFetch(readRoutes());
-  const offers = await linodeAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await linodeAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
@@ -64,9 +64,9 @@ test("offers linux: live prices per regional price, Metadata core regions only, 
   );
 });
 
-test("offers linux-gpu: GPU plans in GPU regions, sold-out regions dropped", async () => {
+test("offers linux-gpu: GPU plans in GPU regions, sold-out regions dropped", async (t) => {
   const replay = replayFetch(readRoutes());
-  const offers = await linodeAdapter.offers(credentials, "linux-gpu", replayOptions(replay));
+  const offers = await linodeAdapter.offers(credentials, "linux-gpu", replayOptions(t, replay));
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions, size.gpu]),
     [
@@ -79,16 +79,16 @@ test("offers linux-gpu: GPU plans in GPU regions, sold-out regions dropped", asy
     offers.regions.map((region) => region.id),
     ["us-east", "us-ord", "eu-central"]
   );
-  await assert.rejects(linodeAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
+  await assert.rejects(linodeAdapter.offers(credentials, "windows", replayOptions(t, replayFetch([]))), /does not rent windows/);
 });
 
-test("create: one POST with label, tags, base64 cloud-init, the box key and a throwaway root password", async () => {
+test("create: one POST with label, tags, base64 cloud-init, the box key and a throwaway root password", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/linode/types/g6-nanode-1`, body: fixture("linode", "type-nanode") },
     { method: "POST", url: `${API}/linode/instances`, body: fixture("linode", "instance-created") }
   ]);
   const request = testCreateRequest({ size: "g6-nanode-1@id-cgk", region: "id-cgk" });
-  const result = await linodeAdapter.create(credentials, request, replayOptions(replay));
+  const result = await linodeAdapter.create(credentials, request, replayOptions(t, replay));
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   const body = post.body as Record<string, unknown>;
   const rootPass = body.root_pass as string;
@@ -114,16 +114,16 @@ test("create: one POST with label, tags, base64 cloud-init, the box key and a th
     { method: "GET", url: `${API}/linode/types/g6-nanode-1`, body: fixture("linode", "type-nanode") },
     { method: "POST", url: `${API}/linode/instances`, body: fixture("linode", "instance-created") }
   ]);
-  await linodeAdapter.create(credentials, request, replayOptions(again));
+  await linodeAdapter.create(credentials, request, replayOptions(t, again));
   assert.notEqual((again.requests[1]!.body as Record<string, unknown>).root_pass, rootPass);
 });
 
-test("create: a failed create is never retried and surfaces Linode's reasons", async () => {
+test("create: a failed create is never retried and surfaces Linode's reasons", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/linode/types/g6-nanode-1`, body: fixture("linode", "type-nanode") },
     { method: "POST", url: `${API}/linode/instances`, status: 500, body: fixture("linode", "error-server"), times: 2 }
   ]);
-  await assert.rejects(linodeAdapter.create(credentials, testCreateRequest({ size: "g6-nanode-1", region: "us-east" }), replayOptions(replay)), (error) => {
+  await assert.rejects(linodeAdapter.create(credentials, testCreateRequest({ size: "g6-nanode-1", region: "us-east" }), replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.equal(error.message, "Linode: Linode busy.");
@@ -136,12 +136,12 @@ test("create: a failed create is never retried and surfaces Linode's reasons", a
     { method: "POST", url: `${API}/linode/instances`, status: 400, body: fixture("linode", "error-validation") }
   ]);
   await assert.rejects(
-    linodeAdapter.create(credentials, testCreateRequest({ size: "g6-nanode-1", region: "ap-south" }), replayOptions(invalid)),
+    linodeAdapter.create(credentials, testCreateRequest({ size: "g6-nanode-1", region: "ap-south" }), replayOptions(t, invalid)),
     /^ProviderHttpError: Linode: region: Region does not support Metadata\.$/
   );
 });
 
-test("status: maps instance states, 404 is gone, 429 is retried", async () => {
+test("status: maps instance states, 404 is gone, 429 is retried", async (t) => {
   const running = fixture<Record<string, unknown>>("linode", "instance-running");
   const replay = replayFetch([
     { method: "GET", url: instanceUrl, status: 429, headers: { "retry-after": "0" }, body: fixture("linode", "error-rate-limit") },
@@ -153,18 +153,18 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   ]);
   const ref = { linodeId: 600000001, region: "us-east" };
   // The private 192.168/16 address is skipped.
-  assert.deepEqual(await linodeAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await linodeAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.10",
     hourlyUsd: null
   });
-  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  const stopping = await linodeAdapter.status(credentials, ref, replayOptions(replay));
+  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  const stopping = await linodeAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.deepEqual([stopping.state, stopping.detail], ["stopped", "Linode reports the instance shutting down"]);
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
-  assert.deepEqual(await linodeAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
+  assert.deepEqual(await linodeAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "gone",
     detail: "The instance no longer exists in Akamai Cloud",
     publicIp: null,
@@ -173,25 +173,25 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   assert.equal(replay.pending().length, 0);
 });
 
-test("destroy: deletes the instance and is idempotent", async () => {
+test("destroy: deletes the instance and is idempotent", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: instanceUrl, body: {} },
     { method: "DELETE", url: instanceUrl, status: 404, body: fixture("linode", "error-not-found") }
   ]);
   const ref = { linodeId: 600000001, region: "us-east" };
-  await linodeAdapter.destroy(credentials, ref, replayOptions(replay));
-  await linodeAdapter.destroy(credentials, ref, replayOptions(replay));
+  await linodeAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await linodeAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
-  await assert.rejects(linodeAdapter.destroy(credentials, {}, replayOptions(replay)), /instance reference has no linodeId/);
+  await assert.rejects(linodeAdapter.destroy(credentials, {}, replayOptions(t, replay)), /instance reference has no linodeId/);
 });
 
-test("listManaged: X-Filter on the tag, pages followed, only marked instances", async () => {
+test("listManaged: X-Filter on the tag, pages followed, only marked instances", async (t) => {
   const managed = fixture<{ data: unknown[] }>("linode", "instances-managed");
   const replay = replayFetch([
     { method: "GET", url: `${API}/linode/instances?page=1&page_size=500`, body: { data: managed.data.slice(0, 2), page: 1, pages: 2, results: 3 } },
     { method: "GET", url: `${API}/linode/instances?page=2&page_size=500`, body: { data: managed.data.slice(2), page: 2, pages: 2, results: 3 } }
   ]);
-  const result = await linodeAdapter.listManaged(credentials, replayOptions(replay));
+  const result = await linodeAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.equal(replay.requests[0]!.headers["x-filter"], '{"tags":"orquester-box"}');
   assert.deepEqual(result, [
     {

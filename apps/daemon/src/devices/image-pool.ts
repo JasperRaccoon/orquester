@@ -66,33 +66,11 @@ interface Slot {
   idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
-export interface ImageWorkerPoolOptions {
-  size?: number;
-  queueCap?: number;
-  jobTimeoutMs?: number;
-  idleMs?: number;
-  /** The worker entry (tests: a stand-in). */
-  entry?: URL;
-}
-
 export class ImageWorkerPool {
-  private readonly size: number;
-  private readonly queueCap: number;
-  private readonly jobTimeoutMs: number;
-  private readonly idleMs: number;
-  private readonly entry: URL;
   private readonly slots = new Set<Slot>();
   private readonly queue: Job[] = [];
   private nextId = 1;
   private closed = false;
-
-  constructor(options: ImageWorkerPoolOptions = {}) {
-    this.size = Math.max(1, options.size ?? IMAGE_WORKERS);
-    this.queueCap = Math.max(1, options.queueCap ?? IMAGE_QUEUE_CAP);
-    this.jobTimeoutMs = options.jobTimeoutMs ?? IMAGE_JOB_TIMEOUT_MS;
-    this.idleMs = options.idleMs ?? IMAGE_WORKER_IDLE_MS;
-    this.entry = options.entry ?? new URL("./image-worker.ts", import.meta.url);
-  }
 
   /** A PNG (a JPEG passes through) as a JPEG at most `width` px wide; `key` (the lease) coalesces queued frames. */
   async thumbnail(key: string, image: Buffer, width: number): Promise<Buffer> {
@@ -107,11 +85,6 @@ export class ImageWorkerPool {
     const result = await this.run({ kind: "fit", png, maxBase64Chars }, null);
     if (result.kind !== "fit") throw new Error("The image worker answered another job.");
     return { mimeType: result.mimeType, data: toBuffer(result.data), width: result.width, height: result.height };
-  }
-
-  /** Workers running, jobs running and jobs waiting (tests, diagnostics). */
-  stats(): { workers: number; running: number; queued: number } {
-    return { workers: this.slots.size, running: [...this.slots].filter((slot) => slot.job !== null).length, queued: this.queue.length };
   }
 
   /** End every worker; queued and running jobs fail. A later job starts the pool again. */
@@ -134,7 +107,7 @@ export class ImageWorkerPool {
           return;
         }
       }
-      if (this.queue.length >= this.queueCap) {
+      if (this.queue.length >= IMAGE_QUEUE_CAP) {
         reject(new ImagePoolBusyError());
         return;
       }
@@ -153,14 +126,14 @@ export class ImageWorkerPool {
 
   private pump(): void {
     while (this.queue.length > 0) {
-      const slot = [...this.slots].find((entry) => entry.job === null) ?? (this.slots.size < this.size ? this.spawn() : null);
+      const slot = [...this.slots].find((entry) => entry.job === null) ?? (this.slots.size < IMAGE_WORKERS ? this.spawn() : null);
       if (!slot) return;
       this.dispatch(slot, this.queue.shift()!);
     }
   }
 
   private spawn(): Slot {
-    const worker = new Worker(this.entry);
+    const worker = new Worker(new URL("./image-worker.ts", import.meta.url));
     const slot: Slot = { worker, job: null, timer: null, idleTimer: null };
     worker.unref();
     worker.on("message", (reply: ImageWorkerReply) => this.answered(slot, reply));
@@ -177,7 +150,7 @@ export class ImageWorkerPool {
     slot.job = { ...job, id };
     // A job in flight keeps the process alive until it answers (an idle worker never does).
     slot.worker.ref();
-    slot.timer = setTimeout(() => void this.retire(slot, new Error(`The device image took longer than ${Math.round(this.jobTimeoutMs / 1000)} s to encode.`)), this.jobTimeoutMs);
+    slot.timer = setTimeout(() => void this.retire(slot, new Error(`The device image took longer than ${Math.round(IMAGE_JOB_TIMEOUT_MS / 1000)} s to encode.`)), IMAGE_JOB_TIMEOUT_MS);
     slot.timer.unref?.();
     slot.worker.postMessage({ id, job: job.job } satisfies ImageWorkerRequest);
   }
@@ -197,7 +170,7 @@ export class ImageWorkerPool {
       this.pump();
       return;
     }
-    slot.idleTimer = setTimeout(() => void this.retire(slot, null), this.idleMs);
+    slot.idleTimer = setTimeout(() => void this.retire(slot, null), IMAGE_WORKER_IDLE_MS);
     slot.idleTimer.unref?.();
   }
 

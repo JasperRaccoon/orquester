@@ -9,40 +9,27 @@ import { paintCanvas } from "./decoder.ts";
 import { httpError, networkError, StreamLifecycle, type StreamAttempt } from "./lifecycle.ts";
 import {
   DeviceStreamError,
-  resolveDeps,
   type DeviceStreamState,
   type DeviceStreamStats,
   type DeviceVideoSession,
-  type StreamDeps,
   type VideoSessionOptions
 } from "./types.ts";
 
-export const SCREENSHOT_INTERVAL_MS = 1_000;
+const SCREENSHOT_INTERVAL_MS = 1_000;
 const SCREENSHOT_TIMEOUT_MS = 20_000;
-
-export interface ScreenshotPollOptions extends VideoSessionOptions {
-  readonly intervalMs?: number;
-  readonly method?: "GET" | "POST";
-}
 
 export class ScreenshotPollSession implements DeviceVideoSession {
   readonly transport = "screenshots" as const;
-  private readonly deps: StreamDeps;
   private readonly lifecycle: StreamLifecycle;
-  private readonly intervalMs: number;
 
-  constructor(private readonly options: ScreenshotPollOptions) {
-    this.deps = resolveDeps(options.deps);
-    this.intervalMs = options.intervalMs ?? SCREENSHOT_INTERVAL_MS;
+  constructor(private readonly options: VideoSessionOptions) {
     this.lifecycle = new StreamLifecycle({
       transport: this.transport,
       callbacks: options,
       connect: (attempt) => void this.run(attempt),
-      now: this.deps.now,
-      random: this.deps.random,
       // A capture can take a few seconds on a busy host; only call it stalled well past the interval.
-      stallMs: options.stallMs ?? Math.max(this.intervalMs * 3, 3_000),
-      reconnectAfterMs: options.reconnectAfterMs ?? SCREENSHOT_TIMEOUT_MS + this.intervalMs
+      stallMs: Math.max(SCREENSHOT_INTERVAL_MS * 3, 3_000),
+      reconnectAfterMs: SCREENSHOT_TIMEOUT_MS + SCREENSHOT_INTERVAL_MS
     });
     this.lifecycle.setDecoder("png");
     this.lifecycle.start();
@@ -66,10 +53,10 @@ export class ScreenshotPollSession implements DeviceVideoSession {
 
   private async run(attempt: StreamAttempt): Promise<void> {
     while (attempt.current()) {
-      const started = this.deps.now();
+      const started = performance.now();
       try {
-        const response = await this.deps.fetch(this.options.url, {
-          method: this.options.method ?? "POST",
+        const response = await fetch(this.options.url, {
+          method: "POST",
           ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
           signal: attempt.signal,
           cache: "no-store"
@@ -84,7 +71,7 @@ export class ScreenshotPollSession implements DeviceVideoSession {
         if (!attempt.current()) return;
         this.lifecycle.received(blob.size);
         if (blob.size > 0) {
-          const bitmap = await this.deps.createImageBitmap(blob);
+          const bitmap = await createImageBitmap(blob);
           try {
             if (attempt.current() && paintCanvas(this.options.canvas, bitmap, bitmap.width, bitmap.height)) {
               this.lifecycle.frame(bitmap.width, bitmap.height);
@@ -97,7 +84,7 @@ export class ScreenshotPollSession implements DeviceVideoSession {
         if (attempt.current()) this.lifecycle.fail(networkError(cause));
         return;
       }
-      const wait = Math.max(0, this.intervalMs - (this.deps.now() - started));
+      const wait = Math.max(0, SCREENSHOT_INTERVAL_MS - (performance.now() - started));
       await new Promise<void>((resolve) => {
         const onAbort = () => {
           clearTimeout(timer);

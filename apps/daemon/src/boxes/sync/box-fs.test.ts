@@ -73,17 +73,14 @@ test("readBoxFile refuses a file the stat shows past maxBytes before reading a b
   }
 });
 
-test("the read-back hasher (no hash tool in the box) reads each file with a length", async (t) => {
+test("the read-back hasher (no hash tool in the box) hashes whole files and requested prefixes", async (t) => {
   const dir = await scratch(t);
   await writeFile(join(dir, "a"), "hello");
   await writeFile(join(dir, "b"), "hello world");
-  const { connection, reads } = spyBox({ failExec: true });
+  const { connection } = spyBox({ failExec: true });
 
   const [whole, prefix, missing] = await execBoxHasher(connection, [{ path: join(dir, "a") }, { path: join(dir, "b"), length: 5 }, { path: join(dir, "c") }]);
-  assert.equal(whole, prefix, "`hello` either way");
+  const helloSha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+  assert.deepEqual([whole, prefix], [helloSha256, helloSha256]);
   assert.equal(missing, null);
-  assert.deepEqual(
-    reads.map((read) => read.options?.length),
-    [5, 5]
-  );
 });

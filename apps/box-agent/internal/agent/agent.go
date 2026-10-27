@@ -232,9 +232,6 @@ type Agent struct {
 	controlPath string
 	statsPrev   cpuSample
 	client      *http.Client
-
-	// uninstallHook replaces uninstall (tests); nil runs uninstall.
-	uninstallHook func()
 }
 
 // New prepares an agent (data dir, credentials, sys info).
@@ -380,11 +377,7 @@ func (a *Agent) shutdown(reason string, uninstall bool) {
 	a.log.Printf("shutting down: %s", reason)
 	a.procs.killAll()
 	if uninstall {
-		if a.uninstallHook != nil {
-			a.uninstallHook()
-		} else {
-			a.uninstall()
-		}
+		a.uninstall()
 	}
 	a.stopWith(0, false)
 }

@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   decideSubagentCacheTtl,
@@ -9,6 +9,9 @@ import {
   SubagentCacheTtlController,
   type SubagentRequest
 } from "./subagent-cache-ttl.ts";
+
+const fixtureRoot = await mkdtemp(join(tmpdir(), "orq-subagent-ttl-fixtures-"));
+after(() => rm(fixtureRoot, { recursive: true, force: true }));
 
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
@@ -94,7 +97,7 @@ test("auto falls back to 5m when there are too few subagent requests to judge", 
 });
 
 async function controller(source: (sinceMs: number) => SubagentRequest[] | null, at: { now: number }, file?: string) {
-  const stateFile = file ?? join(await mkdtemp(join(tmpdir(), "orq-sub-ttl-")), "subagent-cache-ttl.json");
+  const stateFile = file ?? join(await mkdtemp(join(fixtureRoot, "orq-sub-ttl-")), "subagent-cache-ttl.json");
   const c = new SubagentCacheTtlController({ stateFile, now: () => at.now, requests: source });
   await c.init();
   return { c, stateFile };
@@ -157,7 +160,7 @@ test("auto looks again the next day when there was too little usage to judge", a
 });
 
 test("an unreadable stored decision is ignored", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-sub-ttl-"));
+  const dir = await mkdtemp(join(fixtureRoot, "orq-sub-ttl-"));
   const stateFile = join(dir, "subagent-cache-ttl.json");
   await writeFile(stateFile, "{not json", "utf8");
   const { c } = await controller(() => idleAgents(300, 10), { now: NOW }, stateFile);

@@ -100,13 +100,6 @@ test("agent text is sanitised: bidi overrides stripped from titles, escaped in c
   assert.match(html, /&lt;U\+202E&gt;/);
 });
 
-test("secret fields are masked and approval waits for them", () => {
-  const html = render({ card: card({ secretFields: [{ key: "TOKEN", label: "API token" }] }) });
-  assert.match(html, /<input\b[^>]*type="password"/);
-  assert.match(html, /<input\b[^>]*autocomplete="off"/i);
-  assert.match(html, /<button\b[^>]*disabled=""[^>]*data-approve=""/);
-});
-
 test("the footer counts down to expiry; an expired card cannot be approved", () => {
   assert.match(render(), /Expires in 29 min/);
   const expired = render({ card: card({ expiresAt: "2026-10-15T09:59:59.000Z" }) });

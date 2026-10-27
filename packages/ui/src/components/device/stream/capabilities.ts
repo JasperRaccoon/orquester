@@ -22,7 +22,7 @@ export interface HostStreamCaps {
   readonly h264?: boolean;
 }
 
-export const NO_BROWSER_CAPS: BrowserStreamCaps = { webCodecs: false, h264Baseline: false, h264High: false };
+const NO_BROWSER_CAPS: BrowserStreamCaps = { webCodecs: false, h264Baseline: false, h264High: false };
 
 const BASELINE_CODEC = "avc1.42c020";
 const HIGH_CODEC = "avc1.640033";
@@ -38,18 +38,15 @@ async function supported(Decoder: typeof VideoDecoder, codec: string): Promise<b
 
 let cached: Promise<BrowserStreamCaps> | null = null;
 
-/** Probe once per page (the answer does not change); pass `Decoder` to probe a stand-in. */
-export function capabilities(
-  Decoder: typeof VideoDecoder | undefined = (globalThis as { VideoDecoder?: typeof VideoDecoder }).VideoDecoder,
-  Chunk: unknown = (globalThis as { EncodedVideoChunk?: unknown }).EncodedVideoChunk
-): Promise<BrowserStreamCaps> {
+/** Probe once per page (the answer does not change). */
+export function capabilities(): Promise<BrowserStreamCaps> {
+  const Decoder = globalThis.VideoDecoder;
+  const Chunk = globalThis.EncodedVideoChunk;
   const probe = async (): Promise<BrowserStreamCaps> => {
     if (!Decoder || !Chunk) return NO_BROWSER_CAPS;
     const [h264Baseline, h264High] = await Promise.all([supported(Decoder, BASELINE_CODEC), supported(Decoder, HIGH_CODEC)]);
     return { webCodecs: true, h264Baseline, h264High };
   };
-  const isGlobal = Decoder === (globalThis as { VideoDecoder?: unknown }).VideoDecoder;
-  if (!isGlobal) return probe();
   cached ??= probe();
   return cached;
 }

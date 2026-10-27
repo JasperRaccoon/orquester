@@ -1,0 +1,642 @@
+{
+  "baseline": "610d3c53",
+  "comparisonBase": "923b3a51",
+  "scope": "26 explicit610d body identities:20 newly introduced Go declarations plus6 changed existing declarations already audited in earlier ledgers. The six reconfirmations are not additional new tests; original new-Go removal/survivor accounting stays5/15.",
+  "counts": {
+    "DELETE": 2,
+    "REWRITE": 15,
+    "KEEP": 5,
+    "CONSOLIDATE": 4
+  },
+  "removedNewDeclarations": 5,
+  "survivingNewDeclarations": 15,
+  "tests": [
+    {
+      "path": "apps/box-agent/internal/agent/agent_test.go",
+      "name": "TestBoxDestroyedUninstallsTheServiceAndStops",
+      "line": 101,
+      "baseline": "610d3c53",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "The test observes only a counter installed through a new test-only uninstallHook and private stop/exit fields. It never uninstalls a service or deletes credentials; behavior-preserving uninstallation refactors break it. Remove the counter test and hook. Real removeAgentState filesystem and service configuration/planned native-command owners retain their distinct contracts; this invalid test did not independently prove end-to-end uninstall.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "The test observes only a counter installed through a new test-only uninstallHook and private stop/exit fields. It never uninstalls a service or deletes credentials; behavior-preserving uninstallation refactors break it. Remove the counter test and hook. Real removeAgentState filesystem and service configuration/planned native-command owners retain their distinct contracts; this invalid test did not independently prove end-to-end uninstall.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./..."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/kvm_linux_test.go",
+      "name": "TestKVMUsableOpensTheDeviceReadWrite",
+      "line": 23,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Actual missing/read-write/read-only filesystem opens establish usable access. Retain mandatory missing/positive assertions under root without marking the entire test skipped; non-root additionally checks real kernel permission refusal.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a72.2",
+        "credibleFailure": "Actual missing/read-write/read-only filesystem opens establish usable access. Retain mandatory missing/positive assertions under root without marking the entire test skipped; non-root additionally checks real kernel permission refusal.",
+        "independentOracle": "Authored POSIX modes and explicit owner/group/other access expectations; controlled missing and readable/writable files.",
+        "stableSeam": "Real file opens/stat permissions for the current or specified work identity; sys.info/hello wire compatibility stays in Go/TypeScript golden owners.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestKVMUsableOpensTheDeviceReadWrite"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/kvm_linux_test.go",
+      "name": "TestKVMUsableForTheWorkUserFollowsTheModeBits",
+      "line": 38,
+      "baseline": "610d3c53",
+      "disposition": "KEEP",
+      "survives": true,
+      "reason": "Authored POSIX owner/group/other mode cases, primary/supplementary membership and owner precedence independently prove whether the actual work identity has both read and write access. A root-only opener would incorrectly allow owner-read-only and nonmember cases.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a72.2",
+        "credibleFailure": "Authored POSIX owner/group/other mode cases, primary/supplementary membership and owner precedence independently prove whether the actual work identity has both read and write access. A root-only opener would incorrectly allow owner-read-only and nonmember cases.",
+        "independentOracle": "Authored POSIX modes and explicit owner/group/other access expectations; controlled missing and readable/writable files.",
+        "stableSeam": "Real file opens/stat permissions for the current or specified work identity; sys.info/hello wire compatibility stays in Go/TypeScript golden owners.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestKVMUsableForTheWorkUserFollowsTheModeBits"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/kvm_linux_test.go",
+      "name": "TestDetectSysInfoReportsKVM",
+      "line": 68,
+      "baseline": "610d3c53",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "Host-dependent probe repeats the implementation\u2019s real /dev/kvm open and full sys-info collection. On machines without KVM both actual and expected remain false even if reporting is disconnected; there is no controlled positive regression oracle. Access/permission owners plus checked-in Go/TS sys.info/hello goldens retain independently proved access and wire-field compatibility. No fake claim that these prove positive detectSysInfo wiring.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-2-fleet.md \u00a72.2",
+        "credibleFailure": "Host-dependent probe repeats the implementation\u2019s real /dev/kvm open and full sys-info collection. On machines without KVM both actual and expected remain false even if reporting is disconnected; there is no controlled positive regression oracle. Access/permission owners plus checked-in Go/TS sys.info/hello goldens retain independently proved access and wire-field compatibility. No fake claim that these prove positive detectSysInfo wiring.",
+        "independentOracle": "Authored POSIX modes and explicit owner/group/other access expectations; controlled missing and readable/writable files.",
+        "stableSeam": "Real file opens/stat permissions for the current or specified work identity; sys.info/hello wire compatibility stays in Go/TypeScript golden owners.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./..."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_linux_test.go",
+      "name": "TestServiceDryRunsWriteNothing",
+      "line": 60,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Surviving public InstallServiceCommand/UninstallServiceCommand dry-run owner absorbs real bootstrap redaction and token-file preservation. It independently checks planned config keys/paths while the source token and temp HOME/data directory remain unchanged; remove arbitrary banner/wording assertions.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Surviving public InstallServiceCommand/UninstallServiceCommand dry-run owner absorbs real bootstrap redaction and token-file preservation. It independently checks planned config keys/paths while the source token and temp HOME/data directory remain unchanged; remove arbitrary banner/wording assertions.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestServiceDryRunsWriteNothing"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestSystemUnitIsUnchanged",
+      "line": 17,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Renamed TestSystemUnitPreservesRuntimeAndPathEscaping. Replace the whole-unit copy with independently specified executable/data-dir, restart-on-failure, KillMode=process and boot target settings; preserve literal systemd escaping for spaces, quotes and percent specifiers.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; AGENTS.md process ownership; systemd configuration grammar",
+        "credibleFailure": "Renamed TestSystemUnitPreservesRuntimeAndPathEscaping. Replace the whole-unit copy with independently specified executable/data-dir, restart-on-failure, KillMode=process and boot target settings; preserve literal systemd escaping for spaces, quotes and percent specifiers.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestSystemUnitPreservesRuntimeAndPathEscaping"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestUserUnit",
+      "line": 35,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Keep user executable/data-dir, shell PATH (including spaces), user boot target, restart and OOM/session ownership settings. Remove complete formatting/template snapshot; missing PATH must not replace the service manager\u2019s default with empty.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; systemd user-service configuration/environment contract",
+        "credibleFailure": "Keep user executable/data-dir, shell PATH (including spaces), user boot target, restart and OOM/session ownership settings. Remove complete formatting/template snapshot; missing PATH must not replace the service manager\u2019s default with empty.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestUserUnit"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestLaunchAgentPlist",
+      "line": 98,
+      "baseline": "610d3c53",
+      "disposition": "CONSOLIDATE",
+      "survives": true,
+      "reason": "Surviving owner decodes XML and checks required semantic keys without forbidding extra compatible settings. Literal LaunchAgents path, launch arguments/GUI identity, failure-only restart, user PATH and logs remain independent. Absorb enable-before-bootstrap, tolerant initial bootout and no destructive kickstart -k; private mkdir/step-count duplication disappears.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; macOS property-list/launchctl GUI service interfaces",
+        "credibleFailure": "Surviving owner decodes XML and checks required semantic keys without forbidding extra compatible settings. Literal LaunchAgents path, launch arguments/GUI identity, failure-only restart, user PATH and logs remain independent. Absorb enable-before-bootstrap, tolerant initial bootout and no destructive kickstart -k; private mkdir/step-count duplication disappears.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestLaunchAgentPlist"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestPlanInstallChoosesTheServiceManager",
+      "line": 165,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Renamed TestServicePlansRejectUnsafeInputs. Platform kind-enum table merely duplicated system/user/plist/fallback owners. Retain unique Mac root refusal (GUI-user service required) and newline-in-data-dir refusal, including independently identifiable failure reasons.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; AGENTS.md configuration security",
+        "credibleFailure": "Renamed TestServicePlansRejectUnsafeInputs. Platform kind-enum table merely duplicated system/user/plist/fallback owners. Retain unique Mac root refusal (GUI-user service required) and newline-in-data-dir refusal, including independently identifiable failure reasons.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestServicePlansRejectUnsafeInputs"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestPlanInstallSystemd",
+      "line": 208,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Literal native service file paths and required external systemctl operations own root/user/background routing. Remove exact unrelated step order/count, production-constant-derived path expectations and reboot prose; retain user-only path containment and meaningful linger command advice.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; deploy/README.md needrestart/OOM protection",
+        "credibleFailure": "Literal native service file paths and required external systemctl operations own root/user/background routing. Remove exact unrelated step order/count, production-constant-derived path expectations and reboot prose; retain user-only path containment and meaningful linger command advice.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestPlanInstallSystemd"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestPlanInstallLaunchAgent",
+      "line": 255,
+      "baseline": "610d3c53",
+      "disposition": "CONSOLIDATE",
+      "survives": false,
+      "reason": "Private exact mkdir/command-array replay duplicates generated plist/native action owner. Move only enable-before-bootstrap, initial-unload tolerance and no destructive fresh-process restart into TestLaunchAgentPlist.",
+      "survivingOwner": "apps/box-agent/internal/agent/service_plan_test.go: TestLaunchAgentPlist",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Private exact mkdir/command-array replay duplicates generated plist/native action owner. Move only enable-before-bootstrap, initial-unload tolerance and no destructive fresh-process restart into TestLaunchAgentPlist.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./..."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestPlanUninstall",
+      "line": 278,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Keep independently named managed paths and native disable/unload operations, privilege refusal, absent-install no-op, best-effort cleanup policy and required remove/disable-before-final-stop ordering. Drop incidental order among independent removals, private kind enums, copy and empty Windows declaration assertions.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Keep independently named managed paths and native disable/unload operations, privilege refusal, absent-install no-op, best-effort cleanup policy and required remove/disable-before-final-stop ordering. Drop incidental order among independent removals, private kind enums, copy and empty Windows declaration assertions.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestPlanUninstall"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestPrintPlan",
+      "line": 351,
+      "baseline": "610d3c53",
+      "disposition": "CONSOLIDATE",
+      "survives": false,
+      "reason": "Exact dry-run prose/file separators and manually tagged secret steps did not verify real command wiring. Public dry-run owner now checks an actual source bootstrap token is never printed, while preserving config identity and no side effects.",
+      "survivingOwner": "apps/box-agent/internal/agent/service_linux_test.go: TestServiceDryRunsWriteNothing",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; AGENTS.md secrets stay host-only",
+        "credibleFailure": "Exact dry-run prose/file separators and manually tagged secret steps did not verify real command wiring. Public dry-run owner now checks an actual source bootstrap token is never printed, while preserving config identity and no side effects.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./..."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestApplyPlan",
+      "line": 385,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Replace fake runner call arrays with actual temporary directories/file bytes/mode/removal and /bin/sh marker artifacts. Ignored error permits the next real command; strict failure prevents its marker; best-effort still writes cleanup marker while returning failure. Remove planRunner/osPlanRunner injection entirely.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; service install/uninstall failure handling contract",
+        "credibleFailure": "Replace fake runner call arrays with actual temporary directories/file bytes/mode/removal and /bin/sh marker artifacts. Ignored error permits the next real command; strict failure prevents its marker; best-effort still writes cleanup marker while returning failure. Remove planRunner/osPlanRunner injection entirely.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestApplyPlan"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestRemoveAgentState",
+      "line": 439,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Real files prove credential, source bootstrap and agent.env deletion while proc history remains. Bootstrap-token now exists before action; a second removal independently checks idempotence rather than inferring it from a missing initial fixture.",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74; AGENTS.md privacy/persistence boundaries",
+        "credibleFailure": "Real files prove credential, source bootstrap and agent.env deletion while proc history remains. Bootstrap-token now exists before action; a second removal independently checks idempotence rather than inferring it from a missing initial fixture.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestRemoveAgentState"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_plan_test.go",
+      "name": "TestServiceEnvWritesNothing",
+      "line": 460,
+      "baseline": "610d3c53",
+      "disposition": "CONSOLIDATE",
+      "survives": false,
+      "reason": "Private renderer\u2019s exact full environment/comment/order snapshot and no-write probe duplicate the public dry-run boundary. Move token read/preserve/redaction and meaningful config key/path assertions to that owner.",
+      "survivingOwner": "apps/box-agent/internal/agent/service_linux_test.go: TestServiceDryRunsWriteNothing",
+      "evidence": {
+        "independentSource": "docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Private renderer\u2019s exact full environment/comment/order snapshot and no-write probe duplicate the public dry-run boundary. Move token read/preserve/redaction and meaningful config key/path assertions to that owner.",
+        "independentOracle": "Authored paths, runtime-consumed config keys/values, OS-format decoding, literal secret marker and actual file/process results; no expected value is obtained from the service implementation.",
+        "stableSeam": "Native configuration file contents and explicit OS service commands planned for the public install/uninstall CLI; actual temporary filesystem/child-command effects for the executor, and actual public dry-run output/absence of side effects.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./..."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/setsid_linux_test.go",
+      "name": "TestASetsidProcessOutlivesItsExec",
+      "line": 74,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Retain real exit/channel-close/link-drop process lifetime cases and real hangup escalation. Replace copied production DETACH_SCRIPT/polling with an independent setsid fixture: child reports PID from inside its session on fd3 and closes the readiness pipe before exec; parent waits for that receipt before reporting ready.",
+      "evidence": {
+        "independentSource": "apps/daemon/src/devices/hosts/box/android-executor.ts spawnDetached lifetime contract; AGENTS.md process/session ownership",
+        "credibleFailure": "Retain real exit/channel-close/link-drop process lifetime cases and real hangup escalation. Replace copied production DETACH_SCRIPT/polling with an independent setsid fixture: child reports PID from inside its session on fd3 and closes the readiness pipe before exec; parent waits for that receipt before reporting ready.",
+        "independentOracle": "Observed child PID/session ID and survival/death; independently created processes/ownership records, not a copied daemon script.",
+        "stableSeam": "Real exec/channel/link actions, OS process/session liveness, durable process ownership recovery and independent ready-pipe receipt.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestASetsidProcessOutlivesItsExec"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/setsid_linux_test.go",
+      "name": "TestARestartLeavesASetsidProcessRunning",
+      "line": 107,
+      "baseline": "610d3c53",
+      "disposition": "REWRITE",
+      "survives": true,
+      "reason": "Retain actual recorded-owner recovery: matching recorded process stops while the separate setsid session survives. Independent ready-pipe fixture replaces the copied launcher; OS process/session facts and durable identity state remain the oracle.",
+      "evidence": {
+        "independentSource": "apps/daemon/src/devices/hosts/box/android-executor.ts spawnDetached lifetime contract; AGENTS.md process/session ownership",
+        "credibleFailure": "Retain actual recorded-owner recovery: matching recorded process stops while the separate setsid session survives. Independent ready-pipe fixture replaces the copied launcher; OS process/session facts and durable identity state remain the oracle.",
+        "independentOracle": "Observed child PID/session ID and survival/death; independently created processes/ownership records, not a copied daemon script.",
+        "stableSeam": "Real exec/channel/link actions, OS process/session liveness, durable process ownership recovery and independent ready-pipe receipt.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestARestartLeavesASetsidProcessRunning"
+    },
+    {
+      "path": "apps/box-agent/main_test.go",
+      "name": "TestParseServiceArgs",
+      "line": 9,
+      "baseline": "610d3c53",
+      "disposition": "KEEP",
+      "survives": true,
+      "reason": "Literal supported argv forms, spaces, equal syntax and malformed/ambiguous missing-value inputs verify service CLI grammar. In particular --data-dir must not swallow --dry-run and accidentally install for real. No service/system side effect is invoked.",
+      "evidence": {
+        "independentSource": "apps/box-agent/main.go CLI usage/flag contract; docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Literal supported argv forms, spaces, equal syntax and malformed/ambiguous missing-value inputs verify service CLI grammar. In particular --data-dir must not swallow --dry-run and accidentally install for real. No service/system side effect is invoked.",
+        "independentOracle": "Independently authored argument arrays, field values and usage exit code2.",
+        "stableSeam": "CLI argv\u2192ServiceOptions grammar and public service dispatcher\u2192usage exit status.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestParseServiceArgs"
+    },
+    {
+      "path": "apps/box-agent/main_test.go",
+      "name": "TestServiceCommandsRejectUnknownFlags",
+      "line": 46,
+      "baseline": "610d3c53",
+      "disposition": "KEEP",
+      "survives": true,
+      "reason": "Both public command dispatchers must return usage status2 for an unknown flag even with --dry-run present. Parser-only tests cannot detect dispatcher omission; status is independent and no real installation is attempted.",
+      "evidence": {
+        "independentSource": "apps/box-agent/main.go CLI usage/exit-code contract; docs/superpowers/specs/2026-10-27-devices-phase-3-byo-research.md \u00a72.1 and \u00a74",
+        "credibleFailure": "Both public command dispatchers must return usage status2 for an unknown flag even with --dry-run present. Parser-only tests cannot detect dispatcher omission; status is independent and no real installation is attempted.",
+        "independentOracle": "Independently authored argument arrays, field values and usage exit code2.",
+        "stableSeam": "CLI argv\u2192ServiceOptions grammar and public service dispatcher\u2192usage exit status.",
+        "refactorResistance": "Surviving assertions observe configured OS keys/paths, CLI data, artifacts or lifetime outcomes. Removed assertions pinned template formatting, private callback counts, step inventories or incidental prose. The fixture no longer copies production launcher bytes.",
+        "uniqueProtection": "The named row identifies its distinct install/uninstall/configuration/failure/privacy outcome; merged rows name the single surviving stronger owner."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./...",
+      "finalName": "TestServiceCommandsRejectUnknownFlags"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/agent_test.go",
+      "line": 86,
+      "name": "TestWatchIgnore",
+      "kind": "go",
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "TestWatchIgnore",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "KEEP",
+      "reason": "Authored ignored/allowed path cases retain the Go fs.watch ignore contract across a path segment, wildcard extension and root-relative directory prefix; unrelated siblings must remain visible.",
+      "evidence": {
+        "independentSource": "packages/api/src/box-protocol.ts fs.watch ignore parameter and documented watcher path-pattern semantics; actual Go watcher is the separate box-side implementation.",
+        "credibleFailure": "Incorrect segment/glob/prefix matching leaks node_modules/log noise or suppresses legitimate sibling/source changes from the remote project.",
+        "independentOracle": "Literal /r/node_modules/x/y.js, /r/src/a.log and /r/build/out/z must be ignored; /r/build/keep and /r/src/a.ts must remain allowed. Expectations are authored and do not call another production matcher.",
+        "stableSeam": "The watcher ignore-policy boundary consumed by both native and polling Go watchers.",
+        "refactorResistance": "Asserts matched/allowed paths only, without pending-map state, timers, regex construction or watcher implementation call order.",
+        "uniqueProtection": "Host-side matcher tests cannot exercise the independent Go implementation, and channel/watch integrations do not cover all three ignore pattern categories plus allowed sibling boundaries."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./internal/agent"
+    },
+    {
+      "path": "apps/box-agent/internal/agent/service_linux_test.go",
+      "line": 41,
+      "name": "TestOOMPolicyDropInIsWrittenOnce",
+      "kind": "go",
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "TestOOMPolicyDropInIsWrittenOnce",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "KEEP",
+      "reason": "Actual temporary systemd drop-in bytes require [Service]/OOMPolicy=continue, and a repeated identical write reports no change. This protects agent continuity when a child is OOM-killed and avoids unnecessary service-manager reloads.",
+      "evidence": {
+        "independentSource": "deploy/README.md process-preserving service behavior; systemd OOMPolicy configuration interface; AGENTS.md preserve session/process ownership. Existing OOM child-loss regression is independent of installer helper layout.",
+        "credibleFailure": "Omitting or corrupting OOMPolicy=continue lets systemd stop the box agent and its running sessions when one child is OOM-killed; needless changed=true causes repeated reloads on every start.",
+        "independentOracle": "Literal runtime-consumed [Service] and OOMPolicy=continue bytes read from an actual temporary file, plus true on first write/false on repeated write.",
+        "stableSeam": "On-disk systemd drop-in and changed result consumed by ProtectService before deciding whether to reload the manager.",
+        "refactorResistance": "No template/comment/whitespace snapshot, production constant equality, write-call count or private constructor shape is asserted.",
+        "uniqueProtection": "Service plan generation alone does not prove actual installed file bytes or idempotent write behavior; needrestart tests cover a different upgrade-triggered restart path."
+      },
+      "validationCommand": "cd apps/box-agent && GO=/usr/local/go/bin/go node scripts/go.mjs test -race ./internal/agent"
+    },
+    {
+      "path": "apps/web/test/sw.test.mjs",
+      "line": 239,
+      "name": "answers from the network when it comes in time, and caches the shell",
+      "kind": "node",
+      "dynamic": false,
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "answers from the network when it comes in time, and caches the shell",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "REWRITE",
+      "evidence": {
+        "independentSource": "README.md Mobile/PWA offline shell workflow; apps/web/public/sw.js documented network-first cache policy and browser Fetch/respondWith/waitUntil contract.",
+        "stableSeam": "Registered same-origin navigation fetch handler, returned response and independently observed Cache Storage contents/event lifetime.",
+        "refactorResistance": "No private navigation wrapper or cache-version identifier is called/asserted. Cache is primed through a successful public fetch event; network and time are controlled without specifying the timeout duration.",
+        "uniqueProtection": "This case owns the distinct timing/cache availability or explicit rejection outcome named below; the other three navigation cases and asset/click owners cannot detect this distinct failure.",
+        "credibleFailure": "A timely real worker fetch result must answer the current navigation and persist the same authored new HTML under the offline shell lookup. Always returning stale data or forgetting to refresh the shell fails.",
+        "independentOracle": "Authored <html>new</html> network body must be returned and then observed in Cache Storage after the event lifetime settles."
+      },
+      "validationCommand": "pnpm --filter @orquester/web test",
+      "reason": "A timely real worker fetch result must answer the current navigation and persist the same authored new HTML under the offline shell lookup. Always returning stale data or forgetting to refresh the shell fails. The610d navigation helper refactor is reconciled into the existing generic fetchEvent fixture."
+    },
+    {
+      "path": "apps/web/test/sw.test.mjs",
+      "line": 250,
+      "name": "serves the cached shell once the timeout passes, and still caches the late answer",
+      "kind": "node",
+      "dynamic": false,
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "serves the cached shell once the timeout passes, and still caches the late answer",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "REWRITE",
+      "evidence": {
+        "independentSource": "README.md Mobile/PWA offline shell workflow; apps/web/public/sw.js documented network-first cache policy and browser Fetch/respondWith/waitUntil contract.",
+        "stableSeam": "Registered same-origin navigation fetch handler, returned response and independently observed Cache Storage contents/event lifetime.",
+        "refactorResistance": "No private navigation wrapper or cache-version identifier is called/asserted. Cache is primed through a successful public fetch event; network and time are controlled without specifying the timeout duration.",
+        "uniqueProtection": "This case owns the distinct timing/cache availability or explicit rejection outcome named below; the other three navigation cases and asset/click owners cannot detect this distinct failure.",
+        "credibleFailure": "A stalled request must remain pending until the controlled deadline, then return the cached old shell; its eventual network response must still refresh the cache through waitUntil. A hung startup or lost late refresh fails.",
+        "independentOracle": "Independent <html>old</html>/<html>new</html> bodies, manually expired timer and externally resolved late fetch; old response now/new cached body afterward."
+      },
+      "validationCommand": "pnpm --filter @orquester/web test",
+      "reason": "A stalled request must remain pending until the controlled deadline, then return the cached old shell; its eventual network response must still refresh the cache through waitUntil. A hung startup or lost late refresh fails. The610d navigation helper refactor is reconciled into the existing generic fetchEvent fixture."
+    },
+    {
+      "path": "apps/web/test/sw.test.mjs",
+      "line": 268,
+      "name": "without a cached shell, waits on the network past the timeout",
+      "kind": "node",
+      "dynamic": false,
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "without a cached shell, waits on the network past the timeout",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "REWRITE",
+      "evidence": {
+        "independentSource": "README.md Mobile/PWA offline shell workflow; apps/web/public/sw.js documented network-first cache policy and browser Fetch/respondWith/waitUntil contract.",
+        "stableSeam": "Registered same-origin navigation fetch handler, returned response and independently observed Cache Storage contents/event lifetime.",
+        "refactorResistance": "No private navigation wrapper or cache-version identifier is called/asserted. Cache is primed through a successful public fetch event; network and time are controlled without specifying the timeout duration.",
+        "uniqueProtection": "This case owns the distinct timing/cache availability or explicit rejection outcome named below; the other three navigation cases and asset/click owners cannot detect this distinct failure.",
+        "credibleFailure": "A cold cache cannot answer merely because the deadline elapsed. The navigation must continue waiting and return the independently supplied slow network body once it arrives.",
+        "independentOracle": "No response before the manually resolved fetch, even after controlled timer expiry; eventual <html>slow</html> response body."
+      },
+      "validationCommand": "pnpm --filter @orquester/web test",
+      "reason": "A cold cache cannot answer merely because the deadline elapsed. The navigation must continue waiting and return the independently supplied slow network body once it arrives. The610d navigation helper refactor is reconciled into the existing generic fetchEvent fixture."
+    },
+    {
+      "path": "apps/web/test/sw.test.mjs",
+      "line": 281,
+      "name": "offline, answers the cached shell, or a network error without one",
+      "kind": "node",
+      "dynamic": false,
+      "baseline": "610d3c53",
+      "survives": true,
+      "finalName": "offline, answers the cached shell, or a network error without one",
+      "accounting": "Previously audited declaration with a changed610d body identity. Reconfirmation only: not one of the20 newly introduced Go declarations and not a new test count.",
+      "disposition": "REWRITE",
+      "evidence": {
+        "independentSource": "README.md Mobile/PWA offline shell workflow; apps/web/public/sw.js documented network-first cache policy and browser Fetch/respondWith/waitUntil contract.",
+        "stableSeam": "Registered same-origin navigation fetch handler, returned response and independently observed Cache Storage contents/event lifetime.",
+        "refactorResistance": "No private navigation wrapper or cache-version identifier is called/asserted. Cache is primed through a successful public fetch event; network and time are controlled without specifying the timeout duration.",
+        "uniqueProtection": "This case owns the distinct timing/cache availability or explicit rejection outcome named below; the other three navigation cases and asset/click owners cannot detect this distinct failure.",
+        "credibleFailure": "An explicitly rejected fetch must return the cached shell if available, otherwise the browser error response; returning undefined would violate respondWith and break offline startup.",
+        "independentOracle": "Authored cached <html>old</html> body or the independent browser Response.error marker on cache miss, after an actual controlled fetch rejection."
+      },
+      "validationCommand": "pnpm --filter @orquester/web test",
+      "reason": "An explicitly rejected fetch must return the cached shell if available, otherwise the browser error response; returning undefined would violate respondWith and break offline startup. The610d navigation helper refactor is reconciled into the existing generic fetchEvent fixture."
+    }
+  ],
+  "reconfirmedExisting": [
+    {
+      "path": "apps/web/test/sw.test.mjs",
+      "disposition": "retain prior cleanup",
+      "reason": "Upstream replaces private navigation wrappers with fetch event entry. Our generic fetchEvent already does that for all relevant paths, with independent cache-version-free seeding, consolidated cache/click owners and browser timers. Drop duplicate incoming navigation helper; production wrapper inlining preserved."
+    },
+    {
+      "path": "apps/desktop/src/window-lifecycle.test.ts",
+      "disposition": "accept upstream deletion; keep FIFO owner",
+      "reason": "Upstream removes four private policy-wrapper cases and inlines unchanged behavior in Electron main. Original KEEP judgments for those wrappers are superseded by DELETE: private boolean/trivial branch seam cannot prove Electron event wiring. Existing RendererOutbox FIFO/one-shot test remains."
+    },
+    {
+      "path": "apps/box-agent/internal/agent/exec_unix_test.go",
+      "disposition": "preserve prior rewrite",
+      "reason": "Keep staged actual wire/credit/child-exit five-second regression and removed drain hooks exactly; this remote round does not touch it."
+    },
+    {
+      "path": "apps/box-agent/src/fixtures.test.ts",
+      "disposition": "preserve prior independent goldens",
+      "reason": "Keep checked-in golden control/frame decoder owner and private fixture producers. Incoming kvm/uninstall fields enter checked-in Go/TS compatibility records without reintroducing generated-oracle loops."
+    },
+    {
+      "path": "scripts/check-changed.mjs; scripts/ensure-node-native.mjs",
+      "disposition": "accept unused-export cleanup; preserve prior tests",
+      "reason": "Upstream internalizes TEST_FILE, NATIVE_MODULES, packageDir and pnpmRebuild with no external callers. Keep our semantic real-shell argv oracle/consolidated helper exports and existing native ABI hardlink/verification contracts."
+    },
+    {
+      "path": "apps/web/dev/devices*.{html,tsx}; scripts/convert-device-model.py",
+      "disposition": "retain product/developer tooling",
+      "reason": "Explicit dev preview surfaces and asset conversion build tool support new device feature workflows; they are not orphaned automated suite infrastructure. They add no required CI test launches. No blanket deletion based on names or geometry."
+    }
+  ],
+  "removedInfrastructure": [
+    "Agent.uninstallHook declaration/branch and its mock-driven test.",
+    "planRunner/osPlanRunner callback injection; real applyPlan calls native runner functions directly.",
+    "Copied DETACH_SCRIPT polling fixture replaced with independent session ready pipe."
+  ],
+  "conflicts": "Only assigned agent_test.go and sw.test.mjs conflict resolutions were staged. Other cleanup remains unstaged for root integration.",
+  "validation": {
+    "completed": [
+      "gofmt on changed Go files",
+      "node --check apps/web/test/sw.test.mjs",
+      "git diff --check -- apps/box-agent apps/desktop apps/web scripts"
+    ],
+    "testRuns": "All four focused targets passed in one exclusive root-granted slot. Source frozen; root owns repository-wide gates, build and comparative suite measurements.",
+    "performance": "These are final focused-run observations, not before/after speedups or CI extrapolations. Real five-second drain and parallel hangup escalation remain. No build or Node native ABI rebuild occurred.",
+    "executedTestCommands": [
+      {
+        "command": "GO=/usr/local/go/bin/go node scripts/go.mjs test -race -v ./...",
+        "cwd": "apps/box-agent",
+        "result": "passed main, internal/agent and internal/wire; no skips",
+        "wallSeconds": 14.33,
+        "agentPackageSeconds": 11.475
+      },
+      {
+        "command": "pnpm --filter @orquester/desktop test",
+        "result": "passed38/38, no skips",
+        "wallSeconds": 1.66
+      },
+      {
+        "command": "pnpm --filter @orquester/web test",
+        "result": "passed7/7, no skips",
+        "wallSeconds": 0.58
+      },
+      {
+        "command": "node --test scripts/check-changed.test.mjs scripts/deploy-public-url.test.mjs scripts/ensure-node-native.test.mjs deploy/lib/remote-update.test.mjs",
+        "result": "passed22/22, no skips",
+        "wallSeconds": 1.21
+      }
+    ]
+  },
+  "fixtureSafety": "All changed fixtures use temporary directories, owned child processes and independent local shell artifacts. Service dry runs retain actual DryRun=true; never execute install/uninstall for real on the host. The deleted hook test must not fall through into real uninstall. KVM probe only touches temporary regular files, not /dev/kvm. No new daemon/server or live systemctl action is invoked.",
+  "dispositionOverrides": [
+    {
+      "baseline": "beb7516b",
+      "path": "apps/desktop/src/window-lifecycle.test.ts",
+      "name": "brings the window on screen forward, mid-rebuild too, instead of opening a third",
+      "initialDisposition": "KEEP",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "Upstream610d removed this private policy wrapper and inlined unchanged behavior into Electron main. Its private boolean/enum result did not prove the native event workflow; accept dead-seam removal. FIFO test protects queued delivery only; no claim it covers window visibility."
+    },
+    {
+      "baseline": "beb7516b",
+      "path": "apps/desktop/src/window-lifecycle.test.ts",
+      "name": "creates a window only when there is none and none is on its way",
+      "initialDisposition": "KEEP",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "Upstream610d removed this private policy wrapper and inlined unchanged behavior into Electron main. Its private boolean/enum result did not prove the native event workflow; accept dead-seam removal. FIFO test protects queued delivery only; no claim it covers window visibility."
+    },
+    {
+      "baseline": "beb7516b",
+      "path": "apps/desktop/src/window-lifecycle.test.ts",
+      "name": "lets the replacement show only in place of a window that was showing",
+      "initialDisposition": "KEEP",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "Upstream610d removed this private policy wrapper and inlined unchanged behavior into Electron main. Its private boolean/enum result did not prove the native event workflow; accept dead-seam removal. FIFO test protects queued delivery only; no claim it covers window visibility."
+    },
+    {
+      "baseline": "beb7516b",
+      "path": "apps/desktop/src/window-lifecycle.test.ts",
+      "name": "go only to a loaded main page, and wait out a rebuild for the replacement",
+      "initialDisposition": "KEEP",
+      "disposition": "DELETE",
+      "survives": false,
+      "reason": "Upstream610d removed this private policy wrapper and inlined unchanged behavior into Electron main. Its private boolean/enum result did not prove the native event workflow; accept dead-seam removal. FIFO test protects queued delivery only; no claim it covers window visibility."
+    }
+  ],
+  "newGoCounts": {
+    "DELETE": 2,
+    "REWRITE": 11,
+    "KEEP": 3,
+    "CONSOLIDATE": 4
+  },
+  "newGoCaseCount": 20,
+  "reconfirmedChanged610dCaseCount": 6,
+  "ledgerBodyIdentityCount": 26
+}

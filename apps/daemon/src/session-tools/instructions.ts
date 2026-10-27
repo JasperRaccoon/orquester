@@ -5,27 +5,19 @@
  * Graph plugin) for a chat that can see at least one knowledge collection the knowledge line
  * naming them, and (Device simulators plugin) the devices line while the device tools are
  * advertised. Every chat tool is on in every chat, so nothing here names tools that are off.
- * Detail stays in tool descriptions. The worst case stays under {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES},
+ * Detail stays in tool descriptions. Without devices, the worst case stays under 2 048 bytes,
  * plus exactly {@link KNOWLEDGE_LINE_MAX_BYTES} when the knowledge line is present (asserted by
- * `instructions.test.ts`), and exactly {@link DEVICES_LINE_MAX_BYTES} with the devices line. A knowledge worker session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
+ * `instructions.test.ts`). Devices add their guidance only while advertised. A knowledge worker
+ * session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
  *
  * Pure: the daemon composes it; the agent host only passes it on.
  */
-
-/** Spec §9.5 / D-13: the whole block, worst case, without the knowledge line. */
-export const ORQUESTER_INSTRUCTIONS_MAX_BYTES = 2048;
 
 /**
  * Knowledge Graph spec, "Agent tools": the knowledge line's cap. The block's cap rises by exactly
  * this much only when the line is present, so a chat without knowledge pays nothing.
  */
-export const KNOWLEDGE_LINE_MAX_BYTES = 256;
-
-/**
- * Devices spec §9: the devices line's cap. Like the knowledge line, it raises the block's cap only
- * where it is present (a chat without the device tools pays nothing).
- */
-export const DEVICES_LINE_MAX_BYTES = 160;
+const KNOWLEDGE_LINE_MAX_BYTES = 256;
 
 /**
  * The fixed part: spec §10, revised with T3 Code's orchestration wording — tools a harness loads on
@@ -48,7 +40,7 @@ Changes outside your sandbox (workflows, agent profiles, desktops, other project
 const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: changes that need approval are not available.";
 
 /** Devices spec §9: the one line the devices toolset adds (the rest travels in `open_device`'s quick start). */
-export const DEVICES_LINE =
+const DEVICES_LINE =
   "Mobile devices: list_devices, open_device; prefer device_action snapshot refs to coordinates; the user watches the Device panel and may take control.";
 
 const KNOWLEDGE_LINE_PREFIX = "Knowledge: ";

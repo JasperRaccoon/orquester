@@ -20,6 +20,7 @@ import type { CodexProtocol } from "./_generated/index.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { createCodexAdapter } from "./index.ts";
 import { CodexSession, type CodexSessionOptions } from "./session.ts";
+import { CodexTransportClosedError } from "./protocol.ts";
 import {
   EventCollector,
   createFakeContext,
@@ -184,6 +185,7 @@ describe("codex session — start, turn, stop", () => {
     for (const turn of turns) {
       assert.equal(turn.approvalsReviewer, "user", "always explicit, so auto_review never sticks");
       assert.ok(turn.collaborationMode !== undefined, "plan mode is sticky; always send it");
+      assert.equal("additionalContext" in turn, false, "no app or toolkit context, no field");
     }
     assert.equal((turns[0]!.collaborationMode as { mode: string }).mode, "plan");
     // Sending `default` explicitly is the ONLY way out of plan mode.
@@ -1785,9 +1787,11 @@ describe("codex session — spawn and handshake failures", () => {
   });
 
   it("a child that exits before the handshake settles the session", async () => {
-    const r = rig({ exitAfterMs: 1, hangOnInitialize: true });
-    await assert.rejects(() => r.session.start());
-    await waitUntil(() => r.events.types().includes("session.exited"), "session.exited");
+    const r = rig({ exitAfterMs: 0, exitCode: 0, hangOnInitialize: true });
+    await assert.rejects(() => r.session.start(), CodexTransportClosedError);
+    const exited = await r.events.waitForType("session.exited");
+    assert.equal(r.session.isLive, false);
+    assert.match(String((exited.payload as { reason?: string }).reason), /code 0/);
     await r.stop();
   });
 });

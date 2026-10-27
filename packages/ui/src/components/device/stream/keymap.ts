@@ -67,7 +67,7 @@ const HID_USAGE_BY_CODE: Readonly<Record<string, number>> = {
 export const HID_USAGE_LEFT_SHIFT = 0xe1;
 
 /** HID usage for a physical key (`KeyboardEvent.code`), or null when unmapped. */
-export function hidUsageForCode(code: string): number | null {
+function hidUsageForCode(code: string): number | null {
   if (/^Key[A-Z]$/.test(code)) return 0x04 + (code.charCodeAt(3) - 65);
   if (/^Digit[1-9]$/.test(code)) return 0x1e + (code.charCodeAt(5) - 49);
   if (code === "Digit0") return 0x27;
@@ -97,7 +97,7 @@ const HID_PUNCTUATION: ReadonlyArray<readonly [plain: string, shifted: string, u
 ];
 
 /** The US-layout keystroke that types `char`, or null for anything outside printable ASCII, tab and newline. */
-export function hidStrokeForChar(char: string): HidStroke | null {
+function hidStrokeForChar(char: string): HidStroke | null {
   if (char.length !== 1) return null;
   const c = char.charCodeAt(0);
   if (c >= 0x61 && c <= 0x7a) return { usage: 0x04 + c - 0x61, shift: false };
@@ -133,7 +133,7 @@ export function textToHidStrokes(text: string): { strokes: HidStroke[]; unsuppor
 // Android: KeyEvent keycodes and meta state
 // ---------------------------------------------------------------------------
 
-export const ANDROID_KEYCODE_BY_CODE: Readonly<Record<string, number>> = {
+const ANDROID_KEYCODE_BY_CODE: Readonly<Record<string, number>> = {
   ArrowUp: 19,
   ArrowDown: 20,
   ArrowLeft: 21,
@@ -164,7 +164,7 @@ export const ANDROID_KEYCODE_BY_CODE: Readonly<Record<string, number>> = {
 };
 
 /** Android keycode for a physical key (`KeyboardEvent.code`), or null when unmapped. */
-export function androidKeycodeForCode(code: string): number | null {
+function androidKeycodeForCode(code: string): number | null {
   if (/^Key[A-Z]$/.test(code)) return 29 + (code.charCodeAt(3) - 65);
   if (/^Digit[0-9]$/.test(code)) return 7 + (code.charCodeAt(5) - 48);
   const fn = /^F([1-9]|1[0-2])$/.exec(code);
@@ -177,7 +177,7 @@ const META_ALT_ON = 0x2;
 const META_CTRL_ON = 0x1000;
 const META_META_ON = 0x10000;
 
-export function androidMetaState(event: KeyboardEventLike): number {
+function androidMetaState(event: KeyboardEventLike): number {
   return (
     (event.shiftKey ? META_SHIFT_ON : 0) |
     (event.altKey ? META_ALT_ON : 0) |
@@ -227,9 +227,9 @@ export function mapKeyboardEvent(
 // ---------------------------------------------------------------------------
 
 /** serve-emu `input.js` MAX_TEXT_BYTES truncates longer text packets. */
-export const ANDROID_MAX_TEXT_BYTES = 300;
+const ANDROID_MAX_TEXT_BYTES = 300;
 /** Well under serve-emu's per-client input queue depth (128); the rest is dropped. */
-export const ANDROID_MAX_TEXT_CHUNKS = 64;
+const ANDROID_MAX_TEXT_CHUNKS = 64;
 
 function utf8ByteLength(codePoint: number): number {
   if (codePoint <= 0x7f) return 1;
@@ -239,22 +239,20 @@ function utf8ByteLength(codePoint: number): number {
 }
 
 /**
- * Split `text` into chunks of at most `maxBytes` UTF-8 bytes without splitting
- * a code point, keeping at most `maxChunks`; `truncated` says text was dropped.
+ * Split `text` into packets within serve-emu's UTF-8 byte and queue limits
+ * without splitting a code point; `truncated` says text was dropped.
  */
 export function chunkText(
-  text: string,
-  maxBytes = ANDROID_MAX_TEXT_BYTES,
-  maxChunks = ANDROID_MAX_TEXT_CHUNKS
+  text: string
 ): { chunks: string[]; truncated: boolean } {
   const chunks: string[] = [];
   let chunk = "";
   let chunkBytes = 0;
   for (const character of text) {
     const characterBytes = utf8ByteLength(character.codePointAt(0)!);
-    if (chunkBytes + characterBytes > maxBytes) {
+    if (chunkBytes + characterBytes > ANDROID_MAX_TEXT_BYTES) {
       chunks.push(chunk);
-      if (chunks.length >= maxChunks) return { chunks, truncated: true };
+      if (chunks.length >= ANDROID_MAX_TEXT_CHUNKS) return { chunks, truncated: true };
       chunk = "";
       chunkBytes = 0;
     }
@@ -262,7 +260,7 @@ export function chunkText(
     chunkBytes += characterBytes;
   }
   if (chunk.length > 0) {
-    if (chunks.length >= maxChunks) return { chunks, truncated: true };
+    if (chunks.length >= ANDROID_MAX_TEXT_CHUNKS) return { chunks, truncated: true };
     chunks.push(chunk);
   }
   return { chunks, truncated: false };

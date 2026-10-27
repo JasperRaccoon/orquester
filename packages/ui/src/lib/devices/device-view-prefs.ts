@@ -21,8 +21,8 @@ export interface DevicePanelPrefs {
 const VIEW_PREFIX = "orq.device.view.";
 const PANEL_KEY = "orq.device.panel";
 
-export const DEFAULT_DEVICE_VIEW_PREFS: Readonly<DeviceViewPrefs> = Object.freeze({ mode: null });
-export const DEFAULT_DEVICE_PANEL_PREFS: Readonly<DevicePanelPrefs> = Object.freeze({ logOpen: false });
+const DEFAULT_DEVICE_VIEW_PREFS: Readonly<DeviceViewPrefs> = Object.freeze({ mode: null });
+const DEFAULT_DEVICE_PANEL_PREFS: Readonly<DevicePanelPrefs> = Object.freeze({ logOpen: false });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -34,7 +34,7 @@ export function deviceViewKey(device: { platform: string; profile: string; name?
   return `${device.platform}:${id}`.slice(0, 200);
 }
 
-export function sanitizeDeviceViewPrefs(raw: unknown): DeviceViewPrefs {
+function sanitizeDeviceViewPrefs(raw: unknown): DeviceViewPrefs {
   if (!isRecord(raw)) return { ...DEFAULT_DEVICE_VIEW_PREFS };
   return { mode: raw.mode === "3d" || raw.mode === "flat" ? raw.mode : DEFAULT_DEVICE_VIEW_PREFS.mode };
 }
@@ -48,7 +48,7 @@ export function effectiveDeviceViewMode(prefs: DeviceViewPrefs, transport: strin
   return transport === "serve-sim-mjpeg" || transport === "screenshots" ? "flat" : "3d";
 }
 
-export function sanitizeDevicePanelPrefs(raw: unknown): DevicePanelPrefs {
+function sanitizeDevicePanelPrefs(raw: unknown): DevicePanelPrefs {
   if (!isRecord(raw)) return { ...DEFAULT_DEVICE_PANEL_PREFS };
   return { logOpen: typeof raw.logOpen === "boolean" ? raw.logOpen : DEFAULT_DEVICE_PANEL_PREFS.logOpen };
 }

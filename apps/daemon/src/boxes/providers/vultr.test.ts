@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testBootstrap, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { HOURS_PER_MONTH, roundUsd, VULTR_WINDOWS_LICENCE_USD_PER_VCPU_MONTH } from "./price-tables.ts";
 import { vultrAdapter, vultrWindowsBootScript } from "./vultr.ts";
 
 const API = "https://api.vultr.com/v2";
@@ -20,21 +19,22 @@ function readRoutes() {
   ];
 }
 
-test("validate: ok with a working key, the provider's message for a bad one", async () => {
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
+test("validate: ok with a working key, the provider's message for a bad one", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/instances?per_page=1`, body: fixture("vultr", "instances-empty") },
     { method: "GET", url: `${API}/instances?per_page=1`, status: 401, body: fixture("vultr", "error-unauthorized") }
   ]);
-  assert.deepEqual(await vultrAdapter.validate(credentials, replayOptions(replay)), { ok: true });
+  assert.deepEqual(await vultrAdapter.validate(credentials, replayOptions(t, replay)), { ok: true });
   assert.equal(replay.requests[0]!.headers.authorization, "Bearer vultr-test-key");
-  const bad = await vultrAdapter.validate({ apiKey: "nope" }, replayOptions(replay));
+  const bad = await vultrAdapter.validate({ apiKey: "nope" }, replayOptions(t, replay));
   assert.deepEqual(bad, { ok: false, message: "Vultr: Invalid API token. (check the key and its permissions)" });
-  assert.deepEqual(await vultrAdapter.validate({ apiKey: "  " }, replayOptions(replay)), { ok: false, message: "Vultr: API key is missing" });
+  assert.deepEqual(await vultrAdapter.validate({ apiKey: "  " }, replayOptions(t, replay)), { ok: false, message: "Vultr: API key is missing" });
 });
 
-test("offers linux: live plan prices, no GPU, IPv6-only or sub-1 GB plans", async () => {
+test("offers linux: live plan prices, no GPU, IPv6-only or sub-1 GB plans", async (t) => {
   const replay = replayFetch(readRoutes());
-  const offers = await vultrAdapter.offers(credentials, "linux", replayOptions(replay));
+  const offers = await vultrAdapter.offers(credentials, "linux", replayOptions(t, replay));
   assert.equal(offers.priceSource, "live");
   assert.deepEqual(
     offers.sizes.map((size) => size.id),
@@ -65,29 +65,29 @@ test("offers linux: live plan prices, no GPU, IPv6-only or sub-1 GB plans", asyn
   assert.equal(offers.images[0]!.id, "2284");
 });
 
-test("offers windows: 2 GB minimum and the per-vCPU licence fee from the price table", async () => {
+test("offers windows: 2 GB minimum and the per-vCPU licence fee from the price table", async (t) => {
   const replay = replayFetch(readRoutes());
-  const offers = await vultrAdapter.offers(credentials, "windows", replayOptions(replay));
+  const offers = await vultrAdapter.offers(credentials, "windows", replayOptions(t, replay));
   assert.equal(offers.priceSource, "table");
   assert.deepEqual(
     offers.sizes.map((size) => size.id),
     ["vc2-1c-2gb", "vc2-2c-4gb", "vhp-2c-4gb-amd"]
   );
   const twoCore = offers.sizes.find((size) => size.id === "vc2-2c-4gb")!;
-  assert.equal(twoCore.hourlyUsd, roundUsd(0.027 + (2 * VULTR_WINDOWS_LICENCE_USD_PER_VCPU_MONTH) / HOURS_PER_MONTH));
+  assert.equal(twoCore.hourlyUsd, 0.0708);
   assert.equal(offers.images[0]!.label, "Windows 2022 Standard x64");
   assert.ok(offers.images.every((image) => image.label.startsWith("Windows")));
-  await assert.rejects(vultrAdapter.offers(credentials, "linux-gpu", replayOptions(replayFetch([]))), /does not rent linux-gpu/);
+  await assert.rejects(vultrAdapter.offers(credentials, "linux-gpu", replayOptions(t, replayFetch([]))), /does not rent linux-gpu/);
 });
 
-test("create linux: tags, label, base64 cloud-init, one POST", async () => {
+test("create linux: tags, label, base64 cloud-init, one POST", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/os?per_page=500`, body: fixture("vultr", "os") },
     { method: "GET", url: `${API}/plans?per_page=500`, body: fixture("vultr", "plans") },
     { method: "POST", url: `${API}/instances`, status: 202, body: fixture("vultr", "create-instance") }
   ]);
   const request = testCreateRequest({ size: "vc2-1c-1gb", region: "ewr" });
-  const result = await vultrAdapter.create(credentials, request, replayOptions(replay));
+  const result = await vultrAdapter.create(credentials, request, replayOptions(t, replay));
   const post = replay.requests.find((entry) => entry.method === "POST")!;
   const body = post.body as Record<string, unknown>;
   assert.deepEqual({ ...body, user_data: undefined }, {
@@ -106,14 +106,14 @@ test("create linux: tags, label, base64 cloud-init, one POST", async () => {
   assert.deepEqual(result, { ref: { instanceId: INSTANCE_ID }, hourlyUsd: 0.007 });
 });
 
-test("create windows: a boot script carrying the PowerShell bootstrap, the Administrator password kept", async () => {
+test("create windows: a boot script carrying the PowerShell bootstrap, the Administrator password kept", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/plans?per_page=500`, body: fixture("vultr", "plans") },
     { method: "POST", url: `${API}/startup-scripts`, status: 201, body: fixture("vultr", "create-startup-script") },
     { method: "POST", url: `${API}/instances`, status: 202, body: fixture("vultr", "create-instance-windows") }
   ]);
   const request = testCreateRequest({ kind: "windows", size: "vc2-2c-4gb", region: "ewr", image: "501" });
-  const result = await vultrAdapter.create(credentials, request, replayOptions(replay));
+  const result = await vultrAdapter.create(credentials, request, replayOptions(t, replay));
 
   const [scriptPost, instancePost] = replay.requests.filter((entry) => entry.method === "POST");
   const script = scriptPost!.body as { name: string; type: string; script: string };
@@ -130,10 +130,10 @@ test("create windows: a boot script carrying the PowerShell bootstrap, the Admin
   assert.equal(body.hostname, `orq-${TEST_BOX_ID}`.slice(0, 15));
   assert.deepEqual(result.ref, { instanceId: INSTANCE_ID, startupScriptId: SCRIPT_ID });
   assert.equal(result.windowsPassword, "REDACTED");
-  assert.equal(result.hourlyUsd, roundUsd(0.027 + 32 / HOURS_PER_MONTH));
+  assert.equal(result.hourlyUsd, 0.0708);
 });
 
-test("create windows: the boot script is removed when the instance create fails, and the create is not retried", async () => {
+test("create windows: the boot script is removed when the instance create fails, and the create is not retried", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/plans?per_page=500`, body: fixture("vultr", "plans") },
     { method: "POST", url: `${API}/startup-scripts`, status: 201, body: fixture("vultr", "create-startup-script") },
@@ -141,7 +141,7 @@ test("create windows: the boot script is removed when the instance create fails,
     { method: "DELETE", url: `${API}/startup-scripts/${SCRIPT_ID}`, status: 204 }
   ]);
   const request = testCreateRequest({ kind: "windows", size: "vc2-2c-4gb", region: "ewr", image: "501" });
-  await assert.rejects(vultrAdapter.create(credentials, request, replayOptions(replay)), (error) => {
+  await assert.rejects(vultrAdapter.create(credentials, request, replayOptions(t, replay)), (error) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.message, "Vultr: Server add failed: plan not available in region");
     return true;
@@ -162,7 +162,7 @@ test("vultrWindowsBootScript: cmd hands the rest of the file to PowerShell untou
   assert.equal(script.slice(script.indexOf("#ORQ-POWERSHELL-BEGIN") + "#ORQ-POWERSHELL-BEGIN".length), `\r\n${bootstrap.powershellScript}`);
 });
 
-test("status: installing reads as pending, 404 as gone, 429 retried", async () => {
+test("status: installing reads as pending, 404 as gone, 429 retried", async (t) => {
   const replay = replayFetch([
     { method: "GET", url: instanceUrl, body: fixture("vultr", "instance-installing") },
     { method: "GET", url: instanceUrl, status: 429, headers: { "retry-after": "0" }, body: { error: "Rate limit reached", status: 429 } },
@@ -170,19 +170,19 @@ test("status: installing reads as pending, 404 as gone, 429 retried", async () =
     { method: "GET", url: instanceUrl, status: 404, body: fixture("vultr", "error-not-found") }
   ]);
   const ref = { instanceId: INSTANCE_ID };
-  const installing = await vultrAdapter.status(credentials, ref, replayOptions(replay));
+  const installing = await vultrAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(installing.state, "pending");
-  assert.deepEqual(await vultrAdapter.status(credentials, ref, replayOptions(replay)), {
+  assert.deepEqual(await vultrAdapter.status(credentials, ref, replayOptions(t, replay)), {
     state: "running",
     detail: null,
     publicIp: "203.0.113.20",
     hourlyUsd: null
   });
-  const gone = await vultrAdapter.status(credentials, ref, replayOptions(replay));
+  const gone = await vultrAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(gone.state, "gone");
 });
 
-test("status: a stopped or suspended instance reads as stopped", async () => {
+test("status: a stopped or suspended instance reads as stopped", async (t) => {
   const running = fixture<{ instance: Record<string, unknown> }>("vultr", "instance-running");
   const replay = replayFetch([
     { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, power_status: "stopped" } } },
@@ -190,15 +190,15 @@ test("status: a stopped or suspended instance reads as stopped", async () => {
     { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, status: "something-new" } } }
   ]);
   const ref = { instanceId: INSTANCE_ID };
-  const stopped = await vultrAdapter.status(credentials, ref, replayOptions(replay));
+  const stopped = await vultrAdapter.status(credentials, ref, replayOptions(t, replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Vultr reports the instance active, power stopped");
-  assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
+  assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(t, replay))).state, "stopped");
   // A state the adapter does not know is transient (pending), never a failure that destroys the box.
-  assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
+  assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(t, replay))).state, "pending");
 });
 
-test("destroy: deletes the instance and its boot script, idempotently", async () => {
+test("destroy: deletes the instance and its boot script, idempotently", async (t) => {
   const replay = replayFetch([
     { method: "DELETE", url: instanceUrl, status: 204 },
     { method: "DELETE", url: `${API}/startup-scripts/${SCRIPT_ID}`, status: 204 },
@@ -206,12 +206,12 @@ test("destroy: deletes the instance and its boot script, idempotently", async ()
     { method: "DELETE", url: `${API}/startup-scripts/${SCRIPT_ID}`, status: 404, body: { error: "Startup script not found", status: 404 } }
   ]);
   const ref = { instanceId: INSTANCE_ID, startupScriptId: SCRIPT_ID };
-  await vultrAdapter.destroy(credentials, ref, replayOptions(replay));
-  await vultrAdapter.destroy(credentials, ref, replayOptions(replay));
+  await vultrAdapter.destroy(credentials, ref, replayOptions(t, replay));
+  await vultrAdapter.destroy(credentials, ref, replayOptions(t, replay));
   assert.equal(replay.pending().length, 0);
 });
 
-test("listManaged: tagged or orq- labelled instances, with the boot script of Windows boxes", async () => {
+test("listManaged: tagged or orq- labelled instances, with the boot script of Windows boxes", async (t) => {
   const managed = fixture<{ instances: Array<Record<string, unknown>>; meta: unknown }>("vultr", "instances-managed");
   const tagged = managed.instances[0]!;
   const windows = { ...tagged, id: "22222222-3333-4444-8555-666666666666", label: "orq-ffeeddccbbaa", tags: [], os: "Windows 2022 Standard x64" };
@@ -229,7 +229,7 @@ test("listManaged: tagged or orq- labelled instances, with the boot script of Wi
       body: { startup_scripts: [{ id: SCRIPT_ID, name: "orq-ffeeddccbbaa", type: "boot" }], meta: { total: 1, links: { next: "", prev: "" } } }
     }
   ]);
-  const listed = await vultrAdapter.listManaged(credentials, replayOptions(replay));
+  const listed = await vultrAdapter.listManaged(credentials, replayOptions(t, replay));
   assert.deepEqual(listed, [
     { ref: { instanceId: INSTANCE_ID }, name: `orq-${TEST_BOX_ID}`, boxId: TEST_BOX_ID, createdAt: "2026-10-19T23:06:41.000Z", state: "running" },
     {

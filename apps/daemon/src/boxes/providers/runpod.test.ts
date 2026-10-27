@@ -13,27 +13,27 @@ import { RUNPOD_DEFAULT_IMAGE, parseRunpodSize, runpodAdapter } from "./runpod.t
 const creds = { apiKey: "rpa_test" };
 const f = (name: string): string => fixture("runpod", name);
 
-test("runpod: validate reads one pod page and maps 401 to ok:false with RunPod's wording", async () => {
+test("runpod: validate reads one pod page and maps 401 to ok:false with RunPod's wording", async (t) => {
   const good = routedFetch([{ path: "/v2/pods?limit=1", replies: [{ body: '{"pods":[],"pagination":{"hasNextPage":false}}' }] }]);
-  assert.deepEqual(await runpodAdapter.validate(creds, callOptions(good.fetch)), { ok: true });
+  assert.deepEqual(await runpodAdapter.validate(creds, callOptions(t, good.fetch)), { ok: true });
   assert.equal(good.seen[0]!.headers.authorization, "Bearer rpa_test");
 
   const bad = routedFetch([{ path: "/v2/pods", replies: [{ status: 401, body: f("validate-unauthorized.json") }] }]);
-  const result = await runpodAdapter.validate(creds, callOptions(bad.fetch));
+  const result = await runpodAdapter.validate(creds, callOptions(t, bad.fetch));
   assert.equal(result.ok, false);
   assert.match((result as { message: string }).message, /Subject token is invalid or expired/);
 
-  const missing = await runpodAdapter.validate({}, callOptions(bad.fetch));
+  const missing = await runpodAdapter.validate({}, callOptions(t, bad.fetch));
   assert.equal(missing.ok, false);
 });
 
-test("runpod: offers list in-stock NVIDIA types per cloud with live prices and their data centers", async () => {
+test("runpod: offers list in-stock NVIDIA types per cloud with live prices and their data centers", async (t) => {
   const { fetch, seen } = routedFetch([
     { path: /^\/v2\/catalog\/gpus\?.*cloud=COMMUNITY/, replies: [{ body: f("gpus-community.json") }] },
     { path: /^\/v2\/catalog\/gpus\?.*cloud=SECURE/, replies: [{ body: f("gpus-secure.json") }] },
     { path: "/v2/catalog/datacenters", replies: [{ body: f("datacenters.json") }] }
   ]);
-  const offers = await runpodAdapter.offers(creds, "linux-gpu", callOptions(fetch));
+  const offers = await runpodAdapter.offers(creds, "linux-gpu", callOptions(t, fetch));
   assert.equal(offers.priceSource, "live");
   assert.ok(seen.every((request) => request.url.includes("include=AVAILABILITY&product=POD") || request.url.endsWith("/datacenters")));
 
@@ -61,14 +61,14 @@ test("runpod: offers list in-stock NVIDIA types per cloud with live prices and t
   assert.ok(!offers.regions.some((region) => region.id === "AP-JP-1"), "regions without stock are not offered");
   assert.equal(offers.images[0]!.id, RUNPOD_DEFAULT_IMAGE);
 
-  const none = await runpodAdapter.offers(creds, "windows-gpu", callOptions(fetch));
+  const none = await runpodAdapter.offers(creds, "windows-gpu", callOptions(t, fetch));
   assert.deepEqual(none.sizes, []);
 });
 
-test("runpod: create sends one POST with name, GPU, cloud, entrypoint and env, and no ports", async () => {
+test("runpod: create sends one POST with name, GPU, cloud, entrypoint and env, and no ports", async (t) => {
   const { fetch, seen } = routedFetch([{ method: "POST", path: "/v2/pods", replies: [{ status: 201, body: f("pod-create.json") }] }]);
   const request = sampleCreateRequest({ size: "community:NVIDIA RTX A4500", region: "any" });
-  const result = await runpodAdapter.create(creds, request, callOptions(fetch));
+  const result = await runpodAdapter.create(creds, request, callOptions(t, fetch));
   assert.equal(seen.length, 1);
   const body = seen[0]!.body as Record<string, unknown>;
   assert.equal(body.name, "orq-box-0123abcd");
@@ -84,7 +84,7 @@ test("runpod: create sends one POST with name, GPU, cloud, entrypoint and env, a
   assert.equal(result.hourlyUsd, 0.19);
 });
 
-test("runpod: create pins a data center and never retries (no duplicate rentals)", async () => {
+test("runpod: create pins a data center and never retries (no duplicate rentals)", async (t) => {
   const { fetch, seen } = routedFetch([
     {
       method: "POST",
@@ -93,7 +93,7 @@ test("runpod: create pins a data center and never retries (no duplicate rentals)
     }
   ]);
   const request = sampleCreateRequest({ size: "secure:NVIDIA L4", region: "US-MO-2", image: "runpod/base:1.4.1-ubuntu2404" });
-  await assert.rejects(runpodAdapter.create(creds, request, callOptions(fetch)), (error: unknown) => {
+  await assert.rejects(runpodAdapter.create(creds, request, callOptions(t, fetch)), (error: unknown) => {
     assert.ok(error instanceof ProviderHttpError);
     assert.equal(error.status, 500);
     assert.match(error.message, /upstream timeout/);
@@ -106,13 +106,13 @@ test("runpod: create pins a data center and never retries (no duplicate rentals)
   assert.throws(() => parseRunpodSize("H100"), /unknown size/);
 });
 
-test("runpod: status maps RUNNING, 404 → gone, and other pod states", async () => {
+test("runpod: status maps RUNNING, 404 → gone, and other pod states", async (t) => {
   const running = routedFetch([{ path: "/v2/pods/8rejh12qb4vpre", replies: [{ body: f("pod-get-running.json") }] }]);
-  const status = await runpodAdapter.status(creds, { podId: "8rejh12qb4vpre" }, callOptions(running.fetch));
+  const status = await runpodAdapter.status(creds, { podId: "8rejh12qb4vpre" }, callOptions(t, running.fetch));
   assert.deepEqual(status, { state: "running", detail: "RUNNING", publicIp: null, hourlyUsd: 0.19 });
 
   const gone = routedFetch([{ path: "/v2/pods/", replies: [{ status: 404, body: f("pod-not-found.json") }] }]);
-  const goneStatus = await runpodAdapter.status(creds, { podId: "8rejh12qb4vpre" }, callOptions(gone.fetch));
+  const goneStatus = await runpodAdapter.status(creds, { podId: "8rejh12qb4vpre" }, callOptions(t, gone.fetch));
   assert.equal(goneStatus.state, "gone");
 
   const pod = JSON.parse(f("pod-get-running.json"));
@@ -124,32 +124,32 @@ test("runpod: status maps RUNNING, 404 → gone, and other pod states", async ()
     ["TERMINATED", "gone"]
   ] as const) {
     const stub = routedFetch([{ path: "/v2/pods/", replies: [{ body: JSON.stringify({ ...pod, status: raw, cost: 0 }) }] }]);
-    const mapped = await runpodAdapter.status(creds, { podId: "x" }, callOptions(stub.fetch));
+    const mapped = await runpodAdapter.status(creds, { podId: "x" }, callOptions(t, stub.fetch));
     assert.equal(mapped.state, state, raw);
     assert.equal(mapped.hourlyUsd, null);
   }
   const ip = routedFetch([
     { path: "/v2/pods/", replies: [{ body: JSON.stringify({ ...pod, runtime: { ports: [{ ip: "203.0.113.7", public: 4000, private: 22 }] } }) }] }
   ]);
-  assert.equal((await runpodAdapter.status(creds, { podId: "x" }, callOptions(ip.fetch))).publicIp, "203.0.113.7");
-  await assert.rejects(runpodAdapter.status(creds, {}, callOptions(ip.fetch)), /no pod id/);
+  assert.equal((await runpodAdapter.status(creds, { podId: "x" }, callOptions(t, ip.fetch))).publicIp, "203.0.113.7");
+  await assert.rejects(runpodAdapter.status(creds, {}, callOptions(t, ip.fetch)), /no pod id/);
 });
 
-test("runpod: destroy is idempotent (204, then 404 resolves too)", async () => {
+test("runpod: destroy is idempotent (204, then 404 resolves too)", async (t) => {
   const { fetch, seen } = routedFetch([
     { method: "DELETE", path: "/v2/pods/8rejh12qb4vpre", replies: [{ status: 204 }, { status: 404, body: f("pod-not-found.json") }] }
   ]);
-  await runpodAdapter.destroy(creds, { podId: "8rejh12qb4vpre" }, callOptions(fetch));
-  await runpodAdapter.destroy(creds, { podId: "8rejh12qb4vpre" }, callOptions(fetch));
+  await runpodAdapter.destroy(creds, { podId: "8rejh12qb4vpre" }, callOptions(t, fetch));
+  await runpodAdapter.destroy(creds, { podId: "8rejh12qb4vpre" }, callOptions(t, fetch));
   assert.equal(seen.length, 2);
 
   const cluster = routedFetch([
     { method: "DELETE", path: "/v2/pods/", replies: [{ status: 409, body: '{"title":"Conflict","status":409,"detail":"pod belongs to a cluster"}' }] }
   ]);
-  await assert.rejects(runpodAdapter.destroy(creds, { podId: "x" }, callOptions(cluster.fetch)), /belongs to a cluster/);
+  await assert.rejects(runpodAdapter.destroy(creds, { podId: "x" }, callOptions(t, cluster.fetch)), /belongs to a cluster/);
 });
 
-test("runpod: listManaged keeps orq- pods, reads the box id from env, and follows the cursor", async () => {
+test("runpod: listManaged keeps orq- pods, reads the box id from env, and follows the cursor", async (t) => {
   const page = JSON.parse(f("pod-list.json"));
   const other = { ...page.pods[0], id: "zzz", name: "my-own-pod", env: {} };
   const legacy = { ...page.pods[0], id: "yyy", name: "orq-box-77aa88bb", env: {} };
@@ -163,7 +163,7 @@ test("runpod: listManaged keeps orq- pods, reads the box id from env, and follow
       replies: [{ body: JSON.stringify({ pods: [page.pods[0], other], pagination: { hasNextPage: true, nextCursor: "c2" } }) }]
     }
   ]);
-  const managed = await runpodAdapter.listManaged(creds, callOptions(fetch));
+  const managed = await runpodAdapter.listManaged(creds, callOptions(t, fetch));
   assert.equal(seen.length, 2);
   assert.deepEqual(
     managed.map((instance) => [instance.name, instance.boxId, instance.state]),

@@ -6,6 +6,8 @@
  * a cancel that does not land).
  */
 
+import { parse } from "yaml";
+
 export interface FakeRun {
   id: number;
   workflowFile: string;
@@ -206,7 +208,8 @@ export class FakeGithub {
       }
       // GitHub validates inputs against the committed workflow: unknown inputs are refused.
       const committed = repo.files.get(`.github/workflows/${match[1]}`)?.content;
-      const unexpected = committed === undefined ? [] : Object.keys(inputs).filter((name) => !new RegExp(`^      ${name}:$`, "m").test(committed));
+      const declared = committed === undefined ? null : (parse(committed) as { on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } } })?.on?.workflow_dispatch?.inputs;
+      const unexpected = declared === null ? [] : Object.keys(inputs).filter((name) => !Object.hasOwn(declared ?? {}, name));
       if (unexpected.length > 0) return this.json(422, { message: `Unexpected inputs provided: ${JSON.stringify(unexpected)}` });
       const displayTitle = inputs.request_id !== undefined ? `orq-cache-${inputs.os}-${inputs.request_id}` : `orq-${inputs.box_id}`;
       const run = this.addRun({ workflowFile: match[1]!, displayTitle, status: "queued", jobStatus: "queued", inputs });

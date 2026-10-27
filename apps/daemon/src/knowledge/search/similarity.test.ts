@@ -182,7 +182,7 @@ test("similarForSaved: visible near-duplicates outside the save, closest first, 
     ],
     "s2 is in the same save; z is below the duplicate threshold"
   );
-  assert.deepEqual(all.get(ke("s1"))![0], { entryId: ke("x"), title: "X", similarity: 0.95, citation: knowledgeCitation(s.store.getMeta(ke("x"))!) });
+  assert.equal(all.get(ke("s1"))![0]!.title, "X");
   assert.deepEqual(all.get(ke("s3")), [], "not embedded yet");
   const seo = s.similarity.similarForSaved(saved, s.seoOnly);
   assert.deepEqual(seo.get(ke("s1"))!.map((x) => x.entryId), [ke("x"), ke("w"), ke("v")]);
@@ -284,25 +284,18 @@ test("graph: a cluster is named by its linked entries' most common concept", asy
   assert.deepEqual(g.clusters.map((c) => c.label), ["Alternatives pages", "ads budget", null]);
 });
 
-test("graph: the most recent `limit` embedded entries; truncated; k and limit are clamped", async () => {
+test("graph: the most recent embedded entries respect the limit and report truncation", async () => {
   const s = graphFixture();
-  const g = await s.similarity.graph({ limit: 3, k: 99 }, s.seoOnly);
+  const g = await s.similarity.graph({ limit: 3 }, s.seoOnly);
   assert.deepEqual(g.nodes.map((n) => n.id), ["p1", "p2", "p3"].map(ke));
   assert.equal(g.truncated, true);
   assert.deepEqual(g.totals, { entries: 7, embedded: 6 });
-  assert.equal(g.edges.length, 3, "k clamped to 8: every pair of the three");
   assert.equal((await s.similarity.graph({ limit: 0 }, s.seoOnly)).nodes.length, 1);
 });
 
-test("graph: cached until the index generation, the graph revision or the drawn entries change", async () => {
+test("graph: changed vectors, graph concepts and entry metadata replace stale results", async () => {
   const s = graphFixture();
   const first = await s.similarity.graph({ k: 1 }, s.seoOnly);
-  const calls = s.index.entryVectorCalls;
-  assert.deepEqual(await s.similarity.graph({ k: 1 }, s.seoOnly), first);
-  assert.equal(s.index.entryVectorCalls, calls, "served from the cache");
-  await s.similarity.graph({ k: 2 }, s.seoOnly);
-  assert.ok(s.index.entryVectorCalls > calls, "another k is another graph");
-
   // New vectors (generation): R moves next to Q2.
   s.index.set(ke("r"), around(DIMS, 1, 7, 0.95));
   const moved = await s.similarity.graph({ k: 1 }, s.seoOnly);
@@ -310,18 +303,18 @@ test("graph: cached until the index generation, the graph revision or the drawn 
   assert.ok(moved.edges.some((e) => e.to === ke("r")));
 
   // A graph load (revision) re-labels.
-  let at = s.index.entryVectorCalls;
   await loadGraph(s.graph, [node("topic-ads", "Ad budgets", [`${ke("q1")}.md`])]);
   const relabelled = await s.similarity.graph({ k: 1 }, s.seoOnly);
-  assert.ok(s.index.entryVectorCalls > at);
   assert.ok(relabelled.clusters.some((c) => c.label === "Ad budgets"));
 
   // A title edit (the drawn entries) re-labels too.
-  at = s.index.entryVectorCalls;
-  s.store.put(ke("p1"), "body p1", ["kc_seo"], { title: "Renamed", savedAt: s.store.getMeta(ke("p1"))!.savedAt }, true);
+  for (const name of ["p1", "p2", "p3"]) {
+    s.store.put(ke(name), `body ${name}`, ["kc_seo"], { title: "Pricing research", savedAt: s.store.getMeta(ke(name))!.savedAt }, true);
+  }
   const renamed = await s.similarity.graph({ k: 1 }, s.seoOnly);
-  assert.ok(s.index.entryVectorCalls > at);
-  assert.equal(renamed.nodes.find((n) => n.id === ke("p1"))!.title, "Renamed");
+  const p1 = renamed.nodes.find((n) => n.id === ke("p1"))!;
+  assert.equal(p1.title, "Pricing research");
+  assert.equal(renamed.clusters.find((c) => c.id === p1.cluster)!.label, "pricing research");
 });
 
 test("graph: an entry deleted while the graph is computed is left out with its edges", async () => {

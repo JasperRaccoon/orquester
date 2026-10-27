@@ -136,7 +136,6 @@ export interface BoxLifecycleDeps {
   agentClis?: BoxAgentClis;
   setupLog: BoxSetupLog;
   clock: BoxClock;
-  fetch?: typeof fetch;
   logger: Pick<Console, "warn" | "error" | "log">;
   /** A provider call failed: the reconciler takes a look at that provider soon. */
   onProviderError(provider: string): void;
@@ -691,7 +690,7 @@ export class BoxLifecycle {
           ...(record.purpose === "device-host" ? { prepare: "devices" as const } : {})
         },
         // Not `signal`: aborting a create the provider may already have accepted leaves an instance without a ref.
-        { signal: this.shutdown.signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
+        { signal: this.shutdown.signal }
       );
       await this.deps.store.update(boxId, (next) => {
         next.providerRef = result.ref;
@@ -1174,7 +1173,7 @@ export class BoxLifecycle {
    */
   private async destroyAndConfirm(adapter: BoxProviderAdapter, credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<void> {
     const signal = AbortSignal.timeout(DESTROY_CONFIRM_MS);
-    const options = { signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
+    const options = { signal };
     await adapter.destroy(credentials, ref, options);
     let lastError: unknown = null;
     for (let attempt = 0; ; attempt++) {
@@ -1205,7 +1204,6 @@ export class BoxLifecycle {
     try {
       instances = await adapter.listManaged(credentials, {
         signal: AbortSignal.timeout(DESTROY_CONFIRM_MS),
-        ...(this.deps.fetch ? { fetch: this.deps.fetch } : {})
       });
     } catch (error) {
       throw new Error(`Could not check whether ${adapter.label} created the machine (${errorLine(error)}).`);
