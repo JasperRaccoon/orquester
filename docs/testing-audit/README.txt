@@ -2,8 +2,8 @@ TEST SUITE CLEANUP — FINAL INTEGRATION REPORT
 
 The repository-wide cleanup is implemented. The integrated source passes the
 full measured suite, typechecks, the changed-files gate and the web/desktop
-production build. A second official pnpm test confirmation and Git delivery are
-recorded in performance-results.json and delivery.json when completed. Earlier
+production build. A second official pnpm test confirmation also passes; performance-results.json
+records the measurements and delivery.json records Git integration. Earlier
 area reports are phase records: their pending-validation notes are superseded by
 validation-results.json and this final report, not claims of additional runs.
 
@@ -157,12 +157,14 @@ verified for Node after Electron packaging. Bundler/platform metadata warnings
 were nonfatal and unrelated. Emitted artifacts remain ignored, not committed.
 PASS: completed full matching suite, all Go/standalone/package/root scripts.
 PASS: focused controls, mutation experiments and static/caller/diff reviews.
-The second official pnpm test result is in performance-results.json.
+The second official pnpm test passed in 522.517 s with the same 11,410 pass /
+32 skip / zero failure Node totals; source hashes remained unchanged. Its 1.616 s
+spread from the first final run reinforces the limits on the global speed claim.
 Exact command/results and artifact hashes are in validation-results.json; exact
 focused command lists and mutant failure witnesses are in subsystem ledgers.
 
-The latest reference's four failures were not deleted: three checkpoint capture/
-prune/privacy cases and one whole-profile rollback case used filesystem modes
+The latest reference's four failing contracts were retained: three checkpoint
+capture/prune/privacy cases and one whole-profile rollback case used filesystem modes
 that uid 0 bypasses. Checkpoint failures now use real rejecting Git hooks/ref locks instead of mode
 bits; profile rollback executes the same native write failure as an unprivileged
 child. Their real failure/rollback assertions remain.
@@ -204,7 +206,8 @@ GIT DELIVERY
 
 Work remains on main as requested. Cleanup commit 701ab21b, retrieval merge
 301959ab and Devices merge b659841b preserve incoming history. The final ee5c3249
-merge and report/confirmation commits are recorded in delivery.json. Fetch and
+merge is 9b6308a714c77d89baf534e7476d1db912acb186. Report/confirmation and push
+status are recorded in delivery.json and the final chat reply. Fetch and
 integration use ordinary merges; no history rewrite, force push or protection
 bypass is authorized. The final chat reply records the actual push result and
 remote-HEAD verification. No deployment is part of this task.

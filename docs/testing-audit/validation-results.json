@@ -65,5 +65,28 @@
     "Live daemon/deployment"
   ],
   "finalNodeSkips": 32,
-  "secondOfficialConfirmation": "Pending; see performance-results.json when complete"
+  "secondOfficialConfirmation": {
+    "command": "pnpm test",
+    "result": "PASS",
+    "commit": "9b6308a714c77d89baf534e7476d1db912acb186",
+    "wallSeconds": 522.5173324349998,
+    "nodeTotals": {
+      "tests": 11442,
+      "failed": 0,
+      "passed": 11410,
+      "cancelled": 0,
+      "skipped": 32,
+      "todo": 0
+    },
+    "sourceHashesUnchanged": true
+  },
+  "restorationFinalReadOnly": {
+    "installedBytes": 9375904,
+    "installedMode": "0o755",
+    "installedSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
+    "runningOriginalBytes": 9375904,
+    "runningOriginalSha256": "7a049f1d9dfc2b7deb81edbba399bc5ca66fd61e9e211f78c1ce0c0dcaa6cec0",
+    "byteEqualToOriginalProcess": true,
+    "syntheticTokenExists": false
+  }
 }
