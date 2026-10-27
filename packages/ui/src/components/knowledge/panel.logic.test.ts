@@ -14,6 +14,7 @@ import {
   keepDuplicatePair,
   knowledgeMergePlan,
   markdownBodyPreview,
+  openCodeFence,
   mergeConfirmMessage,
   mergeErrorText,
   panelSessionVersion,
@@ -238,6 +239,27 @@ describe("the body's Markdown preview", () => {
     const preview = markdownBodyPreview(fenced, 100);
     assert.match(preview.text, /\n```$/);
     assert.ok(preview.rest > 0);
+  });
+
+  it("closes an open fence with its own character and length", () => {
+    const four = `intro\n\n\`\`\`\`md\n\`\`\`\n${"inner line\n".repeat(20)}`;
+    assert.match(markdownBodyPreview(four, 100).text, /\n````$/);
+    const tilde = `intro\n\n~~~\n\`\`\`\n${"inner line\n".repeat(20)}`;
+    assert.match(markdownBodyPreview(tilde, 100).text, /\n~~~$/);
+  });
+
+  it("tracks code fences as CommonMark does", () => {
+    assert.equal(openCodeFence("```ts\ncode"), "```");
+    assert.equal(openCodeFence("```ts\ncode\n```"), null);
+    // Inside a ~~~ block, ``` is text; a shorter run does not close a longer fence.
+    assert.equal(openCodeFence("~~~\n```\ncode"), "~~~");
+    assert.equal(openCodeFence("~~~~\n~~~\ncode"), "~~~~");
+    assert.equal(openCodeFence("~~~~\ncode\n~~~~~  "), null);
+    // A closing fence takes no info string; a backtick info string with a backtick opens nothing.
+    assert.equal(openCodeFence("```\ncode\n``` js"), "```");
+    assert.equal(openCodeFence("``` a`b\ntext"), null);
+    // Four spaces of indent is an indented code block, not a fence.
+    assert.equal(openCodeFence("    ```\ntext"), null);
   });
 });
 
