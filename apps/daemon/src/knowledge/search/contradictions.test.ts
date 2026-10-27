@@ -149,6 +149,46 @@ test("a note that says nothing is null; an edge whose note says the conflict is 
   assert.ok(!isResolvedNote("Unresolved; notes disagree"), "unresolved is not resolved");
 });
 
+test("note checks: a negated or bare resolved word is a disagreement; a note is filler only whole or as a heading", () => {
+  const table: [note: string, resolved: boolean, filler: boolean][] = [
+    // Disagreements the old checks read as resolved.
+    ["The claims are not consistent: one says weekly, the other daily", false, false],
+    ["Not resolved: sources disagree on the trial length", false, false],
+    ["These are not compatible strategies for a new account", false, false],
+    ["Still isn't really resolved by either source", false, false],
+    ["Never resolved; both cite their own tests", false, false],
+    ["Both posts are consistent in tone but disagree on the price", false, false],
+    ["Gmail and Outlook are compatible with the signup flow, but one is banned", false, false],
+    ["The un-resolved question is which proxy works", false, false],
+    // Resolved or apparent only.
+    ["Apparent only; HIG exempts legal consent", true, false],
+    ["Resolved by the 2026 policy update", true, false],
+    ["The dispute was resolved in the later post", true, false],
+    ["It is not a real conflict: different storefronts", true, false],
+    ["Both true at different scales", true, false],
+    ["Compatible only because the 2019 claim was about matching", true, false],
+    // Notes that start with a filler word but say something.
+    ["Unknown proxy provider recommended over a residential one", false, false],
+    ["None of the tested apps kept the trial", false, false],
+    ["Placeholder pages rank in one source and not the other", false, false],
+    // Filler: whole, or a filler word set apart as a heading.
+    ["n/a", false, true],
+    ["N/A.", false, true],
+    ["placeholder", false, true],
+    ["Unknown.", false, true],
+    ["TBD - placeholder", false, true],
+    ["Unresolved; notes disagree on magnitude", false, true],
+    ["unresolved: see both entries for the numbers", false, true],
+    ["Unclear: the second post never says", false, true],
+    ["too short", false, true],
+    ["", false, true]
+  ];
+  for (const [note, resolved, filler] of table) {
+    assert.equal(isResolvedNote(note), resolved, `resolved: ${note}`);
+    assert.equal(isFillerNote(note), filler, `filler: ${note}`);
+  }
+});
+
 test("isSurveyEntry: synthesis entries, and notes titled as surveys", () => {
   assert.ok(isSurveyEntry({ kind: "synthesis", title: "Plan length is the hidden master variable" }));
   assert.ok(isSurveyEntry({ kind: "research note", title: "Cross-links: where the saved tips collide" }));
