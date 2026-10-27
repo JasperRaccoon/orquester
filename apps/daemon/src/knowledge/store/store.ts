@@ -108,6 +108,11 @@ function frozenMeta(meta: KnowledgeEntryMeta): KnowledgeEntryMeta {
   return Object.freeze({ ...meta, savedFrom: Object.freeze({ ...meta.savedFrom }), collections: Object.freeze([...meta.collections]) as string[] });
 }
 
+/** A copy without `key` (`fromEntries`: a key such as `__proto__` stays an own key). */
+function withoutKey(record: Record<string, unknown>, key: string): Record<string, unknown> {
+  return Object.prototype.hasOwnProperty.call(record, key) ? Object.fromEntries(Object.entries(record).filter(([k]) => k !== key)) : record;
+}
+
 function sha(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -614,11 +619,14 @@ export class KnowledgeStore implements KnowledgeStorePort {
       updatedAt: new Date().toISOString(),
       linkState: edited ? "pending" : before.linkState
     });
-    await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
+    // An edit is linked again: the linking-context version it was linked with no longer holds (the
+    // run that links it records its own, `setLinkContext`).
+    const extra = edited ? withoutKey(stored.extra, KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY) : stored.extra;
+    await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, extra, body));
     const shingles = body === currentBody ? null : knowledgeShingles(body);
     const urlKey = meta.url ? normalizeKnowledgeUrl(meta.url) : null;
     this.unindex(id, before.contentHash, stored.urlKey);
-    this.entries.set(id, { meta, extra: stored.extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
+    this.entries.set(id, { meta, extra, signature: shingles ? knowledgeTextSignature(shingles) : stored.signature, urlKey });
     this.index(id, meta.contentHash, urlKey);
     this.metaCache = null;
     if (edited) await this.writeMirror(meta, body);
