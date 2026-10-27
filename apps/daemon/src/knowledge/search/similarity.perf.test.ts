@@ -36,13 +36,15 @@ async function corpus(t: test.TestContext, count = ENTRIES) {
   const collections = Array.from({ length: 8 }, (_, i) => store.collection(id("kc_", i, 10), `Collection ${i}`).id);
   const vectors: Float32Array[] = [];
   const centres = Array.from({ length: 60 }, () => Array.from({ length: DIMS }, () => random() - 0.5));
+  const centreTexts = centres.map((_, c) => Array.from({ length: 60 }, (_, w) => `c${c}w${w}`).join(" "));
   const entryIds: string[] = [];
   for (let i = 0; i < count; i += 1) {
     const entryId = id("ke_", i, 12);
     entryIds.push(entryId);
+    // Entries of one centre are near-copies (possible duplicates need both meaning and text).
     store.put(
       entryId,
-      `entry ${i}`,
+      `${centreTexts[i % centreTexts.length]} entry ${i}`,
       [collections[i % collections.length]!],
       {
         title: `Title ${i % 300} topic ${i % 17}`,
@@ -171,7 +173,12 @@ test("insights over 2,000 entries: p95 under 300 ms cached-cold (link gaps aside
     node(`concept-${i}`, `Concept ${i}`, Array.from({ length: 1 + Math.floor(random() ** 2 * 6) }, pick), { type: types[i % types.length] })
   );
   const contradictions = Array.from({ length: 200 }, (_, i) => edge(`x-${i}`, `concept-${(i * 6) % 4_000}`, `concept-${(i * 6 + 3_006) % 4_000}`, null, "contradicts"));
-  await loadGraph(graph, concepts, contradictions);
+  // A topic per vector centre on its entries, and a claim of one entry about it per 4 entries:
+  // single-source claims whose topic their cluster discusses.
+  const topics = Array.from({ length: 60 }, (_, c) => node(`topic-${c}`, `Topic ${c}`, entryIds.filter((_, i) => i % 60 === c).map((entryId) => `${entryId}.md`), { type: "Topic" }));
+  const claims = entryIds.filter((_, i) => i % 4 === 0).map((entryId) => node(`claim-${entryId}`, `Claim of ${entryId}`, [`${entryId}.md`], { type: "Tactic" }));
+  const about = entryIds.filter((_, i) => i % 4 === 0).map((entryId, n) => edge(`about-${n}`, `claim-${entryId}`, `topic-${(n * 4) % 60}`, null, "about"));
+  await loadGraph(graph, [...concepts, ...topics, ...claims], [...contradictions, ...about]);
   const scope = search.scope({ kind: "all" });
 
   let turns = 0;

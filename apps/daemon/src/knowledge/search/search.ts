@@ -148,6 +148,7 @@ export class KnowledgeSearch {
       graph: this.graph,
       index: () => this.vectorIndex(),
       summary: (meta, scope) => this.summary(meta, scope),
+      body: (id) => this.bodies.get(id) ?? null,
       pairChecks: () => this.linkingPorts.pairChecks,
       pairChecksRevision: () => this.linkingPorts.revision
     });
@@ -196,6 +197,7 @@ export class KnowledgeSearch {
   async stop(): Promise<void> {
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
     this.connectLinking({});
+    await this.similarity.idle();
     const stopping = this.vectors.stop();
     await this.ready?.catch(() => undefined);
     await this.textChain.catch(() => undefined);
@@ -244,6 +246,7 @@ export class KnowledgeSearch {
     await this.whenReady();
     await this.textChain.catch(() => undefined);
     await this.vectors.idle();
+    await this.similarity.idle();
   }
 
   // -------------------------------------------------------------------------
@@ -311,7 +314,8 @@ export class KnowledgeSearch {
     const similar = similarHits.ids;
 
     // One hop through visible concepts: the best concepts, and the concepts of the best entries.
-    const conceptHits = query ? this.graph.searchConcepts(terms, scope, CANDIDATES).map((hit) => hit.id) : [];
+    const conceptMatches = query ? this.graph.searchConcepts(terms, scope, CANDIDATES) : [];
+    const conceptHits = conceptMatches.map((hit) => hit.id);
     const expansionSeeds = new Map<string, string[]>();
     let expansion: string[] = [];
     if (query) {
@@ -353,11 +357,21 @@ export class KnowledgeSearch {
     const ranked = this.rank(entryScores, sort, diverse);
 
     // --- Concept hits (first page only) ---------------------------------------
+    // A concept is one ranked list, an entry the sum of up to four: their fused scores are not on one
+    // scale, and a concept would never outrank an entry found by two signals (the top concept fuses
+    // to 1/61, the top entry to up to 2.5/61). A concept hit's score is its own list's, normalized
+    // like an entry's (1 for the first), times the share of the query its name or aliases hold: the
+    // concept named like the query scores near 1 and is listed among the best entries; one matched
+    // in its description only scores 0 and comes after them. The best scores are listed.
     const maxConcepts = Math.max(1, Math.floor(limit / 3));
     const offset = cursor?.o ?? 0;
-    const conceptItems: { id: string; fused: number; entryIds: string[] }[] = [];
+    const conceptItems: { id: string; score: number; entryIds: string[] }[] = [];
     if (!cursor) {
-      for (const [id, fused] of fuse([[conceptHits, WEIGHT.concept]])) {
+      const conceptScale = WEIGHT.concept / (RRF_K + 1);
+      const scored = conceptMatches
+        .map((hit, rank) => ({ id: hit.id, rank, score: Math.round((WEIGHT.concept / (RRF_K + rank + 1) / conceptScale) * hit.named * 1e4) / 1e4 }))
+        .sort((a, b) => b.score - a.score || a.rank - b.rank);
+      for (const { id, score } of scored) {
         if (conceptItems.length >= maxConcepts) break;
         const entryIds = this.graph
           .visibleEntriesOf(id, scope)
@@ -367,7 +381,7 @@ export class KnowledgeSearch {
           .slice(0, 3)
           .map((e) => e.id);
         // With filters, a concept whose visible entries all fail them is not a hit.
-        if (entryIds.length > 0 && this.graph.conceptRef(id, scope)) conceptItems.push({ id, fused, entryIds });
+        if (entryIds.length > 0 && this.graph.conceptRef(id, scope)) conceptItems.push({ id, score, entryIds });
       }
     }
 
@@ -389,12 +403,12 @@ export class KnowledgeSearch {
     while (hits.length < limit && (next < ranked.length || c < conceptItems.length)) {
       const entry = ranked[next];
       const concept = conceptItems[c];
-      if (concept && (!entry || concept.fused > entry.fused)) {
+      if (concept && (!entry || concept.score > normalized(entry.fused))) {
         c += 1;
         const ref = this.graph.conceptRef(concept.id, scope)!;
         hits.push({
           kind: "concept",
-          score: normalized(concept.fused),
+          score: concept.score,
           concept: ref,
           entryIds: concept.entryIds,
           entries: concept.entryIds.map((id) => ({ id, title: this.store.getMeta(id)?.title ?? id }))

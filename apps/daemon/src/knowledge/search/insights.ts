@@ -4,13 +4,19 @@
  * graph shows that neither shows alone, over the entries a scope lets through.
  *
  * - Contradictions: {@link findContradictions} over every visible pair; checked ones first, then
- *   the closest in meaning.
+ *   by closeness in meaning plus {@link CENTRALITY_WEIGHT} × how central the contradicting
+ *   concepts are to both entries ({@link conceptCentrality}).
  * - Bridges: entries whose distinctive concepts ({@link distinctiveLimit}; never a person or an
  *   organization) are shared with entries in at least 2 other clusters of two or more; most
  *   clusters first, then most such concepts, then newest.
- * - Single-source concepts: claims (Tactic, Rule, Guideline, Result, Metric) linked to exactly one
- *   visible entry that sits in a cluster of 3 or more; taken one per entry in turn (entries in
- *   larger clusters first, then newest), so one prolific entry does not fill the list.
+ * - Single-source claims worth verifying: claims (Tactic, Rule, Guideline, Result, Metric) linked
+ *   to exactly one visible entry (not a survey: {@link isSurveyEntry}) that sits in a cluster of 3
+ *   or more, whose topic other entries of that cluster discuss: at least
+ *   {@link SINGLE_SOURCE_MIN_PEERS} and {@link SINGLE_SOURCE_MIN_SHARE} of its other (non-survey)
+ *   entries link to a concept the claim is linked to (never a person or an organization, nor a concept on most entries). Peers that
+ *   discuss the topic and do not back the claim are what makes it worth checking. Ranked by
+ *   centrality: the share of the cluster's peers that discuss its topic; taken one per entry in
+ *   turn (entries by their most central claim), so one prolific entry does not fill the list.
  * - Link gaps: {@link findLinkGaps} at the model's `strong` threshold; `queued` from the re-linker.
  *
  * Clusters are those of the similarity graph over the most recent
@@ -35,8 +41,8 @@ import {
   type KnowledgeSingleSource
 } from "@orquester/api";
 import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
-import { findContradictions, type ContradictionGraph } from "./contradictions.ts";
-import { type KnowledgeLinkGapPair, findLinkGaps } from "./gaps.ts";
+import { findContradictions, isSurveyEntry, type ContradictionGraph } from "./contradictions.ts";
+import { type KnowledgeLinkGapPair, findLinkGaps, linkGapConceptKey } from "./gaps.ts";
 import type { KnowledgeGraph } from "./graph.ts";
 import {
   CLAIM_CONCEPT_TYPES,
@@ -55,7 +61,7 @@ import { type KnowledgeScope, entryInScope } from "./visibility.ts";
 export const KNOWLEDGE_INSIGHTS_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_INSIGHTS_MAX_LIMIT = 50;
 /** How insights are derived; part of the cache key. */
-const INSIGHTS_ALGORITHM = "insights-v1";
+const INSIGHTS_ALGORITHM = "insights-v2";
 /** Insights responses (and, separately, link-gap lists) kept. */
 const INSIGHTS_CACHE_SIZE = 8;
 /** Other clusters a bridge's distinctive concepts must reach. */
@@ -64,10 +70,29 @@ const BRIDGE_MIN_CLUSTERS = 2;
 const BRIDGE_CONCEPTS_MAX = 5;
 /** The cluster size from which an unbacked claim counts (peers that could have said it and did not). */
 const SINGLE_SOURCE_MIN_CLUSTER = 3;
+/**
+ * Other entries of its cluster that must discuss a single-source claim's topic: at least 2, and at
+ * least a quarter of them (126 real entries: 2,298 claims on one entry, 456 whose topic two peers
+ * discuss, 208 whose topic a quarter of the cluster does).
+ */
+const SINGLE_SOURCE_MIN_PEERS = 2;
+const SINGLE_SOURCE_MIN_SHARE = 0.25;
+/**
+ * A topic concept linked to more than this share of the visible entries ("TikTok" on a third of
+ * them) says nothing about what a claim is about: it does not make a peer discuss its topic.
+ */
+const TOPIC_MAX_SHARE = 0.15;
+/**
+ * What how central the contradicting concepts are to their entries ({@link conceptCentrality}, 0..1)
+ * weighs against closeness in meaning when contradictions are ranked: 0.1 lets a pair whose
+ * concepts are what both entries are about pass a pair up to 0.05 closer whose concepts are a side
+ * remark; meaning still decides between pairs further apart.
+ */
+const CENTRALITY_WEIGHT = 0.1;
 
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
-  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry">;
+  graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType">;
   similarity: Pick<KnowledgeSimilarity, "graph">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
@@ -131,7 +156,7 @@ export class KnowledgeInsights {
           findLinkGaps({
             ids: visible.map((meta) => meta.id),
             index: vectors.index,
-            conceptsOf: (id) => this.options.graph.conceptIdsOfEntry(id),
+            conceptsOf: (id) => this.options.graph.conceptsOfEntry(id, scope).map(linkGapConceptKey),
             minimum: vectors.thresholds.strong,
             limit: Number.POSITIVE_INFINITY
           })
@@ -184,16 +209,39 @@ export class KnowledgeInsights {
 
     // Contradictions.
     const vectorOf = (id: string) => index?.entryVector(id) ?? null;
+    const neighbours = graph.neighbourLookup(scope);
+    const ownConcepts = new Map<string, ReadonlySet<string>>();
+    const ownOf = (id: string): ReadonlySet<string> => {
+      let set = ownConcepts.get(id);
+      if (!set) ownConcepts.set(id, (set = new Set(graph.conceptIdsOfEntry(id))));
+      return set;
+    };
+    const centrality = (conceptId: string, entryId: string): number => conceptCentrality(graph.canonicalConceptId(conceptId), ownOf(entryId), neighbours);
     const contradictions = [
-      ...findContradictions({ graph, scope, pairChecks: this.options.pairChecks?.() ?? null, accept: (id) => metaOf.has(id) }).values()
+      ...findContradictions({
+        graph,
+        scope,
+        pairChecks: this.options.pairChecks?.() ?? null,
+        accept: (id) => metaOf.has(id),
+        entryMeta: (id) => metaOf.get(id) ?? null
+      }).values()
     ].map((found) => {
       const [x, y] = [vectorOf(found.a), vectorOf(found.b)];
-      return { ...found, similarity: x && y ? dot(x, y) : null };
+      const similarity = x && y ? dot(x, y) : null;
+      // The best of its concept pairs, each as central as it is to the less engaged of the two entries.
+      let central = 0;
+      for (const { from, to } of found.pairs) {
+        const fromA = ownOf(found.a).has(graph.canonicalConceptId(from.id));
+        const [ofA, ofB] = fromA ? [from.id, to.id] : [to.id, from.id];
+        central = Math.max(central, Math.min(centrality(ofA, found.a), centrality(ofB, found.b)));
+      }
+      return { ...found, similarity, rank: (similarity ?? 0) + CENTRALITY_WEIGHT * central };
     });
     contradictions.sort(
       (x, y) =>
         Number(y.source === "checked") - Number(x.source === "checked") ||
-        (y.similarity ?? -Infinity) - (x.similarity ?? -Infinity) ||
+        Number(y.similarity !== null) - Number(x.similarity !== null) ||
+        y.rank - x.rank ||
         (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : x.b > y.b ? 1 : 0)
     );
     await pause();
@@ -230,19 +278,51 @@ export class KnowledgeInsights {
       bridges.sort((x, y) => y.reached.length - x.reached.length || y.concepts.length - x.concepts.length || newestFirst(x.meta, y.meta));
     }
 
-    // Single-source claims, one per entry in turn.
-    const perEntry: { meta: KnowledgeEntryMeta; cluster: number; concepts: KnowledgeConceptRef[] }[] = [];
+    // Single-source claims whose topic the entry's cluster discusses, one per entry in turn.
+    const perEntry: { meta: KnowledgeEntryMeta; cluster: number; concepts: KnowledgeConceptRef[]; best: number }[] = [];
     let singleSourceTotal = 0;
     if (drawn) {
+      const members = new Map<number, string[]>();
       for (const meta of visible) {
         const cluster = clusterOf.get(meta.id);
-        if (cluster === undefined || clusterSize(cluster) < SINGLE_SOURCE_MIN_CLUSTER) continue;
-        const concepts = conceptsOf.get(meta.id)!.filter((concept) => CLAIM_CONCEPT_TYPES.has(concept.type.toLowerCase()) && entriesOf.get(concept.id)!.length === 1);
-        if (concepts.length === 0) continue;
-        perEntry.push({ meta, cluster, concepts });
-        singleSourceTotal += concepts.length;
+        if (cluster === undefined || isSurveyEntry(meta)) continue;
+        let list = members.get(cluster);
+        if (!list) members.set(cluster, (list = []));
+        list.push(meta.id);
       }
-      perEntry.sort((x, y) => clusterSize(y.cluster) - clusterSize(x.cluster) || newestFirst(x.meta, y.meta));
+      const topicMax = Math.max(SINGLE_SOURCE_MIN_PEERS, visible.length * TOPIC_MAX_SHARE);
+      const topic = new Map<string, boolean>();
+      /** Whether a concept says what a claim is about: not who said it, not on most entries. */
+      const isTopic = (conceptId: string): boolean => {
+        let is = topic.get(conceptId);
+        if (is === undefined) {
+          const type = graph.conceptType(conceptId)?.toLowerCase() ?? null;
+          is = type !== null && !NON_TOPIC_CONCEPT_TYPES.has(type) && graph.visibleEntriesOf(conceptId, scope).length <= topicMax;
+          topic.set(conceptId, is);
+        }
+        return is;
+      };
+      for (const meta of visible) {
+        const cluster = clusterOf.get(meta.id);
+        if (cluster === undefined || clusterSize(cluster) < SINGLE_SOURCE_MIN_CLUSTER || isSurveyEntry(meta)) continue;
+        const peers = (members.get(cluster) ?? []).filter((id) => id !== meta.id);
+        if (peers.length < SINGLE_SOURCE_MIN_PEERS) continue;
+        const scored: { concept: KnowledgeConceptRef; peers: number }[] = [];
+        for (const concept of conceptsOf.get(meta.id)!) {
+          if (!CLAIM_CONCEPT_TYPES.has(concept.type.toLowerCase()) || entriesOf.get(concept.id)!.length !== 1) continue;
+          const topics = neighbours(graph.canonicalConceptId(concept.id)).filter(isTopic);
+          if (topics.length === 0) continue;
+          let discussing = 0;
+          for (const peer of peers) if (topics.some((id) => ownOf(peer).has(id))) discussing += 1;
+          if (discussing >= Math.max(SINGLE_SOURCE_MIN_PEERS, SINGLE_SOURCE_MIN_SHARE * peers.length)) scored.push({ concept, peers: discussing });
+        }
+        if (scored.length === 0) continue;
+        scored.sort((x, y) => y.peers - x.peers);
+        perEntry.push({ meta, cluster, concepts: scored.map((item) => item.concept), best: scored[0]!.peers / peers.length });
+        singleSourceTotal += scored.length;
+        await pause();
+      }
+      perEntry.sort((x, y) => y.best - x.best || clusterSize(y.cluster) - clusterSize(x.cluster) || newestFirst(x.meta, y.meta));
     }
     const singleSource: KnowledgeSingleSource[] = [];
     for (let turn = 0; singleSource.length < limit && perEntry.some((item) => item.concepts.length > turn); turn += 1) {
@@ -282,6 +362,18 @@ export class KnowledgeInsights {
       totals: { contradictions: contradictions.length, bridges: bridges.length, singleSource: singleSourceTotal, gaps: gaps.length }
     };
   }
+}
+
+/**
+ * How central a concept is to an entry: the share of the entry's concepts that are it or one of its
+ * neighbours (0..1). A concept tied into most of what an entry says is what it is about; one tied
+ * to nothing else in a 150-concept guide is a side remark.
+ */
+export function conceptCentrality(conceptId: string, entryConcepts: ReadonlySet<string>, neighbours: (conceptId: string) => readonly string[]): number {
+  if (entryConcepts.size === 0) return 0;
+  let near = entryConcepts.has(conceptId) ? 1 : 0;
+  for (const id of new Set(neighbours(conceptId))) if (entryConcepts.has(id)) near += 1;
+  return near / entryConcepts.size;
 }
 
 /** A deep copy of a cached, JSON-shaped value (callers may change what they are given). */

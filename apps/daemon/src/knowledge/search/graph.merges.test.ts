@@ -209,6 +209,49 @@ test("similar concepts come from the provider, visible and in the current graph 
   assert.deepEqual(graph.concept("tactic-warm-up", all)!.similarConcepts, []);
 });
 
+test("a short name's similar concepts: only related names (a shared word, one name in the other) or a very high similarity", async () => {
+  const store = new FakeStore();
+  store.collection(A, "A");
+  store.put(eA, "a", [A], {}, true);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const on = [`${eA}.md`];
+  await loadGraph(graph, [
+    node("channel-tiktok", "TikTok", on, { type: "Channel" }),
+    node("channel-tiktok-ads", "TikTok Ads", on, { type: "Channel" }),
+    node("channel-chatgpt", "ChatGPT", on, { type: "Channel" }),
+    node("channel-snapchat", "Snapchat", on, { type: "Channel" }),
+    node("channel-douyin", "Douyin", on, { type: "Channel", aliases: ["Chinese TikTok"] }),
+    node("channel-tiktokshop", "TikTokShop", on, { type: "Channel" }),
+    node("channel-twin", "Musical.ly", on, { type: "Channel" }),
+    node("tactic-long", "Post three times a day on TikTok", on),
+    node("tactic-longer", "Post three times a day on Reels", on),
+    node("tactic-other", "Answer every comment within the hour", on)
+  ]);
+  const scope = knowledgeScope({ kind: "all" }, [A]);
+  graph.setSimilarConcepts((id) =>
+    id === "channel-tiktok"
+      ? [
+          { id: "channel-tiktok-ads", similarity: 0.97 },
+          { id: "channel-chatgpt", similarity: 0.96 },
+          { id: "channel-snapchat", similarity: 0.95 },
+          { id: "channel-twin", similarity: 0.99 },
+          { id: "channel-douyin", similarity: 0.94 },
+          { id: "channel-tiktokshop", similarity: 0.93 }
+        ]
+      : [{ id: "tactic-longer", similarity: 0.96 }, { id: "tactic-other", similarity: 0.95 }]
+  );
+  // Kept: a shared word, an alias's word, one name inside the other, a similarity of 0.985 or more.
+  assert.deepEqual(
+    graph.concept("channel-tiktok", scope)!.similarConcepts.map((s) => s.concept.name),
+    ["TikTok Ads", "Musical.ly", "Douyin", "TikTokShop"]
+  );
+  // Two long names: meaning alone decides, as before.
+  assert.deepEqual(
+    graph.concept("tactic-long", scope)!.similarConcepts.map((s) => s.concept.name),
+    ["Post three times a day on Reels", "Answer every comment within the hour"]
+  );
+});
+
 // A merge must never show a scope what only hidden entries say (the review's reproduction): the
 // kept concept `tactic-secret` comes from eB and eD (collection B, hidden from the profile), with a
 // description, an attribute and a `contradicts` edge whose context only eB backs; `tactic-public`
