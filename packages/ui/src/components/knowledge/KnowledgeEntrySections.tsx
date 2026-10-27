@@ -75,7 +75,8 @@ export const EntryBody: React.FC<{ body: string }> = ({ body }) => {
         </div>
       ) : (
         <div data-knowledge-body="markdown" className={BODY_BOX}>
-          <ChatMarkdown text={preview.text} className="text-[13px] text-neutral-200" />
+          {/* Saved posts are third-party text: their remote images wait for a click (no tracking pixel fires on open). */}
+          <ChatMarkdown text={preview.text} remoteImages="click" className="text-[13px] text-neutral-200" />
           {preview.rest > 0 && (
             <button
               type="button"

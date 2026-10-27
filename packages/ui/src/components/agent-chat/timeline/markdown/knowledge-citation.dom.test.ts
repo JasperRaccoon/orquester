@@ -144,6 +144,15 @@ describe("the chat's URL filter", () => {
     assert.doesNotMatch(html, /src="orquester-knowledge:/);
     assert.doesNotMatch(html, /href="orquester-knowledge:/);
   });
+
+  it("shows a remote image at once in chat, and holds it behind a button with remoteImages=\"click\"", () => {
+    const text = "![chart](https://example.com/chart.png)";
+    assert.match(renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text })), /<img[^>]*src="https:\/\/example\.com\/chart\.png"/);
+    const held = renderToStaticMarkup(createElement(markdown.ChatMarkdown, { text, remoteImages: "click" }));
+    assert.doesNotMatch(held, /<img/);
+    assert.match(held, /<button[^>]*title="https:\/\/example\.com\/chart\.png"/);
+    assert.match(held, /Load image: chart \(example\.com\)/);
+  });
 });
 
 describe("knowledge citations in a message", () => {

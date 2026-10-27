@@ -241,6 +241,18 @@ describe("the entry panel", () => {
     assert.equal(buttonNamed("Plain text").getAttribute("aria-pressed"), "true");
   });
 
+  it("loads a remote image in the body only when clicked (no tracking pixel on open)", async () => {
+    await show(openDetail({ entry: entry({ id: OPEN, body: "Saved post.\n\n![pixel](https://tracker.example/p.gif)" }) }));
+    const body = doc().querySelector('[data-knowledge-body="markdown"]')!;
+    assert.equal(body.querySelector("img"), null, "nothing is requested on open");
+    const load = [...body.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Load image"));
+    assert.ok(load, "a click-to-load button stands in");
+    assert.equal(load.textContent, "Load image: pixel (tracker.example)");
+    assert.equal(load.getAttribute("title"), "https://tracker.example/p.gif");
+    await click(load);
+    assert.equal(body.querySelector("img")?.getAttribute("src"), "https://tracker.example/p.gif");
+  });
+
   it("cuts a long body's Markdown until asked for the rest", async () => {
     const long = Array.from({ length: 3000 }, (_, i) => `Paragraph ${i} with some words in it.`).join("\n\n");
     await show(openDetail({ entry: entry({ id: OPEN, body: long }) }));
