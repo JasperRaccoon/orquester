@@ -314,7 +314,7 @@ Graph view search box, and the panel's "More like this". Props between component
 - Search p95 < 300 ms (existing perf test), including filters, MMR and facets.
 - Entry detail (similar + duplicates) p95 < 100 ms.
 - Facets p95 < 100 ms.
-- Similarity graph ≤ 2 s cold at 1,000 entries; cached afterwards.
+- Similarity graph ≤ 2 s cold at 1,000 entries on an idle host; cached afterwards. The perf test also times the bare pairwise dot products in the same run and allows 2.5× that floor, so a busy host does not fail it while an algorithmic regression still does.
 
 ## Testing
 
