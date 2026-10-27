@@ -89,7 +89,13 @@ import {
 } from "./profile-launch.ts";
 import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
 import { launchHomeKey } from "../../session-tools/index.ts";
-import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
+import {
+  CLAUDE_OPTION_IDS,
+  findModel,
+  hasKnownCapabilities,
+  resolveEffortLevel,
+  selectionStringOption
+} from "./models.ts";
 import {
   ClaudeNormalizer,
   extractExitPlanModePlan,
@@ -2658,7 +2664,7 @@ export class ClaudeSession {
     } else if (
       requestedEffort !== undefined &&
       effort === undefined &&
-      model !== undefined
+      hasKnownCapabilities(model)
     ) {
       this.emit([
         this.normalizer.warning(

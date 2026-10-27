@@ -20,8 +20,10 @@ import {
 import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
 import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
+  FALLBACK_CLAUDE_MODELS,
   meetsMinimumClaudeVersion,
   parseClaudeVersion,
+  resolveBooleanOption,
   resolveEffortLevel,
   toProviderModels
 } from "./models.ts";
@@ -352,6 +354,15 @@ describe("claude models and the version gate", () => {
     assert.ok(!ids.includes("fastMode"));
     const haiku = MODELS.find((entry) => entry.slug === "haiku")!;
     assert.equal(haiku.capabilities, null);
+  });
+
+  it("passes the effort level through for a fallback alias with unknown capabilities", () => {
+    const opus = FALLBACK_CLAUDE_MODELS.find((entry) => entry.slug === "opus")!;
+    assert.equal(resolveEffortLevel({ model: "opus", options: [{ id: "effort", value: "high" }] }, opus), "high");
+    assert.equal(
+      resolveBooleanOption({ model: "opus", options: [{ id: "thinking", value: true }] }, opus, "thinking"),
+      true
+    );
   });
 
   it("drops an effort level the selected model does not support", () => {
