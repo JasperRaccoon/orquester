@@ -68,7 +68,7 @@ export function DeviceScreenshotThumb({ link, name }: { link: DeviceToolReferenc
   const [open, setOpen] = React.useState(false);
   const { leaseId, screenshotId } = link;
   const url = React.useMemo(
-    () => (api && leaseId && screenshotId ? api.deviceMediaUrl(deviceRoutes.screenshot(leaseId, screenshotId)) : null),
+    () => (api && leaseId && screenshotId ? api.deviceImageUrl(deviceRoutes.screenshot(leaseId, screenshotId)) : null),
     [api, leaseId, screenshotId]
   );
   React.useEffect(() => setFailed(false), [url]);

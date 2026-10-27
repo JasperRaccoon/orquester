@@ -25,7 +25,7 @@ import {
   type ChatRef
 } from "./fleet.logic";
 import { DeviceGlyph, StatusPill, TONE_TEXT, platformText } from "./parts";
-import { useDeviceThumbnail } from "./use-device-thumbnail";
+import { useDeviceThumbnail, type DeviceThumbnailRequest } from "./use-device-thumbnail";
 import type { ThumbnailDeps } from "./thumbnail-poller";
 
 export interface LeaseCardProps {
@@ -35,8 +35,8 @@ export interface LeaseCardProps {
   sharers: number;
   chat: ChatRef;
   lastAction: DeviceActionEntry | null;
-  /** The thumbnail's authenticated URL, or null (nothing to show, or a transport without media URLs). */
-  thumbnailUrl: string | null;
+  /** The thumbnail's URL and auth headers, or null (nothing to show, or a transport without them). */
+  thumbnail: DeviceThumbnailRequest | null;
   /** Why there is no thumbnail URL although the lease is live (a unix-socket connection). */
   thumbnailUnavailable?: string | null;
   now: number;
@@ -48,13 +48,14 @@ export interface LeaseCardProps {
 
 const Thumbnail: React.FC<{
   lease: DeviceLeaseSummary;
-  url: string | null;
+  request: DeviceThumbnailRequest | null;
   unavailable: string | null;
   container: Element | null;
   onVisible?: (leaseId: string) => void;
   deps?: ThumbnailDeps;
-}> = ({ lease, url, unavailable, container, onVisible, deps }) => {
-  const thumb = useDeviceThumbnail(url, container, deps);
+}> = ({ lease, request, unavailable, container, onVisible, deps }) => {
+  const thumb = useDeviceThumbnail(request, container, deps);
+  const url = request?.url ?? null;
   const note = leaseStateNote(lease);
   const formFactor = leaseFormFactor(lease);
   const visibleRef = React.useRef(false);
@@ -111,7 +112,7 @@ const Thumbnail: React.FC<{
   );
 };
 
-export const LeaseCard: React.FC<LeaseCardProps> = ({ lease, host, sharers, chat, lastAction, thumbnailUrl, thumbnailUnavailable = null, now, onVisible, thumbnailDeps }) => {
+export const LeaseCard: React.FC<LeaseCardProps> = ({ lease, host, sharers, chat, lastAction, thumbnail, thumbnailUnavailable = null, now, onVisible, thumbnailDeps }) => {
   const [element, setElement] = React.useState<HTMLLIElement | null>(null);
   const cost = leaseCostShare(lease, host, sharers, now);
   const name = lease.name || lease.profile || "Device";
@@ -138,7 +139,7 @@ export const LeaseCard: React.FC<LeaseCardProps> = ({ lease, host, sharers, chat
           open ? "cursor-pointer" : "cursor-default"
         )}
       >
-        <Thumbnail lease={lease} url={thumbnailUrl} unavailable={thumbnailUnavailable} container={element} onVisible={onVisible} deps={thumbnailDeps} />
+        <Thumbnail lease={lease} request={thumbnail} unavailable={thumbnailUnavailable} container={element} onVisible={onVisible} deps={thumbnailDeps} />
       </button>
 
       <div className="flex min-w-0 flex-1 flex-col gap-1.5 border-l border-neutral-800/70 p-3 md:border-l-0 md:border-t">

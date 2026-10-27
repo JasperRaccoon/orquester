@@ -97,7 +97,11 @@ export class ServeSimH264Session implements DeviceVideoSession {
     const demuxer = new AvccDemuxer();
     let seedPending = false;
     try {
-      const response = await this.deps.fetch(this.options.url, { signal: attempt.signal, cache: "no-store" });
+      const response = await this.deps.fetch(this.options.url, {
+        ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
+        signal: attempt.signal,
+        cache: "no-store"
+      });
       if (!attempt.current()) {
         await response.body?.cancel().catch(() => {});
         return;

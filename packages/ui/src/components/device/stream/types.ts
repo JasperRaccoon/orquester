@@ -119,8 +119,10 @@ export function resolveDeps(overrides: Partial<StreamDeps> = {}): StreamDeps {
 
 /** Options every video session takes. */
 export interface VideoSessionOptions extends DeviceStreamCallbacks {
-  /** Full URL; the caller's API client has already added the auth token. */
+  /** Full URL, without credentials (`ApiClient.deviceHttpRequest`). */
   readonly url: string;
+  /** Sent with every request: the transport's auth headers (`ApiClient.deviceHttpRequest`). */
+  readonly headers?: Readonly<Record<string, string>>;
   readonly canvas: HTMLCanvasElement;
   /** Silence after the last frame before the state turns `stalled` (default 2 s). */
   readonly stallMs?: number;

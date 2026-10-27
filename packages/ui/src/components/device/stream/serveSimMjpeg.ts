@@ -62,7 +62,11 @@ export class ServeSimMjpegSession implements DeviceVideoSession {
 
   private async run(attempt: StreamAttempt): Promise<void> {
     try {
-      const response = await this.deps.fetch(this.options.url, { signal: attempt.signal, cache: "no-store" });
+      const response = await this.deps.fetch(this.options.url, {
+        ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
+        signal: attempt.signal,
+        cache: "no-store"
+      });
       if (!attempt.current()) {
         await response.body?.cancel().catch(() => {});
         return;

@@ -25,8 +25,10 @@ import { serveSimStreamUrl, useDeviceStream, withQueryParams, type DeviceStreamH
 const FULL: BrowserStreamCaps = { webCodecs: true, h264Baseline: true, h264High: true };
 const NONE: BrowserStreamCaps = { webCodecs: false, h264Baseline: false, h264High: false };
 const EMU_WS = "ws://daemon.test/ws-device/local/vendor/serve-emu/ws?device=emulator-5600&frame-meta=1&token=t";
-const SHOT = "http://daemon.test/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?device=emulator-5600&token=t";
-const AVCC = "http://daemon.test/api/devices/hosts/mac/hub/vendor/serve-sim/helper/UDID/stream.avcc?token=t";
+const SHOT = "http://daemon.test/api/devices/hosts/local/hub/vendor/serve-emu/api/screenshot?device=emulator-5600";
+const AVCC = "http://daemon.test/api/devices/hosts/mac/hub/vendor/serve-sim/helper/UDID/stream.avcc";
+/** The fetched URLs' auth: a header, never `?token=` (the WebSocket URLs keep theirs). */
+const AUTH = { Authorization: "Bearer t" };
 const SIM_WS = "ws://daemon.test/ws-device/mac/vendor/serve-sim/helper/ws?device=UDID&token=t";
 
 let dom: JSDOM;
@@ -151,15 +153,15 @@ describe("useDeviceStream", () => {
 
   it("falls back to screenshots plus an input-only socket when the browser can't decode H.264", async () => {
     const ws = fakeWebSocketClass();
-    const requests: Array<[string, string | undefined]> = [];
+    const requests: Array<[string, string | undefined, string | null]> = [];
     const fetch = (async (url: string, init?: RequestInit) => {
-      requests.push([url, init?.method]);
+      requests.push([url, init?.method, new Headers(init?.headers).get("authorization")]);
       return new Response(new Blob([Uint8Array.of(1)]));
     }) as unknown as typeof globalThis.fetch;
     const bitmaps = fakeImageBitmaps();
     render({
       platform: "android",
-      urls: { video: EMU_WS, screenshot: SHOT },
+      urls: { video: EMU_WS, screenshot: SHOT, headers: AUTH },
       enabled: true,
       browserCaps: NONE,
       deps: testDeps({ WebSocket: ws.WebSocket, fetch, createImageBitmap: bitmaps.createImageBitmap })
@@ -167,7 +169,7 @@ describe("useDeviceStream", () => {
     assert.equal(handle.transport, "screenshots");
     assert.equal(ws.instances[0]!.url, "ws://daemon.test/ws-device/local/vendor/serve-emu/ws?device=emulator-5600&token=t&video=0");
     await act(() => settle());
-    assert.deepEqual(requests, [[SHOT, "POST"]]);
+    assert.deepEqual(requests, [[SHOT, "POST", "Bearer t"]]);
     assert.equal(handle.state, "live");
     act(() => ws.instances[0]!.serverOpen());
     assert.equal(handle.sendButton("home"), true);
@@ -188,7 +190,7 @@ describe("useDeviceStream", () => {
     const warnings: string[] = [];
     render({
       platform: "ios",
-      urls: { video: AVCC, input: SIM_WS },
+      urls: { video: AVCC, input: SIM_WS, headers: AUTH },
       enabled: true,
       browserCaps: FULL,
       hostCaps: { h264: true },
@@ -204,6 +206,7 @@ describe("useDeviceStream", () => {
     assert.equal(handle.transport, "serve-sim-h264");
     await act(() => settle());
     assert.equal(http.requests[0]!.url, AVCC);
+    assert.equal(new Headers(http.requests[0]!.init?.headers).get("authorization"), "Bearer t");
     await act(async () => {
       http.requests[0]!.push(encodeAvccEnvelope(4, Uint8Array.of(0xff, 0xd8, 0xff, 0xd9)));
       await settle();
@@ -215,6 +218,7 @@ describe("useDeviceStream", () => {
     await act(() => settle());
     assert.equal(handle.transport, "serve-sim-mjpeg");
     assert.equal(http.requests.at(-1)!.url, serveSimStreamUrl(AVCC, "stream.mjpeg"));
+    assert.equal(new Headers(http.requests.at(-1)!.init?.headers).get("authorization"), "Bearer t", "the MJPEG fallback keeps the header");
     assert.match(warnings.join("\n"), /Switching to MJPEG/);
     assert.equal(ws.instances.length, 2, "the input socket is reopened with the new session");
 

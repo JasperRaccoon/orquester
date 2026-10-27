@@ -30,7 +30,7 @@ import type { ActionLogRow } from "./action-log.logic";
 import { gestureSummary } from "./action-log.logic";
 import {
   controllerPill,
-  deviceFoldUrl,
+  deviceFoldRequest,
   deviceKeyOf,
   deviceStreamUrls,
   hostStreamCaps,
@@ -138,7 +138,12 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
   }, [restarting]);
   const viewport = React.useRef<DeviceViewportHandle>(null);
   const streamUrls = React.useMemo(
-    () => ({ video: urls?.video ?? "", ...(urls?.input ? { input: urls.input } : {}), ...(urls?.screenshot ? { screenshot: urls.screenshot } : {}) }),
+    () => ({
+      video: urls?.video ?? "",
+      ...(urls?.input ? { input: urls.input } : {}),
+      ...(urls?.screenshot ? { screenshot: urls.screenshot } : {}),
+      headers: urls?.headers ?? {}
+    }),
     [urls]
   );
   // iOS: H.264 (and with it the 3D view) only where the host says its encoder works (physical Macs).
@@ -370,24 +375,27 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
   // --- Fold (Android foldables) -------------------------------------------------------------
   const profile = DEVICE_PROFILES.find((entry) => entry.id === lease.profile);
   const foldable = lease.platform === "android" && profile?.formFactor === "foldable";
-  const foldUrl = api && foldable ? deviceFoldUrl(api, lease) : null;
+  const foldTarget = React.useMemo(
+    () => (api && foldable ? deviceFoldRequest(api, lease) : null),
+    [api, foldable, lease.hostId, lease.stream?.kind, lease.stream?.deviceParam]
+  );
   const [fold, setFold] = React.useState<AndroidFoldState | null>(null);
   const [foldPending, setFoldPending] = React.useState(false);
   const [foldError, setFoldError] = React.useState<string | null>(null);
   React.useEffect(() => {
-    if (!foldUrl || !props.visible) return;
+    if (!foldTarget || !props.visible) return;
     const abort = new AbortController();
-    requestAndroidFold(foldUrl, undefined, abort.signal).then(setFold, (err) => {
+    requestAndroidFold(foldTarget, undefined, abort.signal).then(setFold, (err) => {
       if (!abort.signal.aborted) setFoldError(errorText(err));
     });
     return () => abort.abort();
-  }, [foldUrl, props.visible]);
+  }, [foldTarget, props.visible]);
   const changeFold = (posture: "closed" | "opened") => {
-    if (!foldUrl) return;
+    if (!foldTarget) return;
     noteInput();
     setFoldPending(true);
     setFoldError(null);
-    requestAndroidFold(foldUrl, posture)
+    requestAndroidFold(foldTarget, posture)
       .then((state) => {
         setFold(state);
         logLocalDeviceAction(lease.id, posture === "closed" ? "Folded the device" : "Unfolded the device");
@@ -423,7 +431,7 @@ export function DeviceLiveView(props: DeviceLiveViewProps): React.ReactElement {
             fold: {
               posture: fold?.posture ?? null,
               pending: foldPending,
-              enabled: Boolean(foldUrl) && (fold?.supported ?? true),
+              enabled: Boolean(foldTarget) && (fold?.supported ?? true),
               error: foldError,
               onChange: changeFold
             }

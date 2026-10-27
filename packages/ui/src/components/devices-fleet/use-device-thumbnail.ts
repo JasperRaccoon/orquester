@@ -19,11 +19,17 @@ export interface DeviceThumbnail extends ThumbnailSnapshot {
   onScreen: boolean;
 }
 
+/** What a card polls: the URL (no credentials in it) and the transport's auth headers. */
+export interface DeviceThumbnailRequest {
+  url: string;
+  headers: Readonly<Record<string, string>>;
+}
+
 /**
- * Poll `url` about once a second while `element` is on screen and the page is visible. Without
+ * Poll `request` about once a second while `element` is on screen and the page is visible. Without
  * IntersectionObserver (old browsers, jsdom) the card counts as on screen.
  */
-export function useDeviceThumbnail(url: string | null, element: Element | null, deps?: ThumbnailDeps): DeviceThumbnail {
+export function useDeviceThumbnail(request: DeviceThumbnailRequest | null, element: Element | null, deps?: ThumbnailDeps): DeviceThumbnail {
   const [snapshot, setSnapshot] = useState<ThumbnailSnapshot>(OFF_SNAPSHOT);
   const [onScreen, setOnScreen] = useState(false);
   const pollerRef = useRef<ThumbnailPoller | null>(null);
@@ -43,9 +49,12 @@ export function useDeviceThumbnail(url: string | null, element: Element | null, 
     };
   }, []);
 
+  const url = request?.url ?? null;
+  const headers = request?.headers;
   useEffect(() => {
-    pollerRef.current?.setUrl(url);
-  }, [url]);
+    // The poller ignores an equal URL and equal headers, so a re-render's fresh object is free.
+    pollerRef.current?.setUrl(url, headers);
+  }, [url, headers]);
 
   useEffect(() => {
     if (!element) return;

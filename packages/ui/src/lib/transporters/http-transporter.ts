@@ -48,13 +48,14 @@ export class HttpTransporter implements Transporter {
     this.client = options.httpClient ?? new FetchHttpClient();
   }
 
+  /** `Authorization: Bearer <credential>` when there is one; `{}` otherwise. */
+  authHeaders(): Record<string, string> {
+    return this.credential ? { Authorization: `Bearer ${this.credential}` } : {};
+  }
+
   async request<T = unknown>(req: TransportRequest): Promise<TransportResponse<T>> {
     const url = `${this.baseUrl}${req.path}${buildQueryString(req.query)}`;
-    const headers: Record<string, string> = { ...req.headers };
-
-    if (this.credential) {
-      headers.Authorization = `Bearer ${this.credential}`;
-    }
+    const headers: Record<string, string> = { ...req.headers, ...this.authHeaders() };
 
     let body: string | BinaryBody | undefined;
     if (req.binaryBody !== undefined) {
@@ -99,10 +100,7 @@ export class HttpTransporter implements Transporter {
       throw new Error("This transport cannot fetch binary content.");
     }
     const url = `${this.baseUrl}${req.path}${buildQueryString(req.query)}`;
-    const headers: Record<string, string> = { ...req.headers };
-    if (this.credential) {
-      headers.Authorization = `Bearer ${this.credential}`;
-    }
+    const headers: Record<string, string> = { ...req.headers, ...this.authHeaders() };
     const response = await this.client.sendBytes({ url, method: req.method, headers, signal: req.signal });
     const data = response.ok ? await response.bytes() : new ArrayBuffer(0);
     return { status: response.status, ok: response.ok, data, headers: response.headers };
@@ -110,10 +108,7 @@ export class HttpTransporter implements Transporter {
 
   openStream(path: string, handlers: StreamHandlers): StreamHandle {
     const url = `${this.baseUrl}${path}`;
-    const headers: Record<string, string> = {};
-    if (this.credential) {
-      headers.Authorization = `Bearer ${this.credential}`;
-    }
+    const headers = this.authHeaders();
 
     // Desktop injects a Node client that streams over IPC; using it here keeps
     // the remote event bus / output stream off the browser `fetch` so it isn't

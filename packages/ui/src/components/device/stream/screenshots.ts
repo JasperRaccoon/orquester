@@ -70,6 +70,7 @@ export class ScreenshotPollSession implements DeviceVideoSession {
       try {
         const response = await this.deps.fetch(this.options.url, {
           method: this.options.method ?? "POST",
+          ...(this.options.headers ? { headers: { ...this.options.headers } } : {}),
           signal: attempt.signal,
           cache: "no-store"
         });

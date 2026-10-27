@@ -45,7 +45,7 @@ const api = {
   async deviceLeaseActions(leaseId: string) {
     return { leaseId, actions: fleet.actions[leaseId] ?? [] };
   },
-  deviceMediaUrl: (path: string) => `harness:${path}`,
+  deviceHttpRequest: (path: string) => ({ url: `harness:${path}`, headers: { Authorization: "Bearer t" } }),
   async setDeviceHostDraining(hostId: string) {
     return { host: state.hosts.find((host) => host.id === hostId)! };
   },

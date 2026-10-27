@@ -12,6 +12,7 @@ import {
 
 interface Pending {
   url: string;
+  headers: Record<string, string>;
   signal: AbortSignal;
   resolve: (response: { ok: boolean; status: number; blob: () => Promise<Blob> }) => void;
   reject: (error: unknown) => void;
@@ -28,7 +29,7 @@ function harness() {
   const deps: ThumbnailDeps = {
     fetch: (url, init) =>
       new Promise((resolve, reject) => {
-        fetches.push({ url, signal: init.signal, resolve: resolve as Pending["resolve"], reject });
+        fetches.push({ url, headers: init.headers, signal: init.signal, resolve: resolve as Pending["resolve"], reject });
         init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       }),
     setTimeout: (callback, ms) => {
@@ -188,6 +189,21 @@ describe("thumbnail poller", () => {
     assert.equal(h.timers.size, 0);
     h.poller.setOnScreen(true);
     assert.equal(h.fetches.length, 4, "a disposed poller stays quiet");
+  });
+
+  it("sends the auth headers with every request; new headers start over, equal ones do not", async () => {
+    const h = harness();
+    h.poller.setUrl("http://d/shot?device=x", { Authorization: "Bearer one" });
+    h.poller.setOnScreen(true);
+    assert.deepEqual(h.fetches[0]!.headers, { Authorization: "Bearer one" });
+    assert.ok(!h.fetches[0]!.url.includes("token="));
+    await h.answer(0);
+    h.poller.setUrl("http://d/shot?device=x", { Authorization: "Bearer one" });
+    assert.equal(h.fetches.length, 1, "the same URL and headers (a re-render) change nothing");
+    h.poller.setUrl("http://d/shot?device=x", { Authorization: "Bearer two" });
+    assert.equal(h.fetches.length, 2, "a new credential starts over");
+    assert.deepEqual(h.fetches[1]!.headers, { Authorization: "Bearer two" });
+    h.poller.dispose();
   });
 
   it("an empty answer keeps polling without replacing the frame", async () => {

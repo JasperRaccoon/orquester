@@ -14,24 +14,26 @@ it("reads the hub's fold answer and refuses anything else", () => {
 
 it("GETs the posture and POSTs a change as {posture} to the proxy URL; a refusal reads as the hub's message", async () => {
   const saved = globalThis.fetch;
-  const seen: { url: string; method: string; body: unknown; type: string | null }[] = [];
+  const seen: { url: string; method: string; body: unknown; type: string | null; auth: string | null }[] = [];
   let answer: { status: number; body: unknown } = { status: 200, body: { ok: true, fold: { supported: true, posture: "closed", hingeAngle: 0 } } };
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
-    seen.push({ url, method: init.method ?? "GET", body: init.body ?? null, type: new Headers(init.headers).get("content-type") });
+    seen.push({ url, method: init.method ?? "GET", body: init.body ?? null, type: new Headers(init.headers).get("content-type"), auth: new Headers(init.headers).get("authorization") });
     return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
-    const url = "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/fold?token=t&device=emulator-5554";
-    assert.deepEqual(await requestAndroidFold(url), { supported: true, posture: "closed", hingeAngle: 0 });
-    assert.deepEqual(await requestAndroidFold(url, "closed"), { supported: true, posture: "closed", hingeAngle: 0 });
+    const url = "http://d.test/api/devices/hosts/local/hub/vendor/serve-emu/api/fold?device=emulator-5554";
+    const target = { url, headers: { Authorization: "Bearer t" } };
+    assert.deepEqual(await requestAndroidFold(target), { supported: true, posture: "closed", hingeAngle: 0 });
+    assert.deepEqual(await requestAndroidFold(target, "closed"), { supported: true, posture: "closed", hingeAngle: 0 });
+    // The bearer rides as a header on both: never as `?token=` in the URL.
     assert.deepEqual(seen, [
-      { url, method: "GET", body: null, type: null },
-      { url, method: "POST", body: JSON.stringify({ posture: "closed" }), type: "application/json" }
+      { url, method: "GET", body: null, type: null, auth: "Bearer t" },
+      { url, method: "POST", body: JSON.stringify({ posture: "closed" }), type: "application/json", auth: "Bearer t" }
     ]);
     answer = { status: 404, body: { code: "DEVICE_NOT_LEASED", message: "That device is not leased on this host." } };
-    await assert.rejects(requestAndroidFold(url, "opened"), /not leased/);
+    await assert.rejects(requestAndroidFold(target, "opened"), /not leased/);
     answer = { status: 200, body: { ok: true } };
-    await assert.rejects(requestAndroidFold(url), /unexpected shape/);
+    await assert.rejects(requestAndroidFold(target), /unexpected shape/);
   } finally {
     globalThis.fetch = saved;
   }

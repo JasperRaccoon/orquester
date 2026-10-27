@@ -12,7 +12,7 @@ import {
   testDeps
 } from "./testing/fakes.ts";
 
-const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.avcc?token=t";
+const URL = "http://hub.test/vendor/serve-sim/helper/UDID/stream.avcc";
 // serve-sim's fallback-encoder description (no VUI), from T3 Code's avcConfig fixtures.
 const description = Uint8Array.from([
   1, 100, 0, 51, 255, 225, 0, 12, 39, 100, 0, 51, 172, 86, 128, 76, 1, 73, 230, 164, 1, 0, 4, 40, 238, 60, 176
@@ -36,6 +36,7 @@ function setup(decoderOptions: Parameters<typeof fakeVideoDecoderClass>[0] = { s
   const frames: string[] = [];
   const session = new ServeSimH264Session({
     url: URL,
+    headers: { Authorization: "Bearer t" },
     canvas,
     deps: testDeps({
       fetch: http.fetch,
@@ -64,6 +65,8 @@ describe("ServeSimH264Session", () => {
     const t = setup();
     await settle();
     assert.equal(t.request().url, URL);
+    // The bearer rides as a header, never as `?token=` in the fetched URL.
+    assert.equal(new Headers(t.request().init?.headers).get("authorization"), "Bearer t");
     const bytes = stream(
       encodeAvccEnvelope(4, seed),
       encodeAvccEnvelope(1, description),

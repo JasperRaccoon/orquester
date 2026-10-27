@@ -25,6 +25,7 @@ import { LeaseCard } from "./LeaseCard";
 import { PoolHeader } from "./PoolHeader";
 import { chatRef, costSharers, countFleetLeases, groupFleet, lastAction, poolView, thumbnailPath } from "./fleet.logic";
 import type { ThumbnailDeps } from "./thumbnail-poller";
+import type { DeviceThumbnailRequest } from "./use-device-thumbnail";
 
 /** How often uptimes, costs and "ago" times move. */
 const CLOCK_MS = 15_000;
@@ -34,14 +35,14 @@ export interface DevicesFleetViewProps {
   thumbnailDeps?: ThumbnailDeps;
 }
 
-type ThumbnailApi = Pick<ApiClient, "deviceMediaUrl">;
+type ThumbnailApi = Pick<ApiClient, "deviceHttpRequest">;
 
-/** The thumbnail URL of a lease, or why there is none although it streams. */
-function thumbnailOf(api: ThumbnailApi | null, lease: DeviceLeaseSummary): { url: string | null; unavailable: string | null } {
+/** What a lease's thumbnail polls (its URL and auth headers), or why there is none although it streams. */
+function thumbnailOf(api: ThumbnailApi | null, lease: DeviceLeaseSummary): { request: DeviceThumbnailRequest | null; unavailable: string | null } {
   const path = thumbnailPath(lease);
-  if (path === null) return { url: null, unavailable: null };
-  const url = api ? api.deviceMediaUrl(path) : null;
-  return url ? { url, unavailable: null } : { url: null, unavailable: "Thumbnails need a server connection" };
+  if (path === null) return { request: null, unavailable: null };
+  const request = api ? api.deviceHttpRequest(path) : null;
+  return request ? { request, unavailable: null } : { request: null, unavailable: "Thumbnails need a server connection" };
 }
 
 const EmptyFleet: React.FC<{ onOpenSettings: () => void }> = ({ onOpenSettings }) => (
@@ -152,7 +153,7 @@ export const DevicesFleetView: React.FC<DevicesFleetViewProps> = ({ thumbnailDep
                         sharers={sharers}
                         chat={chatRef(lease.threadId, sessions, agents)}
                         lastAction={lastAction(actions[lease.id])}
-                        thumbnailUrl={thumb.url}
+                        thumbnail={thumb.request}
                         thumbnailUnavailable={thumb.unavailable}
                         now={now}
                         onVisible={onVisible}
