@@ -10,7 +10,12 @@ export type DeviceModelId =
   | "ipad-pro-13-m5"
   | "ipad-air"
   | "ipad-a16"
-  | "iphone-duo";
+  | "iphone-duo"
+  | "galaxy-s26"
+  | "galaxy-s26-plus"
+  | "galaxy-s26-ultra"
+  | "galaxy-z-fold8"
+  | "galaxy-z-flip8";
 
 export interface DeviceModelSource {
   readonly id: DeviceModelId;
@@ -47,9 +52,22 @@ const MODEL_NAMES: ReadonlyArray<readonly [RegExp, DeviceModelId]> = [
   [/^iPad \(A16\)$/i, "ipad-a16"],
 ];
 
+/**
+ * Emulator display names and Orquester AVD profile names (`orq-galaxy-s26`, also without the
+ * prefix), matched whole and case-insensitively. Other Android devices, Pixels included, get the
+ * procedural body. The foldables carry a hinge rig (see foldModelScene.ts).
+ */
+const ANDROID_MODEL_NAMES: ReadonlyArray<readonly [RegExp, DeviceModelId]> = [
+  [/^(Galaxy S26|(orq-)?galaxy-s26)$/i, "galaxy-s26"],
+  [/^(Galaxy S26\+|(orq-)?galaxy-s26-plus)$/i, "galaxy-s26-plus"],
+  [/^(Galaxy S26 Ultra|(orq-)?galaxy-s26-ultra)$/i, "galaxy-s26-ultra"],
+  [/^(Galaxy Z Fold8|(orq-)?galaxy-z-fold8)$/i, "galaxy-z-fold8"],
+  [/^(Galaxy Z Flip8|(orq-)?galaxy-z-flip8)$/i, "galaxy-z-flip8"],
+];
+
 export function resolveDeviceModelId(platform: DevicePlatform, name: string): DeviceModelId | null {
-  if (platform !== "ios") return null;
-  return MODEL_NAMES.find(([pattern]) => pattern.test(name))?.[1] ?? null;
+  const names = platform === "ios" ? MODEL_NAMES : ANDROID_MODEL_NAMES;
+  return names.find(([pattern]) => pattern.test(name))?.[1] ?? null;
 }
 
 /** Each request owns its result. A cancelled or superseded parse must still release its resources. */
