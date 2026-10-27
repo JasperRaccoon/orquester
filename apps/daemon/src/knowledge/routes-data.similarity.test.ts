@@ -43,7 +43,9 @@ async function harness(t: TestContext, options: { index?: boolean } = {}) {
   const logger = silentLogger();
   const store = await KnowledgeStore.open({ appdir, logger });
   const graph = new KnowledgeGraph({ entries: store, logger });
-  const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(new FakeEmbedder()), indexDir: knowledgeIndexDir(appdir), logger });
+  // `index: false` is a runtime without a model: the real vector index then has nothing to embed with.
+  const embedder = options.index === false ? null : new FakeEmbedder();
+  const search = new KnowledgeSearch({ store, graph, embedders: new FakeEmbedderSource(embedder), indexDir: knowledgeIndexDir(appdir), logger });
   const index = new FakeVectorIndex();
   if (options.index !== false) {
     (search as unknown as { similarityIndex: () => KnowledgeVectorIndex }).similarityIndex = () => index;
@@ -246,7 +248,7 @@ test("save: each saved entry lists visible near-duplicates outside the same save
   assert.ok(!asUser.results[0]!.similar!.some((s) => s.entryId === billing), "closest three only");
 });
 
-test("before the vector index is wired: no meaning or duplicates (concepts and author still apply); save similar is []", async (t) => {
+test("without an embedding model: no meaning or duplicates (concepts and author still apply); save similar is []", async (t) => {
   const h = await harness(t, { index: false });
   const { alt } = await seed(h);
   const detail = ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(alt) }));
