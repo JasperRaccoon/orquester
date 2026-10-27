@@ -472,7 +472,13 @@ export class KnowledgeService {
     const opening = this.opening;
     if (!opening) return null;
     const scope = knowledgeScope({ kind: "all" }, opening.store.listCollections().map((collection) => collection.id));
-    const found = findContradictions({ graph: opening.graph, scope, pairChecks: opening.linking.pairChecks, accept: () => true });
+    const found = findContradictions({
+      graph: opening.graph,
+      scope,
+      pairChecks: opening.linking.pairChecks,
+      accept: () => true,
+      entryMeta: (id) => opening.store.getMeta(id)
+    });
     return [...found.keys()].sort().join("\n");
   }
 
