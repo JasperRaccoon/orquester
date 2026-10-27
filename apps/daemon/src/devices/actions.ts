@@ -458,6 +458,19 @@ export function staleHolder(error: unknown, lease: StoredDeviceLease): string | 
   return holder === agentDeviceSession(lease.threadId, lease.hostId, lease.deviceId) ? null : holder;
 }
 
+/**
+ * agent-device's Android guard after input: the session's app (from its last `open <app>`) is not in
+ * front any more — the launcher, Settings or System UI is. The input WAS sent (agent-device checks
+ * after it runs), so this is not a failure: the agent drives the whole device. A permission dialog
+ * over the app is a real stop and stays an error.
+ */
+export function leftSessionApp(error: unknown): { expected: string; foreground: string } | null {
+  if (!(error instanceof AgentDeviceError) || error.cliCode !== "COMMAND_FAILED" || !error.details) return null;
+  const { expectedPackage, foregroundPackage, permissionDialog } = error.details;
+  if (typeof expectedPackage !== "string" || typeof foregroundPackage !== "string" || permissionDialog === true) return null;
+  return { expected: expectedPackage, foreground: foregroundPackage };
+}
+
 function appIdOf(data: Record<string, unknown>): string | null {
   for (const key of ["appId", "bundleId", "appBundleId", "package", "packageName"]) {
     const value = data[key];
@@ -627,7 +640,23 @@ export function createDeviceActionExecutor(deps: DeviceActionExecutorDeps): Devi
       if (input.action === "close_app") state.refs = {};
       return {};
     }
-    const data = await call(ctx, plan.command, plan.args, signal, { ...(plan.timeoutMs !== undefined ? { timeoutMs: plan.timeoutMs } : {}), ...(plan.stdin !== undefined ? { stdin: plan.stdin } : {}) });
+    let data: Record<string, unknown>;
+    try {
+      data = await call(ctx, plan.command, plan.args, signal, { ...(plan.timeoutMs !== undefined ? { timeoutMs: plan.timeoutMs } : {}), ...(plan.stdin !== undefined ? { stdin: plan.stdin } : {}) });
+    } catch (error) {
+      const left = leftSessionApp(error);
+      if (!left) throw error;
+      const outcome: DeviceActionOutcome = { summary: defaultSummary(input) };
+      const point = input.action === "tap" || input.action === "long_press" ? resolvePoint(input, {}, state.refs, upp) : undefined;
+      if (point) outcome.point = point;
+      // The session still names the app it opened, so every later input would trip the same guard:
+      // end it, and the next action reopens one on whatever is in front.
+      await raw(ctx, "close", [], signal, { timeoutMs: END_TIMEOUT_MS }).catch(() => undefined);
+      state.sessionOpen = false;
+      state.refs = {};
+      outcome.text = `Done. ${left.foreground} is in front now (not ${left.expected}). Refs expired: take a snapshot.`;
+      return outcome;
+    }
     const outcome: DeviceActionOutcome = { summary: defaultSummary(input, data) };
     switch (input.action) {
       case "tap":

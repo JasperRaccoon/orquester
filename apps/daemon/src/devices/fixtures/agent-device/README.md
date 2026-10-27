@@ -21,3 +21,4 @@ redacts its text. Nothing else was edited.
 | `err-ref.json` | `click @e999` (a ref outside the frame) |
 | `err-cmd.json` | `bogus` (INVALID_ARGS) |
 | `home3.json` | `home` after `close <app>` ended the session (SESSION_NOT_FOUND) |
+| `click-escaped.json` | `click 360 600` on the launcher after `open com.android.settings` + `home` (COMMAND_FAILED: the session's app is not in front; the tap was sent). Captured 2026-10-27 in the devices e2e run, same emulator image; paths rewritten as above. |
