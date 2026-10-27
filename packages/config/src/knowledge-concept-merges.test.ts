@@ -76,6 +76,23 @@ test("LLM checks and a merge's source read tolerantly and survive a rewrite", ()
   assert.equal(parseKnowledgeConceptMergesFile({ version: 1, merges: [{ ...raw.merges[0], source: 5 }] }).merges[0]!.source, undefined);
 });
 
+test("a check's input version reads when valid; an older check has none and is written as it was; a bad one costs only the field", () => {
+  const check = { a: "tactic-a", b: "tactic-b", type: "Tactic", nameA: "A", nameB: "B", same: false, keep: "tactic-a", reason: "r", similarity: 0.97, checkedAt: "t" };
+  const file = parseKnowledgeConceptMergesFile({ version: 1, checks: [check, { ...check, b: "tactic-c", inputVersion: 2 }, { ...check, b: "tactic-d", inputVersion: "x" }] });
+  assert.equal(file.unreadable.checks.length, 0);
+  assert.deepEqual(
+    file.checks.map((c) => [c.b, c.inputVersion]),
+    [
+      ["tactic-b", undefined],
+      ["tactic-c", 2],
+      ["tactic-d", undefined]
+    ]
+  );
+  const written = JSON.parse(serializeKnowledgeConceptMergesFile(file)) as { checks: unknown[] };
+  assert.deepEqual(written.checks[0], check);
+  assert.deepEqual(written.checks[1], { ...check, b: "tactic-c", inputVersion: 2 });
+});
+
 test("a file without checks is written exactly as before; a non-list `checks` is kept as an unknown key", () => {
   const plain = parseKnowledgeConceptMergesFile({ version: 1, merges: [], rejected: [] });
   assert.equal("checks" in JSON.parse(serializeKnowledgeConceptMergesFile(plain)), false);

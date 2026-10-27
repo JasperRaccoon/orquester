@@ -31,6 +31,13 @@
  * does not parse. Results persist in `pair-checks.json` (`knowledgePairChecksPath`, tolerant, see
  * `@orquester/config` `knowledge-linking.ts`), keyed by the pair, with both content hashes: a check
  * of an entry edited since is stale (`all`/`get` leave it out) until the pair is checked again.
+ *
+ * The task shows each entry's title and body; a body longer than {@link PAIR_CHECK_BODY_CHARS} as
+ * its opening and the passages most relevant to the other entry ({@link pairCheckExcerpt},
+ * `search/excerpts.ts`), the pair's focus concepts' first. A check records its input version
+ * ({@link PAIR_CHECK_INPUT_VERSION}); a `consistent` or `unrelated` one asked on version 1 (each
+ * body's opening only) of a body that version cut is a candidate again, once
+ * ({@link pairCheckNeedsRecheck}).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -48,6 +55,7 @@ import {
 import type { KnowledgeConceptRef, KnowledgeEntry } from "@orquester/api";
 import type { KnowledgePairCheck, KnowledgePairChecksPort, KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
 import { isSurveyEntry } from "../search/contradictions.ts";
+import { relevantExcerpt, type Excerpt } from "../search/excerpts.ts";
 import { normalizeAuthor } from "../search/filters.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import { INBOX_DIR, OUTBOX_DIR, readEnvelope, type InboxTaskEnvelope } from "./inbox.ts";
@@ -55,8 +63,22 @@ import { INBOX_DIR, OUTBOX_DIR, readEnvelope, type InboxTaskEnvelope } from "./i
 export const PAIR_CHECK_STEP = "pair-check";
 /** New pairs checked per linking run at most. */
 export const PAIR_CHECK_MAX_PER_RUN = 30;
-/** Each entry's body is trimmed to this many characters in the task. */
-export const PAIR_CHECK_BODY_CHARS = 2_000;
+/**
+ * Each entry's body is shown whole up to this many characters; a longer one as its opening and the
+ * passages most relevant to the other entry within it ({@link pairCheckInput}). About 750 tokens
+ * per body at most (the opening-only 2,000 of input version 1 was about 500).
+ */
+export const PAIR_CHECK_BODY_CHARS = 3_000;
+/**
+ * The version of a check's input, recorded with it (`inputVersion`). 1 (absent): each body's first
+ * {@link PAIR_CHECK_V1_BODY_CHARS} characters. 2: relevant excerpts ({@link pairCheckInput}).
+ */
+export const PAIR_CHECK_INPUT_VERSION = 2;
+/** What input version 1 showed of a body: a longer one was cut there (see {@link pairCheckNeedsRecheck}). */
+export const PAIR_CHECK_V1_BODY_CHARS = 2_000;
+/** Weights of the other entry's concept names when choosing excerpts: a concept both are linked to counts double. */
+const OTHER_CONCEPT_WEIGHT = 1;
+const SHARED_CONCEPT_WEIGHT = 2;
 /** Concept types whose sharing makes two close entries worth checking (claims that can disagree). */
 export const PAIR_CHECK_TYPES: ReadonlySet<string> = new Set(["Tactic", "Rule", "Guideline", "Metric", "Result"]);
 const NOTE_MAX = 500;
@@ -80,6 +102,7 @@ export function pairCheckItemKey(pair: PairKey): string {
 
 export const PAIR_CHECK_SYSTEM = [
   "You compare two saved knowledge entries and decide whether they contradict each other.",
+  "A long entry is shown as excerpts: its opening and the passages chosen for their relevance to the other entry, in document order, with […] where text is left out. A disagreement in any excerpt counts, wherever it is; text that is left out is no sign that the entries agree.",
   'Answer with ONLY a JSON object, no prose and no other keys: {"verdict": "contradicts" | "consistent" | "unrelated", "note": "<one sentence>"}.',
   "- contradicts: they make claims, numbers or recommendations about the same thing that cannot both hold. The note names the point of disagreement.",
   "- consistent: they are about the same thing and agree with or complement each other. The note says what they share.",
@@ -246,14 +269,33 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
     return () => this.listeners.delete(listener);
   }
 
-  /** Whether this pair was checked at exactly these content hashes. */
-  isChecked(pair: PairKey): boolean {
+  /**
+   * Whether this pair was checked at exactly these content hashes, on an input that still counts:
+   * given `longBody` (whether an entry's body is longer than {@link PAIR_CHECK_V1_BODY_CHARS}), a
+   * check {@link pairCheckNeedsRecheck} reads as not checked, so the pair is a candidate again.
+   */
+  isChecked(pair: PairKey, longBody?: (entryId: string) => boolean): boolean {
     const record = this.byKey.get(pairKey(pair.a, pair.b));
-    return record !== undefined && record.hashA === pair.hashA && record.hashB === pair.hashB;
+    if (record === undefined || record.hashA !== pair.hashA || record.hashB !== pair.hashB) return false;
+    return longBody === undefined || !pairCheckNeedsRecheck(record, longBody);
   }
 
-  /** Records a check (replacing the pair's earlier one) and persists it. */
-  async record(pair: PairKey, verdict: PairCheckVerdict, note: string | null): Promise<void> {
+  /**
+   * The entries of current checks that may need asking again ({@link pairCheckNeedsRecheck}): those
+   * of `consistent` or `unrelated` checks on input version 1. Their bodies' lengths decide.
+   */
+  recheckEntryIds(): string[] {
+    const out = new Set<string>();
+    for (const record of this.byKey.values()) {
+      if (!this.current(record) || !pairCheckNeedsRecheck(record, () => true)) continue;
+      out.add(record.a);
+      out.add(record.b);
+    }
+    return [...out].sort();
+  }
+
+  /** Records a check on input `inputVersion` (replacing the pair's earlier one) and persists it. */
+  async record(pair: PairKey, verdict: PairCheckVerdict, note: string | null, inputVersion: number = PAIR_CHECK_INPUT_VERSION): Promise<void> {
     const [a, b] = sorted(pair.a, pair.b);
     const swapped = a !== pair.a;
     const key = `${a} ${b}`;
@@ -266,7 +308,8 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
       hashB: swapped ? pair.hashA : pair.hashB,
       verdict,
       note,
-      checkedAt: this.options.now().toISOString()
+      checkedAt: this.options.now().toISOString(),
+      inputVersion
     };
     this.byKey.set(key, record);
     this.file = { ...this.file, checks: [...this.byKey.values()] };
@@ -320,6 +363,20 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
   }
 }
 
+/**
+ * Whether a check is asked again: a `consistent` or `unrelated` verdict on input version 1 where
+ * either body was longer than that version showed ({@link PAIR_CHECK_V1_BODY_CHARS}), so the check
+ * saw a cut text. A `contradicts` verdict stands (the next check of the pair replaces it anyway).
+ * A check asked again is recorded on the current version: it is asked again once.
+ */
+export function pairCheckNeedsRecheck(
+  record: Pick<KnowledgePairCheckRecord, "a" | "b" | "verdict" | "inputVersion">,
+  longBody: (entryId: string) => boolean
+): boolean {
+  if ((record.inputVersion ?? 1) >= 2 || record.verdict === "contradicts") return false;
+  return longBody(record.a) || longBody(record.b);
+}
+
 function toCheck(record: KnowledgePairCheckRecord): KnowledgePairCheck {
   return { a: record.a, b: record.b, verdict: record.verdict, note: record.note, checkedAt: record.checkedAt };
 }
@@ -342,6 +399,12 @@ export interface PairCandidate extends PairKey {
   /** Cosine of the two entry vectors; null when either has none (a `contradicts` edge alone). */
   similarity: number | null;
   reason: PairCandidateReason;
+  /**
+   * The concepts the pair was found through, for `contradicts`, `negation` and `alternatives` (the
+   * two ends of the edge, the concept and its negation, the two values): their passages are shown
+   * first ({@link pairCheckInput}). Empty for `shared`.
+   */
+  focus: KnowledgeConceptRef[];
 }
 
 /** What candidates read of an entry beside its concepts (`KnowledgeEntryMeta`). */
@@ -496,13 +559,19 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     return dot;
   };
   const found = new Map<string, PairCandidate>();
-  const consider = (x: string, y: string, sim: number | null, reason: PairCandidateReason): void => {
+  const consider = (x: string, y: string, sim: number | null, reason: PairCandidateReason, focus: readonly KnowledgeConceptRef[] = []): void => {
     if (x === y) return;
     const [a, b] = sorted(x, y);
     const key = `${a} ${b}`;
     const seen = found.get(key);
     if (seen) {
-      if (PAIR_CHECK_REASONS.indexOf(reason) < PAIR_CHECK_REASONS.indexOf(seen.reason)) seen.reason = reason;
+      const was = PAIR_CHECK_REASONS.indexOf(seen.reason);
+      const now = PAIR_CHECK_REASONS.indexOf(reason);
+      if (now < was) {
+        seen.reason = reason;
+        seen.focus = [];
+      }
+      if (now <= was) for (const concept of focus) if (!seen.focus.some((c) => c.id === concept.id)) seen.focus.push(concept);
       return;
     }
     const hashA = options.hashOf(a);
@@ -510,7 +579,11 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     if (!hashA || !hashB) return;
     const pair = { a, b, hashA, hashB };
     if (options.isChecked(pair)) return;
-    found.set(key, { ...pair, similarity: sim, reason });
+    found.set(key, { ...pair, similarity: sim, reason, focus: [...focus] });
+  };
+  const refOf = (entryId: string, conceptId: string): KnowledgeConceptRef[] => {
+    const concept = conceptsOf.get(entryId)?.find((c) => c.id === conceptId);
+    return concept ? [concept] : [];
   };
 
   // Joined by a `contradicts` edge between their concepts (any similarity); an entry linked to both
@@ -520,7 +593,9 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
       for (const a of entries) {
         if (due()) await breathe();
         if (conceptIdsOf.get(a)!.has(other)) continue;
-        for (const b of entriesOfConcept.get(other) ?? []) if (a !== b && !conceptIdsOf.get(b)!.has(concept)) consider(a, b, similarity(a, b), "contradicts");
+        for (const b of entriesOfConcept.get(other) ?? []) {
+          if (a !== b && !conceptIdsOf.get(b)!.has(concept)) consider(a, b, similarity(a, b), "contradicts", [...refOf(a, concept), ...refOf(b, other)]);
+        }
       }
     }
     await breathe();
@@ -601,23 +676,23 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
       // Sharing a claim-like concept.
       if (ca.some((c) => PAIR_CHECK_TYPES.has(c.type) && idsB.has(c.id))) consider(a, b, sim, "shared");
       // A concept and its negation ("One trial per IP" / "Never one trial per IP").
-      let negated = false;
+      let negated: KnowledgeConceptRef[] | null = null;
       for (const x of ca) {
         if (negated || !NEGATION_TYPES.has(x.type) || idsB.has(x.id)) continue;
         for (const y of cb) {
           if (y.type === x.type && !idsA.has(y.id) && negatedWords(negation(x), negation(y))) {
-            negated = true;
+            negated = [x, y];
             break;
           }
         }
       }
-      if (negated) consider(a, b, sim, "negation");
+      if (negated) consider(a, b, sim, "negation", negated);
       // Different values for the same decision: nearest neighbours by different authors whose
       // Tools or Tactics (not shared) name the same subject ("Outlook/Proton email for TikTok
       // account" / "Create TikTok accounts with a fresh Gmail"; "ISP proxy with socks5" / "Using
       // residential, mobile or ISP proxies").
       if (!(isNearest(i, j) || isNearest(j, i)) || sameAuthor(a, b)) continue;
-      let alternative = false;
+      let alternative: KnowledgeConceptRef[] | null = null;
       for (const x of ca) {
         if (alternative || !ALTERNATIVE_TYPES.has(x.type) || idsB.has(x.id)) continue;
         const wx = words(x);
@@ -627,12 +702,12 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
           let shared = 0;
           for (const w of words(y)) if (wx.has(w)) shared += 1;
           if (shared >= PAIR_CHECK_ALTERNATIVE_WORDS) {
-            alternative = true;
+            alternative = [x, y];
             break;
           }
         }
       }
-      if (alternative) consider(a, b, sim, "alternatives");
+      if (alternative) consider(a, b, sim, "alternatives", alternative);
     }
   }
   const tier = (c: PairCandidate): number => PAIR_CHECK_REASONS.indexOf(c.reason);
@@ -650,26 +725,63 @@ export interface PairCheckEnvelope extends InboxTaskEnvelope {
   pair: PairKey;
 }
 
-function trimBody(body: string): string {
-  const text = body.trim();
-  return text.length <= PAIR_CHECK_BODY_CHARS ? text : `${text.slice(0, PAIR_CHECK_BODY_CHARS).trimEnd()} […]`;
+/** One side of a pair check: the entry and the concepts it is linked to (absent: none known). */
+export interface PairCheckSide extends Pick<KnowledgeEntry, "id" | "title" | "body"> {
+  concepts?: readonly KnowledgeConceptRef[];
 }
 
-/** The task's user message: both entries' titles and (trimmed) bodies. */
-export function pairCheckInput(a: Pick<KnowledgeEntry, "id" | "title" | "body">, b: Pick<KnowledgeEntry, "id" | "title" | "body">): string {
-  const block = (label: string, entry: Pick<KnowledgeEntry, "id" | "title" | "body">): string =>
-    [`${label} (${entry.id})`, "=".repeat(label.length + entry.id.length + 3), `Title: ${entry.title.replace(/\s+/g, " ").trim()}`, "", trimBody(entry.body)].join("\n");
-  return `${block("ENTRY A", a)}\n\n${block("ENTRY B", b)}\n\nDo these two entries contradict each other? Answer with the JSON object only.`;
+/**
+ * What a check shows of one entry's body: whole up to {@link PAIR_CHECK_BODY_CHARS}, else its
+ * opening and the passages most relevant to the other entry (`search/excerpts.ts`): the other's
+ * words, its concept names (those both are linked to count double), and first the `focus` concepts.
+ */
+export function pairCheckExcerpt(self: PairCheckSide, other: PairCheckSide, focus: readonly KnowledgeConceptRef[] = []): Excerpt {
+  const own = new Set((self.concepts ?? []).map((concept) => concept.id));
+  return relevantExcerpt(
+    self.body,
+    {
+      text: `${other.title}\n${other.body}`,
+      concepts: (other.concepts ?? []).map((concept) => ({ name: concept.name, weight: own.has(concept.id) ? SHARED_CONCEPT_WEIGHT : OTHER_CONCEPT_WEIGHT })),
+      focus: focus.map((concept) => concept.name)
+    },
+    PAIR_CHECK_BODY_CHARS
+  );
 }
 
-/** Writes one pair-check task (temp + rename, as myKG does); answers its id. */
+/**
+ * The task's user message (input version {@link PAIR_CHECK_INPUT_VERSION}): both entries' titles
+ * and bodies, a long body as excerpts chosen for relevance to the other ({@link pairCheckExcerpt}).
+ */
+export function pairCheckInput(a: PairCheckSide, b: PairCheckSide, focus: readonly KnowledgeConceptRef[] = []): string {
+  const block = (label: string, entry: PairCheckSide, other: PairCheckSide): string => {
+    const excerpt = pairCheckExcerpt(entry, other, focus);
+    const heading = `${label} (${entry.id})`;
+    return [
+      heading,
+      "=".repeat(heading.length),
+      `Title: ${entry.title.replace(/\s+/g, " ").trim()}`,
+      ...(excerpt.excerpted ? [`(Excerpts chosen for relevance to the other entry: the opening and the passages that bear on it, of a ${excerpt.chars.toLocaleString("en-US")}-character text.)`] : []),
+      "",
+      excerpt.text
+    ].join("\n");
+  };
+  return `${block("ENTRY A", a, b)}\n\n${block("ENTRY B", b, a)}\n\nDo these two entries contradict each other? A disagreement in any excerpt counts. Answer with the JSON object only.`;
+}
+
+/** Writes one pair-check task (temp + rename, as myKG does), with its input version; answers its id. */
 export async function writePairCheckTask(
   inboxDir: string,
   pair: PairKey,
-  entries: { a: Pick<KnowledgeEntry, "id" | "title" | "body">; b: Pick<KnowledgeEntry, "id" | "title" | "body"> },
+  entries: { a: PairCheckSide; b: PairCheckSide; focus?: readonly KnowledgeConceptRef[] },
   now: Date
 ): Promise<string> {
-  return writeInboxTask(inboxDir, PAIR_CHECK_STEP, { label: `${PAIR_CHECK_STEP} ${pair.a} ${pair.b}`, system: PAIR_CHECK_SYSTEM, user: pairCheckInput(entries.a, entries.b) }, { pair }, now);
+  return writeInboxTask(
+    inboxDir,
+    PAIR_CHECK_STEP,
+    { label: `${PAIR_CHECK_STEP} ${pair.a} ${pair.b}`, system: PAIR_CHECK_SYSTEM, user: pairCheckInput(entries.a, entries.b, entries.focus ?? []) },
+    { pair, inputVersion: PAIR_CHECK_INPUT_VERSION },
+    now
+  );
 }
 
 /** A {@link KnowledgeRoundTaskSource}'s task file: myKG's envelope plus the source's payload. */
@@ -787,7 +899,10 @@ export async function harvestPairCheckInbox(
       }
       const parsed = envelope?.step === PAIR_CHECK_STEP && typeof answer.answer === "string" ? parsePairCheckAnswer(answer.answer) : null;
       if (pair && parsed) {
-        await checks.record(pair, parsed.verdict, parsed.note);
+        // A task an older build wrote (no input version) was asked on version 1.
+        const version = raw.inputVersion;
+        const inputVersion = typeof version === "number" && Number.isInteger(version) && version >= 1 ? version : 1;
+        await checks.record(pair, parsed.verdict, parsed.note, inputVersion);
         count += 1;
       }
     } catch {
