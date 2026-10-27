@@ -11,6 +11,7 @@ import type { StoredBox, StoredDeviceLease } from "@orquester/config";
 import { isProcessAlive, waitForExit } from "../../android/procs.ts";
 import { boxAgentDeviceConfigPath } from "./agent-device-config.ts";
 import { BoxAndroidHost, type BoxAndroidHostDeps } from "./android-host.ts";
+import { androidRentalSpec } from "./android-remote.ts";
 import { createFakeLinuxBox, type FakeLinuxBox, type FakeLinuxBoxOptions } from "./android-testing.ts";
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -256,5 +257,26 @@ describe("BoxAndroidHost (fake Linux box)", { concurrency: false }, () => {
     const teardown = host.teardown();
     await assert.rejects(host.boot({ leaseId: "late", profile, fresh: true }, signal()), /being turned off/);
     await teardown;
+  });
+});
+
+describe("androidRentalSpec", () => {
+  it("takes the Linux hosts' own time limit (pool.androidLifetimeMinutes), not the Mac hosts'", () => {
+    const settings: DevicesSettings = structuredClone(DEFAULT_DEVICES_SETTINGS);
+    settings.ios.lifetimeMinutes = 600;
+    settings.pool.androidLifetimeMinutes = 90;
+    const spec = androidRentalSpec(settings);
+    assert.equal(spec.lifetimeMinutes, 90);
+    assert.equal(spec.size, "16vcpu");
+    settings.pool.provider = "hetzner";
+    settings.pool.androidSize = "ccx33";
+    assert.deepEqual(androidRentalSpec(settings, [{ id: "ccx33", label: "CCX33", vcpu: 8, ramGb: 32, diskGb: 240, gpu: null, hourlyUsd: 0.2, regions: [] }]), {
+      provider: "hetzner",
+      size: "ccx33",
+      sizeLabel: "CCX33",
+      image: null,
+      hourlyUsd: 0.2,
+      lifetimeMinutes: 90
+    });
   });
 });

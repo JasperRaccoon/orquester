@@ -249,12 +249,12 @@ export const DEFAULT_ANDROID_HOST_SIZE = "blacksmith-16vcpu-ubuntu-2404";
 /**
  * What renting one Linux device host means from Settings → Devices: `pool.provider` (default
  * Blacksmith), `pool.androidSize` (a Blacksmith runner label or size id; default
- * {@link DEFAULT_ANDROID_HOST_SIZE}), the device-host time limit (`ios.lifetimeMinutes`, the one
- * lifetime setting device hosts have), and its price.
+ * {@link DEFAULT_ANDROID_HOST_SIZE}), the Linux host time limit (`pool.androidLifetimeMinutes`;
+ * Mac hosts keep `ios.lifetimeMinutes`), and its price.
  */
 export function androidRentalSpec(settings: DevicesSettings, offers: readonly BoxSizeOffer[] = []): DeviceHostRentalSpec {
   const provider = settings.pool.provider ?? "blacksmith";
-  const lifetimeMinutes = settings.ios.lifetimeMinutes;
+  const lifetimeMinutes = settings.pool.androidLifetimeMinutes;
   const size = settings.pool.androidSize ?? (provider === "blacksmith" ? DEFAULT_ANDROID_HOST_SIZE : "");
   if (provider === "blacksmith") {
     for (const candidate of BLACKSMITH_LINUX_SIZES) {

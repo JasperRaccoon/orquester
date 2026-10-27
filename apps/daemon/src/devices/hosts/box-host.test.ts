@@ -266,6 +266,10 @@ describe("box device host factory", () => {
       lifetimeMinutes: 240,
       needsApproval: false
     });
+    // Each platform's hosts keep their own time limit.
+    settings = { ...settings, ios: { ...settings.ios, lifetimeMinutes: 120 }, pool: { ...settings.pool, androidLifetimeMinutes: 60 } };
+    assert.equal(factory.provisionQuote!("ios")!.lifetimeMinutes, 120);
+    assert.equal(factory.provisionQuote!("android")!.lifetimeMinutes, 60);
     boxes.configured = false;
     assert.equal(factory.provisionQuote!("ios"), null);
   });

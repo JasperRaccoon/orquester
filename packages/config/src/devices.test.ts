@@ -212,6 +212,28 @@ test("idle teardown: the pool's one setting; a legacy Mac idle teardown is adopt
   assert.equal(mergeDevicesSettings(defaultDevicesSettings(), { ios: { idleTeardownMinutes: 30 }, pool: { idleTeardownMinutes: 10 } }).pool.idleTeardownMinutes, 10);
 });
 
+test("Linux host lifetime: its own pool setting; a file without it keeps its Mac lifetime for Linux hosts", () => {
+  assert.equal(readDevicesSettings({}).pool.androidLifetimeMinutes, 240);
+  // Absent: the stored `ios.lifetimeMinutes` (the one device-host limit before) carries over, clamped like any.
+  assert.equal(readDevicesSettings({ ios: { lifetimeMinutes: 90 } }).pool.androidLifetimeMinutes, 90);
+  assert.equal(readDevicesSettings({ ios: { lifetimeMinutes: 5 } }).pool.androidLifetimeMinutes, 30);
+  assert.equal(readDevicesSettings({ ios: { lifetimeMinutes: "x" } }).pool.androidLifetimeMinutes, 240);
+  // Present: kept, independent of the Mac one; invalid falls back to the default alone.
+  const both = readDevicesSettings({ ios: { lifetimeMinutes: 90 }, pool: { androidLifetimeMinutes: 600, maxHosts: 3 } });
+  assert.equal(both.pool.androidLifetimeMinutes, 600);
+  assert.equal(both.ios.lifetimeMinutes, 90);
+  assert.equal(readDevicesSettings({ pool: { androidLifetimeMinutes: 99_999 } }).pool.androidLifetimeMinutes, 24 * 60);
+  const invalid = readDevicesSettings({ pool: { androidLifetimeMinutes: "x", maxHosts: 3, future: 1 } });
+  assert.equal(invalid.pool.androidLifetimeMinutes, 240);
+  assert.equal(invalid.pool.maxHosts, 3);
+  assert.equal((invalid.pool as unknown as Record<string, unknown>).future, 1);
+  // A patch of one never moves the other.
+  const merged = mergeDevicesSettings(defaultDevicesSettings(), { pool: { androidLifetimeMinutes: 120 } });
+  assert.equal(merged.pool.androidLifetimeMinutes, 120);
+  assert.equal(merged.ios.lifetimeMinutes, 240);
+  assert.equal(mergeDevicesSettings(merged, { ios: { lifetimeMinutes: 60 } }).pool.androidLifetimeMinutes, 120);
+});
+
 test("pool settings: the monthly cap defaults, clamps and falls back alone", () => {
   assert.equal(readDevicesSettings({}).pool.monthlyCapUsd, 100);
   assert.equal(readDevicesSettings({ pool: { monthlyCapUsd: -5 } }).pool.monthlyCapUsd, 0);

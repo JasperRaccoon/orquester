@@ -52,6 +52,7 @@ test("every patch the page builds is one the daemon accepts", () => {
   accepted({ agents: { enabled: false, followAgentDevices: false } });
   accepted({ leaseIdleMinutes: 30, maxLeasesPerChat: 2 });
   accepted({ pool: { placement: "pool-only", provider: nullableText("  "), androidSize: nullableText("ccx23"), iosSize: null } });
+  accepted({ pool: { androidLifetimeMinutes: 90 } });
   accepted({ pool: { maxHosts: 0, maxHourlyUsd: 12.5, idleTeardownMinutes: 10, capacityWaitSeconds: 60, rentWithoutAsking: true } });
   accepted({ pool: { minWarmHosts: { android: 1 } } });
 });

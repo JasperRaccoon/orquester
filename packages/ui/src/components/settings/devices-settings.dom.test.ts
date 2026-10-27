@@ -193,5 +193,12 @@ describe("DevicesSettings", () => {
     assert.ok(doc().querySelector("[data-devices-fleet]"));
     await click(button("Pool only")!);
     assert.deepEqual(calls, [["settings", { pool: { placement: "pool-only" } }]]);
+    // The Android (Linux) hosts' own time limit, apart from the Mac hosts' Lifetime.
+    const lifetime = doc().querySelector<HTMLInputElement>('input[aria-label="Android host lifetime in minutes"]')!;
+    assert.equal(lifetime.value, String(DEFAULT_DEVICES_SETTINGS.pool.androidLifetimeMinutes));
+    await type(lifetime, "10");
+    assert.match([...doc().querySelectorAll("[role=alert]")].map((el) => el.textContent).join("|"), /Between 30 and 1440/);
+    await type(lifetime, "90");
+    assert.deepEqual(calls.at(-1), ["settings", { pool: { androidLifetimeMinutes: 90 } }]);
   });
 });

@@ -563,7 +563,7 @@ const IosSection: React.FC<{ settings: DevicesSettingsValue; hosts: readonly Dev
               />
             )}
           </SettingRow>
-          <SettingRow label="Lifetime" description="A Mac host is destroyed at this age, devices or not.">
+          <SettingRow label="Lifetime" description="A Mac host is destroyed at this age, devices or not. Android hosts: Fleet → Android host lifetime.">
             <NumberField
               id="ios.lifetimeMinutes"
               label="Lifetime in minutes"
@@ -756,6 +756,17 @@ const FleetSection: React.FC<{ settings: DevicesSettingsValue; ctx: SaveContext 
               placeholder="provider default"
               ctx={ctx}
               patch={(value) => ({ pool: { androidSize: value } })}
+            />
+          </SettingRow>
+          <SettingRow label="Android host lifetime" description="A rented Linux host is destroyed at this age, devices or not.">
+            <NumberField
+              id="pool.androidLifetimeMinutes"
+              label="Android host lifetime in minutes"
+              suffix="min"
+              value={pool.androidLifetimeMinutes}
+              limits={L.lifetimeMinutes}
+              ctx={ctx}
+              patch={(value) => ({ pool: { androidLifetimeMinutes: value } })}
             />
           </SettingRow>
           <SettingRow label="iOS host size" description="macOS size; blank: the Mac host size above.">
