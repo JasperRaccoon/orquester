@@ -514,6 +514,8 @@ export class LocalAndroidHost implements DeviceHost {
         onProgress
       );
       await writeGoldenMarker(this.layout.avd, profile, revision);
+      // The profile's check reads "Ready" now, not "prepared on first use" (a first open makes it).
+      void this.refreshReadiness().catch(() => undefined);
     });
   }
 
