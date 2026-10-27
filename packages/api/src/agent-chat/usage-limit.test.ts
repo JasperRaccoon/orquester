@@ -140,3 +140,21 @@ test("a legacy row without a reason is read by its documented prefix", () => {
 test("no rows, no notice", () => {
   assert.equal(usageLimitNoticeOf([], []), null);
 });
+
+test("a provider's capacity failure is reported as an overloaded notice; a newer usage limit wins", () => {
+  clock = 0;
+  const start = at();
+  const overloaded = activity("runtime.error", { message: "Selected model is at capacity.", class: "provider_error", reason: "overloaded" });
+  const items: ThreadItem[] = [message("user"), overloaded];
+  assert.deepEqual(usageLimitNoticeOf(items, [turn("t1", "failed", start)]), {
+    activityId: overloaded.id,
+    turnId: "t1",
+    message: "Selected model is at capacity.",
+    at: overloaded.createdAt,
+    parked: false,
+    kind: "overloaded"
+  });
+  const limited = [...items, limitRow()];
+  assert.equal(usageLimitNoticeOf(limited, [turn("t1", "failed", start)])?.kind, undefined);
+  assert.equal(usageLimitNoticeOf([...items, message("user")], [turn("t1", "failed", start)]), null, "the user spoke after it");
+});

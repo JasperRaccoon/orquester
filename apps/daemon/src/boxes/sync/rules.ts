@@ -34,10 +34,12 @@ export type SyncRootKind = "account" | "prepared";
  * - `raw` — bytes as they are.
  * - `mcp-json` / `mcp-toml` — a JSON(C) / TOML config whose MCP env and header values and
  *   credential-named keys are blanked in the box copy and restored from the host on approval.
+ * - `codex-toml` — Codex's account `config.toml`: `mcp-toml`, but the project trust Codex adds
+ *   (`projects.<dir>.trust_level`) stays in the box: never collected, never written to the host.
  * - `claude-json` — Claude's `.claude.json`: only the MCP servers and per-project MCP/trust keys
  *   sync (the rest is the CLI's own state: onboarding, tips, costs, `oauthAccount`, `userID`).
  */
-export type SyncCodecId = "raw" | "mcp-json" | "mcp-toml" | "claude-json";
+export type SyncCodecId = "raw" | "mcp-json" | "mcp-toml" | "codex-toml" | "claude-json";
 
 export interface SyncRule {
   agent: SyncAgent;
@@ -191,7 +193,8 @@ const CLAUDE_PREPARED = rule("claude", "prepared", ["plugin", "plugins", "plugin
 /**
  * Codex `CODEX_HOME`. Not `sessions/` (transcripts), `archived_sessions/`, `history.jsonl`, the
  * state/log SQLite DBs, `version.json`, `models_cache.json`, `shell_snapshots/`. `skills/.system`
- * is Codex's bundled set, rewritten at every start.
+ * is Codex's bundled set, rewritten at every start. The project trust Codex adds to `config.toml`
+ * in a box stays there (`codex-toml`).
  */
 const CODEX_ACCOUNT = rule(
   "codex",
@@ -199,7 +202,7 @@ const CODEX_ACCOUNT = rule(
   ["config.toml", "hooks.json", "AGENTS.md", "AGENTS.override.md", "prompts", "skills", "rules", "plugins", ".personality_migration", ".sandbox_migration"],
   {
     exclude: (rel) => startsWithDir(rel, "skills/.system"),
-    codecs: { "config.toml": "mcp-toml" },
+    codecs: { "config.toml": "codex-toml" },
     // `plugins/` is Codex's own marketplace store: each box's Codex downloads the plugins
     // `config.toml` enables into `plugins/cache` itself. What turns one on is `config.toml`.
     hostOnly: (rel) => startsWithDir(rel, "plugins")

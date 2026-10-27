@@ -987,10 +987,12 @@ export interface ModelReroutedPayload {
  * Why a turn could not go on, when the adapter KNOWS (workflows spec §5.4): `usage_limit` — the
  * account's quota is exhausted (Claude's parked `rate_limit_event`, Codex `usageLimitExceeded` /
  * `rateLimitExceeded` / `sessionBudgetExceeded`, Grok `stopReason: "rate_limit"`); `auth` — the
- * account's login was refused. Absent = not known to be either. The workflow engine's account
- * failover reads this instead of matching message text.
+ * account's login was refused; `overloaded` — the provider had no capacity for the model right
+ * now (Codex `serverOverloaded`): not the account's fault, so never an account failure, but a
+ * chat stopped on it is retried shortly (`usage-limit.ts`). Absent = not known to be any. The
+ * workflow engine's account failover reads this instead of matching message text.
  */
-export type RuntimeFailureReason = "usage_limit" | "auth";
+export type RuntimeFailureReason = "usage_limit" | "auth" | "overloaded";
 
 export interface RuntimeWarningPayload {
   message: string;

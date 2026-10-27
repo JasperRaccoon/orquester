@@ -96,7 +96,8 @@ const USAGE_LIMIT_KEYS: ReadonlySet<string> = new Set([
   "resumeAt",
   "userCancelled",
   "message",
-  "action"
+  "action",
+  "kind"
 ]);
 
 const LIMIT_FAILOVER_KEYS: ReadonlySet<string> = new Set(["fromAccountId", "toAccountId", "at", "automatic"]);
@@ -115,6 +116,7 @@ function publicUsageLimit(record: ChatUsageLimitRecord): ChatUsageLimitState {
     resumeAt: record.resumeAt,
     ...(record.userCancelled === true ? { userCancelled: true as const } : {}),
     ...(record.message !== undefined ? { message: record.message } : {}),
+    ...(record.kind !== undefined ? { kind: record.kind } : {}),
     ...(record.action
       ? {
           action: {

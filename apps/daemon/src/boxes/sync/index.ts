@@ -4,7 +4,7 @@
  * | File | Role |
  * |---|---|
  * | `rules.ts` | Per-agent include/exclude lists, root kinds, the hard deny list, "executable" rules. |
- * | `codecs.ts` | Host file ↔ box copy: raw, MCP-secret-blanking JSON(C)/TOML, Claude's `.claude.json` subset. |
+ * | `codecs.ts` | Host file ↔ box copy: raw, MCP-secret-blanking JSON(C)/TOML, Codex's `config.toml` (trust stays in the box), Claude's `.claude.json` subset. |
  * | `host-fs.ts` | Host walks (links followed), cached view hashes, writes through links. |
  * | `box-fs.ts` | Box walks over `fs.*`, hashing with one `exec` per batch, file transfer. |
  * | `store.ts` | `config-changes.json` (change sets) and the per-box sync baselines. |
