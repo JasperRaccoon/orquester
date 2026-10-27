@@ -1,0 +1,40 @@
+{
+  "sims": [
+    {
+      "udid": "6F1C2E9A-3B7D-4E21-9C55-0A8B1D2E3F40",
+      "name": "orq-L1",
+      "state": "Booted",
+      "platform": "iOS",
+      "osVersion": "27.0",
+      "set": "default",
+      "managedDisabled": 173,
+      "managedTotal": 176,
+      "memory": { "processes": 71, "bytes": 966367641, "cpu": 3.4 },
+      "diskBytes": 1873264640
+    },
+    {
+      "udid": "0B9D7C1E-5A2F-4C83-8E14-77D3A9B2C6E1",
+      "name": "My iPhone",
+      "state": "Booted",
+      "platform": "iOS",
+      "osVersion": "26.5",
+      "set": "default",
+      "managedDisabled": 0,
+      "managedTotal": 176,
+      "memory": { "processes": 258, "bytes": 4294967296, "cpu": 12.1 },
+      "diskBytes": 4831838208
+    },
+    {
+      "udid": "A1B2C3D4-0000-4000-8000-000000000001",
+      "name": "orq-L2",
+      "state": "Booted",
+      "platform": "iOS",
+      "osVersion": "27.0",
+      "set": "default",
+      "statusError": "launchctl print timed out",
+      "managedTotal": 176,
+      "memoryError": "simulator A1B2C3D4-0000-4000-8000-000000000001 does not appear to be booted"
+    }
+  ],
+  "totalBytes": 5261334937
+}
