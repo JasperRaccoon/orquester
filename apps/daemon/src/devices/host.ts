@@ -111,6 +111,13 @@ export interface DeviceHost {
   ensureReady(signal: AbortSignal, onProgress: (progress: DeviceHostProgress) => void, actions?: readonly string[]): Promise<void>;
   /** The hub's loopback origin (`http://127.0.0.1:<port>`) the proxy targets; null while it is not running. */
   hubOrigin(): string | null;
+  /**
+   * The hub's session token (it runs with `--require-token`); the proxy adds it to every upstream
+   * request and strips any client-supplied one. Null when the hub needs none. Never sent to clients.
+   */
+  hubToken?(): string | null;
+  /** What the host's hub can stream for iOS: serve-sim H.264 fails in Apple VMs (no H.264 encoder). */
+  streamCapabilities?(): { iosH264: boolean };
   /** The agent-device config file pinned to this host's daemon (token inside, never returned); null while not running. */
   agentDeviceConfigPath(): string | null;
 
