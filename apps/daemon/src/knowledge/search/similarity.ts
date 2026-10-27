@@ -35,7 +35,9 @@ import type { KnowledgePairChecksPort, KnowledgeStorePort, KnowledgeVectorIndex,
 import { type WeightedEdge, communities } from "./communities.ts";
 import { type KnowledgeContradictionFound, findContradictions, pairKeyOf } from "./contradictions.ts";
 import { normalizeAuthor } from "./filters.ts";
+import type { KnowledgeClusterLabelsPort } from "./cluster-labels.ts";
 import type { KnowledgeGraph } from "./graph.ts";
+import { NEAR_COPY_MIN_RESEMBLANCE, resemblance, shingles } from "./near-copy.ts";
 import { tokenize } from "./text.ts";
 import { type KnowledgeScope, entryInScope, visibleCollections } from "./visibility.ts";
 
@@ -55,6 +57,16 @@ const TREE_CANDIDATES = 8;
 const YIELD_EVERY_MS = 40;
 /** Similarity graphs kept (per scope, k, limit, index generation, graph revision and node set). */
 const GRAPH_CACHE_SIZE = 8;
+/** Latest graphs kept for novelty and saves, one per scope and model (more scopes than the graph cache: they are read without drawing). */
+const LATEST_SIZE = 32;
+/**
+ * A scope whose latest graph was drawn in the background this recently is not drawn again in the
+ * background (its latest may have been evicted by other scopes) unless the vectors or the concept
+ * graph moved since: novelty and saves read null meanwhile.
+ */
+const BACKGROUND_REDRAW_MS = 5 * 60_000;
+/** Background draws remembered for {@link BACKGROUND_REDRAW_MS} (the least recent go first). */
+const BACKGROUND_DRAWS_MAX = 256;
 /**
  * How the graph's clusters and labels are made; part of the cache key, so a daemon never serves a
  * graph drawn by an older rule. Bump it whenever clustering or labelling changes.
@@ -99,6 +111,8 @@ const CONTRADICTIONS_SIMILAR_MAX = 3;
 const CLUSTER_CONCEPTS_MAX = 5;
 /** Concepts named in an entry's `novelty`. */
 const NOVELTY_CONCEPTS_MAX = 8;
+/** Entries whose shingles ({@link shingles}) are kept for the near-copy check. */
+const SHINGLES_CACHE_SIZE = 256;
 
 /** The most entries a concept can be linked to and still be distinctive, among `visible` entries. */
 export function distinctiveLimit(visible: number): number {
@@ -130,10 +144,14 @@ export interface KnowledgeSimilarityOptions {
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it (snippet, visible collections, link count, citation). */
   summary: (meta: KnowledgeEntryMeta, scope: KnowledgeScope) => KnowledgeEntrySummary;
+  /** An entry's body as indexed (the near-copy check of duplicates); null when unknown. */
+  body: (id: string) => string | null;
   /** Linking's LLM pair checks, read per call; absent or null: none. */
   pairChecks?: () => KnowledgePairChecksPort | null;
   /** Moves whenever the pair checks change (part of the graph's cache key); absent: never. */
   pairChecksRevision?: () => number;
+  /** Milliseconds now (background draws are spaced by it); default `Date.now`. */
+  now?: () => number;
 }
 
 interface Candidate {
@@ -173,6 +191,16 @@ interface GraphStructure {
   degree: Int32Array;
   edges: KnowledgeSimilarityEdge[];
   clusters: KnowledgeSimilarityCluster[];
+  /**
+   * Per cluster: the entries an LLM label was named from (`clusters[i].label` is that label), or
+   * null for a concept label. Checked again whenever the graph is served: a label never outlives
+   * its visibility ({@link KnowledgeSimilarity.clusterLabel}).
+   */
+  labelSources: (readonly string[] | null)[];
+  /** Per cluster: the concept label, shown instead of an LLM label one of whose sources is hidden. */
+  conceptLabels: (string | null)[];
+  /** Clusters drawn without an LLM label (member ids, most central first): asked for by the default unscoped draw. */
+  unnamed: string[][];
 }
 
 export function dot(a: Float32Array, b: Float32Array): number {
@@ -198,6 +226,9 @@ export function scopeKey(scope: KnowledgeScope): string {
   const sorted = (set: ReadonlySet<string> | null) => (set ? [...set].sort() : null);
   return JSON.stringify([sorted(scope.canSee), sorted(scope.filter), scope.unfiled, [...scope.known].sort()]);
 }
+
+/** Whether a scope lets every entry through: `all` visibility, no narrowing. */
+const unscoped = (scope: KnowledgeScope): boolean => scope.canSee === null && scope.filter === null && scope.unfiled;
 
 class UnionFind {
   private readonly parent: Int32Array;
@@ -247,6 +278,11 @@ export class KnowledgeSimilarity {
   private readonly knowledgeGraph: KnowledgeSimilarityOptions["graph"];
   private readonly index: () => KnowledgeVectorIndex | null;
   private readonly summary: KnowledgeSimilarityOptions["summary"];
+  private readonly body: KnowledgeSimilarityOptions["body"];
+  /** Entry id → its shingles, keyed by a hash of the body they were made from; least recently used first. */
+  private readonly shingleCache = new Map<string, { hash: string; shingles: Set<string> }>();
+  /** Similarity graphs drawn in the background (novelty, a save's cluster), by scope and model. */
+  private readonly drawing = new Map<string, Promise<void>>();
   private readonly pairChecks: () => KnowledgePairChecksPort | null;
   private readonly pairChecksRevision: () => number;
   /** Insertion order is least recently used first. */
@@ -256,15 +292,36 @@ export class KnowledgeSimilarity {
    * `cluster` read it without waiting for a new one); least recently used first.
    */
   private readonly latest = new Map<string, { seq: number; structure: GraphStructure }>();
+  /** Background draws by scope and model: when, and at which vectors and concept graph; least recent first. */
+  private readonly backgroundDraws = new Map<string, { at: number; generation: number; revision: number }>();
+  private readonly now: () => number;
   private seq = 0;
+  /** LLM topic names for clusters ({@link connectClusterLabels}); null: the concept labels only. */
+  private clusterNames: KnowledgeClusterLabelsPort | null = null;
 
   constructor(options: KnowledgeSimilarityOptions) {
     this.store = options.store;
     this.knowledgeGraph = options.graph;
     this.index = options.index;
     this.summary = options.summary;
+    this.body = options.body;
     this.pairChecks = options.pairChecks ?? (() => null);
     this.pairChecksRevision = options.pairChecksRevision ?? (() => 0);
+    this.now = options.now ?? Date.now;
+  }
+
+  /** Moves whenever an LLM cluster name is added (part of every cache over the graph's labels); null when none are connected. */
+  clusterLabelsRevision(): number | null {
+    return this.clusterNames?.revision() ?? null;
+  }
+
+  /**
+   * Clusters of 3+ entries take the LLM's topic name from `port` when it has one and the caller sees
+   * every entry it was named from (else their concept label, as without it); the unscoped default
+   * draw asks it for the ones it lacks (`cluster-labels.ts`). Null disconnects.
+   */
+  connectClusterLabels(port: KnowledgeClusterLabelsPort | null): void {
+    this.clusterNames = port;
   }
 
   /** The index with its model's thresholds, or null while embeddings are unavailable. */
@@ -289,8 +346,10 @@ export class KnowledgeSimilarity {
    * by the same author or handle, and up to 3 entries that contradict it ({@link findContradictions},
    * always kept among the 8, even below `good`); each with every reason that applies; ordered by
    * similarity plus the distinctive-concept bonus ({@link DISTINCTIVE_BONUS}; none last), shared
-   * concepts, then newest; at most 8. Duplicates: up to 3 at cosine ≥ `duplicate`. Only entries
-   * `scope` lets through; never the entry itself.
+   * concepts, then newest; at most 8. A candidate sharing a visible concept with it has the
+   * `concepts` reason whichever way it was found. Duplicates: up to 3 at cosine ≥ `duplicate` whose
+   * text is a near-copy of its own ({@link nearCopy}). Only entries `scope` lets through; never the
+   * entry itself.
    */
   forEntry(id: string, scope: KnowledgeScope): { similar: KnowledgeSimilarEntry[]; possibleDuplicates: KnowledgeSimilarEntry[] } {
     const meta = this.store.getMeta(id);
@@ -322,14 +381,11 @@ export class KnowledgeSimilarity {
     // (b) Shared concepts, and the distinctive ones among them.
     const ownConcepts = this.knowledgeGraph.conceptsOfEntry(id, scope);
     const related = this.knowledgeGraph.relatedEntries(id, scope, KNOWLEDGE_SIMILAR_MAX);
-    const distinctive = related.length > 0 ? this.distinctiveTest(scope) : () => false;
-    for (const { id: otherId, shared } of related) {
+    const distinctive = ownConcepts.length > 0 ? this.distinctiveTest(scope) : () => false;
+    for (const { id: otherId } of related) {
       if (otherId === id) continue;
       const otherMeta = this.visibleMeta(otherId, scope);
-      if (!otherMeta) continue;
-      const theirs = new Set(this.knowledgeGraph.conceptsOfEntry(otherId, scope).map((c) => c.id));
-      const common = ownConcepts.filter((c) => theirs.has(c.id));
-      candidate(otherMeta).concepts = { refs: common.slice(0, SHARED_CONCEPTS_NAMED), shared, distinctive: common.filter((c) => distinctive(c.id)) };
+      if (otherMeta) candidate(otherMeta);
     }
 
     // (c) The same author or handle, most recent first.
@@ -353,7 +409,8 @@ export class KnowledgeSimilarity {
         scope,
         pairChecks: this.pairChecks(),
         accept: (other) => (other === id ? entryInScope(meta, scope) : this.visibleMeta(other, scope) !== null),
-        entryId: id
+        entryId: id,
+        entryMeta: (other) => this.store.getMeta(other)
       }).values()
     ];
     if (contradicting.length > 0) {
@@ -365,6 +422,18 @@ export class KnowledgeSimilarity {
         })
         .sort((x, y) => y.checked - x.checked || y.similarity - x.similarity || newestFirst(x.meta, y.meta));
       for (const item of ranked.slice(0, CONTRADICTIONS_SIMILAR_MAX)) candidate(item.meta).contradiction = item.found;
+    }
+
+    // The concepts every candidate shares with it, however it was found (the distinctive ones named first).
+    if (ownConcepts.length > 0) {
+      for (const found of candidates.values()) {
+        const theirs = new Set(this.knowledgeGraph.conceptsOfEntry(found.meta.id, scope).map((c) => c.id));
+        const common = ownConcepts.filter((c) => theirs.has(c.id));
+        if (common.length === 0) continue;
+        const telling = common.filter((c) => distinctive(c.id));
+        const named = [...telling, ...common.filter((c) => !telling.includes(c))];
+        found.concepts = { refs: named.slice(0, SHARED_CONCEPTS_NAMED), shared: common.length, distinctive: telling };
+      }
     }
 
     // Every candidate's similarity, when both have vectors (it orders them even below `good`).
@@ -413,10 +482,36 @@ export class KnowledgeSimilarity {
     return {
       similar: listed.map(toWire),
       possibleDuplicates: neighbours
-        .filter((n) => n.similarity >= duplicate)
+        .filter((n) => n.similarity >= duplicate && this.nearCopy(id, n.meta.id))
         .slice(0, KNOWLEDGE_DUPLICATES_MAX)
         .map((n) => toWire(candidates.get(n.meta.id)!))
     };
+  }
+
+  /** Whether two entries' texts are near-copies ({@link NEAR_COPY_MIN_RESEMBLANCE}); never when either body is unknown. */
+  private nearCopy(a: string, b: string): boolean {
+    const x = this.shinglesOf(a);
+    const y = x ? this.shinglesOf(b) : null;
+    return x !== null && y !== null && resemblance(x, y) >= NEAR_COPY_MIN_RESEMBLANCE;
+  }
+
+  private shinglesOf(id: string): Set<string> | null {
+    // Keyed by the body actually read, not the entry's content hash: the two can disagree for a
+    // moment (an edit lands in one before the other), and shingles must match the text compared.
+    const body = this.store.getMeta(id) ? this.body(id) : null;
+    if (body === null) return null;
+    const hash = createHash("sha1").update(body, "utf8").digest("base64");
+    const cached = this.shingleCache.get(id);
+    if (cached && cached.hash === hash) {
+      this.shingleCache.delete(id); // most recently used last
+      this.shingleCache.set(id, cached);
+      return cached.shingles;
+    }
+    const made = { hash, shingles: shingles(body) };
+    this.shingleCache.delete(id);
+    this.shingleCache.set(id, made);
+    while (this.shingleCache.size > SHINGLES_CACHE_SIZE) this.shingleCache.delete(this.shingleCache.keys().next().value!);
+    return made.shingles;
   }
 
   private cosine(index: KnowledgeVectorIndex, own: Float32Array, other: string): number | null {
@@ -444,7 +539,9 @@ export class KnowledgeSimilarity {
   /**
    * What the entry adds: its concepts no other visible entry has (claims first, people and
    * organizations last, up to 8), and the cluster it sits in by the latest similarity graph drawn
-   * for `scope` (null when none yet: it never waits for one). Null while the entry has no vectors.
+   * for `scope` (any `k` and `limit`: the layer's, insights'). Null when none is drawn yet: it never
+   * waits for one, it starts drawing one in the background for the next read. Null while the entry
+   * has no vectors.
    */
   novelty(id: string, scope: KnowledgeScope): KnowledgeNovelty | null {
     const vectors = this.vectors();
@@ -462,25 +559,29 @@ export class KnowledgeSimilarity {
       .slice(0, NOVELTY_CONCEPTS_MAX)
       .map(({ concept }) => ({ ...concept }));
     const structure = this.latestStructure(scope, vectors.index);
-    return { newConcepts, cluster: structure ? clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()) : null };
+    if (!structure) this.drawInBackground(scope, vectors.index);
+    return { newConcepts, cluster: structure ? this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, new Set()), scope) : null };
   }
 
   /**
    * The cluster each of `entryIds` (entries one save just created) joins, by its nearest drawn
    * neighbours in the latest similarity graph for `scope` (entries of the same save aside); null
-   * when it has no vectors yet, no graph was drawn yet, or its neighbours are a singleton or none.
-   * Never waits: it reads what is already drawn.
+   * when it has no vectors yet, no graph was drawn yet (one is then drawn in the background), or its
+   * neighbours are a singleton or none. Never waits: it reads what is already drawn.
    */
   clustersForSaved(entryIds: readonly string[], scope: KnowledgeScope): Map<string, KnowledgeClusterRef | null> {
     const out = new Map<string, KnowledgeClusterRef | null>(entryIds.map((id) => [id, null]));
     const vectors = this.vectors();
     if (!vectors || entryIds.length === 0) return out;
     const structure = this.latestStructure(scope, vectors.index);
-    if (!structure) return out;
+    if (!structure) {
+      this.drawInBackground(scope, vectors.index);
+      return out;
+    }
     const exclude = new Set(entryIds);
     for (const id of entryIds) {
       const own = vectors.index.entryVector(id);
-      if (own) out.set(id, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, exclude));
+      if (own) out.set(id, this.clusterRef(structure, clusterOf(structure, id, own, vectors.index, vectors.thresholds.minimum, exclude), scope));
     }
     return out;
   }
@@ -490,13 +591,51 @@ export class KnowledgeSimilarity {
    * exists is still in scope (otherwise its labels could name what the caller no longer sees).
    */
   private latestStructure(scope: KnowledgeScope, index: KnowledgeVectorIndex): GraphStructure | null {
-    const found = this.latest.get(JSON.stringify([scopeKey(scope), index.modelId()]));
+    const key = JSON.stringify([scopeKey(scope), index.modelId()]);
+    const found = this.latest.get(key);
     if (!found) return null;
     for (const id of found.structure.ids) {
       const meta = this.store.getMeta(id);
-      if (meta && !entryInScope(meta, scope)) return null;
+      if (meta && !entryInScope(meta, scope)) {
+        // Stale, not evicted: a new one may be drawn in the background at once.
+        this.backgroundDraws.delete(key);
+        return null;
+      }
     }
     return found.structure;
+  }
+
+  /**
+   * Draw the default similarity graph for `scope` after the current turn of the event loop (so the
+   * read that asked returns first), once at a time per scope and model; what it draws becomes the
+   * latest graph novelty and saves read.
+   */
+  private drawInBackground(scope: KnowledgeScope, index: KnowledgeVectorIndex): void {
+    const key = JSON.stringify([scopeKey(scope), index.modelId()]);
+    if (this.drawing.has(key)) return;
+    // Bounded: a scope drawn lately is not drawn again (its latest graph may have made room for
+    // other scopes') until the vectors or the concept graph move, or a while has passed.
+    const at = this.now();
+    const generation = index.generation();
+    const revision = this.knowledgeGraph.revision();
+    const last = this.backgroundDraws.get(key);
+    if (last && at - last.at < BACKGROUND_REDRAW_MS && last.generation === generation && last.revision === revision) return;
+    this.backgroundDraws.delete(key);
+    this.backgroundDraws.set(key, { at, generation, revision });
+    while (this.backgroundDraws.size > BACKGROUND_DRAWS_MAX) this.backgroundDraws.delete(this.backgroundDraws.keys().next().value!);
+    const drawn = new Promise<void>((resolve) => setImmediate(resolve))
+      .then(() => this.graph({}, scope))
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .finally(() => this.drawing.delete(key));
+    this.drawing.set(key, drawn);
+  }
+
+  /** Resolves once the similarity graphs drawn in the background have been drawn (tests, shutdown). */
+  async idle(): Promise<void> {
+    while (this.drawing.size > 0) await Promise.all([...this.drawing.values()]);
   }
 
   private remember(scope: KnowledgeScope, index: KnowledgeVectorIndex, seq: number, structure: GraphStructure): void {
@@ -505,7 +644,7 @@ export class KnowledgeSimilarity {
     if (previous && previous.seq > seq) return;
     this.latest.delete(key);
     this.latest.set(key, { seq, structure });
-    while (this.latest.size > GRAPH_CACHE_SIZE) this.latest.delete(this.latest.keys().next().value!);
+    while (this.latest.size > LATEST_SIZE) this.latest.delete(this.latest.keys().next().value!);
   }
 
   // -------------------------------------------------------------------------
@@ -514,8 +653,9 @@ export class KnowledgeSimilarity {
 
   /**
    * For each of `entryIds` (entries one save just created) that has vectors: up to 3 entries
-   * `scope` lets through, not among `entryIds`, at cosine ≥ the model's `duplicate` threshold,
-   * closest first. Entries without vectors (not embedded within the save's wait) get `[]`.
+   * `scope` lets through, not among `entryIds`, at cosine ≥ the model's `duplicate` threshold whose
+   * text is a near-copy of its own ({@link nearCopy}), closest first. Entries without vectors (not
+   * embedded within the save's wait) get `[]`.
    */
   similarForSaved(entryIds: readonly string[], scope: KnowledgeScope): Map<string, KnowledgeSavedSimilar[]> {
     const out = new Map<string, KnowledgeSavedSimilar[]>(entryIds.map((id) => [id, []]));
@@ -535,7 +675,7 @@ export class KnowledgeSimilarity {
       const close: { meta: KnowledgeEntryMeta; similarity: number }[] = [];
       for (const other of pool) {
         const similarity = dot(own, other.vector);
-        if (similarity >= vectors.thresholds.duplicate) close.push({ meta: other.meta, similarity });
+        if (similarity >= vectors.thresholds.duplicate && this.nearCopy(id, other.meta.id)) close.push({ meta: other.meta, similarity });
       }
       close.sort((a, b) => b.similarity - a.similarity || newestFirst(a.meta, b.meta));
       out.set(
@@ -588,6 +728,7 @@ export class KnowledgeSimilarity {
       vectors.index.generation(),
       this.knowledgeGraph.revision(),
       this.pairChecksRevision(),
+      this.clusterNames?.revision() ?? null,
       fingerprint.digest("base64")
     ]);
 
@@ -605,6 +746,12 @@ export class KnowledgeSimilarity {
     }
     const built = await cached.structure;
     this.remember(scope, vectors.index, cached.seq, built);
+    // Names are asked for from the unscoped default draw only (the one linking's rounds refresh):
+    // a scoped draw, or another `k` or `limit`, cuts the clusters differently.
+    const names = this.clusterNames;
+    if (names && built.unnamed.length > 0 && unscoped(scope) && k === KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_K && limit === KNOWLEDGE_SIMILARITY_GRAPH_DEFAULT_NODES) {
+      names.request(built.unnamed);
+    }
 
     // An entry deleted or moved out of view while the graph was computed is left out, with its edges.
     const nodes = built.ids.flatMap((id, i) => {
@@ -628,7 +775,10 @@ export class KnowledgeSimilarity {
     return {
       nodes,
       edges: built.edges.filter((edge) => !drawn || (drawn.has(edge.from) && drawn.has(edge.to))).map((edge) => ({ ...edge })),
-      clusters: built.clusters.map((cluster) => (cluster.concepts ? { ...cluster, concepts: cluster.concepts.map((c) => ({ ...c })) } : { ...cluster })),
+      clusters: built.clusters.map((cluster, i) => {
+        const label = this.clusterLabel(built, i, scope);
+        return cluster.concepts ? { ...cluster, label, concepts: cluster.concepts.map((c) => ({ ...c })) } : { ...cluster, label };
+      }),
       truncated: embedded.length > limit,
       totals: { entries: visible.length, embedded: embedded.length }
     };
@@ -729,7 +879,13 @@ export class KnowledgeSimilarity {
 
     // Contradicting entries: their edge marked, or added when they were not neighbours.
     const position = new Map(drawn.map((meta, i) => [meta.id, i]));
-    const contradictions = findContradictions({ graph: this.knowledgeGraph, scope, pairChecks: this.pairChecks(), accept: (id) => position.has(id) });
+    const contradictions = findContradictions({
+      graph: this.knowledgeGraph,
+      scope,
+      pairChecks: this.pairChecks(),
+      accept: (id) => position.has(id),
+      entryMeta: (id) => this.store.getMeta(id)
+    });
     for (const { a: from, b: to } of contradictions.values()) {
       const [x, y] = [position.get(from)!, position.get(to)!];
       const key = pairKey(x, y);
@@ -772,8 +928,27 @@ export class KnowledgeSimilarity {
     });
     await pause();
     const named = clusterLabels(groups, drawn, concepts);
+    // LLM topic names where there are some (`connectClusterLabels`), with the entries they were named
+    // from; the rest are asked for by `graph` (the unscoped default draw only).
+    const names = this.clusterNames;
+    const membersOf = (group: readonly number[]): string[] => [...group].sort((x, y) => degree[y]! - degree[x]! || x - y).map((i) => drawn[i]!.id);
+    const hidden = (entryId: string): boolean => {
+      const meta = this.store.getMeta(entryId);
+      return meta !== null && meta !== undefined && !entryInScope(meta, scope);
+    };
+    const unnamed: string[][] = [];
+    const labelSources: (readonly string[] | null)[] = groups.map(() => null);
     const clusters: KnowledgeSimilarityCluster[] = groups.map((group, id) => {
-      const { label, concepts: top } = named[id]!;
+      const { concepts: top } = named[id]!;
+      let label = named[id]!.label;
+      if (names) {
+        const members = membersOf(group);
+        const topic = names.labelFor(members, hidden);
+        if (topic !== null) {
+          label = topic.label;
+          labelSources[id] = topic.sources;
+        } else unnamed.push(members);
+      }
       return top.length > 0 ? { id, size: group.length, label, concepts: top } : { id, size: group.length, label };
     });
 
@@ -795,8 +970,33 @@ export class KnowledgeSimilarity {
             ...(edge.contradicts ? { contradicts: true } : {})
           };
         }),
-      clusters
+      clusters,
+      labelSources,
+      conceptLabels: named.map((item) => item.label),
+      unnamed
     };
+  }
+
+  /**
+   * A drawn cluster's label as `scope` may see it: an LLM label only while every entry it was named
+   * from is still visible (an entry may have moved out of view since the graph was drawn), else the
+   * concept label.
+   */
+  private clusterLabel(structure: GraphStructure, cluster: number, scope: KnowledgeScope): string | null {
+    const label = structure.clusters[cluster]!.label;
+    const sources = structure.labelSources[cluster];
+    if (!sources) return label;
+    for (const id of sources) {
+      const meta = this.store.getMeta(id);
+      if (meta && !entryInScope(meta, scope)) return structure.conceptLabels[cluster] ?? null;
+    }
+    return label;
+  }
+
+  /** A cluster as entries name it ({@link clusterOf}'s), labelled as `scope` may see it; null for a singleton or none. */
+  private clusterRef(structure: GraphStructure, cluster: number, scope: KnowledgeScope): KnowledgeClusterRef | null {
+    const found = cluster >= 0 ? structure.clusters[cluster] : undefined;
+    return found && found.size >= 2 ? { label: this.clusterLabel(structure, cluster, scope), size: found.size } : null;
   }
 
 }
@@ -903,9 +1103,9 @@ function clusterLabels(
 }
 
 /**
- * The entry's cluster in `structure`: its own when drawn, else the one most of its nearest drawn
- * neighbours (cosine ≥ `minimum`, up to {@link CLUSTER_NEIGHBOURS}, `exclude` aside) are in, the
- * nearest's on a tie. Null for a singleton or no neighbour.
+ * The entry's cluster in `structure` (its index; -1 for none): its own when drawn, else the one
+ * most of its nearest drawn neighbours (cosine ≥ `minimum`, up to {@link CLUSTER_NEIGHBOURS},
+ * `exclude` aside) are in, the nearest's on a tie.
  */
 function clusterOf(
   structure: GraphStructure,
@@ -914,7 +1114,7 @@ function clusterOf(
   index: KnowledgeVectorIndex,
   minimum: number,
   exclude: ReadonlySet<string>
-): KnowledgeClusterRef | null {
+): number {
   let cluster = structure.position.get(id) ?? -1;
   if (cluster >= 0) cluster = structure.cluster[cluster]!;
   else {
@@ -937,8 +1137,7 @@ function clusterOf(
       }
     }
   }
-  const found = cluster >= 0 ? structure.clusters[cluster] : undefined;
-  return found && found.size >= 2 ? { label: found.label, size: found.size } : null;
+  return cluster;
 }
 
 /**

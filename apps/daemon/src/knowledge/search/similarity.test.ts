@@ -12,8 +12,12 @@ import { knowledgeScope, visibleCollections } from "./visibility.ts";
 // Thresholds of the fake index: minimum 0.3, good 0.5, strong 0.7, duplicate 0.9.
 const DIMS = 16;
 const ke = (name: string): string => `ke_${name.padStart(12, "0")}`;
+/** The shared text of the fixtures' bodies. */
+const COMMON_BODY = "Write one comparison page per competitor, with an honest table of prices and features, and link it from the pricing page.";
 
 function setup() {
+  /** The similarity's clock (background draws are spaced by it). */
+  let nowMs = Date.parse("2026-10-27T12:00:00.000Z");
   const store = new FakeStore();
   store.collection("kc_seo", "SEO");
   store.collection("kc_ads", "Ads");
@@ -34,11 +38,15 @@ function setup() {
       linkCount: graph.linkCount(meta.id),
       citation: knowledgeCitation(meta)
     }),
+    body: (id) => store.entries.get(id)?.body ?? null,
     pairChecks: () => ({ all: () => pairChecks, get: (a, b) => pairChecks.find((c) => c.a === a && c.b === b) ?? null, onChange: () => () => undefined }),
-    pairChecksRevision: () => checksRevision
+    pairChecksRevision: () => checksRevision,
+    now: () => nowMs
   });
   const scope = (visibility: KnowledgeVisibility, narrow?: string[]) => knowledgeScope(visibility, store.collections.map((c) => c.id), narrow);
-  const put = (name: string, collections: string[], extra: Partial<KnowledgeEntryMeta> = {}) => store.put(ke(name), `body ${name}`, collections, { title: name, ...extra }, true);
+  // Every body is a near-copy of the others (only the name differs): meaning decides what is a duplicate, unless a test writes its own body.
+  const put = (name: string, collections: string[], extra: Partial<KnowledgeEntryMeta> = {}, body = `${COMMON_BODY} ${name}`) =>
+    store.put(ke(name), body, collections, { title: name, ...extra }, true);
   return {
     store,
     graph,
@@ -54,6 +62,9 @@ function setup() {
     },
     noIndex: () => {
       indexOn = false;
+    },
+    advance: (ms: number) => {
+      nowMs += ms;
     }
   };
 }
@@ -96,7 +107,8 @@ test("similar: meaning, concepts and author reasons together, ordered by similar
   assert.equal(by.get(ke("b"))!.similarity, 0.95);
   assert.ok(!by.has(ke("x")), "below `good` with no other reason");
   // Here by concepts: a similarity below `good` orders it but gives no meaning reason; four shared
-  // concepts, three named; three of them on no other entry (distinctive: ≤ max(2, 3% of 9) entries).
+  // concepts, three named (the distinctive ones first); three of them on no other entry
+  // (distinctive: ≤ max(2, 3% of 9) entries).
   assert.equal(by.get(ke("e"))!.similarity, 0.2);
   assert.deepEqual(by.get(ke("e"))!.reasons, [
     {
@@ -104,7 +116,7 @@ test("similar: meaning, concepts and author reasons together, ordered by similar
       concepts: [
         { id: "tactic-comparison", name: "Comparison pages", type: "tactic" },
         { id: "tool-stripe", name: "Stripe", type: "tool" },
-        { id: "topic-pricing", name: "Pricing", type: "topic" }
+        { id: "topic-seo", name: "SEO", type: "topic" }
       ],
       shared: 4,
       distinctive: [
@@ -156,6 +168,55 @@ test("at most 8 similar entries, best first; at most 3 duplicates", () => {
   assert.equal(similar.length, 8);
   assert.deepEqual(ids(similar), Array.from({ length: 8 }, (_, i) => ke(`n${i + 1}`)));
   assert.deepEqual(ids(possibleDuplicates), [ke("n1"), ke("n2"), ke("n3")]);
+});
+
+test("possible duplicates and near-duplicates on save are near-copies: close in meaning is not enough", () => {
+  const s = setup();
+  const guide = "Buy a used iPhone, factory reset it, set the region to the United States, then warm the account up for two days before you post anything.";
+  s.put("a", [], {}, guide);
+  // A repost with light edits; another guide on the same topic, as close in meaning.
+  s.put("repost", [], {}, `${guide.replace("two days", "48 hours")} Credit to the original author.`);
+  s.put("other", [], {}, "Get a free Visible eSIM, spoof the location during setup and keep location services off: TikTok then shows US content from day one.");
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("repost"), around(DIMS, 0, 1, 0.96));
+  s.index.set(ke("other"), around(DIMS, 0, 2, 0.97));
+  const { similar, possibleDuplicates } = s.similarity.forEntry(ke("a"), s.all);
+  assert.deepEqual(ids(possibleDuplicates), [ke("repost")]);
+  assert.deepEqual(ids(similar), [ke("other"), ke("repost")], "both stay similar by meaning");
+  const saved = s.similarity.similarForSaved([ke("a")], s.all);
+  assert.deepEqual(saved.get(ke("a"))!.map((x) => x.entryId), [ke("repost")]);
+});
+
+test("every similar entry sharing a visible concept has the concepts reason, however it was found; distinctive concepts named first", async () => {
+  const s = setup();
+  // The oldest entry is close in meaning and shares the common concept only; eight newer ones share
+  // it too (N1 also a distinctive one), so it is not among the eight most related by concepts.
+  s.put("old", []);
+  s.put("a", []);
+  for (let i = 1; i <= 8; i += 1) s.put(`n${i}`, []);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("old"), around(DIMS, 0, 1, 0.9));
+  await loadGraph(s.graph, [
+    node("channel-tiktok", "TikTok", [ke("a"), ke("old"), ...Array.from({ length: 8 }, (_, i) => ke(`n${i + 1}`))].map((id) => `${id}.md`), { type: "Channel" }),
+    node("platform-app-store", "App Store", [`${ke("a")}.md`, `${ke("n1")}.md`], { type: "Platform" })
+  ]);
+  const { similar } = s.similarity.forEntry(ke("a"), s.all);
+  const by = new Map(similar.map((item) => [item.entry.id, item]));
+  assert.deepEqual(by.get(ke("old"))!.reasons, [
+    { kind: "meaning", similarity: 0.9 },
+    { kind: "concepts", concepts: [{ id: "channel-tiktok", name: "TikTok", type: "Channel" }], shared: 1 }
+  ]);
+  assert.deepEqual(by.get(ke("n1"))!.reasons, [
+    {
+      kind: "concepts",
+      concepts: [
+        { id: "platform-app-store", name: "App Store", type: "Platform" },
+        { id: "channel-tiktok", name: "TikTok", type: "Channel" }
+      ],
+      shared: 2,
+      distinctive: [{ id: "platform-app-store", name: "App Store", type: "Platform" }]
+    }
+  ]);
 });
 
 test("without an index or a model: concepts and author only, similarity null, no duplicates", async () => {
@@ -549,6 +610,61 @@ async function contradictionFixture() {
 const shortRef = { id: "tactic-short", name: "3-day trials", type: "tactic" };
 const longRef = { id: "tactic-long", name: "14-day trials", type: "tactic" };
 
+test("possible duplicates compare the body read now: shingles are cached by that text, not by the entry's content hash", () => {
+  const s = setup();
+  const guide = "Buy a used iPhone, factory reset it, set the region to the United States, then warm the account up for two days before you post anything.";
+  s.put("a", [], {}, guide);
+  s.put("repost", [], {}, `${guide} Credit to the original author.`);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("repost"), around(DIMS, 0, 1, 0.96));
+  assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).possibleDuplicates), [ke("repost")]);
+  // The indexed body changed while the entry's content hash did not (yet): the cache must not answer
+  // for a text it was not made from.
+  s.store.entries.get(ke("repost"))!.body = "Get a free Visible eSIM, spoof the location during setup and keep location services off from day one.";
+  assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).possibleDuplicates), []);
+});
+
+test("background draws for more scopes than the latest graphs kept are bounded: a scope drawn lately waits until the vectors, the graph or a few minutes move", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [node("topic-shared", "Comparison pages", files([ke("p1"), ke("p2"), ke("p3")]))]);
+  for (let i = 0; i < 40; i += 1) s.store.collection(`kc_x${String(i).padStart(8, "0")}`, `X ${i}`);
+  const scopes = Array.from({ length: 40 }, (_, i) => s.scope({ kind: "collections", ids: ["kc_seo", `kc_x${String(i).padStart(8, "0")}`] }));
+  const draw = s.similarity.graph.bind(s.similarity);
+  let draws = 0;
+  s.similarity.graph = async (...args) => {
+    draws += 1;
+    return draw(...args);
+  };
+  const pass = async (): Promise<number> => {
+    let found = 0;
+    for (const scope of scopes) if (s.similarity.novelty(ke("p1"), scope)?.cluster) found += 1;
+    await s.similarity.idle();
+    return found;
+  };
+  assert.equal(await pass(), 0, "nothing drawn yet");
+  assert.equal(draws, 40);
+  // More scopes than the latest graphs kept: the evicted ones are not drawn again right away.
+  const found = await pass();
+  assert.ok(found >= 30, `${found} scopes read their latest graph`);
+  assert.equal(draws, 40, "no scope drawn twice within minutes");
+  await pass();
+  assert.equal(draws, 40);
+  // A few minutes later, an evicted scope is drawn again, at most once each: the reads settle.
+  s.advance(6 * 60_000);
+  let passes = 0;
+  for (let before = -1; before !== draws && passes < 10; passes += 1) {
+    before = draws;
+    await pass();
+  }
+  const later = draws;
+  assert.ok(later > 40 && later <= 80, `${later - 40} drawn again`);
+  assert.ok(passes < 10, "the background draws stop");
+  // New vectors: drawn again at once.
+  s.index.set(ke("p3"), around(DIMS, 0, 4, 0.81));
+  await pass();
+  assert.ok(draws > later);
+});
+
 test("similar: entries that contradict it (graph, either direction) are listed even below the meaning bar, among the 8", async () => {
   const s = await contradictionFixture();
   const { similar } = s.similarity.forEntry(ke("a"), s.all);
@@ -673,7 +789,7 @@ test("graph: a cluster labelled by its second-best concept or by title words sti
   assert.deepEqual(byTopic("tiktok").concepts!.map((c) => c.name), ["Growth"]);
 });
 
-test("novelty: concepts no other visible entry has (claims first, people last), and its cluster from the graph already drawn", async () => {
+test("novelty: concepts no other visible entry has (claims first, people last), and its cluster from the graph already drawn, else drawn in the background", async () => {
   const s = graphFixture();
   await loadGraph(s.graph, [
     node("person-om", "Om", files([ke("p1")]), { type: "Person" }),
@@ -684,23 +800,34 @@ test("novelty: concepts no other visible entry has (claims first, people last), 
   const unique = { id: "tactic-unique", name: "Only here", type: "tactic" };
   const om = { id: "person-om", name: "Om", type: "Person" };
   const hiddenShare = { id: "tactic-hiddenshare", name: "Shared with a hidden entry", type: "tactic" };
-  // Nothing drawn yet: no cluster (it never waits for a graph).
+  // Nothing drawn yet: no cluster (it never waits for a graph), and one is drawn in the background.
   assert.deepEqual(s.similarity.novelty(ke("p1"), s.all), { newConcepts: [unique, om], cluster: null });
+  await s.similarity.idle();
+  assert.equal(s.similarity.novelty(ke("p1"), s.all)!.cluster?.label, "Comparison pages", "the background graph is read next time");
   // Among what an SEO chat sees, the concept it shares with a hidden entry is new; the hidden entry is never named.
   assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.newConcepts, [hiddenShare, unique, om]);
 
   await s.similarity.graph({}, s.seoOnly);
   assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, { label: "Comparison pages", size: 3 });
   assert.equal(s.similarity.novelty(ke("r"), s.seoOnly)!.cluster, null, "a singleton");
-  assert.equal(s.similarity.novelty(ke("p1"), s.all)!.cluster, null, "no graph drawn for this scope");
+  assert.equal(s.similarity.novelty(ke("p1"), s.scope({ kind: "all" }, ["kc_seo", "kc_ads"]))!.cluster, null, "no graph drawn for this scope yet");
   assert.equal(s.similarity.novelty(ke("plain"), s.seoOnly), null, "no vectors yet");
   // An entry embedded after the graph was drawn: the cluster of its nearest drawn neighbours.
   s.put("late", ["kc_seo"]);
   s.index.set(ke("late"), around(DIMS, 0, 9, 0.97));
   assert.deepEqual(s.similarity.novelty(ke("late"), s.seoOnly), { newConcepts: [], cluster: { label: "Comparison pages", size: 3 } });
-  // A drawn entry moved out of the caller's view: the old graph is not used.
+  // A drawn entry moved out of the caller's view: the old graph is not used; a new one is drawn.
   s.store.put(ke("p2"), "body p2", ["kc_ads"], { title: "Comparison pages that convert", savedAt: s.store.getMeta(ke("p2"))!.savedAt }, true);
   assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, null);
+  await s.similarity.idle();
+  assert.equal(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster?.size, 3, "P1, P3 and the late entry");
+});
+
+test("novelty reads the latest graph drawn for the scope at any k and limit (insights' graph counts)", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [node("topic-shared", "Comparison pages", files([ke("p1"), ke("p2"), ke("p3")]))]);
+  await s.similarity.graph({ k: 2, limit: 2_000 }, s.seoOnly);
+  assert.deepEqual(s.similarity.novelty(ke("p1"), s.seoOnly)!.cluster, { label: "Comparison pages", size: 3 });
 });
 
 test("clustersForSaved: the cluster of the saved entry's nearest drawn neighbours, from the graph already drawn, never other entries of the save", async () => {

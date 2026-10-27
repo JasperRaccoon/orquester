@@ -828,7 +828,7 @@ test("knowledge_insights: one GET with the session, the limit (default 10) and t
       '1. ke_eeeeeeeeeeee "Ads feed SEO" · links "Paid ads" (12), "SEO" (8), unlabelled (3)',
       "   via: Alternatives pages (Tactic), CPC (Metric)",
       `   cite: ${c("ke_eeeeeeeeeeee", "Ads feed SEO")}`,
-      "Single source, claims only one entry backs (1):",
+      "Single source, claims its cluster discusses that only one entry backs (1):",
       '1. Wait 48 hours (Rule) [rule-48h] → only ke_ffffffffffff "Learning phase" · in cluster "Paid ads" (12 entries)',
       `   cite: ${c("ke_ffffffffffff", "Learning phase")}`,
       "Link gaps, close in meaning, no shared concept (2):",
@@ -938,6 +938,57 @@ test("knowledge_get: entries it disagrees with come first (source, note, concept
   const bare = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
   assert.ok(bare.includes("\nNew here: no concept of its own\nDisagrees with:\n"), bare);
   assert.ok(!bare.includes("Similar:"));
+});
+
+test("knowledge_get: a name that repeats in one list of shared concepts carries its type", async () => {
+  const entry = meta();
+  const detail: KnowledgeEntryDetail = {
+    entry: { ...entry, body: "Body." },
+    concepts: [],
+    related: [],
+    similar: [
+      {
+        entry: meta({ id: "ke_bbbbbbbbbbbb", title: "US TikTok via eSIM" }),
+        similarity: 0.9,
+        reasons: [
+          {
+            kind: "concepts",
+            concepts: [concept("channel-tiktok", "TikTok", "Channel"), concept("permission-location", "Location", "Permission"), concept("app-tiktok", "tiktok", "App")],
+            shared: 5,
+            distinctive: [concept("app-tiktok", "tiktok", "App")]
+          }
+        ]
+      }
+    ],
+    possibleDuplicates: [],
+    citation: entry.citation
+  };
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: detail } });
+  const out = textOf(await run(api, "knowledge_get", { id: "ke_aaaaaaaaaaaa" }));
+  assert.ok(out.includes('· shares concepts TikTok (Channel), Location, tiktok (App) (distinctive) +2 more'), out);
+});
+
+test("knowledge_get: a concept with more entries than it shows lists every other visible entry by id", async () => {
+  const entries = Array.from({ length: 6 }, (_, i) => meta({ id: `ke_${String(i).repeat(12)}`, title: `Entry ${i}` }));
+  const body = {
+    kind: "concept",
+    concept: {
+      concept: { id: "channel-tiktok", name: "TikTok", type: "Channel", confidence: 0.9, description: null, aliases: [], attributes: {} },
+      collections: [],
+      entries,
+      neighbors: [],
+      entryIds: [...entries.map((entry) => entry.id), "ke_bk4lk3nknmiw"]
+    }
+  };
+  const api = withCollections(new FakeDaemonApi())
+    .on("GET", knowledgeRoutes.item("channel-tiktok"), { status: 200, body })
+    .on("GET", knowledgeRoutes.item("ke_aaaaaaaaaaaa"), { status: 200, body: { kind: "entry", entry: { entry: { ...meta(), body: "Body." }, concepts: [], related: [], citation: meta().citation } } });
+  // Read with another id, the concept shows 4 entries in full: the 3 others by id, none missing.
+  const out = textOf(await run(api, "knowledge_get", { ids: ["channel-tiktok", "ke_aaaaaaaaaaaa"] }));
+  assert.ok(out.includes("Entries (7; the newest 4 in full):"), out);
+  assert.ok(out.includes("- also: ke_444444444444, ke_555555555555, ke_bk4lk3nknmiw"), out);
+  const alone = textOf(await run(api, "knowledge_get", { id: "channel-tiktok" }));
+  assert.ok(alone.includes("Entries (7; the newest 6 in full):") && alone.includes("- also: ke_bk4lk3nknmiw"), alone);
 });
 
 test("knowledge_get: a concept shows what was merged into it and its similar concepts; an older daemon's concept renders as before", async () => {

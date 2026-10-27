@@ -101,6 +101,25 @@ test("BM25 finds words in titles, bodies and concepts; concept hits carry visibl
   assert.match(snippet, /Stripe makes proration easy/);
 });
 
+test("a concept named like the query is listed among the best entries, even when more entries match than the page holds", async (t) => {
+  // Every matching entry is found by two or three signals (keyword, meaning, the concept's one-hop
+  // expansion); the concept by one. Their fused scores are on different scales: the concept must
+  // still make the first page, scored by how much of the query its name holds.
+  const { search } = await setup(t);
+  await search.idle();
+  for (const limit of [3, 6]) {
+    const result = await search.search({ query: "comparison tables", limit }, ALL);
+    const concept = result.hits.find((hit) => hit.kind === "concept");
+    assert.ok(concept && concept.kind === "concept", `limit ${limit}: no concept hit in ${JSON.stringify(result.hits.map((hit) => hit.kind))}`);
+    assert.equal(concept.concept.id, "tactic-comparison-tables");
+    assert.equal(concept.score, 1);
+    assert.ok(result.hits.indexOf(concept) <= 1, "listed with the best entries");
+  }
+  // A concept matched in its description or attributes only is listed after the entries.
+  const described = await search.search({ query: "stripe proration", limit: 2 }, ALL);
+  assert.ok(described.hits.every((hit) => hit.kind === "entry" || hit.score < 1));
+});
+
 test("the collections filter narrows within visibility; unknown or hidden names are refused with what is visible", async (t) => {
   const { search } = await setup(t, { embedder: null });
   const narrowed = await search.search({ query: "tables", collections: ["seo"], limit: 25 }, ALL);

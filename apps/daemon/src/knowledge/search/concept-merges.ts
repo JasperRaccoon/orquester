@@ -6,7 +6,10 @@
  * every load (`KnowledgeGraph.setConceptMerges`), since myKG rewrites its output on every run.
  *
  * - the rule: {@link conceptMergeRefusal} (type, similarity, lexical guard, numbers, negation,
- *   lists, Person) and {@link planConceptMerges} (transitive per type, the kept concept);
+ *   lists, Person) and {@link planConceptMerges} (transitive per type, the kept concept), plus the
+ *   deterministic Person rule ({@link personRuleGroups}: the same handle, or a handle written out as
+ *   another Person's name; never two different full names, never chained) and the pairs LLM checks confirmed (`concept-merge-checks.ts`; merges `source: "checked"`,
+ *   the answers kept in the file's `checks`);
  * - the file: read tolerant (`@orquester/config` `parseKnowledgeConceptMergesFile`), written atomically;
  * - {@link KnowledgeConceptMerges}: plans after every complete vector computation, applies the
  *   overlay, lists and undoes merges (an undone merge is never made again), and answers similar
@@ -20,6 +23,7 @@ import {
   emptyKnowledgeConceptMergesFile,
   parseKnowledgeConceptMergesFile,
   serializeKnowledgeConceptMergesFile,
+  type KnowledgeConceptMergeCheck,
   type KnowledgeConceptMergeRecord,
   type KnowledgeConceptMergeRejection,
   type KnowledgeConceptMergesFile
@@ -27,9 +31,9 @@ import {
 import { EMBEDDING_MODEL_ID } from "../install/pins.ts";
 import { KnowledgeError, type KnowledgeLogger } from "../store/errors.ts";
 import { writeFileAtomic } from "../store/fs.ts";
-import { ConceptVectors } from "./concept-vectors.ts";
+import { ConceptVectors, type ConceptVectorSet } from "./concept-vectors.ts";
 import type { KnowledgeEmbedderSource } from "./embedder.ts";
-import type { KnowledgeGraph } from "./graph.ts";
+import type { GraphConcept, KnowledgeGraph } from "./graph.ts";
 import type { KnowledgeScope } from "./visibility.ts";
 
 // ---------------------------------------------------------------------------
@@ -127,6 +131,11 @@ export function conceptNameNumbers(name: string): Set<string> {
   return out;
 }
 
+/** The negating words of a name ("Do not offer a free trial" → not). */
+export function conceptNameNegations(name: string): Set<string> {
+  return new Set([...conceptNameTokens(name)].filter((t) => NEGATIONS.has(t)));
+}
+
 /** Whether a name lists several things ("AI Overviews and AI Mode", "Social / UGC"). */
 function listsThings(name: string): boolean {
   return /\b(?:and|or)\b|[&+/,;]/.test(fold(name));
@@ -180,6 +189,151 @@ export interface PlanConcept {
   name: string;
   /** Entries it came from. */
   entryCount: number;
+  /** A Person's `handle` attribute ({@link personRulePair}). */
+  handle?: string | null;
+}
+
+/** A pair an LLM check found to be one thing (`concept-merge-checks.ts`): merged like a rule's pair. */
+export interface CheckedConceptPair {
+  a: string;
+  b: string;
+  similarity: number;
+  /** The concept the checker would keep; honoured when the merge is just these two. */
+  keep: string | null;
+}
+
+/** One word of letters, digits, "_", "." or "-": the shape of a handle. */
+const HANDLE_SHAPE = /^[\p{L}\p{N}_.-]{3,}$/u;
+/** A plain capitalized word ("Sam", "Alex"): a first name, never taken for a handle. */
+const FIRST_NAME_SHAPE = /^\p{Lu}\p{Ll}+$/u;
+
+/** A handle's text: trimmed, no leading "@"; null unless it has the shape of a handle ({@link HANDLE_SHAPE}). */
+function handleText(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const bare = value.normalize("NFKC").trim().replace(/^@+/, "");
+  return HANDLE_SHAPE.test(bare) ? bare : null;
+}
+
+/**
+ * A handle as compared: trimmed, no leading "@", lower case (handles are case-insensitive); null
+ * unless it is one word of letters, digits, "_", "." or "-" of 3+ characters. Punctuation stays:
+ * "danielhangan_" and "danielhangan" are different accounts.
+ */
+export function personHandle(value: string | null | undefined): string | null {
+  return handleText(value)?.toLowerCase() ?? null;
+}
+
+/** A Person's own name, or null when it has none (the graph then names it by its id). */
+function realName(person: PlanConcept): string | null {
+  const name = person.name.normalize("NFKC").trim();
+  return name.length > 0 && name !== person.id ? name : null;
+}
+
+/**
+ * The handle a Person's name is written as, compared like {@link personHandle}: "@jasonugc", or a
+ * name with the shape of a handle that is not a plain capitalized word ("jasonugc", "KCodes7777";
+ * not "Sam"). Whether it IS a given handle also needs the case to match ({@link nameIsHandle}).
+ */
+function nameAsHandle(name: string | null): string | null {
+  if (name === null) return null;
+  if (name.startsWith("@")) return personHandle(name);
+  return HANDLE_SHAPE.test(name) && !FIRST_NAME_SHAPE.test(name) ? name.toLowerCase() : null;
+}
+
+/** Whether a name is exactly this handle written out: "@JasonUGC" for jasonugc, or "jasonugc" itself (case kept). */
+function nameIsHandle(name: string | null, handle: string | null | undefined): boolean {
+  const text = handleText(handle);
+  if (name === null || text === null) return false;
+  if (name.startsWith("@")) return personHandle(name) === text.toLowerCase();
+  return nameAsHandle(name) !== null && name === text;
+}
+
+/** A name of two words or more ("Alex Nguyen"), as its token set; null for none or one word. */
+function fullName(person: PlanConcept): Set<string> | null {
+  const name = realName(person);
+  return name === null || name.split(/\s+/).length < 2 ? null : conceptNameTokens(name);
+}
+
+/**
+ * The Person rule for two Persons (deterministic, no LLM): the same handle ("@jasonugc" and
+ * "JasonUGC"), or one's handle written out as the other's name ("jason", handle jasonugc, and a
+ * Person named "jasonugc"). Never two Persons whose full names (two words or more) differ: "Alex
+ * Nguyen" (@alex) and "Alex Chen" (handle alex) share a handle on different platforms. A first name
+ * is never a handle: "Sam" is not "Samantha Lee" (handle sam).
+ */
+export function personRulePair(x: PlanConcept, y: PlanConcept): boolean {
+  if (x.type !== "Person" || y.type !== "Person" || x.id === y.id) return false;
+  const fx = fullName(x);
+  const fy = fullName(y);
+  if (fx && fy && !sameSet(fx, fy)) return false;
+  const hx = personHandle(x.handle);
+  if (hx !== null && hx === personHandle(y.handle)) return true;
+  return nameIsHandle(realName(y), x.handle) || nameIsHandle(realName(x), y.handle);
+}
+
+/** Whether two Persons may be in one merge: the same name (the cosine rule's), or the Person rule's pair. */
+function personsJoin(x: PlanConcept, y: PlanConcept): boolean {
+  return sameSet(conceptNameTokens(x.name), conceptNameTokens(y.name)) || personRulePair(x, y);
+}
+
+/** The Person rule's pairs ({@link personRulePair}) as concept ids, each once, in a stable order. */
+export function personHandlePairs(concepts: readonly PlanConcept[]): [string, string][] {
+  const persons = concepts.filter((c) => c.type === "Person");
+  // Only Persons sharing a handle key (their handle, or their name written as a handle) can pair.
+  const byKey = new Map<string, PlanConcept[]>();
+  for (const person of persons) {
+    for (const key of new Set([personHandle(person.handle), nameAsHandle(realName(person))])) {
+      if (key === null) continue;
+      const list = byKey.get(key);
+      if (list) list.push(person);
+      else byKey.set(key, [person]);
+    }
+  }
+  const seen = new Set<string>();
+  const out: [string, string][] = [];
+  for (const list of byKey.values()) {
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        const [x, y] = [list[i]!, list[j]!];
+        const [a, b] = x.id < y.id ? [x.id, y.id] : [y.id, x.id];
+        const pairKey = `${a}\u0000${b}`;
+        if (seen.has(pairKey) || !personRulePair(x, y)) continue;
+        seen.add(pairKey);
+        out.push([a, b]);
+      }
+    }
+  }
+  return out.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0));
+}
+
+/**
+ * The merges the Person rule makes, without chaining: Persons that pair with exactly the same
+ * Persons (each other included) are one group, so every two in a group are a pair of the rule.
+ * Persons its pairs connect form one group when every two of them pair; otherwise only the ones
+ * that cannot be told apart are merged: two unnamed Persons with one handle merge, while "alexdev"
+ * pairing with both "Alex Nguyen" and "Alex Chen" (who do not pair) joins neither. Sorted ids, in a
+ * stable order.
+ */
+export function personRuleGroups(concepts: readonly PlanConcept[]): string[][] {
+  const partners = new Map<string, Set<string>>();
+  for (const [a, b] of personHandlePairs(concepts)) {
+    for (const [x, y] of [[a, b], [b, a]] as const) {
+      let set = partners.get(x);
+      if (!set) partners.set(x, (set = new Set([x])));
+      set.add(y);
+    }
+  }
+  const byNeighbourhood = new Map<string, string[]>();
+  for (const [id, set] of partners) {
+    const key = [...set].sort().join("\u0000");
+    const list = byNeighbourhood.get(key);
+    if (list) list.push(id);
+    else byNeighbourhood.set(key, [id]);
+  }
+  return [...byNeighbourhood.values()]
+    .filter((group) => group.length >= 2)
+    .map((group) => group.sort())
+    .sort((x, y) => (x[0]! < y[0]! ? -1 : x[0]! > y[0]! ? 1 : 0));
 }
 
 export interface ConceptMergePlanInput {
@@ -191,6 +345,8 @@ export interface ConceptMergePlanInput {
   existing: readonly KnowledgeConceptMergeRecord[];
   /** Undone merges: no two concepts of one are merged again. */
   rejected: readonly KnowledgeConceptMergeRejection[];
+  /** Pairs LLM checks confirmed (merged with `source: "checked"`, whatever the name guards say). */
+  checked?: readonly CheckedConceptPair[];
   now: string;
   /** Awaited every few hundred rows of comparisons (default: one turn of the event loop). */
   pause?: () => Promise<void>;
@@ -223,6 +379,13 @@ const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(reso
  * keeps that record; a new or grown group becomes a new record (replacing the merges it absorbed)
  * with the kept concept of {@link keptConcept} and the lowest similarity that joined it. Merges
  * whose concepts are gone are kept as they are. `changed`: whether the list differs from `existing`.
+ *
+ * Beside the cosine pairs: the Person rule's groups ({@link personRuleGroups}) and the pairs LLM
+ * checks confirmed (`checked`) join groups first, never across an undone merge. Persons join a
+ * group only when every two of it are one person (the same name, or a pair of the Person rule), and
+ * an earlier Person merge (not a checked one) that is no longer so is dropped. A new group one of
+ * them joined is `source: "checked"` when a checked pair (or a checked merge it absorbed) is in it;
+ * a group of exactly one checked pair keeps the concept the checker chose.
  */
 export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{ merges: KnowledgeConceptMergeRecord[]; changed: boolean }> {
   const pause = input.pause ?? nextTurn;
@@ -230,6 +393,8 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
   const parent = new Map<string, string>();
   const members = new Map<string, string[]>();
   const minSimilarity = new Map<string, number>();
+  /** Roots of groups a checked pair (or a checked merge) joined. */
+  const checkedRoots = new Set<string>();
   const find = (id: string): string => {
     let root = id;
     while (parent.get(root) !== root) root = parent.get(root)!;
@@ -256,6 +421,12 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
       }
     }
   }
+  /** Two Persons join only when every two of the joined group are one person ({@link personsJoin}): no chains. */
+  const personsApart = (ma: readonly string[], mb: readonly string[]): boolean => {
+    const x0 = byId.get(ma[0]!);
+    if (x0?.type !== "Person") return false;
+    return ma.some((x) => mb.some((y) => !personsJoin(byId.get(x)!, byId.get(y)!)));
+  };
   const union = (a: string, b: string, similarity: number, checkForbidden: boolean): boolean => {
     const ra = find(a);
     const rb = find(b);
@@ -263,12 +434,14 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
     const ma = members.get(ra)!;
     const mb = members.get(rb)!;
     if (checkForbidden && ma.some((x) => mb.some((y) => forbidden.get(x)?.has(y)))) return false;
+    if (checkForbidden && personsApart(ma, mb)) return false;
     const [root, child] = ma.length >= mb.length ? [ra, rb] : [rb, ra];
     parent.set(child, root);
     members.set(root, [...members.get(root)!, ...members.get(child)!]);
     members.delete(child);
     minSimilarity.set(root, Math.min(minSimilarity.get(ra) ?? Infinity, minSimilarity.get(rb) ?? Infinity, similarity));
     minSimilarity.delete(child);
+    if (checkedRoots.delete(child)) checkedRoots.add(root);
     return true;
   };
 
@@ -276,12 +449,40 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
   // graph applies them).
   const claimed = new Set<string>();
   const presentOf = new Map<KnowledgeConceptMergeRecord, string[]>();
+  /** Person merges an earlier rule made that the Person rule no longer allows (different people): undone. */
+  const dropped = new Set<KnowledgeConceptMergeRecord>();
   for (const record of input.existing) {
     const present = [record.into, ...record.merged].filter((id, i, all) => all.indexOf(id) === i && byId.get(id)?.type === record.type && !claimed.has(id));
     if (!byId.has(record.into) || present[0] !== record.into || present.length < 2) continue;
+    if (record.type === "Person" && record.source !== "checked" && personsApart(present, present)) {
+      dropped.add(record);
+      continue;
+    }
     for (const id of present) claimed.add(id);
     presentOf.set(record, present);
     for (const id of present.slice(1)) union(record.into, id, record.similarity, false);
+    if (record.source === "checked") checkedRoots.add(find(record.into));
+  }
+
+  // The Person rule, then the pairs LLM checks confirmed.
+  const vectorDot = (a: string, b: string): number => {
+    const x = input.vectors.get(a);
+    const y = input.vectors.get(b);
+    return x && y && x.length === y.length ? dot(x, y) : 1;
+  };
+  for (const group of personRuleGroups(input.concepts)) {
+    for (const id of group.slice(1)) union(group[0]!, id, vectorDot(group[0]!, id), true);
+  }
+  const keepOf = new Map<string, string>();
+  for (const pair of input.checked ?? []) {
+    const a = byId.get(pair.a);
+    const b = byId.get(pair.b);
+    if (!a || !b || a.type !== b.type) continue;
+    const joined = union(pair.a, pair.b, pair.similarity, true);
+    if (joined || find(pair.a) === find(pair.b)) {
+      if (joined) checkedRoots.add(find(pair.a));
+      if (pair.keep === pair.a || pair.keep === pair.b) keepOf.set([pair.a, pair.b].sort().join("\u0000"), pair.keep);
+    }
   }
 
   // Same-type candidate pairs, closest first.
@@ -326,7 +527,8 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
       continue;
     }
     const concepts = ids.map((id) => byId.get(id)!);
-    const keep = keptConcept(concepts);
+    const chosen = ids.length === 2 ? keepOf.get([...ids].sort().join("\u0000")) : undefined;
+    const keep = (chosen !== undefined ? byId.get(chosen) : undefined) ?? keptConcept(concepts);
     const merged = concepts
       .filter((c) => c.id !== keep.id)
       .sort((a, b) => b.entryCount - a.entryCount || a.name.length - b.name.length || (a.id < b.id ? -1 : 1))
@@ -337,11 +539,12 @@ export async function planConceptMerges(input: ConceptMergePlanInput): Promise<{
       into: keep.id,
       merged,
       similarity: Math.round((minSimilarity.get(root) ?? input.thresholds.merge) * 10_000) / 10_000,
-      createdAt: input.now
+      createdAt: input.now,
+      ...(checkedRoots.has(root) ? { source: "checked" } : {})
     });
   }
   // An existing merge stays unless a new group absorbed it; one whose concepts are gone stays too.
-  const merges = input.existing.filter((record) => keptRecords.has(record) || !presentOf.has(record));
+  const merges = input.existing.filter((record) => !dropped.has(record) && (keptRecords.has(record) || !presentOf.has(record)));
   const ids = new Set(merges.map((m) => m.id));
   for (const record of added) if (!ids.has(record.id)) merges.push(record);
   const changed = merges.length !== input.existing.length || merges.some((record, i) => record !== input.existing[i]);
@@ -391,6 +594,7 @@ export class KnowledgeConceptMerges {
   private readOnly: string | null = null;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<() => void>();
+  private readonly plannedListeners = new Set<() => void>();
   private readonly unsubscribe: (() => void)[] = [];
   private byType: { revision: number; map: Map<string, string[]> } | null = null;
   private stopped = false;
@@ -449,6 +653,59 @@ export class KnowledgeConceptMerges {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Called after every planning pass over a complete set of vectors (whether or not the merges
+   * changed): the LLM concept checks may have new candidates.
+   */
+  onPlanned(listener: () => void): () => void {
+    this.plannedListeners.add(listener);
+    return () => this.plannedListeners.delete(listener);
+  }
+
+  /**
+   * What the LLM concept checks (`concept-merge-checks.ts`) choose candidates from: myKG's concepts,
+   * their vectors from a calibrated model, the undone merges and the checks so far; null until the
+   * vectors are complete, or while the file is a newer build's.
+   */
+  checkState(): {
+    concepts: readonly GraphConcept[];
+    set: ConceptVectorSet;
+    thresholds: ConceptMergeThresholds;
+    rejected: readonly KnowledgeConceptMergeRejection[];
+    checks: readonly KnowledgeConceptMergeCheck[];
+    canonical: (conceptId: string) => string;
+  } | null {
+    if (this.readOnly || this.stopped) return null;
+    const set = this.vectors.current();
+    const thresholds = set ? this.thresholdsOf(set.modelId) : null;
+    if (!set || !thresholds) return null;
+    return {
+      concepts: this.graph.baseConcepts(),
+      set,
+      thresholds,
+      rejected: this.file.rejected,
+      checks: this.file.checks,
+      canonical: (id) => this.graph.canonicalConceptId(id)
+    };
+  }
+
+  /**
+   * Records an LLM check of two concepts (replacing an earlier one of the pair) and plans again: a
+   * pair found to be one thing becomes a merge (`source: "checked"`). Undone like any merge.
+   */
+  async recordCheck(check: KnowledgeConceptMergeCheck): Promise<void> {
+    const recorded = await this.serialize(async () => {
+      if (this.readOnly || this.stopped) return false;
+      const [a, b] = check.a < check.b ? [check.a, check.b] : [check.b, check.a];
+      const swapped = a !== check.a;
+      const record: KnowledgeConceptMergeCheck = { ...check, a, b, nameA: swapped ? check.nameB : check.nameA, nameB: swapped ? check.nameA : check.nameB };
+      const checks = this.file.checks.filter((c) => !(c.a === a && c.b === b));
+      await this.write({ ...this.file, checks: [...checks, record] });
+      return true;
+    });
+    if (recorded && check.same) await this.plan();
+  }
+
   /** Merges in effect on the current graph. */
   count(): number {
     return this.graph.conceptMerges().length;
@@ -456,9 +713,10 @@ export class KnowledgeConceptMerges {
 
   /** `GET knowledgeRoutes.conceptMerges`: the merges whose concepts the scope can see, newest first. */
   list(scope: KnowledgeScope): KnowledgeConceptMerge[] {
+    const checked = new Set(this.file.merges.filter((merge) => merge.source === "checked").map((merge) => merge.id));
     return this.graph
       .visibleConceptMerges(scope)
-      .map(({ id, into, merged, similarity, createdAt }) => ({ id, into, merged, similarity, createdAt }))
+      .map(({ id, into, merged, similarity, createdAt }) => ({ id, into, merged, similarity, createdAt, ...(checked.has(id) ? { source: "checked" as const } : {}) }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || (a.id < b.id ? -1 : 1));
   }
 
@@ -540,19 +798,36 @@ export class KnowledgeConceptMerges {
       const set = this.vectors.current();
       const thresholds = set ? this.thresholdsOf(set.modelId) : null;
       if (!set || !thresholds) return;
-      const concepts = this.graph.baseConcepts().map(({ id, type, name, entryIds }) => ({ id, type, name, entryCount: entryIds.length }));
+      const concepts = this.graph.baseConcepts().map(({ id, type, name, entryIds, attributes }) => ({
+        id,
+        type,
+        name,
+        entryCount: entryIds.length,
+        handle: type === "Person" ? (attributes.handle?.value ?? null) : null
+      }));
       const { merges, changed } = await planConceptMerges({
         concepts,
         vectors: set.vectors,
         thresholds,
         existing: this.file.merges,
         rejected: this.file.rejected,
+        checked: this.file.checks.filter((check) => check.same).map(({ a, b, similarity, keep }) => ({ a, b, similarity, keep })),
         now: this.now().toISOString(),
         ...(this.pause ? { pause: this.pause } : {})
       });
-      if (!changed || this.stopped) return;
-      await this.write({ ...this.file, merges });
-      this.applyOverlay();
+      if (changed && !this.stopped) {
+        await this.write({ ...this.file, merges });
+        this.applyOverlay();
+      }
+      if (!this.stopped) {
+        for (const listener of [...this.plannedListeners]) {
+          try {
+            listener();
+          } catch (error) {
+            this.logger.warn(`knowledge: a concept planning listener failed (${(error as Error).message})`);
+          }
+        }
+      }
     }).catch((error: Error) => this.logger.warn(`knowledge: planning concept merges failed (${error.message})`));
   }
 

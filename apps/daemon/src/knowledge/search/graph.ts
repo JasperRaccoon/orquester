@@ -122,6 +122,19 @@ export type SimilarConceptsProvider = (conceptId: string) => readonly { id: stri
 
 /** Similar concepts a concept detail lists. */
 const SIMILAR_CONCEPTS_LIMIT = 5;
+/**
+ * A name of at most this many words is short: its vector says little more than its type, so
+ * "TikTok" (Channel) scores 0.95–0.96 against ChatGPT, Snapchat and iOS. Two concepts one of
+ * which is short are listed as similar only when their names are related ({@link namesRelated})
+ * or their similarity is at least {@link SHORT_NAME_SIMILAR_MIN}.
+ */
+const SHORT_NAME_WORDS = 3;
+/**
+ * 4,161 real concepts: 4,543 similar pairs with a short name, 2,287 with no related name; 347 of
+ * those at 0.95 or more, nearly all siblings (Statsig ~ Optimizely 0.984, Supabase ~ Convex 0.984,
+ * Reddit ~ Google 0.957); 3 at 0.985 or more (GBRAID ~ WBRAID 0.994).
+ */
+const SHORT_NAME_SIMILAR_MIN = 0.985;
 
 /** `ke_xxx.md`, `input/ke_xxx.md`, `session_a/ke_xxx.md`, `ke_xxx.md::3` → `ke_xxx`. */
 function entryIdOfSourceFile(sourceFile: string): string | null {
@@ -613,6 +626,26 @@ class View {
   }
 }
 
+/** Name and alias words of a concept ({@link tokenize}), numbers aside ("4.0 – Design" and "Guideline 4.3" share no word). */
+function nameWords(concept: KnowledgeConcept): Set<string> {
+  return new Set(tokenize([concept.name, ...concept.aliases].join(" ")).filter((token) => !/^\p{N}+$/u.test(token)));
+}
+
+/** A name compared without case, accents, spaces or punctuation. */
+const squashed = (name: string): string => name.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** Whether two concepts' names are related: a shared content word (names and aliases), or one name containing the other. */
+export function namesRelated(a: KnowledgeConcept, b: KnowledgeConcept): boolean {
+  const x = squashed(a.name);
+  const y = squashed(b.name);
+  if (x.length > 0 && y.length > 0 && (x.includes(y) || y.includes(x))) return true;
+  const words = nameWords(a);
+  for (const word of nameWords(b)) if (words.has(word)) return true;
+  return false;
+}
+
+const isShortName = (name: string): boolean => name.trim().split(/\s+/).length <= SHORT_NAME_WORDS;
+
 function toRef(concept: GraphConcept): KnowledgeConceptRef {
   return { id: concept.id, name: concept.name, type: concept.type };
 }
@@ -631,7 +664,10 @@ export interface KnowledgeConceptView {
   neighbors: { edge: KnowledgeEdge; concept: KnowledgeConceptRef }[];
   /** Concepts merged into it that a visible entry backs. */
   mergedFrom: KnowledgeConceptRef[];
-  /** Visible concepts close in meaning (not merged with it), best first, up to 5. */
+  /**
+   * Visible concepts close in meaning (not merged with it), best first, up to 5; with a short name on
+   * either side, only related names or a very high similarity (`SHORT_NAME_SIMILAR_MIN`).
+   */
   similarConcepts: { concept: KnowledgeConceptRef; similarity: number }[];
 }
 
@@ -863,6 +899,8 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       if (similarConcepts.length >= SIMILAR_CONCEPTS_LIMIT) break;
       const other = view.snapshot.mergedInto.get(hit.id) ?? hit.id;
       if (other === id || !view.concept(other)) continue;
+      const theirs = view.present(other)!;
+      if ((isShortName(shown.name) || isShortName(theirs.name)) && hit.similarity < SHORT_NAME_SIMILAR_MIN && !namesRelated(shown, theirs)) continue;
       const ref = view.ref(other);
       if (similarConcepts.some((s) => s.concept.id === ref.id)) continue;
       similarConcepts.push({ concept: ref, similarity: hit.similarity });
@@ -957,9 +995,10 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
 
   /**
    * BM25 over visible concepts' names, aliases, attribute values and descriptions; a merged concept
-   * matches on what its visible sources say only. Answers the graph's own ids.
+   * matches on what its visible sources say only. Answers the graph's own ids, each with `named`:
+   * the share of the query's distinct terms its name or aliases (as the scope sees them) hold.
    */
-  searchConcepts(terms: readonly string[], scope: KnowledgeScope, limit: number): { id: string; score: number }[] {
+  searchConcepts(terms: readonly string[], scope: KnowledgeScope, limit: number): { id: string; score: number; named: number }[] {
     const view = this.view(scope);
     const accept = (key: string): boolean => {
       const at = key.indexOf("\u0000");
@@ -974,7 +1013,32 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
       const id = at < 0 ? hit.key : hit.key.slice(0, at);
       if (!best.has(id)) best.set(id, hit.score);
     }
-    return [...best].map(([id, score]) => ({ id, score })).slice(0, limit);
+    const distinct = new Set(terms);
+    return [...best].slice(0, limit).map(([id, score]) => {
+      const shown = view.present(id)!;
+      const named = new Set(tokenize([shown.name, ...shown.aliases].join(" ")));
+      let held = 0;
+      for (const term of distinct) if (named.has(term)) held += 1;
+      return { id, score, named: distinct.size > 0 ? held / distinct.size : 0 };
+    });
+  }
+
+  /**
+   * For one scope: a visible concept's visible neighbours by any relation (the graph's own ids),
+   * none when it is not visible; a folded concept's id answers its merge. Memoized per lookup.
+   */
+  neighbourLookup(scope: KnowledgeScope): (conceptId: string) => readonly string[] {
+    const view = this.view(scope);
+    const memo = new Map<string, string[]>();
+    return (requested) => {
+      const id = view.snapshot.mergedInto.get(requested) ?? requested;
+      let ids = memo.get(id);
+      if (!ids) {
+        ids = view.concept(id) ? view.visibleEdges(id).map((edge) => (edge.from === id ? edge.to : edge.from)) : [];
+        memo.set(id, ids);
+      }
+      return ids;
+    };
   }
 
   /** Visible entries behind a concept (the one-hop expansion); a folded concept's id answers its merge. */

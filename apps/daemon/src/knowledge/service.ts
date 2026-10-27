@@ -33,7 +33,7 @@ import {
   type KnowledgeStatus,
   type SessionOwner
 } from "@orquester/api";
-import { knowledgeConceptMergesPath, knowledgeIndexDir } from "@orquester/config";
+import { knowledgeClusterLabelsPath, knowledgeConceptMergesPath, knowledgeIndexDir } from "@orquester/config";
 
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
@@ -41,9 +41,11 @@ import type { ManifestKnowledge } from "../session-tools/manifest.ts";
 import { KnowledgeRuntimeTracker, type KnowledgeRuntimeTrackerOptions } from "./install/runtime.ts";
 import type { KnowledgeLinkGraphView } from "./linking/context.ts";
 import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
-import type { KnowledgePairChecksPort, KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
+import type { KnowledgePairChecksPort, KnowledgeRoundTaskSource, KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
 import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
+import { KnowledgeClusterLabels, type ClusterDescription } from "./search/cluster-labels.ts";
+import { ConceptMergeCheckSource } from "./search/concept-merge-checks.ts";
 import { KnowledgeConceptMerges } from "./search/concept-merges.ts";
 import { findContradictions } from "./search/contradictions.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
@@ -83,6 +85,8 @@ export type KnowledgeLinkingFactory = (ports: {
   settings: KnowledgeSettingsPort;
   /** Search and the concept graph as phase 2 linking reads them (`linkGraphView`). */
   graphView: KnowledgeLinkGraphView;
+  /** LLM work for linking's idle rounds: concept merge checks and cluster names (`KnowledgeLinkingOptions.roundTasks`). */
+  roundTasks: readonly KnowledgeRoundTaskSource[];
 }) => KnowledgeLinking;
 
 /** An embedder source over a runtime (the gated one: null while the plugin is off). */
@@ -134,6 +138,8 @@ interface Opening {
   linking: KnowledgeLinking;
   /** Automatic concept merges over the graph (phase 2 spec, "Concept merges"). */
   conceptMerges: KnowledgeConceptMerges;
+  /** LLM topic names of similarity clusters (`search/cluster-labels.ts`). */
+  clusterLabels: KnowledgeClusterLabels;
   unsubscribe: (() => void)[];
 }
 
@@ -171,6 +177,64 @@ export function linkGraphView(store: Pick<KnowledgeStore, "listCollections">, gr
       return [...out];
     }
   };
+}
+
+/** Concept types that name a thing rather than a topic: a cluster name must not be one of them alone. */
+const ENTITY_CONCEPT_TYPES: ReadonlySet<string> = new Set([
+  "person",
+  "organization",
+  "company",
+  "product",
+  "tool",
+  "app",
+  "platform",
+  "platformapi",
+  "aiservice",
+  "channel",
+  "agentskill",
+  "storefront"
+]);
+/** Concept types left out of a cluster's shown concepts (who wrote it, not what it is about). */
+const AUTHOR_CONCEPT_TYPES: ReadonlySet<string> = new Set(["person", "organization", "company"]);
+
+/**
+ * A similarity cluster as its naming task shows it (`cluster-labels.ts`): member titles in the order
+ * given (most central first) with syntheses last (hub notes that cite every topic), the concepts at
+ * least two members share (by count; authors left out), and the names the label must not be alone
+ * (authors, handles, entity concepts).
+ */
+export function describeCluster(
+  store: Pick<KnowledgeStore, "getMeta">,
+  graph: Pick<KnowledgeGraph, "conceptsOfEntry">,
+  memberIds: readonly string[],
+  scope: ReturnType<typeof knowledgeScope>
+): ClusterDescription | null {
+  const titles: string[] = [];
+  const later: string[] = [];
+  const forbidden = new Set<string>();
+  const counts = new Map<string, { name: string; type: string; count: number }>();
+  for (const id of memberIds) {
+    const meta = store.getMeta(id);
+    if (!meta) continue;
+    (meta.kind === "synthesis" ? later : titles).push(meta.title);
+    if (meta.author) forbidden.add(meta.author);
+    if (meta.handle) forbidden.add(meta.handle);
+    for (const concept of graph.conceptsOfEntry(id, scope)) {
+      const type = concept.type.toLowerCase();
+      if (ENTITY_CONCEPT_TYPES.has(type)) forbidden.add(concept.name);
+      if (AUTHOR_CONCEPT_TYPES.has(type)) continue;
+      const seen = counts.get(concept.id);
+      if (seen) seen.count += 1;
+      else counts.set(concept.id, { name: concept.name, type: concept.type, count: 1 });
+    }
+  }
+  titles.push(...later);
+  if (titles.length === 0) return null;
+  const concepts = [...counts.values()]
+    .filter((c) => c.count >= 2)
+    .sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map(({ name, type }) => ({ name, type }));
+  return { titles, concepts, forbidden: [...forbidden] };
 }
 
 /** Linking when none is built (tests) or building it failed: paused, with the reason; ignores changes. */
@@ -398,7 +462,6 @@ export class KnowledgeService {
     const search = new KnowledgeSearch({ store, graph, embedders, indexDir: knowledgeIndexDir(appdir), logger: this.logger });
     // Text indexing runs in the background; queries wait for it.
     void search.start().catch((error) => this.logger.warn("knowledge: indexing the entries failed", error));
-    const linking = this.buildLinking(store, graph, search);
     // The merge overlay is read and applied before linking loads the graph; concept vectors and
     // merge planning follow every load in the background.
     const conceptMerges = new KnowledgeConceptMerges({
@@ -408,8 +471,30 @@ export class KnowledgeService {
       vectorsDir: join(knowledgeIndexDir(appdir), "concepts"),
       logger: this.logger
     });
+    // LLM quality work answered in linking's idle rounds: concept pairs the name guards refused, and
+    // topic names for the similarity clusters (read by the similarity graph).
+    const everything = () => knowledgeScope({ kind: "all" }, store.listCollections().map((collection) => collection.id));
+    const clusterLabels = new KnowledgeClusterLabels({
+      path: knowledgeClusterLabelsPath(appdir),
+      describe: (memberIds) => describeCluster(store, graph, memberIds, everything()),
+      refresh: async () => void (await search.similarity.graph({}, everything())),
+      logger: this.logger
+    });
+    await clusterLabels.load();
+    search.similarity.connectClusterLabels(clusterLabels);
+    const conceptChecks = new ConceptMergeCheckSource({
+      merges: conceptMerges,
+      entry: async (id) => {
+        const entry = await store.getEntry(id);
+        return entry ? { title: entry.title, body: entry.body } : null;
+      }
+    });
+    const linking = this.buildLinking(store, graph, search, [conceptChecks, clusterLabels]);
     await conceptMerges.start();
-    const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, unsubscribe: [] };
+    const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, clusterLabels, unsubscribe: [] };
+    opening.unsubscribe.push(() => search.similarity.connectClusterLabels(null));
+    // A new cluster name redraws the similarity layer.
+    opening.unsubscribe.push(clusterLabels.onChange(() => this.publishChanged({ graph: true })));
     // Insights and similar entries read linking's pair checks and queued link gaps (phase 2 spec,
     // "Shared seams"); the gap set is read on each use, so a linking swapped for NoLinking counts.
     const connectSearch = (): void =>
@@ -472,7 +557,13 @@ export class KnowledgeService {
     const opening = this.opening;
     if (!opening) return null;
     const scope = knowledgeScope({ kind: "all" }, opening.store.listCollections().map((collection) => collection.id));
-    const found = findContradictions({ graph: opening.graph, scope, pairChecks: opening.linking.pairChecks, accept: () => true });
+    const found = findContradictions({
+      graph: opening.graph,
+      scope,
+      pairChecks: opening.linking.pairChecks,
+      accept: () => true,
+      entryMeta: (id) => opening.store.getMeta(id)
+    });
     return [...found.keys()].sort().join("\n");
   }
 
@@ -491,11 +582,11 @@ export class KnowledgeService {
     this.publishStatus();
   }
 
-  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph, search: KnowledgeSearch): KnowledgeLinking {
+  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph, search: KnowledgeSearch, roundTasks: readonly KnowledgeRoundTaskSource[]): KnowledgeLinking {
     const factory = this.options.linking;
     if (!factory) return new NoLinking(this.settings, "Graph linking is not available in this build.");
     try {
-      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search) });
+      return factory({ store, graph, runtime: this.runtime, settings: this.settings, graphView: linkGraphView(store, graph, search), roundTasks });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`knowledge: the linking module could not be built (${message})`);

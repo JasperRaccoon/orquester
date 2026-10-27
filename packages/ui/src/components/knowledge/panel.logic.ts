@@ -29,13 +29,24 @@ export function similarityPercent(similarity: number): number {
   return Math.round(Math.min(1, Math.max(0, similarity)) * 100);
 }
 
+/**
+ * Concept names as one list shows them: a name that repeats in it (compared without case) carries
+ * its type, so "TikTok, TikTok" reads "TikTok (Channel), TikTok (Organization)".
+ */
+export function conceptLabels(concepts: readonly KnowledgeConceptRef[]): string[] {
+  const key = (concept: KnowledgeConceptRef) => concept.name.trim().toLowerCase();
+  const counts = new Map<string, number>();
+  for (const concept of concepts) counts.set(key(concept), (counts.get(key(concept)) ?? 0) + 1);
+  return concepts.map((concept) => (counts.get(key(concept))! > 1 ? `${concept.name} (${concept.type})` : concept.name));
+}
+
 /** A reason chip's text: "Meaning 91%", "Concepts: A, B +1", "Same author". */
 export function reasonLabel(reason: KnowledgeRelatedReason): string {
   switch (reason.kind) {
     case "meaning":
       return `Meaning ${similarityPercent(reason.similarity)}%`;
     case "concepts": {
-      const names = reason.concepts.map((c) => c.name);
+      const names = conceptLabels(reason.concepts);
       if (names.length > 0) {
         const more = reason.shared - names.length;
         return `Concepts: ${names.join(", ")}${more > 0 ? ` +${more}` : ""}`;
@@ -88,6 +99,18 @@ export function similarSection(detail: Pick<KnowledgeEntryDetail, "entry" | "rel
 /** The distinctive concepts of a "concepts" reason (few entries have them): none for another reason or an older daemon. */
 export function distinctiveConcepts(reason: KnowledgeRelatedReason): KnowledgeConceptRef[] {
   return reason.kind === "concepts" ? (reason.distinctive ?? []) : [];
+}
+
+/**
+ * The distinctive concept chips of a reason, each with its label: a name that repeats among the
+ * reason's concepts and its distinctive ones carries its type ({@link conceptLabels}).
+ */
+export function distinctiveChips(reason: KnowledgeRelatedReason): { concept: KnowledgeConceptRef; label: string }[] {
+  const concepts = distinctiveConcepts(reason);
+  if (reason.kind !== "concepts" || concepts.length === 0) return [];
+  const listed = [...reason.concepts, ...concepts.filter((concept) => !reason.concepts.some((other) => other.id === concept.id))];
+  const labels = new Map(conceptLabels(listed).map((label, index) => [listed[index]!.id, label]));
+  return concepts.map((concept) => ({ concept, label: labels.get(concept.id)! }));
 }
 
 export interface Disagreement {

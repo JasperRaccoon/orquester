@@ -2,11 +2,25 @@
  * Knowledge Graph linking — pair checks: contradictions an LLM confirms (phase 2 spec, "Pair
  * checks"). Implements `KnowledgePairChecksPort` (read by insights and similar entries, W3).
  *
- * Candidates ({@link pairCheckCandidates}): pairs of linked entries that are close in meaning
- * (cosine ≥ the model's `good`) and share at least one concept of a claim-like type
- * ({@link PAIR_CHECK_TYPES}), or that are joined by a `contradicts` edge between their concepts (any
- * similarity); closest first, at most {@link PAIR_CHECK_MAX_PER_RUN} new ones per linking run, each
- * pair checked once per pair of content hashes.
+ * Candidates ({@link pairCheckCandidates}), taken tier by tier ({@link PAIR_CHECK_REASONS}), closest
+ * first within a tier, at most {@link PAIR_CHECK_MAX_PER_RUN} new ones per round, each pair checked
+ * once per pair of content hashes:
+ * 1. joined by a `contradicts` edge between their concepts (any similarity): the check confirms the
+ *    graph's guess (`checked`) or drops it (consistent/unrelated);
+ * 2. opposite advice, at cosine ≥ the model's `good`: a concept and its negation ("One trial per IP"
+ *    / "Never one-trial-per-IP"), or different values for the same decision — one is among the
+ *    other's {@link PAIR_CHECK_ALTERNATIVE_NEIGHBOURS} nearest, by different authors, and a Tool or
+ *    Tactic of each (not shared) names the same subject in {@link PAIR_CHECK_ALTERNATIVE_WORDS}+
+ *    words ("Outlook/Proton email for TikTok account" / "Create TikTok accounts with a fresh Gmail");
+ * 3. close (≥ `good`) and sharing a concept of a claim-like type ({@link PAIR_CHECK_TYPES}).
+ * Meta entries are left out: a survey entry (a synthesis, or a note titled as a map, audit, hub or
+ * index: `isSurveyEntry`, as contradictions read them) never takes part, and an entry linked to
+ * both concepts of a `contradicts` edge is not paired through that edge (it reports the
+ * disagreement, it takes no side).
+ *
+ * The same rounds answer the tasks of `KnowledgeRoundTaskSource`s (concept merge checks, cluster
+ * names): {@link writeRoundTask} writes them into this inbox with their payload, and
+ * {@link harvestPairCheckInbox} hands an answer left before a restart to its source.
  *
  * A check is a daemon-written task in the pair checks' own inbox (`knowledgePairChecksInboxDir`,
  * the same `agent_inbox/<id>.task.json` envelope myKG writes, step {@link PAIR_CHECK_STEP}, plus the
@@ -28,10 +42,13 @@ import {
   readKnowledgePairChecksFile,
   serializeKnowledgePairChecksFile,
   type KnowledgePairCheckRecord,
-  type KnowledgePairChecksFile
+  type KnowledgePairChecksFile,
+  type KnowledgeRoundAttemptRecord
 } from "@orquester/config";
-import type { KnowledgeEntry } from "@orquester/api";
-import type { KnowledgePairCheck, KnowledgePairChecksPort } from "../ports.ts";
+import type { KnowledgeConceptRef, KnowledgeEntry } from "@orquester/api";
+import type { KnowledgePairCheck, KnowledgePairChecksPort, KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
+import { isSurveyEntry } from "../search/contradictions.ts";
+import { normalizeAuthor } from "../search/filters.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import { INBOX_DIR, OUTBOX_DIR, readEnvelope, type InboxTaskEnvelope } from "./inbox.ts";
 
@@ -44,6 +61,22 @@ export const PAIR_CHECK_BODY_CHARS = 2_000;
 export const PAIR_CHECK_TYPES: ReadonlySet<string> = new Set(["Tactic", "Rule", "Guideline", "Metric", "Result"]);
 const NOTE_MAX = 500;
 const YIELD_EVERY_MS = 40;
+/**
+ * Rounds that may hand out one item (the same input) and end without an acceptable answer before
+ * it is given up on: no round asks it again (`KnowledgePairChecks.gaveUp`).
+ */
+export const ROUND_TASK_MAX_ATTEMPTS = 3;
+/** Chats that may give up on one task within a round before the round hands it out no more (below the pool's 3 failures in a row). */
+export const ROUND_TASK_MAX_GIVE_UPS = 2;
+/** Attempt records kept at most (the least recent go first). */
+const ROUND_ATTEMPTS_MAX = 2_000;
+
+/** A pair check's item key for the attempt records: the pair at its content hashes (the same input). */
+export function pairCheckItemKey(pair: PairKey): string {
+  const [a, b] = sorted(pair.a, pair.b);
+  const swapped = a !== pair.a;
+  return `pair ${a} ${b} ${swapped ? pair.hashB : pair.hashA} ${swapped ? pair.hashA : pair.hashB}`;
+}
 
 export const PAIR_CHECK_SYSTEM = [
   "You compare two saved knowledge entries and decide whether they contradict each other.",
@@ -113,6 +146,8 @@ export interface KnowledgePairChecksOptions {
 export class KnowledgePairChecks implements KnowledgePairChecksPort {
   private file: KnowledgePairChecksFile = emptyKnowledgePairChecksFile();
   private readonly byKey = new Map<string, KnowledgePairCheckRecord>();
+  /** Round task items without an acceptable answer yet, by item key. */
+  private readonly attempts = new Map<string, KnowledgeRoundAttemptRecord>();
   private readonly listeners = new Set<() => void>();
   private chain: Promise<void> = Promise.resolve();
 
@@ -139,7 +174,60 @@ export class KnowledgePairChecks implements KnowledgePairChecksPort {
     this.file = file;
     this.byKey.clear();
     for (const record of file.checks) this.byKey.set(pairKey(record.a, record.b), record);
+    this.attempts.clear();
+    for (const record of file.attempts) this.attempts.set(record.key, record);
     this.emit();
+  }
+
+  /** Whether rounds gave up on this item ({@link ROUND_TASK_MAX_ATTEMPTS}): no round asks it again. */
+  gaveUp(itemKey: string): boolean {
+    return this.attempts.get(itemKey)?.gaveUpAt != null;
+  }
+
+  /** Items rounds gave up on, most recent first (status, tests). */
+  givenUp(): readonly KnowledgeRoundAttemptRecord[] {
+    return [...this.attempts.values()].filter((record) => record.gaveUpAt != null).sort((x, y) => (y.gaveUpAt! < x.gaveUpAt! ? -1 : 1));
+  }
+
+  /**
+   * A round handed this item out and ended without an acceptable answer: counted, persisted, and
+   * after {@link ROUND_TASK_MAX_ATTEMPTS} such rounds it is given up on. Answers whether it is now.
+   */
+  async failedAttempt(item: { key: string; step: string; label: string }): Promise<boolean> {
+    const previous = this.attempts.get(item.key);
+    if (previous?.gaveUpAt != null) return true;
+    const at = this.options.now().toISOString();
+    const failures = (previous?.failures ?? 0) + 1;
+    const record: KnowledgeRoundAttemptRecord = {
+      ...(previous ?? {}),
+      key: item.key,
+      step: item.step,
+      label: item.label,
+      failures,
+      lastAt: at,
+      gaveUpAt: failures >= ROUND_TASK_MAX_ATTEMPTS ? at : null
+    };
+    this.attempts.delete(item.key);
+    this.attempts.set(item.key, record);
+    // The least recent go first (Map order is the order of their last attempt).
+    while (this.attempts.size > ROUND_ATTEMPTS_MAX) this.attempts.delete(this.attempts.keys().next().value!);
+    this.file = { ...this.file, attempts: [...this.attempts.values()] };
+    await this.save();
+    if (record.gaveUpAt !== null) {
+      this.options.logger?.warn("knowledge pair checks: a round task got no acceptable answer in several rounds; it is not asked again", {
+        step: item.step,
+        label: item.label,
+        failures
+      });
+    }
+    return record.gaveUpAt !== null;
+  }
+
+  /** The item was answered: its failed attempts are forgotten. */
+  async answered(itemKey: string): Promise<void> {
+    if (!this.attempts.delete(itemKey)) return;
+    this.file = { ...this.file, attempts: [...this.attempts.values()] };
+    await this.save();
   }
 
   all(): readonly KnowledgePairCheck[] {
@@ -240,9 +328,29 @@ function toCheck(record: KnowledgePairCheckRecord): KnowledgePairCheck {
 // Candidates
 // ---------------------------------------------------------------------------
 
+/** Why a pair is worth checking, in priority order ({@link PAIR_CHECK_REASONS}). */
+export type PairCandidateReason = "contradicts" | "negation" | "alternatives" | "shared";
+/**
+ * Candidates are taken tier by tier, closest first within a tier: the concept graph already says
+ * they disagree (`contradicts` edge: a check confirms or drops it), then concept-level signs of
+ * opposite advice (a concept and its negation; different values for the same decision), then the
+ * close pairs sharing a claim.
+ */
+export const PAIR_CHECK_REASONS: readonly PairCandidateReason[] = ["contradicts", "negation", "alternatives", "shared"];
+
 export interface PairCandidate extends PairKey {
   /** Cosine of the two entry vectors; null when either has none (a `contradicts` edge alone). */
   similarity: number | null;
+  reason: PairCandidateReason;
+}
+
+/** What candidates read of an entry beside its concepts (`KnowledgeEntryMeta`). */
+export interface PairCheckEntryInfo {
+  kind: string;
+  /** Its title (a note titled as a map, audit, hub or index is a survey: `isSurveyEntry`); absent: none. */
+  title?: string | null;
+  author: string | null;
+  handle: string | null;
 }
 
 export interface PairCheckCandidatesOptions {
@@ -252,26 +360,130 @@ export interface PairCheckCandidatesOptions {
   hashOf(entryId: string): string | null;
   isChecked(pair: PairKey): boolean;
   limit: number;
+  /** An entry's kind, title and author (survey entries and the same author are left out); absent: neither applies. */
+  entryOf?(entryId: string): PairCheckEntryInfo | null;
 }
 
-/** New candidate pairs, closest first (see the module header). Yields to the event loop on large sets. */
+/**
+ * Whether an entry surveys others rather than taking a side (a synthesis, or a note titled as a
+ * map, audit, hub, register, index or overview: `isSurveyEntry`, the same test contradictions use):
+ * never checked.
+ */
+export function isPairCheckMetaEntry(info: PairCheckEntryInfo | null): boolean {
+  return info !== null && isSurveyEntry({ kind: info.kind, title: info.title ?? "" });
+}
+/** "Different values for the same decision": the other entry is among an entry's this many nearest by meaning. */
+export const PAIR_CHECK_ALTERNATIVE_NEIGHBOURS = 6;
+/** … and a Tool or Tactic of each, not shared, names the same subject: at least this many content words in common. */
+export const PAIR_CHECK_ALTERNATIVE_WORDS = 2;
+const ALTERNATIVE_TYPES: ReadonlySet<string> = new Set(["Tool", "Tactic"]);
+/**
+ * Concept types whose negation reads as opposite advice. Not Rule or Guideline: those are named
+ * after what they forbid ("Hidden Features" / "No hidden, dormant, or undocumented features").
+ */
+const NEGATION_TYPES: ReadonlySet<string> = new Set(["Tactic", "Tool", "Metric", "Result"]);
+/** Words that turn advice around ("Never one trial per IP"); the rest of the names must overlap this much. */
+const NEGATION_WORDS: ReadonlySet<string> = new Set(["not", "no", "never", "avoid", "without", "dont", "don", "cannot", "cant", "stop", "against", "non", "nor"]);
+const NEGATION_MIN_JACCARD = 0.5;
+const GLUE_WORDS: ReadonlySet<string> = new Set(["the", "a", "an", "of", "for", "to", "and", "or", "with", "by", "at", "from", "as", "is", "your", "you", "its", "it", "in", "on", "use", "using", "used", "via", "per", "into"]);
+
+/** A concept name's words: lower case, no accents, plurals folded ("proxies" → "proxy"). */
+function nameWords(name: string): string[] {
+  const out: string[] = [];
+  for (const word of name.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/['’]/g, "").split(/[^a-z0-9]+/)) {
+    if (word.length === 0) continue;
+    out.push(word.length > 4 && word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word);
+  }
+  return out;
+}
+
+/** Words that say what a name is about: no glue words, numbers or words under 3 letters. */
+function contentWords(name: string): Set<string> {
+  return new Set(nameWords(name).filter((w) => w.length >= 3 && !GLUE_WORDS.has(w) && !NEGATION_WORDS.has(w) && !/^\d+$/.test(w)));
+}
+
+/**
+ * Whether one name is the other turned around: exactly one negates, and the rest overlaps (Jaccard
+ * ≥ 0.5). What a name says in parentheses is a clarification ("One strong page per claim (no
+ * thousands of thin pages)"), not part of it.
+ */
+export function negatedNames(x: string, y: string): boolean {
+  return negatedWords(negationWords(x), negationWords(y));
+}
+
+/** What {@link negatedNames} reads of a name: whether it negates, and its other words. */
+interface NegationWords {
+  negates: boolean;
+  rest: ReadonlySet<string>;
+}
+
+function negationWords(name: string): NegationWords {
+  const words = nameWords(name.replace(/\([^)]*\)/g, " "));
+  return { negates: words.some((w) => NEGATION_WORDS.has(w)), rest: new Set(words.filter((w) => !NEGATION_WORDS.has(w) && !GLUE_WORDS.has(w))) };
+}
+
+function negatedWords(x: NegationWords, y: NegationWords): boolean {
+  if (x.negates === y.negates) return false;
+  let shared = 0;
+  for (const w of x.rest) if (y.rest.has(w)) shared += 1;
+  const union = x.rest.size + y.rest.size - shared;
+  return union > 0 && shared / union >= NEGATION_MIN_JACCARD;
+}
+
+const authorKey = (value: string): string => normalizeAuthor(value);
+
+/**
+ * New candidate pairs (see the module header), tier by tier in {@link PAIR_CHECK_REASONS} order,
+ * closest first within a tier; meta entries left out (a survey entry never takes part:
+ * {@link isPairCheckMetaEntry}; an entry linked to both concepts of a `contradicts` edge is not
+ * paired through it). Memory stays linear in the entries plus the close pairs (each entry's nearest
+ * neighbours are kept bounded), and it yields to the event loop every {@link YIELD_EVERY_MS} ms.
+ */
 export async function pairCheckCandidates(options: PairCheckCandidatesOptions): Promise<PairCandidate[]> {
   const index = options.view.vectors();
   const good = index.thresholds()?.good ?? null;
-  const typed = new Map<string, Set<string>>();
+  // The yielder pattern (`search/similarity.ts` `yielder`), checked inline in the hot loops: `due()`
+  // is a clock read, `breathe()` one turn of the event loop once the slice is used up.
+  let since = performance.now();
+  const due = (): boolean => performance.now() - since >= YIELD_EVERY_MS;
+  const breathe = async (): Promise<void> => {
+    if (!due()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    since = performance.now();
+  };
+  const conceptsOf = new Map<string, readonly KnowledgeConceptRef[]>();
+  const conceptIdsOf = new Map<string, ReadonlySet<string>>();
   const entriesOfConcept = new Map<string, string[]>();
+  const contradicting = new Map<string, readonly string[]>();
+  const contradictingOf = (concept: string): readonly string[] => {
+    let others = contradicting.get(concept);
+    if (!others) contradicting.set(concept, (others = options.view.contradicting(concept)));
+    return others;
+  };
+  const ids: string[] = [];
   for (const id of options.ids) {
-    const set = new Set<string>();
-    for (const concept of options.view.conceptsOf(id)) {
-      if (PAIR_CHECK_TYPES.has(concept.type)) set.add(concept.id);
+    if (isPairCheckMetaEntry(options.entryOf?.(id) ?? null)) continue;
+    const concepts = options.view.conceptsOf(id);
+    ids.push(id);
+    conceptsOf.set(id, concepts);
+    conceptIdsOf.set(id, new Set(concepts.map((concept) => concept.id)));
+    for (const concept of concepts) {
       const list = entriesOfConcept.get(concept.id);
       if (list) list.push(id);
       else entriesOfConcept.set(concept.id, [id]);
     }
-    typed.set(id, set);
   }
+  const authorsOf = (id: string): Set<string> => {
+    const info = options.entryOf?.(id) ?? null;
+    return new Set([info?.author, info?.handle].filter((v): v is string => typeof v === "string" && v.trim() !== "").map(authorKey));
+  };
+  const sameAuthor = (a: string, b: string): boolean => {
+    const x = authorsOf(a);
+    for (const name of authorsOf(b)) if (x.has(name)) return true;
+    return false;
+  };
   const vectors = new Map<string, Float32Array>();
-  for (const id of options.ids) {
+  for (const id of ids) {
     const vector = index.entryVector(id);
     if (vector) vectors.set(id, vector);
   }
@@ -284,62 +496,148 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
     return dot;
   };
   const found = new Map<string, PairCandidate>();
-  const consider = (x: string, y: string, sim: number | null): void => {
+  const consider = (x: string, y: string, sim: number | null, reason: PairCandidateReason): void => {
+    if (x === y) return;
     const [a, b] = sorted(x, y);
     const key = `${a} ${b}`;
-    if (found.has(key)) return;
+    const seen = found.get(key);
+    if (seen) {
+      if (PAIR_CHECK_REASONS.indexOf(reason) < PAIR_CHECK_REASONS.indexOf(seen.reason)) seen.reason = reason;
+      return;
+    }
     const hashA = options.hashOf(a);
     const hashB = options.hashOf(b);
     if (!hashA || !hashB) return;
     const pair = { a, b, hashA, hashB };
     if (options.isChecked(pair)) return;
-    found.set(key, { ...pair, similarity: sim });
+    found.set(key, { ...pair, similarity: sim, reason });
   };
-  let since = performance.now();
-  const breathe = async (): Promise<void> => {
-    if (performance.now() - since < YIELD_EVERY_MS) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    since = performance.now();
-  };
-  // Close in meaning and sharing a claim-like concept.
-  if (good !== null) {
-    const rows = [...vectors.keys()].filter((id) => (typed.get(id)?.size ?? 0) > 0);
-    for (let i = 0; i < rows.length; i += 1) {
-      const a = rows[i]!;
-      const conceptsA = typed.get(a)!;
-      for (let j = i + 1; j < rows.length; j += 1) {
-        const b = rows[j]!;
-        const sim = similarity(a, b);
-        if (sim === null || sim < good) continue;
-        let shared = false;
-        for (const concept of typed.get(b)!) {
-          if (conceptsA.has(concept)) {
-            shared = true;
-            break;
-          }
-        }
-        if (shared) consider(a, b, sim);
-      }
-      await breathe();
-    }
-  }
-  // Joined by a `contradicts` edge between their concepts.
-  const contradicting = new Map<string, readonly string[]>();
+
+  // Joined by a `contradicts` edge between their concepts (any similarity); an entry linked to both
+  // concepts of the edge reports that disagreement rather than taking a side: not for this edge.
   for (const [concept, entries] of entriesOfConcept) {
-    let others = contradicting.get(concept);
-    if (!others) {
-      others = options.view.contradicting(concept);
-      contradicting.set(concept, others);
-    }
-    for (const other of others) {
+    for (const other of contradictingOf(concept)) {
       for (const a of entries) {
-        for (const b of entriesOfConcept.get(other) ?? []) if (a !== b) consider(a, b, similarity(a, b));
+        if (due()) await breathe();
+        if (conceptIdsOf.get(a)!.has(other)) continue;
+        for (const b of entriesOfConcept.get(other) ?? []) if (a !== b && !conceptIdsOf.get(b)!.has(concept)) consider(a, b, similarity(a, b), "contradicts");
       }
     }
     await breathe();
   }
+
+  if (good !== null) {
+    // Every close pair once, and each entry's nearest neighbours (for "alternatives"): rows in id
+    // order, so a tie keeps the smaller id; a bounded best-first list per row.
+    const rows = [...vectors.keys()].sort();
+    const rowVectors = rows.map((id) => vectors.get(id)!);
+    const n = rows.length;
+    const keep = PAIR_CHECK_ALTERNATIVE_NEIGHBOURS;
+    const topIndex = new Int32Array(n * keep).fill(-1);
+    const topSim = new Float64Array(n * keep);
+    const topCount = new Int32Array(n);
+    const offer = (node: number, other: number, sim: number): void => {
+      const base = node * keep;
+      let at = topCount[node]!;
+      if (at < keep) topCount[node] = at + 1;
+      else if (sim > topSim[base + keep - 1]!) at = keep - 1;
+      else return;
+      while (at > 0 && topSim[base + at - 1]! < sim) {
+        topSim[base + at] = topSim[base + at - 1]!;
+        topIndex[base + at] = topIndex[base + at - 1]!;
+        at -= 1;
+      }
+      topSim[base + at] = sim;
+      topIndex[base + at] = other;
+    };
+    const closeA: number[] = [];
+    const closeB: number[] = [];
+    const closeSim: number[] = [];
+    for (let i = 0; i < n; i += 1) {
+      const x = rowVectors[i]!;
+      for (let j = i + 1; j < n; j += 1) {
+        const y = rowVectors[j]!;
+        if (x.length !== y.length) continue;
+        let sim = 0;
+        for (let d = 0; d < x.length; d += 1) sim += x[d]! * y[d]!;
+        offer(i, j, sim);
+        offer(j, i, sim);
+        if (sim >= good) {
+          closeA.push(i);
+          closeB.push(j);
+          closeSim.push(sim);
+        }
+        if ((j & 63) === 0 && due()) await breathe();
+      }
+      await breathe();
+    }
+    const isNearest = (i: number, j: number): boolean => {
+      for (let r = 0; r < topCount[i]!; r += 1) if (topIndex[i * keep + r] === j) return true;
+      return false;
+    };
+    const wordsOf = new Map<string, Set<string>>();
+    const words = (concept: KnowledgeConceptRef): Set<string> => {
+      let set = wordsOf.get(concept.id);
+      if (!set) wordsOf.set(concept.id, (set = contentWords(concept.name)));
+      return set;
+    };
+    const negationOf = new Map<string, NegationWords>();
+    const negation = (concept: KnowledgeConceptRef): NegationWords => {
+      let found = negationOf.get(concept.id);
+      if (!found) negationOf.set(concept.id, (found = negationWords(concept.name)));
+      return found;
+    };
+    for (let p = 0; p < closeA.length; p += 1) {
+      if (due()) await breathe();
+      const i = closeA[p]!;
+      const j = closeB[p]!;
+      const sim = closeSim[p]!;
+      const a = rows[i]!;
+      const b = rows[j]!;
+      const ca = conceptsOf.get(a)!;
+      const cb = conceptsOf.get(b)!;
+      const idsA = conceptIdsOf.get(a)!;
+      const idsB = conceptIdsOf.get(b)!;
+      // Sharing a claim-like concept.
+      if (ca.some((c) => PAIR_CHECK_TYPES.has(c.type) && idsB.has(c.id))) consider(a, b, sim, "shared");
+      // A concept and its negation ("One trial per IP" / "Never one trial per IP").
+      let negated = false;
+      for (const x of ca) {
+        if (negated || !NEGATION_TYPES.has(x.type) || idsB.has(x.id)) continue;
+        for (const y of cb) {
+          if (y.type === x.type && !idsA.has(y.id) && negatedWords(negation(x), negation(y))) {
+            negated = true;
+            break;
+          }
+        }
+      }
+      if (negated) consider(a, b, sim, "negation");
+      // Different values for the same decision: nearest neighbours by different authors whose
+      // Tools or Tactics (not shared) name the same subject ("Outlook/Proton email for TikTok
+      // account" / "Create TikTok accounts with a fresh Gmail"; "ISP proxy with socks5" / "Using
+      // residential, mobile or ISP proxies").
+      if (!(isNearest(i, j) || isNearest(j, i)) || sameAuthor(a, b)) continue;
+      let alternative = false;
+      for (const x of ca) {
+        if (alternative || !ALTERNATIVE_TYPES.has(x.type) || idsB.has(x.id)) continue;
+        const wx = words(x);
+        if (wx.size < PAIR_CHECK_ALTERNATIVE_WORDS) continue;
+        for (const y of cb) {
+          if (y.type !== x.type || idsA.has(y.id)) continue;
+          let shared = 0;
+          for (const w of words(y)) if (wx.has(w)) shared += 1;
+          if (shared >= PAIR_CHECK_ALTERNATIVE_WORDS) {
+            alternative = true;
+            break;
+          }
+        }
+      }
+      if (alternative) consider(a, b, sim, "alternatives");
+    }
+  }
+  const tier = (c: PairCandidate): number => PAIR_CHECK_REASONS.indexOf(c.reason);
   return [...found.values()]
-    .sort((x, y) => (y.similarity ?? -2) - (x.similarity ?? -2) || (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : 1))
+    .sort((x, y) => tier(x) - tier(y) || (y.similarity ?? -2) - (x.similarity ?? -2) || (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : 1))
     .slice(0, options.limit);
 }
 
@@ -371,19 +669,42 @@ export async function writePairCheckTask(
   entries: { a: Pick<KnowledgeEntry, "id" | "title" | "body">; b: Pick<KnowledgeEntry, "id" | "title" | "body"> },
   now: Date
 ): Promise<string> {
-  const user = pairCheckInput(entries.a, entries.b);
-  const label = `${PAIR_CHECK_STEP} ${pair.a} ${pair.b}`;
-  const id = createHash("sha256").update(`${PAIR_CHECK_SYSTEM}\n--user--\n${user}\n--ctx--\n${label}`).digest("hex");
-  const envelope: PairCheckEnvelope = {
+  return writeInboxTask(inboxDir, PAIR_CHECK_STEP, { label: `${PAIR_CHECK_STEP} ${pair.a} ${pair.b}`, system: PAIR_CHECK_SYSTEM, user: pairCheckInput(entries.a, entries.b) }, { pair }, now);
+}
+
+/** A {@link KnowledgeRoundTaskSource}'s task file: myKG's envelope plus the source's payload. */
+export interface RoundTaskEnvelope extends InboxTaskEnvelope {
+  payload: unknown;
+}
+
+/** Writes one task of a round task source into the pair checks' inbox; answers its id. */
+export function writeRoundTask(inboxDir: string, step: string, task: KnowledgeRoundTask, now: Date): Promise<string> {
+  return writeInboxTask(inboxDir, step, task, { payload: task.payload }, now);
+}
+
+/** The id a task is written under (myKG's `_make_task_id`: its prompt and label), so the same input has the same id. */
+export function roundTaskId(task: { label: string; system: string; user: string }): string {
+  return createHash("sha256").update(`${task.system}\n--user--\n${task.user}\n--ctx--\n${task.label}`).digest("hex");
+}
+
+async function writeInboxTask(
+  inboxDir: string,
+  step: string,
+  task: { label: string; system: string; user: string },
+  extra: Record<string, unknown>,
+  now: Date
+): Promise<string> {
+  const id = roundTaskId(task);
+  const envelope = {
     task_id: id,
-    step: PAIR_CHECK_STEP,
-    context_label: label,
-    system: PAIR_CHECK_SYSTEM,
-    user,
+    step,
+    context_label: task.label,
+    system: task.system,
+    user: task.user,
     max_tokens: 1_024,
     timeout_seconds: 0,
     created_at: now.toISOString(),
-    pair
+    ...extra
   };
   const inbox = join(inboxDir, INBOX_DIR);
   await mkdir(inbox, { recursive: true, mode: 0o700 });
@@ -393,6 +714,17 @@ export async function writePairCheckTask(
   await writeFile(tmp, JSON.stringify(envelope, null, 2), { mode: 0o600 });
   await rename(tmp, path);
   return id;
+}
+
+/** A source's answer text when it parses and the source accepts it for this payload, else null. */
+export function acceptedRoundAnswer(source: Pick<KnowledgeRoundTaskSource, "validate">, payload: unknown, answer: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(answer);
+  } catch {
+    return null;
+  }
+  return source.validate(value, payload) === null ? answer : null;
 }
 
 function readPair(value: unknown): PairKey | null {
@@ -411,38 +743,57 @@ export async function removePairCheckTask(inboxDir: string, taskId: string): Pro
 }
 
 /**
- * Before a round (no broker on the inbox): records every answered task (an answer written just
- * before a restart) and removes every task file, answered or not — a pair still worth checking is
- * written again. Answers how many answers were recorded.
+ * Before a round and after one (no broker on the inbox): records every answered task (an answer
+ * written just before a restart, or one the round did not record) — a pair check in `checks`,
+ * another step's in its source — except the tasks in `recorded` (the round recorded them already),
+ * and removes every task file, answered or not: an item still worth asking is written again.
+ * Answers how many answers were recorded.
  */
-export async function harvestPairCheckInbox(inboxDir: string, checks: Pick<KnowledgePairChecks, "record">): Promise<number> {
+export async function harvestPairCheckInbox(
+  inboxDir: string,
+  checks: Pick<KnowledgePairChecks, "record">,
+  sources: ReadonlyMap<string, Pick<KnowledgeRoundTaskSource, "validate" | "record">> = new Map(),
+  recorded: ReadonlySet<string> = new Set()
+): Promise<number> {
   let names: string[];
   try {
     names = await readdir(join(inboxDir, INBOX_DIR));
   } catch {
     return 0;
   }
-  let recorded = 0;
+  let count = 0;
   for (const name of names) {
     if (!name.endsWith(".task.json")) {
       if (name.endsWith(".tmp")) await rm(join(inboxDir, INBOX_DIR, name), { force: true });
       continue;
     }
     const id = name.slice(0, -".task.json".length);
+    if (recorded.has(id)) {
+      await removePairCheckTask(inboxDir, id);
+      continue;
+    }
     try {
       const raw = JSON.parse(await readFile(join(inboxDir, INBOX_DIR, name), "utf8")) as Record<string, unknown>;
       const envelope = readEnvelope(raw, id);
       const pair = readPair(raw.pair);
       const answer = JSON.parse(await readFile(join(inboxDir, OUTBOX_DIR, `${id}.answer.json`), "utf8")) as { answer?: unknown };
+      const source = envelope ? sources.get(envelope.step) : undefined;
+      if (source && typeof answer.answer === "string" && "payload" in raw) {
+        const accepted = acceptedRoundAnswer(source, raw.payload, answer.answer);
+        if (accepted !== null) {
+          await source.record(raw.payload, accepted);
+          count += 1;
+        }
+      }
       const parsed = envelope?.step === PAIR_CHECK_STEP && typeof answer.answer === "string" ? parsePairCheckAnswer(answer.answer) : null;
       if (pair && parsed) {
         await checks.record(pair, parsed.verdict, parsed.note);
-        recorded += 1;
+        count += 1;
       }
     } catch {
       // Unanswered, or unreadable: nothing to record.
     }
     await removePairCheckTask(inboxDir, id);
   }
-  return recorded;
+  return count;
 }

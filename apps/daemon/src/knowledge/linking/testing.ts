@@ -48,6 +48,9 @@ export type AnswerFor = (task: KnowledgeWorkerTask) => string;
 /** A plausible myKG answer: Pass 2 extractions name the entry file of the task input; a pair check is consistent. */
 export const defaultAnswer: AnswerFor = (task) => {
   if (task.step === "pair-check") return JSON.stringify({ verdict: "consistent", note: "Both say the same." });
+  if (task.step === "concept-check") return JSON.stringify({ same: false, keep: "a", reason: "Different things." });
+  if (task.step === "cluster-name") return JSON.stringify({ label: "Test topic" });
+  if (task.step === "round-test") return JSON.stringify({ ok: true });
   const file = /^FILE (\S+)/m.exec(task.input)?.[1];
   if (task.step === "pass2" && file) {
     const stem = file.replace(/\.md$/, "");
@@ -236,6 +239,8 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       const answer = behaviour.invalidFirst && !refusedOnce ? "Sure! Here is what I found." : this.answerFor(task);
       const submitted = await tools.submit(session.id, task.taskId, answer);
       if (!submitted.accepted) {
+        // Told to stop (it refused too often: the task goes to another chat), it ends its turn.
+        if (/end your turn now/.test(submitted.error)) break;
         refusedOnce = true;
         session.refused += 1;
         reply = { kind: "task", task: { ...task, instructions: null } };

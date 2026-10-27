@@ -99,6 +99,7 @@ type Harness = Awaited<ReturnType<typeof harness>>;
 /**
  * Alternatives (SEO), Annual billing (SaaS, hidden from "seo-chat"), Comparison (SEO + SaaS),
  * Unrelated (SEO); each with a claim of its own, Annual billing's contradicting Comparison's.
+ * Alternatives' claim is about pricing, which both other entries of its cluster discuss.
  */
 async function seed(h: Harness) {
   const save = ok<KnowledgeSaveResponse>(
@@ -127,9 +128,10 @@ async function seed(h: Harness) {
     [
       node("tactic-solo", "One page per competitor", [`${alt}.md`]),
       node("tactic-annual", "Bill annually", [`${billing}.md`]),
-      node("tactic-monthly", "Bill monthly", [`${comparison}.md`])
+      node("tactic-monthly", "Bill monthly", [`${comparison}.md`]),
+      node("topic-pricing", "Pricing", [`${billing}.md`, `${comparison}.md`])
     ],
-    [edge("x1", "tactic-annual", "tactic-monthly", null, "contradicts")]
+    [edge("x1", "tactic-annual", "tactic-monthly", null, "contradicts"), edge("t1", "tactic-solo", "topic-pricing", null, "about")]
   );
   return { save, seo: seo!, saas: saas!, alt, billing, comparison, unrelated };
 }
@@ -140,12 +142,14 @@ test("GET /insights: every list with totals before the limit, scoped to the call
   const h = await harness(t);
   const { saas, alt, billing, comparison } = await seed(h);
   const all = ok<KnowledgeInsightsResponse>(await h.inject({ method: "GET", url: knowledgeRoutes.insights }));
-  assert.deepEqual(all.totals, { contradictions: 1, bridges: 0, singleSource: 3, gaps: 3 });
+  // Billing and Comparison share Pricing; Alternatives shares nothing with either (two gaps). The
+  // claims about nothing their cluster discusses are not listed: only Alternatives' is.
+  assert.deepEqual(all.totals, { contradictions: 1, bridges: 0, singleSource: 1, gaps: 2 });
   assert.deepEqual(all.contradictions.map(pair), [[billing, comparison].sort()]);
   assert.equal(all.contradictions[0]!.source, "graph");
-  assert.deepEqual(all.singleSource.map((item) => item.concept.id).sort(), ["tactic-annual", "tactic-monthly", "tactic-solo"]);
+  assert.deepEqual(all.singleSource.map((item) => item.concept.id), ["tactic-solo"]);
   assert.ok(all.singleSource.every((item) => item.cluster?.size === 3));
-  assert.deepEqual(all.gaps.map((gap) => gap.queued), [false, false, false]);
+  assert.deepEqual(all.gaps.map((gap) => gap.queued), [false, false]);
 
   const one = ok<KnowledgeInsightsResponse>(await h.inject({ method: "GET", url: `${knowledgeRoutes.insights}?limit=1` }));
   assert.deepEqual(one.totals, all.totals);
@@ -223,20 +227,16 @@ test("GET /insights: linking's pair checks and re-link queue, connected through 
   assert.ok(disconnected.gaps.every((gap) => !gap.queued));
 });
 
-test("entry details carry novelty; a save names the cluster it joins only from a graph already drawn", async (t) => {
+test("entry details carry novelty; a save names the cluster it joins from a graph already drawn, else one is drawn in the background", async (t) => {
   const h = await harness(t);
-  const { alt, unrelated } = await seed(h);
-  const fresh = ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(alt) }));
-  assert.deepEqual(fresh.novelty, { newConcepts: [{ id: "tactic-solo", name: "One page per competitor", type: "tactic" }], cluster: null });
-
-  const newEntry = { entries: [{ body: "Alternatives pages rank for competitor names.", title: "New alternatives", collections: ["SEO"] }] };
-  const early = ok<KnowledgeSaveResponse>(await h.inject({ method: "POST", url: knowledgeRoutes.save, payload: newEntry }));
-  assert.equal(early.results[0]!.cluster, null, "no graph drawn yet: the save does not draw one");
-
+  const { save, alt, unrelated } = await seed(h);
+  assert.ok(save.results.every((result) => result.cluster === null), "no graph drawn yet: the save does not wait for one");
+  // The save started drawing one: the next reads have it.
+  await h.search.similarity.idle();
   const graph = ok<KnowledgeSimilarityGraphResponse>(await h.inject({ method: "GET", url: knowledgeRoutes.similarityGraph }));
   const drawn = graph.clusters[graph.nodes.find((n) => n.id === alt)!.cluster]!;
   const detail = ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(alt) }));
-  assert.deepEqual(detail.novelty!.cluster, { label: drawn.label, size: drawn.size });
+  assert.deepEqual(detail.novelty, { newConcepts: [{ id: "tactic-solo", name: "One page per competitor", type: "tactic" }], cluster: { label: drawn.label, size: drawn.size } });
   assert.equal(ok<KnowledgeEntryDetail>(await h.inject({ method: "GET", url: knowledgeRoutes.entry(unrelated) })).novelty!.cluster, null);
 
   const later = ok<KnowledgeSaveResponse>(

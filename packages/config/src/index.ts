@@ -224,6 +224,11 @@ export function knowledgePairChecksPath(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks.json");
 }
 
+/** Topic names an LLM gave similarity clusters (`knowledge-cluster-labels.ts`). */
+export function knowledgeClusterLabelsPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "cluster-labels.json");
+}
+
 /** The pair checks' own inbox (`agent_inbox/`, `agent_outbox/`), answered by worker chats between linking runs. */
 export function knowledgePairChecksInboxDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks");
@@ -2914,4 +2919,5 @@ export * from "./tooling.ts";
 export * from "./box-mcp.ts";
 export * from "./knowledge-store.ts";
 export * from "./knowledge-concept-merges.ts";
+export * from "./knowledge-cluster-labels.ts";
 export * from "./devices.ts";

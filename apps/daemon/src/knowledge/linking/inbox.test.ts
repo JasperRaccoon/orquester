@@ -33,6 +33,7 @@ async function harness(
     nextWaitMs?: number;
     contextFor?: InboxBrokerOptions["contextFor"];
     validate?: InboxBrokerOptions["validate"];
+    maxGiveUpsPerTask?: number;
   } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-inbox-"));
@@ -177,6 +178,39 @@ describe("InboxBroker", () => {
     const reassigned = await h.broker.next("w2");
     assert.equal(reassigned.kind === "task" && reassigned.task.taskId, id);
     assert.deepEqual(await readdir(h.outbox), [], "invalid answers never reach myKG");
+  });
+
+  it("a task chats keep giving up on is handed out no more (maxGiveUpsPerTask); the others go on; a limit or a stop is not the task's fault", async () => {
+    const h = await harness({ maxGiveUpsPerTask: 2 });
+    const bad = await h.addTask("S", "BAD");
+    const good = await h.addTask("S", "GOOD");
+    const abandoned: string[] = [];
+    h.broker.events.on("abandoned", ({ taskId }) => abandoned.push(taskId));
+    // w1 refuses three times, w2 ends holding it: two chats gave up.
+    assert.equal(((await h.broker.next("w1")) as { task: { taskId: string } }).task.taskId, bad);
+    for (let attempt = 0; attempt < 3; attempt += 1) await h.broker.submit("w1", bad, "not JSON");
+    assert.equal(((await h.broker.next("w2")) as { task: { taskId: string } }).task.taskId, bad);
+    assert.equal(h.broker.giveUpsOf(bad), 1);
+    // A usage limit took w3's chat away from it: not counted.
+    h.broker.release("w2", { blame: false });
+    assert.equal(h.broker.giveUpsOf(bad), 1);
+    assert.equal(((await h.broker.next("w3")) as { task: { taskId: string } }).task.taskId, bad);
+    h.broker.release("w3");
+    assert.equal(h.broker.giveUpsOf(bad), 2);
+    assert.deepEqual(abandoned, [bad]);
+    assert.ok(h.broker.isAbandoned(bad));
+    assert.deepEqual({ pending: h.broker.counts().pending, leased: h.broker.counts().leased }, { pending: 1, leased: 0 }, "an abandoned task is neither pending nor leased");
+    const next = await h.broker.next("w4");
+    assert.equal(next.kind === "task" && next.task.taskId, good, "the round goes on with the other tasks");
+    // Without the option (a linking run: myKG waits for every task) a task is never abandoned.
+    const run = await harness();
+    const only = await run.addTask("S", "ONLY");
+    for (const chat of ["c1", "c2", "c3", "c4"]) {
+      await run.broker.next(chat);
+      run.broker.release(chat);
+    }
+    assert.equal(run.broker.isAbandoned(only), false);
+    assert.equal(run.broker.counts().pending, 1);
   });
 
   it("writes the answer (temp + rename) strictly before the .done marker", async () => {
