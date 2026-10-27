@@ -1,0 +1,411 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { type TestContext } from "node:test";
+import type { KnowledgeConceptMergeCheck, KnowledgeConceptMergeRecord } from "@orquester/config";
+import type { KnowledgeEmbedder } from "./embedder.ts";
+import {
+  CONCEPT_CHECK_STEP,
+  CONCEPT_CHECK_SYSTEM,
+  ConceptMergeCheckSource,
+  conceptCheckCandidates,
+  conceptCheckInput,
+  conceptExcerpt,
+  parseConceptCheckAnswer,
+  validateConceptCheckAnswer,
+  type ConceptCheckBars
+} from "./concept-merge-checks.ts";
+import { KnowledgeConceptMerges, personHandlePairs, personKey, planConceptMerges, type ConceptMergeThresholds, type PlanConcept } from "./concept-merges.ts";
+import { KnowledgeGraph, type GraphConcept } from "./graph.ts";
+import { FakeEmbedderSource, FakeStore, loadGraph, node, silentLogger } from "./test-fakes.ts";
+import { knowledgeScope } from "./visibility.ts";
+
+const BARS: ConceptMergeThresholds = { merge: 0.91, similar: 0.93 };
+const CHECK_BARS: ConceptCheckBars = { sharedEntry: 0.96, alone: 0.975 };
+const noPause = async (): Promise<void> => undefined;
+const DIMS = 24;
+
+/** A unit vector at `cos` to axis `base`, leaning towards axis `side`. */
+function vec(base: number, cos = 1, side = base + 1): Float32Array {
+  const v = new Float32Array(DIMS);
+  v[base] = cos;
+  if (cos < 1) v[side] = Math.sqrt(1 - cos * cos);
+  return v;
+}
+
+function concept(id: string, name: string, entryIds: string[], type = "Tactic", extra: Partial<GraphConcept> = {}): GraphConcept {
+  return { id, type, name, confidence: 0.9, description: null, aliases: [], attributes: {}, entryIds, ...extra };
+}
+
+// ---------------------------------------------------------------------------
+// The Person rule
+// ---------------------------------------------------------------------------
+
+test("the Person rule: a handle equal to another Person's name or handle is the same person; nothing else is", async () => {
+  assert.equal(personKey("@JasonUGC"), "jasonugc");
+  assert.equal(personKey(" @danielhangan_ "), "danielhangan");
+  assert.equal(personKey("Al"), null, "too short to say");
+  const p = (id: string, name: string, handle: string | null, type = "Person"): PlanConcept => ({ id, type, name, entryCount: 1, handle });
+  const concepts = [
+    p("person-jason", "jason", "jasonugc"),
+    p("person-jasonugc", "jasonugc", null),
+    p("person-personjasonugc", "person-personjasonugc", "@jasonugc"),
+    p("person-alex", "Alex", null),
+    p("person-alex-nguyen", "Alex Nguyen", "alexcooldev"),
+    p("person-other", "Someone", "alex"), // a handle equal to another's name: the same person
+    p("tool-jasonugc", "jasonugc", "jasonugc", "Tool") // not a Person
+  ];
+  assert.deepEqual(personHandlePairs(concepts), [
+    ["person-alex", "person-other"],
+    ["person-jason", "person-jasonugc"],
+    ["person-jason", "person-personjasonugc"],
+    ["person-jasonugc", "person-personjasonugc"]
+  ]);
+  // Far apart by vector and refused by the name guard: merged anyway, transitively, never across an undo.
+  const vectors = new Map(concepts.map((c, i) => [c.id, vec(i)]));
+  const { merges } = await planConceptMerges({ concepts, vectors, thresholds: BARS, existing: [], rejected: [], now: "t", pause: noPause });
+  assert.deepEqual(
+    merges.map((m) => [m.into, [...m.merged].sort(), m.source]).sort(),
+    [
+      ["person-alex", ["person-other"], undefined],
+      ["person-jason", ["person-jasonugc", "person-personjasonugc"], undefined]
+    ]
+  );
+  const undone = await planConceptMerges({
+    concepts,
+    vectors,
+    thresholds: BARS,
+    existing: [],
+    rejected: [{ id: "cm_x", type: "Person", concepts: ["person-alex", "person-other"], rejectedAt: "t" }],
+    now: "t",
+    pause: noPause
+  });
+  assert.equal(undone.merges.some((m) => m.into === "person-alex" || m.into === "person-other"), false);
+});
+
+// ---------------------------------------------------------------------------
+// Merges from checks
+// ---------------------------------------------------------------------------
+
+test("a checked pair merges whatever the guards say, as `source: checked`, keeping the checker's choice; an absorbed checked merge stays checked", async () => {
+  const c = (id: string, name: string, entryCount = 1): PlanConcept => ({ id, type: "Tactic", name, entryCount });
+  const concepts = [c("tactic-48h", "48-hour account warm-up", 3), c("tactic-warm", "Warm up the account for 48 hours before posting"), c("tactic-x", "Something else")];
+  const vectors = new Map([
+    ["tactic-48h", vec(0)],
+    ["tactic-warm", vec(0, 0.985)],
+    ["tactic-x", vec(5)]
+  ]);
+  const plain = await planConceptMerges({ concepts, vectors, thresholds: BARS, existing: [], rejected: [], now: "t", pause: noPause });
+  assert.deepEqual(plain.merges, [], "the guard refuses it");
+  const checked = await planConceptMerges({
+    concepts,
+    vectors,
+    thresholds: BARS,
+    existing: [],
+    rejected: [],
+    checked: [{ a: "tactic-48h", b: "tactic-warm", similarity: 0.985, keep: "tactic-warm" }],
+    now: "t",
+    pause: noPause
+  });
+  assert.deepEqual(
+    checked.merges.map((m) => [m.into, m.merged, m.similarity, m.source]),
+    [["tactic-warm", ["tactic-48h"], 0.985, "checked"]],
+    "the checker kept the clearer name though the other has more entries"
+  );
+  // Re-planned: the same record stays (nothing changes).
+  const again = await planConceptMerges({ concepts, vectors, thresholds: BARS, existing: checked.merges, rejected: [], checked: [{ a: "tactic-48h", b: "tactic-warm", similarity: 0.985, keep: "tactic-warm" }], now: "t2", pause: noPause });
+  assert.equal(again.changed, false);
+  // Undone: never again, though the check said the same.
+  const undone = await planConceptMerges({
+    concepts,
+    vectors,
+    thresholds: BARS,
+    existing: [],
+    rejected: [{ id: checked.merges[0]!.id, type: "Tactic", concepts: ["tactic-warm", "tactic-48h"], rejectedAt: "t" }],
+    checked: [{ a: "tactic-48h", b: "tactic-warm", similarity: 0.985, keep: "tactic-warm" }],
+    now: "t",
+    pause: noPause
+  });
+  assert.deepEqual(undone.merges, []);
+  // A checked merge a rule's pair grows: the new group is still checked.
+  const grown = await planConceptMerges({
+    concepts: [...concepts, c("tactic-48h-2", "48 hour account warm-up")],
+    vectors: new Map([...vectors, ["tactic-48h-2", vec(0, 0.99)]]),
+    thresholds: BARS,
+    existing: checked.merges,
+    rejected: [],
+    now: "t3",
+    pause: noPause
+  });
+  assert.deepEqual(
+    grown.merges.map((m) => [[m.into, ...m.merged].sort(), m.source]),
+    // (the rule's pair joins the checked group)
+    [[["tactic-48h", "tactic-48h-2", "tactic-warm"], "checked"]]
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Candidates
+// ---------------------------------------------------------------------------
+
+test("candidates: a name guard refused them, close enough (higher bar without a shared entry), a word in common; shared entries first; merged, undone and checked pairs left out", async () => {
+  const concepts = [
+    concept("tactic-48h", "48-hour account warm-up", ["ke_1"]),
+    concept("tactic-warm", "Warm up the account for 48 hours before posting", ["ke_1"]),
+    concept("tactic-risk", "Proxy risk check", ["ke_1"]),
+    concept("tactic-score", "Check proxy fraud score on IPQualityScore and Scamalytics", ["ke_2"]),
+    concept("tactic-score-far", "Check proxy fraud score", ["ke_3"]), // 0.97 to risk, no shared entry: below the bar
+    concept("tactic-72", "72-hour trial", ["ke_4"]),
+    concept("tactic-7d", "7-day trial", ["ke_4"]), // numbers on both sides: never
+    concept("tactic-no", "Do not offer a free trial", ["ke_5"]),
+    concept("tactic-yes", "Offer a free trial", ["ke_5"]), // one negates: never
+    concept("aiservice-copilot", "Copilot", ["ke_6"], "AIService"),
+    concept("aiservice-sd", "Stable Diffusion", ["ke_6"], "AIService"), // no word in common
+    concept("person-a", "jason", ["ke_7"], "Person"),
+    concept("person-b", "jason ugc", ["ke_7"], "Person"), // Persons: never asked
+    concept("tactic-m1", "Warm up TikTok account daily", ["ke_8"]),
+    concept("tactic-m2", "Warm up the TikTok account every day", ["ke_8"]), // merged already
+    concept("tactic-r1", "Post daily on TikTok", ["ke_9"]),
+    concept("tactic-r2", "Post on TikTok every single day", ["ke_9"]), // undone
+    concept("tactic-c1", "Use a landing page", ["ke_10"]),
+    concept("tactic-c2", "Landing page for every ad", ["ke_10"]) // checked at these names
+  ];
+  const vectors = new Map<string, Float32Array>([
+    ["tactic-48h", vec(0)],
+    ["tactic-warm", vec(0, 0.985)],
+    ["tactic-risk", vec(2)],
+    ["tactic-score", vec(2, 0.98)],
+    ["tactic-score-far", vec(2, 0.97, 4)],
+    ["tactic-72", vec(5)],
+    ["tactic-7d", vec(5, 0.99)],
+    ["tactic-no", vec(7)],
+    ["tactic-yes", vec(7, 0.99)],
+    ["aiservice-copilot", vec(9)],
+    ["aiservice-sd", vec(9, 0.99)],
+    ["person-a", vec(11)],
+    ["person-b", vec(11, 0.99)],
+    ["tactic-m1", vec(13)],
+    ["tactic-m2", vec(13, 0.99)],
+    ["tactic-r1", vec(15)],
+    ["tactic-r2", vec(15, 0.99)],
+    ["tactic-c1", vec(17)],
+    ["tactic-c2", vec(17, 0.99)]
+  ]);
+  const check: KnowledgeConceptMergeCheck = { a: "tactic-c1", b: "tactic-c2", type: "Tactic", nameA: "Use a landing page", nameB: "Landing page for every ad", same: false, keep: null, reason: "r", similarity: 0.99, checkedAt: "t" };
+  const input = {
+    concepts,
+    vectors,
+    thresholds: BARS,
+    bars: CHECK_BARS,
+    rejected: [{ id: "cm_r", type: "Tactic", concepts: ["tactic-r1", "tactic-r2"], rejectedAt: "t" }],
+    checks: [check],
+    canonical: (id: string) => (id === "tactic-m2" ? "tactic-m1" : id),
+    limit: 40,
+    pause: noPause
+  };
+  const found = await conceptCheckCandidates(input);
+  assert.deepEqual(
+    found.map((c) => [c.a.id, c.b.id, c.sharesEntry, c.refusal]),
+    [
+      ["tactic-48h", "tactic-warm", true, "lexical"],
+      ["tactic-risk", "tactic-score", false, "lexical"]
+    ]
+  );
+  assert.equal((await conceptCheckCandidates({ ...input, limit: 1 })).length, 1, "the cap");
+  // A concept renamed since its check: asked again.
+  const renamed = await conceptCheckCandidates({ ...input, concepts: concepts.map((c) => (c.id === "tactic-c2" ? { ...c, name: "Landing page per ad" } : c)) });
+  assert.ok(renamed.some((c) => c.a.id === "tactic-c1" && c.b.id === "tactic-c2"));
+});
+
+// ---------------------------------------------------------------------------
+// The task and its answers
+// ---------------------------------------------------------------------------
+
+test("the task shows both concepts with type, aliases, description and an excerpt; the instructions say what is not the same", () => {
+  const input = conceptCheckInput(
+    { type: "Tactic", name: "48-hour account warm-up", aliases: ["48h warm-up"], description: "Warm up for 48 hours", excerpt: { title: "Make any phone hit a US audience", text: "warm up the account for 48 hours before posting." } },
+    { type: "Tactic", name: "Warm up the account for 48 hours before posting", aliases: [], description: null, excerpt: null }
+  );
+  assert.match(input, /CONCEPT A\n=+\nType: Tactic\nName: 48-hour account warm-up\nAliases: 48h warm-up\nDescription: Warm up for 48 hours\nExcerpt from "Make any phone hit a US audience": warm up/);
+  assert.match(input, /CONCEPT B\n=+\nType: Tactic\nName: Warm up the account for 48 hours before posting\n\nAre A and B the same thing\?/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /same level of specificity/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /different numbers/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /negation/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /scope/);
+  assert.match(CONCEPT_CHECK_SYSTEM, /\{"same": true \| false, "keep": "a" \| "b", "reason"/);
+
+  const body = "Intro line about phones.\n\n7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue.\n\n8) Warm up.";
+  assert.equal(conceptExcerpt(body, { name: "Proxy risk check", aliases: [] }), "7) Proxy risk check: run it on ipqualityscore and scamalytics, both must read low risk. Then continue. 8) Warm up.");
+  assert.ok(conceptExcerpt("x ".repeat(400), { name: "nothing", aliases: [] }).endsWith("[…]"));
+});
+
+test("answers: exactly {same, keep, reason}; anything else (bad JSON too) is refused", () => {
+  assert.equal(validateConceptCheckAnswer({ same: true, keep: "a", reason: "Same warm-up." }), null);
+  for (const bad of [
+    null,
+    [],
+    "yes",
+    { same: "true", keep: "a", reason: "x" },
+    { same: true, keep: "c", reason: "x" },
+    { same: true, keep: "a" },
+    { same: true, keep: "a", reason: " " },
+    { same: true, keep: "a", reason: "x".repeat(301) },
+    { same: true, keep: "a", reason: "x", confidence: 1 }
+  ]) {
+    assert.equal(typeof validateConceptCheckAnswer(bad), "string", JSON.stringify(bad));
+  }
+  assert.deepEqual(parseConceptCheckAnswer('{"same": false, "keep": "b", "reason": " Different durations. "}'), { same: false, keep: "b", reason: "Different durations." });
+  assert.equal(parseConceptCheckAnswer("{same: true}"), null);
+  assert.equal(parseConceptCheckAnswer('{"same": true}'), null);
+});
+
+// ---------------------------------------------------------------------------
+// The source over KnowledgeConceptMerges
+// ---------------------------------------------------------------------------
+
+const E1 = "ke_aaaaaaaaaaaa";
+const E2 = "ke_bbbbbbbbbbbb";
+const COLL = "kc_aaaaaaaaaa";
+
+/** Concept vectors by name: what the text starts with decides. */
+function namedEmbedder(byName: Record<string, Float32Array>): KnowledgeEmbedder {
+  return {
+    modelId: "fake/concepts",
+    dimensions: DIMS,
+    thresholds: { minimum: 0.2, good: 0.4, strong: 0.6, duplicate: 0.95 },
+    async embed(texts) {
+      return texts.map((text) => {
+        const name = Object.keys(byName).find((key) => text.includes(`: ${key}.`) || text.endsWith(`: ${key}`));
+        return name ? byName[name]! : vec(DIMS - 1);
+      });
+    }
+  };
+}
+
+async function harness(t: TestContext) {
+  const dir = await mkdtemp(join(tmpdir(), "kg-concept-checks-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "concept-merges.json");
+  const store = new FakeStore();
+  store.collection(COLL, "C");
+  store.put(E1, "Make any phone hit a US audience. Warm up the account for 48 hours before posting, scroll a few times a day.", [COLL], { title: "US TikTok phone" }, true);
+  store.put(E2, "Proxy risk check on ipqs.", [COLL], { title: "Proxies" }, true);
+  const logger = silentLogger();
+  const graph = new KnowledgeGraph({ entries: store, logger });
+  const embedder = namedEmbedder({
+    "48-hour account warm-up": vec(0),
+    "Warm up the account for 48 hours before posting": vec(0, 0.985),
+    "Proxy risk check": vec(2),
+    "Check proxy fraud score": vec(2, 0.98),
+    "Check the proxy fraud score": vec(2, 0.98),
+    jason: vec(4),
+    jasonugc: vec(6)
+  });
+  let clock = Date.parse("2026-10-27T12:00:00.000Z");
+  const merges = new KnowledgeConceptMerges({
+    graph,
+    embedders: new FakeEmbedderSource(embedder),
+    path,
+    vectorsDir: join(dir, "index", "concepts"),
+    logger,
+    now: () => new Date((clock += 1000)),
+    thresholds: () => BARS,
+    pause: noPause
+  });
+  t.after(() => merges.stop());
+  const source = new ConceptMergeCheckSource({
+    merges,
+    entry: async (id) => {
+      const entry = store.getMeta(id);
+      return entry ? { title: entry.title, body: (await store.getEntry(id))!.body } : null;
+    },
+    bars: () => CHECK_BARS,
+    now: () => new Date("2026-10-27T13:00:00.000Z"),
+    pause: noPause
+  });
+  const nodes = [
+    node("tactic-48h", "48-hour account warm-up", [`${E1}.md`]),
+    node("tactic-warm", "Warm up the account for 48 hours before posting", [`${E1}.md`]),
+    node("tactic-risk", "Proxy risk check", [`${E2}.md`]),
+    node("tactic-score", "Check proxy fraud score", [`${E1}.md`]),
+    node("person-jason", "jason", [`${E1}.md`], { type: "Person", attributes: { handle: { value: "jasonugc", confidence: 0.9 } } }),
+    node("person-jasonugc", "jasonugc", [`${E2}.md`], { type: "Person" })
+  ];
+  return {
+    graph,
+    merges,
+    source,
+    nodes,
+    all: knowledgeScope({ kind: "all" }, [COLL]),
+    file: async () => JSON.parse(await readFile(path, "utf8")) as { merges: KnowledgeConceptMergeRecord[]; checks: KnowledgeConceptMergeCheck[]; rejected: unknown[] }
+  };
+}
+
+test("the source: tasks once planning is done, a 'same' answer merges (checked), a 'different' one is remembered, undo never asks again", async (t) => {
+  const h = await harness(t);
+  let planned = 0;
+  h.source.onWork(() => (planned += 1));
+  await h.merges.start();
+  assert.deepEqual(await h.source.tasks(), [], "no vectors yet: nothing to ask");
+  await loadGraph(h.graph, h.nodes);
+  await h.merges.idle();
+  assert.ok(planned >= 1, "planning announced work");
+  // The Person rule merged jason and jasonugc on its own.
+  assert.equal(h.graph.canonicalConceptId("person-jasonugc"), h.graph.canonicalConceptId("person-jason"));
+
+  const tasks = await h.source.tasks();
+  assert.deepEqual(
+    tasks.map((task) => task.label),
+    [`${CONCEPT_CHECK_STEP} tactic-48h tactic-warm`, `${CONCEPT_CHECK_STEP} tactic-risk tactic-score`]
+  );
+  assert.match(tasks[0]!.user, /Name: 48-hour account warm-up\nExcerpt from "US TikTok phone": Warm up the account for 48 hours before posting, scroll a few times a day\./);
+  assert.equal(tasks[0]!.system, CONCEPT_CHECK_SYSTEM);
+
+  assert.equal(h.source.validate({ same: true, keep: "b", reason: "Same." }), null);
+  assert.equal(typeof h.source.validate({ same: "yes" }), "string");
+  await h.source.record(tasks[0]!.payload, JSON.stringify({ same: true, keep: "b", reason: "Same 48-hour warm-up." }));
+  await h.source.record(tasks[1]!.payload, JSON.stringify({ same: false, keep: "b", reason: "A check vs one way to do it." }));
+  await h.merges.idle();
+  const merge = h.merges.list(h.all).find((m) => m.into.id === "tactic-warm");
+  assert.ok(merge, JSON.stringify(h.merges.list(h.all)));
+  assert.equal(merge.source, "checked");
+  assert.deepEqual(merge.merged.map((m) => m.id), ["tactic-48h"]);
+  assert.equal(h.merges.count(), 2, "the checked merge and the Person rule's");
+  const file = await h.file();
+  assert.deepEqual(
+    file.checks.map((c) => [c.a, c.b, c.same, c.keep]),
+    [
+      ["tactic-48h", "tactic-warm", true, "tactic-warm"],
+      ["tactic-risk", "tactic-score", false, "tactic-score"]
+    ]
+  );
+  assert.deepEqual(await h.source.tasks(), [], "both pairs answered: nothing asked again");
+
+  // Undone like any merge: apart, and never asked or merged again.
+  assert.equal(await h.merges.undo(merge.id, h.all), true);
+  assert.notEqual(h.graph.canonicalConceptId("tactic-48h"), h.graph.canonicalConceptId("tactic-warm"));
+  await loadGraph(h.graph, h.nodes);
+  await h.merges.idle();
+  assert.notEqual(h.graph.canonicalConceptId("tactic-48h"), h.graph.canonicalConceptId("tactic-warm"));
+  assert.deepEqual(await h.source.tasks(), []);
+  // A concept renamed (same id) is asked about again.
+  await loadGraph(h.graph, h.nodes.map((n) => (n.id === "tactic-score" ? node("tactic-score", "Check the proxy fraud score", [`${E1}.md`]) : n)));
+  await h.merges.idle();
+  assert.deepEqual(
+    (await h.source.tasks()).map((task) => task.label),
+    [`${CONCEPT_CHECK_STEP} tactic-risk tactic-score`]
+  );
+});
+
+test("record ignores an answer that does not validate or a payload it did not write", async (t) => {
+  const h = await harness(t);
+  await h.merges.start();
+  await loadGraph(h.graph, h.nodes);
+  await h.merges.idle();
+  const [task] = await h.source.tasks();
+  await h.source.record(task!.payload, "not json");
+  await h.source.record({ nope: true }, JSON.stringify({ same: true, keep: "a", reason: "x" }));
+  await h.merges.idle();
+  assert.equal((await h.source.tasks()).length, 2, "nothing recorded");
+});
