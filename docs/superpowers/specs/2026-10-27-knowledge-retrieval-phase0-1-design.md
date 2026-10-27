@@ -215,8 +215,10 @@ thresholds.duplicate, as `similar` with citation. Never blocks the save beyond t
   de-duplicated; plus a maximum spanning forest (Kruskal) over the candidate set of each node's
   top-max(k, 8) neighbours, marked `tree: true` (a tree edge may also be a k-NN edge: one edge,
   tree = true).
-- Clusters: connected components over edges with similarity ≥ thresholds.good, largest first;
-  label = most common concept name among the cluster's linked entries, else the two most
+- Clusters: modularity communities (deterministic Louvain) over each node's top-4 neighbours,
+  each pair weighted ((similarity − thresholds.minimum) / (1 − thresholds.minimum))², largest
+  first; label = the concept (not a Person, Organization or Company; linked to ≥ 2 of its entries)
+  with the best coverage × √precision, no two clusters alike where avoidable, else the most
   distinctive title tokens (frequency in the cluster's titles over document frequency), null for
   singletons.
 - Computation yields to the event loop at least every 50 ms; results are cached per (visibility,
