@@ -9,7 +9,7 @@ import { computeKnowledgeFacets } from "./facets.ts";
 import { parseKnowledgeFilters, entryMatchesFilter } from "./filters.ts";
 import { KnowledgeGraph } from "./graph.ts";
 import { KnowledgeSearch } from "./search.ts";
-import { FakeEmbedderSource, FakeStore, loadGraph, node, silentLogger } from "./test-fakes.ts";
+import { FakeEmbedderSource, FakeStore, edge, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { entryInScope } from "./visibility.ts";
 
 // Retrieval spec "Performance budgets": entry detail (similar + duplicates) and facets p95 under
@@ -86,7 +86,7 @@ async function corpus(t: test.TestContext, count = ENTRIES) {
   await search.start();
   await search.search({ query: "warm up" }, { kind: "all" });
   await search.idle();
-  return { store, collections, search, entryIds, random };
+  return { store, graph, collections, search, entryIds, random };
 }
 
 const p95 = (timings: number[]) => [...timings].sort((a, b) => a - b)[Math.floor(timings.length * 0.95)]!;
@@ -142,4 +142,66 @@ test("similarity graph over 1,000 entries: within 2 s cold and yielding to the e
   assert.equal(graph.truncated, true);
   assert.ok(cold < 2_000, `cold ${cold.toFixed(0)} ms`);
   assert.ok(turns > 1 || cold < 40, "the event loop ran while the graph was computed");
+});
+
+/**
+ * This machine's time, right now, for one pass insights cannot avoid: every visible entry's
+ * concepts read from the graph and its metadata hashed (median of 5).
+ */
+function insightsFloor(graph: KnowledgeGraph, ids: readonly string[]): number {
+  const runs: number[] = [];
+  for (let run = 0; run < 5; run += 1) {
+    const started = performance.now();
+    let sink = 0;
+    for (const id of ids) sink += graph.conceptsOfEntry(id).length + id.length;
+    assert.ok(sink > 0);
+    runs.push(performance.now() - started);
+  }
+  return runs.sort((a, b) => a - b)[2]!;
+}
+
+// Phase 2 spec "Performance": insights within 300 ms p95 at 2,000 entries with the similarity
+// graph cached and the insights cold, link gaps aside (they are cached on their own, and yield).
+// On a busy host the budget is the larger of 300 ms and 25× the same-run floor above.
+test("insights over 2,000 entries: p95 under 300 ms cached-cold (link gaps aside), yielding while gaps compute", { timeout: 300_000 }, async (t) => {
+  const { graph, search, entryIds, random } = await corpus(t, 2_000);
+  const pick = () => `${entryIds[Math.floor(random() * entryIds.length)]}.md`;
+  const types = ["Tactic", "Rule", "Metric", "Topic", "Tool", "Person"];
+  const concepts = Array.from({ length: 4_000 }, (_, i) =>
+    node(`concept-${i}`, `Concept ${i}`, Array.from({ length: 1 + Math.floor(random() ** 2 * 6) }, pick), { type: types[i % types.length] })
+  );
+  const contradictions = Array.from({ length: 200 }, (_, i) => edge(`x-${i}`, `concept-${(i * 6) % 4_000}`, `concept-${(i * 6 + 3_006) % 4_000}`, null, "contradicts"));
+  await loadGraph(graph, concepts, contradictions);
+  const scope = search.scope({ kind: "all" });
+
+  let turns = 0;
+  let computing = true;
+  const tick = () => {
+    turns += 1;
+    if (computing) setImmediate(tick);
+  };
+  setImmediate(tick);
+  const started = performance.now();
+  const first = await search.insights.list({ limit: 20 }, scope).finally(() => {
+    computing = false;
+  });
+  const cold = performance.now() - started;
+  assert.ok(turns > 1, "the event loop ran while the graph and gaps were computed");
+
+  const floor = insightsFloor(graph, entryIds);
+  const timings: number[] = [];
+  for (let limit = 1; limit <= 50; limit += 1) {
+    if (limit === 20) continue;
+    const at = performance.now();
+    const result = await search.insights.list({ limit }, scope);
+    timings.push(performance.now() - at);
+    assert.deepEqual(result.totals, first.totals);
+  }
+  const budget = Math.max(300, floor * 25);
+  t.diagnostic(
+    `insights: ${JSON.stringify(first.totals)}; first (graph + gaps + insights) ${cold.toFixed(0)} ms, ${turns} event-loop turns; ` +
+      `cached-cold p50 ${timings.sort((a, b) => a - b)[Math.floor(timings.length / 2)]!.toFixed(1)} ms, p95 ${p95(timings).toFixed(1)} ms (floor ${floor.toFixed(1)} ms, budget ${budget.toFixed(0)} ms)`
+  );
+  assert.ok(first.totals.contradictions > 0 && first.totals.bridges > 0 && first.totals.singleSource > 0, JSON.stringify(first.totals));
+  assert.ok(p95(timings) < budget, `insights p95 ${p95(timings).toFixed(1)} ms (budget ${budget.toFixed(0)} ms)`);
 });
