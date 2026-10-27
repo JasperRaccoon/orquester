@@ -201,6 +201,15 @@ export class FakeActionExecutor implements DeviceActionExecutor {
   async launch(_ctx: DeviceActionContext, app: string): Promise<void> {
     this.launches.push(app);
   }
+
+  /** `restartApp` calls (lease ids), and what it answers. */
+  restarts: string[] = [];
+  restartImpl: () => Promise<{ appId: string }> = async () => ({ appId: "com.example.app" });
+
+  async restartApp(ctx: DeviceActionContext): Promise<{ appId: string }> {
+    this.restarts.push(ctx.lease.id);
+    return this.restartImpl();
+  }
 }
 
 export interface TestDeviceService {

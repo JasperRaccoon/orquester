@@ -47,7 +47,9 @@ import {
   type DevicesSettings,
   type DevicesSettingsPatch,
   type DevicesStateResponse,
-  type DeviceSummary
+  type DeviceSummary,
+  type DeviceUserActionRequest,
+  type DeviceUserActionResponse
 } from "@orquester/api";
 import type { StoredDeviceLease } from "@orquester/config";
 
@@ -94,6 +96,7 @@ import type {
   DeviceToolOpenResult,
   DeviceToolsPort
 } from "./tools-port.ts";
+import { runUserAction } from "./user-actions.ts";
 
 /** How long `open_device` waits for a device before answering `starting` (spec §9: 9 min). */
 export const OPEN_DEVICE_WAIT_MS = 9 * 60_000;
@@ -676,6 +679,33 @@ export class DeviceService implements DeviceToolsPort {
     const next = withController(lease, controller, this.iso());
     if (next !== lease) this.commit(next);
     return this.summary(next)!;
+  }
+
+  /**
+   * The panel's buttons that are not hub input (`deviceRoutes.userAction`, `user-actions.ts`): the
+   * user takes control first (never `DEVICE_CONTROLLED_BY_USER`), and the log shows it as theirs.
+   */
+  userAction(leaseId: string, request: DeviceUserActionRequest, signal: AbortSignal): Promise<DeviceUserActionResponse> {
+    this.assertRunning();
+    let lease = this.requireLease(leaseId);
+    if (request.kind !== "power_off" && isLiveLease(lease)) {
+      const next = userInput(lease, this.iso());
+      if (next.controller !== lease.controller) this.commit(next);
+      lease = next;
+    }
+    return runUserAction(
+      {
+        lease,
+        host: this.hosts.get(lease.hostId) ?? null,
+        actions: this.deps.actions,
+        record: (draft) => this.recordAction(leaseId, { ...draft, actor: "user" }),
+        powerOff: () => this.releaseLease(leaseId, "user", { shutdown: true }),
+        summary: () => this.lease(leaseId) ?? null,
+        logger: this.logger
+      },
+      request,
+      signal
+    );
   }
 
   /**

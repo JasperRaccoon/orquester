@@ -20,7 +20,9 @@ import {
   leaseStateLabel,
   leaseSubtitle,
   NO_TRANSPORT_MESSAGE,
+  nextRotation,
   pickerGroups,
+  rotateControl,
   streamAvailability,
   takeOverToast
 } from "./device-panel.logic.ts";
@@ -205,6 +207,20 @@ describe("stream URLs", () => {
     const off = { deviceSocketUrl: () => null, deviceMediaUrl: () => null };
     assert.equal(deviceStreamUrls(off, lease()), null);
     assert.equal(deviceStreamUrls(api, lease({ stream: undefined })), null);
+  });
+});
+
+describe("rotate", () => {
+  it("asks for landscape from portrait and portrait from anything else", () => {
+    assert.equal(nextRotation("portrait"), "landscape");
+    for (const current of ["landscape_left", "landscape_right", "portrait_upside_down"] as const) assert.equal(nextRotation(current), "portrait");
+  });
+  it("iOS needs the input socket; Android (the daemon's user action) the live video; never twice at once", () => {
+    assert.deepEqual(rotateControl("ios", { inputReady: true, live: false, pending: false }), { enabled: true, reason: null });
+    assert.equal(rotateControl("ios", { inputReady: false, live: true, pending: false }).enabled, false);
+    assert.deepEqual(rotateControl("android", { inputReady: false, live: true, pending: false }), { enabled: true, reason: null });
+    assert.deepEqual(rotateControl("android", { inputReady: true, live: false, pending: false }), { enabled: false, reason: "Waiting for video" });
+    assert.deepEqual(rotateControl("android", { inputReady: true, live: true, pending: true }), { enabled: false, reason: "Rotating…" });
   });
 });
 

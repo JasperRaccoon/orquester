@@ -1,7 +1,8 @@
 /**
  * The Device panel's controls (spec §10.1): a compact vertical rail beside the device with its
  * tooltips on the left (t3code's `DeviceControlsRail`), or a bottom bar on a phone. Every disabled
- * control says why in its tooltip. Fold controls appear for Android foldables.
+ * control says why in its tooltip. Fold controls appear for Android foldables. More holds Restart
+ * app (the daemon's user action), Copy device key, Release and Power off.
  */
 
 import React from "react";
@@ -16,6 +17,7 @@ import {
   LogOut,
   MoreHorizontal,
   Power,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Smartphone,
@@ -49,7 +51,7 @@ export interface DeviceToolbarProps {
   keyboard: ToolbarControl & { active: boolean; onToggle: () => void };
   view: { mode: "3d" | "flat"; unavailable: string | null; enabled: boolean; onMode: (mode: "3d" | "flat") => void; onReset?: () => void };
   fold?: { posture: AndroidFoldPosture | null; pending: boolean; enabled: boolean; error: string | null; onChange: (posture: "closed" | "opened") => void };
-  more: { onRelease: () => void; onPowerOff: () => void; onCopyKey: () => void; releasing: boolean };
+  more: { onRelease: () => void; onPowerOff: () => void; onCopyKey: () => void; releasing: boolean; onRestartApp: () => void; restarting: boolean };
 }
 
 function Tip({ layout, text }: { layout: ToolbarLayout; text: string }) {
@@ -194,6 +196,9 @@ export function DeviceToolbar(props: DeviceToolbarProps): React.ReactElement {
               Face the device forward
             </DropdownItem>
           ) : null}
+          <DropdownItem icon={<RefreshCw size={14} />} disabled={props.more.restarting || props.more.releasing} onClick={props.more.onRestartApp}>
+            {props.more.restarting ? "Restarting the app…" : "Restart app"}
+          </DropdownItem>
           <DropdownItem icon={<Copy size={14} />} onClick={props.more.onCopyKey}>
             Copy device key
           </DropdownItem>

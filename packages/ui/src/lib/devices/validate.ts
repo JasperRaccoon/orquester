@@ -273,6 +273,14 @@ export function sanitizeActionEvent(value: unknown): DeviceActionEventPayload | 
   return entry && entry.leaseId === value.leaseId ? { leaseId: value.leaseId, threadId: value.threadId, entry } : null;
 }
 
+/** A user action's answer: the lease (released after a power off) and its log row. */
+export function sanitizeUserActionResponse(value: unknown): { lease: DeviceLeaseSummary; entry: DeviceActionEntry } | null {
+  if (!isRecord(value)) return null;
+  const lease = sanitizeDeviceLease(value.lease);
+  const entry = sanitizeActionEntry(value.entry);
+  return lease && entry && entry.leaseId === lease.id ? { lease, entry } : null;
+}
+
 export function sanitizeActionsResponse(value: unknown): { leaseId: string; actions: DeviceActionEntry[] } | null {
   if (!isRecord(value) || !str(value.leaseId)) return null;
   const actions = listOf(value.actions, sanitizeActionEntry);
