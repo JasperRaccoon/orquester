@@ -29,12 +29,18 @@ import {
   type KnowledgeEntry,
   type KnowledgeEntryDetail,
   type KnowledgeEntryMeta,
+  type KnowledgeEntryMatch,
   type KnowledgeEntrySummary,
+  type KnowledgeFacetCount,
+  type KnowledgeFacets,
+  type KnowledgeFacetsResponse,
   type KnowledgeGraphNode,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
   type KnowledgeLinkState,
   type KnowledgeLinkingState,
+  type KnowledgeMatchBand,
+  type KnowledgeMatchSignal,
   type KnowledgePauseReason,
   type KnowledgeRebuildEstimate,
   type KnowledgeRunMode,
@@ -300,27 +306,111 @@ export function parseKnowledgeItemResponse(value: unknown): KnowledgeItemRespons
 // Search
 // ---------------------------------------------------------------------------
 
+const BANDS: ReadonlySet<string> = new Set<KnowledgeMatchBand>(["strong", "good", "weak"]);
+/** The contract's fixed order for `via`. */
+const SIGNAL_ORDER: readonly KnowledgeMatchSignal[] = ["keyword", "meaning", "similar", "concept"];
+
+const isIndex = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+function parseMatchPassage(value: unknown): KnowledgeEntryMatch["passage"] {
+  if (!isRecord(value)) return null;
+  const { start, end, chunk, chunks } = value;
+  if (!isIndex(start) || !isIndex(end) || !isIndex(chunk) || !isIndex(chunks)) return null;
+  if (end < start || chunks < 1 || chunk >= chunks) return null;
+  return { start, end, chunk, chunks };
+}
+
+/**
+ * Why a search found an entry. Null — the hit then carries no `match`, as from a daemon that
+ * predates it — when it is not an object, its band is not one this client knows, or it names no
+ * signal this client knows; a bad passage reads as none, and unreadable terms or concepts are left out.
+ */
+export function parseKnowledgeEntryMatch(value: unknown): KnowledgeEntryMatch | null {
+  if (!isRecord(value) || typeof value.band !== "string" || !BANDS.has(value.band)) return null;
+  const named = new Set(strings(value.via));
+  const via = SIGNAL_ORDER.filter((signal) => named.has(signal));
+  if (via.length === 0) return null;
+  const terms = [...new Set(strings(value.terms).map((term) => term.trim()).filter((term) => term !== ""))];
+  return {
+    band: value.band as KnowledgeMatchBand,
+    via,
+    terms,
+    passage: parseMatchPassage(value.passage),
+    concepts: list(value.concepts, parseKnowledgeConceptRef) ?? []
+  };
+}
+
+function parseIdTitle(value: unknown): { id: string; title: string } | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  return { id: value.id, title: str(value.title) };
+}
+
 function parseSearchHit(value: unknown): KnowledgeSearchHit | null {
   if (!isRecord(value)) return null;
   const score = num(value.score);
   if (value.kind === "entry") {
     const entry = parseKnowledgeEntrySummary(value.entry);
-    return entry ? { kind: "entry", score, entry } : null;
+    if (!entry) return null;
+    const match = parseKnowledgeEntryMatch(value.match);
+    return match ? { kind: "entry", score, entry, match } : { kind: "entry", score, entry };
   }
   if (value.kind === "concept") {
     const ref = parseKnowledgeConceptRef(value.concept);
     if (!ref) return null;
     const description = isRecord(value.concept) ? nullableStr(value.concept.description) : null;
-    return { kind: "concept", score, concept: { ...ref, description }, entryIds: strings(value.entryIds) };
+    const hit: KnowledgeSearchHit = { kind: "concept", score, concept: { ...ref, description }, entryIds: strings(value.entryIds) };
+    const entries = list(value.entries, parseIdTitle);
+    if (entries) hit.entries = entries;
+    return hit;
   }
   return null;
 }
 
+function parseFacetCount(value: unknown): KnowledgeFacetCount | null {
+  if (!isRecord(value) || typeof value.value !== "string" || value.value === "") return null;
+  return { value: value.value, label: str(value.label) || value.value, count: count(value.count) };
+}
+
+/** Facet counts, each value once; a list that is missing or not an array reads as empty. Null when it is not an object. */
+export function parseKnowledgeFacets(value: unknown): KnowledgeFacets | null {
+  if (!isRecord(value)) return null;
+  const facet = (field: unknown): KnowledgeFacetCount[] => {
+    const seen = new Set<string>();
+    const out: KnowledgeFacetCount[] = [];
+    for (const c of list(field, parseFacetCount) ?? []) {
+      if (seen.has(c.value)) continue;
+      seen.add(c.value);
+      out.push(c);
+    }
+    return out;
+  };
+  return { kinds: facet(value.kinds), authors: facet(value.authors), collections: facet(value.collections), years: facet(value.years) };
+}
+
+/** POST /facets' answer; null without readable `facets`. A missing total reads as the kinds' sum (every entry has one kind). */
+export function parseKnowledgeFacetsResponse(value: unknown): KnowledgeFacetsResponse | null {
+  if (!isRecord(value)) return null;
+  const facets = parseKnowledgeFacets(value.facets);
+  if (!facets) return null;
+  const total = typeof value.total === "number" && Number.isFinite(value.total) ? count(value.total) : facets.kinds.reduce((sum, c) => sum + c.count, 0);
+  return { facets, total };
+}
+
+/**
+ * A search answer. `total`, `nextCursor` and `facets` stay absent when the daemon sent none (one
+ * that predates paging): callers tell an older daemon by the missing `total`.
+ */
 export function parseKnowledgeSearchResponse(value: unknown): KnowledgeSearchResponse | null {
   if (!isRecord(value)) return null;
   const hits = list(value.hits, parseSearchHit);
   if (!hits) return null;
-  return { hits, searched: strings(value.searched) };
+  const answer: KnowledgeSearchResponse = { hits, searched: strings(value.searched) };
+  if (typeof value.total === "number" && Number.isFinite(value.total)) answer.total = count(value.total);
+  if (typeof value.nextCursor === "string" && value.nextCursor !== "") answer.nextCursor = value.nextCursor;
+  else if (value.nextCursor === null || value.nextCursor === "") answer.nextCursor = null;
+  const facets = value.facets === undefined ? null : parseKnowledgeFacets(value.facets);
+  if (facets) answer.facets = facets;
+  return answer;
 }
 
 // ---------------------------------------------------------------------------
