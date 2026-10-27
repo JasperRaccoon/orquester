@@ -255,6 +255,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private readonly pairInboxDir: string;
   private pairRound: PairRound | null = null;
   private pairStarting = false;
+  /** Pair-check chats a previous daemon left behind (it stopped without ending its round) being closed. */
+  private orphansClosing: Promise<void> = Promise.resolve();
   /** A graph load since the last pair-check round. */
   private pairRoundDue = false;
 
@@ -290,6 +292,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         }
       : null;
     for (const change of this.early.splice(0)) this.entriesChanged(change);
+    // A pair-check round is never resumed: chats a crashed daemon left are closed, their tokens counted.
+    if (!this.newerNotice) {
+      this.orphansClosing = this.closeOrphanPairWorkers().catch((error: unknown) =>
+        this.opts.logger?.warn("knowledge linking: pair-check chats a previous daemon left could not be closed", { error: String(error) })
+      );
+    }
     this.offs.push(this.opts.settings.onChange(() => this.onEnvironmentChanged()));
     this.offs.push(this.opts.runtime.onChange(() => this.onEnvironmentChanged()));
     if (this.opts.graphView) {
@@ -343,6 +351,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       this.endPairRound(round, { interrupt: true });
       await round.ended;
     }
+    await this.orphansClosing;
     await this.stateFile.flush();
     await this.pairChecks.flush();
   }
@@ -503,8 +512,9 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     return new Set(this.state?.relink.gapQueue ?? []);
   }
 
-  /** Resolves once no pair-check round runs (tests, shutdown). */
+  /** Resolves once no pair-check round runs and a previous daemon's are closed (tests, shutdown). */
   async pairChecksIdle(): Promise<void> {
+    await this.orphansClosing;
     while (this.pairRound || this.pairStarting) {
       if (this.pairRound) await this.pairRound.ended;
       else await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1114,6 +1124,32 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       state.pause === null &&
       this.relinkBacklog().length === 0
     );
+  }
+
+  /**
+   * The chats of a pair-check round a previous daemon process left running (it crashed: a clean
+   * stop ends the round): each is interrupted, its usage counted, and closed; their records are
+   * marked done. In the background, so a start never waits on a chat.
+   */
+  private async closeOrphanPairWorkers(): Promise<void> {
+    const state = this.requireState();
+    const orphans = state.workers.filter((worker) => worker.runId.startsWith("kp_") && worker.state === "running");
+    if (orphans.length === 0) return;
+    const port = this.opts.workers;
+    await Promise.all(
+      orphans.map(async (worker) => {
+        await port.interrupt(worker.sessionId).catch(() => undefined);
+        const tokens = await port.usage(worker.sessionId).catch(() => ({ in: 0, out: 0 }));
+        await port.stop(worker.sessionId, { interrupt: false }).catch(() => undefined);
+        if (tokens.in > 0 || tokens.out > 0) addTokens(state, this.opts.clock.now(), tokens.in, tokens.out);
+      })
+    );
+    const closed = new Set(orphans.map((worker) => worker.sessionId));
+    const at = this.opts.clock.now().toISOString();
+    state.workers = state.workers.map((worker) => (closed.has(worker.sessionId) && worker.state === "running" ? { ...worker, state: "done", finishedAt: at } : worker));
+    this.opts.logger?.info?.("knowledge linking: closed pair-check chats a previous daemon left", { chats: orphans.length });
+    this.persist();
+    this.emitStatus();
   }
 
   /** Starts a round of pair checks when one is due and linking is idle (see the module header). */

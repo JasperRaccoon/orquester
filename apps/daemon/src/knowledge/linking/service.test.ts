@@ -880,6 +880,49 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
   });
 });
 
+describe("KnowledgeLinkingService — pair-check chats a crashed daemon left", () => {
+  it("are interrupted, their tokens counted, closed and marked done at start; a run's own chats are left to its resume", async () => {
+    const h = await harness();
+    const worker = (sessionId: string, runId: string, state: "running" | "done") => ({ sessionId, accountId: "a1", runId, state, tasks: 1, startedAt: "2026-10-23T09:00:00.000Z", finishedAt: null });
+    await mkdir(dirname(knowledgeStatePath(h.appdir)), { recursive: true });
+    await writeFile(
+      knowledgeStatePath(h.appdir),
+      JSON.stringify({
+        version: 1,
+        workers: [worker("pair-1", "kp_aaaaaaaaaaaa", "running"), worker("pair-2", "kp_aaaaaaaaaaaa", "running"), worker("pair-old", "kp_000000000000", "done"), worker("run-1", "kr_bbbbbbbbbbbb", "running")],
+        tokens: { total: { in: 10, out: 1 }, byDay: {} }
+      })
+    );
+    h.port.foreignUsage.set("pair-1", { in: 700, out: 70 });
+    h.port.foreignUsage.set("pair-2", { in: 300, out: 30 });
+    await h.service.start();
+    await h.service.pairChecksIdle();
+    for (const id of ["pair-1", "pair-2"]) {
+      assert.deepEqual(
+        h.port.calls.filter((call) => call.endsWith(`:${id}`)),
+        [`interrupt:${id}`, `usage:${id}`, `stop:${id}`],
+        id
+      );
+    }
+    assert.ok(!h.port.calls.some((call) => call.endsWith(":run-1") || call.endsWith(":pair-old")));
+    const snapshot = h.service.snapshot();
+    assert.deepEqual(snapshot.tokens.total, { in: 1010, out: 101 });
+    assert.deepEqual(
+      snapshot.workers.map((w) => [w.sessionId, w.state]),
+      [
+        ["pair-1", "done"],
+        ["pair-2", "done"],
+        ["pair-old", "done"],
+        ["run-1", "running"]
+      ]
+    );
+    await h.service.stop();
+    const state = await readState(h);
+    assert.deepEqual(state.tokens.total, { in: 1010, out: 101 });
+    assert.ok(state.workers.filter((w) => w.sessionId.startsWith("pair-") && w.sessionId !== "pair-old").every((w) => w.state === "done" && w.finishedAt !== null));
+  });
+});
+
 describe("KnowledgeLinkingService — a state.json a newer Orquester wrote", () => {
   const SESSION = "2026-10-20T08-00-00";
   async function newerState(h: Harness, extra: Record<string, unknown>): Promise<string> {
