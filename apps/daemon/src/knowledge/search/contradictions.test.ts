@@ -102,7 +102,7 @@ test("an entry linked to both concepts of a contradicting pair discusses it: a s
   assert.deepEqual([...findContradictions({ graph, scope, pairChecks: null, accept: () => true, entryId: "ke_a" }).values()].map((c) => [c.a, c.b]), [["ke_a", "ke_b"]]);
 });
 
-test("survey entries (a synthesis, a note titled as a map, audit, hub or index) are never a side of the graph's guesses; a pair check still counts", () => {
+test("survey entries (a synthesis, a note titled as a map, audit, hub or index) are never a side, of the graph's guesses or of a pair check", () => {
   const meta: Record<string, { kind: string; title: string }> = {
     ke_a: { kind: "post", title: "Use Gmail for the account" },
     ke_b: { kind: "post", title: "Use Outlook or Proton" },
@@ -119,8 +119,19 @@ test("survey entries (a synthesis, a note titled as a map, audit, hub or index) 
     ["ke_a", "ke_post"]
   ], "a post's title naming an index is not a survey");
   assert.deepEqual([...findContradictions({ graph, scope, pairChecks: null, accept: () => true, entryMeta, entryId: "ke_syn" }).values()], []);
-  const checked = findContradictions({ graph, scope, pairChecks: checks([check("ke_audit", "ke_b", "contradicts", "the audit marks it stale")]), accept: () => true, entryMeta });
-  assert.equal(checked.get("ke_audit\u0000ke_b")?.source, "checked");
+  // A verdict recorded before survey entries were left out of pair checks: ignored, whatever it says.
+  const checked = findContradictions({
+    graph,
+    scope,
+    pairChecks: checks([check("ke_audit", "ke_b", "contradicts", "the audit marks it stale"), check("ke_a", "ke_syn", "consistent", "the synthesis agrees")]),
+    accept: () => true,
+    entryMeta
+  });
+  assert.deepEqual([...checked.values()].map((c) => [c.a, c.b, c.source]), [
+    ["ke_a", "ke_b", "graph"],
+    ["ke_a", "ke_post", "graph"]
+  ]);
+  assert.equal(findContradictions({ graph, scope, pairChecks: checks([check("ke_hub", "ke_b", "contradicts", "x")]), accept: () => true, entryMeta, entryId: "ke_hub" }).size, 0);
 });
 
 test("a note that says nothing is null; an edge whose note says the conflict is only apparent or resolved is no disagreement", () => {

@@ -16,7 +16,8 @@
  * - A survey entry ({@link isSurveyEntry}: a synthesis, or a note titled as a map, audit, hub,
  *   register, index or cross-links) restates what other entries say, so its concepts are theirs: a
  *   disagreement it seems to take part in is one between its sources, which are listed themselves.
- *   It is never a side of the graph's guesses (an LLM pair check that read it still counts).
+ *   It is never a side: not of the graph's guesses, nor of an LLM pair check (pair checks no longer
+ *   pick survey entries; a verdict recorded before involving one is left out, whatever it says).
  * - An edge whose context says the conflict is only apparent or resolved ({@link isResolvedNote})
  *   is not a disagreement: it adds no pair (the edge itself stays in the concept graph). Dropped
  *   rather than kept as "resolved": every reader of these pairs (insights, similar entries, the
@@ -151,7 +152,6 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
     if (is === undefined) survey.set(id, (is = isSurveyEntry(options.entryMeta?.(id))));
     return !is && options.accept(id);
   };
-  const { accept } = options;
   const found = new Map<string, KnowledgeContradictionFound & { edges: Set<string> }>();
   const entriesOf = new Map<string, string[]>();
   const visibleEntries = (conceptId: string): string[] => {
@@ -211,7 +211,8 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
 
   for (const check of options.pairChecks?.all() ?? []) {
     if (entryId !== undefined && check.a !== entryId && check.b !== entryId) continue;
-    if (check.a === check.b || !accept(check.a) || !accept(check.b)) continue;
+    // A survey entry is never a side, checked or guessed: a verdict involving one is left out.
+    if (check.a === check.b || !side(check.a) || !side(check.b)) continue;
     const key = pairKeyOf(check.a, check.b);
     if (check.verdict !== "contradicts") {
       found.delete(key);

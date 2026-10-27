@@ -185,6 +185,24 @@ describe("pair-check candidates", () => {
       entryOf: (id) => ({ kind: kinds[id] ?? "note", author: null, handle: null })
     });
     assert.ok(all.every((c) => c.a !== "ke_s" && c.b !== "ke_s"), JSON.stringify(all));
+    // A note titled as a map, audit, hub or index surveys others, like a synthesis (`isSurveyEntry`).
+    const titled = await pairCheckCandidates({
+      ids: ["ke_a", "ke_b", "ke_d", "ke_q", "ke_s"],
+      view: meta,
+      hashOf,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id) =>
+        id === "ke_s"
+          ? { kind: "research note", title: "Claims audit / stale-tip register", author: null, handle: null }
+          : id === "ke_q"
+            ? { kind: "note", title: "Map of the knowledge base (hub)", author: null, handle: null }
+            : { kind: "post", title: "Index your site with IndexNow", author: null, handle: null }
+    });
+    assert.deepEqual(titled.map((c) => [c.a, c.b, c.reason]), [
+      ["ke_a", "ke_d", "contradicts"],
+      ["ke_a", "ke_b", "shared"]
+    ]);
     assert.deepEqual(
       all.map((c) => [c.a, c.b, c.reason]),
       [

@@ -1214,7 +1214,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         hashOf: (id) => store.getMeta(id)?.contentHash ?? null,
         entryOf: (id) => {
           const meta = store.getMeta(id);
-          return meta ? { kind: meta.kind, author: meta.author, handle: meta.handle } : null;
+          return meta ? { kind: meta.kind, title: meta.title, author: meta.author, handle: meta.handle } : null;
         },
         isChecked: (pair) => this.pairChecks.isChecked(pair),
         limit: PAIR_CHECK_MAX_PER_RUN

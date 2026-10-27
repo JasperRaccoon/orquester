@@ -13,9 +13,10 @@
  *    Tactic of each (not shared) names the same subject in {@link PAIR_CHECK_ALTERNATIVE_WORDS}+
  *    words ("Outlook/Proton email for TikTok account" / "Create TikTok accounts with a fresh Gmail");
  * 3. close (≥ `good`) and sharing a concept of a claim-like type ({@link PAIR_CHECK_TYPES}).
- * Meta entries are left out: a `synthesis` never takes part, and an entry linked to both concepts
- * of a `contradicts` edge is not paired through that edge (it reports the disagreement, it takes no
- * side).
+ * Meta entries are left out: a survey entry (a synthesis, or a note titled as a map, audit, hub or
+ * index: `isSurveyEntry`, as contradictions read them) never takes part, and an entry linked to
+ * both concepts of a `contradicts` edge is not paired through that edge (it reports the
+ * disagreement, it takes no side).
  *
  * The same rounds answer the tasks of `KnowledgeRoundTaskSource`s (concept merge checks, cluster
  * names): {@link writeRoundTask} writes them into this inbox with their payload, and
@@ -45,6 +46,7 @@ import {
 } from "@orquester/config";
 import type { KnowledgeConceptRef, KnowledgeEntry } from "@orquester/api";
 import type { KnowledgePairCheck, KnowledgePairChecksPort, KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
+import { isSurveyEntry } from "../search/contradictions.ts";
 import { normalizeAuthor } from "../search/filters.ts";
 import type { KnowledgeLinkGraphView } from "./context.ts";
 import { INBOX_DIR, OUTBOX_DIR, readEnvelope, type InboxTaskEnvelope } from "./inbox.ts";
@@ -273,6 +275,8 @@ export interface PairCandidate extends PairKey {
 /** What candidates read of an entry beside its concepts (`KnowledgeEntryMeta`). */
 export interface PairCheckEntryInfo {
   kind: string;
+  /** Its title (a note titled as a map, audit, hub or index is a survey: `isSurveyEntry`); absent: none. */
+  title?: string | null;
   author: string | null;
   handle: string | null;
 }
@@ -284,12 +288,18 @@ export interface PairCheckCandidatesOptions {
   hashOf(entryId: string): string | null;
   isChecked(pair: PairKey): boolean;
   limit: number;
-  /** An entry's kind and author (meta entries and the same author are left out); absent: neither applies. */
+  /** An entry's kind, title and author (survey entries and the same author are left out); absent: neither applies. */
   entryOf?(entryId: string): PairCheckEntryInfo | null;
 }
 
-/** Entry kinds that quote both sides rather than take one (a synthesis of other entries): never checked. */
-export const PAIR_CHECK_META_KINDS: ReadonlySet<string> = new Set(["synthesis"]);
+/**
+ * Whether an entry surveys others rather than taking a side (a synthesis, or a note titled as a
+ * map, audit, hub, register, index or overview: `isSurveyEntry`, the same test contradictions use):
+ * never checked.
+ */
+export function isPairCheckMetaEntry(info: PairCheckEntryInfo | null): boolean {
+  return info !== null && isSurveyEntry({ kind: info.kind, title: info.title ?? "" });
+}
 /** "Different values for the same decision": the other entry is among an entry's this many nearest by meaning. */
 export const PAIR_CHECK_ALTERNATIVE_NEIGHBOURS = 6;
 /** … and a Tool or Tactic of each, not shared, names the same subject: at least this many content words in common. */
@@ -352,8 +362,9 @@ const authorKey = (value: string): string => normalizeAuthor(value);
 
 /**
  * New candidate pairs (see the module header), tier by tier in {@link PAIR_CHECK_REASONS} order,
- * closest first within a tier; meta entries left out (a {@link PAIR_CHECK_META_KINDS} kind never
- * takes part; an entry linked to both concepts of a `contradicts` edge is not paired through it). Memory stays linear in the entries plus the close pairs (each entry's nearest
+ * closest first within a tier; meta entries left out (a survey entry never takes part:
+ * {@link isPairCheckMetaEntry}; an entry linked to both concepts of a `contradicts` edge is not
+ * paired through it). Memory stays linear in the entries plus the close pairs (each entry's nearest
  * neighbours are kept bounded), and it yields to the event loop every {@link YIELD_EVERY_MS} ms.
  */
 export async function pairCheckCandidates(options: PairCheckCandidatesOptions): Promise<PairCandidate[]> {
@@ -379,8 +390,7 @@ export async function pairCheckCandidates(options: PairCheckCandidatesOptions): 
   };
   const ids: string[] = [];
   for (const id of options.ids) {
-    const info = options.entryOf?.(id) ?? null;
-    if (info && PAIR_CHECK_META_KINDS.has(info.kind)) continue;
+    if (isPairCheckMetaEntry(options.entryOf?.(id) ?? null)) continue;
     const concepts = options.view.conceptsOf(id);
     ids.push(id);
     conceptsOf.set(id, concepts);
