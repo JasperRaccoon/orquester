@@ -33,6 +33,11 @@ export interface KnowledgeSelection {
   edit?: boolean;
 }
 
+/** How a selection moves: `replace` takes the current item's place instead of leaving it to go Back to. */
+export interface KnowledgeSelectOptions {
+  replace?: boolean;
+}
+
 /** The routes the panel reads, on top of the store's. `ApiClient` satisfies it. */
 export interface KnowledgePanelApi extends KnowledgeApi {
   getKnowledgeItem(id: string, signal?: AbortSignal): Promise<KnowledgeItemResponse>;
@@ -116,7 +121,7 @@ export interface KnowledgePanelProps {
   api: KnowledgePanelApi | null;
   selection: KnowledgeSelection;
   collections: readonly KnowledgeCollectionView[];
-  onSelect: (selection: KnowledgeSelection) => void;
+  onSelect: (selection: KnowledgeSelection, options?: KnowledgeSelectOptions) => void;
   onClose: () => void;
   /** Shown when there is somewhere to go back to. */
   onBack?: () => void;
@@ -148,8 +153,8 @@ export const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ api, selection, 
       setMerging(true);
       try {
         const kept = await runKnowledgeMerge(api, plan);
-        // Unless the user moved on meanwhile.
-        if (kept !== from && selectedId.current === from) onSelectRef.current({ kind: "entry", id: kept });
+        // Unless the user moved on meanwhile. The open entry is gone: Back must not lead to it.
+        if (kept !== from && selectedId.current === from) onSelectRef.current({ kind: "entry", id: kept }, { replace: true });
       } finally {
         setMerging(false);
       }

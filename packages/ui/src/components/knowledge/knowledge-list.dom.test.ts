@@ -29,6 +29,7 @@ let resetKnowledge: typeof import("../../lib/knowledge/store").resetKnowledge;
 let knowledgeStore: typeof import("../../lib/knowledge/store").knowledgeStore;
 let KnowledgeListView: typeof import("./KnowledgeListView").KnowledgeListView;
 let EMPTY: KnowledgeQuery;
+let withoutExamples: typeof import("./query-state").withoutExamples;
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Node", "navigator", "KeyboardEvent", "MouseEvent", "FocusEvent", "Event"] as const;
@@ -45,7 +46,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ resetKnowledge, knowledgeStore } = await import("../../lib/knowledge/store"));
   ({ KnowledgeListView } = await import("./KnowledgeListView"));
-  ({ EMPTY_KNOWLEDGE_QUERY: EMPTY } = await import("./query-state"));
+  ({ EMPTY_KNOWLEDGE_QUERY: EMPTY, withoutExamples } = await import("./query-state"));
 });
 
 after(() => {
@@ -150,6 +151,7 @@ describe("the List view", () => {
         onCollection: () => undefined,
         query,
         onQueryChange: setQuery,
+        onExamplesGone: (ids: string[]) => setQuery((q) => withoutExamples(q, ids)),
         selection: null,
         onSelect: (s) => void selected.push(s.id),
         onNewCollection: () => undefined,
@@ -409,6 +411,43 @@ describe("the List view", () => {
     assert.deepEqual(current.similarTo, []);
     assert.deepEqual(current.unlike, [], "no \"not like\" without a \"like\"");
     assert.ok(doc().querySelector('ul[aria-label="Entries"]'), "back to the plain list");
+  });
+
+  it("lets go of a deleted example the search is refused for, back to the plain list when none is left", async () => {
+    const notFound = (id: string) => Object.assign(new Error("404"), { status: 404, body: { code: "KNOWLEDGE_NOT_FOUND", message: `No visible entry "${id}".` } });
+    await show(
+      {
+        searchKnowledge: async (req: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> => {
+          searches.push(req);
+          const gone = (req.similarTo ?? []).find((id) => id === "ke_gone0000000");
+          if (gone) throw notFound(gone);
+          return { hits: [hit("ke_bbbbbbbbbbbb", "Hit B")], searched: [], total: 1, nextCursor: null };
+        }
+      },
+      { similarTo: ["ke_gone0000000", "ke_seed0000000"] }
+    );
+    assert.deepEqual(current.similarTo, ["ke_seed0000000"]);
+    assert.deepEqual(searches.at(-1)?.similarTo, ["ke_seed0000000"]);
+    assert.match(text(), /1 result/);
+    assert.doesNotMatch(text(), /No visible entry/);
+
+    act(() => root.unmount());
+    root = createRoot(doc().body.appendChild(doc().createElement("div")));
+    searches = [];
+    lists = [];
+    await show(
+      {
+        searchKnowledge: async (req: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> => {
+          searches.push(req);
+          throw notFound("ke_gone0000000");
+        }
+      },
+      { similarTo: ["ke_gone0000000"], unlike: ["ke_bbbbbbbbbbbb"] }
+    );
+    assert.deepEqual([current.similarTo, current.unlike], [[], []]);
+    assert.equal(searches.length, 1, "asked once");
+    assert.ok(doc().querySelector('ul[aria-label="Entries"]'), "the plain list");
+    assert.doesNotMatch(text(), /No visible entry|Retry/);
   });
 
   it("Rediscover: older entries like this week's, hidden for an older daemon, dismissible", async () => {

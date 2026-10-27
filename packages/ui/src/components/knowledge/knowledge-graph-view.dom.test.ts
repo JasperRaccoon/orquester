@@ -462,9 +462,9 @@ describe("the Graph view", () => {
       assert.ok(doc().querySelector('[role="listbox"]'), "the list is open");
       assert.equal(await key("Escape"), false, "the browser does not clear the search field");
       assert.equal(doc().querySelector('[role="listbox"]'), null, "the list closed");
-      assert.deepEqual(changes, [], "the words stay");
+      assert.equal(changes.length, 0, "the words stay");
       await key("Escape");
-      assert.deepEqual(changes.at(-1)?.text, "");
+      assert.equal(changes.at(-1)?.text, "");
     });
 
     it("edits the shared query's words and searches with its filters", async () => {

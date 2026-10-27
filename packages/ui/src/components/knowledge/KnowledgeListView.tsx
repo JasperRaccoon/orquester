@@ -28,6 +28,7 @@ import {
   entriesKeyOf,
   entriesQueryOf,
   knowledgeErrorText,
+  missingExamplesOf,
   rediscoverEntries,
   rediscoverRequestOf,
   rediscoverSeeds,
@@ -79,7 +80,9 @@ function useEntriesRevision(): number {
 function usePaged<T>(
   key: string | null,
   read: ((cursor: string | null, signal?: AbortSignal) => Promise<PageAnswer<T>>) | null,
-  idOf: (item: T) => string
+  idOf: (item: T) => string,
+  /** A failure the caller mends by changing what is read (so `key` moves): true when it did, and no error shows. */
+  recover?: (error: unknown) => boolean
 ) {
   const [page, setPage] = useState<Paged<T>>({ status: "loading" });
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
@@ -96,6 +99,8 @@ function usePaged<T>(
   readRef.current = read;
   const idOfRef = useRef(idOf);
   idOfRef.current = idOf;
+  const recoverRef = useRef(recover);
+  recoverRef.current = recover;
   const ready = read !== null;
 
   useEffect(() => {
@@ -127,6 +132,7 @@ function usePaged<T>(
       setRefetching(false);
     })().catch((error: unknown) => {
       if (mine !== seq.current || controller.signal.aborted) return;
+      if (recoverRef.current?.(error)) return;
       setPage({ status: "error", message: knowledgeErrorText(error) });
       setRefetching(false);
     });
@@ -146,7 +152,7 @@ function usePaged<T>(
       setPage((p) => (p.status === "ready" ? { status: "ready", ...appendPage(p, answer, idOfRef.current) } : p));
       setMore({ busy: false, error: null });
     } catch (error) {
-      if (mine === seq.current) setMore({ busy: false, error: knowledgeErrorText(error) });
+      if (mine === seq.current && !recoverRef.current?.(error)) setMore({ busy: false, error: knowledgeErrorText(error) });
     } finally {
       if (mine === seq.current) loadingMore.current = false;
     }
@@ -195,6 +201,12 @@ function useExampleTitles(api: KnowledgeListApi | null, ids: readonly string[], 
   const [read, setRead] = useState<Record<string, string | null>>({});
   const asked = useRef(new Set<string>());
   const idsKey = ids.join(",");
+  // Entries changed: their titles are read again (an edit renames the chip).
+  const revision = useEntriesRevision();
+  useEffect(() => {
+    const changed = knowledgeStore.getState().changedEntryIds;
+    for (const id of [...asked.current]) if (changed === null || changed.includes(id)) asked.current.delete(id);
+  }, [revision]);
   useEffect(() => {
     if (!api) return;
     for (const id of ids) {
@@ -207,7 +219,7 @@ function useExampleTitles(api: KnowledgeListApi | null, ids: readonly string[], 
     }
     // `idsKey` stands for `ids`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, idsKey, known]);
+  }, [api, idsKey, known, revision]);
   const remember = useCallback((id: string, title: string) => setRead((r) => ({ ...r, [id]: title })), []);
   const titleOf = useCallback((id: string): string | null | undefined => known.get(id) ?? read[id], [known, read]);
   return { titleOf, remember };
@@ -285,6 +297,11 @@ export interface KnowledgeListViewProps {
   /** What the list searches for (owned by KnowledgeView, shared with the Graph view and the panel). */
   query: KnowledgeQuery;
   onQueryChange: (query: KnowledgeQuery) => void;
+  /**
+   * The search was refused because example entries are gone (deleted): let go of them (the query
+   * moves on). Absent: the refusal shows as an error.
+   */
+  onExamplesGone?: (ids: string[]) => void;
   selection: KnowledgeSelection | null;
   onSelect: (selection: KnowledgeSelection) => void;
   onNewCollection: () => void;
@@ -300,6 +317,7 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
   onCollection,
   query,
   onQueryChange,
+  onExamplesGone,
   selection,
   onSelect,
   onNewCollection,
@@ -317,7 +335,15 @@ export const KnowledgeListView: React.FC<KnowledgeListViewProps> = ({
   const search = usePaged<KnowledgeSearchHit>(
     searching ? searchKeyOf(query, collection) : null,
     api ? (cursor, signal) => api.searchKnowledge(searchRequestOf(query, collection, { cursor }), signal).then(searchPageOf) : null,
-    searchHitKey
+    searchHitKey,
+    // An example entry deleted: let go of it (nothing left to search: the plain list) rather than
+    // asking again, forever, for a search the daemon must refuse.
+    (error) => {
+      const missing = onExamplesGone ? missingExamplesOf(error, query) : null;
+      if (!missing || !onExamplesGone) return false;
+      onExamplesGone(missing);
+      return true;
+    }
   );
 
   // Rediscover: seeded by this week's entries at the top of the plain, unfiltered list.
