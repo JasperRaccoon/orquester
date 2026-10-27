@@ -561,6 +561,7 @@ export const devicePoolCacheSchema = z
     lastWarmAt: z.string().nullable().default(null),
     /** The last warm a cache miss dispatched (at most one a day). */
     lastAutoWarmAt: z.string().nullable().default(null),
+    /** The last dispatched run's id; with no `lastConclusion` yet it is in flight (polled again after a restart). */
     lastRunId: z.string().nullable().default(null),
     /** `success`, `failure`, … once the last run completed; null while unknown. */
     lastConclusion: z.string().nullable().default(null)

@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DEVICES_POOL_EVENT, type DevicePoolSummary } from "@orquester/api";
+import { DEFAULT_DEVICES_SETTINGS, DEVICES_POOL_EVENT, type DevicePoolSummary } from "@orquester/api";
 
 import { DeviceError } from "./errors.ts";
-import type { DeviceRentalQuote } from "./host.ts";
-import type { DeviceCacheWarmer } from "./pool-actor.ts";
+import { DeviceHostRegistry, type DeviceRentalQuote } from "./host.ts";
+import { DevicePool, type DeviceCacheWarmer } from "./pool-actor.ts";
+import { DevicePoolStore } from "./store.ts";
 import { FakeDeviceHost, FakeHostFactory, startTestDeviceService, type TestDeviceService } from "./testing.ts";
 
 const signal = () => new AbortController().signal;
@@ -397,6 +399,96 @@ test("cache warming: the owner's Warm caches, a cache miss (once a day) and the 
     assert.equal(file.cache.linux.lastRunId, "3");
   } finally {
     await t.cleanup();
+  }
+});
+
+test("a cache run in flight at a restart is resumed from device-pool.json and polled to its end; a concluded one is not", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-pool-resume-"));
+  const file = join(dir, "device-pool.json");
+  const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+  try {
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        rentals: [],
+        learnedCapacity: [],
+        drainingHostIds: [],
+        cache: {
+          linux: { lastWarmAt: new Date(T0 - 10 * MIN).toISOString(), lastAutoWarmAt: null, lastRunId: "run-7", lastConclusion: null },
+          macos: { lastWarmAt: new Date(T0 - 60 * MIN).toISOString(), lastAutoWarmAt: null, lastRunId: "run-3", lastConclusion: "success" }
+        }
+      })
+    );
+    const polled: string[] = [];
+    let status: Awaited<ReturnType<DeviceCacheWarmer["status"]>> = { state: "running", conclusion: null, htmlUrl: "https://github.test/runs/7" };
+    const warmer: DeviceCacheWarmer = {
+      dispatch: async () => {
+        throw new Error("no new run");
+      },
+      status: async (runId) => {
+        polled.push(runId);
+        return status;
+      }
+    };
+    const store = new DevicePoolStore({ file, logger: quiet });
+    const pool = new DevicePool({
+      store,
+      hosts: new DeviceHostRegistry(),
+      factories: [],
+      settings: () => DEFAULT_DEVICES_SETTINGS,
+      leasesOn: () => 0,
+      publish: () => undefined,
+      cacheWarmer: () => warmer,
+      now: () => T0,
+      logger: quiet,
+      timers: false
+    });
+    await pool.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(polled, ["run-7"], "only the unconcluded run");
+    const job = pool.cacheJobs()[0]!;
+    assert.deepEqual([job.platform, job.state, job.url, job.startedAt], ["android", "running", "https://github.test/runs/7", new Date(T0 - 10 * MIN).toISOString()]);
+    assert.match((await pool.warmCaches("android")).message ?? "", /already running/);
+    status = { state: "completed", conclusion: "success", htmlUrl: null };
+    await pool.pollCacheRun(warmer, "android");
+    assert.equal(pool.cacheJobs()[0]?.state, "done");
+    await pool.stop();
+    const saved = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(saved.cache.linux.lastConclusion, "success");
+    assert.equal(saved.cache.linux.lastRunId, "run-7");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resumed cache run past the 3 h limit fails and is concluded (a later restart does not resume it)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-pool-resume-"));
+  const file = join(dir, "device-pool.json");
+  const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+  try {
+    const cache = { macos: { lastWarmAt: new Date(T0 - 4 * 60 * MIN).toISOString(), lastAutoWarmAt: null, lastRunId: "run-9", lastConclusion: null } };
+    await writeFile(file, JSON.stringify({ version: 1, cache }));
+    const warmer: DeviceCacheWarmer = { dispatch: async () => ({ runId: "x", htmlUrl: null }), status: async () => ({ state: "running", conclusion: null, htmlUrl: null }) };
+    const pool = new DevicePool({
+      store: new DevicePoolStore({ file, logger: quiet }),
+      hosts: new DeviceHostRegistry(),
+      factories: [],
+      settings: () => DEFAULT_DEVICES_SETTINGS,
+      leasesOn: () => 0,
+      publish: () => undefined,
+      cacheWarmer: () => warmer,
+      now: () => T0,
+      logger: quiet,
+      timers: false
+    });
+    await pool.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual([pool.cacheJobs()[0]?.platform, pool.cacheJobs()[0]?.state, pool.cacheJobs()[0]?.error], ["ios", "failed", "The cache run did not finish in 3 hours."]);
+    await pool.stop();
+    assert.equal(JSON.parse(await readFile(file, "utf8")).cache.macos.lastConclusion, "timed-out");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

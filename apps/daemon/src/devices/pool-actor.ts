@@ -22,7 +22,8 @@
  * - **Cache warming.** `warmCaches` dispatches the box provider's cache run per OS, tracked as a
  *   `cache-warm` {@link DeviceSetupJob}; a pool host's cache miss warms at most once a day; while the
  *   pool may rent without asking, caches older than {@link CACHE_REFRESH_MS} are refreshed
- *   (the provider evicts caches unused for 7 days).
+ *   (the provider evicts caches unused for 7 days). A run's id is persisted when dispatched
+ *   (`cache.<os>.lastRunId`, no conclusion yet): after a restart its polling resumes.
  *
  * Every change is published as a {@link DevicePoolSummary} (`devices.pool`) when it differs.
  * Ticks run on every host or lease change (`kick`), at each queue deadline, and every
@@ -215,6 +216,7 @@ export class DevicePool {
       void this.deps.store.persist();
     }
     for (const id of present) this.seen.add(id);
+    this.resumeCacheRuns();
     if (this.deps.timers !== false) {
       this.tickTimer = setInterval(() => this.tick(), POOL_TICK_MS);
       this.tickTimer.unref?.();
@@ -358,6 +360,43 @@ export class DevicePool {
     return { started: true, message: `Building the ${DEVICE_PLATFORM_LABELS[platform]} device caches (a few minutes; billed by the box provider).`, job: structuredClone(job) };
   }
 
+  /**
+   * Cache runs dispatched before a restart and not concluded (`lastRunId` with no
+   * `lastConclusion`): tracked again as running jobs and polled now.
+   */
+  private resumeCacheRuns(): void {
+    const now = this.deps.now();
+    for (const platform of DEVICE_PLATFORMS) {
+      const cache = this.deps.store.state().cache[DEVICE_CACHE_OS[platform]];
+      if (!cache?.lastRunId || cache.lastConclusion !== null || this.cacheRuns.has(platform)) continue;
+      const startedAt = parseMs(cache.lastWarmAt) ?? now;
+      const job: DeviceSetupJob = {
+        id: this.newId(),
+        kind: "cache-warm",
+        url: null,
+        platform,
+        hostId: "pool",
+        state: "running",
+        steps: [
+          { id: "dispatch", label: `Start the ${DEVICE_PLATFORM_LABELS[platform]} cache run`, state: "done", detail: "Resumed after Orquester restarted." },
+          { id: "run", label: "Build and save the caches", state: "running", detail: null }
+        ],
+        percent: null,
+        logLine: "Reading the run",
+        error: null,
+        startedAt: new Date(startedAt).toISOString(),
+        finishedAt: null
+      };
+      const run: CacheRun = { job, runId: cache.lastRunId, timer: null, startedAt };
+      this.cacheRuns.set(platform, run);
+      this.cacheAttemptAt.set(platform, startedAt);
+      this.deps.logger.info(`[devices] resuming the ${DEVICE_PLATFORM_LABELS[platform]} cache run ${cache.lastRunId}`);
+      const warmer = this.deps.cacheWarmer?.() ?? null;
+      if (warmer) void this.pollCacheRun(warmer, platform, run);
+      else this.scheduleCachePoll(platform, run);
+    }
+  }
+
   cacheJobs(): DeviceSetupJob[] {
     return [...this.cacheRuns.values()].map((run) => structuredClone(run.job));
   }
@@ -400,7 +439,7 @@ export class DevicePool {
       cache.lastConclusion = null;
       if (trigger === "miss") cache.lastAutoWarmAt = cache.lastWarmAt;
       void this.deps.store.persist();
-      this.scheduleCachePoll(warmer, platform, run);
+      this.scheduleCachePoll(platform, run);
     } catch (error) {
       this.finishCacheRun(run, "failed", `The cache run could not start: ${errorText(error)}`);
     }
@@ -408,10 +447,28 @@ export class DevicePool {
     return job;
   }
 
-  private scheduleCachePoll(warmer: DeviceCacheWarmer, platform: DevicePlatform, run: CacheRun): void {
+  /** The next poll, with the box service's warmer as it is then (it may come and go). */
+  private scheduleCachePoll(platform: DevicePlatform, run: CacheRun): void {
     if (this.stopped || this.deps.timers === false) return;
-    run.timer = setTimeout(() => void this.pollCacheRun(warmer, platform, run), this.deps.cachePollMs ?? CACHE_POLL_MS);
+    run.timer = setTimeout(() => {
+      const warmer = this.deps.cacheWarmer?.() ?? null;
+      if (warmer) {
+        void this.pollCacheRun(warmer, platform, run);
+        return;
+      }
+      if (this.giveUpCacheRun(run)) this.publish();
+      else this.scheduleCachePoll(platform, run);
+    }, this.deps.cachePollMs ?? CACHE_POLL_MS);
     run.timer.unref?.();
+  }
+
+  /** A run past {@link CACHE_POLL_LIMIT_MS} is failed (and concluded, so a restart does not resume it). */
+  private giveUpCacheRun(run: CacheRun): boolean {
+    if (this.deps.now() - run.startedAt <= CACHE_POLL_LIMIT_MS) return false;
+    this.cacheState(run.job.platform).lastConclusion = "timed-out";
+    void this.deps.store.persist();
+    this.finishCacheRun(run, "failed", "The cache run did not finish in 3 hours.");
+    return true;
   }
 
   /** Read a cache run's state once (the timer calls it; tests too). */
@@ -432,11 +489,7 @@ export class DevicePool {
     } catch (error) {
       run.job.logLine = `Could not read the run: ${errorText(error)}`;
     }
-    if (this.deps.now() - run.startedAt > CACHE_POLL_LIMIT_MS) {
-      this.finishCacheRun(run, "failed", "The cache run did not finish in 3 hours.");
-    } else {
-      this.scheduleCachePoll(warmer, platform, run);
-    }
+    if (!this.giveUpCacheRun(run)) this.scheduleCachePoll(platform, run);
     this.publish();
   }
 
