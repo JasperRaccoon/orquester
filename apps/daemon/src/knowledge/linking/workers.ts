@@ -70,9 +70,12 @@ export interface WorkerSessionPort<C extends WorkerCandidate = WorkerCandidate> 
   watch(sessionId: string, signal: AbortSignal): Promise<WorkerOutcome>;
   /** Cools the candidate's account down after a limit (shared with the workflows). */
   coolDown(candidate: C, memory: FailoverMemory, outcome: Extract<WorkerOutcome, { kind: "limit" }>): Promise<void>;
-  /** Tokens the chat's turns used (provider-reported; 0 when unknown). */
+  /**
+   * Tokens the chat's turns used (provider-reported; 0 when unknown). Read it BEFORE `stop`: closing
+   * the tab deletes the chat and its usage.
+   */
   usage(sessionId: string): Promise<{ in: number; out: number }>;
-  /** Ends the chat: interrupts its turn when asked, then closes the tab. Never throws. */
+  /** Ends the chat: interrupts its turn when asked, then closes (deletes) the tab. Never throws. */
   stop(sessionId: string, options: { interrupt: boolean }): Promise<void>;
   /** A chat from before a restart still has a turn running (it may ask for work again). */
   isRunning(sessionId: string): Promise<boolean>;
@@ -153,7 +156,10 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
         running = false;
       }
       if (!running || this.stopped) {
+        // Its tokens were never counted (the previous daemon left it running): read them before the tab goes.
+        const tokens = await this.readUsage(record.sessionId);
         await this.options.port.stop(record.sessionId, { interrupt: false });
+        this.emitTokens(record.sessionId, tokens);
         this.emitWorker({ ...record, state: "done", finishedAt: this.now() });
         continue;
       }
@@ -206,8 +212,10 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     const ending = [...this.workers.values()].map(async (worker) => {
       worker.abort.abort();
       this.options.broker.release(worker.record.sessionId);
+      // Usage first: stopping deletes the chat, and its turns' usage with it.
+      const tokens = await this.readUsage(worker.record.sessionId);
       await this.options.port.stop(worker.record.sessionId, { interrupt: true });
-      await this.finishWorker(worker, "done");
+      await this.finishWorker(worker, "done", tokens);
     });
     await Promise.all(ending);
   }
@@ -299,6 +307,8 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     const answered = broker.tasksOf(sessionId) > 0;
     // A usage limit is the account's doing (failover handles it), not the task's.
     const gaveUp = outcome.kind !== "limit" && broker.gaveUp(sessionId);
+    // Usage first: `port.stop` deletes the chat, and its turns' usage with it (every run recorded 0 tokens).
+    const tokens = await this.readUsage(sessionId);
     if (outcome.kind === "limit") {
       if (worker.candidate) await port.coolDown(worker.candidate, this.memory, outcome).catch(() => undefined);
       await port.stop(sessionId, { interrupt: true });
@@ -310,7 +320,7 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     if (gaveUp) this.failures += 1;
     else if (answered) this.failures = 0;
     else if (outcome.kind === "failed" || outcome.kind === "closed") this.failures += 1;
-    await this.finishWorker(worker, outcome.kind === "done" || outcome.kind === "limit" ? "done" : "failed");
+    await this.finishWorker(worker, outcome.kind === "done" || outcome.kind === "limit" ? "done" : "failed", tokens);
     if (this.failures >= this.maxFailures()) {
       this.fail(
         outcome.kind === "failed"
@@ -324,13 +334,24 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     this.reconcile();
   }
 
-  private async finishWorker(worker: Worker<C>, state: "done" | "failed"): Promise<void> {
+  /**
+   * The chat's tokens, read BEFORE `port.stop` (which deletes the chat). `tokens` is that reading;
+   * a chat another path already finished is not counted twice.
+   */
+  private async finishWorker(worker: Worker<C>, state: "done" | "failed", tokens: { in: number; out: number }): Promise<void> {
     const sessionId = worker.record.sessionId;
     if (!this.workers.delete(sessionId)) return;
-    const tokens = await this.options.port.usage(sessionId).catch(() => ({ in: 0, out: 0 }));
-    if (tokens.in > 0 || tokens.out > 0) this.options.onEvent({ kind: "tokens", sessionId, ...tokens });
+    this.emitTokens(sessionId, tokens);
     this.emitWorker({ ...worker.record, state, tasks: this.options.broker.tasksOf(sessionId), finishedAt: this.now() });
     this.checkIdle();
+  }
+
+  private readUsage(sessionId: string): Promise<{ in: number; out: number }> {
+    return this.options.port.usage(sessionId).catch(() => ({ in: 0, out: 0 }));
+  }
+
+  private emitTokens(sessionId: string, tokens: { in: number; out: number }): void {
+    if (tokens.in > 0 || tokens.out > 0) this.options.onEvent({ kind: "tokens", sessionId, in: tokens.in, out: tokens.out });
   }
 
   private emitWorker(record: KnowledgeWorkerRecord): void {

@@ -219,6 +219,16 @@ export function knowledgeMykgHomeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
 }
 
+/** LLM pair checks of two entries (phase 2 spec, "Pair checks"; schema in `knowledge-linking.ts`). */
+export function knowledgePairChecksPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks.json");
+}
+
+/** The pair checks' own inbox (`agent_inbox/`, `agent_outbox/`), answered by worker chats between linking runs. */
+export function knowledgePairChecksInboxDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "pair-checks");
+}
+
 // appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target path helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  emptyKnowledgePairChecksFile,
   parseKnowledgeLinkingState,
+  readKnowledgePairChecksFile,
+  serializeKnowledgePairChecksFile,
   readKnowledgeLinkingState,
   serializeKnowledgeLinkingState
 } from "./knowledge-linking.ts";
@@ -94,4 +97,34 @@ test("readKnowledgeLinkingState: a current file reads as current; an older, odd 
   assert.throws(() => readKnowledgeLinkingState({ version: 2.5 }));
   assert.throws(() => readKnowledgeLinkingState({ session: "s1" }));
   assert.throws(() => readKnowledgeLinkingState([{ version: 2 }]));
+});
+
+test("re-linking state: absent from an older file reads empty; a bad part costs only that part; unknown fields survive", () => {
+  const older = parseKnowledgeLinkingState({ version: 1, session: "s" });
+  assert.deepEqual(older.relink, { done: 0, gapQueue: [], gapPairs: {}, prepared: [] });
+  const parsed = parseKnowledgeLinkingState({
+    version: 1,
+    relink: { done: 3, gapQueue: "nope", gapPairs: { "ke_a ke_b": "h1 h2" }, prepared: ["ke_c"], future: 1 },
+    currentRun: { id: "kr_1", mode: "update", startedAt: "t", session: "s1", entryIds: ["ke_c"], relinkEntryIds: ["ke_c"] }
+  });
+  assert.deepEqual(parsed.relink, { done: 3, gapQueue: [], gapPairs: { "ke_a ke_b": "h1 h2" }, prepared: ["ke_c"], future: 1 });
+  assert.deepEqual(parsed.currentRun?.relinkEntryIds, ["ke_c"]);
+  const noRelink = parseKnowledgeLinkingState({ version: 1, currentRun: { id: "kr_1", mode: "update", startedAt: "t", relinkEntryIds: 5 } });
+  assert.equal(noRelink.currentRun?.relinkEntryIds, undefined, "a bad value reads as none");
+  assert.deepEqual(parseKnowledgeLinkingState({ version: 1, relink: "x" }).relink.prepared, []);
+  assert.deepEqual(JSON.parse(serializeKnowledgeLinkingState(parsed)).relink.future, 1);
+});
+
+test("pair-checks.json: unreadable records and unknown keys are kept for the rewrite; a newer file is read-only", () => {
+  const record = { a: "ke_a", b: "ke_b", hashA: "h1", hashB: "h2", verdict: "contradicts", note: "48h vs 72h", checkedAt: "t", model: "x" };
+  const file = readKnowledgePairChecksFile({ version: 1, checks: [record, { a: "ke_c", verdict: "maybe" }], future: { kept: true } });
+  assert.equal(file.readOnly, false);
+  assert.deepEqual(file.checks, [record]);
+  assert.deepEqual(file.rejected, [{ a: "ke_c", verdict: "maybe" }]);
+  assert.deepEqual(JSON.parse(serializeKnowledgePairChecksFile(file)), { version: 1, checks: [record, { a: "ke_c", verdict: "maybe" }], future: { kept: true } });
+  assert.deepEqual(readKnowledgePairChecksFile("garbage"), emptyKnowledgePairChecksFile());
+  const newer = readKnowledgePairChecksFile({ version: 2, checks: [record] });
+  assert.equal(newer.readOnly, true);
+  assert.equal(newer.version, 2);
+  assert.equal(newer.checks.length, 1);
 });

@@ -78,7 +78,8 @@ export function buildKnowledgeStatus(snapshot: KnowledgeLinkingSnapshot, counts:
     tokens: snapshot.tokens,
     lastError: snapshot.lastError,
     ...(counts.embeddingModelReady !== undefined ? { embeddingModelReady: counts.embeddingModelReady } : {}),
-    ...(counts.conceptMerges !== undefined ? { conceptMerges: counts.conceptMerges } : {})
+    ...(counts.conceptMerges !== undefined ? { conceptMerges: counts.conceptMerges } : {}),
+    ...(snapshot.relink !== undefined ? { relink: snapshot.relink } : {})
   };
 }
 

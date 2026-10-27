@@ -39,6 +39,8 @@ function graphLinking(): KnowledgeLinkingFactory {
       stop: async () => undefined,
       status: () => ({ state: "idle" }),
       entriesChanged: () => undefined,
+      pairChecks: { all: () => [], get: () => null, onChange: () => () => {} },
+      gapQueued: () => new Set(),
       snapshot: () => ({ linking: { state: "idle" }, lastRun: null, recentRuns: [], workers: [], tokens: { week: { in: 0, out: 0 }, total: { in: 0, out: 0 } }, lastError: null }),
       rebuild: async () => ({ queued: false, running: false }),
       rebuildEstimate: async () => ({ entries: 0, tasks: 0 }),

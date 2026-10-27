@@ -29,7 +29,9 @@ import {
   knowledgeEntriesDir,
   knowledgeMykgInputDir,
   parseKnowledgeCollectionsConfig,
-  serializeKnowledgeCollectionsFile
+  readKnowledgeLinkContext,
+  serializeKnowledgeCollectionsFile,
+  KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY
 } from "@orquester/config";
 import type { KnowledgeEntryChange, KnowledgeStorePort } from "../ports.ts";
 import { parseEntryFile, renderMykgInput, serializeEntryFile } from "./entry-file.ts";
@@ -213,6 +215,29 @@ export class KnowledgeStore implements KnowledgeStorePort {
         }
       }
     }
+  }
+
+  linkContext(id: string): number | null {
+    const stored = this.entries.get(id);
+    return stored ? readKnowledgeLinkContext(stored.extra) : null;
+  }
+
+  /**
+   * The frontmatter's `linkContext` (phase 2 spec, "Context version"), kept with the entry's extra
+   * keys so every later rewrite carries it. No change event: nothing needs re-linking or re-indexing.
+   */
+  async setLinkContext(ids: readonly string[], version: number): Promise<void> {
+    await this.serialize(async () => {
+      for (const id of new Set(ids)) {
+        const stored = this.entries.get(id);
+        if (!stored || readKnowledgeLinkContext(stored.extra) === version) continue;
+        const body = await this.readBody(id);
+        if (body === null) continue;
+        const extra = { ...stored.extra, [KNOWLEDGE_ENTRY_LINK_CONTEXT_KEY]: version };
+        await writeFileAtomic(this.entryPath(id), serializeEntryFile(stored.meta, extra, body));
+        this.entries.set(id, { ...stored, extra });
+      }
+    });
   }
 
   onChange(listener: (change: KnowledgeEntryChange) => void): () => void {

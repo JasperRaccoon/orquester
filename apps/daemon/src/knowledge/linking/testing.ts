@@ -31,14 +31,17 @@ export interface FakeWorkerSession {
   answered: string[];
   refused: number;
   seenInstructions: (string | null)[];
+  /** Every task's `input` as the chat was shown it (`step` first), in order. */
+  inputs: { step: string; input: string }[];
   stopped: { interrupt: boolean } | null;
   end(outcome: WorkerOutcome): void;
 }
 
 export type AnswerFor = (task: KnowledgeWorkerTask) => string;
 
-/** A plausible myKG answer: Pass 2 extractions name the entry file of the task input. */
+/** A plausible myKG answer: Pass 2 extractions name the entry file of the task input; a pair check is consistent. */
 export const defaultAnswer: AnswerFor = (task) => {
+  if (task.step === "pair-check") return JSON.stringify({ verdict: "consistent", note: "Both say the same." });
   const file = /^FILE (\S+)/m.exec(task.input)?.[1];
   if (task.step === "pass2" && file) {
     const stem = file.replace(/\.md$/, "");
@@ -98,6 +101,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       answered: [],
       refused: 0,
       seenInstructions: [],
+      inputs: [],
       stopped: null,
       end: (outcome) => {
         this.running.delete(id);
@@ -125,6 +129,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
         answered: [],
         refused: 0,
         seenInstructions: [],
+        inputs: [],
         stopped: null,
         end: (outcome) => {
           this.running.delete(sessionId);
@@ -144,12 +149,19 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
     this.limited.set(candidate.accountId, until);
   }
 
+  /** `usage` and `stop` calls in order (`usage:<id>`, `stop:<id>`). */
+  readonly calls: string[] = [];
+
+  /** Like the daemon's port: a stopped chat's tab is deleted, and its turns' usage with it. */
   async usage(sessionId: string): Promise<{ in: number; out: number }> {
+    this.calls.push(`usage:${sessionId}`);
     const session = this.sessions.find((s) => s.id === sessionId);
-    return { in: 1000 * (session?.answered.length ?? 0), out: 100 * (session?.answered.length ?? 0) };
+    if (!session || session.stopped) return { in: 0, out: 0 };
+    return { in: 1000 * session.answered.length, out: 100 * session.answered.length };
   }
 
   async stop(sessionId: string, options: { interrupt: boolean }): Promise<void> {
+    this.calls.push(`stop:${sessionId}`);
     const session = this.sessions.find((s) => s.id === sessionId);
     if (session && !session.stopped) session.stopped = { ...options };
     this.running.delete(sessionId);
@@ -185,6 +197,7 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       if (session.stopped) return;
       const task = reply.task;
       session.seenInstructions.push(task.instructions);
+      session.inputs.push({ step: task.step, input: task.input });
       if (behaviour.limitAfter !== undefined && session.answered.length >= behaviour.limitAfter) {
         session.end({ kind: "limit", reason: "usage_limit", ...(behaviour.resetsAt ? { resetsAt: behaviour.resetsAt } : {}), message: "You've hit your limit" });
         return;
