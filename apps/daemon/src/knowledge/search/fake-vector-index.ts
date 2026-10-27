@@ -91,7 +91,10 @@ export class FakeVectorIndex implements KnowledgeVectorIndex {
           chunk = i;
         }
       });
-      if (best >= floor) hits.push({ entryId, score: best, chunk, chunks: vectors.length, span: { start: chunk * 100, end: chunk * 100 + 100 } });
+      if (best < floor) continue;
+      const hit: KnowledgeVectorHit = { entryId, score: best, chunk, chunks: vectors.length, span: { start: chunk * 100, end: chunk * 100 + 100 } };
+      if (vectors.length > 1) hit.chunkScores = vectors.map((vector, i) => ({ score: dot(query, vector), span: { start: i * 100, end: i * 100 + 100 } }));
+      hits.push(hit);
     }
     return hits.sort((a, b) => b.score - a.score || (a.entryId < b.entryId ? -1 : 1)).slice(0, limit);
   }

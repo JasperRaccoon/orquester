@@ -140,6 +140,11 @@ export interface KnowledgeVectorHit {
   chunks: number;
   /** The best chunk's character range in the entry body. */
   span: { start: number; end: number };
+  /**
+   * Every chunk's cosine and character range, in body order (search picks the passage to show
+   * from them with the query's words); absent: only the best chunk is known. Read-only.
+   */
+  chunkScores?: readonly { score: number; span: { start: number; end: number } }[];
 }
 
 /**
