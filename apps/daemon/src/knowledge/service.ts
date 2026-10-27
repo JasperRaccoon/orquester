@@ -340,8 +340,7 @@ export class KnowledgeService {
       embedders,
       path: knowledgeConceptMergesPath(appdir),
       vectorsDir: join(knowledgeIndexDir(appdir), "concepts"),
-      logger: this.logger,
-      ...(this.options.now ? { now: this.options.now } : {})
+      logger: this.logger
     });
     await conceptMerges.start();
     const opening: Opening = { store, graph, search, embedders, linking, conceptMerges, unsubscribe: [] };
