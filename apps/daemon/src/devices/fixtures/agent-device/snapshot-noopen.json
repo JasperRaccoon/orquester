@@ -1,0 +1,348 @@
+{
+ "success": true,
+ "data": {
+  "nodes": [
+   {
+    "index": 0,
+    "type": "android.widget.ScrollView",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/workspace",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 0,
+     "y": 0,
+     "width": 720,
+     "height": 1280
+    },
+    "visibleToUser": true,
+    "depth": 0,
+    "ref": "e1",
+    "kind": "scroll-area"
+   },
+   {
+    "index": 1,
+    "type": "androidx.viewpager.widget.ViewPager",
+    "label": "At a glance",
+    "enabled": true,
+    "selected": false,
+    "roleDescription": "View",
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/smartspace_card_pager",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 39,
+     "y": 129,
+     "width": 642,
+     "height": 120
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 1,
+    "parentIndex": 0,
+    "ref": "e2",
+    "kind": "viewpager"
+   },
+   {
+    "index": 2,
+    "type": "android.view.ViewGroup",
+    "enabled": true,
+    "selected": false,
+    "roleDescription": " ",
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/base_template_card_with_date",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 39,
+     "y": 129,
+     "width": 642,
+     "height": 120
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 2,
+    "parentIndex": 1,
+    "ref": "e3",
+    "kind": "group"
+   },
+   {
+    "index": 3,
+    "type": "android.widget.TextView",
+    "label": "Tue, Oct 27",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/date",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 39,
+     "y": 173,
+     "width": 116,
+     "height": 27
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 3,
+    "parentIndex": 2,
+    "ref": "e4",
+    "kind": "text"
+   },
+   {
+    "index": 4,
+    "type": "android.widget.TextView",
+    "label": "Phone",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 39,
+     "y": 936,
+     "width": 98,
+     "height": 111
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e5",
+    "kind": "text"
+   },
+   {
+    "index": 5,
+    "type": "android.widget.TextView",
+    "label": "Messages",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 175,
+     "y": 936,
+     "width": 98,
+     "height": 111
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e6",
+    "kind": "text"
+   },
+   {
+    "index": 6,
+    "type": "android.widget.TextView",
+    "label": "Gmail",
+    "contentDescription": "Predicted app: Gmail",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 311,
+     "y": 936,
+     "width": 98,
+     "height": 111
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e7",
+    "kind": "text"
+   },
+   {
+    "index": 7,
+    "type": "android.widget.TextView",
+    "label": "Chrome",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 447,
+     "y": 936,
+     "width": 98,
+     "height": 111
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e8",
+    "kind": "text"
+   },
+   {
+    "index": 8,
+    "type": "android.widget.TextView",
+    "label": "Camera",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 583,
+     "y": 936,
+     "width": 98,
+     "height": 111
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e9",
+    "kind": "text"
+   },
+   {
+    "index": 9,
+    "type": "android.widget.FrameLayout",
+    "label": "Google search",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/search_container_hotseat",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 43,
+     "y": 1070,
+     "width": 634,
+     "height": 126
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 0,
+    "ref": "e10",
+    "kind": "group"
+   },
+   {
+    "index": 10,
+    "type": "android.widget.ImageView",
+    "label": "Google app",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/g_icon",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 51,
+     "y": 1085,
+     "width": 96,
+     "height": 96
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 1,
+    "parentIndex": 9,
+    "ref": "e11",
+    "kind": "image"
+   },
+   {
+    "index": 11,
+    "type": "android.widget.ImageView",
+    "label": "Voice search",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/mic_icon",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 477,
+     "y": 1070,
+     "width": 96,
+     "height": 126
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 1,
+    "parentIndex": 9,
+    "ref": "e12",
+    "kind": "image"
+   },
+   {
+    "index": 12,
+    "type": "android.widget.ImageButton",
+    "label": "Google Lens",
+    "enabled": true,
+    "selected": false,
+    "editable": false,
+    "password": false,
+    "hintShowing": false,
+    "identifier": "com.google.android.apps.nexuslauncher:id/lens_icon",
+    "bundleId": "com.google.android.apps.nexuslauncher",
+    "rect": {
+     "x": 573,
+     "y": 1070,
+     "width": 96,
+     "height": 126
+    },
+    "visibleToUser": true,
+    "hittable": true,
+    "depth": 1,
+    "parentIndex": 9,
+    "ref": "e13",
+    "kind": "button"
+   }
+  ],
+  "truncated": false,
+  "visibility": {
+   "partial": false,
+   "visibleNodeCount": 13,
+   "totalNodeCount": 13,
+   "reasons": []
+  },
+  "keyboard": {
+   "kind": "absent"
+  },
+  "viewport": {
+   "width": 720,
+   "height": 1280
+  },
+  "androidSnapshot": {
+   "backend": "android-helper",
+   "pixelDensity": 2,
+   "helperVersion": "0.21.31",
+   "helperApiVersion": "2",
+   "helperTransport": "persistent-session",
+   "helperSessionReused": false,
+   "installReason": "missing",
+   "waitForIdleTimeoutMs": 500,
+   "waitForIdleQuietMs": 100,
+   "timeoutMs": 2000,
+   "maxDepth": 128,
+   "maxNodes": 5000,
+   "rootPresent": true,
+   "cacheInvalidated": true,
+   "captureMode": "interactive-windows",
+   "windowCount": 2,
+   "missingRootWindowTypes": [],
+   "nodeCount": 60,
+   "helperTruncated": false,
+   "elapsedMs": 410
+  },
+  "snapshotQuality": {
+   "state": "healthy",
+   "backend": "android-helper"
+  },
+  "refsGeneration": 604571
+ }
+}

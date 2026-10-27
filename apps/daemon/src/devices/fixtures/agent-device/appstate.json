@@ -1,0 +1,8 @@
+{
+ "success": true,
+ "data": {
+  "platform": "android",
+  "package": "com.google.android.apps.nexuslauncher",
+  "activity": "com.google.android.apps.nexuslauncher.NexusLauncherActivity"
+ }
+}

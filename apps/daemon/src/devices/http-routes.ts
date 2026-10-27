@@ -222,7 +222,7 @@ export function registerDeviceHttpRoutes(app: FastifyInstance, deps: DeviceHttpR
         if (!service.hostHasLease(hostId)) throw new DeviceError(DEVICE_ERROR_CODES.DEVICE_NOT_LEASED, "No device on this host is leased.");
         const origin = service.hubOrigin(hostId);
         if (!origin) throw new DeviceError("UNAVAILABLE", "The device hub is not running.");
-        await deps.hubProxy().handleHttp(request, reply, { hostId, origin, hubPath: `/${request.params["*"] ?? ""}`, search: hubSearch(request.url) });
+        await deps.hubProxy().handleHttp(request, reply, { hostId, origin, hubPath: `/${request.params["*"] ?? ""}`, search: hubSearch(request.url), token: service.hubToken(hostId) });
         return reply;
       })
     );

@@ -18,6 +18,7 @@ import { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
 
 import type {
+  DeviceActionInput,
   DeviceCapacity,
   DeviceHostBoxInfo,
   DeviceHostKind,
@@ -26,6 +27,7 @@ import type {
   DeviceHostStatus,
   DeviceHostSummary,
   DevicePlatform,
+  DevicePoint,
   DeviceProfile,
   DeviceScreen,
   DeviceStreamInfo,
@@ -70,6 +72,50 @@ export interface DeviceCommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * How to run the agent-device CLI against a host (`DeviceHost.agentDeviceCommand`): `command` and
+ * the `args` before agent-device's own (`node`, `<pinned entry>`), and the environment the host
+ * needs on top of the daemon's (`ANDROID_ADB_SERVER_PORT`, `PATH`, …). Never a secret: those stay
+ * in the `--config` file.
+ */
+export interface AgentDeviceCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+/** A validated `device_action` input, as a host that drives devices itself receives it. */
+export type DeviceActionRequest = DeviceActionInput;
+
+/** A screen rectangle in device points. */
+export interface DeviceRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * What one action did (`actions.ts` builds it from agent-device; `DeviceHost.performAction` may
+ * answer it directly). Points are device points (dp on Android), in the current orientation.
+ */
+export interface DeviceActionOutcome {
+  /** Compact text for the agent: the snapshot tree, the settle diff, log lines. */
+  text?: string;
+  /** The action log's line; absent: a default one per action kind. */
+  summary?: string;
+  image?: { mimeType: "image/png" | "image/jpeg"; data: Buffer; width: number; height: number };
+  /** Where a tap or press landed, and a swipe's ends (the panel's overlay). */
+  point?: DevicePoint;
+  from?: DevicePoint;
+  to?: DevicePoint;
+  /** The target's label ("@e7 Search"). */
+  target?: string;
+  /** A snapshot's refs (`e7` → frame), kept per lease to resolve later ref taps to points. */
+  refs?: Record<string, DeviceRect>;
+  details?: Record<string, unknown>;
 }
 
 /** The status line a host reports for its summary. */
@@ -122,6 +168,23 @@ export interface DeviceHost {
   viewerActive?(deviceId: string): void;
   /** The agent-device config file pinned to this host's daemon (token inside, never returned); null while not running. */
   agentDeviceConfigPath(): string | null;
+  /** How to run agent-device for this host; absent: the toolchain's pinned CLI with the daemon's environment. */
+  agentDeviceCommand?(): AgentDeviceCommand;
+  /**
+   * How many proxied streams of a device are open changed (`deviceId` is the device's id); 0: the
+   * last viewer left, so the host may recycle the device's capture session.
+   */
+  viewersChanged?(deviceId: string, count: number): void;
+  /**
+   * Drive a device without agent-device (a host with its own automation): answer the action's
+   * outcome, or null to let `actions.ts` run it through agent-device.
+   */
+  performAction?(lease: StoredDeviceLease, action: DeviceActionRequest, signal: AbortSignal): Promise<DeviceActionOutcome | null>;
+  /**
+   * Install a build `uploadFile` put at `uploadedPath` on the host (instead of agent-device's
+   * `install`); resolves the bundle id / package when known.
+   */
+  installApp?(lease: StoredDeviceLease, uploadedPath: string, signal: AbortSignal): Promise<{ appId: string | null; summary: string }>;
 
   listDevices(signal?: AbortSignal): Promise<DeviceSummary[]>;
   /** Boot (or attach to) a device; resolves once the OS finished booting. */

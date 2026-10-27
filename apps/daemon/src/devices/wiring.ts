@@ -96,7 +96,13 @@ export function createDaemonDevices(deps: DaemonDevicesDeps): DaemonDevices {
   /** Plugin switches apply one at a time, in order. */
   let queue: Promise<void> = Promise.resolve();
 
-  const hubProxy: HubProxy = createHubProxy({ userInput: (hostId, deviceParam) => service?.userInput(hostId, deviceParam), logger });
+  const hubProxy: HubProxy = createHubProxy({
+    leaseOnDevice: (hostId, deviceParam) => service?.leaseOnDevice(hostId, deviceParam) ?? null,
+    userInput: (hostId, deviceParam) => service?.userInput(hostId, deviceParam),
+    viewerActive: (leaseId) => service?.viewerActive(leaseId),
+    viewersChanged: (hostId, deviceParam, count) => service?.streamViewers(hostId, deviceParam, count),
+    logger
+  });
   const publish = (type: DevicesEventType, payload: unknown) => deps.broadcaster.publish(DEVICES_CHANNEL, type, payload);
 
   const build = (): DeviceService => {

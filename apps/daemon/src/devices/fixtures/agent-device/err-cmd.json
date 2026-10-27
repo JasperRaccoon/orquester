@@ -1,0 +1,10 @@
+{
+ "success": false,
+ "error": {
+  "code": "INVALID_ARGS",
+  "message": "Unknown command: bogus. Did you mean one of: focus, logs?",
+  "hint": "Check command arguments and run --help for usage examples.",
+  "diagnosticId": "mvq6s5lh-b2477142",
+  "logPath": "/home/user/.agent-device/logs/orq-fixture/2026-10-27/2026-10-27T04-29-34-482Z-mvq6s5lh-b2477142.ndjson"
+ }
+}

@@ -14,7 +14,7 @@ const quiet = { info: () => undefined, warn: () => undefined, error: () => undef
 
 function appWith(service: DeviceService | null, mode: "local" | "remote" = "remote") {
   const app = Fastify();
-  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => createHubProxy({ userInput: () => undefined, logger: quiet }), logger: quiet }, mode);
+  registerDeviceHttpRoutes(app, { devices: () => service, hubProxy: () => createHubProxy({ leaseOnDevice: () => null, userInput: () => undefined, viewerActive: () => undefined, logger: quiet }), logger: quiet }, mode);
   return app;
 }
 
@@ -113,9 +113,10 @@ test("the hub proxy is remote-only, needs a known host with a lease, and strips 
     assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("box:x", "api/devices") })).json().code, "HOST_NOT_FOUND");
     assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("local", "api/devices") })).json().code, "DEVICE_NOT_LEASED");
     await t.service.toolOpen("t1", { platform: "android" }, new AbortController().signal);
-    // The stand-in proxy answers 503 until the real one lands.
+    // Past the route's checks the proxy answers: a fold names its device; a path off the allowlist is 404.
     const proxied = await remote.inject({ method: "POST", url: deviceRoutes.hub("local", "vendor/serve-emu/api/fold"), headers: { "content-type": "application/octet-stream" }, payload: Buffer.from([1, 2]) });
-    assert.equal(proxied.statusCode, 503);
+    assert.equal(proxied.statusCode, 400);
+    assert.equal((await remote.inject({ method: "GET", url: deviceRoutes.hub("local", "vendor/serve-sim/exec") })).statusCode, 404);
     assert.equal(hubSearch("/x?token=secret&device=abc"), "?device=abc");
     assert.equal(hubSearch("/x?token=secret"), "");
     assert.equal(hubSearch("/x"), "");

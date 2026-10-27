@@ -66,19 +66,29 @@ attribute and a `tabIndex` for keyboard input.
 
 ## Models
 
-`../models/` holds Apple's AR device models converted with `scripts/convert-device-model.py`;
-`sources.json` records each source URL, SHA-256, nodes and tools. `model.ts` maps simulator device
-names (whole name, case-insensitive) to model ids; any other name gets a procedural body from
-`shapeProfile.ts`. `../models/registry.ts` turns ids into Vite asset URLs and is imported only
-lazily, with three.js, so Node tests never load a `?url` import. A model that fails to load
-leaves the procedural body in place.
+`../models/` holds Apple's AR device models and Samsung's product-viewer GLBs converted with
+`scripts/convert-device-model.py`; `sources.json` records each author, source URL, SHA-256, nodes
+and tools. `model.ts` maps simulator device names, and Android emulator names and `orq-` AVD
+profile names (Galaxy S26/S26+/S26 Ultra/Z Fold8/Z Flip8), whole and case-insensitively, to model
+ids; any other name (Pixels included) gets a procedural body from `shapeProfile.ts`.
+`../models/registry.ts` turns ids into Vite asset URLs and is imported only lazily, with three.js,
+so Node tests never load a `?url` import. A model that fails to load leaves the procedural body in
+place.
 
-Single-body models are meshopt-compressed (`MeshoptDecoder` is registered in `modelScene.ts`);
-the Duo keeps its float rig because its hinge and display UVs are derived from per-mesh local
-coordinates. Textures are decoded through `<img>` because the web CSP does not allow `fetch` of
-`blob:` URLs.
+Foldable models (Z Fold8, Z Flip8) are hinge rigs shown by `foldModelScene.ts` with the `foldAngle`
+prop (open when it is null): `left-half`/`right-half` (vertical hinge) or `bottom-half`/`top-half`
+(horizontal hinge) groups with their origins on the hinge axis, a `cover-display` on the half that
+folds, `inner-display-<side>` on each half and an optional `hinge` spine group. Like the procedural
+fold, one framebuffer shows on the inner pair past 90 degrees and on the cover below it. The iPhone
+Duo keeps its own two-panel rig (`duoScene.ts`).
 
-To add a model: add a `sources.json` entry (id, file, sourceUrl, sourceSha256, bodyNode,
-screenNode), run the script with Blender 4.5, optimize with `@gltf-transform/cli` (see the script
-header), add the id and name pattern to `model.ts`, the URL to `../models/registry.ts`, and a
-case to `modelMatch.test.ts`.
+Single-body models and fold rigs are meshopt-compressed (`MeshoptDecoder` is registered in
+`modelScene.ts`); the Duo keeps its float rig because its hinge and display UVs are derived from
+per-mesh local coordinates. Textures are decoded through `<img>` because the web CSP does not allow
+`fetch` of `blob:` URLs.
+
+To add a model: add a `sources.json` entry (id, file, sourceUrl, sourceSha256, and bodyNode +
+screenNode for a USDZ, screenNode alone for a one-device glTF, or a `fold` block with hinge,
+innerNode, coverNode and spineNodes for a foldable; `author` when not Apple), run the script with
+Blender 4.5, optimize with `@gltf-transform/cli` (see the script header), add the id and name
+pattern to `model.ts`, the URL to `../models/registry.ts`, and a case to `modelMatch.test.ts`.

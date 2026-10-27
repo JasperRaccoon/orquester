@@ -1,0 +1,11 @@
+{
+  "file": "serve-emu-semu-v1.bin",
+  "format": "WebSocket messages in arrival order: u8 kind (0 binary, 1 text) | u32 BE length | payload",
+  "capturedAt": "2026-10-27",
+  "source": "ws://127.0.0.1:<random>/vendor/serve-emu/ws?device=emulator-5600&frame-meta=1 (no token; hub run without --require-token)",
+  "hub": "expo-device-hub 0.19.0-canary-20261023-1357114 (Node middleware; writes SEMU v1, 16-byte headers)",
+  "emulator": "emulator 37.2.12, AVD spike35s (system-images;android-35;google_apis;x86_64 rev 9), booted from snapshot with -read-only -gpu swangle_indirect, 720x1280 @320",
+  "content": "9 binary frames over ~3 s: one keyframe (SPS avc1.42c020 Baseline, PPS, SEI, IDR slices) then 8 deltas while a swipe gesture was sent; no text messages",
+  "redaction": "none needed: video of the stock home screen only; no tokens, serials beyond emulator-5600, or account data",
+  "sha256": "0a9ab6149880adf60c46510438e4b47f979a9966e2164524d405e8ed26c2690e"
+}
