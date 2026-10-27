@@ -16,12 +16,13 @@ import {
   type KnowledgeVisibility
 } from "@orquester/api";
 import { isKnowledgeEntryId } from "@orquester/config";
-import type { KnowledgeEntryChange, KnowledgeStorePort } from "../ports.ts";
+import type { KnowledgeEntryChange, KnowledgeStorePort, KnowledgeVectorIndex } from "../ports.ts";
 import { KnowledgeError, type KnowledgeLogger } from "../store/errors.ts";
 import { knowledgeContentHash } from "../store/normalize.ts";
 import { Bm25Index } from "./bm25.ts";
 import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
 import type { KnowledgeGraph } from "./graph.ts";
+import { KnowledgeSimilarity } from "./similarity.ts";
 import { CHUNKER_VERSION, type TextSpan, bestSnippet, chunkBody, leadSnippet, tokenize } from "./text.ts";
 import { VectorCache } from "./vector-cache.ts";
 import { type KnowledgeScope, UNFILED, entryInScope, knowledgeScope, scopeCollectionIds, visibleCollections } from "./visibility.ts";
@@ -114,6 +115,8 @@ export class KnowledgeSearch {
   /** `indexEntries` calls in flight, by their entries and content hashes. */
   private readonly indexing = new Map<string, Promise<void>>();
   private embedWorker: Promise<void> | null = null;
+  /** Similar entries, possible duplicates, near-duplicates on save and the similarity graph. */
+  readonly similarity: KnowledgeSimilarity;
 
   constructor(options: KnowledgeSearchOptions) {
     this.store = options.store;
@@ -122,6 +125,17 @@ export class KnowledgeSearch {
     this.indexDir = options.indexDir;
     this.logger = options.logger ?? console;
     this.minSimilarity = options.minSimilarity ?? 0.25;
+    this.similarity = new KnowledgeSimilarity({
+      store: this.store,
+      graph: this.graph,
+      index: () => this.similarityIndex(),
+      summary: (meta, scope) => this.summary(meta, scope)
+    });
+  }
+
+  /** The vector index similarity reads (null: none yet). */
+  private similarityIndex(): KnowledgeVectorIndex | null {
+    return null; /* integrator: return this.vectorIndex(); */
   }
 
   /** Subscribe to the store and index every entry's text (in the background; queries wait for it). */
@@ -339,9 +353,10 @@ export class KnowledgeSearch {
   }
 
   /**
-   * A visible entry with its concepts and related entries; null when hidden or unknown.
-   * `evenIfHidden`: the entry itself is answered even when out of scope (a caller's own edit that
-   * moved it out of view); its collections and related entries are still only the visible ones.
+   * A visible entry with its concepts, related and similar entries and possible duplicates; null
+   * when hidden or unknown. `evenIfHidden`: the entry itself is answered even when out of scope (a
+   * caller's own edit that moved it out of view); its collections, related and similar entries are
+   * still only the visible ones.
    */
   async entryDetail(id: string, visibility: KnowledgeVisibility, options: { evenIfHidden?: boolean } = {}): Promise<KnowledgeEntryDetail | null> {
     await this.whenReady();
@@ -355,10 +370,13 @@ export class KnowledgeSearch {
       .map((r) => this.store.getMeta(r.id))
       .filter((m): m is KnowledgeEntryMeta => m !== null)
       .map((m) => this.summary(m, scope));
+    const { similar, possibleDuplicates } = this.similarity.forEntry(id, scope);
     return {
       entry: { ...entry, savedFrom: { ...entry.savedFrom }, collections: visibleCollections(entry, scope) },
       concepts: this.graph.conceptsOfEntry(id),
       related,
+      similar,
+      possibleDuplicates,
       citation: knowledgeCitation(meta)
     };
   }

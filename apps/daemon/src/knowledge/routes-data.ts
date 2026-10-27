@@ -5,6 +5,8 @@ import {
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_COLORS,
   KNOWLEDGE_GRAPH_MAX_NODES,
+  KNOWLEDGE_SIMILARITY_GRAPH_MAX_K,
+  KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES,
   knowledgeRoutes,
   type KnowledgeChangedEvent,
   type KnowledgeCollection,
@@ -13,14 +15,18 @@ import {
   type KnowledgeEntriesResponse,
   type KnowledgeEntryDetail,
   type KnowledgeErrorCode,
+  type KnowledgeFacetsResponse,
   type KnowledgeGraphResponse,
   type KnowledgeItemResponse,
   type KnowledgeSaveResponse,
   type KnowledgeSearchResponse,
+  type KnowledgeSimilarityGraphResponse,
   type KnowledgeVisibility
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { KnowledgeLinkingPort, KnowledgeSettingsPort, KnowledgeVisibilityPort } from "./ports.ts";
+import { computeKnowledgeFacets } from "./search/facets.ts";
+import { entryMatchesFilter, parseKnowledgeFilters } from "./search/filters.ts";
 import type { KnowledgeSearch } from "./search/search.ts";
 import { entryInScope } from "./search/visibility.ts";
 import { KnowledgeError, type KnowledgeLogger, knowledgeFrameworkError } from "./store/errors.ts";
@@ -135,6 +141,31 @@ const graphQuerySchema = z.object({
   focus: z.string().min(1).max(300).optional(),
   depth: intFromQuery(1, 3),
   limit: intFromQuery(1, KNOWLEDGE_GRAPH_MAX_NODES),
+  sessionId
+});
+const facetsSchema = z.object({
+  collections: z
+    .array(z.string())
+    .nullish()
+    .transform((value) => value ?? undefined),
+  filters: z
+    .object({
+      kinds: z.array(z.string()).optional(),
+      authors: z.array(z.string()).optional(),
+      years: z.array(z.string()).optional(),
+      postedAfter: z.string().optional(),
+      postedBefore: z.string().optional(),
+      savedAfter: z.string().optional(),
+      savedBefore: z.string().optional()
+    })
+    .nullish()
+    .transform((value) => value ?? undefined),
+  sessionId
+});
+const similarityGraphQuerySchema = z.object({
+  collections: z.string().optional(),
+  k: intFromQuery(1, KNOWLEDGE_SIMILARITY_GRAPH_MAX_K),
+  limit: intFromQuery(1, KNOWLEDGE_SIMILARITY_GRAPH_MAX_NODES),
   sessionId
 });
 const sessionQuerySchema = z.object({ sessionId });
@@ -413,7 +444,21 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
     })
   );
 
-  // --- search and save -----------------------------------------------------
+  app.get(
+    knowledgeRoutes.similarityGraph,
+    handle(async (request): Promise<KnowledgeSimilarityGraphResponse> => {
+      const query = parse(similarityGraphQuerySchema, request.query, "query");
+      const visibility = await visibilityOf(request, query.sessionId);
+      const refs = (query.collections ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const narrow = refs.length > 0 ? deps.search.resolveVisible(refs, visibility, true) : null;
+      return deps.search.similarity.graph({ k: query.k, limit: query.limit }, deps.search.scope(visibility, narrow));
+    })
+  );
+
+  // --- search, facets and save ---------------------------------------------
 
   app.post(
     knowledgeRoutes.search,
@@ -421,6 +466,19 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
       const body = parse(searchSchema, request.body, "search");
       const visibility = await visibilityOf(request, body.sessionId);
       return deps.search.search({ query: body.query, collections: body.collections, limit: body.limit }, visibility);
+    })
+  );
+
+  app.post(
+    knowledgeRoutes.facets,
+    handle(async (request): Promise<KnowledgeFacetsResponse> => {
+      const body = parse(facetsSchema, request.body, "facets request");
+      const visibility = await visibilityOf(request, body.sessionId);
+      const narrow = body.collections && body.collections.length > 0 ? deps.search.resolveVisible(body.collections, visibility, true) : null;
+      const filter = parseKnowledgeFilters(body.filters);
+      const scope = deps.search.scope(visibility, narrow);
+      const kept = deps.store.listMeta().filter((meta) => entryInScope(meta, scope) && entryMatchesFilter(meta, filter));
+      return { facets: computeKnowledgeFacets(kept, scope, deps.store.listCollections()), total: kept.length };
     })
   );
 
@@ -439,9 +497,13 @@ function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps)
       if (touched.length > 0 || outcome.createdCollections.length > 0) {
         changed({ ...(touched.length > 0 ? { entryIds: touched } : {}), collections: true });
       }
+      // Possible duplicates already in the knowledge base, among what the caller can see (no extra
+      // wait: entries not embedded within the indexing wait above get none).
+      const saved = outcome.results.filter((r) => r.status === "saved").map((r) => r.entryId);
+      const similar = saved.length > 0 ? deps.search.similarity.similarForSaved(saved, deps.search.scope(await visibilityOf(request, body.sessionId))) : null;
       const linking = deps.linking.status();
       return {
-        results: outcome.results,
+        results: similar ? outcome.results.map((r) => (r.status === "saved" ? { ...r, similar: similar.get(r.entryId) ?? [] } : r)) : outcome.results,
         createdCollections: outcome.createdCollections,
         linking: linking.state === "running" ? "running" : linking.state === "queued" || linking.state === "paused" ? "queued" : "not-needed"
       };
