@@ -362,6 +362,80 @@ test("items, graph and search never show a profile chat what it cannot see", asy
   refused(await h.inject({ method: "POST", url: knowledgeRoutes.search, payload: { query: "" } }), 400, "KNOWLEDGE_INVALID");
 });
 
+test("search takes filters, examples, sort, paging and facets; bad values are refused", async (t) => {
+  const h = await harness(t);
+  const { seo, alt, billing } = await seed(h);
+  h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
+  await h.store.updateEntry(alt, { kind: "thread", postedAt: "2025-06-01" });
+  await h.search.idle();
+  const search = (payload: Record<string, unknown>) => h.inject({ method: "POST", url: knowledgeRoutes.search, payload });
+
+  const filtered = ok<KnowledgeSearchResponse>(await search({ query: "competitor billing", filters: { kinds: ["Thread"], years: ["2025"] }, facets: true }));
+  assert.deepEqual(filtered.hits.filter((h) => h.kind === "entry").map((h) => h.kind === "entry" && h.entry.id), [alt]);
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.nextCursor, null);
+  assert.deepEqual(filtered.facets!.kinds, [{ value: "thread", label: "thread", count: 1 }]);
+  const hit = filtered.hits.find((h) => h.kind === "entry");
+  assert.ok(hit && hit.kind === "entry" && hit.match && hit.match.via.includes("keyword"));
+
+  // Nulls from agents read as absent.
+  ok<KnowledgeSearchResponse>(await search({ query: "billing", filters: null, similarTo: null, sort: null, cursor: null, diverse: null, facets: null, limit: null }));
+
+  const like = ok<KnowledgeSearchResponse>(await search({ similarTo: [alt], sort: "newest", diverse: false }));
+  assert.ok(like.hits.every((h) => h.kind === "entry" && h.entry.id !== alt));
+
+  const paged = ok<KnowledgeSearchResponse>(await search({ query: "competitor billing stripe", limit: 1 }));
+  assert.equal(paged.total, 2);
+  assert.ok(paged.nextCursor);
+  const rest = ok<KnowledgeSearchResponse>(await search({ query: "competitor billing stripe", limit: 1, cursor: paged.nextCursor }));
+  assert.equal(rest.nextCursor, null);
+  assert.deepEqual(
+    [...paged.hits, ...rest.hits].map((h) => h.kind === "entry" && h.entry.id).sort(),
+    [alt, billing].sort()
+  );
+  refused(await search({ query: "competitor billing stripe", limit: 1, cursor: paged.nextCursor, sessionId: "seo-chat" }), 400, "KNOWLEDGE_INVALID");
+
+  const notFound = refused(await search({ similarTo: [billing], sessionId: "seo-chat" }), 404, "KNOWLEDGE_NOT_FOUND");
+  assert.ok(notFound.includes(billing));
+  for (const payload of [
+    {},
+    { query: "   " },
+    { query: "x", limit: 26 },
+    { query: "x", limit: 0 },
+    { query: "x", sort: "oldest" },
+    { query: "x", diverse: "yes" },
+    { query: "x", facets: 1 },
+    { query: "x", cursor: "not-a-cursor" },
+    { query: "x", filters: { kinds: Array.from({ length: 21 }, (_, i) => `k${i}`) } },
+    { query: "x", filters: { postedAfter: "last week" } },
+    { query: "x", filters: { years: ["twenty"] } },
+    { query: "x", similarTo: Array.from({ length: 11 }, () => alt) },
+    { query: "x", unlike: "ke_abcabcabcabc" },
+    { query: "x".repeat(1_001) }
+  ]) {
+    refused(await search(payload), 400, "KNOWLEDGE_INVALID");
+  }
+});
+
+test("entries list takes the search filters as query params", async (t) => {
+  const h = await harness(t);
+  const { seo, alt, billing } = await seed(h);
+  h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
+  await h.store.updateEntry(alt, { kind: "thread", author: "Hridoy", postedAt: "2025-06-01" });
+  await h.store.updateEntry(billing, { kind: "article" });
+  const list = async (query: string) =>
+    ok<KnowledgeEntriesResponse>(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?${query}` })).entries.map((e) => e.id);
+  assert.deepEqual(await list("kinds=thread"), [alt]);
+  assert.deepEqual((await list("kinds=thread,Article")).sort(), [alt, billing].sort());
+  assert.deepEqual(await list(`authors=${encodeURIComponent("@hridoy")}`), [alt]);
+  assert.deepEqual(await list("years=2025"), [alt]);
+  assert.deepEqual(await list("postedBefore=2025-06-01"), [alt]);
+  assert.deepEqual(await list("postedAfter=2025-06-02"), []);
+  assert.deepEqual(await list("kinds=article&sessionId=seo-chat"), []);
+  refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?postedAfter=tomorrow` }), 400, "KNOWLEDGE_INVALID");
+  refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entries}?years=20x5` }), 400, "KNOWLEDGE_INVALID");
+});
+
 test("an edit that moves an entry out of a profile caller's view answers the edit, still scoped", async (t) => {
   const h = await harness(t);
   const { seo, saas, alt, billing } = await seed(h);

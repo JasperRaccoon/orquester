@@ -309,7 +309,7 @@ export class KnowledgeSearch {
     const maxConcepts = Math.max(1, Math.floor(limit / 3));
     const offset = cursor?.o ?? 0;
     const conceptItems: { id: string; fused: number; entryIds: string[] }[] = [];
-    if (offset === 0) {
+    if (!cursor) {
       for (const [id, fused] of fuse([[conceptHits, WEIGHT.concept]])) {
         if (conceptItems.length >= maxConcepts) break;
         const entryIds = this.graph
