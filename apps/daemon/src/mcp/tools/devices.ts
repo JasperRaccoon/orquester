@@ -202,7 +202,7 @@ const openDevice = defineTool({
   chatNote: "The device appears in the user's Device panel at once.",
   input: {
     platform: z.enum(["ios", "android"]),
-    profile: z.enum(PROFILE_IDS).optional().describe("A profile id from list_devices (the ones the owner enabled in Settings → Devices); default: iPhone 17 Pro / Pixel 9 when enabled, else the platform's first enabled profile."),
+    profile: z.enum(PROFILE_IDS).optional().describe("An enabled profile id from list_devices; default: iPhone 17 Pro / Pixel 9 when enabled, else the platform's first enabled profile."),
     app: APP_ID.optional().describe("Launch this installed app once booted."),
     fresh: z.boolean().optional().describe("A clean device, never a reused one.")
   },
