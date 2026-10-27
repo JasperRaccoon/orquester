@@ -150,6 +150,20 @@ test("pair-checks.json: unreadable records and unknown keys are kept for the rew
   assert.deepEqual(readKnowledgePairChecksFile("garbage"), emptyKnowledgePairChecksFile());
   const newer = readKnowledgePairChecksFile({ version: 2, checks: [record] });
   assert.equal(newer.readOnly, true);
+  assert.deepEqual(newer.attempts, [], "an older file has no attempts");
   assert.equal(newer.version, 2);
   assert.equal(newer.checks.length, 1);
+});
+
+test("pair-checks.json: round task attempts read tolerantly, unknown fields and unreadable records kept for the rewrite", () => {
+  const attempt = { key: "pair ke_a ke_b h1 h2", step: "pair-check", label: "pair-check ke_a ke_b", failures: 2, lastAt: "t", gaveUpAt: null, model: "x" };
+  const given = { key: "abc", step: "cluster-name", failures: 3, lastAt: "t", gaveUpAt: "t2" };
+  const file = readKnowledgePairChecksFile({ version: 1, checks: [], attempts: [attempt, given, { key: "", failures: -1 }] });
+  assert.deepEqual(file.attempts, [attempt, { ...given, label: "" }]);
+  assert.deepEqual(file.rejectedAttempts, [{ key: "", failures: -1 }]);
+  assert.deepEqual(JSON.parse(serializeKnowledgePairChecksFile(file)).attempts, [attempt, { ...given, label: "" }, { key: "", failures: -1 }]);
+  assert.equal("attempts" in JSON.parse(serializeKnowledgePairChecksFile(emptyKnowledgePairChecksFile())), false, "no attempts: no key");
+  const odd = readKnowledgePairChecksFile({ version: 1, checks: [], attempts: "not a list" });
+  assert.deepEqual(odd.attempts, []);
+  assert.equal(JSON.parse(serializeKnowledgePairChecksFile(odd)).attempts, "not a list", "kept as it was");
 });

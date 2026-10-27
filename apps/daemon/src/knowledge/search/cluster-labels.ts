@@ -10,8 +10,10 @@
  *
  * - The port similarity reads ({@link KnowledgeClusterLabelsPort}): `labelFor(members)` answers the
  *   label of a named cluster whose members are at least {@link CLUSTER_LABEL_REUSE} the same (both
- *   ways), so a label stays as entries are added; `request(clusters)` queues the clusters it drew
- *   without one. A label is never shown to a caller who cannot see every entry it was named from.
+ *   ways), so a label stays as entries are added, with the entries it was named from;
+ *   `request(clusters)` queues the clusters the unscoped default draw has without one (new work
+ *   only for a cluster never queued before). A label is never shown to a caller who cannot see
+ *   every entry it was named from (similarity checks again whenever it serves a drawn graph).
  * - Answers: exactly `{label}`, ≤ {@link CLUSTER_LABEL_MAX_CHARS} characters, 2–5 words, no quotes,
  *   not an author's name or handle, nor a product, tool or other brand name alone (the cluster's
  *   entity concepts; {@link validateClusterLabelAnswer}).
@@ -28,7 +30,7 @@ import {
   type KnowledgeClusterLabelRecord,
   type KnowledgeClusterLabelsFile
 } from "@orquester/config";
-import type { KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
+import type { KnowledgeRoundTask, KnowledgeRoundTaskOptions, KnowledgeRoundTaskSource } from "../ports.ts";
 import type { KnowledgeLogger } from "../store/errors.ts";
 import { writeFileAtomic } from "../store/fs.ts";
 
@@ -42,6 +44,8 @@ export const CLUSTER_LABEL_REUSE = 0.8;
 export const CLUSTER_LABEL_MAX_CHARS = 40;
 /** Clusters waiting for a name at most (the oldest go first). */
 const PENDING_MAX = 64;
+/** Cluster keys ever queued, remembered (the least recent go first) so one evicted and drawn again is no new work. */
+const QUEUED_KEYS_MAX = 1_024;
 const TITLES_MAX = 12;
 const CONCEPTS_MAX = 12;
 
@@ -49,10 +53,10 @@ const CONCEPTS_MAX = 12;
 export interface KnowledgeClusterLabelsPort {
   /**
    * The LLM label of the cluster with these members (or one at least {@link CLUSTER_LABEL_REUSE}
-   * the same), or null. `hidden(id)`: the entry exists but the caller cannot see it — a label named
-   * from such an entry is not shown.
+   * the same) and the entries it was named from, or null. `hidden(id)`: the entry exists but the
+   * caller cannot see it — a label named from such an entry is not shown.
    */
-  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): string | null;
+  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): { label: string; sources: readonly string[] } | null;
   /** Clusters drawn (member ids, most central first) that may need a name: queued when they have none. */
   request(clusters: readonly (readonly string[])[]): void;
   /** Moves whenever a label is added (part of the similarity graph's cache key). */
@@ -75,15 +79,18 @@ export const CLUSTER_NAME_SYSTEM = [
   `- The label is a topic name of 2 to 5 words and at most ${CLUSTER_LABEL_MAX_CHARS} characters, in Title case or sentence case, e.g. "App Store review rules", "Paywall pricing", "User retention".`,
   "- Name what the entries are about (the shared subject), not who wrote them or where they come from.",
   "- Never only an author's name, a product, tool, app or brand name, or a source's name (a product name may appear inside a topic, e.g. \"ChatGPT search visibility\").",
-  "- No quotes, no punctuation at the ends, no emoji."
+  "- No quotes (an apostrophe is fine), no punctuation at the ends, no emoji."
 ].join("\n");
 
+/** A name as compared: no case, accents, "@", possessive ("Candy Crush's" is "Candy Crush") or apostrophes. */
 const fold = (text: string): string =>
   text
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/^@+/, "")
+    .replace(/['‘’]s\b/g, "")
+    .replace(/['‘’]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
@@ -97,7 +104,10 @@ export function validateClusterLabelAnswer(value: unknown, forbidden: readonly s
   const label = record.label.trim();
   if (label.length === 0) return '"label" must not be empty.';
   if (label.length > CLUSTER_LABEL_MAX_CHARS) return `"label" must be at most ${CLUSTER_LABEL_MAX_CHARS} characters.`;
-  if (/["'`“”‘’«»]/.test(label) || /[\r\n\t]/.test(label)) return '"label" must have no quotes and be one line.';
+  // Quotes, but not an apostrophe inside or closing a word ("Founders' pricing", "App Store's rules").
+  if (/["`“”«»]/.test(label) || /^['‘’]|(^|\s)['‘’]|['‘’](?=\s*$)(?<![sS]['‘’])/.test(label) || /[\r\n\t]/.test(label)) {
+    return '"label" must have no quotes and be one line.';
+  }
   const words = label.split(/\s+/).filter((w) => w.length > 0);
   if (words.length < 2 || words.length > 5) return '"label" must be a topic name of 2 to 5 words.';
   const key = fold(label);
@@ -178,6 +188,8 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
   private records: { record: KnowledgeClusterLabelRecord; members: Set<string> }[] = [];
   /** Clusters waiting for a name, by key, oldest first. */
   private readonly pending = new Map<string, { members: string[]; set: Set<string> }>();
+  /** Keys of every cluster queued lately (pending or not): a cluster seen again is not new work. */
+  private readonly queued = new Set<string>();
   private readonly workListeners = new Set<() => void>();
   private readonly changeListeners = new Set<() => void>();
   private rev = 0;
@@ -226,14 +238,19 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
     return () => this.workListeners.delete(listener);
   }
 
-  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): string | null {
+  labelFor(memberIds: readonly string[], hidden: (entryId: string) => boolean): { label: string; sources: readonly string[] } | null {
     if (memberIds.length < CLUSTER_LABEL_MIN_SIZE) return null;
     const found = this.find(new Set(memberIds));
     if (!found) return null;
     for (const id of found.record.members) if (hidden(id)) return null;
-    return found.record.label;
+    return { label: found.record.label, sources: found.record.members };
   }
 
+  /**
+   * Queues the clusters without a name; new work ({@link onWork}) only when one was never queued
+   * before: a changed cluster replacing its queued version, or one evicted (more than 64 waiting)
+   * and drawn again, is not.
+   */
   request(clusters: readonly (readonly string[])[]): void {
     let added = false;
     for (const members of clusters) {
@@ -242,15 +259,23 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
       const key = clusterKey(members);
       if (this.pending.has(key) || this.find(set)) continue;
       // A queued cluster that is mostly the same is replaced by the newer member set.
-      for (const [other, item] of this.pending) if (similarMembers(item.set, set)) this.pending.delete(other);
+      let replaced = false;
+      for (const [other, item] of this.pending) {
+        if (!similarMembers(item.set, set)) continue;
+        this.pending.delete(other);
+        replaced = true;
+      }
       this.pending.set(key, { members: [...members], set });
-      added = true;
+      if (!replaced && !this.queued.has(key)) added = true;
+      this.queued.delete(key);
+      this.queued.add(key);
     }
     while (this.pending.size > PENDING_MAX) this.pending.delete(this.pending.keys().next().value!);
+    while (this.queued.size > QUEUED_KEYS_MAX) this.queued.delete(this.queued.keys().next().value!);
     if (added) for (const listener of [...this.workListeners]) listener();
   }
 
-  async tasks(): Promise<KnowledgeRoundTask[]> {
+  async tasks(options: KnowledgeRoundTaskOptions = {}): Promise<KnowledgeRoundTask[]> {
     if (this.file.readOnly) return [];
     await this.options.refresh?.().catch((error: unknown) => this.logger.warn(`knowledge: drawing the clusters to name failed (${String(error)})`));
     const limit = this.options.limit ?? CLUSTER_NAME_MAX_PER_ROUND;
@@ -269,7 +294,10 @@ export class KnowledgeClusterLabels implements KnowledgeClusterLabelsPort, Knowl
       }
       const shown: ClusterDescription = { ...description, titles: description.titles.slice(0, TITLES_MAX), concepts: description.concepts.slice(0, CONCEPTS_MAX) };
       const payload: ClusterPayload = { key, members: [...item.members].sort(), forbidden: description.forbidden };
-      tasks.push({ label: `${CLUSTER_NAME_STEP} ${key}`, system: CLUSTER_NAME_SYSTEM, user: clusterNameInput(shown), payload });
+      const task: KnowledgeRoundTask = { label: `${CLUSTER_NAME_STEP} ${key}`, system: CLUSTER_NAME_SYSTEM, user: clusterNameInput(shown), payload };
+      // Rounds gave up on naming it as it is: it keeps its concept label (it stays queued, so a draw
+      // does not count it as new work; a changed member set is a new item).
+      if (!options.skip?.(task)) tasks.push(task);
     }
     return tasks;
   }

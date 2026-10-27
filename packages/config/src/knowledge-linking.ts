@@ -319,9 +319,12 @@ function jsonEqual(a: unknown, b: unknown): boolean {
 //
 // `knowledgePairChecksPath(appdir)`. One record per checked pair (`a` < `b`) with both entries'
 // content hashes when it was checked: a record whose hashes no longer match is stale (kept until the
-// pair is checked again). Tolerant like `state.json`: records are `passthrough`, a record that does
-// not read is kept verbatim in `rejected` and written back, unknown top-level keys too. A file of a
-// newer version is read for what this build knows and never written.
+// pair is checked again). `attempts`: the round tasks (pair checks and round task sources' items)
+// that rounds handed out and got no acceptable answer for, by item (the same input), so one no
+// worker can answer is given up after a few rounds instead of being asked first in every round.
+// Tolerant like `state.json`: records are `passthrough`, a record that does not read is kept
+// verbatim in `rejected` (or `rejectedAttempts`) and written back, unknown top-level keys too. A
+// file of a newer version is read for what this build knows and never written.
 
 export const KNOWLEDGE_PAIR_CHECKS_VERSION = 1;
 export const KNOWLEDGE_PAIR_CHECK_VERDICTS = ["contradicts", "consistent", "unrelated"] as const;
@@ -339,11 +342,31 @@ export const knowledgePairCheckRecordSchema = z
   .passthrough();
 export type KnowledgePairCheckRecord = z.infer<typeof knowledgePairCheckRecordSchema>;
 
+/** One round task item that rounds failed to get an answer for. */
+export const knowledgeRoundAttemptRecordSchema = z
+  .object({
+    /** The item: a pair check's pair at its hashes, or a source's task id (its exact input). */
+    key: z.string().min(1),
+    step: z.string(),
+    label: z.string().catch(""),
+    /** Rounds that handed it out and ended without an acceptable answer. */
+    failures: z.number().int().min(0),
+    lastAt: z.string(),
+    /** When it was given up on (no round asks it again); null while it is still asked. */
+    gaveUpAt: z.string().nullable().catch(null)
+  })
+  .passthrough();
+export type KnowledgeRoundAttemptRecord = z.infer<typeof knowledgeRoundAttemptRecordSchema>;
+
 export interface KnowledgePairChecksFile {
   version: number;
   checks: KnowledgePairCheckRecord[];
+  /** Round task items that rounds got no acceptable answer for (absent in older files). */
+  attempts: KnowledgeRoundAttemptRecord[];
   /** Records this build could not read, written back as they were. */
   rejected: unknown[];
+  /** Attempt records this build could not read, written back as they were. */
+  rejectedAttempts: unknown[];
   /** Unknown top-level keys, written back as they were. */
   extra: Record<string, unknown>;
   /** A newer build's file: read, never written. */
@@ -351,7 +374,7 @@ export interface KnowledgePairChecksFile {
 }
 
 export function emptyKnowledgePairChecksFile(): KnowledgePairChecksFile {
-  return { version: KNOWLEDGE_PAIR_CHECKS_VERSION, checks: [], rejected: [], extra: {}, readOnly: false };
+  return { version: KNOWLEDGE_PAIR_CHECKS_VERSION, checks: [], attempts: [], rejected: [], rejectedAttempts: [], extra: {}, readOnly: false };
 }
 
 /** Reads a `pair-checks.json` value; anything that is not an object reads as an empty file. */
@@ -365,11 +388,30 @@ export function readKnowledgePairChecksFile(value: unknown): KnowledgePairChecks
     if (parsed.success) checks.push(parsed.data);
     else rejected.push(item);
   }
-  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
-  const extra = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "version" && key !== "checks"));
-  return { version: Math.max(version, KNOWLEDGE_PAIR_CHECKS_VERSION), checks, rejected, extra, readOnly: version > KNOWLEDGE_PAIR_CHECKS_VERSION };
+  const attempts: KnowledgeRoundAttemptRecord[] = [];
+  const rejectedAttempts: unknown[] = [];
+  for (const item of Array.isArray(value.attempts) ? value.attempts : []) {
+    const parsed = knowledgeRoundAttemptRecordSchema.safeParse(item);
+    if (parsed.success) attempts.push(parsed.data);
+    else rejectedAttempts.push(item);
+  }
+  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key. A non-array
+  // `attempts` stays as it was too.
+  const extra = Object.fromEntries(
+    Object.entries(value).filter(([key, item]) => key !== "version" && key !== "checks" && !(key === "attempts" && Array.isArray(item)))
+  );
+  return {
+    version: Math.max(version, KNOWLEDGE_PAIR_CHECKS_VERSION),
+    checks,
+    attempts,
+    rejected,
+    rejectedAttempts,
+    extra,
+    readOnly: version > KNOWLEDGE_PAIR_CHECKS_VERSION
+  };
 }
 
 export function serializeKnowledgePairChecksFile(file: KnowledgePairChecksFile): string {
-  return `${JSON.stringify({ version: file.version, checks: [...file.checks, ...file.rejected], ...file.extra }, null, 2)}\n`;
+  const attempts = [...file.attempts, ...file.rejectedAttempts];
+  return `${JSON.stringify({ version: file.version, checks: [...file.checks, ...file.rejected], ...(attempts.length > 0 ? { attempts } : {}), ...file.extra }, null, 2)}\n`;
 }

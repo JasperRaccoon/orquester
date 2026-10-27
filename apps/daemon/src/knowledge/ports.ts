@@ -213,17 +213,28 @@ export interface KnowledgeRoundTask {
   payload: unknown;
 }
 
+export interface KnowledgeRoundTaskOptions {
+  /** Whether rounds gave up on this exact task (no acceptable answer in several rounds). */
+  skip?(task: KnowledgeRoundTask): boolean;
+}
+
 /**
  * LLM work beside the pair checks (concept merge checks, cluster names): linking writes a source's
  * tasks in its idle rounds (never while a linking run is active, paused with linking's pause
  * reasons, its tokens counted with linking's) and hands each validated answer back. A source asks
  * for each item at most once per input: it leaves out of {@link tasks} what it has an answer for.
+ * Linking counts the rounds that handed an item out and got no acceptable answer for it (by its
+ * exact input: the task's id); after a few it is given up on, and `skip` says so.
  */
 export interface KnowledgeRoundTaskSource {
   /** The inbox step of its tasks (unique among the sources). */
   readonly step: string;
-  /** New tasks for one round, at most the source's own cap; [] when there is nothing to ask. */
-  tasks(): Promise<KnowledgeRoundTask[]>;
+  /**
+   * New tasks for one round, at most the source's own cap; [] when there is nothing to ask. A task
+   * `skip` answers true for (rounds gave up on it) is left out and does not count against the cap:
+   * the source offers its next item instead.
+   */
+  tasks(options?: KnowledgeRoundTaskOptions): Promise<KnowledgeRoundTask[]>;
   /** `null` when `value` (the parsed answer) is acceptable for this task, else why not (the worker answers again). */
   validate(value: unknown, payload: unknown): string | null;
   /** A validated answer (JSON text) of a task with this payload. */

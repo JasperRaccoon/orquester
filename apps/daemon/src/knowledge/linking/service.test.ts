@@ -9,7 +9,7 @@ import { PassThrough } from "node:stream";
 import { after, describe, it } from "node:test";
 import type { KnowledgeConceptRef, KnowledgeEntry, KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
-import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
+import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgePairChecksPath, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
 import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type {
   KnowledgeEntryChange,
@@ -25,6 +25,7 @@ import { FAKE_THRESHOLDS, FakeVectorIndex, around, axis } from "../search/fake-v
 import { CONTEXT_HEADING, LINK_CONTEXT_VERSION, type KnowledgeLinkGraphView } from "./context.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { MykgProcessProbe, SpawnMykg } from "./runner.ts";
+import { MAX_REFUSALS } from "./inbox.ts";
 import { DEFAULT_NORMALIZE_TYPES, KnowledgeLinkingService, type KnowledgeLinkingOptions } from "./service.ts";
 import { FAKE_RUNTIME, FakeWorkerPort, fakeSpawn, writeMykgTask, type FakeAccountBehaviour } from "./testing.ts";
 
@@ -1340,6 +1341,13 @@ describe("KnowledgeLinkingService — phase 2: link gaps and pair checks", { tim
   });
 });
 
+/** The attempt key of the round-test source's task for `item`: its task id (myKG's, of its prompt and label). */
+const roundTaskKey = (item: string): string =>
+  createHash("sha256").update(`Answer {"ok": true}.\n--user--\nItem ${item}\n--ctx--\nround-test ${item}`).digest("hex");
+/** Failed rounds counted for the round-test source's `item`. */
+const attemptsOf = (h: Harness, item: string): number =>
+  (h.service.pairChecks as unknown as { attempts: Map<string, { failures: number }> }).attempts.get(roundTaskKey(item))?.failures ?? 0;
+
 /** A round task source that asks for the items it is given, once each, and records the answers. */
 function fakeRoundSource(items: string[]) {
   const listeners = new Set<() => void>();
@@ -1406,6 +1414,104 @@ describe("KnowledgeLinkingService — round task sources", { timeout: 120_000 },
     await h.service.pairChecksIdle();
     const asked = h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.step === "round-test").map((i) => i.input);
     assert.equal(asked.length, 3, "each item once");
+    await h.service.stop();
+  });
+
+  it("an item no chat answers acceptably cannot sink its round, and after three rounds it is never asked again", async () => {
+    const graph = fakeGraphView();
+    const listeners = new Set<() => void>();
+    const recorded: string[] = [];
+    const source: KnowledgeRoundTaskSource = {
+      step: "round-test",
+      async tasks(options) {
+        const tasks = ["bad", "good"]
+          .filter((item) => !recorded.includes(item))
+          .map((item) => ({ label: `round-test ${item}`, system: 'Answer {"ok": true}.', user: `Item ${item}`, payload: { item } }));
+        return tasks.filter((task) => !options?.skip?.(task));
+      },
+      // No answer to "bad" is ever acceptable.
+      validate: (value, payload) =>
+        (payload as { item: string }).item === "bad" ? "Not acceptable." : (value as { ok?: unknown } | null)?.ok === true ? null : 'Answer {"ok": true}.',
+      async record(payload) {
+        recorded.push((payload as { item: string }).item);
+      },
+      onWork(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    };
+    const work = (): void => listeners.forEach((listener) => listener());
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [source] } });
+    graph.ready([ID(1), ID(2)]);
+    await h.service.start();
+    for (const id of [ID(1), ID(2)]) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    work();
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await h.until(() => recorded.includes("good"));
+    await h.service.pairChecksIdle();
+    const askedBad = () => h.port.sessions.flatMap((s) => s.inputs).filter((i) => i.input === "Item bad").length;
+    // Two chats gave up on it (each refused MAX_REFUSALS times), then it was out of the round: a third
+    // chat answered the rest instead of failing the round's pool (3 chats in a row giving up).
+    assert.equal(askedBad(), 2 * MAX_REFUSALS);
+    assert.ok(!h.service.pairChecks.gaveUp(roundTaskKey("bad")), "one failed round");
+    for (let round = 2; round <= 3; round += 1) {
+      work();
+      await h.until(() => h.service.pairChecks.givenUp().length > 0 || attemptsOf(h, "bad") >= round);
+      await h.service.pairChecksIdle();
+    }
+    assert.ok(h.service.pairChecks.gaveUp(roundTaskKey("bad")), "given up after three rounds");
+    const asked = askedBad();
+    work();
+    await flushAsync(50);
+    await h.service.pairChecksIdle();
+    assert.equal(askedBad(), asked, "never asked again");
+    assert.deepEqual(recorded, ["good"]);
+    const written = JSON.parse(await readFile(knowledgePairChecksPath(h.appdir), "utf8")) as { attempts?: { label: string; failures: number }[] };
+    assert.deepEqual(written.attempts?.map((a) => [a.label, a.failures]), [["round-test bad", 3]]);
+    await h.service.stop();
+  });
+
+  it("an answer still being recorded when its round ends is recorded once, not again by the round's harvest", async () => {
+    const graph = fakeGraphView();
+    const listeners = new Set<() => void>();
+    const records: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let recording!: () => void;
+    const firstRecording = new Promise<void>((resolve) => (recording = resolve));
+    const source: KnowledgeRoundTaskSource = {
+      step: "round-test",
+      async tasks() {
+        return records.length > 0 ? [] : [{ label: "round-test slow", system: 'Answer {"ok": true}.', user: "Item slow", payload: { item: "slow" } }];
+      },
+      validate: (value) => ((value as { ok?: unknown } | null)?.ok === true ? null : 'Answer {"ok": true}.'),
+      async record(payload) {
+        records.push((payload as { item: string }).item);
+        if (records.length === 1) {
+          recording();
+          await gate; // a slow write: the round ends meanwhile (this was its last task)
+        }
+      },
+      onWork(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }
+    };
+    const h = await harness({ extra: { graphView: graph.view, roundTasks: [source] } });
+    graph.ready([ID(1), ID(2)]);
+    await h.service.start();
+    for (const id of [ID(1), ID(2)]) h.service.entriesChanged(await h.store.put(id, `body of ${id}`));
+    for (const listener of listeners) listener(); // the source has work: a round once linking is idle
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await firstRecording;
+    // The round's chats end and its inbox is harvested while the answer is still being recorded.
+    await flushAsync(50);
+    assert.deepEqual(records, ["slow"], "the harvest waits for the recording instead of recording the answer again");
+    release();
+    await h.service.pairChecksIdle();
+    assert.deepEqual(records, ["slow"]);
     await h.service.stop();
   });
 });

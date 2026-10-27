@@ -16,7 +16,7 @@ import {
   validateConceptCheckAnswer,
   type ConceptCheckBars
 } from "./concept-merge-checks.ts";
-import { KnowledgeConceptMerges, personHandlePairs, personKey, planConceptMerges, type ConceptMergeThresholds, type PlanConcept } from "./concept-merges.ts";
+import { KnowledgeConceptMerges, personHandle, personHandlePairs, personRuleGroups, planConceptMerges, type ConceptMergeThresholds, type PlanConcept } from "./concept-merges.ts";
 import { KnowledgeGraph, type GraphConcept } from "./graph.ts";
 import { FakeEmbedderSource, FakeStore, loadGraph, node, silentLogger } from "./test-fakes.ts";
 import { knowledgeScope } from "./visibility.ts";
@@ -42,34 +42,36 @@ function concept(id: string, name: string, entryIds: string[], type = "Tactic", 
 // The Person rule
 // ---------------------------------------------------------------------------
 
-test("the Person rule: a handle equal to another Person's name or handle is the same person; nothing else is", async () => {
-  assert.equal(personKey("@JasonUGC"), "jasonugc");
-  assert.equal(personKey(" @danielhangan_ "), "danielhangan");
-  assert.equal(personKey("Al"), null, "too short to say");
+test("the Person rule: the same handle, or a handle written out as another Person's name, is the same person; nothing else is", async () => {
+  assert.equal(personHandle("@JasonUGC"), "jasonugc");
+  assert.equal(personHandle(" @danielhangan_ "), "danielhangan_", "punctuation is part of a handle");
+  assert.equal(personHandle("Al"), null, "too short to say");
+  assert.equal(personHandle("x.com/alex"), null, "not a handle");
   const p = (id: string, name: string, handle: string | null, type = "Person"): PlanConcept => ({ id, type, name, entryCount: 1, handle });
   const concepts = [
     p("person-jason", "jason", "jasonugc"),
     p("person-jasonugc", "jasonugc", null),
-    p("person-personjasonugc", "person-personjasonugc", "@jasonugc"),
-    p("person-alex", "Alex", null),
-    p("person-alex-nguyen", "Alex Nguyen", "alexcooldev"),
-    p("person-other", "Someone", "alex"), // a handle equal to another's name: the same person
+    p("person-personjasonugc", "person-personjasonugc", "@jasonugc"), // no name: the graph names it by its id
+    p("person-kcodes", "KCodes7777", null),
+    p("person-penelope", "Penelope Lopez", "KCodes7777"),
+    p("person-other", "Someone", "danielhangan"),
+    p("person-daniel", "daniel", "danielhangan_"), // another account
     p("tool-jasonugc", "jasonugc", "jasonugc", "Tool") // not a Person
   ];
   assert.deepEqual(personHandlePairs(concepts), [
-    ["person-alex", "person-other"],
     ["person-jason", "person-jasonugc"],
     ["person-jason", "person-personjasonugc"],
-    ["person-jasonugc", "person-personjasonugc"]
+    ["person-jasonugc", "person-personjasonugc"],
+    ["person-kcodes", "person-penelope"]
   ]);
-  // Far apart by vector and refused by the name guard: merged anyway, transitively, never across an undo.
+  // Far apart by vector and refused by the name guard: merged anyway, never across an undo.
   const vectors = new Map(concepts.map((c, i) => [c.id, vec(i)]));
   const { merges } = await planConceptMerges({ concepts, vectors, thresholds: BARS, existing: [], rejected: [], now: "t", pause: noPause });
   assert.deepEqual(
     merges.map((m) => [m.into, [...m.merged].sort(), m.source]).sort(),
     [
-      ["person-alex", ["person-other"], undefined],
-      ["person-jason", ["person-jasonugc", "person-personjasonugc"], undefined]
+      ["person-jason", ["person-jasonugc", "person-personjasonugc"], undefined],
+      ["person-kcodes", ["person-penelope"], undefined]
     ]
   );
   const undone = await planConceptMerges({
@@ -77,11 +79,42 @@ test("the Person rule: a handle equal to another Person's name or handle is the 
     vectors,
     thresholds: BARS,
     existing: [],
-    rejected: [{ id: "cm_x", type: "Person", concepts: ["person-alex", "person-other"], rejectedAt: "t" }],
+    rejected: [{ id: "cm_x", type: "Person", concepts: ["person-kcodes", "person-penelope"], rejectedAt: "t" }],
     now: "t",
     pause: noPause
   });
-  assert.equal(undone.merges.some((m) => m.into === "person-alex" || m.into === "person-other"), false);
+  assert.equal(undone.merges.some((m) => m.into === "person-kcodes" || m.into === "person-penelope"), false);
+});
+
+test("the Person rule never merges different people: a first name is no handle, different full names never pair, pairs never chain", async () => {
+  const p = (id: string, name: string, handle: string | null): PlanConcept => ({ id, type: "Person", name, entryCount: 1, handle });
+  const plan = async (concepts: PlanConcept[], existing: KnowledgeConceptMergeRecord[] = []) =>
+    (
+      await planConceptMerges({ concepts, vectors: new Map(concepts.map((c, i) => [c.id, vec(i)])), thresholds: BARS, existing, rejected: [], now: "t", pause: noPause })
+    ).merges.map((m) => [m.into, [...m.merged].sort()]);
+  // The same handle on two platforms, and a first name equal to it.
+  const alexes = [p("person-alex", "Alex", null), p("person-alex-nguyen", "Alex Nguyen", "@alex"), p("person-alex-chen", "Alex Chen", "alex")];
+  assert.deepEqual(personHandlePairs(alexes), []);
+  assert.deepEqual(await plan(alexes), []);
+  // A first name is not the handle of a longer name.
+  assert.deepEqual(await plan([p("person-sam", "Sam", null), p("person-samantha", "Samantha Lee", "sam")]), []);
+  // The account "alexdev" (its name, and two unnamed Persons of that handle) is one; it pairs with two
+  // different people too, so it joins neither of them.
+  const chained = [
+    p("person-nguyen", "Alex Nguyen", "alexdev"),
+    p("person-chen", "Alex Chen", "alexdev"),
+    p("person-alexdev", "alexdev", null),
+    p("person-p1", "person-p1", "alexdev"),
+    p("person-p2", "person-p2", "alexdev")
+  ];
+  assert.deepEqual(personRuleGroups(chained), [["person-alexdev", "person-p1", "person-p2"]]);
+  assert.deepEqual(await plan(chained), [["person-alexdev", ["person-p1", "person-p2"]]]);
+  // A Person merge an earlier rule made between different people is dropped; one of the same person stays.
+  const earlier: KnowledgeConceptMergeRecord[] = [
+    { id: "cm_bad", type: "Person", into: "person-alex-nguyen", merged: ["person-alex", "person-alex-chen"], similarity: 1, createdAt: "t" },
+    { id: "cm_ok", type: "Person", into: "person-jason", merged: ["person-jasonugc"], similarity: 1, createdAt: "t" }
+  ];
+  assert.deepEqual(await plan([...alexes, p("person-jason", "jason", "jasonugc"), p("person-jasonugc", "jasonugc", null)], earlier), [["person-jason", ["person-jasonugc"]]]);
 });
 
 // ---------------------------------------------------------------------------
@@ -361,6 +394,10 @@ test("the source: tasks once planning is done, a 'same' answer merges (checked),
   );
   assert.match(tasks[0]!.user, /Name: 48-hour account warm-up\nExcerpt from "US TikTok phone": Warm up the account for 48 hours before posting, scroll a few times a day\./);
   assert.equal(tasks[0]!.system, CONCEPT_CHECK_SYSTEM);
+  // A pair rounds gave up on is skipped, and the next one takes its place under the cap.
+  const one = new ConceptMergeCheckSource({ merges: h.merges, entry: async () => null, bars: () => CHECK_BARS, limit: 1, pause: noPause });
+  assert.deepEqual((await one.tasks()).map((task) => task.label), [tasks[0]!.label]);
+  assert.deepEqual((await one.tasks({ skip: (task) => task.label === tasks[0]!.label })).map((task) => task.label), [tasks[1]!.label]);
 
   assert.equal(h.source.validate({ same: true, keep: "b", reason: "Same." }), null);
   assert.equal(typeof h.source.validate({ same: "yes" }), "string");

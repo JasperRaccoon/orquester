@@ -239,6 +239,8 @@ export class FakeWorkerPort implements WorkerSessionPort<WorkerCandidate> {
       const answer = behaviour.invalidFirst && !refusedOnce ? "Sure! Here is what I found." : this.answerFor(task);
       const submitted = await tools.submit(session.id, task.taskId, answer);
       if (!submitted.accepted) {
+        // Told to stop (it refused too often: the task goes to another chat), it ends its turn.
+        if (/end your turn now/.test(submitted.error)) break;
         refusedOnce = true;
         session.refused += 1;
         reply = { kind: "task", task: { ...task, instructions: null } };

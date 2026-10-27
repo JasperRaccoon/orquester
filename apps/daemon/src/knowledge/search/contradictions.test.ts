@@ -102,7 +102,7 @@ test("an entry linked to both concepts of a contradicting pair discusses it: a s
   assert.deepEqual([...findContradictions({ graph, scope, pairChecks: null, accept: () => true, entryId: "ke_a" }).values()].map((c) => [c.a, c.b]), [["ke_a", "ke_b"]]);
 });
 
-test("survey entries (a synthesis, a note titled as a map, audit, hub or index) are never a side of the graph's guesses; a pair check still counts", () => {
+test("survey entries (a synthesis, a note titled as a map, audit, hub or index) are never a side, of the graph's guesses or of a pair check", () => {
   const meta: Record<string, { kind: string; title: string }> = {
     ke_a: { kind: "post", title: "Use Gmail for the account" },
     ke_b: { kind: "post", title: "Use Outlook or Proton" },
@@ -119,8 +119,19 @@ test("survey entries (a synthesis, a note titled as a map, audit, hub or index) 
     ["ke_a", "ke_post"]
   ], "a post's title naming an index is not a survey");
   assert.deepEqual([...findContradictions({ graph, scope, pairChecks: null, accept: () => true, entryMeta, entryId: "ke_syn" }).values()], []);
-  const checked = findContradictions({ graph, scope, pairChecks: checks([check("ke_audit", "ke_b", "contradicts", "the audit marks it stale")]), accept: () => true, entryMeta });
-  assert.equal(checked.get("ke_audit\u0000ke_b")?.source, "checked");
+  // A verdict recorded before survey entries were left out of pair checks: ignored, whatever it says.
+  const checked = findContradictions({
+    graph,
+    scope,
+    pairChecks: checks([check("ke_audit", "ke_b", "contradicts", "the audit marks it stale"), check("ke_a", "ke_syn", "consistent", "the synthesis agrees")]),
+    accept: () => true,
+    entryMeta
+  });
+  assert.deepEqual([...checked.values()].map((c) => [c.a, c.b, c.source]), [
+    ["ke_a", "ke_b", "graph"],
+    ["ke_a", "ke_post", "graph"]
+  ]);
+  assert.equal(findContradictions({ graph, scope, pairChecks: checks([check("ke_hub", "ke_b", "contradicts", "x")]), accept: () => true, entryMeta, entryId: "ke_hub" }).size, 0);
 });
 
 test("a note that says nothing is null; an edge whose note says the conflict is only apparent or resolved is no disagreement", () => {
@@ -147,6 +158,46 @@ test("a note that says nothing is null; an edge whose note says the conflict is 
     assert.ok(isResolvedNote(note), note);
   }
   assert.ok(!isResolvedNote("Unresolved; notes disagree"), "unresolved is not resolved");
+});
+
+test("note checks: a negated or bare resolved word is a disagreement; a note is filler only whole or as a heading", () => {
+  const table: [note: string, resolved: boolean, filler: boolean][] = [
+    // Disagreements the old checks read as resolved.
+    ["The claims are not consistent: one says weekly, the other daily", false, false],
+    ["Not resolved: sources disagree on the trial length", false, false],
+    ["These are not compatible strategies for a new account", false, false],
+    ["Still isn't really resolved by either source", false, false],
+    ["Never resolved; both cite their own tests", false, false],
+    ["Both posts are consistent in tone but disagree on the price", false, false],
+    ["Gmail and Outlook are compatible with the signup flow, but one is banned", false, false],
+    ["The un-resolved question is which proxy works", false, false],
+    // Resolved or apparent only.
+    ["Apparent only; HIG exempts legal consent", true, false],
+    ["Resolved by the 2026 policy update", true, false],
+    ["The dispute was resolved in the later post", true, false],
+    ["It is not a real conflict: different storefronts", true, false],
+    ["Both true at different scales", true, false],
+    ["Compatible only because the 2019 claim was about matching", true, false],
+    // Notes that start with a filler word but say something.
+    ["Unknown proxy provider recommended over a residential one", false, false],
+    ["None of the tested apps kept the trial", false, false],
+    ["Placeholder pages rank in one source and not the other", false, false],
+    // Filler: whole, or a filler word set apart as a heading.
+    ["n/a", false, true],
+    ["N/A.", false, true],
+    ["placeholder", false, true],
+    ["Unknown.", false, true],
+    ["TBD - placeholder", false, true],
+    ["Unresolved; notes disagree on magnitude", false, true],
+    ["unresolved: see both entries for the numbers", false, true],
+    ["Unclear: the second post never says", false, true],
+    ["too short", false, true],
+    ["", false, true]
+  ];
+  for (const [note, resolved, filler] of table) {
+    assert.equal(isResolvedNote(note), resolved, `resolved: ${note}`);
+    assert.equal(isFillerNote(note), filler, `filler: ${note}`);
+  }
 });
 
 test("isSurveyEntry: synthesis entries, and notes titled as surveys", () => {

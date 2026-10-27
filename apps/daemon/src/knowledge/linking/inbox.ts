@@ -147,6 +147,12 @@ export interface InboxBrokerOptions {
   contextFor?: (envelope: InboxTaskEnvelope) => Promise<string | null>;
   /** A stricter check of a parsed answer for some steps (or tasks): an error message refuses it like a parse error. */
   validate?: (step: string, value: unknown, taskId: string) => string | null;
+  /**
+   * Chats that may give up on one task (refused {@link MAX_REFUSALS} times, or ended holding it)
+   * before the broker hands it out no more (`abandoned`): one task no chat can answer then cannot
+   * end every chat of the run. Absent: no limit (myKG waits for every task of a linking run).
+   */
+  maxGiveUpsPerTask?: number;
 }
 
 export type ParsedAnswer = { ok: true; text: string } | { ok: false; error: string };
@@ -181,6 +187,10 @@ interface TaskEntry {
   done: boolean;
   /** Being written (an accepted answer in flight). */
   writing: boolean;
+  /** Chats that gave up on it while the run went on ({@link InboxBrokerOptions.maxGiveUpsPerTask}). */
+  giveUps?: Set<string>;
+  /** Handed out no more: too many chats gave up on it. */
+  abandoned?: boolean;
 }
 
 interface SessionEntry {
@@ -215,6 +225,8 @@ export interface InboxBrokerEvents {
   change: [];
   /** One accepted answer (`answer`: the JSON text written). */
   answered: [{ sessionId: string; taskId: string; step: string; answer: string }];
+  /** A task too many chats gave up on is handed out no more ({@link InboxBrokerOptions.maxGiveUpsPerTask}). */
+  abandoned: [{ taskId: string; step: string }];
 }
 
 export class InboxBroker {
@@ -227,6 +239,7 @@ export class InboxBroker {
   private readonly logger: InboxBrokerOptions["logger"];
   private readonly contextFor: InboxBrokerOptions["contextFor"];
   private readonly validate: InboxBrokerOptions["validate"];
+  private readonly maxGiveUps: number;
   private inbox: string | null = null;
   private outbox: string | null = null;
   private reuseIndex: string | null = null;
@@ -253,6 +266,7 @@ export class InboxBroker {
     this.logger = options.logger;
     this.contextFor = options.contextFor;
     this.validate = options.validate;
+    this.maxGiveUps = options.maxGiveUpsPerTask ?? Number.POSITIVE_INFINITY;
   }
 
   /** Points the broker at a myKG session's `intermediate/` directory and starts watching. */
@@ -291,14 +305,31 @@ export class InboxBroker {
     }
   }
 
-  /** The chat ended or failed: its lease goes back to the queue, and it gets no more work. */
-  release(sessionId: string): void {
+  /**
+   * The chat ended or failed: its lease goes back to the queue, and it gets no more work. `blame`
+   * (default true): it gave up on the task it held — false when the account, not the task, ended it
+   * (a usage limit) or the run was stopped under it.
+   */
+  release(sessionId: string, options: { blame?: boolean } = {}): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.retired = true;
-    if (session.lease !== null) session.gaveUp = true;
+    if (session.lease !== null) {
+      session.gaveUp = true;
+      if (options.blame !== false) this.gaveUpOn(session.lease, session.id);
+    }
     this.dropLease(session);
     this.changed();
+  }
+
+  /** How many chats gave up on this task while the run went on (0 for an unknown one). */
+  giveUpsOf(taskId: string): number {
+    return this.tasks.get(taskId)?.giveUps?.size ?? 0;
+  }
+
+  /** Whether too many chats gave up on this task and it is handed out no more. */
+  isAbandoned(taskId: string): boolean {
+    return this.tasks.get(taskId)?.abandoned === true;
   }
 
   /** The chat ended, or was retired, holding a task it never answered (the pool counts it as a failure). */
@@ -335,7 +366,7 @@ export class InboxBroker {
     let pending = 0;
     let leased = 0;
     for (const task of this.tasks.values()) {
-      if (task.done || !task.envelope) continue;
+      if (task.done || task.abandoned || !task.envelope) continue;
       if (task.leasedTo !== null) leased += 1;
       else pending += 1;
     }
@@ -437,9 +468,10 @@ export class InboxBroker {
       if (task.leasedTo === session.id) session.lease = task.id;
       session.refusals += 1;
       if (session.refusals >= MAX_REFUSALS && session.lease === task.id) {
-        // This chat cannot answer it: the task goes to a fresh chat, this one ends.
+        // This chat cannot answer it: the task goes to a fresh chat (or no more), this one ends.
         session.retired = true;
         session.gaveUp = true;
+        this.gaveUpOn(task.id, session.id);
         this.dropLease(session);
         this.changed();
         return { accepted: false, error: `${parsed.error} This task goes to another worker: end your turn now.` };
@@ -516,10 +548,21 @@ export class InboxBroker {
     };
   }
 
+  /** A chat gave up on a task while the run goes on: after `maxGiveUpsPerTask` chats did, it is handed out no more. */
+  private gaveUpOn(taskId: string, sessionId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task || task.done || this.finished) return;
+    (task.giveUps ??= new Set()).add(sessionId);
+    if (task.giveUps.size < this.maxGiveUps || task.abandoned) return;
+    task.abandoned = true;
+    this.logger?.warn("knowledge inbox: chats keep giving up on a task; it is handed out no more this run", { taskId, step: task.envelope?.step ?? null });
+    this.events.emit("abandoned", { taskId, step: task.envelope?.step ?? "" });
+  }
+
   private firstPending(): TaskEntry | undefined {
     let best: TaskEntry | undefined;
     for (const task of this.tasks.values()) {
-      if (task.done || task.writing || task.leasedTo !== null || !task.envelope) continue;
+      if (task.done || task.writing || task.abandoned || task.leasedTo !== null || !task.envelope) continue;
       if (!best || compareTasks(task, best) < 0) best = task;
     }
     return best;

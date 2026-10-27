@@ -50,6 +50,10 @@ test("answers: exactly {label}, 2–5 words, ≤ 40 characters, no quotes, never
   const forbidden = ["Candy Crush", "@jasonugc", "App Store Preflight"];
   assert.equal(validateClusterLabelAnswer({ label: "Paywall pricing" }, forbidden), null);
   assert.equal(validateClusterLabelAnswer({ label: "App Store review rules" }, forbidden), null);
+  // An apostrophe is no quote.
+  for (const label of ["Apple's review rules", "Founders' pricing", "App Store’s review", "Don't-miss growth tactics"]) {
+    assert.equal(validateClusterLabelAnswer({ label }, forbidden), null, label);
+  }
   for (const bad of [
     null,
     [],
@@ -59,8 +63,10 @@ test("answers: exactly {label}, 2–5 words, ≤ 40 characters, no quotes, never
     { label: "One two three four five six" },
     { label: "A label that is far too long for a cluster name" },
     { label: '"Paywall pricing"' },
-    { label: "Apple's review" },
+    { label: "'Paywall pricing'" },
+    { label: "‘Paywall pricing’" },
     { label: "Candy  crush" },
+    { label: "Candy Crush's" },
     { label: "@JasonUGC" },
     { label: "App Store Preflight" },
     { label: "Paywall pricing", extra: 1 }
@@ -97,6 +103,10 @@ test("clusters of 3+ are queued once, asked largest first up to the cap, named o
   assert.deepEqual(tasks.map((task) => task.label), [`${CLUSTER_NAME_STEP} ${clusterKey(big)}`, `${CLUSTER_NAME_STEP} ${clusterKey(mid)}`]);
   assert.match(tasks[0]!.user, /ENTRY TITLES \(5\)\n- Title of ke_a0/);
   assert.equal(tasks[0]!.system, CLUSTER_NAME_SYSTEM);
+  // A cluster rounds gave up on naming is skipped; the next one takes its place under the cap, and it stays queued.
+  const skipping = await h.port.tasks({ skip: (task) => task.label === tasks[0]!.label });
+  assert.deepEqual(skipping.map((task) => task.label), [`${CLUSTER_NAME_STEP} ${clusterKey(mid)}`, `${CLUSTER_NAME_STEP} ${clusterKey(small)}`]);
+  assert.equal(h.port.waiting().length, 3);
   assert.equal(h.port.validate({ label: "Candy Crush" }, tasks[0]!.payload) !== null, true, "the cluster's forbidden names");
   assert.equal(h.port.validate({ label: "Paywall pricing" }, tasks[0]!.payload), null);
 
@@ -108,12 +118,12 @@ test("clusters of 3+ are queued once, asked largest first up to the cap, named o
   assert.equal(changes, 1);
   assert.ok(h.port.revision() > before);
   const none = () => false;
-  assert.equal(h.port.labelFor(big, none), "Paywall pricing");
-  assert.equal(h.port.labelFor([...big, "ke_new"], none), "Paywall pricing", "5 of 6: reused");
-  assert.equal(h.port.labelFor([...big.slice(0, 4), "ke_new"], none), "Paywall pricing", "4 of 5 the same: reused");
-  assert.equal(h.port.labelFor([...big.slice(0, 3), "ke_x", "ke_y"], none), null, "3 of 5: a new cluster");
-  assert.equal(h.port.labelFor([...big, "ke_n1", "ke_n2"], none), null, "5 of 7: too different");
-  assert.equal(h.port.labelFor(big, (id) => id === "ke_a2"), null, "named from an entry the caller cannot see");
+  assert.equal(h.port.labelFor(big, none)?.label ?? null, "Paywall pricing");
+  assert.equal(h.port.labelFor([...big, "ke_new"], none)?.label ?? null, "Paywall pricing", "5 of 6: reused");
+  assert.equal(h.port.labelFor([...big.slice(0, 4), "ke_new"], none)?.label ?? null, "Paywall pricing", "4 of 5 the same: reused");
+  assert.equal(h.port.labelFor([...big.slice(0, 3), "ke_x", "ke_y"], none)?.label ?? null, null, "3 of 5: a new cluster");
+  assert.equal(h.port.labelFor([...big, "ke_n1", "ke_n2"], none)?.label ?? null, null, "5 of 7: too different");
+  assert.equal(h.port.labelFor(big, (id) => id === "ke_a2")?.label ?? null, null, "named from an entry the caller cannot see");
   // Named: never asked again; the rest are.
   h.port.request([big, [...big, "ke_new"]]);
   const next = await h.port.tasks();
@@ -123,7 +133,7 @@ test("clusters of 3+ are queued once, asked largest first up to the cap, named o
   const file = await h.read();
   assert.deepEqual(file.labels.map((l) => [l.key, l.members, l.label]), [[clusterKey(big), [...big].sort(), "Paywall pricing"]]);
   const reloaded = await labels(t, { file });
-  assert.equal(reloaded.port.labelFor(big, none), "Paywall pricing", "persisted");
+  assert.equal(reloaded.port.labelFor(big, none)?.label ?? null, "Paywall pricing", "persisted");
 });
 
 test("a cluster that changed (mostly the same) replaces its queued version; one no entry of exists any more is dropped", async (t) => {
@@ -140,7 +150,7 @@ test("a cluster that changed (mostly the same) replaces its queued version; one 
 test("tolerant file: unreadable records and unknown keys survive; a newer file is never written; an unparsable one is moved aside", async (t) => {
   const record = { key: clusterKey(members("a", 3)), members: members("a", 3), label: "App Store review", labeledAt: "t", extra: 1 };
   const h = await labels(t, { file: { version: 1, labels: [record, { broken: true }], future: "x" } });
-  assert.equal(h.port.labelFor(members("a", 3), () => false), "App Store review");
+  assert.equal(h.port.labelFor(members("a", 3), () => false)?.label ?? null, "App Store review");
   h.port.request([members("b", 3)]);
   const [task] = await h.port.tasks();
   await h.port.record(task!.payload, JSON.stringify({ label: "Retention metrics" }));
@@ -151,12 +161,12 @@ test("tolerant file: unreadable records and unknown keys survive; a newer file i
 
   const newer = JSON.stringify({ version: 2, labels: [record] });
   const n = await labels(t, { file: newer });
-  assert.equal(n.port.labelFor(members("a", 3), () => false), "App Store review", "read");
+  assert.equal(n.port.labelFor(members("a", 3), () => false)?.label ?? null, "App Store review", "read");
   assert.deepEqual(await n.port.tasks(), [], "nothing asked");
   assert.equal(await readFile(n.path, "utf8"), newer);
 
   const bad = await labels(t, { file: "{ nope" });
-  assert.equal(bad.port.labelFor(members("a", 3), () => false), null);
+  assert.equal(bad.port.labelFor(members("a", 3), () => false)?.label ?? null, null);
   assert.ok((await readdir(bad.dir)).some((name) => name.startsWith("cluster-labels.json.unreadable-")));
 });
 
@@ -212,4 +222,71 @@ test("similarity: a cluster takes the LLM label when there is one (scoped: only 
   // Disconnected: back to the concept labels.
   similarity.connectClusterLabels(null);
   assert.equal((await similarity.graph({}, scope({ kind: "all" }))).clusters[0]!.label, fallback);
+});
+
+test("similarity: names are asked for from the unscoped default draw only; a cached graph drops a label whose source left the caller's view", async (t) => {
+  const store = new FakeStore();
+  store.collection("kc_seo", "SEO");
+  store.collection("kc_ads", "Ads");
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const index = new FakeVectorIndex();
+  const similarity = new KnowledgeSimilarity({
+    store,
+    graph,
+    index: () => index,
+    body: (id) => store.entries.get(id)?.body ?? null,
+    summary: (meta, scope) => ({ ...meta, collections: visibleCollections(meta, scope), snippet: "", linkCount: 0, citation: knowledgeCitation(meta) })
+  });
+  const scope = (visibility: KnowledgeVisibility, filter?: string[]) => knowledgeScope(visibility, ["kc_seo", "kc_ads"], filter);
+  const names = ["p1", "p2", "p3", "p4"];
+  names.forEach((name, i) => {
+    store.put(ke(name), `body ${name}`, ["kc_seo"], { title: `Comparison pages ${name}` }, true);
+    index.set(ke(name), around(DIMS, 0, i + 1, 0.95));
+  });
+  // Named from p0 too, an entry in kc_seo that is not drawn (not embedded).
+  store.put(ke("p0"), "body p0", ["kc_seo"], { title: "Comparison pages p0" }, true);
+  const h = await labels(t);
+  let work = 0;
+  h.port.onWork(() => (work += 1));
+  similarity.connectClusterLabels(h.port);
+
+  // Scoped draws, or another k or limit, ask for nothing.
+  await similarity.graph({}, scope({ kind: "collections", ids: ["kc_seo"] }));
+  await similarity.graph({}, scope({ kind: "all" }, ["kc_seo"]));
+  await similarity.graph({ k: 5 }, scope({ kind: "all" }));
+  await similarity.graph({ limit: 3 }, scope({ kind: "all" }));
+  assert.deepEqual(h.port.waiting(), []);
+  assert.equal(work, 0);
+  await similarity.graph({}, scope({ kind: "all" }));
+  assert.equal(h.port.waiting().length, 1);
+  assert.equal(work, 1);
+  const [task] = await h.port.tasks();
+  await h.port.record({ ...(task!.payload as object), members: [...names, "p0"].map(ke).sort() }, JSON.stringify({ label: "Comparison page strategy" }));
+
+  const seo = scope({ kind: "collections", ids: ["kc_seo"] });
+  assert.equal((await similarity.graph({}, seo)).clusters[0]!.label, "Comparison page strategy");
+  // p0 moves to a collection the caller cannot see: no drawn entry changed, so the graph is served
+  // from its cache, but the label named from p0 is not.
+  store.put(ke("p0"), "body p0", ["kc_ads"], { title: "Comparison pages p0" }, true);
+  const after = await similarity.graph({}, seo);
+  assert.notEqual(after.clusters[0]!.label, "Comparison page strategy");
+  assert.equal((await similarity.graph({}, scope({ kind: "all" }))).clusters[0]!.label, "Comparison page strategy", "a caller who sees p0 still gets it");
+});
+
+test("cluster names: new work only for a cluster never queued before, not for one evicted and drawn again or a changed one replacing its queued version", async (t) => {
+  const h = await labels(t);
+  let work = 0;
+  h.port.onWork(() => (work += 1));
+  const many = Array.from({ length: 70 }, (_, i) => members(`m${i}x`, 5));
+  h.port.request(many);
+  assert.equal(work, 1);
+  assert.equal(h.port.waiting().length, 64, "the oldest were evicted");
+  // The evicted ones drawn again: queued again, but no new work.
+  h.port.request(many.slice(0, 6));
+  assert.equal(work, 1);
+  // A changed cluster (mostly the same) replaces its queued version: no new work either.
+  h.port.request([[...many[30]!, "ke_extra"]]);
+  assert.equal(work, 1);
+  h.port.request([members("fresh", 3)]);
+  assert.equal(work, 2);
 });

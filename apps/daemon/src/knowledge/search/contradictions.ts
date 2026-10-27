@@ -16,12 +16,13 @@
  * - A survey entry ({@link isSurveyEntry}: a synthesis, or a note titled as a map, audit, hub,
  *   register, index or cross-links) restates what other entries say, so its concepts are theirs: a
  *   disagreement it seems to take part in is one between its sources, which are listed themselves.
- *   It is never a side of the graph's guesses (an LLM pair check that read it still counts).
+ *   It is never a side: not of the graph's guesses, nor of an LLM pair check (pair checks no longer
+ *   pick survey entries; a verdict recorded before involving one is left out, whatever it says).
  * - An edge whose context says the conflict is only apparent or resolved ({@link isResolvedNote})
  *   is not a disagreement: it adds no pair (the edge itself stays in the concept graph). Dropped
  *   rather than kept as "resolved": every reader of these pairs (insights, similar entries, the
  *   similarity graph's `contradicts` edges) means entries that disagree now.
- * - A context that says nothing ({@link isFillerNote}: "n/a", "placeholder", "unresolved; …",
+ * - A context that says nothing ({@link isFillerNote}: "n/a", "placeholder", "Unresolved; …",
  *   two words or fewer) is no note: the pair stays, its note is null.
  */
 
@@ -76,23 +77,49 @@ export function isSurveyEntry(meta: Pick<KnowledgeEntryMeta, "kind" | "title"> |
   return NOTE_KINDS.test(kind) && SURVEY_TITLE.test(meta.title);
 }
 
-/** Notes that say nothing about the disagreement, whole or as their first word ("Unresolved; notes disagree"). */
+/** Words that say nothing about the disagreement ("n/a", "placeholder", "unresolved"). */
 const FILLER_WORDS = new Set(["n/a", "na", "none", "null", "nil", "placeholder", "unknown", "unresolved", "unclear", "tbd", "todo", "empty", "-", "?"]);
+const fillerWord = (word: string): boolean => FILLER_WORDS.has(word.toLowerCase().replace(/^[^\p{L}\p{N}/?-]+|[.,;:!]+$/gu, ""));
 
-/** Whether a `contradicts` context says nothing: empty, a filler word ("n/a", "placeholder"; also leading one), or two words or fewer. */
+/**
+ * Whether a `contradicts` context says nothing: empty, two words or fewer, only filler words
+ * ("n/a", "None.", "TBD - placeholder"), or a filler word set apart as a heading ("Unresolved;
+ * notes disagree", "N/A: …"). A note that merely starts with such a word says something ("Unknown
+ * proxy provider recommended over a known one").
+ */
 export function isFillerNote(note: string): boolean {
-  const words = note.toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+  const words = note.split(/\s+/).filter((word) => word.length > 0);
   if (words.length <= 2) return true;
-  return FILLER_WORDS.has(words[0]!.replace(/[.,;:!]+$/, ""));
+  if (words.every((word) => fillerWord(word) || /^[^\p{L}\p{N}]+$/u.test(word))) return true;
+  return fillerWord(words[0]!) && /[;:]$/.test(words[0]!);
 }
 
-/** A context that says the two do not really disagree. */
+/**
+ * Phrases that say the two do not really disagree. Not bare "consistent" or "compatible": "the
+ * claims are not consistent" and "not compatible strategies" are disagreements.
+ */
 const RESOLVED_NOTE =
-  /\b(apparent(ly)? only|only apparent(ly)?|not (a |an )?(real|true|genuine|actual) (conflict|contradiction|disagreement)|no (real|true|genuine|actual) (conflict|contradiction|disagreement)|both (are |can be )?(true|right|valid|correct)|both can work|not either\/or|everyone agrees|compatible|resolved|consistent)\b/i;
+  /\b(apparent(ly)? only|only apparent(ly)?|not (a |an )?(real|true|genuine|actual) (conflict|contradiction|disagreement)|no (real|true|genuine|actual) (conflict|contradiction|disagreement)|both (are |can be )?(true|right|valid|correct)|both can work|not either\/or|everyone agrees|resolved)\b/gi;
+/** A note that opens with the verdict "compatible" or "consistent" ("Compatible only because …", "Consistent: …"). */
+const RESOLVED_VERDICT = /^\s*(compatible|consistent)(\s+(only|after all|overall)\b|\s*[:;,.—–-])/i;
+/** A negation within the two words before a phrase turns it around ("Not resolved", "isn't really resolved"). */
+const NEGATED = /(?:^|\s)(?:not|never|no|\S+n['’]t)(?:\s+\S+)?\s*$/i;
 
-/** Whether a `contradicts` context says the conflict is only apparent or resolved ("Apparent only; …", "both true", "not a real conflict"). */
+/**
+ * Whether a `contradicts` context says the conflict is only apparent or resolved ("Apparent only;
+ * …", "both true", "not a real conflict", "resolved by …", a note opening with the verdict
+ * "Compatible only because …"); a phrase never counts when a negation comes within two
+ * words before it ("Not resolved: sources disagree", "isn't really resolved").
+ */
 export function isResolvedNote(note: string): boolean {
-  return RESOLVED_NOTE.test(note);
+  if (RESOLVED_VERDICT.test(note)) return true;
+  for (const match of note.matchAll(RESOLVED_NOTE)) {
+    const raw = note.slice(0, match.index);
+    if (/\bun-?$/i.test(raw)) continue; // "un-resolved"
+    const before = raw.replace(/[^\p{L}\p{N}'’\s]+/gu, " ").trimEnd();
+    if (!NEGATED.test(before)) return true;
+  }
+  return false;
 }
 
 export const pairKeyOf = (x: string, y: string): string => (x < y ? `${x}\u0000${y}` : `${y}\u0000${x}`);
@@ -125,7 +152,6 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
     if (is === undefined) survey.set(id, (is = isSurveyEntry(options.entryMeta?.(id))));
     return !is && options.accept(id);
   };
-  const { accept } = options;
   const found = new Map<string, KnowledgeContradictionFound & { edges: Set<string> }>();
   const entriesOf = new Map<string, string[]>();
   const visibleEntries = (conceptId: string): string[] => {
@@ -185,7 +211,8 @@ export function findContradictions(options: FindContradictionsOptions): Map<stri
 
   for (const check of options.pairChecks?.all() ?? []) {
     if (entryId !== undefined && check.a !== entryId && check.b !== entryId) continue;
-    if (check.a === check.b || !accept(check.a) || !accept(check.b)) continue;
+    // A survey entry is never a side, checked or guessed: a verdict involving one is left out.
+    if (check.a === check.b || !side(check.a) || !side(check.b)) continue;
     const key = pairKeyOf(check.a, check.b);
     if (check.verdict !== "contradicts") {
       found.delete(key);

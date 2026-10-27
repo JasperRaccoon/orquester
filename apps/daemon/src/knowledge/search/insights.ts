@@ -93,7 +93,7 @@ const CENTRALITY_WEIGHT = 0.1;
 export interface KnowledgeInsightsOptions {
   store: Pick<KnowledgeStorePort, "listMeta" | "getMeta">;
   graph: ContradictionGraph & Pick<KnowledgeGraph, "revision" | "conceptsOfEntry" | "neighbourLookup" | "canonicalConceptId" | "conceptType">;
-  similarity: Pick<KnowledgeSimilarity, "graph">;
+  similarity: Pick<KnowledgeSimilarity, "graph" | "clusterLabelsRevision">;
   /** The vector index, read per call; null while there is none. */
   index: () => KnowledgeVectorIndex | null;
   /** An entry as the read views show it. */
@@ -149,7 +149,8 @@ export class KnowledgeInsights {
     const visibleKey = fingerprint.digest("base64");
     const base = [scopeKey(scope), vectors?.index.modelId() ?? null, vectors?.thresholds ?? null, vectors?.index.generation() ?? null, this.options.graph.revision(), visibleKey];
     const gapsKey = JSON.stringify(base);
-    const key = JSON.stringify([INSIGHTS_ALGORITHM, ...base, limit, this.options.pairChecksRevision?.() ?? 0]);
+    // The clusters' LLM names are part of what insights show (a cluster ref's label).
+    const key = JSON.stringify([INSIGHTS_ALGORITHM, ...base, limit, this.options.pairChecksRevision?.() ?? 0, this.options.similarity.clusterLabelsRevision()]);
 
     const gaps = vectors
       ? remember(this.gapCache, gapsKey, () =>

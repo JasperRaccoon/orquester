@@ -20,7 +20,7 @@
 
 import type { KnowledgeConceptMergeCheck, KnowledgeConceptMergeRejection } from "@orquester/config";
 import { EMBEDDING_MODEL_ID } from "../install/pins.ts";
-import type { KnowledgeRoundTask, KnowledgeRoundTaskSource } from "../ports.ts";
+import type { KnowledgeRoundTask, KnowledgeRoundTaskOptions, KnowledgeRoundTaskSource } from "../ports.ts";
 import {
   conceptMergeRefusal,
   conceptNameNegations,
@@ -293,10 +293,11 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
 
   constructor(private readonly options: ConceptMergeCheckSourceOptions) {}
 
-  async tasks(): Promise<KnowledgeRoundTask[]> {
+  async tasks(options: KnowledgeRoundTaskOptions = {}): Promise<KnowledgeRoundTask[]> {
     const state = this.options.merges.checkState();
     const bars = state ? (this.options.bars ?? conceptCheckBarsFor)(state.set.modelId) : null;
     if (!state || !bars) return [];
+    const cap = this.options.limit ?? CONCEPT_CHECK_MAX_PER_ROUND;
     const candidates = await conceptCheckCandidates({
       concepts: state.concepts,
       vectors: state.set.vectors,
@@ -305,11 +306,13 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
       rejected: state.rejected,
       checks: state.checks,
       canonical: state.canonical,
-      limit: this.options.limit ?? CONCEPT_CHECK_MAX_PER_ROUND,
+      // Items rounds gave up on are skipped below: the next ones take their place.
+      limit: options.skip ? Number.POSITIVE_INFINITY : cap,
       ...(this.options.pause ? { pause: this.options.pause } : {})
     });
     const tasks: KnowledgeRoundTask[] = [];
     for (const candidate of candidates) {
+      if (tasks.length >= cap) break;
       const [a, b] = await Promise.all([this.side(candidate.a), this.side(candidate.b)]);
       const payload: ConceptCheckPayload = {
         a: candidate.a.id,
@@ -319,7 +322,8 @@ export class ConceptMergeCheckSource implements KnowledgeRoundTaskSource {
         nameB: candidate.b.name,
         similarity: Math.round(candidate.similarity * 10_000) / 10_000
       };
-      tasks.push({ label: `${CONCEPT_CHECK_STEP} ${candidate.a.id} ${candidate.b.id}`, system: CONCEPT_CHECK_SYSTEM, user: conceptCheckInput(a, b), payload });
+      const task: KnowledgeRoundTask = { label: `${CONCEPT_CHECK_STEP} ${candidate.a.id} ${candidate.b.id}`, system: CONCEPT_CHECK_SYSTEM, user: conceptCheckInput(a, b), payload };
+      if (!options.skip?.(task)) tasks.push(task);
     }
     return tasks;
   }

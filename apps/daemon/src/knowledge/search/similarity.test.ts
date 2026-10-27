@@ -16,6 +16,8 @@ const ke = (name: string): string => `ke_${name.padStart(12, "0")}`;
 const COMMON_BODY = "Write one comparison page per competitor, with an honest table of prices and features, and link it from the pricing page.";
 
 function setup() {
+  /** The similarity's clock (background draws are spaced by it). */
+  let nowMs = Date.parse("2026-10-27T12:00:00.000Z");
   const store = new FakeStore();
   store.collection("kc_seo", "SEO");
   store.collection("kc_ads", "Ads");
@@ -38,7 +40,8 @@ function setup() {
     }),
     body: (id) => store.entries.get(id)?.body ?? null,
     pairChecks: () => ({ all: () => pairChecks, get: (a, b) => pairChecks.find((c) => c.a === a && c.b === b) ?? null, onChange: () => () => undefined }),
-    pairChecksRevision: () => checksRevision
+    pairChecksRevision: () => checksRevision,
+    now: () => nowMs
   });
   const scope = (visibility: KnowledgeVisibility, narrow?: string[]) => knowledgeScope(visibility, store.collections.map((c) => c.id), narrow);
   // Every body is a near-copy of the others (only the name differs): meaning decides what is a duplicate, unless a test writes its own body.
@@ -59,6 +62,9 @@ function setup() {
     },
     noIndex: () => {
       indexOn = false;
+    },
+    advance: (ms: number) => {
+      nowMs += ms;
     }
   };
 }
@@ -603,6 +609,61 @@ async function contradictionFixture() {
 
 const shortRef = { id: "tactic-short", name: "3-day trials", type: "tactic" };
 const longRef = { id: "tactic-long", name: "14-day trials", type: "tactic" };
+
+test("possible duplicates compare the body read now: shingles are cached by that text, not by the entry's content hash", () => {
+  const s = setup();
+  const guide = "Buy a used iPhone, factory reset it, set the region to the United States, then warm the account up for two days before you post anything.";
+  s.put("a", [], {}, guide);
+  s.put("repost", [], {}, `${guide} Credit to the original author.`);
+  s.index.set(ke("a"), axis(DIMS, 0));
+  s.index.set(ke("repost"), around(DIMS, 0, 1, 0.96));
+  assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).possibleDuplicates), [ke("repost")]);
+  // The indexed body changed while the entry's content hash did not (yet): the cache must not answer
+  // for a text it was not made from.
+  s.store.entries.get(ke("repost"))!.body = "Get a free Visible eSIM, spoof the location during setup and keep location services off from day one.";
+  assert.deepEqual(ids(s.similarity.forEntry(ke("a"), s.all).possibleDuplicates), []);
+});
+
+test("background draws for more scopes than the latest graphs kept are bounded: a scope drawn lately waits until the vectors, the graph or a few minutes move", async () => {
+  const s = graphFixture();
+  await loadGraph(s.graph, [node("topic-shared", "Comparison pages", files([ke("p1"), ke("p2"), ke("p3")]))]);
+  for (let i = 0; i < 40; i += 1) s.store.collection(`kc_x${String(i).padStart(8, "0")}`, `X ${i}`);
+  const scopes = Array.from({ length: 40 }, (_, i) => s.scope({ kind: "collections", ids: ["kc_seo", `kc_x${String(i).padStart(8, "0")}`] }));
+  const draw = s.similarity.graph.bind(s.similarity);
+  let draws = 0;
+  s.similarity.graph = async (...args) => {
+    draws += 1;
+    return draw(...args);
+  };
+  const pass = async (): Promise<number> => {
+    let found = 0;
+    for (const scope of scopes) if (s.similarity.novelty(ke("p1"), scope)?.cluster) found += 1;
+    await s.similarity.idle();
+    return found;
+  };
+  assert.equal(await pass(), 0, "nothing drawn yet");
+  assert.equal(draws, 40);
+  // More scopes than the latest graphs kept: the evicted ones are not drawn again right away.
+  const found = await pass();
+  assert.ok(found >= 30, `${found} scopes read their latest graph`);
+  assert.equal(draws, 40, "no scope drawn twice within minutes");
+  await pass();
+  assert.equal(draws, 40);
+  // A few minutes later, an evicted scope is drawn again, at most once each: the reads settle.
+  s.advance(6 * 60_000);
+  let passes = 0;
+  for (let before = -1; before !== draws && passes < 10; passes += 1) {
+    before = draws;
+    await pass();
+  }
+  const later = draws;
+  assert.ok(later > 40 && later <= 80, `${later - 40} drawn again`);
+  assert.ok(passes < 10, "the background draws stop");
+  // New vectors: drawn again at once.
+  s.index.set(ke("p3"), around(DIMS, 0, 4, 0.81));
+  await pass();
+  assert.ok(draws > later);
+});
 
 test("similar: entries that contradict it (graph, either direction) are listed even below the meaning bar, among the 8", async () => {
   const s = await contradictionFixture();

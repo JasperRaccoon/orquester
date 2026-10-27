@@ -12,6 +12,8 @@ import {
   KnowledgePairChecks,
   PAIR_CHECK_BODY_CHARS,
   PAIR_CHECK_STEP,
+  pairCheckItemKey,
+  ROUND_TASK_MAX_ATTEMPTS,
   pairCheckCandidates,
   pairCheckInput,
   parsePairCheckAnswer,
@@ -122,6 +124,36 @@ describe("KnowledgePairChecks (the port)", () => {
   });
 });
 
+describe("round task attempts", () => {
+  it("an item without an acceptable answer in three rounds is given up on, persisted and read back; an answer forgets its failures", async () => {
+    const root = await dir();
+    const path = join(root, "pair-checks.json");
+    let now = NOW;
+    const checks = new KnowledgePairChecks({ path, hashOf: () => null, now: () => now });
+    await checks.load();
+    const item = { key: pairCheckItemKey({ a: "ke_b", b: "ke_a", hashA: "hb", hashB: "ha" }), step: PAIR_CHECK_STEP, label: "pair-check ke_a ke_b" };
+    assert.equal(item.key, "pair ke_a ke_b ha hb", "the pair sorted, with its hashes");
+    for (let round = 1; round < ROUND_TASK_MAX_ATTEMPTS; round += 1) {
+      assert.equal(await checks.failedAttempt(item), false);
+      assert.equal(checks.gaveUp(item.key), false);
+    }
+    now = new Date("2026-10-27T12:00:00.000Z");
+    assert.equal(await checks.failedAttempt(item), true);
+    assert.equal(checks.gaveUp(item.key), true);
+    await checks.failedAttempt({ key: "other", step: "cluster-name", label: "cluster-name k" });
+    await checks.flush();
+    const reread = new KnowledgePairChecks({ path, hashOf: () => null, now: () => now });
+    await reread.load();
+    assert.equal(reread.gaveUp(item.key), true);
+    assert.equal(reread.gaveUp("other"), false);
+    assert.deepEqual(reread.givenUp().map((r) => [r.key, r.failures, r.gaveUpAt]), [[item.key, 3, "2026-10-27T12:00:00.000Z"]]);
+    await reread.answered("other");
+    await reread.flush();
+    const written = JSON.parse(await readFile(path, "utf8")) as { attempts: { key: string }[] };
+    assert.deepEqual(written.attempts.map((r) => r.key), [item.key]);
+  });
+});
+
 describe("pair-check candidates", () => {
   const ref = (type: string, id: string): KnowledgeConceptRef => ({ id, type, name: id });
   function setup() {
@@ -185,6 +217,24 @@ describe("pair-check candidates", () => {
       entryOf: (id) => ({ kind: kinds[id] ?? "note", author: null, handle: null })
     });
     assert.ok(all.every((c) => c.a !== "ke_s" && c.b !== "ke_s"), JSON.stringify(all));
+    // A note titled as a map, audit, hub or index surveys others, like a synthesis (`isSurveyEntry`).
+    const titled = await pairCheckCandidates({
+      ids: ["ke_a", "ke_b", "ke_d", "ke_q", "ke_s"],
+      view: meta,
+      hashOf,
+      isChecked: () => false,
+      limit: 30,
+      entryOf: (id) =>
+        id === "ke_s"
+          ? { kind: "research note", title: "Claims audit / stale-tip register", author: null, handle: null }
+          : id === "ke_q"
+            ? { kind: "note", title: "Map of the knowledge base (hub)", author: null, handle: null }
+            : { kind: "post", title: "Index your site with IndexNow", author: null, handle: null }
+    });
+    assert.deepEqual(titled.map((c) => [c.a, c.b, c.reason]), [
+      ["ke_a", "ke_d", "contradicts"],
+      ["ke_a", "ke_b", "shared"]
+    ]);
     assert.deepEqual(
       all.map((c) => [c.a, c.b, c.reason]),
       [
