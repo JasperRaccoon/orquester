@@ -63,6 +63,7 @@ test("an unmarked row — a user's same-named server — makes no link, and a ma
   assert.equal(readThreadToolReference({ threadId: "", title: "x", relation: "delegate" }), undefined);
   assert.equal(readThreadToolReference({ threadId: "c1", title: "x", relation: "sibling" }), undefined);
   assert.equal(readThreadToolReference("c1"), undefined);
+  assert.deepEqual(readThreadToolReference({ threadId: "c1", title: "Review", relation: "opened" }), { threadId: "c1", title: "Review", relation: "opened" });
   assert.deepEqual(readThreadToolReference({ threadId: "c1", title: 5, relation: "fork" }), { threadId: "c1", title: "", relation: "fork" });
 });
 

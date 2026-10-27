@@ -20,7 +20,6 @@ import {
   sessionToolReferences,
   SESSION_TOOL_REFERENCE_MAX_BYTES
 } from "./session-tools.ts";
-import { stripSecretRequestValues } from "./secret-requests.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 test("every provider's spelling parses to the bare name", () => {
@@ -92,12 +91,12 @@ test("a row is a session tool's only by the ingestion's marker, never by its spe
   assert.equal(sessionToolNameOfData(marked), "echo");
   // A user's same-named external /mcp server: spelled alike, never marked, never read as ours.
   const external = { toolName: "mcp__orquester__send_message", input: {} };
-  assert.equal(sessionToolMarkedData(external, registered), external);
+  assert.deepEqual(sessionToolMarkedData(external, registered), { toolName: "mcp__orquester__send_message", input: {} });
   assert.equal(sessionToolNameOfData(external), null);
   assert.equal(sessionToolNameOfData({ toolName: "mcp__orquester__echo" }), null, "spelling alone is not provenance");
   // No session tools: nothing marked.
   const plain = { server: "orquester", tool: "echo" };
-  assert.equal(sessionToolMarkedData(plain, new Set()), plain);
+  assert.deepEqual(sessionToolMarkedData(plain, new Set()), { server: "orquester", tool: "echo" });
 });
 
 test("reference fields are read from structuredContent or the JSON text block", () => {
@@ -178,32 +177,6 @@ test("a row slimmed before keeps its references: the summary its result became i
   assert.deepEqual(projectSessionToolData(slimmedOnce), { name: "html_render", references: { htmlRender: ref } });
   // Only the listed keys, and still under the size cap.
   assert.equal(projectSessionToolData({ ...slimmedOnce, sessionTool: { name: "html_render", references: { other: 1 } } })?.references, undefined);
-});
-
-test("secretRequest is a kept reference key beside htmlRender: the record survives a double slim, the value never", () => {
-  const record = { name: "DEPLOY_KEY", purpose: "Push the release", outcome: "provided" };
-  const value = "correct-horse-battery-staple-4711";
-  // As ingestion stores it: the value stripped by shape first, then marked.
-  const stored = stripSecretRequestValues({
-    toolName: "mcp__orquester__request_secret",
-    input: { name: "DEPLOY_KEY", prompt: "Paste it." },
-    result: {
-      type: "tool_result",
-      content: [{ type: "text", text: JSON.stringify({ secretRequest: record, value, note: "Do not print it." }) }]
-    }
-  });
-  assert.ok(!JSON.stringify(stored).includes(value));
-  const payload = {
-    itemType: "mcp_tool_call",
-    status: "completed",
-    data: sessionToolMarkedData(stored, new Set(["request_secret"]))
-  };
-  const once = slimActivityPayload(payload) as { data: Record<string, unknown> };
-  const twice = slimActivityPayload(once) as { data: Record<string, unknown> };
-  for (const slim of [once, twice]) {
-    assert.deepEqual(slim.data.sessionTool, { name: "request_secret", references: { secretRequest: record } });
-    assert.ok(!JSON.stringify(slim).includes(value));
-  }
 });
 
 test("a marked row keeps data.sessionTool through slimming; an unmarked MCP row has none", () => {
@@ -300,7 +273,7 @@ test("image bytes leave every provider's recorded result; the rest stays", () =>
   }
 });
 
-test("a string blob is cut at the cap; arguments, small values and untouched data keep their identity", () => {
+test("a string blob is cut at the cap; arguments and small values stay intact", () => {
   const big = "word ".repeat((SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 5_000) / 5);
   const data = {
     toolName: "mcp__orquester__echo",
@@ -309,14 +282,14 @@ test("a string blob is cut at the cap; arguments, small values and untouched dat
     sessionTool: { name: "echo" }
   };
   const bounded = boundSessionToolData(data) as typeof data;
-  assert.equal(bounded.input, data.input, "the agent's arguments are kept as written");
+  assert.deepEqual(bounded.input, { html: big }, "the agent's arguments are kept as written");
   assert.ok(bounded.result.content.length < SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 100);
   assert.match(bounded.result.content, /… \[\d+ bytes omitted\]$/);
   // Multi-byte text is cut on a whole character.
   const wide = boundSessionToolData({ result: "é".repeat(SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) }) as { result: string };
   assert.match(wide.result, /^é+… \[\d+ bytes omitted\]$/);
   const small = { toolName: "mcp__orquester__echo", result: { content: [{ type: "text", text: "{}" }] }, sessionTool: { name: "echo" } };
-  assert.equal(boundSessionToolData(small), small);
+  assert.deepEqual(boundSessionToolData(small), { toolName: "mcp__orquester__echo", result: { content: [{ type: "text", text: "{}" }] }, sessionTool: { name: "echo" } });
 });
 
 test("a base64 run spelled into text is dropped whole, and the text around it stays", () => {

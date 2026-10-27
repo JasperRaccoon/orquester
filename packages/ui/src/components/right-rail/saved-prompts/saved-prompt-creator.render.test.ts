@@ -7,10 +7,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 
 import type { SavedPrompt } from "@orquester/api";
 
-import { promptCreatorBadge, SavedPromptItem } from "./SavedPromptItem";
+import { SavedPromptItem } from "./SavedPromptItem";
 
 const prompt = (extra: Partial<SavedPrompt> = {}): SavedPrompt => ({
   id: "p1",
@@ -28,8 +29,8 @@ const prompt = (extra: Partial<SavedPrompt> = {}): SavedPrompt => ({
 });
 
 const noop = (): void => {};
-const render = (value: SavedPrompt, expanded: boolean): string =>
-  renderToStaticMarkup(
+const render = (value: SavedPrompt, expanded: boolean): DocumentFragment =>
+  JSDOM.fragment(renderToStaticMarkup(
     createElement(SavedPromptItem, {
       prompt: value,
       expanded,
@@ -47,29 +48,35 @@ const render = (value: SavedPrompt, expanded: boolean): string =>
       onMove: noop,
       onDelete: noop
     })
-  );
+  ));
+
+const pin = (view: DocumentFragment): HTMLButtonElement => {
+  const button = [...view.querySelectorAll("button")].find((candidate) => candidate.textContent === "Pin");
+  assert.ok(button, "the Pin button is available");
+  return button;
+};
 
 const byAgent = prompt({ createdBy: { kind: "agent", agent: "codex", threadId: "t1", title: "Plan the API" } });
 
-test("the badge names the agent and, in its title, the chat", () => {
-  assert.deepEqual(promptCreatorBadge(byAgent)?.label, "by Codex");
-  assert.ok(promptCreatorBadge(byAgent)?.title?.includes("Plan the API"));
-  assert.equal(promptCreatorBadge(prompt()), null);
-  assert.equal(promptCreatorBadge(prompt({ createdBy: { kind: "user" } })), null);
-  assert.equal(promptCreatorBadge(prompt({ createdBy: { kind: "agent", agent: "future" } }))?.label, "by an agent");
-});
-
 test("an agent's prompt shows its badge collapsed and open, and has no one-click pin", () => {
-  assert.match(render(byAgent, false), /data-created-by="agent"[^>]*>.*by Codex/);
-  const open = render(byAgent, true);
-  assert.match(open, /by Codex/);
-  assert.match(open, /<button\b[^>]*aria-pressed="false"[^>]*disabled=""[^>]*data-agent-pin="disabled"/);
-  assert.match(open, /open Edit to read it/);
+  const collapsed = render(byAgent, false);
+  assert.match(collapsed.textContent ?? "", /by Codex/);
+  assert.ok([...collapsed.querySelectorAll("[title]")].some((element) => element.getAttribute("title")?.includes("Plan the API")));
+  assert.match(render(byAgent, true).textContent ?? "", /by Codex/);
+  for (const value of [byAgent, prompt({ createdBy: { kind: "agent", agent: "future" } })]) {
+    const button = pin(render(value, true));
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    assert.equal(button.disabled, true);
+  }
 });
 
 test("an already pinned agent prompt can still be unpinned; the user's prompts pin as before", () => {
-  assert.match(render({ ...byAgent, pinned: true }, true), /<button\b[^>]*aria-pressed="true"(?![^>]*disabled="")[^>]*data-agent-pin="unpin"/);
-  const mine = render(prompt(), true);
-  assert.doesNotMatch(mine, /data-created-by/);
-  assert.doesNotMatch(mine, /<button\b[^>]*aria-pressed="false"[^>]*disabled=""/);
+  const pinned = pin(render({ ...byAgent, pinned: true }, true));
+  assert.equal(pinned.getAttribute("aria-pressed"), "true");
+  assert.equal(pinned.disabled, false);
+  for (const value of [prompt(), prompt({ createdBy: { kind: "user" } })]) {
+    const mine = render(value, true);
+    assert.doesNotMatch(mine.textContent ?? "", /by Codex/);
+    assert.equal(pin(mine).disabled, false);
+  }
 });

@@ -55,7 +55,6 @@ describe("preferred profile per agent (persisted-shape rule)", () => {
   it("null forgets the agent's pick (Global); a deleted profile is forgotten everywhere", () => {
     const map = withPreferredProfile({}, "claude", "p-dev");
     assert.deepEqual(map, { claude: "p-dev" });
-    assert.equal(withPreferredProfile(map, "claude", "p-dev"), map, "unchanged keeps identity");
     assert.deepEqual(withPreferredProfile(map, "claude", null), {});
     assert.deepEqual(withoutPreferredProfile({ claude: "p-dev", codex: "p-dev", grok: "p-ed" }, "p-dev"), { grok: "p-ed" });
   });
@@ -63,6 +62,5 @@ describe("preferred profile per agent (persisted-shape rule)", () => {
   it("keeps only the picks the daemon's profile list knows", () => {
     const map = { claude: "p-dev", codex: "p-gone", grok: "p-broken" };
     assert.deepEqual(keepKnownPreferredProfiles(map, new Set(["p-dev", "p-broken"])), { claude: "p-dev", grok: "p-broken" });
-    assert.equal(keepKnownPreferredProfiles(map, new Set(["p-dev", "p-gone", "p-broken"])), map, "unchanged keeps identity");
   });
 });

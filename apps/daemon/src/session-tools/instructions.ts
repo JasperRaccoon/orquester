@@ -4,26 +4,18 @@
  * chat inside an automated workflow the line saying approvals are not available, and (Knowledge
  * Graph plugin) for a chat that can see at least one knowledge collection the knowledge line
  * naming them. Every chat tool is on in every chat, so nothing here names tools that are off.
- * Detail stays in tool descriptions. The worst case stays under {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES},
+ * Detail stays in tool descriptions. The worst case stays under 2 048 bytes,
  * plus exactly {@link KNOWLEDGE_LINE_MAX_BYTES} when the knowledge line is present (asserted by
  * `instructions.test.ts`). A knowledge worker session gets {@link KNOWLEDGE_WORKER_INSTRUCTIONS} instead.
  *
  * Pure: the daemon composes it; the agent host only passes it on.
  */
 
-/** Spec §9.5 / D-13: the whole block, worst case, without the knowledge line. */
-export const ORQUESTER_INSTRUCTIONS_MAX_BYTES = 2048;
-
 /**
  * Knowledge Graph spec, "Agent tools": the knowledge line's cap. The block's cap rises by exactly
  * this much only when the line is present, so a chat without knowledge pays nothing.
  */
-export const KNOWLEDGE_LINE_MAX_BYTES = 256;
-
-/** The block's cap for one thread: {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES}, plus the knowledge line's when it has one. */
-export function orquesterInstructionsCap(hasKnowledgeLine: boolean): number {
-  return ORQUESTER_INSTRUCTIONS_MAX_BYTES + (hasKnowledgeLine ? KNOWLEDGE_LINE_MAX_BYTES : 0);
-}
+const KNOWLEDGE_LINE_MAX_BYTES = 256;
 
 /**
  * The fixed part: spec §10, revised with T3 Code's orchestration wording — tools a harness loads on

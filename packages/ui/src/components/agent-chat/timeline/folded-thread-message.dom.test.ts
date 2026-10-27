@@ -112,7 +112,7 @@ function body(scope: HTMLElement): HTMLElement {
 describe("another chat's message folds to one line", () => {
   for (const origin of ["sent", "reply", "opened", "delegated"] as const) {
     it(`folds a ${origin} message behind a header naming its sender and first line`, () => {
-      const scope = render(sentBy(origin));
+      const scope = render(sentBy(origin, "\n\n  Audit   the\tauth module.  \nThen report back."));
       const button = header(scope);
       assert.equal(button.getAttribute("aria-expanded"), "false");
       assert.equal(button.getAttribute("aria-controls"), body(scope).id);

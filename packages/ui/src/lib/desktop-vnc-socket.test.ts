@@ -54,6 +54,8 @@ test("noVNC attaches the channel and receives RFB bytes", async () => {
     const receiver = new Websock();
     receiver.attach(channel);
     assert.equal(receiver.readyState, "connecting");
+    socket.open();
+    assert.equal(receiver.readyState, "open");
     socket.message(new Uint8Array([82, 70, 66, 32]).buffer);
     assert.equal(receiver.rQshiftStr(4), "RFB ");
   } finally {
@@ -63,18 +65,6 @@ test("noVNC attaches the channel and receives RFB bytes", async () => {
       else delete globals[key];
     }
   }
-});
-
-test("forces arraybuffer and mirrors readyState and protocol", () => {
-  const socket = new FakeSocket();
-  socket.protocol = "binary";
-  const channel = new DesktopVncChannel(socket);
-  assert.equal(channel.binaryType, "arraybuffer");
-  assert.equal(channel.readyState, 0);
-  assert.equal(channel.protocol, "binary");
-  socket.open();
-  assert.equal(channel.readyState, 1);
-  channel.close();
 });
 
 test("text frames are consumed as control messages and a pong yields an RTT sample", () => {

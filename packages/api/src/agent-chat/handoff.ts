@@ -184,20 +184,20 @@ export function retainedTurnsForFork(
 // ---------------------------------------------------------------------------
 
 /** The context window, in tokens, a handoff assumes when the target model's is unknown (T3 Code's). */
-export const HANDOFF_FALLBACK_CONTEXT_WINDOW = 128_000;
+const HANDOFF_FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /**
  * The least room, in tokens, kept out of the target's window for its system prompt, tool
  * definitions and the work after the handoff; a quarter of a larger window is kept instead.
  */
-export const HANDOFF_MIN_RESERVE_TOKENS = 16_000;
+const HANDOFF_MIN_RESERVE_TOKENS = 16_000;
 
 /**
  * UTF-8 bytes a token is counted as: one. T3 Code's deliberately pessimistic rate — a token of a
  * byte-level tokenizer is never shorter than a byte, and English prose runs near four bytes a
  * token — so a budget sized with it fits whatever the text, multilingual included.
  */
-export const HANDOFF_BYTES_PER_TOKEN = 1;
+const HANDOFF_BYTES_PER_TOKEN = 1;
 
 /** Room the rendered handoff's own words take: its preamble, the `read_transcript` call, the coverage line. */
 export const HANDOFF_PREAMBLE_BYTES = 2 * 1024;

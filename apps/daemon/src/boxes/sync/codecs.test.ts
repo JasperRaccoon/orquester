@@ -3,14 +3,14 @@ import { test } from "node:test";
 
 import { parse as parseToml } from "@decimalturn/toml-patch";
 
-import { secretPaths, syncCodec, type CodecContext } from "./codecs.ts";
+import { syncCodec, type CodecContext } from "./codecs.ts";
 import { executableConfigKeys } from "./rules.ts";
 
 const identity: CodecContext = { paths: { kind: "identity" } };
 const windows: CodecContext = { paths: { kind: "windows-prefix", prefix: "C:\\orq" } };
 const buf = (text: string): Buffer => Buffer.from(text, "utf8");
 
-test("secret paths: MCP env/headers and credential-named keys, not names of secrets", () => {
+test("the box copy blanks nested credential values while preserving settings that name credentials", () => {
   const doc = {
     mcpServers: { gh: { command: "gh-mcp", env: { GH_TOKEN: "ghp_x", MODE: "fast" }, headers: { Authorization: "Bearer y" } } },
     env: { GITHUB_TOKEN: "t", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000", API_KEY_ENV_VAR: "NAME" },
@@ -18,14 +18,15 @@ test("secret paths: MCP env/headers and credential-named keys, not names of secr
     provider: { openai: { options: { apiKey: "sk-1" } } },
     empty: { token: "" }
   };
-  const paths = secretPaths(doc).map((path) => path.join("."));
-  assert.deepEqual(paths.sort(), [
-    "env.GITHUB_TOKEN",
-    "mcpServers.gh.env.GH_TOKEN",
-    "mcpServers.gh.env.MODE",
-    "mcpServers.gh.headers.Authorization",
-    "provider.openai.options.apiKey"
-  ]);
+  const copy = syncCodec("mcp-json").toBox(buf(JSON.stringify(doc)), null, identity);
+  assert.ok(copy);
+  assert.deepEqual(JSON.parse(copy.toString("utf8")), {
+    mcpServers: { gh: { command: "gh-mcp", env: { GH_TOKEN: "", MODE: "" }, headers: { Authorization: "" } } },
+    env: { GITHUB_TOKEN: "", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000", API_KEY_ENV_VAR: "NAME" },
+    apiKeyHelper: "/bin/helper",
+    provider: { openai: { options: { apiKey: "" } } },
+    empty: { token: "" }
+  });
 });
 
 test("mcp-json blanks secrets in the box copy and restores them on approval, keeping comments", () => {

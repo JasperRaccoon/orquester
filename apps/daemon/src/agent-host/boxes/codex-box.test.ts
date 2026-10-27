@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, symlink, writeFile, chmod } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -26,12 +26,14 @@ interface Frame {
   result?: Record<string, unknown>;
 }
 
-test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens, refresh answered by the broker, MCP bridged (fixture 01 replayed)", async () => {
+test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens, refresh answered by the broker, MCP bridged (fixture 01 replayed)", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "codex-box-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(join(home, ".local", "bin"), { recursive: true });
   await writeFile(join(home, "sh"), '#!/bin/sh\nprintf "%s" "/usr/bin:/bin"\n', "utf8");
   await chmod(join(home, "sh"), 0o755);
   const appdir = await mkdtemp(join(tmpdir(), "codex-box-appdir-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   // The box's `codex`: a peer answering every request with fixture 01's recorded frames; the
   // login and the refresh request it raises right after are the frames the spikes doc records
   // (spike 2: `{type: "chatgptAuthTokens"}`, then `{reason: "unauthorized", previousAccountId}`).
@@ -58,6 +60,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
       ]
     }
   });
+  t.after(() => rm(peer.dir, { recursive: true, force: true }));
   await symlink(peer.bin, join(home, ".local", "bin", "codex"));
 
   // The host's `config.toml` (the source of truth) holds the real values; `local-db` is switched
@@ -92,6 +95,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
   });
   const fake = createFakeContext({
     boxes,
+    tmpDir: () => join(appdir, "tmp"),
     buildEnv: () => ({ PATH: "/host/bin", HOME: "/var/lib/orquester", OPENAI_API_KEY: "sk-host", ORQUESTER_SESSION_ID: "t1" })
   });
   const adapter = await createCodexAdapter(fake.context);
@@ -104,6 +108,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     tooling: { pathPrepend: [], env: {}, nodeRequire: [] }
   };
   const cwd = await mkdtemp(join(tmpdir(), "codex-box-project-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
   try {
     await adapter.startSession({
       threadId: "t1",

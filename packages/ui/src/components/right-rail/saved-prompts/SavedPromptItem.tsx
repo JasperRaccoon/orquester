@@ -52,7 +52,7 @@ const CREATOR_AGENT_LABELS: Readonly<Record<string, string>> = {
  * The "by <agent>" badge of a prompt an agent created (unified MCP D-16), or null for the user's
  * own. Only `kind: "agent"` is an agent's; the label is the agent's name, the title says which chat.
  */
-export function promptCreatorBadge(prompt: Pick<SavedPrompt, "createdBy">): { label: string; title: string } | null {
+function promptCreatorBadge(prompt: Pick<SavedPrompt, "createdBy">): { label: string; title: string } | null {
   const createdBy = prompt.createdBy;
   if (createdBy?.kind !== "agent") return null;
   const agent = (createdBy.agent && CREATOR_AGENT_LABELS[createdBy.agent]) || "an agent";
@@ -61,7 +61,7 @@ export function promptCreatorBadge(prompt: Pick<SavedPrompt, "createdBy">): { la
 }
 
 /** Why an agent-created prompt has no one-click pin. */
-export const AGENT_PROMPT_PIN_NOTE = "Created by an agent: open Edit to read it, then pin it there";
+const AGENT_PROMPT_PIN_NOTE = "Created by an agent: open Edit to read it, then pin it there";
 
 /** The brief line under a prompt after an Insert / Send: it landed, or why not. */
 export interface SavedPromptFeedback {
@@ -306,7 +306,6 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
           disabled={agentCreated && !prompt.pinned}
           onClick={props.onTogglePin}
           className={cn(iconButton, "disabled:pointer-events-none disabled:opacity-40")}
-          data-agent-pin={agentCreated ? (prompt.pinned ? "unpin" : "disabled") : undefined}
         >
           <Star
             size={14}
@@ -513,7 +512,6 @@ function CreatorBadge({ prompt, className }: { prompt: SavedPrompt; className?: 
   return (
     <span
       title={badge.title}
-      data-created-by="agent"
       className={cn(
         "inline-flex shrink-0 items-center gap-0.5 rounded-full bg-info-soft/40 px-1.5 py-px text-[10px] font-medium text-info-300",
         className

@@ -68,33 +68,24 @@ export interface ProfileLaunchContribution {
   serverPool?: HostThreadServerPool;
 }
 
-export type ProfileLaunchContributor<A extends SessionProfileAgentId = SessionProfileAgentId> = (
+type ProfileLaunchContributor<A extends SessionProfileAgentId = SessionProfileAgentId> = (
   ctx: ProfileLaunchContext<A>
 ) => ProfileLaunchContribution | Promise<ProfileLaunchContribution>;
 
 /** One contributor per agent. */
-export type ProfileLaunchContributors = { [A in SessionProfileAgentId]: ProfileLaunchContributor<A> };
+type ProfileLaunchContributors = { [A in SessionProfileAgentId]: ProfileLaunchContributor<A> };
 
 const contributesNothing = (): ProfileLaunchContribution => ({});
 
 /**
- * The registry. Per-agent tasks replace their entry here (and nowhere else): the resolver reads
- * it through {@link profileLaunchContribution}.
+ * The registry read by the resolver. Each agent has one contribution.
  */
-export const profileLaunchContributors: ProfileLaunchContributors = {
+const profileLaunchContributors: ProfileLaunchContributors = {
   claude: contributesNothing,
   codex: codexProfileLaunchContribution,
   grok: grokProfileLaunchContribution,
   opencode: opencodeLaunchContribution
 };
-
-/** The contributor for `agent` (the registry's unless another one is given — tests). */
-export function profileLaunchContribution<A extends SessionProfileAgentId>(
-  agent: A,
-  contributors: ProfileLaunchContributors = profileLaunchContributors
-): ProfileLaunchContributor<A> {
-  return contributors[agent] as ProfileLaunchContributor<A>;
-}
 
 /** A chat thread's launch fields, as `CreateHostThreadRequest` / `SetThreadIdentityRequest` carry them. */
 export interface ChatLaunchFields {
@@ -153,7 +144,6 @@ export type ResolveProfileLaunch = (request: ProfileLaunchRequest) => Promise<Re
 
 export interface ProfileLaunchResolverOptions {
   lifecycle: { ensureReady(profileId: string, agent: SessionProfileAgentId, accountId: string | null): Promise<SessionProfileReady> };
-  contributors?: ProfileLaunchContributors;
   /** The account's home when the launch env names none (System: the agent's system home). */
   accountHome?(agent: SessionProfileAgentId, accountId: string | null): string | null;
 }
@@ -184,7 +174,8 @@ export function createProfileLaunchResolver(options: ProfileLaunchResolverOption
     const accountHome = request.base.launchEnv[homeVariable] ?? options.accountHome?.(agent, accountId) ?? null;
     let contribution: ProfileLaunchContribution;
     try {
-      contribution = await profileLaunchContribution(agent, options.contributors)({
+      const contribute = profileLaunchContributors[agent] as ProfileLaunchContributor<typeof agent>;
+      contribution = await contribute({
         agent,
         profile,
         manifestSection,
@@ -215,31 +206,15 @@ export function deletedProfileNotice(name: string | undefined): string {
 
 /**
  * Follows which profiles EXIST now ({@link liveIds}): what workflow validation checks an agent
- * block's `profileId` against (§5.5), synchronously. It also remembers the names it has seen; the
- * deleted-profile notice does NOT use them (it reads the store's durable `deleted.json`).
+ * block's `profileId` against (§5.5), synchronously.
  */
 export class SessionProfileNames {
-  private readonly names = new Map<string, string>();
-  private readonly reads = new Set<Promise<void>>();
   /** Created or changed since tracking began (live unless deleted after). */
   private readonly seen = new Set<string>();
   /** Deleted since tracking began: a list read that started before the delete must not revive them. */
   private readonly gone = new Set<string>();
   /** The ids the first list read answered (unreadable profile directories too); null until it landed. */
   private listed: Set<string> | null = null;
-
-  /** Resolves once every name read started so far has landed (tests). */
-  async idle(): Promise<void> {
-    while (this.reads.size > 0) await Promise.allSettled([...this.reads]);
-  }
-
-  note(profileId: string, name: string): void {
-    this.names.set(profileId, name);
-  }
-
-  get(profileId: string): string | undefined {
-    return this.names.get(profileId);
-  }
 
   /** The ids of the profiles that exist now, or undefined until the first list read landed (unknown). */
   liveIds(): string[] | undefined {
@@ -248,12 +223,11 @@ export class SessionProfileNames {
   }
 
   /**
-   * Fill from the service's list now and follow its changes (a deleted profile's name is kept).
-   * Never throws; a read that fails leaves the name unknown (and, for the first list, the live ids).
+   * Fill from the service's list now and follow creates and deletes.
+   * Never throws; a failed first list leaves the live ids unknown.
    */
   track(service: {
-    list(): Promise<{ profiles: Array<{ id: string; name: string }>; errors?: Array<{ profileId: string }> }>;
-    get(profileId: string): Promise<{ name: string }>;
+    list(): Promise<{ profiles: Array<{ id: string }>; errors?: Array<{ profileId: string }> }>;
     events: {
       on(event: "changed", listener: (payload: { profileId: string }) => void): unknown;
       on(event: "deleted", listener: (payload: { profileId: string }) => void): unknown;
@@ -262,12 +236,6 @@ export class SessionProfileNames {
     service.events.on("changed", ({ profileId }) => {
       this.seen.add(profileId);
       this.gone.delete(profileId);
-      const read = service.get(profileId).then(
-        ({ name }) => this.note(profileId, name),
-        () => undefined
-      );
-      this.reads.add(read);
-      void read.finally(() => this.reads.delete(read));
     });
     service.events.on("deleted", ({ profileId }) => {
       this.seen.delete(profileId);
@@ -275,7 +243,6 @@ export class SessionProfileNames {
     });
     return service.list().then(
       ({ profiles, errors }) => {
-        for (const profile of profiles) if (!this.names.has(profile.id)) this.note(profile.id, profile.name);
         // An unreadable profile directory still exists: a block naming it is not "missing".
         this.listed = new Set([...profiles.map((profile) => profile.id), ...(errors ?? []).map((error) => error.profileId)]);
       },

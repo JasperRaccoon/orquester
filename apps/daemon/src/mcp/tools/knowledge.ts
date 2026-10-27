@@ -241,12 +241,12 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
 }
 
 /** The get answer as the agent reads it. */
-export function renderItem(response: KnowledgeItemResponse, names: ReadonlyMap<string, string>): string {
+function renderItem(response: KnowledgeItemResponse, names: ReadonlyMap<string, string>): string {
   return response.kind === "entry" ? renderEntryDetail(response.entry, names) : renderConceptDetail(response.concept, names);
 }
 
 /** The save answer: what was saved, what was already there, what was created. */
-export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<string, string>): string {
+function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<string, string>): string {
   const all = new Map(names);
   for (const created of response.createdCollections) all.set(created.id, created.name);
   const saved = response.results.filter((result) => result.status === "saved").length;
@@ -264,16 +264,16 @@ export function renderSave(response: KnowledgeSaveResponse, names: ReadonlyMap<s
 }
 
 /** The edit answer: what changed, the entry as it is now, its citation (relinking shows in the head). */
-export function renderUpdate(detail: KnowledgeEntryDetail, changed: readonly string[], names: ReadonlyMap<string, string>): string {
+function renderUpdate(detail: KnowledgeEntryDetail, changed: readonly string[], names: ReadonlyMap<string, string>): string {
   const entry = detail.entry;
   return [`Updated ${changed.join(", ")}.`, `entry ${entryHead(entry, names)}`, `Title: ${oneLine(entry.title)}`, `cite: ${detail.citation}`].join("\n");
 }
 
 /** One id of a delete call: deleted (with what it was), or refused (with the daemon's words). */
-export type KnowledgeDeleteOutcome = { id: string; deleted: true; title: string } | { id: string; deleted: false; message: string };
+type KnowledgeDeleteOutcome = { id: string; deleted: true; title: string } | { id: string; deleted: false; message: string };
 
 /** The delete answer: what was deleted, what was not and why. */
-export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): string {
+function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): string {
   const deleted = outcomes.filter((outcome) => outcome.deleted).length;
   const failed = outcomes.length - deleted;
   const lines = [`Deleted ${deleted} entr${deleted === 1 ? "y" : "ies"}${failed > 0 ? `; ${failed} not deleted` : ""}. Their cite links no longer resolve.`];
@@ -284,7 +284,7 @@ export function renderDelete(outcomes: readonly KnowledgeDeleteOutcome[]): strin
 }
 
 /** Every collection, one line each. */
-export function renderCollections(response: KnowledgeCollectionsResponse): string {
+function renderCollections(response: KnowledgeCollectionsResponse): string {
   const lines = [`${response.collections.length} collection${response.collections.length === 1 ? "" : "s"}, ${response.totalEntries} entries (${response.unfiledCount} unfiled).`];
   for (const collection of response.collections) {
     const description = collection.description ? `: ${clipText(oneLine(collection.description), DESCRIPTION_CHARS)}` : "";
@@ -295,7 +295,7 @@ export function renderCollections(response: KnowledgeCollectionsResponse): strin
 }
 
 /** A worker's next task (or the word to stop). */
-export function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
+function renderWorkerNext(next: KnowledgeWorkerNextResponse): string {
   if (next.kind === "done") return `No task (${next.reason}). End your turn now.`;
   const task = next.task;
   const lines = [`Task ${task.taskId} · step ${task.step} · answer ≤ ${task.maxTokens} tokens · ${task.remaining} more waiting`];
@@ -349,7 +349,7 @@ const newCollection = z
   .strict();
 
 /** A save item as the route takes it: a handle without its "@", absent fields left out. */
-export function toSaveItem(item: z.infer<typeof saveItem>): KnowledgeSaveItem {
+function toSaveItem(item: z.infer<typeof saveItem>): KnowledgeSaveItem {
   const handle = item.handle?.replace(/^@+/, "");
   return {
     body: item.body,
@@ -376,7 +376,7 @@ const updateFields = {
 type UpdateFields = z.infer<z.ZodObject<typeof updateFields>>;
 
 /** An edit as the route takes it: only the fields passed, a handle without its "@", collections once each. */
-export function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
+function toUpdateRequest(fields: UpdateFields): UpdateKnowledgeEntryRequest {
   const request: UpdateKnowledgeEntryRequest = {};
   if (fields.title !== undefined) request.title = fields.title;
   if (fields.body !== undefined) request.body = fields.body;

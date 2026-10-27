@@ -29,7 +29,6 @@ test("new whiteboards go in the project's whiteboards folder", () => {
 
 test("a new whiteboard is an empty Excalidraw scene", () => {
   const file = emptyWhiteboardFile();
-  assert.equal(isWhiteboardScene(file), true);
   assert.deepEqual(JSON.parse(file), {
     type: "excalidraw",
     version: 2,

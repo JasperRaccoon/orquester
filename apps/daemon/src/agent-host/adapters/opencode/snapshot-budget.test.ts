@@ -104,7 +104,7 @@ function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test("E9: a COLD probe waits for the server to report ready, then reads the catalogue", async () => {
+test("E9: a cold probe waits for readiness and reads the catalogue; the next probe reuses its project server", async () => {
   const peer = makePeer();
   const peers = slowPeers();
   const adapter = await createOpenCodeAdapter(peerCtx(peer, { MOCK_MODE: "slow" }, peers.onWarn));
@@ -128,20 +128,7 @@ test("E9: a COLD probe waits for the server to report ready, then reads the cata
     );
     assert.equal(snapshot.auth.status, "authenticated");
     assert.ok(snapshot.skills.some((skill) => skill.name === "review"));
-  } finally {
-    await adapter.stopAll();
-    peer.cleanup();
-  }
-});
 
-test("E9: the second probe is warm — the start cost is paid once per project", async () => {
-  const peer = makePeer();
-  const peers = slowPeers();
-  const adapter = await createOpenCodeAdapter(peerCtx(peer, { MOCK_MODE: "slow" }, peers.onWarn));
-  try {
-    const cold = adapter.refreshSnapshot({ cwd: peer.dir });
-    peers.ready(await peers.bound(0));
-    await cold;
     // A different spelling of the same project: it must ride the warm server,
     // not start a second one (R4 #6 — the probe keys the pool like a session),
     // which would wait on a readiness line nobody signals.

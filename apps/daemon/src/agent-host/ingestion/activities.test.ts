@@ -379,9 +379,9 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
   }
 
   it("task.started keeps an agent's launch prompt verbatim — never the 180-character detail cap", () => {
-    // Pages of it, leading and trailing whitespace included: the drill-in shows
+    // Past the preview cap, leading and trailing whitespace included: the drill-in shows
     // the prompt the agent was given, not a preview of it (§7.6).
-    const prompt = `  Read b.txt and report its first word.\n\n${"Context line.\n".repeat(900)}  `;
+    const prompt = `  Read b.txt and report its first word.\n\n${"Context line.\n".repeat(20)}  `;
     assert.ok(prompt.length > 180 && prompt.length < 32_000);
     const [row] = runtimeEventToActivities(
       runtimeEvent("task.started", {

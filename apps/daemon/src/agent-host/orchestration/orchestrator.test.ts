@@ -1715,7 +1715,7 @@ describe("orchestrator — reads (§6.3)", () => {
     // Grow the log past the 1 000-row replay budget.
     await host.orchestrator.ingestionSink(
       threadId,
-      Array.from({ length: 1_200 }, (_unused, index) => ({
+      Array.from({ length: 1_001 }, (_unused, index) => ({
         eventId: `bulk-${index}`,
         threadId,
         type: "thread.activity-appended" as const,

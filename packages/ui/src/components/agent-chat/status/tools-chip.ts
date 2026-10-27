@@ -3,7 +3,7 @@
  * is on in every chat, so the chip is about the grants that apply to this chat (and, for a chat a
  * workflow runs, why it has no Admin tools).
  *
- * No React import. Tested by `tools-chip.test.ts`.
+ * No React import.
  */
 
 import type { ThreadAgentToolsResponse } from "@orquester/api";

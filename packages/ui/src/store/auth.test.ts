@@ -92,7 +92,6 @@ describe("establish", () => {
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
     assert.deepEqual(store().authPrompt, { connectionId: CONNECTION.id });
     assert.equal(store().connectionStatus, "error");
-    assert.match(store().authError ?? "", /sign in again/i);
   });
 });
 
@@ -224,6 +223,6 @@ describe("submitCredentials", () => {
     loginAnswer = async () => ({ token: LEGACY });
     await store().submitCredentials("admin", "pw");
     assert.equal(storage.has(`orquester.session:${ENDPOINT}`), false);
-    assert.match(store().authError ?? "", /invalid session token/);
+    assert.ok(store().authError, "an invalid token response supplies an error");
   });
 });

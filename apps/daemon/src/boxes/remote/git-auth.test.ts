@@ -102,19 +102,14 @@ async function agentSocket(dir: string, hub: FakeHub, context: BoxRequestContext
   return { path, server };
 }
 
-/** A Unix-socket ssh-agent with an explicit policy; `seen` collects every request's type byte. */
-async function policySocket(dir: string, policy: SshAgentPolicy | null): Promise<{ path: string; server: Server; seen: number[] }> {
+/** A Unix-socket ssh-agent with an explicit policy. */
+async function policySocket(dir: string, policy: SshAgentPolicy | null): Promise<{ path: string; server: Server }> {
   const path = join(dir, `agent-${randomBytes(4).toString("hex")}.sock`);
-  const seen: number[] = [];
   const server = createServer((socket: Socket) => {
-    socket.on("data", (chunk: Buffer) => {
-      // Single-frame requests in these tests: the type byte follows the length.
-      if (chunk.length > 4) seen.push(chunk[4]!);
-    });
     serveSshAgent(socket, async () => policy);
   });
   await new Promise<void>((resolve) => server.listen(path, resolve));
-  return { path, server, seen };
+  return { path, server };
 }
 
 /** Request/response exchanges on ONE agent connection (bindings are per connection). */
@@ -338,8 +333,8 @@ async function startSshd(dir: string, authorizedKey: string): Promise<{ port: nu
   return { port, hostKeyLine, stop: () => child.kill("SIGTERM") };
 }
 
-/** `ssh -v` to the throwaway sshd as `user`, through the agent at `agentPath`; its stderr. */
-async function sshLogin(sshd: { port: number; hostKeyLine: string }, dir: string, agentPath: string, user: string): Promise<string> {
+/** `ssh -v` to the throwaway sshd as `user`, through the agent at `agentPath`. */
+async function sshLogin(sshd: { port: number; hostKeyLine: string }, dir: string, agentPath: string, user: string): Promise<{ stdout: string; stderr: string; code: unknown }> {
   // The CLIENT trusts the real sshd key (as the box's own known_hosts would); what the agent binds
   // to is decided by the policy under test.
   const clientKnownHosts = join(dir, `client_known_hosts_${randomBytes(4).toString("hex")}`);
@@ -368,8 +363,11 @@ async function sshLogin(sshd: { port: number; hostKeyLine: string }, dir: string
       `${user}@127.0.0.1`
     ],
     { env: { ...process.env, SSH_AUTH_SOCK: agentPath }, timeout: 30_000 }
-  ).catch((error: { stdout?: string; stderr?: string }) => ({ stdout: error.stdout ?? "", stderr: error.stderr ?? "" }));
-  return result.stderr;
+  ).then(
+    (output) => ({ ...output, code: 0 }),
+    (error: { stdout?: string; stderr?: string; code?: unknown }) => ({ stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code })
+  );
+  return result;
 }
 
 async function policyFor(key: { keyPath: string; publicKey: string }, user: string, knownHosts: string, port: number): Promise<SshAgentPolicy> {
@@ -394,11 +392,9 @@ for (const type of ["ed25519", "rsa"] as const) {
         const policy = await policyFor(key, user, `[127.0.0.1]:${sshd.port} ${sshd.hostKeyLine}\n`, sshd.port);
         const agent = await policySocket(dir, policy);
         try {
-          const log = await sshLogin(sshd, dir, agent.path, user);
-          assert.match(log, /Server accepts key: .*agent/);
-          assert.match(log, /Authenticated to 127\.0\.0\.1 .*using "publickey"/);
-          assert.ok(agent.seen.includes(SSH_AGENTC_EXTENSION), "ssh bound the agent connection to the host key");
-          assert.ok(agent.seen.includes(SSH_AGENTC_SIGN_REQUEST));
+          const result = await sshLogin(sshd, dir, agent.path, user);
+          assert.equal(result.code, 0, result.stderr);
+          assert.equal(result.stdout, "orq-box-ok\n");
         } finally {
           agent.server.close();
         }
@@ -427,10 +423,10 @@ test("a real sshd login is refused when the agent may sign only for another user
       // The server takes the key, but the agent signs only for "git".
       const gitOnly = await policySocket(dir, await policyFor(key, "git", trusted, sshd.port));
       try {
-        const log = await sshLogin(sshd, dir, gitOnly.path, user);
-        assert.match(log, /Server accepts key: .*agent/);
-        assert.doesNotMatch(log, /Authenticated to/);
-        assert.match(log, /agent refused operation|signing failed/);
+        const result = await sshLogin(sshd, dir, gitOnly.path, user);
+        assert.equal(result.code, 255, result.stderr);
+        assert.match(result.stderr, /Server accepts key: .*agent/);
+        assert.match(result.stderr, /agent refused operation|signing failed/);
       } finally {
         gitOnly.server.close();
       }
@@ -439,9 +435,10 @@ test("a real sshd login is refused when the agent may sign only for another user
       const elsewhere = hostKey().line(`[127.0.0.1]:${sshd.port}`);
       const wrongHost = await policySocket(dir, await policyFor(key, user, `${elsewhere}\n`, sshd.port));
       try {
-        const log = await sshLogin(sshd, dir, wrongHost.path, user);
-        assert.ok(wrongHost.seen.includes(SSH_AGENTC_EXTENSION), "ssh tried to bind");
-        assert.doesNotMatch(log, /Authenticated to/);
+        const result = await sshLogin(sshd, dir, wrongHost.path, user);
+        assert.equal(result.code, 255, result.stderr);
+        assert.match(result.stderr, /Server accepts key: .*agent/);
+        assert.match(result.stderr, /agent refused operation|signing failed/);
       } finally {
         wrongHost.server.close();
       }

@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { hetznerAdapter } from "./hetzner.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { EUR_TO_USD, roundUsd } from "./price-tables.ts";
 
 const API = "https://api.hetzner.cloud/v1";
 const credentials = { token: "hcloud-test-token" };
@@ -19,6 +18,7 @@ function readRoutes() {
   ];
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working token, a message for a bad or missing one", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/servers?per_page=1`, body: fixture("hetzner", "servers-empty") },
@@ -52,7 +52,7 @@ test("offers: live sizes per available location with the IPv4 price, converted f
   assert.equal(cx23.diskGb, 40);
   assert.equal(cx23.gpu, null);
   // 0.0088 € server + 0.0008 € primary IPv4 per hour.
-  assert.equal(cx23.hourlyUsd, roundUsd((0.0088 + 0.0008) * EUR_TO_USD));
+  assert.equal(cx23.hourlyUsd, 0.0111);
 
   // cpx02 costs more in Singapore: one offer per price, the dearer one with a suffixed id.
   const cpx02 = offers.sizes.filter((size) => size.id.startsWith("cpx02"));
@@ -68,7 +68,7 @@ test("offers: live sizes per available location with the IPv4 price, converted f
   // cpx11 is only orderable in the US locations, whose price differs from its EU list price.
   const cpx11 = offers.sizes.find((size) => size.id === "cpx11");
   assert.deepEqual(cpx11?.regions, ["ash", "hil"]);
-  assert.equal(cpx11?.hourlyUsd, roundUsd((0.028 + 0.0008) * EUR_TO_USD));
+  assert.equal(cpx11?.hourlyUsd, 0.0334);
 
   // Cheapest first.
   const prices = offers.sizes.map((size) => size.hourlyUsd ?? Infinity);
@@ -106,7 +106,7 @@ test("create: one POST with name, labels and cloud-init; price for the chosen lo
     public_net: { enable_ipv4: true, enable_ipv6: true }
   });
   assert.deepEqual(result.ref, { serverId: 100000001, location: "fsn1" });
-  assert.equal(result.hourlyUsd, roundUsd((0.0088 + 0.0008) * EUR_TO_USD));
+  assert.equal(result.hourlyUsd, 0.0111);
   assert.equal(result.windowsPassword, undefined);
   assert.equal(JSON.stringify(result).includes("root_password"), false);
 });

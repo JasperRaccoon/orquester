@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  isKnowledgeCollectionId,
   isKnowledgeEntryId,
   knowledgeEntryFrontmatterSchema,
   parseKnowledgeCollectionsConfig,
@@ -21,12 +20,10 @@ const collection = (overrides: Record<string, unknown> = {}): Record<string, unk
   ...overrides
 });
 
-test("ids follow the contract's shapes", () => {
+test("entry ids follow the stored file-name contract", () => {
   assert.ok(isKnowledgeEntryId("ke_abcdefgh2345"));
   assert.ok(!isKnowledgeEntryId("ke_ABCDEFGH2345"));
   assert.ok(!isKnowledgeEntryId("ke_abc"));
-  assert.ok(isKnowledgeCollectionId("kc_abcdefgh23"));
-  assert.ok(!isKnowledgeCollectionId("kc_abcdefgh234"));
 });
 
 test("collections file: unknown fields, unreadable records and unknown keys survive a rewrite", () => {
@@ -36,6 +33,7 @@ test("collections file: unknown fields, unreadable records and unknown keys surv
     collections: [
       collection({ extraField: 7 }),
       { id: "not-an-id", name: "x" },
+      collection({ id: "kc_abcdefgh234", name: "Too-long id" }),
       collection({ id: "kc_bbbbbbbbbb", name: "seo" }), // repeated name (case-insensitive)
       collection({ id: "kc_abcdefghij", name: "Other" }), // repeated id
       collection({ id: "kc_cccccccccc", name: "Ads", color: "neon" })
@@ -50,25 +48,18 @@ test("collections file: unknown fields, unreadable records and unknown keys surv
     ]
   );
   assert.equal((file.collections[0] as Record<string, unknown>).extraField, 7);
-  assert.equal(file.rejected.length, 3);
+  assert.equal(file.rejected.length, 4);
   const written = serializeKnowledgeCollectionsFile(file) as { collections: unknown[]; future: unknown };
-  assert.equal(written.collections.length, 5);
+  assert.equal(written.collections.length, 6);
+  assert.equal((written.collections[1] as { color: string }).color, "neon");
   assert.deepEqual(written.future, { keep: true });
   assert.deepEqual(written.collections[2], raw.collections[1]);
 });
 
-test("collections file: a colour this build does not know (a newer palette key) is kept for the rewrite", () => {
-  const file = parseKnowledgeCollectionsConfig({
-    version: 1,
-    collections: [collection({ color: "chart-9" }), collection({ id: "kc_dddddddddd", name: "Ads", color: undefined })]
-  });
-  assert.deepEqual(file.collections.map((c) => c.color), ["chart-9", "chart-1"]);
-  const written = serializeKnowledgeCollectionsFile(file) as { collections: { color: unknown }[] };
-  assert.equal(written.collections[0]!.color, "chart-9");
-});
-
 test("collections file: a bare array reads as version 1; a wrong outer shape throws", () => {
-  assert.equal(parseKnowledgeCollectionsConfig([collection()]).collections.length, 1);
+  const fromArray = parseKnowledgeCollectionsConfig([collection({ color: undefined })]);
+  assert.equal(fromArray.collections.length, 1);
+  assert.equal(fromArray.collections[0]?.color, "chart-1");
   assert.throws(() => parseKnowledgeCollectionsConfig({ version: 2, collections: [] }));
   assert.throws(() => parseKnowledgeCollectionsConfig("nope"));
   assert.throws(() => parseKnowledgeCollectionsConfig({ collections: {} }));

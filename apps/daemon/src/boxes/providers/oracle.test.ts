@@ -5,7 +5,6 @@ import { test } from "node:test";
 import { ProviderHttpError } from "./http.ts";
 import { ociKeyFingerprint, ociSignedHeaders, oracleAdapter } from "./oracle.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest } from "./fixtures/vm-replay.ts";
-import { monthlyToHourly, roundUsd } from "./price-tables.ts";
 
 const CORE = "https://iaas.eu-frankfurt-1.oraclecloud.com/20160918";
 const IDENTITY = "https://identity.eu-frankfurt-1.oraclecloud.com/20160918";
@@ -89,12 +88,7 @@ const existingNetworkRoutes = [
   }
 ];
 
-/** E5 Flex, Balanced 50/256 GB boot volume, list prices of products.json. */
-function e5Hourly(ocpus: number, memoryGb: number, windows: boolean): number {
-  const boot = monthlyToHourly((windows ? 256 : 50) * (0.0255 + 10 * 0.0017));
-  return roundUsd(ocpus * 0.03 + memoryGb * 0.002 + (windows ? ocpus * 0.092 : 0) + boot);
-}
-
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("signing: matches the OCI SDK test vector for the documented sample key (GET and POST)", () => {
   // Oracle's sample key from https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm and the
   // expected signatures from oci-go-sdk common/http_signer_test.go, which signs the documentation's sample requests.
@@ -236,14 +230,14 @@ test("offers: flex shape configs per availability domain, live prices, Ubuntu LT
     ramGb: 16,
     diskGb: 50,
     gpu: null,
-    hourlyUsd: e5Hourly(2, 16, false),
+    hourlyUsd: 0.0949,
     regions: [AD1, AD2]
   });
   // A1 is Arm (1 vCPU per OCPU), priced at its paid tier, and only in AD-1 here.
   const a1 = offers.sizes.find((size) => size.id === "VM.Standard.A1.Flex:1:8");
   assert.equal(a1?.vcpu, 1);
   assert.deepEqual(a1?.regions, [AD1]);
-  assert.equal(a1?.hourlyUsd, roundUsd(0.01 + 8 * 0.0015 + monthlyToHourly(50 * (0.0255 + 10 * 0.0017))));
+  assert.equal(a1?.hourlyUsd, 0.0249);
 
   const prices = offers.sizes.map((size) => size.hourlyUsd ?? Infinity);
   assert.deepEqual(prices, [...prices].sort((a, b) => a - b));
@@ -272,7 +266,7 @@ test("offers: Windows has no Arm shapes, adds the licence per OCPU, falls back t
   assert.equal(offers.sizes.some((size) => size.id.startsWith("VM.Standard.A1.Flex")), false);
   const e5 = offers.sizes.find((size) => size.id === "VM.Standard.E5.Flex:2:16");
   assert.equal(e5?.diskGb, 256);
-  assert.equal(e5?.hourlyUsd, e5Hourly(2, 16, true));
+  assert.equal(e5?.hourlyUsd, 0.2909);
   assert.deepEqual(
     offers.images.map((image) => image.id),
     ["windows-2022", "windows-2025", "windows-2019"]
@@ -311,7 +305,7 @@ test("create: Linux into the existing shared subnet — one signed launch with n
     freeformTags: { "orquester-box": TEST_BOX_ID }
   });
   assert.deepEqual(result.ref, ref);
-  assert.equal(result.hourlyUsd, e5Hourly(2, 16, false));
+  assert.equal(result.hourlyUsd, 0.0949);
   assert.equal(result.windowsPassword, undefined);
   assert.equal(replay.pending().length, 0);
 });
@@ -382,7 +376,7 @@ test("create: Windows gets cloudbase-init PowerShell user data, a 256 GB boot vo
   });
   assert.equal(launch.sourceDetails!.bootVolumeSizeInGBs, 256);
   assert.equal(launch.sourceDetails!.imageId, fixture<Array<{ id: string }>>("oracle", "images-windows-e5")[0]!.id);
-  assert.equal(result.hourlyUsd, e5Hourly(2, 16, true));
+  assert.equal(result.hourlyUsd, 0.2909);
   assert.equal(result.windowsPassword, undefined);
 });
 

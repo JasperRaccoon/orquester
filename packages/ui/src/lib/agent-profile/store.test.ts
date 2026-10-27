@@ -13,7 +13,6 @@ import type {
 } from "@orquester/api";
 
 import {
-  agentProfileItemKey,
   agentProfileStore,
   applyAgentProfileEvent,
   applyAgentProfileSnapshot,
@@ -465,7 +464,7 @@ describe("mutations", () => {
     await loadAgentProfile(api, "claude");
     api.server.set("claude", snapshot("claude", "r2", [{ ...JIRA, enabled: false, revision: "rev-2" }]));
     const pending = setAgentProfileItemEnabled(api, "claude", JIRA, false);
-    assert.equal(agentProfileStore.getState().pending.has(agentProfileItemKey("claude", "mcp:jira")), true);
+    assert.equal(agentProfileStore.getState().pending.size, 1, "the mutation is busy before its answer");
     const result = await pending;
     assert.equal(result.ok, true);
     assert.deepEqual(api.mutations[0], {

@@ -27,7 +27,7 @@ interface Body extends SimulationNodeDatum {
 }
 
 /** Clear space kept between two dots, beyond their radii. */
-export const LAYOUT_GAP = 4;
+const LAYOUT_GAP = 4;
 /** Rest length of a link, beyond the radii of its ends. */
 const LINK_GAP = 24;
 /** Pull towards the centre: what keeps unlinked concepts and small clusters near the rest. */

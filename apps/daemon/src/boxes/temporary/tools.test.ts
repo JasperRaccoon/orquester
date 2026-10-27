@@ -20,7 +20,7 @@ import type { StoredBox } from "@orquester/config";
 import type { BoxProcess } from "../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
 import { boxSummary, FakeTemporaryBoxes, ManualClock } from "./testing.ts";
-import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, OutputTail, shellArgv, TemporaryBoxTools } from "./tools.ts";
+import { boxPathFor, EXEC_STDOUT_TAIL_BYTES, KILL_GRACE_MS, shellArgv, TemporaryBoxTools } from "./tools.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "boxes-temporary-")));
 const PROJECT = join(ROOT, "workspaces", "acme", "game");
@@ -250,24 +250,6 @@ test("shells: bash by default on Linux and macOS, PowerShell on Windows; cmd onl
   assert.equal(boxPathFor({ os: "linux", home: "/root" }, "a\0b"), null);
 });
 
-test("output tails keep the last bytes, count all of them, and never start inside a UTF-8 character", () => {
-  const tail = new OutputTail(8);
-  tail.push(Buffer.from("0123456789"));
-  tail.push(Buffer.from("é€"));
-  const snapshot = tail.snapshot();
-  assert.equal(snapshot.bytes, 15);
-  assert.equal(snapshot.truncated, true);
-  assert.equal(snapshot.text, "789é€");
-  const whole = new OutputTail(64);
-  whole.push(Buffer.from("hi"));
-  assert.deepEqual(whole.snapshot(), { text: "hi", bytes: 2, truncated: false });
-  // Many small chunks stay bounded in memory and correct.
-  const many = new OutputTail(4);
-  for (let i = 0; i < 1000; i += 1) many.push(Buffer.from(String(i % 10)));
-  assert.equal(many.snapshot().text, "6789");
-  assert.equal(many.snapshot().bytes, 1000);
-});
-
 test("foreground exec: exit code, both streams, cwd in the box", async () => {
   const { tools } = world();
   mkdirSync(join(BOX, "work"), { recursive: true });
@@ -282,15 +264,16 @@ test("foreground exec: exit code, both streams, cwd in the box", async () => {
   assert.equal(result.value.connectionLost, false);
 });
 
-test("foreground exec: the returned output is capped (tail kept) with the total byte count", async () => {
+test("foreground exec: the returned output is capped on a UTF-8 boundary with the total byte count", async () => {
   const { tools } = world();
-  const result = await tools.exec("box-a", { command: "head -c 100000 /dev/zero | tr '\\000' a; printf END", shell: "sh", timeoutSeconds: 30, background: false }, { principal: agent() });
+  const result = await tools.exec("box-a", { command: 'awk \'BEGIN { for (i=0; i<50000; i++) printf "é"; printf "END" }\'', shell: "sh", timeoutSeconds: 30, background: false }, { principal: agent() });
   assert.ok(result.ok && !result.value.background);
   if (result.value.background) return;
   assert.equal(result.value.stdout.bytes, 100_003);
   assert.equal(result.value.stdout.truncated, true);
-  assert.equal(Buffer.byteLength(result.value.stdout.text), EXEC_STDOUT_TAIL_BYTES);
-  assert.ok(result.value.stdout.text.endsWith("aaaEND"));
+  // The 24 KiB cut falls inside a two-byte é, so its continuation byte is discarded.
+  assert.equal(Buffer.byteLength(result.value.stdout.text), EXEC_STDOUT_TAIL_BYTES - 1);
+  assert.match(result.value.stdout.text, /^é+END$/);
 });
 
 test("foreground exec: the timeout stops the command (SIGTERM, then SIGKILL after a grace)", async () => {

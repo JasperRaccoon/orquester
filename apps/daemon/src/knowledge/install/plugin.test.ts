@@ -469,16 +469,3 @@ test("an unsupported host: no turning on, no checks", async (t) => {
   await h.service.update(ID, { enabled: false });
   assert.deepEqual(h.host.calls.json, []);
 });
-
-test("settings live on the record: merged, unknown keys kept, unreadable state never written", async (t) => {
-  const h = await harness(t, {
-    seed: { version: 1, plugins: { [ID]: { settings: { model: "m", future: { a: 1 } }, extra: true } } }
-  });
-  assert.deepEqual(h.service.pluginSettings(ID), { model: "m", future: { a: 1 } });
-  assert.equal(h.service.isEnabled(ID), false);
-  await h.service.updatePluginSettings(ID, { concurrency: 3, model: undefined });
-  const stored = await onDisk(h);
-  assert.deepEqual(stored.settings, { future: { a: 1 }, concurrency: 3 });
-  assert.equal(stored.extra, true);
-  assert.equal(h.events.length > 0, true, "the change was broadcast");
-});

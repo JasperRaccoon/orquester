@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testBootstrap, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { HOURS_PER_MONTH, roundUsd, VULTR_WINDOWS_LICENCE_USD_PER_VCPU_MONTH } from "./price-tables.ts";
 import { vultrAdapter, vultrWindowsBootScript } from "./vultr.ts";
 
 const API = "https://api.vultr.com/v2";
@@ -20,6 +19,7 @@ function readRoutes() {
   ];
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working key, the provider's message for a bad one", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/instances?per_page=1`, body: fixture("vultr", "instances-empty") },
@@ -74,7 +74,7 @@ test("offers windows: 2 GB minimum and the per-vCPU licence fee from the price t
     ["vc2-1c-2gb", "vc2-2c-4gb", "vhp-2c-4gb-amd"]
   );
   const twoCore = offers.sizes.find((size) => size.id === "vc2-2c-4gb")!;
-  assert.equal(twoCore.hourlyUsd, roundUsd(0.027 + (2 * VULTR_WINDOWS_LICENCE_USD_PER_VCPU_MONTH) / HOURS_PER_MONTH));
+  assert.equal(twoCore.hourlyUsd, 0.0708);
   assert.equal(offers.images[0]!.label, "Windows 2022 Standard x64");
   assert.ok(offers.images.every((image) => image.label.startsWith("Windows")));
   await assert.rejects(vultrAdapter.offers(credentials, "linux-gpu", replayOptions(replayFetch([]))), /does not rent linux-gpu/);
@@ -130,7 +130,7 @@ test("create windows: a boot script carrying the PowerShell bootstrap, the Admin
   assert.equal(body.hostname, `orq-${TEST_BOX_ID}`.slice(0, 15));
   assert.deepEqual(result.ref, { instanceId: INSTANCE_ID, startupScriptId: SCRIPT_ID });
   assert.equal(result.windowsPassword, "REDACTED");
-  assert.equal(result.hourlyUsd, roundUsd(0.027 + 32 / HOURS_PER_MONTH));
+  assert.equal(result.hourlyUsd, 0.0708);
 });
 
 test("create windows: the boot script is removed when the instance create fails, and the create is not retried", async () => {

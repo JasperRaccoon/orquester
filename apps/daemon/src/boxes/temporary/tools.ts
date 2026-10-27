@@ -177,7 +177,7 @@ export interface BoxCallOptions {
 // ---------------------------------------------------------------------------
 
 /** The last `cap` bytes of a stream, and how many bytes it carried in all. */
-export class OutputTail {
+class OutputTail {
   private chunks: Buffer[] = [];
   private held = 0;
   total = 0;

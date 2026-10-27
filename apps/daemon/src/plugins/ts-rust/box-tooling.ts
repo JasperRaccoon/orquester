@@ -55,7 +55,7 @@ export interface TsRustToolingSource {
 export const TS_RUST_BOX_PRELOAD = "preload.cjs";
 export const TS_RUST_BOX_STATE = "state.json";
 
-export interface TsRustTargetEngines {
+interface TsRustTargetEngines {
   /** Each engine's platform package for the target, or null where it has no build. */
   packages: Readonly<Record<TsCheckerEngine, string | null>>;
   supported: TsCheckerEngine[];
@@ -63,7 +63,7 @@ export interface TsRustTargetEngines {
   defaultEngine: TsCheckerEngine | null;
 }
 
-export function tsRustTargetEngines(target: ToolTarget): TsRustTargetEngines {
+function tsRustTargetEngines(target: ToolTarget): TsRustTargetEngines {
   const packageFor = (engine: TsCheckerEngine) =>
     TS_CHECKER_ENGINE_SPECS[engine].platformPackage(target.os, target.arch, target.libc === "musl" ? "musl" : "glibc");
   const packages = { tsrs: packageFor("tsrs"), "tsc-rs": packageFor("tsc-rs") };
@@ -72,7 +72,7 @@ export function tsRustTargetEngines(target: ToolTarget): TsRustTargetEngines {
 }
 
 /** The engine a box runs: `stored` when it has a build for the target, else the target's default. */
-export function tsRustEngineForTarget(target: ToolTarget, stored: TsCheckerEngine | undefined): TsCheckerEngine | null {
+function tsRustEngineForTarget(target: ToolTarget, stored: TsCheckerEngine | undefined): TsCheckerEngine | null {
   const engines = tsRustTargetEngines(target);
   return stored !== undefined && engines.packages[stored] !== null ? stored : engines.defaultEngine;
 }

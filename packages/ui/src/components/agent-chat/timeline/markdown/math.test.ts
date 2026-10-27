@@ -53,7 +53,6 @@ function text(markdown: string): string {
     .replace(/&amp;/g, "&");
 }
 
-
 describe("delimiters", () => {
   const cases: Array<[source: string, expected: Formula[]]> = [
     // The four delimiters models emit.
@@ -231,19 +230,6 @@ describe("structure around an unclosed block (streaming)", () => {
     assert.equal(html.match(/<li>/g)?.length, 2, html);
   });
 
-  it("parses every prefix of a streamed message without throwing", () => {
-    const message = "Energy \\(E = mc^2\\) and $$\\sum_i x_i$$ done.\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n```math\na^2\n```\n";
-    for (let end = 0; end <= message.length; end += 1) {
-      assert.doesNotThrow(() => parse(message.slice(0, end)), message.slice(0, end));
-    }
-    assert.deepEqual(formulas(message), [
-      ["inline", "E = mc^2"],
-      ["inline", "\\sum_i x_i"],
-      ["display", "\\int_0^1 x\\,dx"],
-      ["display", "a^2"]
-    ]);
-  });
-
   it("composes with the incremental fence cache", () => {
     const plugin = createIncrementalMarkdownPlugin();
     const prefix = "```text\ncode\n```\n\n";
@@ -253,81 +239,33 @@ describe("structure around an unclosed block (streaming)", () => {
   });
 });
 
-/**
- * A remark plugin, run after `remarkChatMath`, that counts the characters the
- * math constructs (`$` and `\` keyed, text and flow) consume in a parse.
- */
-function countMathWork(counter: { consumed: number }): unknown {
-  type Construct = { tokenize: (this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) => unknown };
-  return function countMathConsumes(this: {
-    data(): { micromarkExtensions?: Array<Partial<Record<"text" | "flow", Record<number, unknown>>>> };
-  }): void {
-    for (const extension of this.data().micromarkExtensions ?? []) {
-      for (const map of [extension.text, extension.flow]) {
-        for (const code of [36, 92]) {
-          const construct = map?.[code] as Construct | Construct[] | undefined;
-          if (map === undefined || construct === undefined || Array.isArray(construct)) continue;
-          map[code] = {
-            ...construct,
-            tokenize(this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) {
-              const consume = effects.consume as (code: number | null) => void;
-              const counting = {
-                ...effects,
-                consume(next: number | null) {
-                  counter.consumed += 1;
-                  consume(next);
-                }
-              };
-              return construct.tokenize.call(this, counting, ok, nok);
-            }
-          };
-        }
-      }
-    }
-  };
-}
-
-describe("parse work stays linear in unclosed openers", () => {
-  // Each unclosed opener used to rescan the rest of its paragraph, so 5,000 of
-  // them took tens of seconds, and a streamed message re-parses per token.
-  // The guard is the characters the math constructs read, which does not
-  // depend on the machine's load: linear work stays within a small multiple
-  // of the message, and a quadratic scan misses it by three orders of
-  // magnitude. Wall time is not a reliable signal here: micromark's own
-  // `resolveAllText` merges data runs with `splice` in a loop, which takes
-  // 0.5 s or (while V8 is marking the heap) 5–10 s for a paragraph with
-  // thousands of escapes, with or without the math plugins. The wall-clock
-  // cap is only a backstop against a hang.
-  const WALL_CAP_MS = 30_000;
-  const work = (source: string): number => {
-    const counter = { consumed: 0 };
-    parse(source, [countMathWork(counter)]);
-    return counter.consumed;
-  };
-
-  for (const [label, unit, tail, count] of [
-    ["unclosed \\( in one paragraph", "x \\( y ", "", 1000],
-    ["unclosed \\[ in one paragraph", "x \\[ y ", "", 1000],
-    ["alternating unclosed \\( and \\[", "x \\( y \\[ z ", "", 600],
-    ["openers before one backtick", "\\( a ", "`", 1000],
-    ["citations before one closer", "\\[ 1 ", "\\]", 1000],
-    ["unclosed $ in one paragraph", "x $ y ", "", 1000],
-    ["lines of \\[", "\\[\n", "", 1000],
-    ["lines of $$", "$$\n", "", 1000]
-  ] as const) {
-    it(`${count.toLocaleString("en")} ${label}`, () => {
-      const source = unit.repeat(count) + tail;
-      const small = work(unit.repeat(count / 5) + tail);
-      const start = performance.now();
-      const large = work(source);
-      const elapsed = performance.now() - start;
-      // At most one full scan per opener kind (`\(`, `\[`), plus the delimiters.
-      assert.ok(large <= 3 * source.length, `${large} characters read for a ${source.length}-character message`);
-      // Linear is 5x; a quadratic scan is 25x.
-      assert.ok(large <= 10 * Math.max(small, 1), `${small} -> ${large} characters read for 5x the openers`);
-      assert.ok(elapsed < WALL_CAP_MS, `${Math.round(elapsed)} ms`);
-    });
+describe("malformed input stays readable without quadratic rescanning", () => {
+  // These exercise the public markdown pipeline, including source lookahead
+  // before tokenization. Private consume counters missed that work entirely.
+  // CPU time excludes scheduling delays; five seconds leaves ample headroom
+  // over normal parsing while detecting both historical quadratic algorithms.
+  function boundedParse(source: string): ReturnType<typeof parse> {
+    const started = process.cpuUsage();
+    const result = parse(source);
+    const used = process.cpuUsage(started);
+    const cpuMs = (used.user + used.system) / 1000;
+    assert.ok(cpuMs < 5_000, `${Math.round(cpuMs)} ms of CPU to parse malformed markdown`);
+    return result;
   }
+
+  const prose = (html: string): string => html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+
+  it("keeps unclosed inline delimiters literal and renders the later formula within the CPU budget", () => {
+    const result = boundedParse("x \\( y ".repeat(5_000) + "`stop` and \\(z\\)");
+    assert.deepEqual(result.formulas, [["inline", "z"]]);
+    assert.equal(prose(result.html), "x ( y ".repeat(5_000) + "stop and");
+  });
+
+  it("keeps unclosed block delimiters literal and renders the later formula within the CPU budget", () => {
+    const result = boundedParse("\\[\n".repeat(16_000) + "\n\nAfter. $z$");
+    assert.deepEqual(result.formulas, [["inline", "z"]]);
+    assert.equal(prose(result.html), "[ ".repeat(16_000) + "After.");
+  });
 
   it("still finds the formula after a run of unclosed openers", () => {
     assert.deepEqual(formulas("a \\( b ".repeat(50) + "`c` and \\(x\\) and \\[y\\]"), [

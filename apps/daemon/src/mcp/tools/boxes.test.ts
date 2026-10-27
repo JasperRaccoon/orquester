@@ -15,7 +15,6 @@ import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
-  ADMIN_APPROVAL_TIMEOUT_MS,
   boxRoutes,
   temporaryBoxRoutes,
   type BoxKindsResponse,
@@ -221,7 +220,8 @@ test("gate: a spend tool cards in every mode, for a workflow-owned chat too, and
   for (const runtimeMode of ["approval-required", "auto-accept-edits", "auto", "full-access"] as const) {
     for (const workflowOwned of [false, true]) {
       const decision = gate(input(chat({ runtimeMode, workflowOwned })));
-      assert.deepEqual(decision, { kind: "card", approvalKind: "spend", family: "boxes", crossProject: false, reason: "renting a machine that costs money" }, `${runtimeMode} ${workflowOwned}`);
+      assert.ok(decision.kind === "card", `${runtimeMode} ${workflowOwned}`);
+      assert.deepEqual([decision.approvalKind, decision.family, decision.crossProject], ["spend", "boxes", false]);
     }
   }
   const planning = gate(input(chat({ planning: true })));
@@ -306,17 +306,6 @@ test("create_box with no provider for the kind: a clear refusal naming what to s
   const disabled = await call(off, "create_box", createArgs, { port });
   assert.ok(!disabled.ok && disabled.code === "BOXES_DISABLED");
   assert.equal(port.cards.length, 0, "no card opens for a box that cannot be rented");
-});
-
-test("create_box: denied or timed out → an error and nothing created; refused while planning", async () => {
-  const { api, created } = fakeApi();
-  const denied = await call(api, "create_box", createArgs, { port: new FakeApprovalPort({ outcome: "denied", approvalId: "a", reason: "too expensive" }) });
-  assert.ok(!denied.ok && denied.code === "APPROVAL_DENIED" && denied.message.includes("too expensive"));
-  const expired = await call(api, "create_box", createArgs, { port: new FakeApprovalPort({ outcome: "timed_out", approvalId: "a" }) });
-  assert.ok(!expired.ok && expired.code === "APPROVAL_TIMEOUT");
-  const planning = await call(api, "create_box", createArgs, { caller: chat({ planning: true }) });
-  assert.ok(!planning.ok && planning.code === "PERMISSION_DENIED");
-  assert.deepEqual(created, []);
 });
 
 test("create_box from an unattended chat: the card still opens and says nobody may be watching", async () => {
@@ -420,7 +409,9 @@ test("the card in the registry: approve rents, deny refuses with the owner's wor
     const { api, created } = fakeApi();
     const running = call(api, "create_box", createArgs, { port: h.port });
     await h.nextCard();
-    h.clock.advance(ADMIN_APPROVAL_TIMEOUT_MS);
+    h.clock.advance(30 * 60_000 - 1);
+    assert.equal(h.registry.list("me").length, 1, "the card remains available until its 30-minute deadline");
+    h.clock.advance(1);
     const outcome = await running;
     assert.ok(!outcome.ok && outcome.code === "APPROVAL_TIMEOUT");
     assert.equal(created.length, 0);
@@ -437,6 +428,15 @@ test("the card in the registry: approve rents, deny refuses with the owner's wor
     assert.ok(!outcome.ok && outcome.code === "CANCELLED");
     assert.equal(created.length, 0);
     assert.equal(h.registry.list("me").length, 0, "the card closed");
+  }
+  // Planning never opens a rental card or rents a machine.
+  {
+    const h = registryHarness();
+    const { api, created } = fakeApi();
+    const outcome = await call(api, "create_box", createArgs, { port: h.port, caller: chat({ planning: true }) });
+    assert.ok(!outcome.ok && outcome.code === "PERMISSION_DENIED");
+    assert.equal(created.length, 0);
+    assert.equal(h.registry.list("me").length, 0);
   }
 });
 

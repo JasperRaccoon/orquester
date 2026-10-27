@@ -35,8 +35,8 @@ import type { ProviderRequest, ProviderResponse } from "./http.ts";
 const PROVIDER = "CloudRift";
 const API = "https://api.cloudrift.ai/api/v1";
 /** The protocol date this adapter speaks (rent needs ≥ v062, list/terminate ≥ v061). */
-export const CLOUDRIFT_PROTOCOL = "2026-10-12";
-export const CLOUDRIFT_ANY_REGION = "any";
+const CLOUDRIFT_PROTOCOL = "2026-10-12";
+const CLOUDRIFT_ANY_REGION = "any";
 const TAG_PREFIX = "orquester-box=";
 const GIB = 2 ** 30;
 const LIVE_STATUSES = ["Initializing", "Active", "Deactivating", "Failed"];
@@ -116,7 +116,7 @@ async function call<T>(
 }
 
 /** The newest NVIDIA-driver Ubuntu recipe whose kernel modules this GPU type can load. */
-export function pickCloudriftImage(recipes: CrRecipe[], support: CrInstanceType["nvidia_kernel_module_support"]): string | null {
+function pickCloudriftImage(recipes: CrRecipe[], support: CrInstanceType["nvidia_kernel_module_support"]): string | null {
   const vm = recipes.filter((recipe) => recipe.tags?.includes("nvidia-driver") && recipe.details?.VirtualMachine?.image_url);
   const proprietary = (recipe: CrRecipe): boolean => recipe.tags?.includes("nvidia-driver-proprietary") === true;
   const allowed = vm.filter((recipe) => (support === "ProprietaryOnly" ? proprietary(recipe) : support === "OpenOnly" ? !proprietary(recipe) : true));

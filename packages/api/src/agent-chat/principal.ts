@@ -102,33 +102,6 @@ export const PRINCIPAL_TOKEN_INVALID = "PRINCIPAL_TOKEN_INVALID";
 /** The principal of a request that carries no token. */
 export const USER_PRINCIPAL: CallerPrincipal = Object.freeze({ kind: "user" });
 
-/** How a route uses who is calling: `principal` — a matching principal is required; `socket` — trusted from socket/in-process callers, stripped remotely. */
-export type PrincipalGate = "principal" | "socket";
-
-/** The routes whose behaviour depends on the caller (method + path pattern), for wiring and tests. */
-export const PRINCIPAL_ROUTES: readonly { method: "GET" | "POST" | "PUT" | "DELETE"; path: string; gate: PrincipalGate; reads: string }[] = [
-  { method: "POST", path: "/api/saved-prompts", gate: "principal", reads: "createdBy derived (agent → kind agent; else absent)" },
-  { method: "PUT", path: "/api/saved-prompts/:id", gate: "principal", reads: "pinning an agent-created prompt: user only (403 AGENT_PROMPT_PIN_REFUSED)" },
-  { method: "POST", path: "/api/sessions", gate: "principal", reads: "lineage.agentCreated (opened / delegate): agent of parentThreadId" },
-  { method: "POST", path: "/api/sessions/:id/fork", gate: "principal", reads: "agentCreated: agent of :id" },
-  { method: "POST", path: "/api/sessions/:id/merge-back", gate: "socket", reads: "causedBy (stripped remotely)" },
-  { method: "POST", path: "/api/sessions/:id/turn", gate: "socket", reads: "causedBy (stripped remotely)" },
-  { method: "POST", path: "/api/sessions/:id/reply-subscriptions", gate: "socket", reads: "socket-only route; an agent principal must be fromThreadId" },
-  { method: "POST", path: "/api/sessions/:id/reply-subscriptions/:subscriptionId/wait", gate: "socket", reads: "socket-only route; an agent principal must own the subscription" },
-  { method: "POST", path: "/api/sessions/:id/reply-subscriptions/:subscriptionId/release", gate: "socket", reads: "socket-only route; an agent principal must own the subscription" },
-  { method: "POST", path: "/api/push/notify", gate: "principal", reads: "rate-limit key (agent: chat; external: credential)" },
-  { method: "POST", path: "/api/sessions/:id/tool-approvals/:approvalId", gate: "principal", reads: "agents refused (403)" },
-  { method: "PUT", path: "/api/agent-tools/settings", gate: "principal", reads: "agents refused (403)" },
-  { method: "PUT", path: "/api/sessions/:id/agent-tools", gate: "principal", reads: "agents refused (403)" },
-  { method: "DELETE", path: "/api/agent-tools/grants", gate: "principal", reads: "agents refused (403)" },
-  { method: "DELETE", path: "/api/agent-tools/grants/:id", gate: "principal", reads: "agents refused (403)" },
-  // boxes: temporary boxes (`box-tools.ts`): a chat reaches only the boxes it created.
-  { method: "GET", path: "/api/boxes/temporary", gate: "principal", reads: "an agent lists only its chat's boxes; external refused (403)" },
-  { method: "POST", path: "/api/boxes/temporary", gate: "principal", reads: "agents only (an approved create_box); the box belongs to the agent's chat" },
-  { method: "GET", path: "/api/boxes/temporary/:id", gate: "principal", reads: "an agent reaches only its chat's boxes (404 otherwise)" },
-  { method: "DELETE", path: "/api/boxes/temporary/:id", gate: "principal", reads: "an agent reaches only its chat's boxes (404 otherwise)" }
-];
-
 /** Whether a principal-gated hint may be honoured: the principal is that very agent. */
 export function isAgentPrincipalFor(principal: CallerPrincipal | undefined, threadId: string): principal is AgentPrincipal {
   return principal?.kind === "agent" && principal.threadId === threadId;

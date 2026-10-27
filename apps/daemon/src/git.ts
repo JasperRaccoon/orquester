@@ -958,7 +958,7 @@ function subcommandOf(args: readonly string[]): { command: string; first: string
  *   exists, so no hook runs. Commands the user started (commit, push, …) keep
  *   the repo's hooks. A box repo's hooks run in its box, not here.
  */
-export function gitSafetyArgs(args: readonly string[], onHost: boolean): string[] {
+function gitSafetyArgs(args: readonly string[], onHost: boolean): string[] {
   const out = ["-c", "core.fsmonitor=false"];
   const { command, first } = subcommandOf(args);
   const hooked = HOOKED_COMMANDS.has(command) && !(command === "stash" && first === "list");

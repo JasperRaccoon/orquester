@@ -40,7 +40,8 @@ interface RunResult {
  */
 function run(buffer: JitterBuffer, stream: Stream, seconds: number, record = false): RunResult {
   const quanta = Math.floor((seconds * RATE) / QUANTUM);
-  const out = [new Float32Array(QUANTUM), new Float32Array(QUANTUM)];
+  // Drift checks observe policy state; only acoustic checks need rendered samples.
+  const out = record ? [new Float32Array(QUANTUM), new Float32Array(QUANTUM)] : [];
   const output = record ? [new Float32Array(quanta * QUANTUM), new Float32Array(quanta * QUANTUM)] : [];
   let next = 0;
   let maxExcessFrames = -Infinity;
@@ -49,7 +50,7 @@ function run(buffer: JitterBuffer, stream: Stream, seconds: number, record = fal
   for (let q = 0; q < quanta; q++) {
     const now = (q * QUANTUM) / RATE;
     while (stream.arrival(next) <= now) buffer.push(stream.packet(next++));
-    buffer.render(out);
+    buffer.render(out, QUANTUM);
     const stats = buffer.stats();
     maxExcessFrames = Math.max(maxExcessFrames, ((stats.depthMs - stats.targetMs) * RATE) / 1000);
     maxTargetMs = Math.max(maxTargetMs, stats.targetMs);
@@ -164,14 +165,15 @@ test("underruns raise the target by 10 ms up to 150 ms", () => {
 
 test("stable periods lower the target by 5 ms per 30 s down to 20 ms", () => {
   const buffer = new JitterBuffer({ initialTargetMs: 60 });
-  const steady: Stream = { arrival: (k) => k * 0.01, packet: sinePacket };
+  const packet = [new Float32Array(PACKET), new Float32Array(PACKET)];
+  const steady: Stream = { arrival: (k) => k * 0.01, packet: () => packet };
+  const out: Float32Array[] = [];
   const q30s = (30 * RATE) / QUANTUM;
-  const out = [new Float32Array(QUANTUM), new Float32Array(QUANTUM)];
   let next = 0;
   const playFor = (quanta: number, from: number) => {
     for (let q = from; q < from + quanta; q++) {
       while (steady.arrival(next) <= (q * QUANTUM) / RATE) buffer.push(steady.packet(next++));
-      buffer.render(out);
+      buffer.render(out, QUANTUM);
     }
     return from + quanta;
   };

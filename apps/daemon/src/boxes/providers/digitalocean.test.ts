@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { digitaloceanAdapter, gpuImageSlug } from "./digitalocean.ts";
+import { digitaloceanAdapter } from "./digitalocean.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
 
@@ -99,16 +99,6 @@ test("offers linux-gpu: only GPU plans with their GPU, the AI/ML-ready image", a
   await assert.rejects(digitaloceanAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
 });
 
-test("gpuImageSlug: the AI/ML-ready image per plan", () => {
-  assert.equal(gpuImageSlug({ slug: "gpu-h100x1-80gb", gpu_info: { count: 1, model: "nvidia_h100" } }), "gpu-h100x1-base");
-  assert.equal(gpuImageSlug({ slug: "gpu-4000adax1-20gb", gpu_info: { count: 1, model: "nvidia_rtx_4000_ada" } }), "gpu-h100x1-base");
-  assert.equal(gpuImageSlug({ slug: "gpu-h100x8-640gb", gpu_info: { count: 8, model: "nvidia_h100" } }), "gpu-h100x8-base");
-  assert.equal(gpuImageSlug({ slug: "gpu-mi300x1-192gb", gpu_info: { count: 1, model: "amd_mi300x" } }), "gpu-amd-base");
-  // Without size details the slug decides.
-  assert.equal(gpuImageSlug({ slug: "gpu-mi300x8-1536gb", gpu_info: null }), "gpu-amd-base");
-  assert.equal(gpuImageSlug({ slug: "gpu-h200x8-1128gb", gpu_info: null }), "gpu-h100x8-base");
-});
-
 test("create: registers the box key, one Droplet POST with name, tags, cloud-init and the key", async () => {
   const replay = replayFetch(createRoutes());
   const request = testCreateRequest({ size: "s-1vcpu-1gb", region: "fra1" });
@@ -134,13 +124,19 @@ test("create: registers the box key, one Droplet POST with name, tags, cloud-ini
 });
 
 test("create linux-gpu: the AI/ML-ready image matching the plan", async () => {
-  const replay = replayFetch(createRoutes());
-  const request = testCreateRequest({ kind: "linux-gpu", size: "gpu-mi300x1-192gb", region: "atl1" });
-  const result = await digitaloceanAdapter.create(credentials, request, replayOptions(replay));
-  const droplet = replay.requests.find((entry) => entry.url === `${API}/droplets`)?.body as Record<string, unknown>;
-  assert.equal(droplet.image, "gpu-amd-base");
-  assert.equal(droplet.size, "gpu-mi300x1-192gb");
-  assert.equal(result.hourlyUsd, 1.99);
+  for (const [size, region, image, hourlyUsd] of [
+    ["gpu-h100x1-80gb", "nyc2", "gpu-h100x1-base", 3.39],
+    ["gpu-4000adax1-20gb", "sfo3", "gpu-h100x1-base", 0.76],
+    ["gpu-h100x8-640gb", "tor1", "gpu-h100x8-base", 23.92],
+    ["gpu-mi300x1-192gb", "atl1", "gpu-amd-base", 1.99]
+  ] as const) {
+    const replay = replayFetch(createRoutes());
+    const result = await digitaloceanAdapter.create(credentials, testCreateRequest({ kind: "linux-gpu", size, region }), replayOptions(replay));
+    const droplet = replay.requests.find((entry) => entry.url === `${API}/droplets`)?.body as Record<string, unknown>;
+    assert.equal(droplet.image, image, size);
+    assert.equal(droplet.size, size);
+    assert.equal(result.hourlyUsd, hourlyUsd);
+  }
 });
 
 test("create: a failed Droplet create is never retried, surfaces DO's message and removes the key", async () => {

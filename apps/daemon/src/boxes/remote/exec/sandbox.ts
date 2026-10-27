@@ -52,7 +52,7 @@ const DEADLINE_BACKSTOP_MS = 10_000;
 /** The box keeps this much output for a reattach while the daemon is away. */
 const DETACH_BUFFER_BYTES = 8 * 1024 * 1024;
 /** `handle.json` starttime of a box attempt: never a host process identity. */
-export const BOX_SANDBOX_STARTTIME = -1;
+const BOX_SANDBOX_STARTTIME = -1;
 const STATE_FILE = "box.json";
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

@@ -15,6 +15,7 @@ test("route builders produce the §6 paths and encode their segments", () => {
   assert.equal(agentChatRoutes.itemOutput("s1", "bgshell:t/1"), "/api/sessions/s1/items/bgshell%3At%2F1/output");
   assert.equal(agentChatRoutes.providers, "/api/agent/providers");
   assert.equal(agentChatRoutes.hostStop, "/api/agent-host/stop");
+  assert.equal(agentChatRoutes.replySubscriptionRelease("t 1", "s/1"), "/api/sessions/t%201/reply-subscriptions/s%2F1/release");
 
   assert.equal(agentChatCommandPath("s1", "session/stop"), "/api/sessions/s1/session/stop");
   assert.equal(agentChatCommandPath("s1", "task/stop"), "/api/sessions/s1/task/stop");

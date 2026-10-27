@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -46,8 +46,9 @@ test("host paths map unchanged into a POSIX box and under C:\\orq into a Windows
   assert.equal(joinBoxPath("linux", "/home/box", ".local/", "bin"), "/home/box/.local/bin");
 });
 
-test("launch.json keeps the box; one that no longer reads marks the config so the start fails", async () => {
+test("launch.json keeps the box; one that no longer reads marks the config so the start fails", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "box-launch-config-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const store = createFileLaunchConfigStore({ rootDir: root });
   const config = launchConfigFromRequest({ launchEnv: { A: "1" }, box: box() });
   assert.equal(config.box?.boxId, "box-1");
@@ -61,7 +62,7 @@ test("launch.json keeps the box; one that no longer reads marks the config so th
   assert.equal(broken.boxUnreadable, true);
   await store.save("t2", broken);
   assert.equal((await store.load("t2"))?.boxUnreadable, true);
-  assert.match(await readFile(join(root, "threads", "t1", "launch.json"), "utf8"), /"boxId": "box-1"/);
+  assert.equal(JSON.parse(await readFile(join(root, "threads", "t1", "launch.json"), "utf8")).box.boxId, "box-1");
 });
 
 test("the box env drops the host's own variables and credentials and applies the box's tooling", () => {

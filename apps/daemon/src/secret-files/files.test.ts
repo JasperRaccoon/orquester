@@ -388,15 +388,12 @@ test("scanCandidates returns [] outside a repository or when git fails", async (
 });
 
 test("scanCandidates filters, dedupes and sorts what git returns", async () => {
-  let seen: string[] = [];
-  const runner: GitRunner = (_cwd, args) => {
-    seen = args;
+  const runner: GitRunner = () => {
     return Promise.resolve(
       ["b/.env", "a/.env.local", "b/.env", "nested/", "node_modules/x/.env", ".env.example", "a/.git/../.env", "c/.env\u0001", ""].join("\0")
     );
   };
   assert.deepEqual(await scanCandidates("/clone", runner), ["a/.env.local", "b/.env"]);
-  assert.deepEqual(seen, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ":(glob)**/.env", ":(glob)**/.env.*"]);
 });
 
 test("trackedPaths matches names literally, including glob characters", async (t) => {

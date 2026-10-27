@@ -36,7 +36,7 @@ const TYPESCRIPT = /\.[cm]?tsx?$/;
 const ROOT_TYPECHECK_INPUTS = /^(tsconfig[^/]*\.json|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$/;
 
 /** The workspace package (longest directory prefix) a repository path belongs to, or null. */
-export function packageOf(file, packages) {
+function packageOf(file, packages) {
   let best = null;
   for (const pkg of packages) {
     if (file.startsWith(`${pkg.dir}/`) && (best === null || pkg.dir.length > best.dir.length)) best = pkg;
@@ -110,7 +110,7 @@ export function runnerOf(testScript) {
 }
 
 /** A POSIX shell single-quoted word. */
-export function shellQuote(word) {
+function shellQuote(word) {
   return `'${word.replaceAll("'", "'\\''")}'`;
 }
 

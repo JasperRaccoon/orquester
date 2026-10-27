@@ -99,11 +99,3 @@ describe("loadPlugins", () => {
     assert.equal(store().plugins, null);
   });
 });
-
-describe("upsertPlugin", () => {
-  it("applies one plugin's state from a route's answer", () => {
-    useAppStore.setState({ plugins: [plugin()] });
-    store().upsertPlugin(plugin({ enabled: true }));
-    assert.deepEqual(store().plugins, [plugin({ enabled: true })]);
-  });
-});

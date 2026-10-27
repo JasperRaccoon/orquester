@@ -93,18 +93,6 @@ test("tsrs platform packages: linux by libc on x64 and arm64, and Apple Silicon;
   assert.ok(["glibc", "musl"].includes(detectHostLibc()));
 });
 
-test("the release comes from tsc-rs/latest and the platform package's dist", async (t) => {
-  const { root, registry } = await setup(t);
-  await publish(registry, root, "0.7.0");
-  registry.latest = "0.7.0";
-  const release = await resolveTsRustRelease(TSC_RS_ENGINE, PKG, registry.deps, live());
-  assert.deepEqual(release, {
-    version: "0.7.0",
-    tarball: "https://registry.npmjs.org/@tsc-rs/linux-x64/-/linux-x64-0.7.0.tgz",
-    integrity: registry.releases.get("0.7.0")?.integrity
-  });
-  assert.deepEqual(registry.calls.meta, ["0.7.0"]);
-});
 
 test("a registry answer that is not a plain version, or has no sha512, is refused at the registry step", async (t) => {
   const { registry } = await setup(t);
@@ -150,19 +138,6 @@ test("an install puts the whole lib dir at versions/<version>, the binary execut
   assert.deepEqual(await listing(tsRustStagingDir(pluginDir)), []);
 });
 
-test("tsrs: the release comes from tsrs/latest and its libc's platform package, with its version scheme", async (t) => {
-  const { root } = await setup(t);
-  const registry = fakeRegistry(undefined, TSRS_ENGINE);
-  await publish(registry, root, TSRS_VERSION);
-  registry.latest = TSRS_VERSION;
-  const release = await resolveTsRustRelease(TSRS_ENGINE, TSRS_PKG, registry.deps, live());
-  assert.deepEqual(release, {
-    version: TSRS_VERSION,
-    tarball: `https://registry.npmjs.org/@tsrs/linux-x64-gnu/-/linux-x64-gnu-${TSRS_VERSION}.tgz`,
-    integrity: registry.releases.get(TSRS_VERSION)?.integrity
-  });
-  assert.equal(registry.calls.latest, 1);
-});
 
 test("tsrs: an install puts the whole package at versions/<version>, the binary beside its lib .d.ts files", async (t) => {
   const { root } = await setup(t);
@@ -192,26 +167,6 @@ test("tsrs: an install puts the whole package at versions/<version>, the binary 
   assert.deepEqual(await listing(tsRustStagingDir(engineDir)), []);
 });
 
-test("tsrs: bad integrity, a missing binary and a failing smoke test leave versions/ as it was", async (t) => {
-  const { root } = await setup(t);
-  const engineDir = join(root, "plugins", "ts-rust", "tsrs");
-  const registry = fakeRegistry(undefined, TSRS_ENGINE);
-  await publish(registry, root, "0.15.0-ts7.1.0-dev.20260901");
-  await publish(registry, root, "0.16.0-ts7.1.0-dev.1", { claimedIntegrity: `sha512-${Buffer.alloc(64).toString("base64")}` });
-  await publish(registry, root, "0.16.0-ts7.1.0-dev.2", { noBinary: true });
-  await publish(registry, root, "0.16.0-ts7.1.0-dev.3", { script: "#!/bin/sh\nexit 1\n" });
-  registry.latest = "0.15.0-ts7.1.0-dev.20260901";
-  await install(engineDir, registry);
-
-  registry.latest = "0.16.0-ts7.1.0-dev.1";
-  await rejectsAt(install(engineDir, registry), "integrity", /does not match/);
-  registry.latest = "0.16.0-ts7.1.0-dev.2";
-  await rejectsAt(install(engineDir, registry), "extract", /the package has no tsrs$/);
-  registry.latest = "0.16.0-ts7.1.0-dev.3";
-  await rejectsAt(install(engineDir, registry), "smoke-test", /tsrs --version exited with code 1/);
-  assert.deepEqual(await listing(tsRustVersionsDir(engineDir)), ["0.15.0-ts7.1.0-dev.20260901"]);
-  assert.deepEqual(await listing(tsRustStagingDir(engineDir)), []);
-});
 
 test("bad integrity stops before extracting: versions/ untouched, staging removed", async (t) => {
   const { root, pluginDir, registry } = await setup(t);

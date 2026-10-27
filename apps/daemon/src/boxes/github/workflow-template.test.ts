@@ -8,12 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
-import {
-  blacksmithWorkflowTemplate,
-  CHECK_STEP_SCRIPT,
-  DOWNLOAD_STEP_SCRIPT,
-  PATHS_STEP_SCRIPT
-} from "./workflow-template.ts";
+import { blacksmithWorkflowTemplate } from "./workflow-template.ts";
 
 interface Step {
   name: string;
@@ -64,15 +59,17 @@ test("the optional Tailscale step uses workload identity, the box tag and hostna
 });
 
 test("the step scripts pass bash -n", () => {
-  for (const script of [CHECK_STEP_SCRIPT, DOWNLOAD_STEP_SCRIPT, PATHS_STEP_SCRIPT]) {
+  for (const { run: script } of parsed().jobs.box.steps) {
+    if (!script) continue;
     const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
   }
 });
 
 test("the input check rejects values that could break out of the run", () => {
+  const script = parsed().jobs.box.steps.find((step) => step.env?.LIFETIME)!.run!;
   const check = (env: Record<string, string>): number | null =>
-    spawnSync("bash", ["-c", CHECK_STEP_SCRIPT], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
+    spawnSync("bash", ["-c", script], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...env }, encoding: "utf8" }).status;
   const good = { BOX_ID: "box-0123456789ab", DAEMON_URL: "https://orq.example.com:8443/t4", LIFETIME: "120" };
   assert.equal(check(good), 0);
   assert.equal(check({ ...good, BOX_ID: "x; curl evil" }), 1);
@@ -108,7 +105,8 @@ test("the download step gets an OIDC token for the daemon origin and sends it as
   await mkdir(home);
   await mkdir(runnerTemp);
 
-  const child = spawn("bash", ["-eo", "pipefail", "-c", DOWNLOAD_STEP_SCRIPT], {
+  const script = parsed().jobs.box.steps.find((step) => step.env?.DAEMON_URL && !step.env.LIFETIME)!.run!;
+  const child = spawn("bash", ["-eo", "pipefail", "-c", script], {
     env: {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: home,

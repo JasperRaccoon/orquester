@@ -65,7 +65,6 @@ test("unknown record fields and top-level keys survive a parse/serialise round t
   const [launched] = record.apps as Array<Record<string, unknown>>;
   assert.equal(launched.gpu, "none");
   assert.equal(launched.pgid, 42);
-  assert.deepEqual(parseDesktopsFile(JSON.parse(JSON.stringify(out))), parseDesktopsFile(raw));
 });
 
 test("a VM desktop names its box and its directory there; older records run on this machine", () => {

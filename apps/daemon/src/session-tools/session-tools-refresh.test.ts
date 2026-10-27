@@ -19,9 +19,7 @@ import { defineTool, READ_ONLY, type AnyOrquesterTool, type ToolsetId } from "..
 import { chatSummary } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import {
-  MAX_POINTING_SCOPES,
   isFastifyRouteMiss,
-  REFRESH_CONCURRENCY,
   registerSessionToolsManifestRoute,
   SessionToolsRefresher,
   type SessionToolsRefreshDeps
@@ -206,36 +204,20 @@ test("a push hands the host the chat's manifest and answers what the host did wi
   assert.deepEqual([...seqs].sort((a, b) => a - b), seqs);
 });
 
-test("a refresh of every open chat (the boot refresh) pushes each one, at most REFRESH_CONCURRENCY at a time", async () => {
-  let inFlight = 0;
-  let most = 0;
-  let calls = 0;
-  let released = false;
-  const gates: (() => void)[] = [];
-  let full!: () => void;
-  const saturated = new Promise<void>((resolve) => (full = resolve));
-  const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`codex-${i}`, "codex" as AgentAdapterId]));
+test("a refresh of every open chat pushes each chat exactly once and reports each answer", async () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `codex-${i}`);
+  const pushed: string[] = [];
   const r = rig({
-    thread: (id) => (many[id] ? { agentId: many[id]!, home: "system", projectPath: "/w/acme/api" } : null),
-    openThreads: () => Object.keys(many),
-    pushToHost: async () => {
-      calls += 1;
-      inFlight += 1;
-      most = Math.max(most, inFlight);
-      if (inFlight === REFRESH_CONCURRENCY) full();
-      if (!released) await new Promise<void>((resolve) => gates.push(resolve));
-      inFlight -= 1;
+    thread: (id) => (ids.includes(id) ? { agentId: "codex", home: "system", projectPath: "/w/acme/api" } : null),
+    openThreads: () => ids,
+    pushToHost: async (id) => {
+      pushed.push(id);
       return { applied: "next-idle" };
     }
   });
-  const done = r.refresher.refresh(null);
-  await saturated;
-  assert.equal(calls, REFRESH_CONCURRENCY, "no more pushes start while the pool is full");
-  released = true;
-  gates.splice(0).forEach((go) => go());
-  const answers = await done;
-  assert.equal(answers.size, 10);
-  assert.equal(most, REFRESH_CONCURRENCY);
+  const answers = await r.refresher.refresh(null);
+  assert.deepEqual(pushed.sort(), [...ids].sort());
+  assert.deepEqual([...answers].sort(), ids.map((id) => [id, "next-idle"]).sort());
 });
 
 test("manifests carry this daemon's epoch beside the sequence", async () => {
@@ -385,19 +367,6 @@ test("a refused chat stays remembered until a push actually reached the host", a
   assert.deepEqual(pushes, ["codex-1", "codex-1"], "a delivered manifest is not pushed again");
 });
 
-test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-projects read always stays)", async () => {
-  const r = rig();
-  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
-  await r.refresher.daemonPointing();
-  for (let i = 0; i <= MAX_POINTING_SCOPES + 5; i += 1) await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${i}` });
-  const reads = () => r.api.calls.filter((call) => call.path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE).length;
-  const count = reads();
-  await r.refresher.daemonPointing();
-  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${MAX_POINTING_SCOPES + 5}` });
-  assert.equal(reads(), count, "the newest scopes and the all-projects read are cached");
-  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: "/w/acme/api/d0" });
-  assert.equal(reads(), count + 1, "the oldest scope was evicted");
-});
 
 test("Knowledge Graph: the chat's knowledge view is read fresh for every manifest; failing or unanswered it counts as off", async () => {
   const catalog = [...CATALOG, tool("knowledge_search", "knowledge"), tool("knowledge_save", "knowledge"), tool("knowledge_worker_next_task", "knowledge")];

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe,it } from "node:test";
 
+import type { ToolApprovalReference } from "@orquester/api/agent-chat";
+
 import type { WorkLogEntry } from "./contracts";
 import {
-toolApprovalOutcomeText,
 workEntryDisplayIndicatesToolFailure,
 workEntryDisplayLabel
 } from "./presentation.logic";
@@ -36,11 +37,15 @@ describe("the output heuristic never judges a call still in progress", () => {
 describe("session tool labels (unified MCP §4)", () => {
 
   it("a gated call's row says how its card ended", () => {
-    const gated = (outcome: "approved" | "granted" | "denied" | "timed_out" | "cancelled" | "not_delivered", kind: "admin" | "toolset" = "admin") =>
+    const gated = (
+      outcome: ToolApprovalReference["outcome"],
+      kind: "admin" | "toolset" = "admin",
+      extra: Pick<ToolApprovalReference, "reason" | "grantScope"> = {}
+    ) =>
       workEntryDisplayLabel(
         entry({
           sessionTool: kind === "toolset" ? "request_toolset" : "create_workflow",
-          toolApproval: { kind, family: kind === "toolset" ? "toolset" : "workflows", title: "t", outcome, ...(outcome === "granted" ? {} : { approvalId: "a" }) }
+          toolApproval: { kind, family: kind === "toolset" ? "toolset" : "workflows", title: "t", outcome, ...(outcome === "granted" ? {} : { approvalId: "a" }), ...extra }
         })
       );
     assert.equal(gated("approved"), "Created a workflow · Approved by you");
@@ -49,12 +54,12 @@ describe("session tool labels (unified MCP §4)", () => {
     assert.equal(gated("timed_out"), "Created a workflow · Expired");
     assert.equal(gated("cancelled"), "Created a workflow · Cancelled");
     assert.equal(gated("approved", "toolset"), "Asked for more tools · Enabled by you");
-    assert.match(toolApprovalOutcomeText({ kind: "admin", outcome: "not_delivered" }), /never reached the agent/);
+    assert.match(gated("not_delivered"), /never reached the agent/);
     // The reference's deny reason and grant scope (contracts follow-up).
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "not on\n  Fridays" }), "Denied: not on Fridays");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "  " }), "Denied by you");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "chat" }), "Allowed by a chat grant");
-    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "project" }), "Allowed by a project grant");
+    assert.equal(gated("denied", "admin", { reason: "not on\n  Fridays" }), "Created a workflow · Denied: not on Fridays");
+    assert.equal(gated("denied", "admin", { reason: "  " }), "Created a workflow · Denied by you");
+    assert.equal(gated("granted", "admin", { grantScope: "chat" }), "Created a workflow · Allowed by a chat grant");
+    assert.equal(gated("granted", "admin", { grantScope: "project" }), "Created a workflow · Allowed by a project grant");
     // No card: the tool's own label.
     assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_projects" })), "Listed projects");
   });

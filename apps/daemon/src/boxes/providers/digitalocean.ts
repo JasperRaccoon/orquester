@@ -200,7 +200,7 @@ function gpuInfo(size: DoSize): BoxGpuInfo | null {
  * `gpu-amd-base` for AMD GPUs, `gpu-h100x8-base` for 8-GPU NVIDIA plans and
  * `gpu-h100x1-base` for every single-GPU NVIDIA plan (whatever the GPU model).
  */
-export function gpuImageSlug(size: Pick<DoSize, "slug" | "gpu_info">): string {
+function gpuImageSlug(size: Pick<DoSize, "slug" | "gpu_info">): string {
   const model = size.gpu_info?.model ?? "";
   if (/^amd/i.test(model) || /^gpu-mi\d/.test(size.slug)) return "gpu-amd-base";
   const count = size.gpu_info?.count ?? (/x8-/.test(size.slug) ? 8 : 1);

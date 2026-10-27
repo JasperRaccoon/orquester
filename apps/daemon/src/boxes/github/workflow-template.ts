@@ -69,8 +69,8 @@ export interface BlacksmithWorkflowOptions {
 
 const TAILSCALE_VALUE = /^[A-Za-z0-9._:/-]{1,200}$/;
 
-/** The step that downloads `orq-agent` (bash; exported for tests). */
-export const DOWNLOAD_STEP_SCRIPT = `set +x
+/** The step that downloads `orq-agent` (bash). */
+const DOWNLOAD_STEP_SCRIPT = `set +x
 set -eu
 umask 077
 URL=\${DAEMON_URL%/}
@@ -105,8 +105,8 @@ chmod 755 "$D/orq-agent.download"
 mv -f "$D/orq-agent.download" "$D/orq-agent"
 `;
 
-/** The input check step (bash; exported for tests). */
-export const CHECK_STEP_SCRIPT = `set -eu
+/** The input check step (bash). */
+const CHECK_STEP_SCRIPT = `set -eu
 printf '%s' "$BOX_ID" | grep -Eq '^[A-Za-z0-9-]{8,64}$' || { echo "::error::invalid box_id"; exit 1; }
 printf '%s' "$DAEMON_URL" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$' || { echo "::error::invalid daemon_url"; exit 1; }
 case "$LIFETIME" in '' | *[!0-9]*) echo "::error::invalid lifetime_minutes"; exit 1 ;; esac
@@ -114,7 +114,7 @@ if [ "$LIFETIME" -lt 1 ] || [ "$LIFETIME" -gt ${BLACKSMITH_MAX_LIFETIME_MINUTES}
 `;
 
 /** Box host paths (spec §8.6) live under the daemon's appdir; orq-agent creates the rest itself. */
-export const PATHS_STEP_SCRIPT = `set -eu
+const PATHS_STEP_SCRIPT = `set -eu
 sudo mkdir -p /var/lib/orquester
 sudo chown "$(id -un)" /var/lib/orquester
 `;

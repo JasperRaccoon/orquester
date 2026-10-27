@@ -65,7 +65,7 @@ describe("Claude preparer", () => {
     }
   });
 
-  it("writes the plugin, the plugin copy, the MCP file and the instructions (golden)", async () => {
+  it("writes an immutable plugin copy and private MCP and instruction files (golden)", async () => {
     const { stagingDir, preparedDir, section, fixture } = await prepare();
     assert.deepEqual(section, {
       localPlugin: { path: "plugin", name: "dev-kit" },
@@ -133,16 +133,8 @@ describe("Claude preparer", () => {
     });
     assert.ok(fixture.warnings.some((line) => line.includes('"orquester"')), "Orquester's own server name is refused, with a warning");
     assert.ok(fixture.warnings.every((line) => !line.includes(FIXTURE_SECRETS.env)));
-  });
-
-  it("keeps the secrets file and the instructions 0600", async () => {
-    const { stagingDir } = await prepare();
     assert.equal((await stat(join(stagingDir, "mcp-servers.json"))).mode & 0o777, 0o600);
     assert.equal((await stat(join(stagingDir, "instructions.md"))).mode & 0o777, 0o600);
-  });
-
-  it("copies the plugin, so a later edit of the profile's cache does not reach the prepared version", async () => {
-    const { stagingDir, fixture } = await prepare();
     await writeFile(join(fixture.pluginCacheDir, "commands", "fmt.md"), "changed\n");
     assert.equal(await readFile(join(stagingDir, "plugins", "pl1", "commands", "fmt.md"), "utf8"), "---\ndescription: Format\n---\nFormat.\n");
   });

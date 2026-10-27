@@ -27,10 +27,10 @@ import {
 import { startedTurns } from "./turns.ts";
 
 /** The newest turns a head carries ({@link ThreadHeadResponse.recentTurns}). */
-export const THREAD_HEAD_RECENT_TURNS = 16;
+const THREAD_HEAD_RECENT_TURNS = 16;
 
 /** The most code points of the last reply a head carries, whatever `replyChars` asks. */
-export const THREAD_HEAD_REPLY_MAX_CHARS = 64_000;
+const THREAD_HEAD_REPLY_MAX_CHARS = 64_000;
 
 /**
  * The most ids a head looks turns up by, per list ({@link ThreadHeadQuery.turnIds}): a head request

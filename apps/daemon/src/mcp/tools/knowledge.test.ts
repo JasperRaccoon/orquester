@@ -232,8 +232,8 @@ test("knowledge_update: PATCHes only the fields passed (null clears, no @, colle
     assert.equal(r.isError, undefined, textOf(r));
     assert.equal(r.structuredContent, undefined, "a text result: no card");
     const out = textOf(r);
-    assert.ok(out.startsWith("Updated title, body, author, handle, url, collections."), out);
-    for (const value of ["ke_aaaaaaaaaaaa", "SEO", "Ads", "linking pending", "Title: Playbook v2", `cite: ${entry.citation}`]) assert.ok(out.includes(value), value);
+    for (const field of ["title", "body", "author", "handle", "url", "collections"]) assert.match(out, new RegExp(`\\b${field}\\b`, "i"));
+    for (const value of ["ke_aaaaaaaaaaaa", "SEO", "Ads", "pending", "Playbook v2", entry.citation]) assert.ok(out.includes(value), value);
     assert.ok(!out.includes("Organic only."), "the body is not echoed back");
   }
   const patch = api.calls.find((call) => call.method === "PATCH")!;
@@ -275,9 +275,8 @@ test("knowledge_delete: reads then deletes each id once, with the session; repor
   assert.equal(r.isError, undefined, textOf(r));
   assert.equal(r.structuredContent, undefined, "a text result: no card");
   const out = textOf(r);
-  assert.ok(out.startsWith("Deleted 1 entry; 1 not deleted."), out);
-  assert.match(out, /- deleted ke_aaaaaaaaaaaa "Old playbook"/);
-  assert.match(out, /- not deleted ke_hidden000000: No such entry\./);
+  assert.match(out, /\bdeleted\b[^\n]*ke_aaaaaaaaaaaa[^\n]*Old playbook/);
+  assert.match(out, /\bnot deleted\b[^\n]*ke_hidden000000[^\n]*No such entry/);
   assert.deepEqual(
     api.calls.map((call) => [call.method, call.path, call.query]),
     [

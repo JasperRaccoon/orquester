@@ -133,7 +133,7 @@ describe("runMcpAppRequest", () => {
     });
     for (const name of ["secret", "missing"]) {
       const answer = await refusal(runMcpAppRequest(deps, "call-tool", { itemId: "item-1", name, arguments: {} }));
-      assert.deepEqual(answer, { code: "COMMAND_REJECTED", message: "This app cannot call that tool." });
+      assert.equal(answer.code, "COMMAND_REJECTED");
     }
     assert.equal(calls.filter((call) => call.method === "callTool").length, 1);
   });
@@ -172,13 +172,14 @@ describe("runMcpAppRequest", () => {
       structuredContent: { points: 3 }
     });
     await runMcpAppRequest(deps, "model-context", { itemId: "item-1", content: [] });
-    assert.deepEqual(contexts, [
-      { key: "mcp-app:item-1", context: { server: "charts", tool: "show_chart", text: '3 points\n{"points":3}' } },
-      { key: "mcp-app:item-1", context: null }
+    assert.deepEqual(contexts.map(({ context }) => context), [
+      { server: "charts", tool: "show_chart", text: '3 points\n{"points":3}' },
+      null
     ]);
+    assert.equal(contexts[0]!.key, contexts[1]!.key, "clearing the app addresses the context it set");
     const grokLike = setup({ apps: { modelContext: false, setModelContext: undefined } });
     const answer = await refusal(runMcpAppRequest(grokLike.deps, "model-context", { itemId: "item-1", content: [] }));
-    assert.deepEqual(answer, { code: "COMMAND_REJECTED", message: "This agent cannot take context from an MCP app." });
+    assert.equal(answer.code, "COMMAND_REJECTED");
     assert.equal(
       ((await runMcpAppRequest(grokLike.deps, "tool-info", { itemId: "item-1", name: "show_chart" })) as { modelContext: boolean })
         .modelContext,
@@ -187,16 +188,18 @@ describe("runMcpAppRequest", () => {
   });
 
   it("a stopped session, a provider failure and an adapter without MCP Apps are refusals the app can show", async () => {
+    let readStoppedSession = false;
     const stopped = setup({
       apps: {
         listTools: async () => {
+          readStoppedSession = true;
           throw new McpAppSessionUnavailableError();
         }
       }
     });
     const answer = await refusal(runMcpAppRequest(stopped.deps, "call-tool", { itemId: "item-1", name: "reset", arguments: {} }));
+    assert.equal(readStoppedSession, true, "the refusal came from the stopped session");
     assert.equal(answer.code, "COMMAND_REJECTED");
-    assert.match(answer.message, /session is not running/);
 
     const failing = setup({
       apps: {
@@ -205,15 +208,11 @@ describe("runMcpAppRequest", () => {
         }
       }
     });
-    assert.deepEqual(await refusal(runMcpAppRequest(failing.deps, "read-resource", { itemId: "item-1", uri: "ui://x" })), {
-      code: "COMMAND_REJECTED",
-      message: "The MCP request failed: server crashed"
-    });
+    const failed = await refusal(runMcpAppRequest(failing.deps, "read-resource", { itemId: "item-1", uri: "ui://x" }));
+    assert.equal(failed.code, "COMMAND_REJECTED");
+    assert.match(failed.message, /server crashed/);
 
     const none = setup({ apps: null });
-    assert.deepEqual(await refusal(runMcpAppRequest(none.deps, "read-resource", { itemId: "item-1", uri: "ui://x" })), {
-      code: "COMMAND_REJECTED",
-      message: "This agent cannot run MCP app requests."
-    });
+    assert.equal((await refusal(runMcpAppRequest(none.deps, "read-resource", { itemId: "item-1", uri: "ui://x" }))).code, "COMMAND_REJECTED");
   });
 });

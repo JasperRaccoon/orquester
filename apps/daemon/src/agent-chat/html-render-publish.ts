@@ -32,9 +32,9 @@ import {
 
 const MIB = 1024 * 1024;
 /** One inlined image (spec §2.1). */
-export const HTML_RENDER_MAX_IMAGE_BYTES = 10 * MIB;
+const HTML_RENDER_MAX_IMAGE_BYTES = 10 * MIB;
 /** The whole stored page, images inlined (spec §2.1). */
-export const HTML_RENDER_MAX_PAGE_BYTES = 25 * MIB;
+const HTML_RENDER_MAX_PAGE_BYTES = 25 * MIB;
 
 const formatMib = (bytes: number): string => `${(bytes / MIB).toFixed(1)} MiB`;
 

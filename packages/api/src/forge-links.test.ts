@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  forgeLinkDescription,
   forgeLinkLabel,
   githubPreviewKey,
   githubPreviewTarget,
@@ -276,25 +275,6 @@ describe("forgeLinkLabel", () => {
   it("names GitLab MRs with ! and Bitbucket PRs with #", () => {
     assert.equal(label("https://gitlab.com/g/p/-/merge_requests/42"), "g/p!42");
     assert.equal(label("https://bitbucket.org/team/repo/pull-requests/8"), "team/repo#8");
-  });
-
-  it("describes every kind for the accessible name", () => {
-    const links = [
-      "https://github.com/a/b/pull/1",
-      "https://github.com/a/b/issues/1",
-      "https://github.com/a/b/discussions/1",
-      `https://github.com/a/b/commit/${SHA}`,
-      "https://github.com/a/b",
-      "https://github.com/a/b/blob/main/x.ts#L2",
-      "https://github.com/a/b/tree/main",
-      "https://github.com/a/b/releases",
-      "https://github.com/a/b/actions/runs/3",
-      "https://gitlab.com/g/p/-/merge_requests/2"
-    ].map((href) => parseForgeLink(href) as ForgeLink);
-    const descriptions = links.map((link) => forgeLinkDescription(link));
-    assert.equal(new Set(descriptions).size, links.length);
-    assert.equal(descriptions[0], "Pull request a/b#1");
-    assert.equal(descriptions[5], "File x.ts#L2 at main in a/b");
   });
 });
 

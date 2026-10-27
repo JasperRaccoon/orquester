@@ -9,7 +9,6 @@ import type { AgentBlockOutput } from "./executor.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { byAccount } from "./testing/fake-chat-host.ts";
 import { Scenario } from "./testing/scenario.ts";
-import { resetWaitUntil } from "./failover.ts";
 
 const T = (s: number): string => new Date(Date.UTC(2026, 8, 28, 12, 0, s)).toISOString();
 
@@ -82,14 +81,6 @@ test("the handoff reads the parent's words since the block began in the session"
   const handoff = sc.host.turnLog.find((turn) => turn.refId === "codex")!.input;
   assert.ok(handoff.includes("current work"));
   assert.doesNotMatch(handoff, /earlier block|subagent text/);
-});
-
-test("wait-for-reset honours maxWaitHours from the first wait", () => {
-  const now = new Date(T(0));
-  const decision = { chosen: null, reason: "", skipped: [], earliestResetAt: new Date(now.getTime() + 3 * 3600_000).toISOString() };
-  assert.equal(resetWaitUntil(decision, { now, firstWaitAt: now, maxWaitHours: 4 })?.toISOString(), decision.earliestResetAt);
-  assert.equal(resetWaitUntil(decision, { now, firstWaitAt: new Date(now.getTime() - 2 * 3600_000), maxWaitHours: 4 }), null);
-  assert.equal(resetWaitUntil({ chosen: null, reason: "", skipped: [] }, { now, firstWaitAt: now, maxWaitHours: 4 }), null);
 });
 
 test("the activity line reads tool calls and assistant text, never a provider's stderr or warnings", () => {

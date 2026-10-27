@@ -56,7 +56,7 @@ export function diffFileEmptyLabel(file: DiffFile): string {
 }
 
 /** Past this many rows a file starts collapsed, so one huge file cannot stall the view. */
-export const LARGE_DIFF_FILE_ROWS = 1_000;
+const LARGE_DIFF_FILE_ROWS = 1_000;
 
 /**
  * Lockfiles and other generated output start collapsed (they are rarely what

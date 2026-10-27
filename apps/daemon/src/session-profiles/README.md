@@ -278,7 +278,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 ## Launching a chat with a profile (`launch.ts`, `agent-chat/service.ts`)
 
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
-ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Codex's, Grok's and
+ProfileLaunchContribution }`, read directly by `createProfileLaunchResolver`. Codex's, Grok's and
 OpenCode's are in `contributions/codex.ts`, `contributions/grok.ts` and `preparers/opencode.ts`;
 Claude contributes nothing. A change to one agent's launch touches ITS entry only:
 

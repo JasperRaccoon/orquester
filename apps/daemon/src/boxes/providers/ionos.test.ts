@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { ProviderHttpError } from "./http.ts";
 import { ionosAdapter } from "./ionos.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type ReplayRoute } from "./fixtures/vm-replay.ts";
-import { EUR_TO_USD, IONOS_BALANCED_EUR_PER_GB_30_DAYS, IONOS_RAM_EUR_PER_GB_HOUR, IONOS_VCPU_EUR_PER_HOUR, roundUsd } from "./price-tables.ts";
 
 const API = "https://api.ionos.com/cloudapi/v6";
 const credentials = { token: "ionos-test-token" };
@@ -13,12 +12,6 @@ const DC2 = "11111111-1111-4111-8111-111111111112";
 const SERVER = "22222222-2222-4222-8222-222222222222";
 const REQUEST_URL = `${API}/requests/55555555-5555-4555-8555-555555555555/status`;
 const ref = { datacenterId: DC, serverId: SERVER, location: "de/fra" };
-
-function price(cores: number, ramGb: number): number {
-  return roundUsd(
-    (cores * IONOS_VCPU_EUR_PER_HOUR + ramGb * IONOS_RAM_EUR_PER_GB_HOUR + (30 * IONOS_BALANCED_EUR_PER_GB_30_DAYS) / 720) * EUR_TO_USD
-  );
-}
 
 function createRoutes(): ReplayRoute[] {
   return [
@@ -30,6 +23,7 @@ function createRoutes(): ReplayRoute[] {
   ];
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working token, IONOS's message for a bad or missing one", async () => {
   const url = `${API}/datacenters?depth=0&limit=1`;
   const replay = replayFetch([
@@ -66,7 +60,7 @@ test("offers: curated vCPU sizes at table prices in the vCPU locations the accou
     ramGb: 4,
     diskGb: 30,
     gpu: null,
-    hourlyUsd: price(2, 4),
+    hourlyUsd: 0.0405,
     regions: ["de/fra", "de/txl", "us/ewr"]
   });
   assert.equal(offers.sizes[0]!.id, "vcpu-1-2");
@@ -128,7 +122,7 @@ test("create: a VDC named after the box, labels, a public LAN, then one server w
   assert.equal(replay.requests.every((entry) => entry.headers.authorization === "Bearer ionos-test-token"), true);
 
   assert.deepEqual(result.ref, { datacenterId: DC, serverId: SERVER, location: "de/fra" });
-  assert.equal(result.hourlyUsd, price(2, 4));
+  assert.equal(result.hourlyUsd, 0.0405);
 });
 
 test("create: an image or size the location cannot serve is refused before anything is created", async () => {

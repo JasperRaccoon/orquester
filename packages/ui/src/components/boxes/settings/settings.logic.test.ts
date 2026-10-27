@@ -9,7 +9,6 @@ import {
   credentialProblems,
   credentialsPayload,
   keyProviders,
-  providerAbbreviation,
   providerStatusView,
   windowsImageView
 } from "./providers.logic.ts";
@@ -23,15 +22,13 @@ import {
 } from "./connection.logic.ts";
 import { ApiError } from "../../../lib/api-client.ts";
 import {
-  BLACKSMITH_POLL,
   blacksmithAccounts,
   blacksmithBusy,
   blacksmithCanPickOrg,
   blacksmithCanRetry,
   blacksmithCanTest,
   blacksmithOrgs,
-  blacksmithStatus,
-  nextBlacksmithPoll
+  blacksmithStatus
 } from "./blacksmith.logic.ts";
 import {
   boxCostLine,
@@ -55,12 +52,10 @@ const OVH_FIELDS = [
   { id: "project", label: "Project ID", secret: false, optional: true }
 ];
 
-test("provider rows: Blacksmith has its own row, each tile its abbreviation", () => {
+test("Blacksmith has its own setup row rather than an API key form", () => {
   const list = [provider(), provider({ id: "blacksmith", label: "Blacksmith" }), provider({ id: "vultr", label: "Vultr" })];
   assert.deepEqual(keyProviders(list).map((entry) => entry.id), ["hetzner", "vultr"]);
   assert.deepEqual(keyProviders(null), []);
-  assert.equal(providerAbbreviation(provider()), "HZ");
-  assert.equal(providerAbbreviation(provider({ id: "digitalocean", label: "DigitalOcean" })), "DO");
 });
 
 test("status: a pill when configured, the Add API key button when not", () => {
@@ -328,14 +323,6 @@ test("a stopped control repo step offers Retry", () => {
   assert.equal(blacksmithCanRetry(step("repo", "ok")), false);
   assert.equal(blacksmithCanRetry(step("repo", "running")), false);
   assert.equal(blacksmithCanRetry(step("test", "failed")), false, "the test step has its own Run again");
-});
-
-test("a running setup is re-read on a growing delay until the deadline", () => {
-  const start = 1_000_000;
-  assert.equal(nextBlacksmithPoll(null, start, start), BLACKSMITH_POLL.firstMs);
-  assert.equal(nextBlacksmithPoll(2_000, start, start), 3_000);
-  assert.equal(nextBlacksmithPoll(14_000, start, start), BLACKSMITH_POLL.maxMs);
-  assert.equal(nextBlacksmithPoll(15_000, start, start + BLACKSMITH_POLL.deadlineMs - 10_000), null);
 });
 
 // ---------------------------------------------------------------------------

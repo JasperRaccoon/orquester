@@ -10,6 +10,7 @@ import { type AgentBlockOutput, type AgentPhase } from "./executor.ts";
 import { byAccount, type FakeBehaviour } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
+import { revealSecrets } from "./secret-text.ts";
 
 const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
 const CLAUDE = [account("claude", "a1", "alpha"), account("claude", "a2", "beta")];
@@ -145,12 +146,13 @@ test("the deadline is wall-clock: a resumed block does not get its maxMinutes ag
 // secret's value — only its marker; the POSTed body carries the real value, a resumed send too.
 const SECRET = "tok-9f8e7d6c5b4a";
 const SECRET_WF = () =>
-  testWorkflow([agentNode("n1", { prompt: { kind: "text", text: "Deploy with token {{ secrets.API_TOKEN }} now." } })]);
+  testWorkflow([agentNode("n1", { prompt: { kind: "text", text: "Deploy with token {{ secrets.API_TOKEN }} under API_TOKEN now." } })]);
 
 for (const phase of ["creating", "sending"] as const) {
   test(`a secret in the prompt is never persisted, and a restart at ${phase} still sends the real value`, async () => {
     const sc = new Scenario({ accounts: CLAUDE, behaviour: () => [{ kind: "say", text: "deployed" }] });
-    const run = await sc.runWithRestart(SECRET_WF(), "n1", { phase }, { extra: { secrets: { API_TOKEN: SECRET } } });
+    // A secret value equal to another secret's name must not corrupt its persisted marker.
+    const run = await sc.runWithRestart(SECRET_WF(), "n1", { phase }, { extra: { secrets: { API_TOKEN: SECRET, NAME: "API_TOKEN" } } });
     assert.equal(run.crashed, true);
     assert.equal(outputOf(run.result).text, "deployed");
     for (const persisted of [...run.first.persisted, ...run.second!.persisted]) {
@@ -158,7 +160,7 @@ for (const phase of ["creating", "sending"] as const) {
     }
     const sent = sc.host.turnLog.map((t) => t.input);
     assert.equal(sent.length, 1);
-    assert.ok(sent[0]!.startsWith(`Deploy with token ${SECRET} now.`), sent[0]);
+    assert.ok(sent[0]!.startsWith(`Deploy with token ${SECRET} under API_TOKEN now.`), sent[0]);
     assert.ok(!sent[0]!.includes(""), "no marker reaches the agent");
   });
 }
@@ -175,4 +177,8 @@ test("a handoff prompt carrying the secret keeps it out of the state and sends t
   for (const persisted of [...run.first.persisted, ...run.second!.persisted]) assert.ok(!JSON.stringify(persisted ?? null).includes(SECRET));
   const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
   assert.ok(handoff.startsWith(`Use ${SECRET}.`), handoff);
+});
+
+test("a marker for a secret that no longer exists is sent as nothing", () => {
+  assert.equal(revealSecrets("a \uE000GONE\uE001 b", {}), "a  b");
 });

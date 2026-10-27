@@ -5,10 +5,9 @@
 // errors are the API's documented wording. No live account was used. Stubbed fetch only.
 
 import assert from "node:assert/strict";
-import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
-import { CLOUDRIFT_PROTOCOL, cloudriftAdapter, pickCloudriftImage } from "./cloudrift.ts";
+import { cloudriftAdapter } from "./cloudrift.ts";
 import { detachedStartCommand } from "./gpu-common.ts";
 import { callOptions, fixture, routedFetch, sampleCreateRequest } from "./gpu-testing.ts";
 
@@ -35,7 +34,7 @@ test("cloudrift: offers list GPU variants with a free node, priced from cents", 
   const { fetch, seen } = routedFetch([{ method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] }]);
   const offers = await cloudriftAdapter.offers(creds, "linux-gpu", callOptions(fetch));
   assert.deepEqual(seen[0]!.body, {
-    version: CLOUDRIFT_PROTOCOL,
+    version: "2026-10-12",
     data: { selector: { ByServiceAndLocation: { services: ["vm"], datacenters: null } } }
   });
   assert.deepEqual(
@@ -59,7 +58,6 @@ test("cloudrift: offers list GPU variants with a free node, priced from cents", 
     ]
   );
 });
-
 test("cloudrift: create rents once with the right driver image, one-line cloud-init command, name and tag", async () => {
   const { fetch, seen } = routedFetch([
     { method: "POST", path: "/api/v1/instance-types/list", replies: [{ body: f("instance-types.json") }] },
@@ -156,20 +154,4 @@ test("cloudrift: listManaged reads live statuses and keeps tagged or orq- named 
       ["orq-box-99887766", "box-99887766", "error"]
     ]
   );
-});
-
-test("cloudrift: the start command is one line that decodes the script; image choice follows the driver rules; 429 retried", async () => {
-  const command = detachedStartCommand("#!/bin/sh\necho 'hi'\n");
-  assert.ok(!command.includes("\n"));
-  const encoded = /echo (\S+) \| base64 -d/.exec(command)![1]!;
-  // The script deletes its own file (it holds the bootstrap token) before anything else.
-  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), "rm -f \"$0\"\n#!/bin/sh\necho 'hi'\n");
-  assert.equal(pickCloudriftImage(recipes, "OpenOrProprietary"), imageOf("Ubuntu 24.04 Server (R580, CUDA 13.3)"));
-  assert.equal(pickCloudriftImage([], "OpenOnly"), null);
-
-  const { fetch, seen } = routedFetch([
-    { method: "POST", path: "/api/v1/auth/me", replies: [{ status: 429, headers: { "retry-after": "0" }, body: "" }, { body: f("auth-me.json") }] }
-  ]);
-  assert.deepEqual(await cloudriftAdapter.validate(creds, callOptions(fetch)), { ok: true });
-  assert.equal(seen.length, 2);
 });

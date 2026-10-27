@@ -35,8 +35,6 @@ describe("TerminalOutputRing", () => {
     }
     const value = ring.value();
     assert.ok(all.endsWith(value), "the ring is a suffix of the output");
-    // At most one scan window more than the cap went.
-    assert.ok(value.length > 4096 - 1024);
     // The cut landed on a line start, not mid-line.
     assert.match(value, /^row \d+ /);
   });

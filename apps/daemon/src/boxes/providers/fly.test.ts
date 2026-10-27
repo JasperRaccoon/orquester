@@ -4,16 +4,13 @@ import { test } from "node:test";
 import { flyAdapter } from "./fly.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { roundUsd } from "./price-tables.ts";
 
 const API = "https://api.machines.dev/v1";
 const APP = `orq-${TEST_BOX_ID}`;
 const credentials = { token: "FlyV1 fm2_test-token" };
 const unauthorized = { status: 401, body: fixture("fly", "error-unauthorized") };
 
-/** shared-cpu-2x with 4 GB at the Ashburn price: 2 vCPU + 3.5 GB above the included ½ GB. */
-const SHARED_2X_4GB_IAD = (2 * 8.465e-7 + 3.5 * 2.316e-6) * 3600;
-
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working token, a message for a bad or missing one", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/apps?org_slug=personal&limit=1`, body: fixture("fly", "apps-empty") },
@@ -61,8 +58,8 @@ test("offers: bundled preset prices per live region, regional groups, curated im
       ["shared-cpu-2x-4gb@xyz", ["xyz"]]
     ]
   );
-  assert.equal(shared2x4[0]!.hourlyUsd, roundUsd(SHARED_2X_4GB_IAD));
-  assert.equal(shared2x4[2]!.hourlyUsd, roundUsd(SHARED_2X_4GB_IAD * 1.153846154));
+  assert.equal(shared2x4[0]!.hourlyUsd, 0.0353);
+  assert.equal(shared2x4[2]!.hourlyUsd, 0.0407);
   // A region the price table does not know has no price rather than a wrong one.
   assert.equal(shared2x4[5]!.hourlyUsd, null);
   assert.deepEqual(
@@ -72,7 +69,7 @@ test("offers: bundled preset prices per live region, regional groups, curated im
 
   // performance-1x includes its 2 GB: $33/30 days in Ashburn, as on the pricing page.
   const perf1x = offers.sizes.find((size) => size.id === "performance-1x-2gb");
-  assert.equal(perf1x?.hourlyUsd, roundUsd(1.2732e-5 * 3600));
+  assert.equal(perf1x?.hourlyUsd, 0.0458);
   assert.ok(Math.abs((perf1x?.hourlyUsd ?? 0) * 720 - 33) < 0.05);
 
   // No sub-1 GB presets; cheapest first.
@@ -114,7 +111,7 @@ test("create: one app and one Machine named after the box, the script delivered 
   // The script is never in argv.
   assert.equal(JSON.stringify(replay.requests[1]!.body).includes("orq-bootstrap-posix"), false);
   assert.deepEqual(result.ref, { app: APP, machineId: "1111111a2b3c4d", region: "fra" });
-  assert.equal(result.hourlyUsd, roundUsd(SHARED_2X_4GB_IAD * 1.153846154));
+  assert.equal(result.hourlyUsd, 0.0407);
 });
 
 test("create: a failed Machine create is not retried and removes the app", async () => {

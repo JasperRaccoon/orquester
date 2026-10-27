@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { decodeDataFrame, parseControlMessage } from "@orquester/api";
 
 import { BOX_AGENT_SOURCE_DIR } from "./build.ts";
-import { controlFixture, FIXTURES, framesFixture } from "./fixtures.ts";
+import { FIXTURES } from "./fixtures.ts";
 
 const fixturePath = (name: string): string => join(BOX_AGENT_SOURCE_DIR, "fixtures", `${name}.json`);
 
@@ -23,18 +23,13 @@ test("golden fixtures match the typed TypeScript values (UPDATE_FIXTURES=1 rewri
   }
 });
 
-test("every control fixture parses as a control message of its type", () => {
-  for (const [t, samples] of Object.entries(controlFixture)) {
-    assert.ok(samples.length > 0, `no sample for ${t}`);
-    for (const sample of samples) {
-      const parsed = parseControlMessage(JSON.stringify(sample));
-      assert.equal(parsed?.t, t);
-    }
+test("golden control and frame bytes decode without losing data", async () => {
+  const controls = JSON.parse(await readFile(fixturePath("control"), "utf8")) as Record<string, unknown[]>;
+  for (const samples of Object.values(controls)) {
+    for (const sample of samples) assert.deepEqual(parseControlMessage(JSON.stringify(sample)), sample);
   }
-});
-
-test("frame fixtures decode back to their payloads", () => {
-  for (const frame of framesFixture) {
+  const frames = JSON.parse(await readFile(fixturePath("frames"), "utf8")) as Array<{ channel: number; stream: number; payloadHex: string; frameHex: string }>;
+  for (const frame of frames) {
     const decoded = decodeDataFrame(Buffer.from(frame.frameHex, "hex"));
     assert.equal(decoded.channel, frame.channel);
     assert.equal(decoded.stream, frame.stream);

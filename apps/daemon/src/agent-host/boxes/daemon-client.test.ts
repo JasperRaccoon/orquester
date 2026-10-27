@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,10 @@ async function daemon(answer: (seen: Seen, response: ServerResponse) => void): P
     });
   });
   await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-  return { socketPath, seen, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  return { socketPath, seen, close: async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  } };
 }
 
 test("a box token is asked on the broker's socket route with the host's bearer, and read field-wise", async () => {

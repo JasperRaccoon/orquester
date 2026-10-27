@@ -9,11 +9,11 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { Script } from "node:vm";
 
-import { BOX_AGENT_PLATFORMS, type BoxArch, type BoxLibc, type BoxOs, type TsCheckerEngine, boxPathMapFor } from "@orquester/api";
+import { type BoxArch, type BoxLibc, type BoxOs, type TsCheckerEngine, boxPathMapFor } from "@orquester/api";
 
 import { toolingTargetContext } from "../../boxes/tooling/provisioner.ts";
 import { ToolingStepError, type ToolingPlan } from "../../boxes/tooling/types.ts";
-import { type TsRustToolingState, createTsRustToolingPlugin, tsRustEngineForTarget, tsRustTargetEngines } from "./box-tooling.ts";
+import { type TsRustToolingState, createTsRustToolingPlugin } from "./box-tooling.ts";
 import { NPM_REGISTRY } from "./installer.ts";
 
 const HOST_WORKSPACES = "/var/lib/orquester/workspaces";
@@ -92,9 +92,7 @@ const EXPECTED: Record<string, { engine: TsCheckerEngine; pkg: string; entry: st
 };
 
 test("every orq-agent platform resolves its engine, platform package and archive layout from the registry", async () => {
-  assert.deepEqual(Object.keys(EXPECTED).sort(), [...BOX_AGENT_PLATFORMS].sort(), "the table covers every platform");
-  for (const platform of BOX_AGENT_PLATFORMS) {
-    const expected = EXPECTED[platform]!;
+  for (const [platform, expected] of Object.entries(EXPECTED)) {
     const fake = registry();
     const plugin = createTsRustToolingPlugin({ source: source(on()), registry: fake.deps });
     const context = contextFor(platform);
@@ -125,18 +123,6 @@ test("every orq-agent platform resolves its engine, platform package and archive
   }
 });
 
-test("the chosen engine is kept where the box has a build, else the box's default; tsc-rs's Linux build serves musl too", () => {
-  const musl = targetOf("linux-x64-musl");
-  assert.equal(tsRustEngineForTarget(musl, "tsc-rs"), "tsc-rs");
-  assert.equal(tsRustTargetEngines(musl).packages["tsc-rs"], "@tsc-rs/linux-x64", "statically linked");
-  assert.equal(tsRustEngineForTarget(targetOf("win32-x64"), "tsrs"), "tsc-rs", "a Windows box gets tsc-rs under a tsrs host");
-  assert.equal(tsRustEngineForTarget(targetOf("darwin-x64"), "tsrs"), "tsc-rs");
-  assert.equal(tsRustEngineForTarget(targetOf("darwin-arm64"), undefined), "tsrs");
-  assert.deepEqual(tsRustTargetEngines(targetOf("win32-x64")).supported, ["tsc-rs"]);
-  assert.deepEqual(tsRustTargetEngines(targetOf("linux-arm64")).supported, ["tsrs", "tsc-rs"]);
-  assert.equal(tsRustEngineForTarget({ os: "linux", arch: "riscv64" as BoxArch, libc: "glibc" }, undefined), null);
-});
-
 test("a box follows the host's current version of its engine, and the registry's latest when the host has none", async () => {
   const fake = registry();
   const plugin = createTsRustToolingPlugin({ source: source(on("tsrs", { tsrs: "0.15.0" })), registry: fake.deps });
@@ -146,6 +132,11 @@ test("a box follows the host's current version of its engine, and the registry's
   assert.equal(windows.kind === "install" && windows.artifacts[0]?.version, TSC_RS_VERSION);
   assert.deepEqual(fake.asked.latest, ["tsc-rs"], "latest is asked only for the engine the host has no version of");
   assert.deepEqual(fake.asked.meta, ["@tsrs/linux-x64-gnu@0.15.0", `@tsc-rs/win32-x64@${TSC_RS_VERSION}`]);
+
+  const selected = createTsRustToolingPlugin({ source: source(on("tsc-rs")), registry: fake.deps });
+  const musl = await selected.plan(contextFor("linux-x64-musl"), AbortSignal.timeout(5000));
+  assert.equal(musl.kind === "install" && musl.artifacts[0]?.tool, "tsc-rs");
+  assert.equal(fake.asked.meta.at(-1), `@tsc-rs/linux-x64@${TSC_RS_VERSION}`, "the chosen statically linked engine serves musl too");
 });
 
 test("a Windows box's preload and contribution carry only Windows box paths, quoted for NODE_OPTIONS", async () => {

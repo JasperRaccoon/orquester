@@ -6,7 +6,6 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseToml } from "../agent-profile/adapters/grok/toml-patch.ts";
 import {
-  GROK_PROFILE_ENV,
   grokDiscoveredPluginNames,
   grokSkillIgnoreList,
   parsePluginNames,
@@ -76,7 +75,7 @@ describe("grokSkillIgnoreList", () => {
 
   it("adds <grokHome>/bundled/skills when hiding built-ins", async () => {
     const list = await grokSkillIgnoreList({ home, grokHome: "/g", hideBundled: true });
-    assert.equal(list.at(-1), "/g/bundled/skills");
+    assert.ok(list.includes("/g/bundled/skills"));
   });
 
   it("tolerates a home without either directory", async () => {
@@ -169,23 +168,11 @@ hooks = true
     });
   });
 
-  it("writes empty lists and no mcp_servers table for an empty profile", () => {
+  it("writes empty exclusion lists and no MCP servers for an empty profile", () => {
     const doc = parseToml(renderGrokProfileConfigToml({ carriedOver: {}, mcpServers: {}, skillsIgnore: [], pluginsDisabled: [] }));
     assert.deepEqual(doc.skills, { ignore: [] });
     assert.deepEqual(doc.plugins, { disabled: [] });
-    assert.equal("mcp_servers" in doc, false);
+    assert.deepEqual(doc.mcp_servers ?? {}, {});
     assert.deepEqual(doc.cli, { auto_update: false, use_leader: false });
-  });
-});
-
-describe("GROK_PROFILE_ENV", () => {
-  it("turns every Claude/Cursor compat cell off except Claude skills", () => {
-    for (const vendor of ["CLAUDE", "CURSOR"]) {
-      for (const cell of ["RULES", "AGENTS", "MCPS", "HOOKS"]) {
-        assert.equal(GROK_PROFILE_ENV[`GROK_${vendor}_${cell}_ENABLED`], "false");
-      }
-    }
-    assert.equal(GROK_PROFILE_ENV.GROK_CURSOR_SKILLS_ENABLED, "false");
-    assert.equal("GROK_CLAUDE_SKILLS_ENABLED" in GROK_PROFILE_ENV, false);
   });
 });

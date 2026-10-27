@@ -11,7 +11,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { Readable } from "node:stream";
 import * as os from "node:os";
 import * as path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import type { AttachmentRef, ThreadHead } from "@orquester/api/agent-chat";
 import { foldThread } from "@orquester/api/agent-chat";
@@ -37,8 +37,12 @@ function hoursFromNow(hours: number): Date {
   return new Date(Date.now() + hours * 60 * 60 * 1000);
 }
 
+const roots: string[] = [];
+after(async () => { await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true }))); });
 async function tempRoot(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-store-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "orq-agent-store-"));
+  roots.push(root);
+  return root;
 }
 
 function fixedClock(iso = "2026-01-01T00:00:00.000Z"): Clock {
@@ -419,7 +423,7 @@ test("meta.json is checkpointed every 50 events", async (t) => {
   await store.drain();
 
   const meta = metaPath(rootDir, "t1");
-  await assert.rejects(fs.stat(meta), "nothing is written before the checkpoint threshold");
+  await assert.rejects(fs.stat(meta), { code: "ENOENT" }, "nothing is written before the checkpoint threshold");
 
   await store.append({
     threadId: "t1",
@@ -674,7 +678,8 @@ test("an unreadable receipts file costs at most a replayed command, never a thre
 async function writeSource(dir: string, name: string, bytes: number): Promise<string> {
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, name);
-  await fs.writeFile(filePath, Buffer.alloc(bytes, 1));
+  await fs.writeFile(filePath, "");
+  await fs.truncate(filePath, bytes);
   return filePath;
 }
 
@@ -709,7 +714,6 @@ test("resolveAttachment reads legacy ids without an extension suffix", async (t)
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   const id = "t1-3f2504e0-4f89-41d3-9a0c-0305e82c3301";
   const directory = attachmentsDirOf(rootDir, "t1");
   await fs.mkdir(directory, { recursive: true });
@@ -724,7 +728,6 @@ test("resolveAttachment reads files stored under the doubled `<id>.<ext>` name",
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   const id = "t1-3f2504e0-4f89-41d3-9a0c-0305e82c3301-txt";
   const directory = attachmentsDirOf(rootDir, "t1");
   await fs.mkdir(directory, { recursive: true });

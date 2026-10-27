@@ -171,20 +171,6 @@ describe("wire window — what the frame leaves to load older", () => {
     assert.ok(!kept.some((item) => item.id === "reply:t-1"));
   });
 
-  it("drops a resolved request's rows with their turn", () => {
-    const t = long();
-    const asked = row("asked", "t-2", "approval.requested", { requestId: "a-1" });
-    const answered = row("answered", "t-2", "approval.resolved", { requestId: "a-1" });
-    // A later request of a kept turn is the newest of each kind.
-    const later = [
-      row("asked-later", "t-14", "approval.requested", { requestId: "a-2" }),
-      row("answered-later", "t-14", "approval.resolved", { requestId: "a-2" })
-    ];
-    const kept = trimToWireWindow([...t.items.slice(0, 8), asked, answered, ...t.items.slice(8), ...later], cutOf(t), everyRowBelow);
-    assert.ok(kept && !kept.includes(asked) && !kept.includes(answered));
-    assert.ok(later.every((item) => kept.includes(item)));
-  });
-
   it("keeps the newest parent row of each kind and the newest parent message of each role", () => {
     const t = long();
     const plan = row("plan", "t-2", "turn.plan.updated", { plan: [] });

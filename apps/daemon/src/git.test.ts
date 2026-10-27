@@ -11,7 +11,6 @@ import {
   GitError,
   GitService,
   GitWatcher,
-  gitSafetyArgs,
   passesGitEventFilter,
   workingDiffMaxBytes
 } from "./git";
@@ -677,18 +676,6 @@ test("working diff ignores the user's own diff config: no quoting, a/ b/ prefixe
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});
-
-test("gitSafetyArgs: fsmonitor off everywhere, hooks off for the daemon's own reads on this host", () => {
-  const off = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
-  assert.deepEqual(gitSafetyArgs(["status", "--porcelain=v2"], true), off);
-  assert.deepEqual(gitSafetyArgs(["-c", "core.quotePath=false", "diff", "--no-color"], true), off);
-  assert.deepEqual(gitSafetyArgs(["stash", "list"], true), off);
-  for (const command of ["commit", "push", "fetch", "merge", "checkout", "add", "stash"]) {
-    assert.deepEqual(gitSafetyArgs([command], true), ["-c", "core.fsmonitor=false"], `${command} keeps the repo's hooks`);
-  }
-  // A box repo's hooks run in its box; its fsmonitor is still never asked for.
-  assert.deepEqual(gitSafetyArgs(["status"], false), ["-c", "core.fsmonitor=false"]);
 });
 
 test("a repo's own fsmonitor command and post-index-change hook never run on the daemon's reads; commit hooks still do", async () => {

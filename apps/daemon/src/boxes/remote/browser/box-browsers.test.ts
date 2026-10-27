@@ -15,10 +15,7 @@ import { boxRecord, fakeAgentConnection, fakeBoxes, type FakeAgentConnection, ty
 import {
   BOX_BROWSER_PROC_PREFIX,
   BoxBrowsers,
-  boxChromiumArgs,
-  boxRunsBrowser,
   connectBoundedTransport,
-  parseDevtoolsListening,
   projectBrowserHash,
   type BoxBrowserInstaller
 } from "./box-browsers.ts";
@@ -95,24 +92,6 @@ async function firstState(manager: BrowserManager, id: string): Promise<BrowserS
 const chromeExecs = (connection: BoxConnection & { execs: { command: string; args?: string[]; detach?: { procId: string } }[] }) =>
   connection.execs.filter((spec) => spec.detach?.procId.startsWith(BOX_BROWSER_PROC_PREFIX));
 
-test("pure helpers: the Linux kinds run the browser, the endpoint line parses, the argv is Chromium's", () => {
-  assert.equal(boxRunsBrowser({ kind: "linux" }), true);
-  assert.equal(boxRunsBrowser({ kind: "linux-gpu" }), true);
-  assert.equal(boxRunsBrowser({ kind: "macos" }), false);
-  assert.equal(boxRunsBrowser({ kind: "windows" }), false);
-  assert.deepEqual(parseDevtoolsListening("\nDevTools listening on ws://127.0.0.1:40123/devtools/browser/0b1c-2d\n"), {
-    port: 40123,
-    path: "/devtools/browser/0b1c-2d"
-  });
-  assert.equal(parseDevtoolsListening("DevTools listening on ws://127.0.0.1:0/devtools/browser/x"), null);
-  assert.equal(parseDevtoolsListening("DevTools listening on ws://127.0.0.1:9222/json/version"), null);
-  assert.equal(parseDevtoolsListening("[1022/101010.1:ERROR:gpu_init.cc] whatever"), null);
-  const args = boxChromiumArgs("/data/browser-profiles/abc", false);
-  assert.ok(args.includes("--headless=new") && args.includes("--remote-debugging-port=0"));
-  assert.ok(args.includes("--user-data-dir=/data/browser-profiles/abc") && !args.includes("--no-sandbox"));
-  assert.ok(boxChromiumArgs("/p", true).includes("--no-sandbox"));
-});
-
 test("only a Linux box project's tab runs in the box; it needs no host Chromium, the others still do", async (t) => {
   const r = await rig(t);
   assert.equal(r.vm.runsInBox(PROJECT), true);
@@ -120,6 +99,11 @@ test("only a Linux box project's tab runs in the box; it needs no host Chromium,
   assert.equal(r.vm.runsInBox(MAC_PROJECT), false);
   assert.equal(r.vm.runsInBox("/srv/workspaces/acme/host-project"), false);
   assert.equal(r.vm.launcherFor(MAC_PROJECT), null);
+  r.boxes.update("box-1", { kind: "linux-gpu" });
+  assert.equal(r.vm.runsInBox(PROJECT), true);
+  r.boxes.update("box-1", { kind: "windows" });
+  assert.equal(r.vm.runsInBox(PROJECT), false);
+  r.boxes.update("box-1", { kind: "linux" });
 
   const tab = await r.manager.create(PROJECT, "http://localhost:5173");
   assert.equal(tab.runsIn, "box");

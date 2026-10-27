@@ -7,7 +7,6 @@ import {
   splitApprovalOptions,
   toolApprovalAnswerFailure,
   toolApprovalChangeSentence,
-  toolApprovalExpiryText,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
   toolApprovalPreviewIsCut,
@@ -143,13 +142,6 @@ test("only ⌘/Ctrl+Enter approves, and never within the guard", () => {
   assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { ...late, inDenyReason: true }), "deny");
 });
 
-test("a secret-files push names the vault, clones and privacy boundary", () => {
-  const push = toolApprovalChangeSentence({ kind: "admin", family: "secret-files", scope: { label: "S" } });
-  assert.match(push, /this repo's vault/);
-  assert.match(push, /every clone listed/);
-  assert.match(push, /never values/);
-});
-
 // boxes: renting a box is a spend card of its own.
 test("a box rental (spend card) says what approving costs and reads as money, not Admin", () => {
   const sentence = toolApprovalChangeSentence({ kind: "spend", family: "boxes", scope: { label: "Billed to your Hetzner account" } });
@@ -159,16 +151,8 @@ test("a box rental (spend card) says what approving costs and reads as money, no
   assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
 });
 
-test("the card counts down and says when it expired", () => {
-  const at = Date.parse("2026-10-15T10:00:00.000Z");
-  assert.equal(toolApprovalExpiryText("2026-10-15T10:30:00.000Z", at), "Expires in 30 min");
-  assert.equal(toolApprovalExpiryText("2026-10-15T10:00:41.000Z", at), "Expires in 41 s");
-  assert.equal(toolApprovalExpiryText("2026-10-15T10:00:00.000Z", at), "Expired");
-  assert.equal(toolApprovalExpiryText("not a date", at), "");
-});
-
 test("a late answer says the agent stopped waiting; a bad one keeps the card", () => {
-  assert.deepEqual(toolApprovalAnswerFailure(409), { text: "The agent stopped waiting: your answer was not used.", closed: true });
+  assert.equal(toolApprovalAnswerFailure(409).closed, true);
   assert.equal(toolApprovalAnswerFailure(404).closed, true);
   assert.equal(toolApprovalAnswerFailure(400).closed, false);
   assert.equal(toolApprovalAnswerFailure(null).closed, false);

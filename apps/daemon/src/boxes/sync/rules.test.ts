@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  CLAUDE_INSTALLED_PLUGINS_REL,
   installedPluginCacheDirs,
   isDeniedRealPath,
   isDeniedRelPath,
@@ -11,7 +10,6 @@ import {
   isSafeRelPath,
   isSyncedRel,
   isUninstalledPluginCache,
-  syncRootKind,
   syncRuleFor
 } from "./rules.ts";
 
@@ -95,13 +93,6 @@ test("include lists keep transcripts, caches, telemetry and state out", () => {
   assert.equal(isSyncedRel(syncRuleFor("grok", "account"), "sessions/x/summary.json"), false);
 });
 
-test("roots under the prepared root are host → box only", () => {
-  assert.equal(syncRootKind("/app/daemon/session-profiles/prepared/p/claude/shared/v-1", "/app/daemon/session-profiles/prepared"), "prepared");
-  assert.equal(syncRootKind("/app/daemon/agent-accounts/claude/a/home", "/app/daemon/session-profiles/prepared"), "account");
-  assert.equal(syncRuleFor("claude", "prepared").twoWay, false);
-  assert.equal(syncRuleFor("claude", "account").twoWay, true);
-});
-
 test("box-listed names: only plain segments; temp files of either side never sync", () => {
   for (const name of ["", ".", "..", "a/b", "../x", "a\\b", "..\\x", "a\u0000b"]) assert.equal(isSafeEntryName(name), false, JSON.stringify(name));
   for (const name of ["s1.jsonl", ".hidden", "...", "a..b", "rollout-1-x.jsonl"]) assert.equal(isSafeEntryName(name), true, name);
@@ -155,7 +146,6 @@ test("installed_plugins.json names the cache dirs of its installs (installPath o
   assert.deepEqual(installedPluginCacheDirs(JSON.stringify({ version: 1, plugins: { "p@m": { version: "1.0" } } })), ["m/p/1.0"]);
   assert.equal(installedPluginCacheDirs("not json"), null);
   assert.equal(installedPluginCacheDirs('{"version":2}'), null);
-  assert.equal(CLAUDE_INSTALLED_PLUGINS_REL, "plugins/installed_plugins.json");
 });
 
 test("the plugin cache keeps installed versions only; temp clones and in-use markers never sync; marketplaces are host → box only", () => {

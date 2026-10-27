@@ -58,9 +58,9 @@ export interface ConnectionDiagnosisInput {
 }
 
 /** A `daemon.stopping` this recent explains the failure that follows it. */
-export const RESTART_WINDOW_MS = 2 * 60_000;
+const RESTART_WINDOW_MS = 2 * 60_000;
 /** Consecutive WebSocket closes, while HTTP is connected, that mean WebSockets are blocked. */
-export const WS_BLOCKED_AFTER = 3;
+const WS_BLOCKED_AFTER = 3;
 
 const NETWORK_KINDS: ReadonlySet<ConnectionFailureKind> = new Set([
   "dns",

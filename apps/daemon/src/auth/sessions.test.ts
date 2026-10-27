@@ -4,19 +4,19 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import { dirname, join } from "node:path";
+import { test, type TestContext } from "node:test";
 
-import { isAuthTokenShape } from "@orquester/api";
-
-import { AuthSessionStore, AuthSessionsUnavailableError, StalePasswordError, DEVICE_SESSION_IDLE_MS, LAST_USED_PERSIST_MS, deviceLabelFromUserAgent } from "./sessions.ts";
+import { AuthSessionStore, AuthSessionsUnavailableError, StalePasswordError, deviceLabelFromUserAgent } from "./sessions.ts";
 
 const quiet = { warn: () => undefined, error: () => undefined };
 
-async function tempFile(): Promise<string> {
-  return join(await mkdtemp(join(tmpdir(), "orquester-auth-sessions-")), "auth-sessions.json");
+async function tempFile(t: TestContext): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "orquester-auth-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return join(dir, "auth-sessions.json");
 }
 
 function clock(start = Date.parse("2026-10-22T10:00:00.000Z")): { now: () => number; advance: (ms: number) => void } {
@@ -28,12 +28,12 @@ async function readJson(file: string): Promise<Record<string, unknown> & { sessi
   return JSON.parse(await readFile(file, "utf8"));
 }
 
-test("a minted token verifies; the file holds only its digest, at 0600", async () => {
-  const file = await tempFile();
+test("a minted token verifies; the file holds only its digest, at 0600", async (t) => {
+  const file = await tempFile(t);
   const store = new AuthSessionStore({ file, logger: quiet });
   await store.load();
   const { token, session } = await store.create("device", "Chrome on macOS");
-  assert.ok(isAuthTokenShape(token));
+  assert.match(token, /^orq_[A-Za-z0-9_-]{43}$/);
   assert.equal(session.kind, "device");
   assert.equal(session.current, true);
   assert.deepEqual(store.verify(token), { id: session.id, kind: "device" });
@@ -58,17 +58,18 @@ test("verify refuses anything but a live token", async () => {
 });
 
 test("device sessions lapse after 30 idle days; each use slides the expiry; API tokens never lapse", async () => {
+  const idleWindow = 30 * 24 * 60 * 60 * 1000;
   const c = clock();
   const store = new AuthSessionStore({ now: c.now });
   const device = await store.create("device", "phone");
   const api = await store.create("api", "ci");
   assert.equal(api.session.expiresAt, null);
 
-  c.advance(DEVICE_SESSION_IDLE_MS - 1000);
+  c.advance(idleWindow - 1000);
   assert.ok(store.verify(device.token), "still live just before the idle window ends");
-  c.advance(DEVICE_SESSION_IDLE_MS - 1000);
+  c.advance(idleWindow - 1000);
   assert.ok(store.verify(device.token), "the use above slid the expiry");
-  c.advance(DEVICE_SESSION_IDLE_MS + 1);
+  c.advance(idleWindow + 1);
   assert.equal(store.verify(device.token), null, "lapsed after a full idle window");
   assert.ok(store.verify(api.token), "an API token lasts until revoked");
   assert.deepEqual(store.list(null).map((s) => s.kind), ["api"], "a lapsed session is no longer listed");
@@ -81,11 +82,13 @@ test("a peek (touch=false) neither stamps the use nor slides the expiry", async 
   c.advance(60_000);
   assert.ok(store.verify(token, false));
   assert.equal(store.list(null)[0]?.lastUsedAt, session.lastUsedAt);
+  c.advance(30 * 24 * 60 * 60 * 1000 - 60_000);
+  assert.equal(store.verify(token, false), null, "a peek did not extend the original expiry");
 });
 
-test("lastUsedAt reaches the disk at most every few minutes per session", async () => {
+test("lastUsedAt reaches the disk at most every few minutes per session", async (t) => {
   const c = clock();
-  const file = await tempFile();
+  const file = await tempFile(t);
   const store = new AuthSessionStore({ file, now: c.now, logger: quiet });
   await store.load();
   const { token, session } = await store.create("device", "x");
@@ -96,7 +99,7 @@ test("lastUsedAt reaches the disk at most every few minutes per session", async 
   assert.equal((await readJson(file)).sessions[0]?.lastUsedAt, session.lastUsedAt, "a use a minute later stays in memory");
   assert.notEqual(store.list(null)[0]?.lastUsedAt, session.lastUsedAt);
 
-  c.advance(LAST_USED_PERSIST_MS);
+  c.advance(10 * 60_000);
   store.verify(token);
   await store.flush();
   assert.equal((await readJson(file)).sessions[0]?.lastUsedAt, new Date(c.now()).toISOString());
@@ -126,8 +129,8 @@ test("revoke one, revoke all but the current, and listeners hear each revocation
   assert.deepEqual(heard[1], [t.session.id]);
 });
 
-test("a password change revokes every device session, keeps API tokens, and is noticed across a restart", async () => {
-  const file = await tempFile();
+test("a password change revokes every device session, keeps API tokens, and is noticed across a restart", async (t) => {
+  const file = await tempFile(t);
   const store = new AuthSessionStore({ file, logger: quiet });
   await store.load();
   assert.equal(await store.syncPassword("$2a$12$old"), 0, "the first hash is only recorded");
@@ -150,8 +153,8 @@ test("a password change revokes every device session, keeps API tokens, and is n
   assert.equal(await again.syncPassword("$2a$12$new"), 0);
 });
 
-test("the file keeps unknown fields and records it cannot read, and never honours the latter", async () => {
-  const file = await tempFile();
+test("the file keeps unknown fields and records it cannot read, and never honours the latter", async (t) => {
+  const file = await tempFile(t);
   const seed = new AuthSessionStore({ file, logger: quiet });
   await seed.load();
   const live = await seed.create("device", "live");
@@ -177,8 +180,8 @@ test("the file keeps unknown fields and records it cannot read, and never honour
   assert.equal(written.sessions.length, 4);
 });
 
-test("a corrupt file is moved aside and nobody is signed in; an unreadable one refuses sign-in", async () => {
-  const file = await tempFile();
+test("a corrupt file is moved aside and nobody is signed in; an unreadable one refuses sign-in", async (t) => {
+  const file = await tempFile(t);
   await writeFile(file, "{ not json");
   const store = new AuthSessionStore({ file, logger: quiet });
   await store.load();
@@ -186,7 +189,7 @@ test("a corrupt file is moved aside and nobody is signed in; an unreadable one r
   const names = await readdir(join(file, ".."));
   assert.ok(names.some((name) => name.startsWith("auth-sessions.json.corrupt-")));
 
-  const dir = await mkdtemp(join(tmpdir(), "orquester-auth-sessions-"));
+  const dir = dirname(await tempFile(t));
   // A directory where the file should be: readFile fails with EISDIR.
   const blocked = new AuthSessionStore({ file: dir, logger: quiet });
   await blocked.load();
@@ -194,14 +197,14 @@ test("a corrupt file is moved aside and nobody is signed in; an unreadable one r
 });
 
 test("device labels come from the user agent", () => {
-  assert.equal(
-    deviceLabelFromUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
-    "Safari on iPhone"
-  );
-  assert.equal(deviceLabelFromUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) orquester/0.0.0 Chrome/138.0 Electron/37.0 Safari/537.36"), "Orquester desktop on macOS");
-  assert.equal(deviceLabelFromUserAgent("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"), "Firefox on Linux");
-  assert.equal(deviceLabelFromUserAgent(undefined), "Unknown device");
-  assert.equal(deviceLabelFromUserAgent("curl/8.5.0"), "curl/8.5.0");
+  for (const [ua, parts] of [
+    ["Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1", ["Safari", "iPhone"]],
+    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) orquester/0.0.0 Chrome/138.0 Electron/37.0 Safari/537.36", ["Orquester", "macOS"]],
+    ["Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0", ["Firefox", "Linux"]]
+  ] as const) {
+    const label = deviceLabelFromUserAgent(ua);
+    for (const part of parts) assert.ok(label.includes(part), label);
+  }
 });
 
 test("a login bound to a hash the sessions are no longer bound to mints nothing", async () => {

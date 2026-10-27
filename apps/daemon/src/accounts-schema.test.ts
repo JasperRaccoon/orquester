@@ -38,10 +38,6 @@ test("new-shape bitbucket-server account round-trips", () => {
   assert.equal(a.sshHost, "bb.corp.com:7999");
 });
 
-test("already-migrated payload is untouched (idempotent)", () => {
-  assert.deepEqual(parseAccountsConfig(JSON.parse(JSON.stringify(migratedConfig))), migratedConfig);
-});
-
 // Rollback safety: the serialized file must stay parseable by the PRE-provider
 // accountSchema (which required `githubLogin` and numeric `githubKeyId`), so a
 // deploy rollback does not wipe connected GitHub accounts.

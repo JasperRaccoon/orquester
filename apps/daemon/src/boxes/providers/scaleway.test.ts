@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type ReplayRoute } from "./fixtures/vm-replay.ts";
-import { EUR_TO_USD, roundUsd, SCALEWAY_BLOCK_EUR_PER_GB_HOUR, SCALEWAY_IPV4_EUR_PER_HOUR } from "./price-tables.ts";
 import { scalewayAdapter } from "./scaleway.ts";
 
 const API = "https://api.scaleway.com";
@@ -27,10 +26,6 @@ function volumesRoute(zone: string, volumes: unknown[] = []): ReplayRoute {
     url: `${API}/block/v1/zones/${zone}/volumes?project_id=${PROJECT}&tags=orquester-box&page=1&page_size=100`,
     body: { volumes, total_count: volumes.length }
   };
-}
-
-function linuxEur(hourly: number, rootGb: number): number {
-  return roundUsd((hourly + rootGb * SCALEWAY_BLOCK_EUR_PER_GB_HOUR + SCALEWAY_IPV4_EUR_PER_HOUR) * EUR_TO_USD);
 }
 
 function mapPage(name: string): { body: unknown; headers: Record<string, string> } {
@@ -64,6 +59,7 @@ function createRoutes(): ReplayRoute[] {
   ];
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working key, a message for a bad key or missing fields", async () => {
   const url = `${zoneApi("fr-par-1")}/servers?project=${PROJECT}&per_page=1`;
   const replay = replayFetch([
@@ -106,8 +102,8 @@ test("offers: live per-zone prices plus block volume and IPv4, no Windows, GPU o
   assert.deepEqual(
     pop2.map((size) => [size.id, size.regions, size.hourlyUsd]),
     [
-      ["POP2-2C-8G", ["fr-par-1", "fr-par-2"], linuxEur(0.0735, 20)],
-      ["POP2-2C-8G@fr-par-3", ["fr-par-3"], linuxEur(0.11025, 20)]
+      ["POP2-2C-8G", ["fr-par-1", "fr-par-2"], 0.0941],
+      ["POP2-2C-8G@fr-par-3", ["fr-par-3"], 0.1367]
     ]
   );
   assert.equal(pop2[0]!.vcpu, 2);
@@ -118,7 +114,7 @@ test("offers: live per-zone prices plus block volume and IPv4, no Windows, GPU o
   // "scarce" stock is still offered; Arm types too.
   const pico = offers.sizes.find((size) => size.id === "PLAY2-PICO");
   assert.deepEqual(pico?.regions, ["fr-par-1", "fr-par-2"]);
-  assert.equal(pico?.hourlyUsd, linuxEur(0.01428, 20));
+  assert.equal(pico?.hourlyUsd, 0.0254);
   assert.match(offers.sizes.find((size) => size.id === "BASIC2-A2C-4G")?.label ?? "", /Arm64/);
 
   const prices = offers.sizes.map((size) => size.hourlyUsd ?? Infinity);
@@ -149,7 +145,7 @@ test("offers: linux-gpu lists only GPU types with their GPU, a larger root volum
   const l4 = offers.sizes[0]!;
   assert.deepEqual(l4.gpu, { model: "L4", count: 1, vramGb: 24 });
   assert.equal(l4.diskGb, 100);
-  assert.equal(l4.hourlyUsd, linuxEur(0.7875, 100));
+  assert.equal(l4.hourlyUsd, 0.9344);
   assert.deepEqual(
     offers.images.map((image) => image.id),
     ["ubuntu_noble_gpu_os_13_nvidia", "ubuntu_noble"]
@@ -208,7 +204,7 @@ test("create: tagged server on a block root volume, cloud-init as raw user data,
   assert.deepEqual(volumePatch?.body, { name: `orq-${TEST_BOX_ID}`, tags: ["orquester-box", `orquester-box=${TEST_BOX_ID}`] });
 
   assert.deepEqual(result.ref, { serverId: SERVER_ID, zone: "fr-par-1", volumeIds: [VOLUME_ID] });
-  assert.equal(result.hourlyUsd, linuxEur(0.0735, 20));
+  assert.equal(result.hourlyUsd, 0.0941);
   assert.equal(result.windowsPassword, undefined);
 });
 
@@ -217,6 +213,7 @@ test("create: Arm types get the zone's arm64 image; a regional size id is sent a
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 201, body: fixture("scaleway", "create-server") },
     { method: "PATCH", url: `${serverUrl}/user_data/cloud-init`, status: 204 },
+    { method: "PATCH", url: volumeUrl, body: { id: VOLUME_ID } },
     { method: "POST", url: `${serverUrl}/action`, status: 202, body: fixture("scaleway", "action-poweron") }
   ]);
   await scalewayAdapter.create(credentials, testCreateRequest({ size: "BASIC2-A2C-4G@fr-par-1", region: "fr-par-1" }), replayOptions(replay));

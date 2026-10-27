@@ -140,6 +140,7 @@ describe("code blocks", () => {
   test("a syntax error is a failure", async () => {
     const { exit } = await code("export default () => {");
     assert.ok(exit.result && "ok" in exit.result && exit.result.ok === false, "an unparsable module fails");
+    assert.match(exit.result.error.stack ?? "", /^SyntaxError:/);
   });
 
 });
@@ -231,7 +232,7 @@ describe("deadlines, cancels and restarts", () => {
     const handle = await runner.spawn(
       request({
         kind: "shell",
-        source: `trap '' TERM; touch ${JSON.stringify(ready)}; while true; do sleep 0.05; done`,
+        source: `trap '' TERM; touch ${JSON.stringify(ready)}; exec tail -f /dev/null`,
         attemptDir
       })
     );

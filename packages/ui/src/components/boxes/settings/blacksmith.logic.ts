@@ -77,7 +77,7 @@ export function blacksmithCanPickOrg(setup: BlacksmithSetupResponse | null): boo
  * Re-reading a running setup: the delay before the next read (growing by half
  * each time, capped) and whether the deadline still allows one.
  */
-export const BLACKSMITH_POLL = { firstMs: 2_000, maxMs: 15_000, deadlineMs: 15 * 60_000 } as const;
+const BLACKSMITH_POLL = { firstMs: 2_000, maxMs: 15_000, deadlineMs: 15 * 60_000 } as const;
 
 export function nextBlacksmithPoll(previousMs: number | null, startedAt: number, now: number): number | null {
   const delay =

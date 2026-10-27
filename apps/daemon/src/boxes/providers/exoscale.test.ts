@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { exoscaleAdapter, exoscaleAuthorization, exoscaleTiming } from "./exoscale.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest } from "./fixtures/vm-replay.ts";
-import { roundUsd } from "./price-tables.ts";
 
 exoscaleTiming.pollMs = 0;
 
@@ -44,6 +43,7 @@ function assertSigned(request: RecordedRequest): void {
   );
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("signature: EXO2-HMAC-SHA256 over method+path, body, query values, headers and expiry", () => {
   // Expected values computed independently with Python's hmac/hashlib/base64.
   assert.equal(
@@ -111,7 +111,7 @@ test("offers: Linux types with live prices including the root disk, zones and cu
   assert.equal(tiny.diskGb, 40);
   assert.equal(tiny.gpu, null);
   // standard.tiny $0.01458/h + 40 GiB × $0.00014 per GiB-hour.
-  assert.equal(tiny.hourlyUsd, roundUsd(0.01458 + 40 * 0.00014));
+  assert.equal(tiny.hourlyUsd, 0.0202);
   // Zones the account does not list (at-vie-1 here) are dropped from a type's regions.
   assert.deepEqual(tiny.regions, ["ch-dk-2", "de-fra-1", "ch-gva-2"]);
   assert.deepEqual(offers.sizes.find((size) => size.id === "memory.extra-large")?.regions, ["de-fra-1"]);
@@ -149,9 +149,9 @@ test("offers: Windows sizes from 4 GB with the licence tier by vCPU count", asyn
   const medium = offers.sizes[0]!;
   assert.equal(medium.diskGb, 60);
   // 2 vCPUs: the up-to-7-vCPU licence.
-  assert.equal(medium.hourlyUsd, roundUsd(0.04666 + 60 * 0.00014 + 0.01111));
+  assert.equal(medium.hourlyUsd, 0.0662);
   // 8 vCPUs: the 8-or-more licence.
-  assert.equal(offers.sizes.find((size) => size.id === "cpu.extra-large")?.hourlyUsd, roundUsd(0.23333 + 60 * 0.00014 + 0.02222));
+  assert.equal(offers.sizes.find((size) => size.id === "cpu.extra-large")?.hourlyUsd, 0.264);
   assert.deepEqual(
     offers.images.map((image) => [image.id, image.label]),
     [
@@ -185,7 +185,7 @@ test("create: one signed POST with name, labels, base64 cloud-init and the resol
   // Every read came first.
   assert.equal(replay.requests.at(-1), post);
   assert.deepEqual(result.ref, { instanceId: INSTANCE_ID, zone: "de-fra-1" });
-  assert.equal(result.hourlyUsd, roundUsd(0.04666 + 40 * 0.00014));
+  assert.equal(result.hourlyUsd, 0.0523);
   assert.equal(result.windowsPassword, undefined);
 });
 
@@ -202,7 +202,7 @@ test("create: Windows gets cloudbase-init user data, the template's disk floor a
   assert.equal(Buffer.from(body["user-data"] as string, "base64").toString("utf8"), `#ps1_sysnative\r\n${request.bootstrap.powershellScript}`);
   assert.deepEqual(body.template, { id: WINDOWS_2022 });
   assert.equal(body["disk-size"], 60);
-  assert.equal(result.hourlyUsd, roundUsd(0.04666 + 60 * 0.00014 + 0.01111));
+  assert.equal(result.hourlyUsd, 0.0662);
   assert.equal(result.windowsPassword, "Redacted-Windows-Password-1");
   assertSigned(replay.requests.at(-1)!);
 });

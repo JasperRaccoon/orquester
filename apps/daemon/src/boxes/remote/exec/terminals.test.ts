@@ -10,7 +10,6 @@ import type { CreateSessionRequest, RegistryEntry, SessionSummary } from "@orque
 import { setSessionNodePreload } from "../../../plugins/session-env.ts";
 import type { RegistryService } from "../../../registry.ts";
 import { drainSessionIndexWrites, LocalSessionManager, SessionError, type ISessionManager } from "../../../sessions.ts";
-import { historyLimitArgs } from "../../../tmux.ts";
 import { BOX_TMUX_SERVER, BoxAwareSessionManager, BoxTerminalManager, composeIndexContributors } from "./terminals.ts";
 import { boxRecord, fakeAgentConnection, fakeBoxes, type FakeAgentConnection, type FakeProcBehavior } from "./testing.ts";
 
@@ -179,8 +178,8 @@ test("with tmux in the box the shell is a private tmux session; close kills it",
     const spawned = r.connection.execs.find((e) => e.detach)!;
     assert.equal(spawned.command, "tmux");
     assert.deepEqual(spawned.args?.slice(0, 2), ["-L", BOX_TMUX_SERVER]);
-    assert.deepEqual(spawned.args?.slice(2, 7), historyLimitArgs());
-    assert.deepEqual(spawned.args?.slice(7, 11), ["new-session", "-A", "-s", `orq-${summary.id}`]);
+    const sessionArgs = spawned.args?.slice(spawned.args.indexOf("new-session"));
+    assert.deepEqual(sessionArgs?.slice(0, 4), ["new-session", "-A", "-s", `orq-${summary.id}`]);
     assert.ok(spawned.args?.includes(`PATH=/var/lib/orq-agent/tools/bin:/usr/local/bin:/usr/bin:/bin`));
     assert.ok(spawned.args?.includes(`NODE_OPTIONS=--require "/var/lib/orq-agent/tools/preload.cjs"`));
     assert.equal(spawned.env?.TSRS_ENGINE, "tsrs");
@@ -261,8 +260,6 @@ test("a dropped link detaches the shell; reconnecting reattaches from the last o
     const resumed = nextOutput(r.sessions, summary.id, /while-away\n/);
     r.connection.restoreLink();
     assert.equal(await resumed, "while-away\n");
-    const attach = r.connection.calls.filter((c) => c.method === "proc.list");
-    assert.equal(attach.length, 1);
 
     const live = nextOutput(r.sessions, summary.id, /echo:pwd\n/);
     r.sessions.input(summary.id, "pwd\n");
@@ -399,7 +396,8 @@ for (const mode of ["forget", "lose"] as const) {
       const rejoin = r.connection.nextExec((spec) => spec.detach !== undefined);
       r.connection.restoreLink();
       const rejoined = await rejoin;
-      assert.deepEqual(rejoined.args?.slice(7, 11), ["new-session", "-A", "-s", `orq-${summary.id}`]);
+      const sessionArgs = rejoined.args?.slice(rejoined.args.indexOf("new-session"));
+      assert.deepEqual(sessionArgs?.slice(0, 4), ["new-session", "-A", "-s", `orq-${summary.id}`]);
       assert.equal(r.sessions.get(summary.id)?.status, "running");
     } finally {
       r.box.dispose();

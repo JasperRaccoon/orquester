@@ -157,6 +157,7 @@ test("each credential acts only as its own thread", async (t) => {
 test("no credential, a wrong one, or one a relaunch revoked is a 401", async (t) => {
   const { host: service } = host(t);
   const first = await service.issue("thread-a", CODEX);
+  const other = await service.issue("thread-b", CODEX);
   assert.equal((await fetch(first.url, initialize(first.authorization))).status, 200);
   assert.equal((await fetch(first.url, initialize())).status, 401);
   assert.equal((await fetch(first.url, initialize("Bearer not-a-credential"))).status, 401);
@@ -165,6 +166,7 @@ test("no credential, a wrong one, or one a relaunch revoked is a 401", async (t)
   const second = await service.issue("thread-a", CODEX);
   assert.equal((await fetch(first.url, initialize(first.authorization))).status, 401);
   assert.equal((await fetch(second.url, initialize(second.authorization))).status, 200);
+  assert.equal((await fetch(other.url, initialize(other.authorization))).status, 200, "another thread keeps its credential");
   // The session ended.
   second.revoke();
   assert.equal((await fetch(second.url, initialize(second.authorization))).status, 401);

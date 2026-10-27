@@ -37,11 +37,11 @@ import { retryAfterMs as parseRetryAfter } from "../providers/types.ts";
 
 const GITHUB_API = "https://api.github.com";
 
-export const OPEN_TTL_MS = 2 * 60_000;
-export const CLOSED_TTL_MS = 10 * 60_000;
-export const COMMIT_TTL_MS = 30 * 60_000;
-export const NOT_FOUND_TTL_MS = 5 * 60_000;
-export const UPSTREAM_TTL_MS = 30_000;
+const OPEN_TTL_MS = 2 * 60_000;
+const CLOSED_TTL_MS = 10 * 60_000;
+const COMMIT_TTL_MS = 30 * 60_000;
+const NOT_FOUND_TTL_MS = 5 * 60_000;
+const UPSTREAM_TTL_MS = 30_000;
 const RATE_LIMIT_MIN_MS = 30_000;
 const RATE_LIMIT_DEFAULT_MS = 60_000;
 const RATE_LIMIT_MAX_MS = 15 * 60_000;
@@ -156,7 +156,7 @@ function repoPath(target: GitHubPreviewTarget): string {
 }
 
 /** Check runs → counts. Statuses other than `completed` are pending whatever their conclusion. */
-export function summarizeCheckRuns(payload: unknown): GitHubChecksSummary | null {
+function summarizeCheckRuns(payload: unknown): GitHubChecksSummary | null {
   const runs = object(payload).check_runs;
   if (!Array.isArray(runs)) return null;
   const summary: GitHubChecksSummary = { total: 0, passed: 0, failed: 0, pending: 0, skipped: 0 };
@@ -185,7 +185,7 @@ export function summarizeCheckRuns(payload: unknown): GitHubChecksSummary | null
   return summary;
 }
 
-export function mapPull(json: Json, target: GitHubPreviewTarget & { number: number }): GitHubPullPreview {
+function mapPull(json: Json, target: GitHubPreviewTarget & { number: number }): GitHubPullPreview {
   const head = object(json.head);
   const base = object(json.base);
   const merged = typeof json.merged_at === "string" && json.merged_at.length > 0;
@@ -217,7 +217,7 @@ export function mapPull(json: Json, target: GitHubPreviewTarget & { number: numb
   };
 }
 
-export function mapIssue(json: Json, target: GitHubPreviewTarget & { number: number }): GitHubIssuePreview {
+function mapIssue(json: Json, target: GitHubPreviewTarget & { number: number }): GitHubIssuePreview {
   const closed = json.state === "closed";
   return {
     kind: "issue",
@@ -236,7 +236,7 @@ export function mapIssue(json: Json, target: GitHubPreviewTarget & { number: num
   };
 }
 
-export function mapCommit(json: Json, target: GitHubPreviewTarget & { sha: string }): GitHubCommitPreview {
+function mapCommit(json: Json, target: GitHubPreviewTarget & { sha: string }): GitHubCommitPreview {
   const commit = object(json.commit);
   const gitAuthor = object(commit.author);
   const gitCommitter = object(commit.committer);

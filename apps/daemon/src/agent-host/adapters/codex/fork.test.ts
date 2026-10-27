@@ -34,11 +34,9 @@ describe("forkCodexThread", () => {
       excludeTurns: true,
       deferGoalContinuation: true
     });
-    // Only the handshake, the config read and the fork: the source thread is never resumed.
-    assert.deepEqual(
-      mock.received().flatMap((frame) => (frame.method !== undefined ? [frame.method] : [])),
-      ["initialize", "initialized", "config/read", "thread/fork"]
-    );
+    assert.equal(mock.received().some((frame) =>
+      ["thread/resume", "thread/start", "turn/start"].includes(frame.method ?? "")
+    ), false, "a fork never resumes the source or starts work in its short-lived process");
   });
 
   it("starts no MCP server in its short-lived process: every server the config defines is switched off", async (t) => {

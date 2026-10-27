@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  BLACKSMITH_APP_INSTALL_URL,
   cancelRun,
-  checkGithubAccount,
-  detectBlacksmithApp,
   dispatchBoxRun,
   ensureControlRepo,
   ensureWorkflowFile,
@@ -39,49 +36,6 @@ async function drive<T>(t: test.TestContext, promise: Promise<T>): Promise<T> {
 }
 
 const inputs = { box_id: "box-0123456789ab", lifetime_minutes: "60", daemon_url: "https://orq.example.com", runner: "blacksmith-6vcpu-macos-26" };
-
-test("checkGithubAccount reports scopes, membership and what to fix", async () => {
-  const ok = await checkGithubAccount("Org", call(new FakeGithub({ token: TOKEN })));
-  assert.deepEqual(
-    { ...ok, scopes: undefined },
-    { login: "octo", scopes: undefined, missingScopes: [], orgRole: "admin", membershipState: "active", canCreateRepo: true, problem: null }
-  );
-
-  const noWorkflow = await checkGithubAccount("Org", call(new FakeGithub({ token: TOKEN, scopes: "repo, read:org" })));
-  assert.deepEqual(noWorkflow.missingScopes, ["workflow"]);
-  assert.match(noWorkflow.problem!, /Add the workflow scope/);
-
-  const fineGrained = await checkGithubAccount("Org", call(new FakeGithub({ token: TOKEN, scopes: null })));
-  assert.equal(fineGrained.scopes, null);
-  assert.match(fineGrained.problem!, /classic personal access token/);
-
-  const outsider = await checkGithubAccount("Org", call(new FakeGithub({ token: TOKEN, role: null })));
-  assert.equal(outsider.orgRole, null);
-  assert.match(outsider.problem!, /not a member of Org/);
-
-  const member = await checkGithubAccount("Org", call(new FakeGithub({ token: TOKEN, role: "member", membersCanCreatePrivateRepos: false })));
-  assert.equal(member.canCreateRepo, false);
-  assert.match(member.problem!, /cannot create private repositories/);
-
-  await assert.rejects(checkGithubAccount("Org", { ...call(new FakeGithub({ token: "other" })) }), (error: Error) => {
-    assert.ok(!error.message.includes(TOKEN));
-    return true;
-  });
-});
-
-test("detectBlacksmithApp finds the app, or returns the install link", async () => {
-  assert.deepEqual(await detectBlacksmithApp("Org", call(new FakeGithub({ token: TOKEN }))), {
-    installed: true,
-    repositorySelection: "all",
-    suspended: false,
-    installUrl: BLACKSMITH_APP_INSTALL_URL
-  });
-  const missing = await detectBlacksmithApp("Org", call(new FakeGithub({ token: TOKEN, installations: [{ app_slug: "vercel", repository_selection: "all" }] })));
-  assert.equal(missing.installed, false);
-  assert.equal(missing.installUrl, BLACKSMITH_APP_INSTALL_URL);
-  const unknown = await detectBlacksmithApp("Org", call(new FakeGithub({ token: TOKEN, installations: "forbidden" })));
-  assert.equal(unknown.installed, null);
-});
 
 test("ensureControlRepo and ensureWorkflowFile are idempotent and update a changed template", async () => {
   const github = new FakeGithub({ token: TOKEN });

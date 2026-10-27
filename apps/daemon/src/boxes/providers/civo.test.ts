@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { civoAdapter } from "./civo.ts";
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { CIVO_INSTANCE_HOURLY_USD, roundUsd } from "./price-tables.ts";
 
 const API = "https://api.civo.com/v2";
 const credentials = { apiKey: "civo-test-key" };
@@ -20,6 +19,7 @@ function createRoutes(createStatus = 200, createBody: unknown = fixture("civo", 
   ];
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: ok with a working key, Civo's reason for a bad or missing one", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/instances?page=1&per_page=1`, body: fixture("civo", "instances-empty") },
@@ -62,7 +62,7 @@ test("offers: instance sizes with table prices, open regions, Ubuntu 24.04 first
     ramGb: 2,
     diskGb: 25,
     gpu: null,
-    hourlyUsd: roundUsd(CIVO_INSTANCE_HOURLY_USD.find((row) => row.family === "standard" && row.ramGb === 2)!.hourlyUsd),
+    hourlyUsd: 0.0149,
     regions: []
   });
   // NYC1 is out of capacity, MUM1 sells no compute.

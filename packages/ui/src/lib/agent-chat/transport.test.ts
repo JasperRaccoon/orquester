@@ -678,7 +678,7 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
       const transporter = new FakeTransporter();
       const transport = createAgentChatTransport(transporter);
       transporter.responses.push(...pages.map(ok));
-      await assert.rejects(() => transport.readItemOutput!("s1", "i1"));
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
       assert.equal(transporter.requests.length, pages.length);
     };
     await refused({ seq: 3 });
@@ -705,7 +705,7 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
       const transporter = new FakeTransporter();
       const transport = createAgentChatTransport(transporter);
       transporter.responses.push(ok(page));
-      await assert.rejects(() => transport.readItemOutput!("s1", "i1"));
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /next window.*streamed output/);
       assert.equal(transporter.requests.length, 1);
     };
     const wide = THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES + 1;
@@ -802,7 +802,8 @@ describe("attachments", () => {
   it("reads an attachment's bytes back over requestBytes, and refuses where the transporter has none (§7.4)", async () => {
     const plain = new FakeTransporter();
     await assert.rejects(
-      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1")
+      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1"),
+      /not supported on this connection/
     );
     assert.equal(plain.requests.length, 0, "never falls back to the JSON request path");
 

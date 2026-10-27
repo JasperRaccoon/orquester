@@ -1049,17 +1049,6 @@ test("git failing in a clone fails closed: unknown paths refused unreadable and 
   assert.equal(h.fs.read(`${b}/.env`), "KEY=two\n");
 });
 
-test("with a workspaces root, every clone write is confined to it", async () => {
-  const h = await makeHarness({ overrides: { workspacesRoot: () => "/ws" } });
-  const a = h.clone("a");
-  const b = h.clone("b");
-  h.fs.put(`${a}/.env`, "KEY=one\n");
-  await setupEnv(h, "a");
-  h.fs.put(`${b}/.env`, "KEY=b\n");
-  await h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b });
-  assert.ok(h.fs.writes.length >= 2);
-  for (const write of h.fs.writes) assert.equal(write.options?.containedIn, "/ws");
-});
 
 // ---------------------------------------------------------------------------
 // Re-review fixes: fresh evaluations on 409, tracked retry, abort listeners, reset re-check

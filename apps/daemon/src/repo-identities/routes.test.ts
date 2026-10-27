@@ -257,20 +257,24 @@ test("favicon: a fetched icon is stored with its source; refusals map to their s
   assert.equal(calls.length, before);
 });
 
-test("favicon: one fetch per repo at a time — a second is 409 FAVICON_BUSY", async (t) => {
+test("favicon: one fetch per repo across servers; other repos and later fetches proceed", async (t) => {
   let release: (value: FetchedFavicon) => void = () => {};
   let started: () => void = () => {};
   /** Resolves when the fetcher is next called for acme.com. */
   const nextFetch = () => new Promise<void>((resolve) => (started = resolve));
-  const h = await harness(t, (domain) => {
+  const fetchFavicon: RepoIdentityRoutesDeps["fetchFavicon"] = (domain) => {
     if (domain === "other.com") return Promise.resolve({ domain, contentType: "image/png", bytes: PNG });
     started();
     return new Promise<FetchedFavicon>((resolve) => (release = resolve));
-  });
+  };
+  const h = await harness(t, fetchFavicon);
+  const second = Fastify();
+  registerRepoIdentityRoutes(second, { service: h.service, fetchFavicon });
+  t.after(() => second.close());
   let running = nextFetch();
   const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
   await running;
-  refused(await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 409, "FAVICON_BUSY");
+  refused(await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } }), 409, "FAVICON_BUSY");
   // Another repo is not held up.
   const other = await h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: "github.com/acme/other", domain: "other.com" } });
   assert.equal(other.statusCode, 200);
@@ -283,29 +287,6 @@ test("favicon: one fetch per repo at a time — a second is 409 FAVICON_BUSY", a
   await running;
   release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
   assert.equal((await again).statusCode, 200);
-});
-
-test("favicon: the one-fetch lock holds across every server the routes are registered on", async (t) => {
-  let release: (value: FetchedFavicon) => void = () => {};
-  let started: () => void = () => {};
-  const running = new Promise<void>((resolve) => (started = resolve));
-  const fetchFavicon: RepoIdentityRoutesDeps["fetchFavicon"] = () => {
-    started();
-    return new Promise<FetchedFavicon>((resolve) => (release = resolve));
-  };
-  // The daemon registers the routes twice over one service: the unix socket and HTTP.
-  const h = await harness(t, fetchFavicon);
-  const second = Fastify();
-  registerRepoIdentityRoutes(second, { service: h.service, fetchFavicon });
-  t.after(() => second.close());
-
-  const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
-  await running;
-  const busy = await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
-  refused(busy, 409, "FAVICON_BUSY");
-
-  release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
-  assert.equal((await first).statusCode, 200);
 });
 
 test("the daemon serves the routes on both transports; the remote one requires the bearer, ?token= included", async (t) => {

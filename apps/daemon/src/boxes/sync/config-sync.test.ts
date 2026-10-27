@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -41,8 +43,13 @@ async function allFiles(dir: string): Promise<string[]> {
  * A Claude account home like `syncAccountHome` leaves it: `skills`, `commands` and `settings.json`
  * are links into the shared system `~/.claude`, the rest is the account's own.
  */
-async function fixture(options: { paths?: BoxPathMap } = {}) {
+async function fixture(t: test.TestContext, options: { paths?: BoxPathMap } = {}) {
   const base = await realpath(await mkdtemp(join(tmpdir(), "orq-sync-")));
+  const services: BoxConfigSyncService[] = [];
+  t.after(async () => {
+    await Promise.all(services.map((service) => service.close()));
+    await rm(base, { recursive: true, force: true });
+  });
   const appdir = join(base, "app");
   const system = join(base, "host", ".claude");
   const home = join(appdir, "daemon", "agent-accounts", "claude", "a1", "home");
@@ -85,8 +92,8 @@ async function fixture(options: { paths?: BoxPathMap } = {}) {
   const hub = fakeBoxHub({ b1: box1, b2: box2 });
   const published: BoxConfigChangesResponse[] = [];
   const listeners: ((payload: BoxConfigChangesResponse) => void)[] = [];
-  const make = (overrides: Partial<BoxConfigSyncOptions> = {}): BoxConfigSyncService =>
-    new BoxConfigSyncService({
+  const make = (overrides: Partial<BoxConfigSyncOptions> = {}): BoxConfigSyncService => {
+    const service = new BoxConfigSyncService({
       appdir,
       hub,
       watchHost: false,
@@ -98,6 +105,9 @@ async function fixture(options: { paths?: BoxPathMap } = {}) {
       },
       ...overrides
     });
+    services.push(service);
+    return service;
+  };
   const scope: BoxSyncScope = { agent: "claude", configRoots: [home], threadId: "t1" };
   const nextPublish = (): Promise<BoxConfigChangesResponse> => new Promise((resolve) => listeners.push(resolve));
   return { base, appdir, system, home, project, box1, box2, hub, published, make, scope, nextPublish };
@@ -112,8 +122,8 @@ function pendingSet(published: BoxConfigChangesResponse[]): BoxConfigChangeSet {
   return set;
 }
 
-test("initial sync mirrors dir links, materializes file links, blanks secrets and never sends credentials or transcripts", async () => {
-  const f = await fixture();
+test("initial sync mirrors dir links, materializes file links, blanks secrets and never sends credentials or transcripts", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
 
@@ -144,8 +154,8 @@ test("initial sync mirrors dir links, materializes file links, blanks secrets an
   await sync.close();
 });
 
-test("the managed hook script the synced configs run is in the box at its host path, written once per connection", async () => {
-  const f = await fixture();
+test("the managed hook script the synced configs run is in the box at its host path, written once per connection", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const script = f.box1.local(join(f.appdir, "daemon", "hooks", "agent-hook.sh"));
@@ -165,8 +175,8 @@ test("the managed hook script the synced configs run is in the box at its host p
   await sync.close();
 });
 
-test("incremental sync pushes only what changed, deletes what the host removed, prunes emptied dirs", async () => {
-  const f = await fixture();
+test("incremental sync pushes only what changed, deletes what the host removed, prunes emptied dirs", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const writes = f.box1.writes.length;
@@ -193,8 +203,8 @@ test("incremental sync pushes only what changed, deletes what the host removed, 
   await sync.close();
 });
 
-test("host watchers push a host edit to a watching box on their own", async () => {
-  const f = await fixture();
+test("host watchers push a host edit to a watching box on their own", async (t) => {
+  const f = await fixture(t);
   const sync = new BoxConfigSyncService({ appdir: f.appdir, hub: f.hub, hostDebounceMs: 20 });
   await sync.ensureSynced("b1", f.scope, signal());
   sync.watch("b1", f.scope);
@@ -213,8 +223,8 @@ test("host watchers push a host edit to a watching box on their own", async () =
   await sync.close();
 });
 
-test("a scope synced through BoxConfigWatches.syncing stays watched: a later host edit reaches the box with no launch", async () => {
-  const f = await fixture();
+test("a scope synced through BoxConfigWatches.syncing stays watched: a later host edit reaches the box with no launch", async (t) => {
+  const f = await fixture(t);
   const sync = new BoxConfigSyncService({ appdir: f.appdir, hub: f.hub, hostDebounceMs: 20 });
   const watches = new BoxConfigWatches({ sync, active: (boxId) => boxId === "b1" });
   await watches.syncing(sync).ensureSynced("b1", f.scope, signal());
@@ -234,8 +244,8 @@ test("a scope synced through BoxConfigWatches.syncing stays watched: a later hos
   await sync.close();
 });
 
-test("a host dir that appears gets a second look: files written into it after the pass that saw it empty still reach the box", async () => {
-  const f = await fixture();
+test("a host dir that appears gets a second look: files written into it after the pass that saw it empty still reach the box", async (t) => {
+  const f = await fixture(t);
   // No host watchers: nothing but the second look can notice the file.
   const sync = f.make({ hostDebounceMs: 20 });
   await sync.ensureSynced("b1", f.scope, signal());
@@ -259,8 +269,8 @@ test("a host dir that appears gets a second look: files written into it after th
   await sync.close();
 });
 
-test("a box change becomes one pending set for its turn; approve writes through links and reaches the other box", async () => {
-  const f = await fixture();
+test("a box change becomes one pending set for its turn; approve writes through links and reaches the other box", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   await sync.ensureSynced("b2", f.scope, signal());
@@ -312,8 +322,8 @@ test("a box change becomes one pending set for its turn; approve writes through 
   await sync.close();
 });
 
-test("deny puts the host version back in the box and deletes what the box added", async () => {
-  const f = await fixture();
+test("deny puts the host version back in the box and deletes what the box added", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxHome = f.box1.local(f.home);
@@ -341,8 +351,8 @@ test("deny puts the host version back in the box and deletes what the box added"
   await sync.close();
 });
 
-test("a host edit of a pending file makes the set stale and the host wins", async () => {
-  const f = await fixture();
+test("a host edit of a pending file makes the set stale and the host wins", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxHome = f.box1.local(f.home);
@@ -369,8 +379,8 @@ test("a host edit of a pending file makes the set stale and the host wins", asyn
   await sync.close();
 });
 
-test("approving a new MCP server keeps the host's secrets and state in .claude.json", async () => {
-  const f = await fixture();
+test("approving a new MCP server keeps the host's secrets and state in .claude.json", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxFile = join(f.box1.local(f.home), ".claude.json");
@@ -391,8 +401,8 @@ test("approving a new MCP server keeps the host's secrets and state in .claude.j
   await sync.close();
 });
 
-test("box watch events outside a turn are grouped after the idle window with no thread", async () => {
-  const f = await fixture();
+test("box watch events outside a turn are grouped after the idle window with no thread", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   sync.watch("b1", f.scope);
@@ -416,8 +426,8 @@ test("box watch events outside a turn are grouped after the idle window with no 
 });
 
 // A deadline, not a wait: a mark that never expired would hold the publish back for good.
-test("a turn mark whose end never came stops holding the idle flush once it is older than turnMarkMaxMs", { timeout: 30_000 }, async () => {
-  const f = await fixture();
+test("a turn mark whose end never came stops holding the idle flush once it is older than turnMarkMaxMs", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
   let nowMs = Date.parse("2026-10-20T10:00:00Z");
   const warnings: string[] = [];
   const sync = f.make({ now: () => new Date(nowMs), turnMarkMaxMs: 60_000, logger: { warn: (message) => void warnings.push(message) } });
@@ -445,8 +455,8 @@ test("a turn mark whose end never came stops holding the idle flush once it is o
   await sync.close();
 });
 
-test("prepared profile dirs are host → box only", async () => {
-  const f = await fixture();
+test("prepared profile dirs are host → box only", async (t) => {
+  const f = await fixture(t);
   const prepared = join(sessionProfilePreparedRootDir(f.appdir), "p1", "claude", "shared", "v-1");
   await put(join(prepared, "plugin", "skills", "x", "SKILL.md"), "Profile skill.\n");
   await put(join(prepared, "mcp-servers.json"), JSON.stringify({ mcpServers: { db: { command: "db", env: { DB_PASSWORD: "pw-secret" } } } }));
@@ -466,8 +476,8 @@ test("prepared profile dirs are host → box only", async () => {
   await sync.close();
 });
 
-test("the baseline survives a restart, so a box edit made meanwhile is still a box change", async () => {
-  const f = await fixture();
+test("the baseline survives a restart, so a box edit made meanwhile is still a box change", async (t) => {
+  const f = await fixture(t);
   const first = f.make();
   await first.ensureSynced("b1", f.scope, signal());
   await first.close();
@@ -482,8 +492,8 @@ test("the baseline survives a restart, so a box edit made meanwhile is still a b
   await second.close();
 });
 
-test("Windows boxes get every file under C:\\orq at the host path's segments", async () => {
-  const f = await fixture({ paths: { kind: "windows-prefix", prefix: "C:\\orq" } });
+test("Windows boxes get every file under C:\\orq at the host path's segments", async (t) => {
+  const f = await fixture(t, { paths: { kind: "windows-prefix", prefix: "C:\\orq" } });
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   assert.ok(f.box1.writes.length > 0);
@@ -505,8 +515,8 @@ test("Windows boxes get every file under C:\\orq at the host path's segments", a
   await sync.close();
 });
 
-test("box-only credential files are invisible to sync: never sent, deleted, listed or reported", async () => {
-  const f = await fixture();
+test("box-only credential files are invisible to sync: never sent, deleted, listed or reported", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxHome = f.box1.local(f.home);
@@ -538,23 +548,44 @@ test("box-only credential files are invisible to sync: never sent, deleted, list
   await sync.close();
 });
 
-test("C15: a host dir or file that cannot be read is never taken for a deletion", async () => {
-  const f = await fixture();
+test("C15: a host dir or file that cannot be read is never taken for a deletion", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxHome = f.box1.local(f.home);
-  await chmod(join(f.system, "commands"), 0o000);
-  await chmod(join(f.home, "CLAUDE.md"), 0o000);
+  const denied = new Set([join(f.system, "commands"), join(f.home, "CLAUDE.md")]);
+  const failures = new Set<string>();
+  const nativeLstat = fsPromises.lstat;
+  const nativeReaddir = fsPromises.readdir;
+  const statFailure = t.mock.method(fsPromises, "lstat", (...args: Parameters<typeof lstat>) => {
+    const path = String(args[0]);
+    if (path === join(f.home, "CLAUDE.md")) {
+      failures.add(path);
+      return Promise.reject(Object.assign(new Error("permission denied"), { code: "EACCES" }));
+    }
+    return nativeLstat(...args);
+  });
+  const directoryFailure = t.mock.method(fsPromises, "readdir", (...args: Parameters<typeof readdir>) => {
+    const path = String(args[0]);
+    if (path === join(f.system, "commands")) {
+      failures.add(path);
+      return Promise.reject(Object.assign(new Error("permission denied"), { code: "EACCES" }));
+    }
+    return nativeReaddir(...args);
+  });
+  syncBuiltinESMExports();
   try {
     await sync.ensureSynced("b1", f.scope, signal());
     sync.watch("b1", f.scope);
     await sync.hostChanged("b1");
     await sync.idle();
+    assert.deepEqual(failures, denied, "both native permission failures were exercised");
     assert.equal(await readFile(join(boxHome, "commands", "ship.md"), "utf8"), "Ship it.\n", "an unreadable host dir keeps the box's copies");
     assert.equal(await readFile(join(boxHome, "CLAUDE.md"), "utf8"), "# Global rules\n", "an unreadable host file keeps the box's copy");
   } finally {
-    await chmod(join(f.system, "commands"), 0o755);
-    await chmod(join(f.home, "CLAUDE.md"), 0o644);
+    statFailure.mock.restore();
+    directoryFailure.mock.restore();
+    syncBuiltinESMExports();
   }
   // Readable again and really removed: now the box copy goes.
   await rm(join(f.system, "commands", "ship.md"));
@@ -563,8 +594,8 @@ test("C15: a host dir or file that cannot be read is never taken for a deletion"
   await sync.close();
 });
 
-test("S5: a large box file is applied only with the exact bytes its card was made of", async () => {
-  const f = await fixture();
+test("S5: a large box file is applied only with the exact bytes its card was made of", async (t) => {
+  const f = await fixture(t);
   // A box that lies about a file it changed after the card: its hash tool keeps answering the old hash.
   const firstHash = new Map<string, string | null>();
   const lyingHasher: BoxHasher = async (connection, items, hashSignal) => {
@@ -606,8 +637,8 @@ test("S5: a large box file is applied only with the exact bytes its card was mad
   await sync.close();
 });
 
-test("S6: a nested permission or env change in settings.json is executable on the card", async () => {
-  const f = await fixture();
+test("S6: a nested permission or env change in settings.json is executable on the card", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
   const boxSettings = join(f.box1.local(f.home), "settings.json");
@@ -619,8 +650,8 @@ test("S6: a nested permission or env change in settings.json is executable on th
   await sync.close();
 });
 
-test("ensureSynced refuses a box that is not connected", async () => {
-  const f = await fixture();
+test("ensureSynced refuses a box that is not connected", async (t) => {
+  const f = await fixture(t);
   const sync = f.make();
   f.box1.setConnected(false);
   await assert.rejects(sync.ensureSynced("b1", f.scope, signal()), (error: unknown) => error instanceof BoxSyncError && error.code === "BOX_NOT_READY");
@@ -657,8 +688,8 @@ function countingHasher(): { hasher: BoxHasher; hashed: string[] } {
   };
 }
 
-test("a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing", async () => {
-  const f = await fixture();
+test("a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing", async (t) => {
+  const f = await fixture(t);
   const paths = await manyAgents(f.home, 60);
   const { hasher, hashed } = countingHasher();
   const progress: { root: string; done: number; total: number }[] = [];
@@ -697,8 +728,8 @@ test("a big first sync goes as one gzipped tar per root: modes kept, baseline ri
   await sync.close();
 });
 
-test("a box that cannot inflate gets a plain tar; one whose tar-write fails gets the files one by one", async () => {
-  const f = await fixture();
+test("a box that cannot inflate gets a plain tar; one whose tar-write fails gets the files one by one", async (t) => {
+  const f = await fixture(t);
   const paths = await manyAgents(f.home, 30);
   const warnings: string[] = [];
   const original = f.box1.writeTar.bind(f.box1);
@@ -746,8 +777,8 @@ async function secondHome(f: Awaited<ReturnType<typeof fixture>>, id = "a2"): Pr
   return { home, scope: { agent: "claude", configRoots: [home], threadId: "t1" } };
 }
 
-test("a dir every account home links to is sent once per box, and a box change under it is one change, approved once", async () => {
-  const f = await fixture();
+test("a dir every account home links to is sent once per box, and a box change under it is one change, approved once", async (t) => {
+  const f = await fixture(t);
   const a2 = await secondHome(f);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
@@ -784,8 +815,8 @@ test("a dir every account home links to is sent once per box, and a box change u
   await sync.close();
 });
 
-test("a link into a denied place is never mirrored nor synced; a link that stops being one becomes a real dir in the box", async () => {
-  const f = await fixture();
+test("a link into a denied place is never mirrored nor synced; a link that stops being one becomes a real dir in the box", async (t) => {
+  const f = await fixture(t);
   const denied = join(secretFilesDir(f.appdir), "skills");
   await put(join(denied, "x", "SKILL.md"), "DENIED-CONTENT");
   const a3 = await secondHome(f, "a3");
@@ -812,8 +843,8 @@ test("a link into a denied place is never mirrored nor synced; a link that stops
   await sync.close();
 });
 
-test("a box synced while links were materialized: its per-account copy becomes the shared copy, with its baseline", async () => {
-  const f = await fixture();
+test("a box synced while links were materialized: its per-account copy becomes the shared copy, with its baseline", async (t) => {
+  const f = await fixture(t);
   // A box that could not make links (and so an older daemon's box): shared dirs copied per account.
   const request = f.box1.request.bind(f.box1);
   f.box1.request = (async (method: string, params: unknown, options: unknown) => {
@@ -868,8 +899,8 @@ async function pluginLayout(f: Awaited<ReturnType<typeof fixture>>) {
   return { plugins, cache, installed };
 }
 
-test("only installed plugin versions sync: no old versions, temp clones or in-use markers", async () => {
-  const f = await fixture();
+test("only installed plugin versions sync: no old versions, temp clones or in-use markers", async (t) => {
+  const f = await fixture(t);
   const { cache } = await pluginLayout(f);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
@@ -880,8 +911,8 @@ test("only installed plugin versions sync: no old versions, temp clones or in-us
   await sync.close();
 });
 
-test("the box CLI's housekeeping (in-use markers, marketplace refresh, old-version GC) makes no change set; a real install does", async () => {
-  const f = await fixture();
+test("the box CLI's housekeeping (in-use markers, marketplace refresh, old-version GC) makes no change set; a real install does", async (t) => {
+  const f = await fixture(t);
   const { plugins, cache, installed } = await pluginLayout(f);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
@@ -929,8 +960,8 @@ test("the box CLI's housekeeping (in-use markers, marketplace refresh, old-versi
   await sync.close();
 });
 
-test("a deleted file is never executable on the card", async () => {
-  const f = await fixture();
+test("a deleted file is never executable on the card", async (t) => {
+  const f = await fixture(t);
   await put(join(f.home, "hooks", "old.sh"), "#!/bin/sh\nexit 0\n", 0o755);
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());

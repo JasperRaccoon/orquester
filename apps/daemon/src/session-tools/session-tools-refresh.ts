@@ -40,7 +40,7 @@ import { buildSessionToolsManifest, isWithinDir, type ManifestKnowledge, type Ma
 export const DAEMON_POINTING_CACHE_MS = 30_000;
 
 /** Chats refreshed at once by {@link SessionToolsRefresher.refresh} of every open chat. */
-export const REFRESH_CONCURRENCY = 4;
+const REFRESH_CONCURRENCY = 4;
 
 /**
  * How long the daemon-pointing read may take before the last good list (or "unavailable") answers.
@@ -57,7 +57,7 @@ const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 3_000;
 export const KNOWLEDGE_INFO_TIMEOUT_MS = 2_000;
 
 /** At most this many per-chat-cwd reads are cached (the all-projects read is always kept). */
-export const MAX_POINTING_SCOPES = 32;
+const MAX_POINTING_SCOPES = 32;
 
 /**
  * How long after a refused launch manifest (503) the chat's manifest is pushed to the host once a

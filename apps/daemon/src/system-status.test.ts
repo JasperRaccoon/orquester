@@ -416,7 +416,8 @@ test("procMetrics diffs only the same process within the staleness window", () =
   // become the next baseline either.
   const sliver = procMetrics(new Map([[10, { stat: { starttime: 5, cpuTicks: 121 } }]]), second.samples, 3_200, 10_402);
   assert.equal(sliver.metrics.get(10)?.cpuPercent, null, "a 200 ms delta is not a rate");
-  assert.equal(sliver.samples, second.samples, "the earlier baseline is kept");
+  const next = procMetrics(new Map([[10, { stat: { starttime: 5, cpuTicks: 130 } }]]), sliver.samples, 4_000, 10_600);
+  assert.equal(next.metrics.get(10)?.cpuPercent, 5, "a short intervening scan does not replace the rate baseline");
 });
 
 test("cpuPercentFromSamples is the busy share of the delta", () => {

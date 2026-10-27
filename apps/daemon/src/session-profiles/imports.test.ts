@@ -324,13 +324,12 @@ describe("Import from Global", () => {
       h.service.importFromGlobal(profile.id, { revision: "1", agent: "claude", itemIds: ["skill:nope"] }),
       (error: { code?: string }) => error.code === "INVALID_ITEM"
     );
-    const pluginSkill = (await h.service.globalSource(profile.id, "claude")).items.find((item) => item.unavailable !== undefined);
-    if (pluginSkill) {
-      await assert.rejects(
-        h.service.importFromGlobal(profile.id, { revision: "1", agent: "claude", itemIds: [pluginSkill.id] }),
-        (error: { code?: string }) => error.code === "INVALID_ITEM"
-      );
-    }
+    const pluginSkill = (await h.service.globalSource(profile.id, "claude")).items.find((item) => item.id === "skill:superpowers:brainstorm");
+    assert.ok(pluginSkill?.unavailable, "the installed plugin's skill is shown as unavailable for individual import");
+    await assert.rejects(
+      h.service.importFromGlobal(profile.id, { revision: "1", agent: "claude", itemIds: [pluginSkill.id] }),
+      (error: { code?: string }) => error.code === "INVALID_ITEM"
+    );
   });
 });
 

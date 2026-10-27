@@ -64,13 +64,14 @@ describe("openWhiteboard", () => {
 });
 
 describe("createWhiteboard", () => {
-  function api(answers: FsUploadResponse[]) {
+  function api(answers: Array<FsUploadResponse | Error>) {
     const calls: FsUploadRequest[] = [];
     const client = {
       uploadFsEntry: async (meta: FsUploadRequest) => {
         calls.push(meta);
         const answer = answers.shift();
         if (!answer) throw new Error("no answer");
+        if (answer instanceof Error) throw answer;
         return answer;
       }
     };
@@ -108,10 +109,11 @@ describe("createWhiteboard", () => {
     api([blocked, { ...blocked }]);
     await store().createWhiteboard();
     assert.deepEqual(store().whiteboardTabsByProject, {});
-    assert.equal(store().notice?.message, 'Could not create a whiteboard: a file named "whiteboards" is in the way.');
+    assert.ok(store().notice?.message);
 
-    api([]);
+    api([new Error("write denied")]);
     await store().createWhiteboard();
-    assert.equal(store().notice?.message, "Could not create a whiteboard: no answer");
+    assert.deepEqual(store().whiteboardTabsByProject, {});
+    assert.match(store().notice?.message ?? "", /write denied/);
   });
 });

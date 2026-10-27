@@ -2,10 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  composeOrquesterInstructions,
-  orquesterInstructionsCap
-} from "./instructions.ts";
+import { composeOrquesterInstructions } from "./instructions.ts";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 const knowledge = (names: string[]): string => composeOrquesterInstructions({ workflowOwned: false, knowledgeCollections: names }).split("\n").at(-1)!;
@@ -13,7 +10,6 @@ const knowledge = (names: string[]): string => composeOrquesterInstructions({ wo
 test("the worst case — workflow-owned — stays under 2 048 bytes", () => {
   const worst = composeOrquesterInstructions({ workflowOwned: true });
   assert.ok(bytes(worst) <= 2_048, `${bytes(worst)} bytes`);
-  assert.equal(orquesterInstructionsCap(false), 2_048);
 });
 
 test("knowledge line: names only, last; absent for no collection — a chat without knowledge pays nothing", () => {
@@ -46,7 +42,6 @@ test("knowledge line: capped at 256 bytes — names that do not fit become '… 
 });
 
 test("the worst case with the knowledge line — workflow-owned, many collections — stays under 2 048 + 256 bytes", () => {
-  assert.equal(orquesterInstructionsCap(true), 2_304);
   for (const names of [Array.from({ length: 100 }, (_, index) => `${"名".repeat(50)}${index}`), Array.from({ length: 100 }, () => "n".repeat(60))]) {
     const worst = composeOrquesterInstructions({ workflowOwned: true, knowledgeCollections: names });
     assert.ok(bytes(worst) <= 2_304, `${bytes(worst)} bytes`);

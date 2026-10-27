@@ -1,4 +1,4 @@
-// The service worker's asset trimming, run in a VM against fake caches.
+// Browser events run the real worker against isolated Cache Storage and clients.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
@@ -24,7 +24,14 @@ function fakeCaches() {
       delete: async (key) => entries.delete(key.url)
     };
   };
-  return { open: async (name) => open(name), stores, openSync: open };
+  return {
+    open: async (name) => open(name),
+    containing(path) {
+      const url = new URL(path, "https://orq.example.com").href;
+      for (const [name, entries] of stores) if (entries.has(url)) return open(name);
+      throw new Error(`No cache contains ${path}`);
+    }
+  };
 }
 
 function worker(globals = {}) {
@@ -40,47 +47,54 @@ function worker(globals = {}) {
     caches,
     URL,
     Promise,
+    setTimeout,
+    clearTimeout,
     Response: {},
     ...globals
   };
   vm.runInNewContext(source, context);
-  return { context, caches, listeners };
+  return { self: context.self, caches, listeners };
+}
+
+function fetchEvent(listeners, path = "/", mode = "navigate") {
+  const lifetimes = [];
+  let answered;
+  listeners.fetch({
+    request: { url: `https://orq.example.com${path}`, method: "GET", mode },
+    waitUntil: (promise) => lifetimes.push(promise),
+    respondWith: (promise) => { answered = promise; }
+  });
+  assert.ok(answered, `the worker must answer ${path}`);
+  return { answered, lifetimes };
 }
 
 describe("the asset cache", () => {
-  it("trims the oldest assets past the limit but never the shell's own", async () => {
-    const { context, caches } = worker();
-    const shell = caches.openSync("orq-shell-v6");
-    await shell.put(
-      "/index.html",
-      '<script type="module" crossorigin src="/assets/index-AAA.js"></script>' +
-        '<link rel="modulepreload" crossorigin href="/assets/vendor-BBB.js">' +
-        '<link rel="stylesheet" crossorigin href="/assets/index-CCC.css">'
-    );
-    const assets = caches.openSync("orq-assets-v6");
-    // The entry bundle was cached first, so it is the oldest; then a burst of lazy chunks.
-    for (const name of ["index-AAA.js", "vendor-BBB.js", "index-CCC.css"]) await assets.put(`/assets/${name}`, "x");
-    for (let index = 0; index < 10; index += 1) await assets.put(`/assets/mermaid-chunk-${index}.js`, "x");
-    await context.trimCache("orq-assets-v6", 5);
-    const left = (await assets.keys()).map((key) => new URL(key.url).pathname);
-    assert.deepEqual(left, [
-      "/assets/index-AAA.js",
-      "/assets/vendor-BBB.js",
-      "/assets/index-CCC.css",
-      "/assets/mermaid-chunk-8.js",
-      "/assets/mermaid-chunk-9.js"
-    ]);
+  it("evicts old assets on overflow, preserving every resource the offline shell needs", async () => {
+    for (const hasShell of [true, false]) {
+      const html = '<script src="/assets/index-AAA.js"></script><link href="/assets/vendor-BBB.js"><link href="/assets/index-CCC.css">';
+      const { caches, listeners } = worker({ fetch: async (request) => response(request.mode === "navigate" ? html : "asset") });
+      if (hasShell) {
+        const navigation = fetchEvent(listeners);
+        await navigation.answered;
+        await Promise.all(navigation.lifetimes);
+      }
+      const first = fetchEvent(listeners, "/assets/index-AAA.js", "cors");
+      await first.answered;
+      await Promise.all(first.lifetimes);
+      const assets = caches.containing("/assets/index-AAA.js");
+      for (const name of ["vendor-BBB.js", "index-CCC.css"]) await assets.put(`/assets/${name}`, "asset");
+      for (let index = 0; index < 200; index += 1) await assets.put(`/assets/chunk-${index}.js`, "asset");
+      const overflow = fetchEvent(listeners, "/assets/latest.js", "cors");
+      await overflow.answered;
+      await Promise.all(overflow.lifetimes);
+      assert.equal(Boolean(await assets.match("/assets/index-AAA.js")), hasShell);
+      assert.equal(Boolean(await assets.match("/assets/vendor-BBB.js")), hasShell);
+      assert.equal(Boolean(await assets.match("/assets/index-CCC.css")), hasShell);
+      assert.equal(await assets.match("/assets/chunk-0.js"), undefined);
+      assert.equal(await (await assets.match("/assets/latest.js")).text(), "asset");
+      assert.ok((await assets.keys()).length <= 200);
+    }
   });
-
-  it("without a cached shell, trims oldest first as before", async () => {
-    const { context, caches } = worker();
-    const assets = caches.openSync("orq-assets-v6");
-    for (let index = 0; index < 4; index += 1) await assets.put(`/assets/chunk-${index}.js`, "x");
-    await context.trimCache("orq-assets-v6", 2);
-    const left = (await assets.keys()).map((key) => new URL(key.url).pathname);
-    assert.deepEqual(left, ["/assets/chunk-2.js", "/assets/chunk-3.js"]);
-  });
-
 });
 
 /** A value out of the worker's realm, as plain data (its objects have the VM's prototypes). */
@@ -112,68 +126,37 @@ function fakeClients(count) {
 }
 
 describe("a notification's tap", () => {
-  it("a session's opens that session's tab", () => {
-    const { context } = worker();
-    assert.deepEqual(plain(context.notificationTarget({ sessionId: "3f2c1a9e-8b7d-4c6e-9f00-112233445566" })), {
-      url: "/?session=3f2c1a9e-8b7d-4c6e-9f00-112233445566",
-      message: { type: "orquester:open-session", sessionId: "3f2c1a9e-8b7d-4c6e-9f00-112233445566" }
-    });
-  });
-
-  it("a workflow run's opens the run, as before", () => {
-    const { context } = worker();
-    assert.deepEqual(plain(context.notificationTarget({ sessionId: "", workflowId: "wf-1", runId: "run 2" })), {
-      url: "/?workflow=wf-1",
-      message: { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: null }
-    });
-    assert.equal(context.notificationTarget({ workflowId: "wf-1", runId: "r-2" }).url, "/?workflow=wf-1&run=r-2");
-  });
-
-  it("anything else (the test push, a malformed id) just opens the app", () => {
-    const { context } = worker();
-    for (const data of [{ sessionId: "" }, { sessionId: "../etc/passwd" }, { sessionId: "a&b=c" }, { sessionId: 7 }, {}, null, undefined]) {
-      assert.deepEqual(plain(context.notificationTarget(data)), { url: "/", message: null }, JSON.stringify(data));
+  it("opens the notified target, reusing an existing window or starting at its deep link", async () => {
+    const { self, listeners } = worker();
+    const targets = [
+      [{ sessionId: "s-1" }, "/?session=s-1", { type: "orquester:open-session", sessionId: "s-1" }],
+      [{ workflowId: "wf-1", runId: "r-2" }, "/?workflow=wf-1&run=r-2", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: "r-2" }],
+      [{ workflowId: "wf-1", runId: "run 2" }, "/?workflow=wf-1", { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: null }],
+      ...[{ sessionId: "" }, { sessionId: "../etc/passwd" }, { sessionId: "a&b=c" }, { sessionId: 7 }, {}, null, undefined].map((data) => [data, "/", null])
+    ];
+    for (const [data, url, message] of targets) {
+      for (const count of [0, 2]) {
+        self.clients = fakeClients(count);
+        let closed = false;
+        let waited;
+        listeners.notificationclick({ notification: { data, close: () => { closed = true; } }, waitUntil: (promise) => { waited = promise; } });
+        assert.equal(closed, true);
+        assert.ok(waited, "the notification event must keep the worker alive");
+        await waited;
+        assert.deepEqual(self.clients.opened, count ? [] : [url]);
+        if (count) {
+          assert.deepEqual(self.clients.windows[0].messages, message ? [message] : []);
+          assert.equal(self.clients.windows[0].focused, 1);
+          assert.equal(self.clients.windows[1].focused, 0);
+        }
+      }
     }
   });
 
-  it("an open window is focused and told which session to open", async () => {
-    const { context } = worker();
-    const clients = fakeClients(2);
-    await context.openNotificationTarget(clients, context.notificationTarget({ sessionId: "s-1" }));
-    assert.deepEqual(clients.windows[0].messages, [{ type: "orquester:open-session", sessionId: "s-1" }]);
-    assert.equal(clients.windows[0].focused, 1);
-    assert.equal(clients.windows[1].focused, 0);
-    assert.deepEqual(clients.opened, []);
-  });
-
-  it("with no window open, a new one starts on the session's link", async () => {
-    const { context } = worker();
-    const clients = fakeClients(0);
-    await context.openNotificationTarget(clients, context.notificationTarget({ sessionId: "s-1" }));
-    assert.deepEqual(clients.opened, ["/?session=s-1"]);
-  });
-
-  it("the click handler closes the notification and waits for the window", async () => {
-    const { context, listeners } = worker();
-    const clients = fakeClients(1);
-    context.self.clients = clients;
-    let closed = 0;
-    let waited = null;
-    listeners.notificationclick({
-      notification: { data: { sessionId: "s-9" }, close: () => (closed += 1) },
-      waitUntil: (promise) => {
-        waited = promise;
-      }
-    });
-    assert.equal(closed, 1);
-    await waited;
-    assert.deepEqual(clients.windows[0].messages, [{ type: "orquester:open-session", sessionId: "s-9" }]);
-  });
-
   it("a push keeps the session, workflow and run ids for the tap", async () => {
-    const { context, listeners } = worker();
+    const { self, listeners } = worker();
     const shown = [];
-    context.self.registration = { showNotification: async (title, options) => shown.push(plain({ title, options })) };
+    self.registration = { showNotification: async (title, options) => shown.push(plain({ title, options })) };
     let waited = null;
     listeners.push({
       data: { json: () => ({ title: "Agent finished", tag: "session-s-1", sessionId: "s-1" }) },
@@ -219,11 +202,6 @@ function controlledNetwork() {
   };
 }
 
-function navigation() {
-  const lifetimes = [];
-  return { request: { url: "https://orq.example.com/", mode: "navigate" }, waitUntil: (promise) => lifetimes.push(promise), lifetimes };
-}
-
 // The fake cache stores what it is given, so the clone is the body itself.
 const response = (body) => ({ ok: true, body, clone: () => body });
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -231,22 +209,24 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 describe("a navigation on a bad link", () => {
   it("answers from the network when it comes in time, and caches the shell", async () => {
     const network = controlledNetwork();
-    const { context, caches } = worker(network.globals);
-    const event = navigation();
-    const answered = context.networkFirstNavigation(event);
+    const { listeners, caches } = worker(network.globals);
+    const event = fetchEvent(listeners);
     network.answer(response("<html>new</html>"));
-    assert.equal((await answered).body, "<html>new</html>");
+    assert.equal((await event.answered).body, "<html>new</html>");
     await Promise.all(event.lifetimes);
-    assert.equal(await (await caches.openSync("orq-shell-v6").match("/index.html")).text(), "<html>new</html>");
+    assert.equal(await (await caches.containing("/index.html").match("/index.html")).text(), "<html>new</html>");
   });
 
   it("serves the cached shell once the timeout passes, and still caches the late answer", async () => {
     const network = controlledNetwork();
-    const { context, caches } = worker(network.globals);
-    await caches.openSync("orq-shell-v6").put("/index.html", "<html>old</html>");
-    const event = navigation();
+    const { listeners, caches } = worker(network.globals);
+    const initial = fetchEvent(listeners);
+    network.answer(response("<html>old</html>"));
+    await initial.answered;
+    await Promise.all(initial.lifetimes);
+    const event = fetchEvent(listeners);
     let result;
-    const answered = context.networkFirstNavigation(event).then((value) => (result = value));
+    const answered = event.answered.then((value) => (result = value));
     await settle();
     assert.equal(result, undefined, "nothing before the timeout");
     network.fireTimers();
@@ -255,14 +235,14 @@ describe("a navigation on a bad link", () => {
     // The network answers later: the next start gets the new shell.
     network.answer(response("<html>new</html>"));
     await Promise.all(event.lifetimes);
-    assert.equal(await (await caches.openSync("orq-shell-v6").match("/index.html")).text(), "<html>new</html>");
+    assert.equal(await (await caches.containing("/index.html").match("/index.html")).text(), "<html>new</html>");
   });
 
   it("without a cached shell, waits on the network past the timeout", async () => {
     const network = controlledNetwork();
-    const { context } = worker(network.globals);
+    const { listeners } = worker(network.globals);
     let result;
-    const answered = context.networkFirstNavigation(navigation()).then((value) => (result = value));
+    const answered = fetchEvent(listeners).answered.then((value) => (result = value));
     network.fireTimers();
     await settle();
     assert.equal(result, undefined);
@@ -274,9 +254,14 @@ describe("a navigation on a bad link", () => {
   it("offline, answers the cached shell, or a network error without one", async () => {
     for (const shell of ["<html>old</html>", undefined]) {
       const network = controlledNetwork();
-      const { context, caches } = worker(network.globals);
-      if (shell) await caches.openSync("orq-shell-v6").put("/index.html", shell);
-      const answered = context.networkFirstNavigation(navigation());
+      const { listeners } = worker(network.globals);
+      if (shell) {
+        const initial = fetchEvent(listeners);
+        network.answer(response(shell));
+        await initial.answered;
+        await Promise.all(initial.lifetimes);
+      }
+      const { answered } = fetchEvent(listeners);
       network.fail();
       const result = await answered;
       if (shell) assert.equal(await result.text(), shell);

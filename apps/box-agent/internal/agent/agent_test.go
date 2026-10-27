@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -60,24 +59,6 @@ func TestConnectURL(t *testing.T) {
 	}
 	if _, err := connectURL("ftp://x"); err == nil {
 		t.Error("ftp must be refused")
-	}
-}
-
-func TestEnvMergeOverridesAndDeletes(t *testing.T) {
-	env := newEnvMap([]string{"A=1", "B=2", "C=3"})
-	env.del("B")
-	env.set("C", "4")
-	env.set("D", "5")
-	got := env.list()
-	slices.Sort(got)
-	want := []string{"A=1", "C=4", "D=5"}
-	if len(got) != len(want) {
-		t.Fatalf("env = %v", got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("env = %v; want %v", got, want)
-		}
 	}
 }
 

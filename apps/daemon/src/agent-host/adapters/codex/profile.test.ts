@@ -130,7 +130,13 @@ describe("codex profile — a launch", () => {
     const { server, started } = await start(p, { withTools: false });
     await started;
     const params = server.received().find((frame) => frame.method === "thread/start")?.params as { config?: Record<string, unknown> };
-    assert.deepEqual(Object.keys(params.config ?? {}), ["skills"]);
+    assert.deepEqual(params.config?.skills, {
+      config: [
+        { path: p.skills[1]!.path, enabled: false },
+        { path: p.skills[2]!.path, enabled: false }
+      ]
+    });
+    assert.equal(params.config?.["mcp_servers.orquester"], undefined, "no session tools without a grant");
   });
 
   it("fails the start when the prepared manifest is missing — never a Global launch", async () => {

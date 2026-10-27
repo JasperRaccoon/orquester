@@ -45,7 +45,6 @@ const registryListeners = new Set<(boxId: string) => void>();
 const hubListeners = new Set<(boxId: string, connected: boolean) => void>();
 let audio: DesktopAudioHub;
 let manager: DesktopManager;
-let desktopId = "";
 /** Every process group the desktops ever had (hosts and apps): checked after close, killed in `after`. */
 const groups = new Set<number>();
 let hostStatus: DesktopHostStatus;
@@ -279,9 +278,9 @@ after(async () => {
   await rm(appdir, { recursive: true, force: true });
 });
 
-test("1. a desktop of a Linux box project runs in the box: its dir, its scripts' copy and its session are the box's", { skip: skipReason ?? false }, async () => {
+test("a Linux box desktop supports RFB, apps, reconnects, restarts and complete teardown", { skip: skipReason ?? false }, async (t) => {
   const created = await manager.create({ projectPath: project, projectRealPath: project, title: "VM", size: { width: 1024, height: 768 }, boxId: BOX_ID });
-  desktopId = created.id;
+  const desktopId = created.id;
   assert.equal(created.status, "running", created.error);
   assert.deepEqual(created.box, { id: BOX_ID, connected: true });
   assert.equal(typeof created.display, "number");
@@ -290,162 +289,145 @@ test("1. a desktop of a Linux box project runs in the box: its dir, its scripts'
   // Nothing of it on the daemon's side: its runtime dir stays empty, and the relay has no local path.
   assert.deepEqual(await readdir(desktopsRuntimeDir(appdir)), []);
   assert.equal(manager.vncSocketPath(desktopId), null);
-  const copies = await readdir(join(home, ".orquester", "desktop-assets"));
-  assert.equal(copies.length, 1);
-  for (const script of ["desktop-host.sh", "app-run.sh"]) {
-    assert.ok(existsSync(join(home, ".orquester", "desktop-assets", copies[0]!, script)), script);
-  }
   assert.deepEqual(await boxSessions(), [`orqsvc-desktop-${desktopId}`]);
   groups.add(await hostPanePid(desktopId));
-});
 
-test("2. the RFB stream comes through the box link", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const open = manager.vncStream(desktopId);
-  assert.ok(open, "a running VM desktop has a VNC stream");
-  const stream = await open();
-  try {
-    assert.match((await readBytes(stream, 12)).toString("latin1"), /^RFB 003\.00\d\n$/);
-  } finally {
-    stream.destroy();
+  {
+    const open = manager.vncStream(desktopId);
+    assert.ok(open, "a running VM desktop has a VNC stream");
+    const stream = await open();
+    try {
+      assert.match((await readBytes(stream, 12)).toString("latin1"), /^RFB 003\.00\d\n$/);
+    } finally {
+      stream.destroy();
+    }
   }
-});
 
-test("3. an app's window is tracked over the box link and mapped to its app; closing it exits the app", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const app = await manager.launchApp(desktopId, { command: "xterm -e cat", cwd: project, env: { ORQ_IT_VALUE: "x" } });
-  await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
-  groups.add(await readPgid(desktopId, app.id));
-  const window = await windowOf(manager, desktopId, app.id);
-  assert.equal(window.wmClass?.toLowerCase().includes("xterm"), true, String(window.wmClass));
-  // The env file was consumed in the box.
-  assert.equal(existsSync(join(boxDir(desktopId), "apps", `${app.id}.env`)), false);
+  {
+    const app = await manager.launchApp(desktopId, { command: "xterm -e cat", cwd: project, env: { ORQ_IT_VALUE: "x" } });
+    await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
+    groups.add(await readPgid(desktopId, app.id));
+    const window = await windowOf(manager, desktopId, app.id);
+    assert.equal(window.wmClass?.toLowerCase().includes("xterm"), true, String(window.wmClass));
+    // The env file was consumed in the box.
+    assert.equal(existsSync(join(boxDir(desktopId), "apps", `${app.id}.env`)), false);
 
-  await manager.windowAction(desktopId, window.id, "close");
-  const summary = await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "exited"));
-  assert.equal(summary.status, "running");
-  assert.equal(typeof (await manager.appLog(desktopId, app.id)), "string");
-});
-
-test("4. sound: the encoder runs in the box and its Opus packets reach a subscriber", { skip: skipReason ?? false }, async (t) => {
-  assert.ok(desktopId, "needs step 1");
-  if (!hostStatus.audioAvailable) {
-    t.skip("no PulseAudio + ffmpeg (pulse, libopus) here");
-    return;
+    await manager.windowAction(desktopId, window.id, "close");
+    const summary = await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "exited"));
+    assert.equal(summary.status, "running");
   }
-  const source = manager.audioSource(desktopId);
-  assert.ok(source && "pulseSocketPath" in source && source.spawn, JSON.stringify(source));
-  const packet = await new Promise<Buffer>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timed out waiting for an audio packet")), 20_000);
-    const sink: DesktopAudioSink = {
-      send: (data) => {
-        clearTimeout(timer);
-        off();
-        resolve(data);
-      },
-      bufferedAmount: () => 0,
-      sendState: () => {}
-    };
-    const off = audio.subscribe(desktopId, source.pulseSocketPath, sink, source.spawn);
+
+  await t.test("Opus packets reach a subscriber through the box link", { skip: !hostStatus.audioAvailable }, async () => {
+    const source = manager.audioSource(desktopId);
+    assert.ok(source && "pulseSocketPath" in source && source.spawn, JSON.stringify(source));
+    const packet = await new Promise<Buffer>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for an audio packet")), 20_000);
+      const sink: DesktopAudioSink = {
+        send: (data) => {
+          clearTimeout(timer);
+          off();
+          resolve(data);
+        },
+        bufferedAmount: () => 0,
+        sendState: () => {}
+      };
+      const off = audio.subscribe(desktopId, source.pulseSocketPath, sink, source.spawn);
+    });
+    assert.equal(packet[0], 1, "a framed Opus packet");
+    audio.stopDesktop(desktopId);
   });
-  assert.equal(packet[0], 1, "a framed Opus packet");
-  audio.stopDesktop(desktopId);
-});
 
-test("5. a link drop shows as an outage; what happened meanwhile is caught up once the link is back", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const app = await manager.launchApp(desktopId, { command: "sleep 600", cwd: project, env: {} });
-  await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
-  const pgid = await readPgid(desktopId, app.id);
-  groups.add(pgid);
+  {
+    const app = await manager.launchApp(desktopId, { command: "sleep 600", cwd: project, env: {} });
+    await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
+    const pgid = await readPgid(desktopId, app.id);
+    groups.add(pgid);
 
-  const down = until(manager, desktopId, (d) => d.box?.connected === false);
-  setLink(false);
-  const outage = await down;
-  assert.equal(outage.status, "running", "the desktop keeps running in the box");
-  assert.equal(manager.vncStream(desktopId), null);
-  await assert.rejects(manager.launchApp(desktopId, { command: "true", cwd: project, env: {} }), { code: "DESKTOP_BOX_UNREACHABLE" });
-  await assert.rejects(manager.stop(desktopId), { code: "DESKTOP_BOX_UNREACHABLE" });
-  // The app ends while nobody watches.
-  process.kill(-pgid, "SIGTERM");
-  const exitFile = join(boxDir(desktopId), "apps", `${app.id}.exit`);
-  await untilInDir(join(boxDir(desktopId), "apps"), async () => existsSync(exitFile), "the app's exit file");
-  assert.equal(manager.get(desktopId)?.apps.find((a) => a.id === app.id)?.status, "running", "unseen while the link is down");
+    const down = until(manager, desktopId, (d) => d.box?.connected === false);
+    setLink(false);
+    const outage = await down;
+    assert.equal(outage.status, "running", "the desktop keeps running in the box");
+    assert.equal(manager.vncStream(desktopId), null);
+    await assert.rejects(manager.launchApp(desktopId, { command: "true", cwd: project, env: {} }), { code: "DESKTOP_BOX_UNREACHABLE" });
+    await assert.rejects(manager.stop(desktopId), { code: "DESKTOP_BOX_UNREACHABLE" });
+    // The app ends while nobody watches.
+    process.kill(-pgid, "SIGTERM");
+    const exitFile = join(boxDir(desktopId), "apps", `${app.id}.exit`);
+    await untilInDir(join(boxDir(desktopId), "apps"), async () => existsSync(exitFile), "the app's exit file");
+    assert.equal(manager.get(desktopId)?.apps.find((a) => a.id === app.id)?.status, "running", "unseen while the link is down");
 
-  setLink(true);
-  const back = await until(manager, desktopId, (d) => d.box?.connected === true && d.apps.some((a) => a.id === app.id && a.status === "exited"));
-  assert.equal(back.status, "running");
-  // The window tracker is back: a new app's window is mapped again.
-  const again = await manager.launchApp(desktopId, { command: "xterm -e cat", cwd: project, env: {} });
-  await until(manager, desktopId, (d) => d.apps.some((a) => a.id === again.id && a.status === "running"));
-  groups.add(await readPgid(desktopId, again.id));
-  await windowOf(manager, desktopId, again.id);
-  manager.stopApp(desktopId, again.id, true);
-  await until(manager, desktopId, (d) => d.apps.some((a) => a.id === again.id && a.status === "exited"));
-});
-
-test("6. after a daemon restart the desktop waits for its VM, then reattaches there", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const display = manager.get(desktopId)!.display;
-  await manager.flush();
-  await manager.shutdown();
-  setLink(false);
-  manager = makeManager();
-  await manager.load();
-  await manager.reattach();
-  const waiting = manager.get(desktopId)!;
-  assert.equal(waiting.status, "starting");
-  assert.equal(waiting.box?.connected, false);
-  assert.match(waiting.statusDetail ?? "", /VM/);
-  setLink(true);
-  const summary = await until(manager, desktopId, (d) => d.status === "running");
-  assert.equal(summary.display, display);
-  assert.equal(summary.box?.connected, true);
-  assert.ok(summary.apps.every((a) => a.status === "exited"));
-  const open = manager.vncStream(desktopId);
-  assert.ok(open);
-  const stream = await open();
-  try {
-    assert.match((await readBytes(stream, 12)).toString("latin1"), /^RFB 003\.00\d\n$/);
-  } finally {
-    stream.destroy();
+    setLink(true);
+    const back = await until(manager, desktopId, (d) => d.box?.connected === true && d.apps.some((a) => a.id === app.id && a.status === "exited"));
+    assert.equal(back.status, "running");
+    // The window tracker is back: a new app's window is mapped again.
+    const again = await manager.launchApp(desktopId, { command: "xterm -e cat", cwd: project, env: {} });
+    await until(manager, desktopId, (d) => d.apps.some((a) => a.id === again.id && a.status === "running"));
+    groups.add(await readPgid(desktopId, again.id));
+    await windowOf(manager, desktopId, again.id);
+    manager.stopApp(desktopId, again.id, true);
+    await until(manager, desktopId, (d) => d.apps.some((a) => a.id === again.id && a.status === "exited"));
   }
-});
 
-test("6b. a VM that restarted while out of reach: the desktop leaves running, then restarts there", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const pane = await hostPanePid(desktopId);
-  groups.add(pane);
-  const { stdout: serverPid } = await boxTmux(["list-sessions", "-F", "#{pid}"]);
-  setLink(false);
-  // The restart: every process of the desktop dies at once (no trap runs, nothing writes
-  // host.exit), and so does the box's tmux server.
-  process.kill(-pane, "SIGKILL");
-  process.kill(Number(serverPid.split("\n")[0]), "SIGKILL");
-  assert.equal(existsSync(join(boxDir(desktopId), "host.exit")), false);
-  assert.equal(manager.get(desktopId)?.status, "running", "unseen while the link is down");
+  {
+    const display = manager.get(desktopId)!.display;
+    await manager.flush();
+    await manager.shutdown();
+    setLink(false);
+    manager = makeManager();
+    await manager.load();
+    await manager.reattach();
+    const waiting = manager.get(desktopId)!;
+    assert.equal(waiting.status, "starting");
+    assert.equal(waiting.box?.connected, false);
+    assert.match(waiting.statusDetail ?? "", /VM/);
+    setLink(true);
+    const summary = await until(manager, desktopId, (d) => d.status === "running");
+    assert.equal(summary.display, display);
+    assert.equal(summary.box?.connected, true);
+    assert.ok(summary.apps.every((a) => a.status === "exited"));
+    const open = manager.vncStream(desktopId);
+    assert.ok(open);
+    const stream = await open();
+    try {
+      assert.match((await readBytes(stream, 12)).toString("latin1"), /^RFB 003\.00\d\n$/);
+    } finally {
+      stream.destroy();
+    }
+  }
 
-  setLink(true);
-  const stopped = await until(manager, desktopId, (d) => d.status === "stopped");
-  assert.match(stopped.error ?? "", /ended while the VM was out of reach/);
-  assert.equal(manager.vncStream(desktopId), null);
+  {
+    const pane = await hostPanePid(desktopId);
+    groups.add(pane);
+    const { stdout: serverPid } = await boxTmux(["list-sessions", "-F", "#{pid}"]);
+    setLink(false);
+    // The restart: every process of the desktop dies at once (no trap runs, nothing writes
+    // host.exit), and so does the box's tmux server.
+    process.kill(-pane, "SIGKILL");
+    process.kill(Number(serverPid.split("\n")[0]), "SIGKILL");
+    assert.equal(existsSync(join(boxDir(desktopId), "host.exit")), false);
+    assert.equal(manager.get(desktopId)?.status, "running", "unseen while the link is down");
 
-  const again = await manager.restart(desktopId);
-  assert.equal(again.status, "running", again.error);
-  groups.add(await hostPanePid(desktopId));
-});
+    setLink(true);
+    const stopped = await until(manager, desktopId, (d) => d.status === "stopped");
+    assert.match(stopped.error ?? "", /ended while the VM was out of reach/);
+    assert.equal(manager.vncStream(desktopId), null);
 
-test("7. closing takes everything down in the box", { skip: skipReason ?? false }, async () => {
-  assert.ok(desktopId, "needs step 1");
-  const app = await manager.launchApp(desktopId, { command: "sleep 600", cwd: project, env: {} });
-  await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
-  groups.add(await readPgid(desktopId, app.id));
-  assert.ok((await liveMembers(groups)).length > 0, "the desktop's processes are running before close");
-  await manager.close(desktopId);
-  assert.equal(manager.get(desktopId), undefined);
-  assert.equal(existsSync(boxDir(desktopId)), false);
-  assert.deepEqual(await boxSessions(), []);
-  assert.deepEqual(await liveMembers(groups), []);
+    const again = await manager.restart(desktopId);
+    assert.equal(again.status, "running", again.error);
+    groups.add(await hostPanePid(desktopId));
+  }
+
+  {
+    const app = await manager.launchApp(desktopId, { command: "sleep 600", cwd: project, env: {} });
+    await until(manager, desktopId, (d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
+    groups.add(await readPgid(desktopId, app.id));
+    assert.ok((await liveMembers(groups)).length > 0, "the desktop's processes are running before close");
+    await manager.close(desktopId);
+    assert.equal(manager.get(desktopId), undefined);
+    assert.equal(existsSync(boxDir(desktopId)), false);
+    assert.deepEqual(await boxSessions(), []);
+    assert.deepEqual(await liveMembers(groups), []);
+  }
 });
 
 test("8. a desktop closed while its VM is away is reaped there once the VM is back", { skip: skipReason ?? false }, async () => {

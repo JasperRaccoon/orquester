@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { packageOf, planTests, planTypecheck, runnerOf, selectTests, shellQuote } from "./check-changed.mjs";
+import { planTests, planTypecheck, runnerOf, selectTests } from "./check-changed.mjs";
 
 const DAEMON_TEST =
   "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do node --import tsx \"$f\" || exit 1; done";
@@ -57,12 +58,6 @@ test("selectTests: a deleted test is skipped; a deleted source still selects its
   assert.deepEqual(selectTests(["apps/daemon/src/removed.test.ts", "apps/daemon/src/gone.ts", "apps/daemon/src/vanished/dir.ts"], fs), ["apps/daemon/src/gone.test.ts"]);
 });
 
-test("packageOf picks the package that contains a path, or null", () => {
-  assert.equal(packageOf("apps/daemon/src/a.ts", PACKAGES)?.name, "@orquester/daemon");
-  assert.equal(packageOf("apps/daemonic/a.ts", PACKAGES), null);
-  assert.equal(packageOf("scripts/a.mjs", PACKAGES), null);
-});
-
 test("runnerOf takes the package's own node --test preamble", () => {
   assert.deepEqual(runnerOf(DAEMON_TEST), {
     test: "TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4}",
@@ -80,19 +75,23 @@ test("runnerOf takes the package's own node --test preamble", () => {
 
 test("planTests groups files per package with its runner, root last, and reports unrunnable ones", () => {
   const plan = planTests(
-    ["apps/daemon/src/a.test.ts", "apps/daemon/src/b.check.ts", "deploy/lib/remote-update.test.mjs", "packages/api/src/it's.test.ts", "packages/registry/src/r.test.ts"],
+    ["apps/daemon/src/a.test.ts", "apps/daemon/src/b.check.ts", "deploy/lib/remote-update.test.mjs", "apps/daemonic/a.test.ts", "packages/api/src/it's test.ts", "packages/registry/src/r.test.ts"],
     PACKAGES
   );
   assert.deepEqual(
-    plan.groups.map((group) => [group.dir, group.files, group.commands]),
+    plan.groups.map((group) => [group.dir, group.files, group.commands.map((command) =>
+      execFileSync("sh", ["-c", `node() { printf '%s\\0' "$@"; }; ${command}`], {
+        env: { ...process.env, ORQUESTER_TEST_TIMEOUT_MS: "1200", ORQUESTER_TEST_CONCURRENCY: "2" }
+      }).toString().split("\0").slice(0, -1)
+    )]),
     [
       [
         "apps/daemon",
         ["src/a.test.ts", "src/b.check.ts"],
-        ["TSX_DISABLE_CACHE=1 node --import tsx --test --test-timeout=${ORQUESTER_TEST_TIMEOUT_MS:-600000} --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} 'src/a.test.ts'", "TSX_DISABLE_CACHE=1 node --import tsx 'src/b.check.ts'"]
+        [["--import", "tsx", "--test", "--test-timeout=1200", "--test-concurrency=2", "src/a.test.ts"], ["--import", "tsx", "src/b.check.ts"]]
       ],
-      ["packages/api", ["src/it's.test.ts"], [`TSX_DISABLE_CACHE=1 node --import tsx --test --test-concurrency=\${ORQUESTER_TEST_CONCURRENCY:-4} 'src/it'\\''s.test.ts'`]],
-      [".", ["deploy/lib/remote-update.test.mjs"], ["node --test 'deploy/lib/remote-update.test.mjs'"]]
+      ["packages/api", ["src/it's test.ts"], [["--import", "tsx", "--test", "--test-concurrency=2", "src/it's test.ts"]]],
+      [".", ["deploy/lib/remote-update.test.mjs", "apps/daemonic/a.test.ts"], [["--test", "deploy/lib/remote-update.test.mjs", "apps/daemonic/a.test.ts"]]]
     ]
   );
   assert.deepEqual(plan.unrunnable, ["packages/registry/src/r.test.ts"]);
@@ -106,9 +105,4 @@ test("planTypecheck: affected packages and dependents, all for a root input, non
   assert.deepEqual(planTypecheck(["apps/web/tsconfig.json"], PACKAGES), { args: ["--filter", "...@orquester/web"] });
   assert.deepEqual(planTypecheck(["tsconfig.base.json"], PACKAGES), { args: ["-r"] });
   assert.deepEqual(planTypecheck(["pnpm-lock.yaml"], PACKAGES), { args: ["-r"] });
-});
-
-test("shellQuote survives quotes and spaces", () => {
-  assert.equal(shellQuote("a b"), "'a b'");
-  assert.equal(shellQuote("it's"), "'it'\\''s'");
 });

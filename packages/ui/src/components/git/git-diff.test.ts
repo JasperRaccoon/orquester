@@ -75,7 +75,7 @@ describe("parseDiffFiles", () => {
     assert.equal(files[2]?.oldPath, "src/gone.ts");
   });
 
-  it("reads a rename's old and new paths and similarity, with or without content changes", () => {
+  it("reads renamed and copied paths and similarity, with or without content changes", () => {
     const pure = lines(
       "diff --git a/old/name.ts b/new/name.ts",
       "similarity index 100%",
@@ -94,7 +94,13 @@ describe("parseDiffFiles", () => {
       "-a",
       "+b"
     );
-    const [first, second] = parseDiffFiles(pure + edited);
+    const copied = lines(
+      "diff --git a/source.ts b/copy.ts",
+      "similarity index 100%",
+      "copy from source.ts",
+      "copy to copy.ts"
+    );
+    const [first, second, third] = parseDiffFiles(pure + edited + copied);
     assert.equal(first?.change, "renamed");
     assert.equal(first?.oldPath, "old/name.ts");
     assert.equal(first?.newPath, "new/name.ts");
@@ -106,6 +112,10 @@ describe("parseDiffFiles", () => {
     assert.equal(second?.path, "lib/y.ts");
     assert.equal(second?.similarity, 87);
     assert.deepEqual([second?.additions, second?.deletions], [1, 1]);
+    assert.deepEqual(
+      [third?.change, third?.oldPath, third?.newPath, third?.path, third?.similarity],
+      ["copied", "source.ts", "copy.ts", "copy.ts", 100]
+    );
   });
 
   it("flags a binary file on its own and keeps the text files beside it", () => {

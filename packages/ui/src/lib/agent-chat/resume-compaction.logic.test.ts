@@ -59,7 +59,8 @@ test("a send under the offer compacts first, and a refused compaction still send
   await sendAfterCompaction(false, async () => void calls.push("compact"), async () => void calls.push("send"));
   assert.deepEqual(calls, ["send"]);
   // A failed send is the caller's to handle.
-  await assert.rejects(sendAfterCompaction(false, async () => undefined, async () => Promise.reject(new Error("refused"))));
+  const refused = new Error("refused");
+  await assert.rejects(sendAfterCompaction(false, async () => undefined, async () => Promise.reject(refused)), (error) => error === refused);
 });
 
 test("a typed /compact, bare or instructed, never gets a bare compaction first", () => {

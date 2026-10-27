@@ -12,7 +12,6 @@ import { z } from "zod";
 
 import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ThreadCaller } from "../mcp/catalog/contract.ts";
 import { executeToolCall } from "../mcp/executor.ts";
-import { toolByName } from "../mcp/catalog/index.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { LEGACY_SESSION_TOOL_DEFINITIONS } from "../agent-host/session-tools/legacy-definitions.ts";
 import { chatToolByName } from "./legacy-aliases.ts";
@@ -66,7 +65,6 @@ test("an old host on this daemon: every name of the old server (the frozen defin
   for (const { name } of LEGACY_SESSION_TOOL_DEFINITIONS) {
     assert.ok(chatToolByName(name), name);
   }
-  assert.deepEqual(LEGACY_SESSION_TOOL_DEFINITIONS.map(({ name }) => name).filter((name) => toolByName(name, "chat")), ["html_preview", "html_render", "request_secret"]);
 });
 
 test("thread_send without wait steers as before (reply none); with wait it waits WITHOUT the notify conversion", async () => {

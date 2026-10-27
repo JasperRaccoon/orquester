@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lchown, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -225,7 +225,17 @@ async function runScript(
   argv: string[],
   options: { onlyPath?: boolean; env?: Record<string, string> } = {}
 ): Promise<{ code: number | null; output: string }> {
+  const unprivileged = process.getuid?.() === 0;
+  if (unprivileged) {
+    // BusyBox may resolve its built-in id before PATH's shim. Run without root privileges so
+    // no generated bootstrap can write the host's real /var/lib/orq-agent, under any shell.
+    // lchown changes the sandbox's tool symlinks, never the system executables they point at.
+    for (const path of [box.dir, ...(await readdir(box.dir, { recursive: true })).map((name) => join(box.dir, name))]) {
+      await lchown(path, 65534, 65534);
+    }
+  }
   const child = spawn(argv[0]!, argv.slice(1), {
+    ...(unprivileged ? { uid: 65534, gid: 65534 } : {}),
     env: {
       HOME: box.home,
       PATH: options.onlyPath ? box.bin : `${box.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,

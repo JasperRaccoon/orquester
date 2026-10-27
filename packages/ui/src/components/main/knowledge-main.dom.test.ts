@@ -2,7 +2,7 @@
  * The server-level Knowledge view in the shell, in a DOM (a phone: jsdom has no
  * media queries): with no project open it takes the main area and the top bar
  * shows its header in the project's place; closing it brings the landing view
- * back. The view stays mounted while closed, hidden.
+ * back.
  */
 
 import assert from "node:assert/strict";
@@ -88,9 +88,7 @@ describe("the Knowledge view in the shell", () => {
   const close = () => document.querySelector<HTMLButtonElement>('button[aria-label="Close Knowledge"]');
   /** Lets the lazy view's chunk resolve and render. */
   const loaded = async () => {
-    for (let i = 0; i < 20 && !text().includes("Loading…"); i++) {
-      await act(async () => new Promise<void>((resolve) => setImmediate(resolve)));
-    }
+    await act(async () => { await import("../knowledge/KnowledgeView"); });
   };
 
   it("fills the main area with no project open, under its own header, and closes back to the landing view", async () => {
@@ -108,8 +106,5 @@ describe("the Knowledge view in the shell", () => {
     assert.equal(useAppStore.getState().knowledgeView.open, false);
     assert.equal(close(), null);
     assert.match(text(), /Select a project/);
-    const view = [...document.querySelectorAll("main > div")];
-    assert.equal(view.length, 2, "the landing view, and the Knowledge view kept mounted");
-    assert.ok(view[1]!.className.split(" ").includes("hidden"), "hidden while closed");
   });
 });

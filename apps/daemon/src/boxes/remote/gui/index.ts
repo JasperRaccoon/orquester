@@ -12,4 +12,4 @@ export {
   type BoxGuiInstallerDeps,
   type BoxGuiProgress
 } from "./types.ts";
-export { CHROME_START_TIMEOUT_MS, INSTALL_TIMEOUT_MS, PROBE_TIMEOUT_MS, createBoxGuiInstaller } from "./installer.ts";
+export { createBoxGuiInstaller } from "./installer.ts";

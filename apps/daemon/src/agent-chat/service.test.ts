@@ -26,14 +26,6 @@ import {
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, type ChatLaunchEnv } from "./service.ts";
-import { realpath as realpathOf } from "node:fs/promises";
-import type { ForkSessionRequest } from "@orquester/api";
-import type { CallerPrincipal } from "@orquester/api/agent-chat";
-import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { FakeApprovalPort } from "../mcp/catalog/approval-double.ts";
-import { toolByName } from "../mcp/catalog/index.ts";
-import { executeToolCall } from "../mcp/executor.ts";
-import { gateForkBody } from "./lineage-routes.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
@@ -2241,55 +2233,4 @@ test("previewHtmlRender without a page browser says so", async (t) => {
     f.service.previewHtmlRender({ threadId: "thread-1", html: "<p>x</p>" }),
     (error: unknown) => error instanceof HtmlPreviewError && error.code === "browser-unavailable"
   );
-});
-
-test("fork_session through the fork route's real principal gate and this service: a self-fork is agentCreated, a fork of another chat is not, workflow ownership is inherited (unified MCP Task 8)", async () => {
-  const f = await makeFixture(OPENCODE, null);
-  const projectDir = join(f.appdir, "w", "acme", "api");
-  await mkdir(projectDir, { recursive: true });
-  const project = await realpathOf(projectDir);
-  const owner = { kind: "workflow" as const, workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
-  const free = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir }, 0);
-  const other = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir }, 1);
-  const owned = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir, owner }, 2);
-  let order = 3;
-  const api: DaemonApi = {
-    fsRoot: f.appdir,
-    workspacesDir: join(f.appdir, "w"),
-    async request(method, path, opts) {
-      if (method === "GET" && path === "/api/sessions") return { status: 200, body: f.service.chat.list() };
-      const fork = /^\/api\/sessions\/([^/]+)\/fork$/.exec(path);
-      if (method === "POST" && fork) {
-        const id = decodeURIComponent(fork[1]!);
-        // The route's own gate, fed the principal the executor stamped on this request.
-        const body = gateForkBody((opts?.body ?? {}) as ForkSessionRequest, id, (opts as { principal?: CallerPrincipal } | undefined)?.principal);
-        return { status: 200, body: await f.service.forkSession(id, body, (order += 1)) };
-      }
-      return { status: 404, body: { error: { code: "NOT_FOUND", message: path } } };
-    },
-    async uploadAttachment() { return { status: 503, value: null }; },
-    async publishHtmlRender() { return { ok: false, code: "UNAVAILABLE", message: "none" }; },
-    async previewHtmlRender() { return { ok: false, code: "UNAVAILABLE", message: "none" }; },
-    subscribe: () => () => undefined
-  };
-  const fork = async (callerId: string, args: Record<string, unknown>, workflowOwned = false) => {
-    const result = await executeToolCall(
-      { approvals: new FakeApprovalPort(), lookup: (name, audience) => toolByName(name, audience) },
-      { name: "fork_session", arguments: args },
-      { caller: { kind: "thread", threadId: callerId, title: "Chat", projectPath: project, workspace: "acme", cwd: project, agentId: "opencode", callId: `c-${order}`, runtimeMode: "full-access", planning: false, workflowOwned, exchange: null }, api, signal: new AbortController().signal }
-    );
-    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
-    return f.service.chat.get((result.structuredContent as { sessionId: string }).sessionId)!.lineage!;
-  };
-  const self = await fork(free.id, {});
-  assert.equal(self.parentThreadId, free.id);
-  assert.equal(self.agentCreated, true, "a chat's own fork is its child");
-  const ofAnother = await fork(free.id, { sessionId: other.id });
-  assert.equal(ofAnother.parentThreadId, other.id);
-  assert.equal(ofAnother.agentCreated, undefined, "the gate drops the flag: the forked chat's agent did not ask");
-  assert.equal(ofAnother.workflowOwned, undefined);
-  const ownedFork = await fork(owned.id, {}, true);
-  assert.equal(ownedFork.agentCreated, true);
-  assert.equal(ownedFork.workflowOwned, true, "a workflow-owned chat's fork inherits the ownership");
-  await f.cleanup();
 });

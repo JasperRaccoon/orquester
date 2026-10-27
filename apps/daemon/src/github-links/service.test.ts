@@ -7,14 +7,8 @@ import { describe, it } from "node:test";
 import type { GitHubPreviewTarget } from "@orquester/api";
 
 import {
-  CLOSED_TTL_MS,
-  COMMIT_TTL_MS,
   GitHubLinkPreviewError,
   GitHubLinkPreviewService,
-  NOT_FOUND_TTL_MS,
-  OPEN_TTL_MS,
-  UPSTREAM_TTL_MS,
-  summarizeCheckRuns,
   type GitHubReadCredential
 } from "./service.ts";
 
@@ -57,13 +51,17 @@ function pullJson(overrides: Record<string, unknown> = {}): Record<string, unkno
 }
 
 const CHECKS = {
-  total_count: 5,
+  total_count: 9,
   check_runs: [
     { status: "completed", conclusion: "success" },
     { status: "completed", conclusion: "failure" },
     { status: "in_progress", conclusion: null },
     { status: "completed", conclusion: "skipped" },
-    { status: "completed", conclusion: "success" }
+    { status: "completed", conclusion: "success" },
+    { status: "completed", conclusion: "timed_out" },
+    { status: "completed", conclusion: "cancelled" },
+    { status: "completed", conclusion: "neutral" },
+    { status: "queued", conclusion: "success" }
   ]
 };
 
@@ -116,25 +114,6 @@ async function refusal(promise: Promise<unknown>): Promise<GitHubLinkPreviewErro
   assert.fail("expected a refusal");
 }
 
-describe("summarizeCheckRuns", () => {
-  it("counts passed, failed, pending and skipped runs", () => {
-    assert.deepEqual(summarizeCheckRuns(CHECKS), { total: 5, passed: 2, failed: 1, pending: 1, skipped: 1 });
-    assert.deepEqual(
-      summarizeCheckRuns({
-        check_runs: [
-          { status: "completed", conclusion: "timed_out" },
-          { status: "completed", conclusion: "cancelled" },
-          { status: "completed", conclusion: "neutral" },
-          { status: "queued", conclusion: "success" }
-        ]
-      }),
-      { total: 4, passed: 0, failed: 2, pending: 1, skipped: 1 }
-    );
-    assert.equal(summarizeCheckRuns({}), null);
-    assert.equal(summarizeCheckRuns(null), null);
-  });
-});
-
 describe("GitHubLinkPreviewService", () => {
   it("previews an open PR with its branches and a checks summary", async () => {
     const { calls, fetchImpl } = scripted({
@@ -153,7 +132,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal(preview.baseRef, "main");
     assert.equal(preview.headLabel, "fork:feature");
     assert.equal(preview.additions, 10);
-    assert.deepEqual(preview.checks, { total: 5, passed: 2, failed: 1, pending: 1, skipped: 1 });
+    assert.deepEqual(preview.checks, { total: 9, passed: 2, failed: 3, pending: 2, skipped: 2 });
     assert.equal(calls.length, 2);
     assert.ok(calls.every((call) => call.authorization === null), "anonymous without a credential");
   });
@@ -265,22 +244,22 @@ describe("GitHubLinkPreviewService", () => {
     await svc.preview(PULL);
     await svc.preview(ISSUE);
     await svc.preview(COMMIT);
-    now += OPEN_TTL_MS - 1;
+    now += 60_000;
     await svc.preview(PULL);
     await svc.preview(ISSUE);
     assert.equal(count("/pulls/12"), 1);
     assert.equal(count("/issues/7"), 1);
-    now += 2;
+    now += 2 * 60_000;
     await svc.preview(ISSUE);
     assert.equal(count("/issues/7"), 2, "an open issue re-reads after the short TTL");
     await svc.preview(PULL);
     assert.equal(count("/pulls/12"), 1, "a closed PR is still cached");
-    now += CLOSED_TTL_MS;
+    now += 10 * 60_000;
     await svc.preview(PULL);
     assert.equal(count("/pulls/12"), 2);
     await svc.preview(COMMIT);
     assert.equal(count("/commits/0123456"), 1);
-    now += COMMIT_TTL_MS;
+    now += 30 * 60_000;
     await svc.preview(COMMIT);
     assert.equal(count("/commits/0123456"), 2);
   });
@@ -340,7 +319,7 @@ describe("GitHubLinkPreviewService", () => {
     assert.match(error.message, /private repository/);
     await refusal(svc.preview(PULL));
     assert.equal(calls.length, 1);
-    now += NOT_FOUND_TTL_MS + 1;
+    now += 10 * 60_000;
     await refusal(svc.preview(PULL));
     assert.equal(calls.length, 2);
   });
@@ -386,11 +365,11 @@ describe("GitHubLinkPreviewService", () => {
     assert.equal((await refusal(svc.preview(PULL))).code, "UPSTREAM");
     await refusal(svc.preview(PULL));
     assert.equal(calls.length, 1);
-    now += UPSTREAM_TTL_MS + 1;
+    now += 60_000;
     const upstream = await refusal(svc.preview(PULL));
     assert.equal(upstream.code, "UPSTREAM");
     assert.match(upstream.message, /HTTP 502/);
-    now += UPSTREAM_TTL_MS + 1;
+    now += 60_000;
     assert.equal((await svc.preview(PULL)).title, "Add the thing");
   });
 

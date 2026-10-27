@@ -8,8 +8,7 @@ import {
   blockerKindLabel,
   blockerStopAction,
   groupRestartBlockers,
-  restartNowConsequences,
-  shortCodeStamp
+  restartNowConsequences
 } from "./agent-host-restart";
 
 const status: AgentHostStatusResponse = {
@@ -65,6 +64,4 @@ test("the restart-now confirmation lists everything it stops", () => {
   assert.deepEqual(restartNowConsequences({ ...status, pendingRestart: null }), [
     "Nothing is running in any chat right now."
   ]);
-  assert.equal(shortCodeStamp("1570de7c8ee6aaaa"), "1570de7c8ee6");
-  assert.equal(shortCodeStamp(null), "unknown");
 });

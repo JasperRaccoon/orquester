@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { ProviderHttpError } from "./http.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID } from "./fixtures/vm-replay.ts";
-import { EUR_TO_USD, roundUsd } from "./price-tables.ts";
 import { upcloudAdapter, upcloudTiming } from "./upcloud.ts";
 
 upcloudTiming.pollMs = 0;
@@ -14,10 +13,7 @@ const SERVER_ID = "00111111-1111-4111-8111-111111111101";
 const UBUNTU_2404 = "01000000-0000-4000-8000-000030240200";
 const unauthorized = { status: 401, body: fixture("upcloud", "error-unauthorized") };
 
-function eurCents(cents: number): number {
-  return roundUsd((cents / 100) * EUR_TO_USD);
-}
-
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("validate: bearer token or Basic subaccount; a message for bad or missing credentials", async () => {
   const replay = replayFetch([
     { method: "GET", url: `${API}/account`, body: fixture("upcloud", "account"), times: 2 },
@@ -54,12 +50,12 @@ test("offers: current non-GPU plans priced per zone, Cloud Native with its disk,
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
     [
-      ["DEV-1xCPU-2GB", eurCents(0.5208), ["de-fra1", "fi-hel1", "us-nyc1"]],
-      ["1xCPU-1GB", eurCents(0.744), ["de-fra1", "fi-hel1"]],
-      ["1xCPU-1GB@us-nyc1", eurCents(0.8929), ["us-nyc1"]],
-      ["2xCPU-4GB", eurCents(2.9762), ["de-fra1", "fi-hel1", "us-nyc1"]],
+      ["DEV-1xCPU-2GB", 0.006, ["de-fra1", "fi-hel1", "us-nyc1"]],
+      ["1xCPU-1GB", 0.0086, ["de-fra1", "fi-hel1"]],
+      ["1xCPU-1GB@us-nyc1", 0.0104, ["us-nyc1"]],
+      ["2xCPU-4GB", 0.0345, ["de-fra1", "fi-hel1", "us-nyc1"]],
       // 2.0833 ¢/h plan + 40 GiB × 0.028 ¢ per GiB-hour of MaxIOPS storage; not sold in New York.
-      ["CLOUDNATIVE-2xCPU-8GB", eurCents(2.0833 + 40 * 0.028), ["de-fra1", "fi-hel1"]]
+      ["CLOUDNATIVE-2xCPU-8GB", 0.0372, ["de-fra1", "fi-hel1"]]
     ]
   );
   const cloudNative = offers.sizes.at(-1)!;
@@ -95,7 +91,7 @@ test("offers: USD accounts are not converted; Windows is refused", async () => {
     { method: "GET", url: `${API}/storage/template`, body: fixture("upcloud", "templates") }
   ]);
   const offers = await upcloudAdapter.offers(credentials, "linux", replayOptions(replay));
-  assert.equal(offers.sizes.find((size) => size.id === "2xCPU-4GB")?.hourlyUsd, roundUsd(0.029762));
+  assert.equal(offers.sizes.find((size) => size.id === "2xCPU-4GB")?.hourlyUsd, 0.0298);
   await assert.rejects(upcloudAdapter.offers(credentials, "windows", replayOptions(replayFetch([]))), /does not rent windows/);
 });
 
@@ -140,7 +136,7 @@ test("create: one POST with title, labels, cloud-init, metadata and the throwawa
     }
   });
   assert.deepEqual(result.ref, { serverUuid: SERVER_ID, zone: "de-fra1" });
-  assert.equal(result.hourlyUsd, eurCents(0.744));
+  assert.equal(result.hourlyUsd, 0.0086);
   assert.equal(result.windowsPassword, undefined);
 });
 
@@ -157,7 +153,7 @@ test("create: a regional Cloud Native size gets its own MaxIOPS disk and the cho
   assert.deepEqual(server.storage_devices, {
     storage_device: [{ action: "clone", storage: debian, title: `orq-${TEST_BOX_ID}-disk`, size: 40, tier: "maxiops" }]
   });
-  assert.equal(result.hourlyUsd, eurCents(2.0833 + 40 * 0.028));
+  assert.equal(result.hourlyUsd, 0.0372);
 });
 
 test("create: a 5xx on the create is never retried; unknown plans and templates fail before it", async () => {

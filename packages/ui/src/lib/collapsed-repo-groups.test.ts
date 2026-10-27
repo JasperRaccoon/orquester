@@ -36,6 +36,6 @@ test("entries that are not repo keys are dropped, the rest kept", () => {
 });
 
 test("a runaway list is bounded", () => {
-  const many = Array.from({ length: 2000 }, (_, i) => `github.com/o/r${i}`);
+  const many = Array.from({ length: 501 }, (_, i) => `github.com/o/r${i}`);
   assert.equal(parseCollapsedRepoGroups(JSON.stringify(many)).size, 500);
 });

@@ -9,8 +9,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  HTML_RENDER_MAX_HEIGHT,
-  HTML_RENDER_MIN_HEIGHT,
   htmlRenderFileName,
   htmlRenderFrameHeight,
   htmlRenderReferenceOfActivityPayload,
@@ -40,9 +38,9 @@ test("a reference is validated, trimmed and clamped", () => {
   assert.deepEqual(readHtmlRenderReference({ ...REF, title: "  Chart  ", height: 5 }), {
     attachmentId: ID,
     title: "Chart",
-    height: HTML_RENDER_MIN_HEIGHT
+    height: 80
   });
-  assert.equal(readHtmlRenderReference({ ...REF, height: 99_999 })?.height, HTML_RENDER_MAX_HEIGHT);
+  assert.equal(readHtmlRenderReference({ ...REF, height: 99_999 })?.height, 2000);
   assert.equal(readHtmlRenderReference({ ...REF, title: "   " })?.title, "HTML");
   // Only a published page's id: an image attachment, a traversal, junk.
   assert.equal(readHtmlRenderReference({ ...REF, attachmentId: ID.replace(/-html$/, "-png") }), undefined);
@@ -53,7 +51,7 @@ test("a reference is validated, trimmed and clamped", () => {
 
 test("measured heights are sorted, clamped, and all-or-nothing", () => {
   assert.deepEqual(readHtmlRenderReference({ ...REF, heights: [[728, 300], [320, 9000]] })?.heights, [
-    [320, HTML_RENDER_MAX_HEIGHT],
+    [320, 2000],
     [728, 300]
   ]);
   assert.equal(readHtmlRenderReference({ ...REF, heights: [[728, 300], ["x", 1]] })?.heights, undefined);
@@ -72,7 +70,7 @@ test("frame height: unmeasured pages take the smaller of the agent's height and 
   assert.equal(htmlRenderFrameHeight(ref, 728), 400);
   assert.equal(htmlRenderFrameHeight(ref, 728, 250), 250);
   assert.equal(htmlRenderFrameHeight(ref, 728, 900), 400);
-  assert.equal(htmlRenderFrameHeight(ref, 728, 10), HTML_RENDER_MIN_HEIGHT);
+  assert.equal(htmlRenderFrameHeight(ref, 728, 10), 80);
 });
 
 test("frame height: a measured page fits itself unless the agent asked for a scrolling frame", () => {
@@ -309,7 +307,7 @@ test("palette RGB colors map to page tokens; an invalid triple falls back to sto
   assert.equal(mapped.variables["--background"], "#112233");
   assert.equal(mapped.variables["--foreground"], "#aabbcc");
   const fallback = htmlRenderThemeFromPalette((variable) => (variable === "--n-950" ? "garbage" : undefined), "dark");
-  assert.equal(fallback.variables["--background"], htmlRenderStockTheme("dark").variables["--background"]);
+  assert.match(fallback.variables["--background"] ?? "", /^#[0-9a-f]{6}$/);
 });
 
 test("the theme fragment and message round-trip the theme", () => {

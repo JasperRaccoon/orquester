@@ -19,6 +19,7 @@ import type {
 } from "@orquester/api";
 import { hostToBoxPath } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import yauzl from "yauzl";
 
 import { createServer } from "../../../index.ts";
 import { onPath } from "../../../archive.ts";
@@ -342,7 +343,7 @@ test("write, create, rename and delete act in the box", async (t) => {
   const removed = await h.inject({ method: "DELETE", url: `/api/fs?path=${q(join(h.projectPath, "a"))}` });
   assert.equal(removed.statusCode, 200, removed.body);
   assert.ok(!existsSync(h.local("a")));
-  assert.deepEqual(h.closed, [join(h.projectPath, "a"), join(h.projectPath, "a")], "sessions under the deleted tree are closed");
+  assert.deepEqual(new Set(h.closed), new Set([join(h.projectPath, "a")]), "sessions under the deleted tree are closed");
   const rootDelete = await h.inject({ method: "DELETE", url: `/api/fs?path=${q(h.projectPath)}` });
   assert.equal(rootDelete.statusCode, 400);
   assert.ok(existsSync(h.local()), "the box project's folder is never deleted through the file browser");
@@ -366,7 +367,7 @@ test("POST /api/fs/upload streams a multi-MB body into the box, with conflicts",
   assert.deepEqual(first.json(), { path: join(h.projectPath, "assets", "data.bin"), name: "data.bin", size: bytes.length });
   assert.ok((await h.get("assets/data.bin")).equals(bytes));
 
-  const conflict = (await upload("assets/data.bin")).json() as FsUploadResponse;
+  const conflict = (await upload("assets/data.bin", undefined, Buffer.from("conflict"))).json() as FsUploadResponse;
   assert.equal(conflict.conflict, true);
   assert.equal(conflict.conflictKind, "file");
   const kept = (await upload("assets/data.bin", "rename", Buffer.from("second"))).json() as FsUploadResponse;
@@ -378,7 +379,7 @@ test("POST /api/fs/upload streams a multi-MB body into the box, with conflicts",
   const dirClash = (await upload("assets", "error", Buffer.from("x"))).json() as FsUploadResponse;
   assert.equal(dirClash.conflictKind, "dir");
 
-  const invalid = await upload("../escape.bin");
+  const invalid = await upload("../escape.bin", undefined, Buffer.from("invalid"));
   assert.equal(invalid.statusCode, 400);
   // No temp files left behind.
   assert.deepEqual((await readdir(h.local("assets"))).sort(), ["data (1).bin", "data.bin"]);
@@ -397,21 +398,25 @@ test("GET /api/fs/download streams a file and zips a folder in the box", async (
   assert.match(String(file.headers["content-disposition"]), /filename="lib.bin"/);
   assert.deepEqual(file.rawPayload, bytes);
 
+  const missing = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(join(h.projectPath, "nope"))}` });
+  assert.equal(missing.statusCode, 404);
+
   const caps = (await h.inject({ method: "GET", url: `/api/fs/capabilities?path=${q(h.projectPath)}` })).json() as FsCapabilitiesResponse;
   if (!caps.folderZip) return;
   const folder = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(join(h.projectPath, "pkg"))}` });
   assert.equal(folder.statusCode, 200);
   assert.equal(folder.headers["content-type"], "application/zip");
-  const zipPath = join(h.root, "pkg.zip");
-  await writeFile(zipPath, folder.rawPayload);
-  const listing = execFileSync(caps.zipTool === "zip" || caps.zipTool === "bsdtar" ? "bsdtar" : "7z", caps.zipTool === "7z" ? ["l", zipPath] : ["-tf", zipPath], {
-    encoding: "utf8"
+  const listing = await new Promise<string[]>((resolve, reject) => {
+    yauzl.fromBuffer(folder.rawPayload, (error, archive) => {
+      if (error) return reject(error);
+      const names: string[] = [];
+      archive.on("entry", (entry: yauzl.Entry) => names.push(entry.fileName));
+      archive.once("error", reject);
+      archive.once("end", () => resolve(names));
+    });
   });
-  assert.match(listing, /pkg\/lib\.bin/);
-  assert.match(listing, /pkg\/notes\/readme\.txt/);
-
-  const missing = await h.inject({ method: "GET", url: `/api/fs/download?path=${q(join(h.projectPath, "nope"))}` });
-  assert.equal(missing.statusCode, 404);
+  assert.ok(listing.includes("pkg/lib.bin"));
+  assert.ok(listing.includes("pkg/notes/readme.txt"));
 });
 
 // --- archive, parquet, capabilities -----------------------------------------------------
@@ -610,8 +615,22 @@ test("a Windows box: every path in and out is a host path", async (t) => {
   assert.equal(read.path, join(h.projectPath, "Src", "Main.cs"));
 
   // Case-only rename: the box reports no inode, the names match but for case.
-  const renamed = await h.inject({ method: "POST", url: "/api/fs/rename", payload: { path: join(h.projectPath, "Src", "Main.cs"), newName: "main.cs" } });
-  assert.equal(renamed.statusCode, 200, renamed.body);
+  const request = h.connection.request.bind(h.connection);
+  const sourcePath = hostToBoxPath(h.connection.paths, join(h.projectPath, "Src", "Main.cs"));
+  const targetPath = hostToBoxPath(h.connection.paths, join(h.projectPath, "Src", "main.cs"));
+  h.connection.request = (async (method: string, params: { path?: string }, options?: unknown) => {
+    const path = method === "fs.stat" && params.path === targetPath ? sourcePath : params.path;
+    return (request as (m: string, p: unknown, o?: unknown) => Promise<unknown>)(method, { ...params, ...(path ? { path } : {}) }, options);
+  }) as typeof h.connection.request;
+  const os = h.connection.sys.os;
+  h.connection.sys.os = "win32";
+  try {
+    const renamed = await h.inject({ method: "POST", url: "/api/fs/rename", payload: { path: join(h.projectPath, "Src", "Main.cs"), newName: "main.cs" } });
+    assert.equal(renamed.statusCode, 200, renamed.body);
+  } finally {
+    h.connection.sys.os = os;
+    h.connection.request = request;
+  }
 
   const uploaded = await h.inject({
     method: "POST",

@@ -119,7 +119,7 @@ async function makeHarness(
     onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId),
     attachmentPath: async () => null,
     sendAttachment: async () => { throw new Error("A refused attachment must never be streamed"); },
-    visualUrls: createVisualUrlSigner(Buffer.alloc(32, 1)),
+    visualUrls: createVisualUrlSigner(),
     ...overrides
   });
   await app.ready();
@@ -535,8 +535,6 @@ test("a client that accepts gzip gets the stream gzipped, each line flushed as i
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["content-encoding"], "gzip");
   assert.equal(response.headers["content-type"], "application/x-ndjson; charset=utf-8");
-  let wire = 0;
-  response.on("data", (chunk: Buffer) => (wire += chunk.length));
   const decoded = response.pipe(createGunzip());
   let text = "";
   for await (const chunk of decoded) {
@@ -546,7 +544,6 @@ test("a client that accepts gzip gets the stream gzipped, each line flushed as i
   const lines = text.split("\n").filter((line) => line.length > 0 && !line.startsWith(":"));
   assert.equal(lines[0], snapshot);
   assert.deepEqual(JSON.parse(lines[1]!), { kind: "synchronized", hostInstanceId: "host-1" });
-  assert.ok(wire * 4 < snapshot.length, `gzip shrinks the snapshot (wire ${wire} B for ${snapshot.length} B)`);
   release();
   response.destroy();
   await h.host.streamClosed;

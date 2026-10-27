@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { ProviderHttpError } from "./http.ts";
 import { ovhAdapter, ovhSignature } from "./ovh.ts";
 import { fixture, replayFetch, replayOptions, testCreateRequest, TEST_BOX_ID, type RecordedRequest, type ReplayRoute } from "./fixtures/vm-replay.ts";
-import { EUR_TO_USD, OVH_CAD_TO_USD, roundUsd } from "./price-tables.ts";
 
 const API = "https://eu.api.ovh.com/1.0";
 const PROJECT = "11111111111111111111111111111111";
@@ -27,10 +26,6 @@ interface Flavor {
 
 const authTime: ReplayRoute = { method: "GET", url: `${API}/auth/time`, body: fixture("ovh", "auth-time"), times: Infinity };
 const catalogRoute: ReplayRoute = { method: "GET", url: `${API}/order/catalog/public/cloud?ovhSubsidiary=FR`, body: fixture("ovh", "catalog") };
-
-function eur(value: number): number {
-  return roundUsd(value * EUR_TO_USD);
-}
 
 function flavorsIn(region: string): Flavor[] {
   return fixture<Flavor[]>("ovh", "flavors").filter((flavor) => flavor.region === region);
@@ -79,6 +74,7 @@ function assertSigned(request: RecordedRequest): void {
   assert.equal(JSON.stringify(request.headers).includes(credentials.applicationSecret), false);
 }
 
+// Expected USD examples are fixed to the captured catalog and bundled currency/licence assumptions.
 test("ovhSignature: $1$ + SHA-1 of secret+consumer+method+url+body+timestamp", () => {
   // Expected values computed independently with `printf '%s' '<AS>+<CK>+GET+<url>++1792368000' | sha1sum`.
   const keys = { applicationSecret: "EgWIz07P0HYwtQDs", consumerKey: "MtSwSrPpNjqfVSmJhLbPyr2i45lSDRbC", timestamp: "1792368000" };
@@ -154,10 +150,10 @@ test("offers (linux): hourly flavors in stock, catalog prices from EUR, one offe
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
     [
-      ["d2-2", eur(0.0104), ["GRA11"]],
-      ["b3-8", eur(0.0512), ["GRA11", "BHS5", "EU-WEST-PAR"]],
-      ["b2-7", eur(0.0709), ["GRA11"]],
-      ["b3-8@AF-NORTH-LZ-RBA-A", eur(0.093), ["AF-NORTH-LZ-RBA-A"]]
+      ["d2-2", 0.0121, ["GRA11"]],
+      ["b3-8", 0.0594, ["GRA11", "BHS5", "EU-WEST-PAR"]],
+      ["b2-7", 0.0822, ["GRA11"]],
+      ["b3-8@AF-NORTH-LZ-RBA-A", 0.1079, ["AF-NORTH-LZ-RBA-A"]]
     ]
   );
   const b38 = offers.sizes[1]!;
@@ -187,8 +183,8 @@ test("offers (windows): Windows flavors with the licence — per vCore on b3, in
   assert.deepEqual(
     offers.sizes.map((size) => [size.id, size.hourlyUsd, size.regions]),
     [
-      ["b3-8", eur(0.0512 + 2 * 0.0347), ["GRA11"]],
-      ["win-b2-7", eur(0.1907), ["GRA11"]]
+      ["b3-8", 0.1399, ["GRA11"]],
+      ["win-b2-7", 0.2212, ["GRA11"]]
     ]
   );
   assert.deepEqual(offers.regions.map((region) => region.id), ["GRA11"]);
@@ -215,7 +211,7 @@ test("offers (GPU kinds): only GPU flavors, described from the catalog", async (
       ramGb: 90,
       diskGb: 400,
       gpu: { model: "L4", count: 1, vramGb: 24 },
-      hourlyUsd: eur(0.75),
+      hourlyUsd: 0.87,
       regions: ["GRA11"]
     }
   ]);
@@ -224,7 +220,7 @@ test("offers (GPU kinds): only GPU flavors, described from the catalog", async (
   const windowsGpu = await ovhAdapter.offers(credentials, "windows-gpu", replayOptions(windows));
   assert.deepEqual(
     windowsGpu.sizes.map((size) => [size.id, size.hourlyUsd, size.gpu?.model]),
-    [["win-l4-90", eur(1.51), "L4"]]
+    [["win-l4-90", 1.7516, "L4"]]
   );
 
   await assert.rejects(ovhAdapter.offers(credentials, "macos", replayOptions(replayFetch([]))), /does not rent macos/);
@@ -240,7 +236,7 @@ test("offers (ovh-ca): the Canadian endpoint and catalog, CAD converted to USD",
     { method: "GET", url: `${CA}/order/catalog/public/cloud?ovhSubsidiary=CA`, body: catalog }
   ]);
   const offers = await ovhAdapter.offers({ ...credentials, endpoint: "OVH-CA" }, "linux", replayOptions(replay));
-  assert.equal(offers.sizes[0]!.hourlyUsd, roundUsd(0.0104 * OVH_CAD_TO_USD));
+  assert.equal(offers.sizes[0]!.hourlyUsd, 0.0075);
   assert.equal(replay.pending().length, 0);
 });
 
@@ -271,7 +267,7 @@ test("create (linux): registers the box's SSH key, then one POST with name, flav
     assertSigned(post);
   }
   assert.deepEqual(result.ref, { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11", sshKeyId: SSH_KEY_ID });
-  assert.equal(result.hourlyUsd, eur(0.0512));
+  assert.equal(result.hourlyUsd, 0.0594);
   assert.equal(result.windowsPassword, undefined);
 });
 
@@ -292,7 +288,7 @@ test("create (windows): no SSH key, cloudbase-init user data, licence in the pri
     userData: `#ps1_sysnative\r\n${request.bootstrap.powershellScript}`
   });
   assert.deepEqual(result.ref, { projectId: PROJECT, instanceId: INSTANCE_ID, region: "GRA11" });
-  assert.equal(result.hourlyUsd, eur(0.0512 + 2 * 0.0347));
+  assert.equal(result.hourlyUsd, 0.1399);
 });
 
 test("create: a regional size id resolves to the flavor of that region; unknown sizes fail before anything is created", async () => {
@@ -308,7 +304,7 @@ test("create: a regional size id resolves to the flavor of that region; unknown 
   const result = await ovhAdapter.create(credentials, testCreateRequest({ size: `b3-8@${region}`, region }), replayOptions(replay));
   const post = replay.requests.find((entry) => entry.url === `${P}/instance`)?.body as Record<string, unknown>;
   assert.equal(post.flavorId, "33333333-3333-4333-8333-333333333307");
-  assert.equal(result.hourlyUsd, eur(0.093));
+  assert.equal(result.hourlyUsd, 0.1079);
 
   const unknown = replayFetch(createReads("linux", "GRA11"));
   await assert.rejects(
