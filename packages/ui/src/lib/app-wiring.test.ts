@@ -8,6 +8,7 @@ import {
   BOXES_CHANNEL,
   DAEMON_EVENTS_CHANNEL,
   DAEMON_STOPPING_EVENT,
+  DEVICES_PLUGIN_ID,
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_STATUS_EVENT,
   type AgentProfileAgentId,
@@ -18,7 +19,7 @@ import {
   type SecretVaultDetail,
   type SessionSummary
 } from "@orquester/api";
-import { useAppStore } from "../store/app.ts";
+import { serverViewOpen, useAppStore } from "../store/app.ts";
 import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./agent-profile/store.ts";
 import type { ApiClient } from "./api-client.ts";
 import { boxesStore, resetBoxes } from "./boxes/store.ts";
@@ -404,6 +405,90 @@ afterEach(async () => {
       });
       await store().selectConnection("target");
       assert.deepEqual(store().knowledgeView, { open: false, focus: null });
+    });
+  });
+
+  describe("the Devices fleet view", () => {
+    const P = "/w/acme/app";
+    const project = (path: string) => ({ name: path.split("/").pop(), workspace: "acme", path }) as ProjectSummary;
+    const store = () => useAppStore.getState();
+    const devicesPlugin = (enabled: boolean): PluginInfo => ({ ...knowledgePlugin(enabled), id: DEVICES_PLUGIN_ID, name: "Device simulators" });
+
+    beforeEach(() => {
+      useAppStore.setState({
+        api: null,
+        currentProject: project(P),
+        knowledgeView: { open: false, focus: null },
+        devicesFleetOpen: false,
+        whiteboardTabsByProject: {},
+        gitTabsByProject: {},
+        activeTabByProject: {},
+        sessions: [],
+        browsers: [],
+        desktops: []
+      });
+    });
+
+    it("opens over the main area in Knowledge's place, and the other way round", () => {
+      useAppStore.setState({ sidebarDrawerOpen: true });
+      store().openKnowledgeEntry("ke_aaaaaaaaaaaa");
+      const focus = store().knowledgeView.focus;
+      store().openDevicesFleet();
+      assert.equal(store().devicesFleetOpen, true);
+      assert.equal(store().knowledgeView.open, false, "one server-level view at a time");
+      assert.equal(store().knowledgeView.focus, focus, "Knowledge keeps what it showed");
+      assert.equal(store().sidebarDrawerOpen, false);
+      assert.equal(serverViewOpen(store()), true);
+      store().openKnowledge();
+      assert.equal(store().devicesFleetOpen, false);
+      assert.equal(store().knowledgeView.open, true);
+      store().closeKnowledge();
+      assert.equal(serverViewOpen(store()), false);
+    });
+
+    it("going to the project, a tab, a tool or a session leaves it", () => {
+      const leaves: Array<[string, () => void]> = [
+        ["openProject (the same project)", () => store().openProject(project(P))],
+        ["activateTab", () => store().activateTab("tab-1")],
+        ["openGit", () => store().openGit()],
+        ["openFileBrowser", () => store().openFileBrowser()],
+        ["openWorkflowTab", () => store().openWorkflowTab(P, "wf_1", { title: "Flow" })]
+      ];
+      for (const [name, leave] of leaves) {
+        store().openDevicesFleet();
+        leave();
+        assert.equal(store().devicesFleetOpen, false, name);
+      }
+    });
+
+    it("a chat turn ending under it stays unread until closing it reveals the chat", () => {
+      const done = "2026-10-26T10:00:00.000Z";
+      const chat = { id: "c1", kind: "agent-chat", projectPath: P, latestTurn: { completedAt: done } } as unknown as SessionSummary;
+      useAppStore.setState({ activeTabByProject: { [P]: "c1" }, threadVisits: {} });
+      store().openDevicesFleet();
+      store().applyEvent({ channel: "sessions", type: "session.updated", payload: chat } as EventMessage);
+      assert.equal(store().threadVisits.c1, undefined, "hidden under the view, the finished turn is not seen");
+      store().closeDevicesFleet();
+      assert.equal(store().devicesFleetOpen, false);
+      assert.equal(store().threadVisits.c1, done, "closing the view shows the chat: that is the visit");
+    });
+
+    it("closes when a loaded plugins list says the plugin is off, not while the list is unknown", () => {
+      useAppStore.setState({ plugins: [devicesPlugin(true)] });
+      store().openDevicesFleet();
+      useAppStore.setState({ plugins: null });
+      assert.equal(store().devicesFleetOpen, true, "a list not loaded yet says nothing");
+      useAppStore.setState({ plugins: [devicesPlugin(false)] });
+      assert.equal(store().devicesFleetOpen, false);
+    });
+
+    it("closes on a connection switch", async () => {
+      const target = { id: "target", name: "Target", kind: "local", endpoint: "unix:/x", status: "disconnected" } as const;
+      useAppStore.setState({ connect: async () => undefined, connectionStatus: "disconnected" });
+      await store().initConnections({ localConnection: target, localTransporter: { kind: "stub" } as never, defaultUseTitlebar: false });
+      useAppStore.setState({ activeConnectionId: "previous", connections: [target, { ...target, id: "previous" }], devicesFleetOpen: true });
+      await store().selectConnection("target");
+      assert.equal(store().devicesFleetOpen, false);
     });
   });
 }

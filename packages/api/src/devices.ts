@@ -606,6 +606,17 @@ export const deviceRoutes = {
   hosts: HOSTS,
   /** GET → `{host}`; DELETE destroys a box host (its leases end `host-lost`). */
   host: (hostId: string): string => `${HOSTS}/${enc(hostId)}`,
+  /**
+   * PUT {@link DeviceHostDrainRequest} → {@link DeviceHostResponse} (phase 2, the fleet view's
+   * Drain): a draining host takes no new lease and is destroyed once empty (`pool.draining`);
+   * `draining: false` takes it back into placement.
+   */
+  hostDrain: (hostId: string): string => `${HOSTS}/${enc(hostId)}/drain`,
+  /**
+   * POST {@link DeviceCacheWarmRequest} → {@link DeviceCacheWarmResponse} (phase 2 §2.6, "Warm
+   * caches"): dispatch the run that builds and saves a platform's device-host caches.
+   */
+  cacheWarm: "/api/devices/pool/caches/warm",
   /** GET → {@link DevicesListResponse}: every device of every ready host. */
   devices: "/api/devices/list",
   /** GET (`?threadId=`) → {@link DeviceLeasesResponse}; POST {@link DeviceOpenRequest} → {@link DeviceLeaseResponse}. */
@@ -674,6 +685,28 @@ export interface DevicesStateResponse {
 
 export interface DeviceHostsResponse {
   hosts: DeviceHostSummary[];
+}
+
+/** PUT {@link deviceRoutes.hostDrain}. */
+export interface DeviceHostDrainRequest {
+  draining: boolean;
+}
+
+/** One host (GET {@link deviceRoutes.host}, PUT {@link deviceRoutes.hostDrain}). */
+export interface DeviceHostResponse {
+  host: DeviceHostSummary;
+}
+
+/** POST {@link deviceRoutes.cacheWarm}: the platform whose pool-host caches to build and save. */
+export interface DeviceCacheWarmRequest {
+  platform: DevicePlatform;
+}
+
+export interface DeviceCacheWarmResponse {
+  /** A run was dispatched (false: one is already running, or there is nothing to warm). */
+  started: boolean;
+  /** One line for the owner (why nothing started, or what runs now); null for none. */
+  message: string | null;
 }
 
 export interface DevicesListResponse {
