@@ -274,7 +274,10 @@ const hostToBox: MethodSamples<BoxHostToBoxMethods> = {
   "forward.unlisten": [{ params: { boxPort: 47999 }, result: undefined }],
   "agent.ensurePaths": [{ params: { paths: ["/var/lib/orquester/workspaces/w/p"] }, result: undefined }],
   "agent.update": [{ params: { url: "https://d.example/api/boxes/agent/linux-x64", sha256: "a".repeat(64) }, result: undefined }],
-  "agent.shutdown": [{ params: { reason: "destroyed" }, result: undefined }]
+  "agent.shutdown": [
+    { params: { reason: "destroyed" }, result: undefined },
+    { params: { reason: "removed", uninstall: true }, result: undefined }
+  ]
 };
 
 const boxToHost: MethodSamples<BoxBoxToHostMethods> = {

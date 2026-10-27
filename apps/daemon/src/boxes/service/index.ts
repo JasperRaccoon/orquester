@@ -35,6 +35,7 @@ import type {
 import type { DeviceCacheWarmRequest, DeviceCacheWarmRun, DeviceCacheWarmStatus } from "../providers/blacksmith.ts";
 import type { DaemonHttpAddress, LocalTailscale } from "../tailscale/local.ts";
 import { BoxSetupLog } from "./box-exec.ts";
+import { ByoMachines } from "./byo.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import { BoxLifecycle, systemClock, type BoxAgentClis, type BoxClock, type BoxGitAccess, type ManagedAgentHome } from "./lifecycle.ts";
 import { resolvePlacement } from "./placement.ts";
@@ -103,6 +104,8 @@ export interface CreateTemporaryBoxRequest {
 
 export interface BoxService {
   registry: StoreBoxRegistry;
+  /** Bring-your-own machines: pairing, settings, removal (and the hub's pair route). */
+  byo: ByoMachines;
   /** The record store the hub reads and updates. */
   records: BoxRecordStore;
   projects: BoxProjects;
@@ -174,6 +177,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     accounts: deps.accounts,
     ...(deps.blacksmith ? { blacksmith: deps.blacksmith } : {}),
     publicOrigin: deps.publicOrigin,
+    connected: (boxId) => deps.hub.get(boxId)?.connected === true,
     ...(deps.localTailscale ? { localTailscale: deps.localTailscale } : {}),
     ...(deps.daemonHttp ? { daemonHttp: deps.daemonHttp } : {}),
     setupLog,
@@ -214,7 +218,27 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     enabled: () => enabled,
     publishChanged: publishBoxes
   });
-  const projects = new BoxProjects({ store, registry, lifecycle, settings, accounts: deps.accounts, enabled: () => enabled, now: () => clock.now() });
+  const byo = new ByoMachines({
+    store,
+    hub: deps.hub,
+    settings,
+    lifecycle,
+    setupLog,
+    clock,
+    logger,
+    enabled: () => enabled,
+    summarize: (record) => registry.summarize(record)
+  });
+  const projects = new BoxProjects({
+    store,
+    registry,
+    lifecycle,
+    settings,
+    accounts: deps.accounts,
+    enabled: () => enabled,
+    now: () => clock.now(),
+    leaseMachine: (boxId, project) => byo.leaseProject(boxId, project)
+  });
 
   const unsubscribers: (() => void)[] = [];
   let blacksmithTest: Promise<void> | null = null;
@@ -236,7 +260,12 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
   };
 
   const destroyBox = async (boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary> => {
-    if (!store.get(boxId)) throw new BoxError(404, "BOX_NOT_FOUND", "No such box.");
+    const existing = store.get(boxId);
+    if (!existing) throw new BoxError(404, "BOX_NOT_FOUND", "No such box.");
+    // An idle machine of the owner's is removed (Remove machine), never destroyed; a lent one is released below.
+    if (existing.provider === "byo" && existing.purpose === "machine") {
+      throw new BoxError(409, "BOX_INVALID_REQUEST", "This is one of your own machines: remove it from its row instead.");
+    }
     const record = await lifecycle.destroy(boxId, reason);
     const summary = registry.summarize(record);
     if (!summary) throw new BoxError(500, "BOXES_UNAVAILABLE", "The destroyed box's record cannot be shown.");
@@ -260,6 +289,17 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
       explicit: false,
       lifetimeRequired: true
     });
+    if (placement.adapter.id === "byo") {
+      // The owner's own machine, lent to the chat until its time limit (the owner approved it on the card).
+      const leased = await byo.leaseTemporary(placement.size.id, {
+        threadId: request.threadId,
+        purposeNote: note.slice(0, MAX_PURPOSE_NOTE),
+        lifetimeMinutes: placement.lifetimeMinutes
+      });
+      const summary = registry.summarize(leased);
+      if (!summary) throw new BoxError(500, "BOXES_UNAVAILABLE", "The machine's record cannot be shown.");
+      return summary;
+    }
     const record = await lifecycle.create({
       purpose: "temporary",
       kind: placement.kind,
@@ -300,6 +340,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
 
   const service: BoxService = {
     registry,
+    byo,
     records: store,
     projects,
     settings,

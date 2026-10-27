@@ -543,7 +543,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       });
       if (mode === "remote") {
         // Box-authenticated (BOX_HUB_PUBLIC_ROUTES): boxes dial the remote transport only.
-        registerBoxHubRoutes(app, hub);
+        registerBoxHubRoutes(app, hub, { pairing: boxes.byo });
         return;
       }
       // SOCKET-ONLY: the agent host's token and sync calls (each also checks the host's bearer or the box).

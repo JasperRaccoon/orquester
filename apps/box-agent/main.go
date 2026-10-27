@@ -2,7 +2,8 @@
 // docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-design.md §5).
 //
 //	orq-agent run [--data-dir DIR]          serve in the foreground (containers, macOS job step)
-//	orq-agent install-service [--data-dir]  systemd unit / Windows service, then start it
+//	orq-agent install-service [--data-dir DIR] [--dry-run]    systemd unit / LaunchAgent / Windows service, then start it
+//	orq-agent uninstall-service [--data-dir DIR] [--dry-run]  stop and remove that service
 //	orq-agent token <claude|codex|grok> --account <id> [--min-valid SECONDS]
 //	orq-agent git-credential <get|store|erase>
 //	orq-agent mcp-bridge <serverId>
@@ -40,7 +41,7 @@ func main() {
 }
 
 func usage() int {
-	fmt.Fprintln(os.Stderr, "usage: orq-agent run|install-service|token|git-credential|mcp-bridge|rpc|status|version …")
+	fmt.Fprintln(os.Stderr, "usage: orq-agent run|install-service|uninstall-service|token|git-credential|mcp-bridge|rpc|status|version …")
 	return 2
 }
 
@@ -63,6 +64,34 @@ func flagValue(args []string, name string) (string, []string) {
 	return value, rest
 }
 
+// parseServiceArgs reads install-service's and uninstall-service's flags:
+// [--data-dir DIR] [--dry-run]. Anything else is refused, so a typo cannot
+// install for real what was meant as a dry run.
+func parseServiceArgs(args []string) (agent.ServiceOptions, error) {
+	var opts agent.ServiceOptions
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--dry-run":
+			opts.DryRun = true
+		case arg == "--data-dir":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return opts, errors.New("--data-dir needs a directory")
+			}
+			opts.DataDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--data-dir="):
+			opts.DataDir = strings.TrimPrefix(arg, "--data-dir=")
+			if opts.DataDir == "" {
+				return opts, errors.New("--data-dir needs a directory")
+			}
+		default:
+			return opts, fmt.Errorf("unknown argument %q", arg)
+		}
+	}
+	return opts, nil
+}
+
 func run(args []string) int {
 	if len(args) == 0 {
 		return usage()
@@ -72,13 +101,18 @@ func run(args []string) int {
 	case "run", "service":
 		dataDir, _ := flagValue(args, "data-dir")
 		return serve(dataDir, command == "service")
-	case "install-service":
-		dataDir, _ := flagValue(args, "data-dir")
-		cfg, err := agent.LoadConfig(version, dataDir)
+	case "install-service", "uninstall-service":
+		opts, err := parseServiceArgs(args)
 		if err != nil {
-			return fail(err)
+			fmt.Fprintf(os.Stderr, "orq-agent %s: %v\nusage: orq-agent %s [--data-dir DIR] [--dry-run]\n", command, err, command)
+			return 2
 		}
-		if err := agent.InstallService(cfg); err != nil {
+		if command == "install-service" {
+			err = agent.InstallServiceCommand(version, opts, os.Stdout)
+		} else {
+			err = agent.UninstallServiceCommand(opts, os.Stdout)
+		}
+		if err != nil {
 			return fail(err)
 		}
 		return 0

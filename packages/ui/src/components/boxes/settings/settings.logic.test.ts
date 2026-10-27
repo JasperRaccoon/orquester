@@ -23,6 +23,17 @@ import {
 } from "./connection.logic.ts";
 import { ApiError } from "../../../lib/api-client.ts";
 import {
+  byoMachines,
+  byoStatusView,
+  byoSubline,
+  canHostDevices,
+  canRemoveMachine,
+  machineNameProblem,
+  pairingHint,
+  pairingPhase,
+  removeMachineText
+} from "./byo.logic.ts";
+import {
   BLACKSMITH_POLL,
   blacksmithAccounts,
   blacksmithBusy,
@@ -40,6 +51,7 @@ import {
   boxStateView,
   boxTitle,
   canDestroyBox,
+  destroyBoxLabel,
   listedBoxes,
   setupProgress
 } from "./boxes-list.logic.ts";
@@ -401,3 +413,99 @@ test("only temporary boxes that still exist offer Destroy", () => {
   assert.equal(canDestroyBox(box({ purpose: "temporary", state: "destroying" })), false);
   assert.equal(canDestroyBox(box({ purpose: "temporary", state: "destroyed" })), false);
 });
+
+// ---------------------------------------------------------------------------
+// Your machines (bring-your-own)
+// ---------------------------------------------------------------------------
+
+describeByo();
+
+function describeByo(): void {
+  const NOW = Date.parse("2026-10-27T10:00:00.000Z");
+  const machine = (overrides: Partial<Parameters<typeof box>[0]> = {}) =>
+    box({
+      id: "m1",
+      purpose: "machine",
+      kind: "macos",
+      provider: "byo",
+      providerLabel: "Your machines",
+      region: "own",
+      regionLabel: "Your machine",
+      size: "machine",
+      sizeLabel: "Mac mini",
+      os: "darwin",
+      arch: "arm64",
+      hourlyUsd: 0,
+      estimatedCostUsd: 0,
+      project: null,
+      setup: [],
+      byo: { name: "Mac mini", pairingExpiresAt: null },
+      ...overrides
+    });
+
+  test("byo: the card lists only the owner's live machines, oldest first; the Boxes list leaves idle ones out", () => {
+    const listed = byoMachines([
+      machine({ id: "new", createdAt: "2026-10-27T09:00:00.000Z" }),
+      box(),
+      machine({ id: "old", createdAt: "2026-10-01T09:00:00.000Z" }),
+      machine({ id: "gone", state: "destroyed" })
+    ]);
+    assert.deepEqual(listed.map((entry) => entry.id), ["old", "new"]);
+    assert.deepEqual(
+      listedBoxes([machine(), machine({ id: "lent", purpose: "temporary", threadId: "t" }), box({ id: "rented" })], NOW).map((entry) => entry.id),
+      ["lent", "rented"]
+    );
+    assert.equal(boxTitle(machine()), "macOS · Mac mini (your machine)");
+    assert.equal(boxCostLine(machine()), "Free");
+    assert.equal(destroyBoxLabel(machine({ purpose: "temporary" })), "Release");
+    assert.equal(destroyBoxLabel(box({ purpose: "temporary" })), "Destroy");
+    assert.equal(boxStateView(machine({ state: "offline" })).label, "Offline");
+    assert.equal(boxStateView(machine({ state: "pairing" })).label, "Pairing…");
+  });
+
+  test("byo: status pills for pairing, an expired command, online, offline and in use", () => {
+    const expiresSoon = { name: "Mac mini", pairingExpiresAt: new Date(NOW + 60_000).toISOString() };
+    assert.equal(byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW).label, "Waiting to pair…");
+    assert.deepEqual(
+      [byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW + 120_000).label, byoStatusView(machine({ state: "pairing", byo: expiresSoon }), NOW + 120_000).tone],
+      ["Command expired", "warn"]
+    );
+    assert.deepEqual(byoStatusView(machine(), NOW), { tone: "ok", label: "Online", title: null });
+    assert.equal(byoStatusView(machine({ state: "offline", connected: false }), NOW).label, "Offline");
+    assert.equal(
+      byoStatusView(machine({ purpose: "project", project: { workspace: "acme", name: "app", path: "/w/acme/app" } }), NOW).label,
+      "In use: acme / app"
+    );
+    assert.equal(byoStatusView(machine({ purpose: "project", state: "provisioning" }), NOW).label, "Setting up a project…");
+    assert.equal(byoStatusView(machine({ purpose: "temporary", purposeNote: "tests" }), NOW).label, "Lent to an agent chat");
+    assert.equal(byoSubline(machine()), "macOS · arm64");
+  });
+
+  test("byo: names, removal and the device toggle", () => {
+    assert.equal(machineNameProblem("  "), "Give the machine a name.");
+    assert.equal(machineNameProblem("x".repeat(61)), "At most 60 characters.");
+    assert.equal(machineNameProblem("Mac\nmini"), "One line of text.");
+    assert.equal(machineNameProblem("Mac mini"), null);
+    assert.equal(canRemoveMachine(machine()), true);
+    assert.equal(canRemoveMachine(machine({ purpose: "project" })), false);
+    assert.equal(canHostDevices(machine({ state: "pairing" })), false);
+    assert.equal(canHostDevices(machine({ state: "offline" })), true);
+    assert.match(removeMachineText(machine()), /removes its service/);
+    assert.match(removeMachineText(machine({ connected: false, state: "offline" })), /orq-agent uninstall-service/);
+    assert.match(removeMachineText(machine({ state: "pairing" })), /pairing command stops working/);
+    assert.match(pairingHint("macos"), /not with sudo/);
+    assert.match(pairingHint("linux"), /user service/);
+  });
+
+  test("byo: the pairing dialog follows the live box — waiting, downloaded, connected, expired, cancelled", () => {
+    const expiresAt = new Date(NOW + 29.5 * 60_000).toISOString();
+    const pairing = machine({ state: "pairing", os: null, arch: null, byo: { name: "Mac mini", pairingExpiresAt: expiresAt } });
+    assert.deepEqual(pairingPhase(pairing, expiresAt, NOW), { kind: "waiting", expiresInMinutes: 30 });
+    assert.deepEqual(pairingPhase(pairing, expiresAt, NOW + 31 * 60_000), { kind: "expired" });
+    assert.deepEqual(pairingPhase(machine({ state: "pairing", byo: { name: "Mac mini", pairingExpiresAt: null } }), expiresAt, NOW), { kind: "downloaded" });
+    assert.deepEqual(pairingPhase(machine(), expiresAt, NOW), { kind: "connected", detail: "macOS, arm64" });
+    assert.deepEqual(pairingPhase(undefined, expiresAt, NOW), { kind: "gone" });
+    assert.ok(!keyProviders([provider(), provider({ id: "byo" }), provider({ id: "blacksmith" })]).some((entry) => entry.id === "byo"));
+    assert.equal(providerAbbreviation({ id: "byo", label: "Your machines" }), "MY");
+  });
+}

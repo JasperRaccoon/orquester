@@ -533,3 +533,47 @@ test("box_forward_port returns the host loopback URL; without the box backend ev
     assert.ok(!outcome.ok && outcome.code === "BOXES_DISABLED", name);
   }
 });
+
+test("create_box on one of the owner's own machines: a 'Use your machine' card (free, names the machine), pinned to that machine", async () => {
+  const { api, created } = fakeApi();
+  const machine = { id: "m4c0ffee1234", label: "Mac mini (macOS, arm64)", vcpu: 0, ramGb: 0, diskGb: null, gpu: null, hourlyUsd: 0, regions: [] };
+  api
+    .on("GET", boxRoutes.kinds, {
+      status: 200,
+      body: { kinds: [{ kind: "macos", providers: ["blacksmith", "byo"], fromHourlyUsd: 0, maxLifetimeMinutes: null, unavailableReason: null }] }
+    })
+    .on("GET", boxRoutes.providers, {
+      status: 200,
+      body: { providers: [...PROVIDERS.providers, provider({ id: "byo", label: "Your machines", kinds: ["linux", "macos"], keyHint: null })] }
+    })
+    .on("GET", boxRoutes.offers("byo", "macos"), {
+      status: 200,
+      body: { ...OFFERS, provider: "byo", kind: "macos", sizes: [machine], regions: [{ id: "own", label: "Your machine", country: null }] }
+    });
+  const port = new FakeApprovalPort();
+  const outcome = await call(api, "create_box", { kind: "macos", provider: "byo", purpose: "run the iOS tests" }, { port });
+  assert.ok(outcome.ok, outcome.ok ? "" : outcome.message);
+  const card = port.cards[0]!;
+  assert.equal(card.kind, "spend", "the same never-grantable family as a rental");
+  assert.deepEqual(card.grantOptions, []);
+  assert.equal(card.title, "Use your machine: Mac mini (macOS, arm64)");
+  assert.equal(card.scope.label, "Runs on your own machine");
+  const fields = card.sections.find((section) => section.kind === "fields");
+  assert.ok(fields && fields.kind === "fields");
+  assert.deepEqual(Object.fromEntries(fields.rows.map((row) => [row.label, row.value])), {
+    Machine: "Mac mini (macOS, arm64)",
+    Kind: "macOS",
+    "Time limit": "2 h",
+    Cost: "Free (your own machine)"
+  });
+  assert.ok(card.sections.some((section) => section.kind === "warning" && section.text.includes("can run any command on Mac mini")));
+  assert.deepEqual(created, [{ kind: "macos", provider: "byo", size: machine.id, region: "own", lifetimeMinutes: 120, purposeNote: "run the iOS tests" }]);
+});
+
+test("create_box with provider byo when none of the owner's machines is free: a refusal saying so, and no card", async () => {
+  const { api } = fakeApi();
+  const port = new FakeApprovalPort();
+  const refused = await call(api, "create_box", { ...createArgs, provider: "byo" }, { port });
+  assert.ok(!refused.ok && refused.code === "BOX_NOT_READY" && refused.message.includes("owner's own Linux machines"));
+  assert.equal(port.cards.length, 0);
+});

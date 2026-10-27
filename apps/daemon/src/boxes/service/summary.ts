@@ -53,16 +53,18 @@ export const SETUP_STEP_LABELS: Readonly<Record<BoxSetupStepId, string>> = {
 
 /**
  * The steps a box runs: create/connect/ready for a temporary one, create/connect/devices/ready for a
- * device host (devices spec §6.3), every other step for a project box.
+ * device host (devices spec §6.3), none for an idle bring-your-own machine (pairing is its state,
+ * not a setup), every other step for a project box.
  */
 export function setupStepIds(purpose: BoxPurpose): BoxSetupStepId[] {
+  if (purpose === "machine") return [];
   if (purpose === "temporary") return ["create", "connect", "ready"];
   if (purpose === "device-host") return ["create", "connect", "devices", "ready"];
   return BOX_SETUP_STEP_IDS.filter((id) => id !== "devices");
 }
 
-/** A stored purpose as this build reads it: one it does not know is a project box (as before device hosts). */
-function purposeOf(record: StoredBox): BoxPurpose {
+/** A record's purpose as the API names it: one this build does not know reads as `project`. */
+export function purposeOf(record: Pick<StoredBox, "purpose">): BoxPurpose {
   return isBoxPurpose(record.purpose) ? record.purpose : "project";
 }
 
@@ -134,7 +136,8 @@ export function boxesTotals(records: readonly StoredBox[], now: number): BoxesTo
   let hourlyUsd = 0;
   let month = 0;
   for (const record of records) {
-    if (isActiveRecord(record)) {
+    // An idle machine of the owner's is not a box running for anything.
+    if (isActiveRecord(record) && record.purpose !== "machine") {
       activeCount += 1;
       hourlyUsd += record.hourlyUsd ?? 0;
     }
@@ -208,6 +211,15 @@ export function toBoxSummary(record: StoredBox, options: { providers: BoxProvide
     project: projectRef(record),
     threadId: record.threadId ?? null,
     purposeNote: record.purposeNote ?? null,
-    setup: setupOf(record)
+    setup: setupOf(record),
+    ...(typeof record.deviceHost === "boolean" ? { deviceHost: record.deviceHost } : {}),
+    ...(record.provider === "byo"
+      ? {
+          byo: {
+            name: record.machineName ?? record.name,
+            pairingExpiresAt: record.state === "pairing" && record.pairingCodeHash ? (record.pairingExpiresAt ?? null) : null
+          }
+        }
+      : {})
   };
 }

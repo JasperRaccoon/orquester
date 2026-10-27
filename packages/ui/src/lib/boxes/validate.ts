@@ -20,6 +20,8 @@ import {
   type BlacksmithSetupStepId,
   type BlacksmithSetupStepState,
   type BoxArch,
+  type BoxByoInfo,
+  type ByoPairingResponse,
   type BoxConfigChangeFile,
   type BoxConfigChangeSet,
   type BoxConfigChangeState,
@@ -176,8 +178,26 @@ export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
     project: sanitizeProjectRef(value.project),
     threadId: stringOrNull(value.threadId),
     purposeNote: stringOrNull(value.purposeNote),
-    setup: listOf(value.setup, sanitizeSetupStep, (step) => step.id)
+    setup: listOf(value.setup, sanitizeSetupStep, (step) => step.id),
+    ...(typeof value.kvm === "boolean" ? { kvm: value.kvm } : {}),
+    ...(typeof value.deviceHost === "boolean" ? { deviceHost: value.deviceHost } : {}),
+    ...(provider === "byo" ? { byo: sanitizeByoInfo(value.byo, stringOr(value.sizeLabel, value.id)) } : {})
   };
+}
+
+/** A bring-your-own machine's own fields; its name falls back to the size label (the daemon keeps them equal). */
+function sanitizeByoInfo(value: unknown, fallbackName: string): BoxByoInfo {
+  const raw = isRecord(value) ? value : {};
+  return { name: nonEmpty(raw.name) ? raw.name : fallbackName, pairingExpiresAt: stringOrNull(raw.pairingExpiresAt) };
+}
+
+/** `POST boxRoutes.byoMachines` / `byoPairing(id)`; null when anything needed is missing. */
+export function sanitizeByoPairingResponse(value: unknown): ByoPairingResponse | null {
+  if (!isRecord(value) || !nonEmpty(value.command) || !nonEmpty(value.expiresAt)) return null;
+  const box = sanitizeBoxSummary(value.box);
+  // Only ever a `curl … | sh` line: anything else is not shown to be pasted into a shell.
+  if (!box || !/^curl -fsSL https?:\/\/\S+\/api\/boxes\/pair\/[A-Za-z0-9_-]+ \| sh$/.test(value.command)) return null;
+  return { box, command: value.command, expiresAt: value.expiresAt };
 }
 
 /** The totals the daemon computed, each recomputed from `boxes` when missing or malformed. */
